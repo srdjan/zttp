@@ -896,6 +896,29 @@ pub const IRStore = struct {
         };
     }
 
+    /// Init with capacity estimated from the source length, so the six
+    /// parallel lists do not grow by doubling from zero on every compile.
+    /// Across the compile-time microbench corpus the node count runs about
+    /// one node per 5 source bytes (77/16, 249/48, 606/101, 1038/206).
+    pub fn initCapacity(allocator: std.mem.Allocator, source_len: usize) !IRStore {
+        var self = init(allocator);
+        errdefer self.deinit();
+
+        const node_estimate = @max(32, source_len / 5);
+        try self.tags.ensureTotalCapacity(allocator, node_estimate);
+        try self.locs.ensureTotalCapacity(allocator, node_estimate);
+        try self.data.ensureTotalCapacity(allocator, node_estimate);
+        try self.binding_name_atoms.ensureTotalCapacity(allocator, node_estimate);
+
+        // `extra` and `index_lists` hold variable-length payloads (params,
+        // properties, statement lists), which are far sparser than nodes.
+        const side_estimate = @max(16, source_len / 16);
+        try self.extra.ensureTotalCapacity(allocator, side_estimate);
+        try self.index_lists.ensureTotalCapacity(allocator, side_estimate);
+
+        return self;
+    }
+
     pub fn deinit(self: *IRStore) void {
         self.tags.deinit(self.allocator);
         self.locs.deinit(self.allocator);
