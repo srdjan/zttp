@@ -12,6 +12,10 @@ zig-pkg/
 # probes, etc. Never commit.
 /temp/
 
+# Compound-engineering scratch state (optimization specs, experiment logs).
+# Local resume/audit only; never commit.
+/.context/
+
 # Demo artifacts (screencasts, recordings) and their recording scripts.
 # Never commit.
 /demos/
