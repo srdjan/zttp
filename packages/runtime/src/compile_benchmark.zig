@@ -31,6 +31,9 @@ pub const std_options: std.Options = .{
 const Fixture = struct {
     name: []const u8,
     source: []const u8,
+    /// Fixtures containing JSX need the tokenizer's JSX mode switched on, the
+    /// same way the runtime enables it for .jsx/.tsx handlers.
+    jsx: bool = false,
 };
 
 const fixtures = [_]Fixture{
@@ -134,6 +137,84 @@ const fixtures = [_]Fixture{
         \\}
         ,
     },
+
+    // The four fixtures above are plain functions, objects, arrays, and
+    // for-of loops. The four below exist because that shape leaves whole
+    // front-end paths unexercised - JSX children and attributes, template
+    // literal parts, import specifiers, and member/optional chains - so
+    // parser work on those paths measured as exactly zero.
+    .{
+        .name = "template_strings",
+        .source =
+        \\function handler(req) {
+        \\  const name = "world";
+        \\  const n = 42;
+        \\  const greeting = `hello, ${name}!`;
+        \\  const detail = `count=${n} doubled=${n * 2} nested=${`inner-${name}`}`;
+        \\  const lines = [`a-${n}`, `b-${n}`, `c-${n}`, `d-${n}`];
+        \\  const joined = `${greeting} / ${detail} / ${lines.length}`;
+        \\  return Response.text(joined);
+        \\}
+        ,
+    },
+    .{
+        .name = "member_chains",
+        .source =
+        \\function handler(req) {
+        \\  const cfg = { a: { b: { c: { d: { e: 7 } } } } };
+        \\  const deep = cfg.a.b.c.d.e;
+        \\  const safe = cfg?.a?.b?.c?.d?.e ?? 0;
+        \\  const miss = cfg?.x?.y?.z ?? -1;
+        \\  const list = [cfg.a.b.c, cfg.a.b, cfg.a];
+        \\  return Response.json({ deep: deep, safe: safe, miss: miss, n: list.length });
+        \\}
+        ,
+    },
+    .{
+        .name = "module_imports",
+        .source =
+        \\import { sha256, base64Encode } from "zttp:crypto";
+        \\import { logInfo } from "zttp:log";
+        \\import { uuid, ulid, nanoid } from "zttp:id";
+        \\function handler(req) {
+        \\  const id = uuid();
+        \\  const digest = sha256(id);
+        \\  logInfo("request");
+        \\  return Response.json({
+        \\    id: id,
+        \\    digest: base64Encode(digest),
+        \\    alt: ulid(),
+        \\    short: nanoid(),
+        \\  });
+        \\}
+        ,
+    },
+    .{
+        .name = "jsx_component",
+        .jsx = true,
+        .source =
+        \\function Row(props) {
+        \\  return <li className="row" id={props.name}>{props.name}: {props.score}</li>;
+        \\}
+        \\function Header(props) {
+        \\  return <h1 className="title">{props.text}</h1>;
+        \\}
+        \\function handler(req) {
+        \\  const users = [
+        \\    { name: "alice", score: 10 },
+        \\    { name: "bob", score: 20 },
+        \\    { name: "carol", score: 30 },
+        \\  ];
+        \\  const rows = users.map((u) => <Row name={u.name} score={u.score} />);
+        \\  return Response.html(
+        \\    <div className="page">
+        \\      <Header text="scores" />
+        \\      <ul className="list">{rows}</ul>
+        \\    </div>
+        \\  );
+        \\}
+        ,
+    },
 };
 
 // -- Counting allocator -------------------------------------------------------
@@ -209,7 +290,7 @@ const CompileStats = struct {
     bytecode_len: u64,
 };
 
-fn compileOnce(backing: std.mem.Allocator, source: []const u8) !CompileStats {
+fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !CompileStats {
     var parser_counting = CountingAlloc{ .backing = backing };
     var codegen_counting = CountingAlloc{ .backing = backing };
     const parser_alloc = parser_counting.allocator();
@@ -222,6 +303,7 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8) !CompileStats {
 
     var p = zq.Parser.init(parser_alloc, source, &strings, &atoms);
     defer p.deinit();
+    if (jsx) p.enableJsx();
 
     const bytecode_data = try p.parseWithCodegenAllocator(codegen_alloc);
     const ir_node_count: u64 = @intCast(p.js_parser.nodes.tags.items.len);
@@ -317,7 +399,7 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result
     }.mk;
 
     // One warm compile to surface parse errors before timing.
-    const warm = compileOnce(allocator, fx.source) catch |err| {
+    const warm = compileOnce(allocator, fx.source, fx.jsx) catch |err| {
         return fail(fx, iterations, 0, 0, 0, 0, @errorName(err));
     };
 
@@ -329,7 +411,7 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32) Result
     var total_cg_bytes: u64 = 0;
     var i: u32 = 0;
     while (i < iterations) : (i += 1) {
-        const s = compileOnce(allocator, fx.source) catch |err| {
+        const s = compileOnce(allocator, fx.source, fx.jsx) catch |err| {
             return fail(fx, iterations, total_bytes, total_cg_bytes, warm.ir_nodes, warm.bytecode_len, @errorName(err));
         };
         total_bytes += s.bytes;
@@ -409,6 +491,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
         emitJson(&results);
     } else if (!options.quiet) {
         emitHuman(&results);
+    }
+
+    // A fixture that stops parsing is a front-end regression, so exit non-zero
+    // after reporting it. Without this the failure is only a line of text and
+    // `zig build compile-bench` still succeeds, which would let a break on the
+    // JSX, template, import, or member-chain paths pass unnoticed.
+    for (results) |r| {
+        if (!r.success) std.process.exit(1);
     }
 }
 

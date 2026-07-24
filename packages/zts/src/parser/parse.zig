@@ -110,16 +110,37 @@ pub const Parser = struct {
     /// budget. Roughly V8's parser nesting tolerance.
     const max_recursion_depth: u32 = 512;
 
+    /// Inline capacity for the short-lived NodeIndex temporaries below. These
+    /// buffers sit on mutually recursive frames, so every byte is multiplied by
+    /// `max_recursion_depth` against the stack budget.
+    ///
+    /// Target-conditional because the two builds have very different budgets
+    /// and very different jobs. A native worker thread gets std.Thread's 16 MiB
+    /// default, where 256 bytes per frame costs ~160 KB at the depth limit -
+    /// negligible - and compile speed is on the cold-start path, so the full
+    /// buffer is worth it. The wasm64-freestanding analyzer takes the linker
+    /// default (~1 MiB) and exists to produce diagnostics, not to be fast:
+    /// there the fat buffers were measured to drop the nesting cliff from ~349
+    /// to 288 levels, so inputs nesting inside that window trapped instead of
+    /// returning the `nesting_too_deep` diagnostic the guard promises. Keeping
+    /// wasm frames slim preserves the guard.
+    ///
+    /// Re-derive both numbers if the buffer set or frame layout changes.
+    const temp_list_stack_bytes: usize = if (@import("builtin").target.cpu.arch.isWasm()) 32 else 256;
+
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Parser {
         return initFallible(allocator, source) catch unreachable;
     }
 
     pub fn initFallible(allocator: std.mem.Allocator, source: []const u8) !Parser {
+        var nodes = IRStore.initCapacity(allocator, source.len);
+        errdefer nodes.deinit();
+
         var parser = Parser{
             .allocator = allocator,
             .tokenizer = Tokenizer.init(source),
             .source = source,
-            .nodes = IRStore.init(allocator),
+            .nodes = nodes,
             .constants = ConstantPool.init(allocator),
             .scopes = try ScopeAnalyzer.initFallible(allocator),
             .errors = ErrorList.init(allocator, source),
@@ -740,10 +761,25 @@ pub const Parser = struct {
         const was_in_function = self.in_function;
         self.in_function = true;
 
+        // Error returns while parsing parameters or the body would otherwise
+        // leave `in_function` set and the function scope pushed. An enclosing
+        // parseBlock swallows the error and keeps parsing against an unbalanced
+        // scope stack, which reports invented follow-on errors such as
+        // "'return' outside of function" for code that is plainly inside one.
+        // The flag is needed because the success path restores explicitly and
+        // fallible work follows it; a bare errdefer would pop a second time.
+        var scope_active = true;
+        errdefer if (scope_active) {
+            self.in_function = was_in_function;
+            self.scopes.popScope();
+        };
+
         // Parse parameters
         try self.expect(.lparen, "'('");
+        var params_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
+        const params_alloc = params_sfa.get();
         var params = std.ArrayList(NodeIndex).empty;
-        defer params.deinit(self.allocator);
+        defer params.deinit(params_alloc);
 
         var param_flags = flags;
 
@@ -794,7 +830,7 @@ pub const Parser = struct {
                         .default_value = default_value,
                     } },
                 });
-                try params.append(self.allocator, param_node);
+                try params.append(params_alloc, param_node);
 
                 if (param_flags.has_rest_param) break; // Rest must be last
                 if (!self.match(.comma)) break;
@@ -808,6 +844,7 @@ pub const Parser = struct {
 
         self.in_function = was_in_function;
         self.scopes.popScope();
+        scope_active = false;
 
         // Create function expression node
         const params_count = try self.checkedU8Count(loc, params.items.len, "too many function parameters; limit is 255");
@@ -1274,12 +1311,14 @@ pub const Parser = struct {
 
         const scope_id = try self.scopes.pushScope(.block);
 
+        var stmts_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
+        const stmts_alloc = stmts_sfa.get();
         var stmts = std.ArrayList(NodeIndex).empty;
-        defer stmts.deinit(self.allocator);
+        defer stmts.deinit(stmts_alloc);
 
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.parseStatement()) |stmt| {
-                try stmts.append(self.allocator, stmt);
+                try stmts.append(stmts_alloc, stmt);
             } else |_| {
                 self.synchronize();
             }
@@ -2019,8 +2058,14 @@ pub const Parser = struct {
     }
 
     fn parseCallArgs(self: *Parser, callee: NodeIndex, loc: SourceLocation, is_optional: bool) anyerror!NodeIndex {
+        // Argument lists are almost always tiny, so a small stack buffer keeps
+        // them off the heap entirely; longer lists fall back to the parser
+        // allocator, and deinit handles either case. See
+        // `temp_list_stack_bytes` for why the buffer is kept small.
+        var args_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
+        const args_alloc = args_sfa.get();
         var args = std.ArrayList(NodeIndex).empty;
-        defer args.deinit(self.allocator);
+        defer args.deinit(args_alloc);
 
         if (!self.check(.rparen)) {
             while (true) {
@@ -2031,10 +2076,10 @@ pub const Parser = struct {
                         .loc = loc,
                         .data = .{ .opt_value = spread_expr },
                     });
-                    try args.append(self.allocator, spread_node);
+                    try args.append(args_alloc, spread_node);
                 } else {
                     const arg = try self.parseExpression(.assignment);
-                    try args.append(self.allocator, arg);
+                    try args.append(args_alloc, arg);
                 }
                 if (!self.match(.comma)) break;
                 if (self.check(.rparen)) break;
@@ -2332,8 +2377,10 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume '{'
 
+        var properties_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
+        const properties_alloc = properties_sfa.get();
         var properties = std.ArrayList(NodeIndex).empty;
-        defer properties.deinit(self.allocator);
+        defer properties.deinit(properties_alloc);
 
         if (!self.check(.rbrace)) {
             while (true) {
@@ -2347,7 +2394,7 @@ pub const Parser = struct {
                         .loc = prop_loc,
                         .data = .{ .opt_value = spread_expr },
                     });
-                    try properties.append(self.allocator, spread_node);
+                    try properties.append(properties_alloc, spread_node);
                 } else {
                     // Check for getter/setter
                     var prop_kind: NodeTag = .object_property;
@@ -2395,7 +2442,7 @@ pub const Parser = struct {
                                     .is_shorthand = true,
                                 } },
                             });
-                            try properties.append(self.allocator, prop_node);
+                            try properties.append(properties_alloc, prop_node);
 
                             if (!self.match(.comma)) break;
                             if (self.check(.rbrace)) break;
@@ -2451,7 +2498,7 @@ pub const Parser = struct {
                                 .is_shorthand = false,
                             } },
                         });
-                        try properties.append(self.allocator, prop_node);
+                        try properties.append(properties_alloc, prop_node);
                     } else {
                         // Regular property
                         try self.expect(.colon, "':'");
@@ -2467,7 +2514,7 @@ pub const Parser = struct {
                                 .is_shorthand = is_shorthand,
                             } },
                         });
-                        try properties.append(self.allocator, prop_node);
+                        try properties.append(properties_alloc, prop_node);
                     }
                 }
 
@@ -2540,9 +2587,20 @@ pub const Parser = struct {
         const was_in_function = self.in_function;
         self.in_function = true;
 
+        // See parseFunctionBody: without this, an error while parsing the
+        // parameter list or body leaves the scope stack unbalanced and the
+        // recovery path invents follow-on diagnostics.
+        var scope_active = true;
+        errdefer if (scope_active) {
+            self.in_function = was_in_function;
+            self.scopes.popScope();
+        };
+
         // Parse parameters
+        var params_sfa = std.heap.stackFallback(temp_list_stack_bytes, self.allocator);
+        const params_alloc = params_sfa.get();
         var params = std.ArrayList(NodeIndex).empty;
-        defer params.deinit(self.allocator);
+        defer params.deinit(params_alloc);
 
         if (self.check(.identifier)) {
             // Single parameter: x => ...
@@ -2567,7 +2625,7 @@ pub const Parser = struct {
                     .default_value = null_node,
                 } },
             });
-            try params.append(self.allocator, param_node);
+            try params.append(params_alloc, param_node);
         } else {
             // Parenthesized parameters
             try self.expect(.lparen, "'('");
@@ -2612,7 +2670,7 @@ pub const Parser = struct {
                             .default_value = default_value,
                         } },
                     });
-                    try params.append(self.allocator, param_node);
+                    try params.append(params_alloc, param_node);
 
                     if (flags.has_rest_param) break;
                     if (!self.match(.comma)) break;
@@ -2640,6 +2698,7 @@ pub const Parser = struct {
 
         self.in_function = was_in_function;
         self.scopes.popScope();
+        scope_active = false;
 
         const params_count = try self.checkedU8Count(loc, params.items.len, "too many arrow function parameters; limit is 255");
         const params_start = if (params.items.len > 0)

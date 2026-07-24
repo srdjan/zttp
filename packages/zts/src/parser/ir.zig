@@ -896,6 +896,45 @@ pub const IRStore = struct {
         };
     }
 
+    /// Upper bound on the pre-sized node count. The source-length estimate is
+    /// content-blind: a handler that is mostly one large string literal has a
+    /// node density far below one node per 5 bytes, and an uncapped estimate
+    /// reserved ~5.1 bytes of heap per source byte, which measured as a 2.5x
+    /// peak-memory regression (20.5 MB -> 51.1 MB) on a 4 MB blob-heavy
+    /// handler. Capping bounds the reservation at roughly 376 KB; sources that
+    /// genuinely exceed it fall back to doubling, which costs a handful of
+    /// reallocations on a parse that is already large.
+    const max_reserved_nodes: usize = 16384;
+    const max_reserved_side: usize = 4096;
+
+    /// Init with capacity estimated from the source length, so the six
+    /// parallel lists do not grow by doubling from zero on every compile.
+    /// Across the compile-time microbench corpus the node count runs about
+    /// one node per 5 source bytes (77/16, 249/48, 606/101, 1038/206).
+    ///
+    /// Infallible on purpose: the reservation is an optimization, never a
+    /// requirement, so a failed reservation degrades to on-demand growth
+    /// instead of failing the parse. That also keeps `Parser.init`'s
+    /// `catch unreachable` honest - parser construction performs no allocation
+    /// that can turn an out-of-memory condition into a panic.
+    pub fn initCapacity(allocator: std.mem.Allocator, source_len: usize) IRStore {
+        var self = init(allocator);
+
+        const node_estimate = @min(@max(32, source_len / 5), max_reserved_nodes);
+        self.tags.ensureTotalCapacity(allocator, node_estimate) catch return self;
+        self.locs.ensureTotalCapacity(allocator, node_estimate) catch return self;
+        self.data.ensureTotalCapacity(allocator, node_estimate) catch return self;
+        self.binding_name_atoms.ensureTotalCapacity(allocator, node_estimate) catch return self;
+
+        // `extra` and `index_lists` hold variable-length payloads (params,
+        // properties, statement lists), which are far sparser than nodes.
+        const side_estimate = @min(@max(16, source_len / 16), max_reserved_side);
+        self.extra.ensureTotalCapacity(allocator, side_estimate) catch return self;
+        self.index_lists.ensureTotalCapacity(allocator, side_estimate) catch return self;
+
+        return self;
+    }
+
     pub fn deinit(self: *IRStore) void {
         self.tags.deinit(self.allocator);
         self.locs.deinit(self.allocator);
