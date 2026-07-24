@@ -1,6 +1,6 @@
 <p align="center">
   <img src="docs/zttp-logo.jpg" alt="zttp" width="600">
-  <p align="center"><a href="https://zttp.timok.deno.net/">Website</a> - <a href="docs/README.md">Documentation</a></p>
+  <p align="center"><a href="https://zigttp.timok.com/">Website</a> - <a href="docs/README.md">Documentation</a></p>
 </p>
 
 # zttp
