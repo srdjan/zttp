@@ -182,7 +182,7 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
         const shift: u6 = @intCast(@min(attempt, 62));
         const multiplier: i64 = @as(i64, 1) << shift;
         const delay = @min(base_delay_ms *| multiplier, max_delay_ms);
-        if (delay > 0) {
+        if (delay > 0 and @import("builtin").os.tag != .freestanding) {
             const delay_ns: u64 = @intCast(delay * std.time.ns_per_ms);
             const ts = std.c.timespec{
                 .sec = @intCast(delay_ns / std.time.ns_per_s),
