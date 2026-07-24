@@ -115,11 +115,14 @@ pub const Parser = struct {
     }
 
     pub fn initFallible(allocator: std.mem.Allocator, source: []const u8) !Parser {
+        var nodes = try IRStore.initCapacity(allocator, source.len);
+        errdefer nodes.deinit();
+
         var parser = Parser{
             .allocator = allocator,
             .tokenizer = Tokenizer.init(source),
             .source = source,
-            .nodes = IRStore.init(allocator),
+            .nodes = nodes,
             .constants = ConstantPool.init(allocator),
             .scopes = try ScopeAnalyzer.initFallible(allocator),
             .errors = ErrorList.init(allocator, source),
@@ -742,8 +745,10 @@ pub const Parser = struct {
 
         // Parse parameters
         try self.expect(.lparen, "'('");
+        var params_sfa = std.heap.stackFallback(256, self.allocator);
+        const params_alloc = params_sfa.get();
         var params = std.ArrayList(NodeIndex).empty;
-        defer params.deinit(self.allocator);
+        defer params.deinit(params_alloc);
 
         var param_flags = flags;
 
@@ -794,7 +799,7 @@ pub const Parser = struct {
                         .default_value = default_value,
                     } },
                 });
-                try params.append(self.allocator, param_node);
+                try params.append(params_alloc, param_node);
 
                 if (param_flags.has_rest_param) break; // Rest must be last
                 if (!self.match(.comma)) break;
@@ -1274,12 +1279,14 @@ pub const Parser = struct {
 
         const scope_id = try self.scopes.pushScope(.block);
 
+        var stmts_sfa = std.heap.stackFallback(256, self.allocator);
+        const stmts_alloc = stmts_sfa.get();
         var stmts = std.ArrayList(NodeIndex).empty;
-        defer stmts.deinit(self.allocator);
+        defer stmts.deinit(stmts_alloc);
 
         while (!self.check(.rbrace) and !self.check(.eof)) {
             if (self.parseStatement()) |stmt| {
-                try stmts.append(self.allocator, stmt);
+                try stmts.append(stmts_alloc, stmt);
             } else |_| {
                 self.synchronize();
             }
@@ -2019,8 +2026,13 @@ pub const Parser = struct {
     }
 
     fn parseCallArgs(self: *Parser, callee: NodeIndex, loc: SourceLocation, is_optional: bool) anyerror!NodeIndex {
+        // Argument lists are short-lived and almost always tiny. A stack
+        // buffer keeps them off the heap entirely; longer lists fall back to
+        // the parser allocator, and deinit handles either case.
+        var args_sfa = std.heap.stackFallback(256, self.allocator);
+        const args_alloc = args_sfa.get();
         var args = std.ArrayList(NodeIndex).empty;
-        defer args.deinit(self.allocator);
+        defer args.deinit(args_alloc);
 
         if (!self.check(.rparen)) {
             while (true) {
@@ -2031,10 +2043,10 @@ pub const Parser = struct {
                         .loc = loc,
                         .data = .{ .opt_value = spread_expr },
                     });
-                    try args.append(self.allocator, spread_node);
+                    try args.append(args_alloc, spread_node);
                 } else {
                     const arg = try self.parseExpression(.assignment);
-                    try args.append(self.allocator, arg);
+                    try args.append(args_alloc, arg);
                 }
                 if (!self.match(.comma)) break;
                 if (self.check(.rparen)) break;
@@ -2332,8 +2344,10 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume '{'
 
+        var properties_sfa = std.heap.stackFallback(256, self.allocator);
+        const properties_alloc = properties_sfa.get();
         var properties = std.ArrayList(NodeIndex).empty;
-        defer properties.deinit(self.allocator);
+        defer properties.deinit(properties_alloc);
 
         if (!self.check(.rbrace)) {
             while (true) {
@@ -2347,7 +2361,7 @@ pub const Parser = struct {
                         .loc = prop_loc,
                         .data = .{ .opt_value = spread_expr },
                     });
-                    try properties.append(self.allocator, spread_node);
+                    try properties.append(properties_alloc, spread_node);
                 } else {
                     // Check for getter/setter
                     var prop_kind: NodeTag = .object_property;
@@ -2395,7 +2409,7 @@ pub const Parser = struct {
                                     .is_shorthand = true,
                                 } },
                             });
-                            try properties.append(self.allocator, prop_node);
+                            try properties.append(properties_alloc, prop_node);
 
                             if (!self.match(.comma)) break;
                             if (self.check(.rbrace)) break;
@@ -2451,7 +2465,7 @@ pub const Parser = struct {
                                 .is_shorthand = false,
                             } },
                         });
-                        try properties.append(self.allocator, prop_node);
+                        try properties.append(properties_alloc, prop_node);
                     } else {
                         // Regular property
                         try self.expect(.colon, "':'");
@@ -2467,7 +2481,7 @@ pub const Parser = struct {
                                 .is_shorthand = is_shorthand,
                             } },
                         });
-                        try properties.append(self.allocator, prop_node);
+                        try properties.append(properties_alloc, prop_node);
                     }
                 }
 
@@ -2541,8 +2555,10 @@ pub const Parser = struct {
         self.in_function = true;
 
         // Parse parameters
+        var params_sfa = std.heap.stackFallback(256, self.allocator);
+        const params_alloc = params_sfa.get();
         var params = std.ArrayList(NodeIndex).empty;
-        defer params.deinit(self.allocator);
+        defer params.deinit(params_alloc);
 
         if (self.check(.identifier)) {
             // Single parameter: x => ...
@@ -2567,7 +2583,7 @@ pub const Parser = struct {
                     .default_value = null_node,
                 } },
             });
-            try params.append(self.allocator, param_node);
+            try params.append(params_alloc, param_node);
         } else {
             // Parenthesized parameters
             try self.expect(.lparen, "'('");
@@ -2612,7 +2628,7 @@ pub const Parser = struct {
                             .default_value = default_value,
                         } },
                     });
-                    try params.append(self.allocator, param_node);
+                    try params.append(params_alloc, param_node);
 
                     if (flags.has_rest_param) break;
                     if (!self.match(.comma)) break;
