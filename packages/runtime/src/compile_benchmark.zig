@@ -492,6 +492,14 @@ pub fn main(init: std.process.Init.Minimal) !void {
     } else if (!options.quiet) {
         emitHuman(&results);
     }
+
+    // A fixture that stops parsing is a front-end regression, so exit non-zero
+    // after reporting it. Without this the failure is only a line of text and
+    // `zig build compile-bench` still succeeds, which would let a break on the
+    // JSX, template, import, or member-chain paths pass unnoticed.
+    for (results) |r| {
+        if (!r.success) std.process.exit(1);
+    }
 }
 
 // -- Tests -------------------------------------------------------------------
