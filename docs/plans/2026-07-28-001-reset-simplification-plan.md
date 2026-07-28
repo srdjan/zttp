@@ -408,6 +408,164 @@ hand-written machine-code backends and a deopt protocol are the largest maintena
 liability in the engine, and the durable-mode correctness special case (`jit_inhibited`,
 `context.zig:300-306`) disappears with them.
 
+## 8.1 Wave 0 results, recorded 2026-07-28
+
+Host: darwin 25.5.0, arm64. Toolchain: Zig 0.16.0. Working tree clean at 329e88de, which
+differs from the review baseline 113022e3 only in `docs/`.
+
+ReleaseFast artifact sizes: `zttp` 10 MB, `zttp-runtime` 5.7 MB, `zts` 6.2 MB.
+
+### Measurement 3, optimized-tier entry rate: answered, zero
+
+The benchmark JSON already reports `tier_promotions` per benchmark, so this needed no new
+instrumentation. Across all 13 benchmarks, in every run:
+
+- `optimized` promotions: **0**. The optimized tier is never entered.
+- `optimized_candidate`: 1 on `functionCalls`, 1 on `recursion`, 0 everywhere else. Two
+  functions in the whole corpus become candidates, and neither is promoted.
+- `baseline` promotions: 2 on `functionCalls`, 1 on `recursion`, **0 on all eleven others**,
+  including `httpHandler` and `httpHandlerHeavy`.
+
+Caveat on instrumentation: `enable_jit_metrics` is `builtin.mode != .ReleaseFast`
+(`packages/zts/src/context.zig:23`), so the richer JIT metrics are compiled out of the
+configuration under test. The tier-promotion counters quoted above come from the bytecode
+profile, not from `jit_metrics`, and are present in ReleaseFast.
+
+### Measurement 1, microbenchmark A/B: the JIT pays only where it promotes
+
+Protocol: `zig build bench -Doptimize=ReleaseFast`, 5 interleaved rounds alternating JIT on
+and `ZTS_JIT_POLICY=disabled`, best-of-N per benchmark on `ops_per_sec`.
+
+| Benchmark | JIT on | JIT off | Delta | Noise floor |
+| --- | ---: | ---: | ---: | ---: |
+| functionCalls | 18,155,410 | 11,890,606 | +52.7 percent | 3.0 |
+| recursion | 3,399 | 2,443 | +39.1 percent | 2.7 |
+| gcPressure | 9,023,641 | 8,785,802 | +2.7 percent | 5.3 |
+| jsonOps | 4,025,764 | 4,003,202 | +0.6 percent | 28.9 |
+| arrayOps | 17,507,002 | 17,476,406 | +0.2 percent | 3.4 |
+| intArithmetic | 22,311,468 | 22,281,639 | +0.1 percent | 37.1 |
+| httpHandler | 7,173,601 | 7,183,908 | -0.1 percent | 4.7 |
+| httpHandlerHeavy | 1,264,222 | 1,271,455 | -0.6 percent | 2.5 |
+| forOfLoop | 65,445,026 | 66,755,674 | -2.0 percent | 12.7 |
+| stringConcat | 27,886,224 | 28,490,028 | -2.1 percent | 3.2 |
+| stringOps | 21,468,441 | 21,949,078 | -2.2 percent | 13.2 |
+| objectCreate | 14,615,609 | 15,096,618 | -3.2 percent | 2.6 |
+| propertyAccess | 19,747,235 | 20,686,801 | -4.5 percent | 3.2 |
+
+Geometric mean speedup with the JIT enabled: **+5.04 percent**, and that figure is carried
+entirely by the two benchmarks that promote. The noise-floor column is the spread across
+the five JIT-on runs; `intArithmetic` and `jsonOps` are too noisy on this host to read at
+all, and every entry between +2.7 and -4.5 percent is at or inside its own noise.
+
+The two results agree with each other, which is the useful part: the benchmarks that gain
+are exactly the two that reach a promotion threshold, and the benchmarks that model the
+product's workload promote nothing and gain nothing.
+
+### Measurement 5, artifact size without the JIT: blocked
+
+Not measurable as the build stands. `analyzer_only` strips the interpreter, JIT, GC,
+SQLite, and libc together (`build.zig:550-558`) and is hardcoded false for the main build
+(`build.zig:112`). There is no option that removes only the JIT. This needs a temporary
+build flag before the number exists.
+
+### Measurement 2, end-to-end server load: no measurable JIT effect
+
+Protocol: `zttp serve` on `examples/handler/handler-full.tsx`, request logging disabled
+with `-q`, `hey` driving fixed request counts (40,000 warmup then 60,000 timed) at
+concurrency 32, three interleaved rounds per configuration.
+
+This host cannot produce a trustworthy median. Individual runs of the same configuration
+ranged from 2,165 to 98,607 requests per second, a 97 percent spread, with load average
+3.0 on 14 cores and occasional multi-second connect stalls in the accept path. Medians are
+therefore not reported as a result. Best-of-N is the appropriate estimator for a noisy
+host, and it is clean:
+
+| Configuration | Best run | p50 | p99 |
+| --- | ---: | ---: | ---: |
+| JIT on | 98,607 rps | 0.200 ms | 3.5 ms |
+| JIT off | 97,843 rps | 0.200 ms | 3.9 ms |
+
+Best-case throughput differs by 0.8 percent, and p50 is identical. An earlier attempt that
+left request logging enabled is discarded: it measured logging I/O, produced 40 to 56
+percent spreads, and its numbers do not appear here.
+
+A structural observation matters more than the delta. At p50 of 0.2 ms with a handler whose
+execution the microbench clocks at roughly 0.14 microseconds, JS execution is about one
+part in a thousand of end-to-end request time. The connection and accept path dominates.
+Even a JIT that doubled interpreter speed could not move this number, which is the honest
+reason the end-to-end test cannot separate the configurations.
+
+### Measurement 4, warm-runtime RSS: memory grows without bound, and does not flatten
+
+This is the most consequential result of wave 0, and it points the opposite way from what
+the plan assumed.
+
+Protocol: `zttp serve` on `examples/handler/handler-full.tsx`, request logging off,
+`hey` at concurrency 8 for 12 minutes, resident set size sampled every 15 seconds.
+
+| Elapsed | RSS |
+| --- | ---: |
+| 0 s | 14.8 MB |
+| 2 min | 50.9 MB |
+| 5 min | 75.9 MB |
+| 8 min | 118.9 MB |
+| 12 min | 135.5 MB |
+
+Growth over the run is 120.7 MB. The curve fluctuates locally, with dips around the 8 and
+9 minute marks that show some memory is returned, but it does not converge. A least-squares
+fit over the final 6 minutes only, which is the window where a warming pool and filling
+caches should already have settled, gives 8.4 MB per minute, essentially the same rate as
+the run as a whole.
+
+What this does not say: it does not prove a leak. Bytecode caches, inline caches, the
+string intern table, and pool warmup all legitimately grow, and 12 minutes on a noisy host
+is a proxy, not the hours-long observation wave 0 asks for. Extrapolating the late slope to
+an hour or a day would be arithmetic, not evidence, so no such number is claimed here.
+
+What this does say, and it is enough to act on: a warm pooled runtime under continuous load
+does not reach a memory steady state within 12 minutes, in a product whose deployment model
+is exactly a long-lived pooled runtime under continuous load. Section 4.4 established that
+in hybrid mode, which is the default in every shipped configuration, `minorGC` and `majorGC`
+are no-ops and collection happens only during handler load. These two facts fit together
+uncomfortably well.
+
+Consequence for the plan: wave 5 item 3 is inverted. It proposed reducing `gc.zig` on the
+theory that a dormant collector serves nothing. The correct next step is the opposite
+order: first find out what is accumulating, then decide what the collector should be. Add
+this as the first task of wave 0 continuation, ahead of any GC simplification:
+
+- Re-run for several hours on a quiet host and confirm the trend.
+- Attribute the growth. Sample allocator statistics, arena high-water marks, bytecode cache
+  size, intern pool size, and per-runtime state across the run, and identify which of them
+  accounts for the slope.
+- If the growth is caches with no eviction, the fix is bounded caches, not a collector.
+  If it is reachable-but-uncollected handler garbage, the dormant collector is not dead
+  weight, it is a missing call site, and section 4.4 needs rewriting.
+
+Either way, no GC code is deleted until this is answered.
+
+### Reading of measurements 1 to 3 and 5
+
+Three independent lines of evidence agree, and none of them was available before today:
+
+1. The optimized tier is never entered on any benchmark, and the baseline tier is entered
+   by two microbenchmarks and by neither HTTP handler benchmark.
+2. In the microbenchmark A/B, every benchmark that gains is a benchmark that promotes.
+   Handler-shaped work moves -0.1 and -0.6 percent, inside its own noise.
+3. End-to-end, best-case throughput and p50 are the same with the JIT on and off, and JS
+   execution is about one part in a thousand of request time.
+
+This is sufficient to act on wave 5 item 1: the optimized tier, roughly 2,900 lines, is not
+earning its place, because nothing in the corpus reaches it. It is not yet sufficient to
+act on wave 5 item 2. The baseline tier demonstrably pays on call-heavy and recursive code
+(+52.7 and +39.1 percent), and although no HTTP benchmark reaches it here, a long-lived
+pooled runtime accumulates call counts across requests in a way this corpus does not model.
+Before deciding the baseline tier, measure one more thing: run a pooled server for a long
+period against a call-heavy handler and record whether handler functions cross the 100-call
+promotion threshold in practice. That is the missing experiment, and it is cheap.
+
+Measurement 5 stays blocked until a build flag exists that removes only the JIT.
+
 ## 9. The plan
 
 Waves are ordered so that every later wave is cheaper and safer because of the earlier
@@ -603,14 +761,20 @@ dispatch state.
 
 Only with wave 0 numbers in hand.
 
-1. If optimized-tier entry is near zero on the handler corpus, delete the optimized tier
-   and its deopt plumbing.
-2. If handler-shaped throughput barely moves without the JIT, delete the baseline tier,
+1. Cleared to proceed by wave 0. Optimized-tier entry is zero on every benchmark, so delete
+   the optimized tier and its deopt plumbing.
+2. Not cleared. The baseline tier pays where it promotes (+52.7 percent on `functionCalls`,
+   +39.1 percent on `recursion`), and no HTTP benchmark reaches it in this corpus. Run the
+   pooled-server promotion experiment named in section 8.1 before deciding. If it stays
+   unreached under sustained real traffic, delete the baseline tier,
    `type_feedback.zig`, both machine-code emitters, the `Context` JIT fields, and the
    `jit_inhibited` durable special case. This is roughly 14,900 lines and it is the single
    largest simplification available.
-3. If long-run RSS is flat, reduce `gc.zig` to a plain stop-the-world mark-sweep for the
-   load path and non-hybrid embedders, keeping the budget-checked allocator front end.
+3. Blocked and inverted by the wave 0 RSS result in section 8.1. Warm-runtime memory grew
+   120 MB in 12 minutes without flattening, so no GC code is deleted until the growth is
+   attributed. If the cause is unbounded caches, the fix is eviction and this item returns
+   as written. If the cause is uncollected handler garbage, the collector is a missing call
+   site rather than dead weight, and this item is struck.
 4. Consider replacing `comptime.zig`'s separate tokenizer, parser, and value model with
    evaluation over the main IR after parse. This deletes about 1,800 lines and structurally
    resolves the `==` inconsistency, but it needs more comptime tests first.
