@@ -578,6 +578,109 @@ right: the growth rate of roughly 8 MB per minute is genuine and sustained. Sust
 growth with retention after idle is the definition of a leak, and the term is now used
 deliberately rather than hedged.
 
+### Measurement 4c, narrowing matrix: the leak is in the core request path
+
+Four arms, 4 minutes each, identical load at concurrency 8, fresh server per arm. The
+second-half slope is the comparable figure because early growth includes pool warmup.
+
+| Arm | Start | End | Second-half slope |
+| --- | ---: | ---: | ---: |
+| Inline trivial, `Response.json({ok:true})`, no imports | 14 MB | 93 MB | +10.66 MB/min |
+| `handler.ts`, plain JSON with a helper call | 14 MB | 77 MB | +9.43 MB/min |
+| `handler-full.tsx`, JSX render path | 15 MB | 83 MB | +12.75 MB/min |
+| `handler.ts` with pool size 1 | 14 MB | 37 MB | +9.12 MB/min |
+
+Every arm leaks, at broadly the same rate, and the simplest possible handler leaks fastest
+of all. Handler complexity is therefore not the driver: JSX, imports, and helper calls make
+no material difference. Pool size 1 reaches a much lower absolute figure over the window,
+which is consistent with N runtimes each warming, but its ongoing slope matches the others,
+so this is per-request accumulation and not a fixed per-runtime cost.
+
+Combined with the `/_health` arm being flat, the defect sits on the path between accepting
+a parsed request and resetting after handler invocation.
+
+### What the static reading rules out
+
+Four plausible explanations were checked in the source and do not hold:
+
+- The server, accept, and HTTP layers, excluded by the `/_health` arm.
+- Arena overflow blocks. `Arena.reset` calls `freeOverflow`, which walks the overflow list,
+  frees each node through the backing allocator, and zeroes the counters
+  (`packages/zts/src/arena.zig:165-178`, `:311-325`).
+- Hidden class explosion. `HiddenClassPool.addProperty` dedupes through a `transition_map`
+  keyed on the from-class and property atom, and returns the existing class on a hit
+  (`packages/zts/src/object.zig:1107-1114`), so repeated identical object shapes do not
+  allocate new classes.
+- Unbounded atom interning as the primary cause. The request path does intern arbitrary
+  header names and query-parameter keys (`packages/runtime/src/runtime_natives.zig:61`,
+  `:273`), and the `AtomTable` is never reset per request, with `reset` called only at
+  `packages/zts/src/context.zig:824` and in a test. That is a genuine unbounded-growth risk
+  for traffic with varying header or parameter names, and it should be fixed on its own
+  merits, but interning deduplicates, and the load used here sends a fixed header set with
+  no query string, so it cannot explain this leak.
+
+What remains, and where the next look should go: allocations made during handler invocation
+that are neither arena-backed nor freed. Note the shape of the design. `HybridAllocator`
+routes by lifetime, and the persistent side is documented as "lives forever" with
+`persistent_used` a monotonically increasing counter and no free path
+(`packages/zts/src/arena.zig:373-400`). Anything that reaches the persistent side per
+request, rather than once per runtime, grows without bound by construction.
+
+### Measurement 4d, configuration sensitivity: nothing bounds it
+
+Two further arms, 8 minutes each at concurrency 4, on the trivial inline handler, to test
+whether pool size or the memory limit contains the growth.
+
+| Arm | Start | End | Second-half slope |
+| --- | ---: | ---: | ---: |
+| Pool size 1, no limit | 14 MB | 64 MB | +5.16 MB/min |
+| Default pool (28), `-m 64m` | 14 MB | 135 MB | +4.15 MB/min |
+
+Neither bounds it. A single runtime still leaks at about 5 MB per minute, so this is not an
+artifact of many pooled runtimes each warming. A memory limit does not contain it either,
+and the source says why: in hybrid mode, budget exhaustion is explicitly not a trigger for
+collection, because the major GC call is guarded behind `!hybrid_mode`
+(`packages/zts/src/gc.zig:707-711`). The limit can only fail an allocation, never reclaim
+one.
+
+Two configuration facts compound this, and both are worth fixing independently of the leak:
+
+- `memory_limit` defaults to 0, meaning unlimited
+  (`packages/runtime/src/runtime_config.zig:35`), so the default configuration has no bound
+  at all.
+- The limit is applied per runtime, not per process
+  (`packages/runtime/src/runtime_config.zig:181-184`), while the pool defaults to a size
+  derived from CPU count (`packages/runtime/src/server.zig:1674-1675`, `:2355`). On the
+  14-core host used here the pool is 28 runtimes, so `-m 128m` authorizes roughly 3.5 GB
+  process-wide. A user setting a memory limit to fit a container will not get the bound they
+  expect.
+
+An earlier arm combining pool size 1 with a 64 MB limit did appear bounded, oscillating in a
+30 to 48 MB band. That reading is not repeatable against the two arms above and is treated
+as noise, not as evidence that either knob helps.
+
+### Where this investigation stands
+
+Black-box narrowing is now exhausted. Established: the growth requires handler execution,
+is independent of handler content, is present with a single runtime, is not contained by
+the memory limit, and is not returned when load stops. Excluded: the server and HTTP
+layers, arena overflow, hidden class explosion, and atom interning as the primary cause.
+
+The next step requires instrumentation rather than more load runs. Add a temporary periodic
+dump of the counters that already exist but are not exposed: `HybridAllocator.persistent_used`
+(`arena.zig:382`), `Arena.getStats` including the high-water mark, `AtomTable` entry count,
+`HiddenClassPool.count`, `BytecodeCache.count` (`bytecode_cache.zig:712`), and
+`StringTable.getStats` (`string.zig:1076`). Sample every few thousand requests under load
+and identify which counter tracks the RSS curve. That single run should name the leak,
+because one of those counters either follows the curve or none of them do, and both answers
+are decisive.
+
+A related gap this exposes: none of these counters is reachable from a running server. There
+is no metrics endpoint; `/_health` and `/_readiness` return bare status codes
+(`packages/runtime/src/server.zig:613-630`). A runtime that cannot report its own memory
+accounting is a runtime whose leaks are found by external RSS sampling, which is how this
+one was found. Exposing them behind a debug flag belongs in the reset.
+
 ### Consequence: this outranks the refactor
 
 A serverless runtime whose selling point is long-lived pooled runtimes leaks about 8 MB per
