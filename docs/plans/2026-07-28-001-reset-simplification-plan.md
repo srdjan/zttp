@@ -511,11 +511,42 @@ Protocol: `zttp serve` on `examples/handler/handler-full.tsx`, request logging o
 | 8 min | 118.9 MB |
 | 12 min | 135.5 MB |
 
-Growth over the run is 120.7 MB. The curve fluctuates locally, with dips around the 8 and
-9 minute marks that show some memory is returned, but it does not converge. A least-squares
-fit over the final 6 minutes only, which is the window where a warming pool and filling
-caches should already have settled, gives 8.4 MB per minute, essentially the same rate as
-the run as a whole.
+Growth over the run is 120.7 MB.
+
+Correction to the first reading of this run. A least-squares fit over the final 6 minutes
+gave 8.4 MB per minute, and that number was reported as a sustained growth rate. It is not
+reliable. The series oscillates with dips of 10 to 20 MB, and fitting a straight line
+through a sawtooth reports the slope of whichever part of the cycle the window happens to
+cover. The 6-minute attribution run below plateaus in its second half by the same estimator,
+which is the same measurement disagreeing with itself. The honest statement is that memory
+rises steeply for the first several minutes and then oscillates in a band, and that neither
+6 nor 12 minutes distinguishes a plateau from a slow upward drift. This is why the wave 0
+requirement is an hours-long run, and it stands.
+
+### Measurement 4a, attribution: the growth requires handler execution
+
+Discriminating experiment, 6 minutes per arm, identical load (`hey`, concurrency 8) against
+the same server binary and handler, differing only in the request path. `/_health` returns
+at `server.zig:613`, before any handler invocation, proof cache, or JS execution.
+
+| Arm | Start | End | Second-half slope |
+| --- | ---: | ---: | ---: |
+| `/_health`, no JS executed | 14.5 MB | 4.5 MB | +0.02 MB/min |
+| `/`, handler executed | 14.5 MB | 76.5 MB | +0.39 MB/min |
+
+The `/_health` arm is flat at 4 to 5 MB for the whole run, and it ends lower than it
+started because startup memory is released once serving begins. The connection, accept, and
+HTTP layers therefore do not accumulate. Whatever grows, grows only when the JS handler
+runs, which narrows the search to the engine, the pool, and per-request state, and clears
+the server layer entirely.
+
+The handler arm rises to about 91 MB by 4 minutes and then oscillates between 72 and 93 MB
+for the rest of the run, dipping and recovering rather than climbing steadily. Combined
+with the 12-minute run reaching 135 MB, the two runs are consistent with a rising band
+rather than either a clean plateau or a linear leak. A 45-minute run with a 4-minute idle
+tail is in progress to settle it; the idle tail is the second discriminator, because memory
+that is returned once load stops behaves like a cache or arena high-water mark, and memory
+that is retained does not.
 
 What this does not say: it does not prove a leak. Bytecode caches, inline caches, the
 string intern table, and pool warmup all legitimately grow, and 12 minutes on a noisy host
@@ -523,11 +554,12 @@ is a proxy, not the hours-long observation wave 0 asks for. Extrapolating the la
 an hour or a day would be arithmetic, not evidence, so no such number is claimed here.
 
 What this does say, and it is enough to act on: a warm pooled runtime under continuous load
-does not reach a memory steady state within 12 minutes, in a product whose deployment model
-is exactly a long-lived pooled runtime under continuous load. Section 4.4 established that
-in hybrid mode, which is the default in every shipped configuration, `minorGC` and `majorGC`
-are no-ops and collection happens only during handler load. These two facts fit together
-uncomfortably well.
+reaches roughly 10 times its startup footprint within minutes, and short observations cannot
+yet tell a bounded band from a slow climb, in a product whose deployment model is exactly a
+long-lived pooled runtime under continuous load. Section 4.4 established that in hybrid mode,
+which is the default in every shipped configuration, `minorGC` and `majorGC` are no-ops and
+collection happens only during handler load. That fact and this measurement belong in the
+same investigation.
 
 Consequence for the plan: wave 5 item 3 is inverted. It proposed reducing `gc.zig` on the
 theory that a dormant collector serves nothing. The correct next step is the opposite
@@ -949,7 +981,38 @@ restart recovery; browser verification of Studio before and after any control-su
 change; completeness checks over examples, commands, pi tools, package tests, module
 descriptors, and generated outputs; and forbidden-import and dependency-cycle checks.
 
-## 13. What this buys
+## 13. Deletion ledger
+
+Wave 0 item 4. Nothing is removed without recorded live-reference evidence. Every row below
+was verified by grep or import scan on 2026-07-28 at 329e88de. A row is cleared to execute
+only when its evidence still holds at the moment of the cut, so re-run the check in the
+commit that performs it.
+
+| # | Target | Live-reference evidence | Re-check command | Status |
+| --- | --- | --- | --- | --- |
+| D1 | `packages/zts/src/parser/parse.zig.tmp` | Untracked editor artifact, gitignored by the `*.tmp` rule; no importer possible | `git check-ignore -v <path>` | cleared |
+| D2 | Generator machinery: `object.zig:889-898`, `object.zig:1821-1895`, `interpreter/call.zig:113-140`, `context.zig:267`, `is_generator` plumbing | `yield` is a parse error (`parse.zig:1701`); only references to `createGenerator*` outside `object.zig` are the two creation sites; nothing advances a generator | `git grep -n 'createGenerator\|GeneratorState\|generator_prototype'` | cleared |
+| D3 | Async opcodes `await_val`, `make_async` and their interpreter, verifier, and JIT-exclusion handling | async is a parse error, so no producer exists; opcodes documented as "kept for future implementation" (`bytecode.zig:163-165`) | `git grep -n 'await_val\|make_async'` | cleared |
+| D4 | Catch stack: `context.zig:199`, `:274`, `:1923-1944`, frame save/restore | `try/catch` is a parse error; no non-test caller of the push/get functions | `git grep -n 'catch_stack\|CatchHandler\|catch_depth'` | cleared |
+| D5 | Loose-equality remnants: `parse.zig:3241-3242`, `ir.zig:83-84`, `ir_opt.zig:303`, `codegen.zig:994-995`, interpreter eq/neq, opcodes 0x44/0x45 | `==` and `!=` are parse errors (`parse.zig:1748-1755`), so no producer exists | `git grep -n 'eq\b.*neq\|0x44\|0x45'` plus a parse-error test | cleared, but see note |
+| D6 | `compiler.zig` `Compiler`, `compileParallel`, `CompileUnit`; all of `intern_pool.zig` | Only importer is `semantics_corpus.zig:34`, which uses the plain `compile()` helper; `intern_pool` is imported only by `compiler.zig` and re-exported by `root.zig` | `git grep -ln 'intern_pool.zig\|compileParallel'` | cleared |
+| D7 | `kind=check` ledger variant | Only `.kind = .check` producer is a test (`proof_ledger.zig:622`); module doc at `:1-2` claims production use that does not exist | `git grep -n '\.kind = \.check'` | cleared |
+| D8 | Semantics receipt signing (`semantics_probe_lib.zig`), workflow receipt signing (`hypermedia_probe_lib.zig`, `hypermedia_receipt.zig`) | Only references to `semantics-receipt` and `workflow-receipt` are inside their producers; the CI gate reads the `--json` summary (`scripts/verify.sh:83-84`), not the receipt | `git grep -n 'semantics-receipt\|workflow-receipt'` | cleared |
+| D9 | Optimized JIT tier and deopt plumbing | Wave 0 measurement: `tier_promotions.optimized` is 0 on all 13 benchmarks | re-run `zig build bench -Doptimize=ReleaseFast -- --json` and confirm | cleared by measurement |
+| D10 | Baseline JIT tier | Not cleared. Pays +52.7 percent on `functionCalls` and +39.1 percent on `recursion`; pooled-server promotion experiment outstanding | see section 8.1 | blocked |
+| D11 | Any `gc.zig` reduction | Not cleared. Warm-runtime RSS grows without flattening; growth unattributed | see section 8.1 | blocked |
+
+Note on D5: the deletion is cleared for the runtime language, but `comptime.zig` genuinely
+supports `==` today (`comptime.zig:9`, `looseEquals` at `:134`). Removing it there is a
+behavior change to `comptime()` expressions, not dead-code removal. Grep `examples/` and any
+user corpus first, and treat it as a small breaking change with its own decision, not as
+part of D5.
+
+Rows D1 to D8 are wave 1. Together they are the roughly 2,000 lines the plan calls
+removable at low risk, and each one is unreachable by construction rather than merely
+unused.
+
+## 14. What this buys
 
 Wave 1 removes roughly 2,000 lines that are provably unreachable today, at low risk, in
 about a week. Waves 2 through 4 remove or relocate several thousand more without any
