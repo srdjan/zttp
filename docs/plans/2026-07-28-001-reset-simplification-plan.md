@@ -15,6 +15,12 @@ build, tests, and docs. Every number below comes from a command or a file. Nothi
 estimated. Claims that could not be verified in the repository are marked "needs
 measurement" and are not used to justify a deletion.
 
+A second, independently produced reset plan was then merged into this one. Its technical
+findings were re-verified against the source before adoption; four of them were real and
+missed by the first pass, and one was misattributed. Section 12 records what was absorbed
+and the three conflicts that remain open. This file is the reset ledger: findings,
+decisions, evidence, and execution status live here until the reset closes.
+
 Findings that were spot-checked a second time by hand are marked as verified. Section 11
 lists the reviewer claims that the second check corrected.
 
@@ -68,6 +74,14 @@ runs.
 **The proof surface, not the engine, is where the concept duplication lives.** One
 algorithm, `contract_diff.diffContracts`, has seven frontends and four separate verdict
 vocabularies. Three signed receipts have no reader anywhere in the repository.
+
+**Ownership, not size, is the real defect.** Added after the second review. Compilation has
+no single fallible entry point and no single owned result, and three production
+constructors turn allocation failure into `unreachable` (section 4.5). The runtime carries a
+second hand-written reader for the contract format the product signs (section 5.6). Native
+callbacks resolve their target through threadlocal state (section 6.1). These are not
+surface-area problems and they do not shrink by deleting anything. They are the work that
+makes the base solid, and they belong at the front of the plan, not the end.
 
 ## 4. Engine core (packages/zts)
 
@@ -141,6 +155,35 @@ temporarily disables hybrid mode, and in the non-default non-hybrid pool branch
 load-time-only collector. This needs the RSS measurement in section 8 before any cut,
 because nothing collects persistent objects during serving today.
 
+### 4.5 Compilation ownership, verified
+
+This was missed by the first pass and comes from the external review. It is the most
+serious correctness finding in this document, because it is about failure paths rather
+than surface area.
+
+`Parser.init` at `parser/parse.zig:131-133` is an infallible wrapper that calls
+`initFallible` and converts allocation failure into `unreachable`. The same pattern
+appears at `parser/root.zig:170` and `parser/scope.zig:151`. There are 26 occurrences of
+`catch unreachable` in `packages/zts`. Some are honest and documented as such
+(`parser/ir.zig:918` notes that parser construction performs no allocation), but the three
+constructor wrappers convert an out-of-memory condition in production code into undefined
+behavior. `packages/zts/src/parser/root.zig:133-136` also documents a legacy Parser
+wrapper kept for `zruntime.zig` compatibility, so there are two live parser entry points.
+
+The consequence is that compilation has no single fallible entry point and no single owned
+result. Ownership of bytecode, constants, nested function payloads, diagnostics, and
+optional contract output is spread across the caller, and the compile benchmark currently
+hides nested-function ownership behind an arena.
+
+The target is one fallible `CompileRequest` to `CompiledModule` API, where `CompiledModule`
+owns everything the compile produced and exposes one idempotent `deinit`, with the internal
+stages made explicit as Parsed, Resolved, Checked, Contracted, Lowered. This subsumes the
+weaker proposal elsewhere in this document to merely move `precompile.zig`'s orchestration
+into `pipeline.zig`: the orchestration move is the same work done properly.
+
+Acceptance is objective and stronger than a passing test suite: every compile path,
+including every failure stage, must report no leaks under `std.testing.allocator`.
+
 ## 5. Proof and verification surface
 
 Slice measured at about 72,000 lines across zts, runtime, tools, and proof-review.
@@ -208,6 +251,28 @@ traversal orders and state. The collapsible layer is a shared import and binding
 computed once, a shared read-only IR shape helper library, and moving `precompile.zig`'s
 ad-hoc orchestration into `pipeline.zig` so each pass runs exactly once.
 
+### 5.6 Two contract wire readers, verified
+
+Also missed by the first pass. The canonical contract codec is
+`packages/zts/src/contract_json_parser.zig`, 2,924 lines. The runtime carries a second,
+hand-written reader in `packages/runtime/src/contract_runtime.zig`, 1,818 lines, whose
+`parseContractJson` produces a `RawRuntimeContract` (`contract_runtime.zig:166-185`). Two
+independent readers of the same on-disk format is a drift hazard on the exact artifact the
+product signs and attests.
+
+The fix is to replace the hand-written reader with the canonical codec followed by a
+runtime-specific projection. The `RawRuntimeContract` to `ValidatedRuntimeContract`
+promotion is not the problem and must be preserved: it is a real trust boundary, and the
+capability, policy, and artifact-hash checks that hang off it stay exactly as they are.
+The same principle applies to contract construction on the producing side, where
+`ContractBuilder` accumulates facts through repeated mutable scans; one immutable
+`ModuleFacts` index built once from parsed and checked source, with pure projections for
+routes, effects, capabilities, workflows, and proof data, replaces both the seven scans
+and the accumulation.
+
+Acceptance for this whole area is byte-identical contract and artifact fixtures. If a
+single byte moves, the change is wrong.
+
 ## 6. Runtime and CLI
 
 The census: 5 core commands, about 20 named advanced commands, 24 registry analyzer
@@ -237,6 +302,30 @@ Two items ship inside the user-facing CLI that are repository tooling, not produ
 `cli_release_check.zig` (581 lines, behind `doctor --release`, consumed by
 `release.yml`), and the two benchmark files (1,434 lines), which contradict the
 project's own rule that benchmarks live outside this repository.
+
+### 6.1 Ambient dispatch state, verified
+
+The first pass found the threadlocal SSR callback at `http.zig:23-33` but stopped there.
+The runtime carries more of the same: `zruntime.zig:137` `current_runtime`,
+`zruntime.zig:143` `last_fault_location`, `zruntime.zig:155` `aot_override`, and
+`zruntime.zig:2289` `active_ws_connection`. WebSocket native callbacks therefore resolve
+their target through ambient thread state rather than through a passed context.
+
+Combined with the back-imports already noted (`runtime_http.zig:9` documents that it exists
+because of the threadlocal and back-imports `Runtime`), this is one problem with one fix:
+an explicit per-invocation context carrying request, WebSocket handle, tracing, and allowed
+egress hosts, passed to native callbacks, plus a `HandlerInstance` that owns the engine
+runtime, installed builtins, loaded handler, and reset lifecycle, owned directly by the
+pool. That removes the runtime-to-pool cycle and the alias bridges at the same time.
+
+This changes the earlier recommendation about `server.zig`. The first pass judged it a
+single coherent pipeline and advised against splitting it. That judgement was about the
+request path, and it holds: there is one parse path and one ordered pipeline. But
+`ServerConfig` reaching below the server edge into durable scheduling and recovery is a
+separate problem, and the answer is a data-only `ExecutionSpec` mapped from `ServerConfig`
+at the composition edge, with `server.zig` kept as a small composition facade over
+transport, request execution, control surface, WebSocket, and recovery. Decompose by
+ownership, not by line count.
 
 ## 7. Agent, tools, modules
 
@@ -327,12 +416,56 @@ ones. Each wave ends at a gate. Do not start the next wave with a red gate.
 Standard gate unless stated otherwise: `bash scripts/verify.sh` green, plus
 `bash scripts/test-examples.sh`.
 
-### Wave 0: measure and freeze the baseline
+### Wave 0: freeze, inventory, and measure
 
-Run all five measurements in section 8 and record the results here. Regenerate
-`zig build bench` and `bench-check` baselines so every later deletion has a before and
-after receipt. No code changes. This wave exists because three of the largest proposals
-below are gated on numbers that do not exist yet.
+No code changes. This wave exists because three of the largest proposals below are gated on
+numbers that do not exist yet, and because a refactor of this size needs its safety net
+built before the first cut, not after.
+
+1. Declare a feature freeze for the duration of the reset. Lift it only when the
+   documentation gates, release gates, performance gates, and public-compatibility
+   fixtures all pass.
+2. Record the baseline in this document: commit, toolchain version, binary sizes,
+   `scripts/verify.sh` output, compile-benchmark results, and `doctor --release --json`
+   output. Note that the release verdict is currently `ready_with_known_issues` because
+   performance claims lack durable measurement receipts; that is unfinished work, not an
+   accepted state.
+3. Build the public-contract inventory. This is the single most valuable addition to the
+   plan and it did not exist in the first draft. Enumerate every surface that must not
+   change: CLI stdout, stderr, and exit codes per command; contract JSON; embedded artifact
+   contents; every receipt format; module behavior; installer compatibility; and the Zig
+   embedding API. Capture a golden fixture for each one before any wave touches it. The
+   rule for the whole reset is then mechanical: if a golden moves, the change is wrong,
+   and the unit stops until it is explained.
+4. Open a deletion ledger. Nothing is removed without recorded live-reference evidence,
+   which is the grep or import scan proving no consumer exists. Every deletion proposed in
+   sections 4 and 5 already has that evidence and is transferred into the ledger with its
+   citation. Nothing is deleted because a file is large or a date is old.
+5. Run all five measurements in section 8 and record the results. Regenerate
+   `zig build bench` and `bench-check` baselines so every later deletion has a before and
+   after receipt.
+6. Write the target dependency graph down before moving any code.
+
+Exit when every reset item has an owner, an invariant, a test surface, and a position in
+the dependency order.
+
+### Wave 0.5: make verification authoritative
+
+`scripts/verify.sh`, `ci.yml`, `release.yml`, and `doctor --release` describe overlapping
+but non-identical gate sets. The first pass measured the drift (section 3 of the meta
+findings: `verify.sh` mirrors `ci.yml` faithfully but not `release.yml`) and proposed
+patching the differences. The better fix is one declarative verification manifest with
+fast, CI, and release profiles, from which the build steps, the script, both workflows, and
+doctor reporting all derive. Add to it the dependency-boundary and generated-artifact drift
+checks, and an example manifest classifying every example as supported, illustrative,
+expected-failure, or live-service dependent.
+
+Performance receipts become reproducible artifacts recording commit, Zig version, host,
+run configuration, sample count, and thresholds. Do this wave before any refactor wave, so
+that every later claim of "no regression" is made against one authority instead of four.
+
+Exit when the release profile covers every supported surface and `doctor --release --json`
+returns ready.
 
 ### Wave 1: provably dead code, low risk
 
@@ -371,8 +504,17 @@ Gate: standard, plus `zttp spec-check` passing with an intentionally changed spe
 6. Split `module_binding.zig` into capabilities, ABI bridge, and types.
 7. Rename `server_io.zig` to reflect that it is generic fd helpers, and document the
    `zruntime` to `server_io` import.
+8. Create curated `zts`, `zts-compiler`, and `zts-contracts` build modules with
+   package-local internals, and enforce the boundary with a forbidden-import check. Do this
+   before considering any physical package move. `packages/zts/src/root.zig` documents a
+   stable-versus-internal split today but re-exports both, and runtime, tools, and pi all
+   import internals directly. Curating the module surface is cheap, reversible, and it makes
+   the later moves mechanical. It also replaces the first draft's proposal to relocate
+   `canonicalize.zig` and `edit_simulate.zig` into `packages/zts`: fix the surface first,
+   then decide whether the files need to move at all.
 
-Gate: standard, plus `zig build --list-steps` diff empty.
+Gate: standard, plus `zig build --list-steps` diff empty, plus the forbidden-import check
+passing.
 
 ### Wave 3: test and build hygiene
 
@@ -391,7 +533,38 @@ Gate: standard, plus `zig build --list-steps` diff empty.
 
 Gate: standard, plus identical collected-test counts before and after item 1.
 
-### Wave 4: concept unification
+### Wave 4: ownership and concept unification
+
+This is the substance of the reset. The first four items are ownership resets added from
+the external review; they are larger and more valuable than the concept cleanups that
+follow them, and they should be sequenced first.
+
+0a. Introduce the fallible `CompileRequest` to `CompiledModule` API from section 4.5, with
+   explicit Parsed, Resolved, Checked, Contracted, Lowered stages and one idempotent
+   `deinit`. Retire the infallible parser constructors (`parse.zig:131-133`,
+   `parser/root.zig:170`, `parser/scope.zig:151`) and the legacy Parser wrapper
+   (`parser/root.zig:133-136`) once every caller has migrated. Stop recreating type,
+   environment, and checker state during contract extraction; carry one session through all
+   stages. Move compile benchmarking off the arena that currently masks nested-function
+   ownership, and measure the real production pipeline.
+
+0b. Build the immutable `ModuleFacts` index from section 5.6 and convert contract
+   construction to pure projections. Replace the runtime's hand-written wire reader with
+   the canonical codec plus a runtime projection, keeping the raw-to-validated promotion and
+   every capability, policy, and hash check intact. Make typed module descriptors
+   authoritative for binding, capability, effect, documentation, and governance metadata,
+   and generate the module spec JSON and documentation mirrors from them rather than
+   editing either by hand. This resolves the module-specs governance question in section 10
+   without deleting the tripwire.
+
+0c. Introduce `HandlerInstance` as the owner of the engine runtime, installed builtins,
+   loaded handler, invocation state, and reset lifecycle, owned directly by the pool. This
+   removes the runtime-to-pool back-imports and the alias bridges.
+
+0d. Replace the ambient state in section 6.1 with an explicit `InvocationContext` passed to
+   native callbacks, and introduce the data-only `ExecutionSpec` mapped from `ServerConfig`
+   at the composition edge so durable scheduling and recovery stop depending on the full
+   server configuration.
 
 1. Collapse the four verdict vocabularies onto one type, and delete the hand-mirrored enum
    at `proof-review/review.zig:27-30`.
@@ -409,9 +582,22 @@ Gate: standard, plus identical collected-test counts before and after item 1.
 6. Add the comptime argument-decode wrapper for module impl functions, generated from the
    `param_types` already declared in each binding.
 7. Add the comptime JSON-tool generator for the 20 thin pi wrappers.
+8. Define typed `CommandDescriptor` records carrying name, help, options, capability
+   requirements, handler, and output contract, and derive dispatch and help for all three
+   binaries from them. Each binary keeps its own command set and its exact current output.
+   The command registry already proves the principle: the generated parts of the help
+   surface never drift while the hand-written parts do.
+9. Extract artifact construction into an explicit `BuildRequest` plus `BuildCapabilities`
+   to `BuildReceipt` service with declared dependencies, so building an artifact stops
+   being a set of ambient effects.
+10. Convert pi's flat tool catalog into typed capability bundles. Classify every tool
+   first; remove a wrapper or a provider only after prompt, cassette, schema, and
+   live-reference analysis proves it redundant.
 
-Gate: standard, plus golden outputs for `prove`, `prove-behavior`, `gate`, and the deploy
-card unchanged, plus contract golden files unchanged.
+Gate: standard, plus every compile path and every failure stage leak-free under
+`std.testing.allocator`, plus byte-identical contract, artifact, and receipt fixtures, plus
+unchanged CLI goldens, plus the runtime dependency graph proven acyclic and free of ambient
+dispatch state.
 
 ### Wave 5: measurement-gated structural cuts
 
@@ -502,8 +688,104 @@ on them.
    audit does not orphan the specs.
 3. `parse.zig.tmp` is covered by the `*.tmp` gitignore rule, so it never inflated the
    tracked line count. It is still a live trap for readers and greps and should go.
+4. The external review's finding that artifact building performs process-wide
+   working-directory mutation is misattributed. Verified: every `chdir` call in the
+   repository is in pi test harnesses and the codegen recorder
+   (`packages/pi/src/agent.zig:1357-1462`, `expert_codegen_record.zig:337`), each paired
+   with a restoring `defer`. No production build path mutates the working directory. The
+   `BuildRequest` to `BuildReceipt` proposal still stands on its own merits, but not on
+   that justification.
+5. The external review's baseline claims, that the verifier, edge and WebAssembly builds,
+   the Studio smoke test, and the benchmark gates all pass at 113022e3, were not
+   independently re-run for this document. Wave 0 records them properly.
 
-## 12. What this buys
+## 12. Reconciliation with the external reset plan
+
+A second, independently produced reset plan was merged into this document. Most of it is
+complementary and has been absorbed into the sections above: the compile ownership finding
+(4.5), the duplicate wire reader (5.6), the ambient dispatch state (6.1), the verification
+manifest (wave 0.5), the public-contract inventory and deletion ledger (wave 0), and the
+ownership resets (wave 4, items 0a to 0d). Its process discipline is stronger than the
+first draft's and is adopted wholesale: freeze features, capture goldens before cutting,
+require live-reference evidence for every deletion, and stop the current unit on any
+unexplained public behavior difference.
+
+Three genuine conflicts remain. They are recorded rather than silently resolved, because
+each is a decision, not a detail.
+
+**Conflict 1, the JIT.** The external plan locks the interpreter, baseline JIT, and
+optimized JIT as three separate execution loops and rejects removing any of them. This
+document says the question is unanswered and gates it on five measurements that have never
+been recorded. These positions are not compatible, and the difference is roughly 14,900
+lines. The recommendation is to run wave 0 first and let the numbers decide. A lock adopted
+before the measurement is a preference; a lock adopted after it is engineering. If the
+numbers show the JIT earns its place, this document's wave 5 items 1 and 2 are struck and
+the lock stands. Note that both plans already agree on the smaller point: no universal
+opcode visitor and no virtual dispatch in the execution loops. Sharing pure opcode metadata
+and semantic primitives is allowed; sharing the dispatch loop is not.
+
+**Conflict 2, retention.** The external plan locks retention of pi, proof review, Studio,
+edge, WebAssembly, WebSockets, durable execution, workflows, queues, modules, and installer
+compatibility. This document agrees on all of them except that it lists edge, the demo and
+quest, several HUD lenses, badge and export, and three unread receipts as owner decisions
+in section 10. The conflict is narrower than it looks: the external plan's own rule is that
+nothing is removed without live-reference evidence, and every item in section 10 carries
+that evidence. So the rule is satisfied and the disagreement is purely about product
+appetite. Section 10 stays as written, with the default set to keep.
+
+**Conflict 3, deletion policy versus dead code.** The external plan says not to remove
+source, examples, tools, or documentation based on file size or apparent age alone. This
+document agrees and never proposes a deletion on those grounds. Wave 1 removes only code
+that is unreachable by construction, each item verified by a parse-time ban plus an absent
+consumer, and each one is now entered in the deletion ledger with its citation. The 8,187
+lines of dated planning documents in wave 6 are archived, not deleted, and git holds the
+detail either way.
+
+Two smaller positions from the external plan are adopted without reservation. First,
+publish only performance numbers that a release receipt supports, and otherwise remove the
+claim; `docs/performance.md` currently carries numbers it flags as unverified, which is why
+the release verdict is `ready_with_known_issues`. Second, do not hand-edit generated
+documentation, vendored artifacts, or `CHANGELOG.md`.
+
+### 12.1 Acceptance thresholds
+
+The first draft had gates but no reject criteria. These are adopted. Reject a unit of work
+if the compiler suite geomean regresses more than 5 percent, an individual compiler fixture
+regresses more than 10 percent, binary size grows more than 5 percent, or an existing
+benchmark threshold fails without an evidence-backed explanation. Run the final release
+profile twice, once from a clean cache and once warm, to expose hidden dependencies and
+flakiness.
+
+### 12.2 Required final commands
+
+```
+zig fmt --check build.zig packages/
+zig build test
+zig build test-zts
+zig build test-zruntime
+zig build test-cli -Dstudio
+zig build smoke-v1
+zig build smoke-studio -Dstudio
+zig build wasm
+zig build -Dedge test
+zig build bench-check
+zig build compile-bench -Doptimize=ReleaseFast -- --json --iterations 50
+bash scripts/test-examples.sh
+bash scripts/verify.sh
+./zig-out/bin/zttp doctor --release --json
+git diff --check
+git status --short --branch
+```
+
+Reset-specific scenarios to add and pass: nested-function compilation and every failure
+stage under `std.testing.allocator`; goldens for diagnostics, contracts, bytecode,
+artifacts, receipts, CLI streams, and exit codes; end-to-end tests for pool reset,
+concurrent isolation, timeout, panic recovery, WebSocket lifecycle, durable replay, and
+restart recovery; browser verification of Studio before and after any control-surface
+change; completeness checks over examples, commands, pi tools, package tests, module
+descriptors, and generated outputs; and forbidden-import and dependency-cycle checks.
+
+## 13. What this buys
 
 Wave 1 removes roughly 2,000 lines that are provably unreachable today, at low risk, in
 about a week. Waves 2 through 4 remove or relocate several thousand more without any
