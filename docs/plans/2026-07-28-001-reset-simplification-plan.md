@@ -773,13 +773,30 @@ concurrency 8:
 Verification: `zig build test-zts` green, `scripts/verify.sh` green (exit 0, matching the
 baseline recorded before the change), 1,000,000 responses in the soak all 200.
 
-**Not yet closed.** The dominant term is gone and memory is returned on idle again, but the
-residual is about 1 MB per minute and the band swings widely enough that a 30-minute linear
-fit is not trustworthy, which is the same estimator trap documented earlier in this section.
-Before declaring this defect closed, run the acceptance soak for two hours and confirm the
-band is stationary rather than drifting. If a residual survives, the likely candidates are
-the same churn mechanism applied to allocations that still bypass the runtime arena, and the
-next step is to profile those the same way rather than to guess.
+**Closed by the two-hour acceptance soak.** The 30-minute run suggested a residual of about
+1 MB per minute, but that was the warmup phase read as a trend. Two hours at concurrency 8,
+sampled every 30 seconds, analyzed by quarter rather than by a single fit, because the series
+oscillates:
+
+| Quarter | Mean | Slope |
+| --- | ---: | ---: |
+| 1, 0 to 30 min | 63.0 MB | -1.37 MB/min |
+| 2, 30 to 60 min | 87.5 MB | +2.67 MB/min |
+| 3, 60 to 90 min | 117.0 MB | -0.72 MB/min |
+| 4, 90 to 120 min | 103.3 MB | -0.14 MB/min |
+
+The process warms to a plateau and then stops rising: the final 30 minutes slope is -0.14 MB
+per minute, and the last two quarters are both flat-to-negative. Peak was 180 MB, the end
+state 98 MB, and the steady band is roughly 70 to 140 MB for a 28-runtime pool under
+saturation, which is about 4 MB per live runtime. The same configuration before the fix was
+at 348 MB and still climbing at +8.9 MB per minute by 45 minutes. All 1,000,000 responses
+returned 200.
+
+The acceptance criterion was a stationary band, and it is met. Note that the idle tail is
+not a useful signal here and should not be read as one: with no traffic there are no
+recycles, so a warm pool of 28 live runtimes holds its high-water footprint. The earlier
+30-minute run happened to release half its footprint at idle because recycles were still
+completing as load stopped.
 
 One test was updated rather than weakened: it allocated module state from the testing
 allocator but freed it through `ctx.allocator`, which is now arena-backed. Production
