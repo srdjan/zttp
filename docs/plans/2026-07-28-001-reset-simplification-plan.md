@@ -541,12 +541,62 @@ runs, which narrows the search to the engine, the pool, and per-request state, a
 the server layer entirely.
 
 The handler arm rises to about 91 MB by 4 minutes and then oscillates between 72 and 93 MB
-for the rest of the run, dipping and recovering rather than climbing steadily. Combined
-with the 12-minute run reaching 135 MB, the two runs are consistent with a rising band
-rather than either a clean plateau or a linear leak. A 45-minute run with a 4-minute idle
-tail is in progress to settle it; the idle tail is the second discriminator, because memory
-that is returned once load stops behaves like a cache or arena high-water mark, and memory
-that is retained does not.
+for the rest of that short run. That apparent flattening was a window artifact, and the
+45-minute run below settles it.
+
+### Measurement 4b, 45 minutes with an idle tail: unbounded retention
+
+Same server, same handler, same load, 45 minutes of `hey` at concurrency 8, sampled every
+30 seconds, followed by 4 minutes with the load stopped and the server left running.
+
+| Elapsed | RSS |
+| --- | ---: |
+| 0 min | 15 MB |
+| 6 min | 94 MB |
+| 12 min | 145 MB |
+| 20 min | 185 MB |
+| 30 min | 234 MB |
+| 40 min | 318 MB |
+| 45 min | 348 MB |
+| 45 min, load stopped | 348 MB |
+| 49 min, still idle | 329 MB |
+
+Slope over the first half is +8.28 MB per minute, over the second half +5.50, and over the
+final 15 minutes +8.90. There is no plateau at any point in 45 minutes: the process ends at
+23 times its startup footprint and is still climbing at the same rate it started with. The
+oscillations seen in the shorter runs are noise on a rising line, not a bound.
+
+The idle tail is the decisive part. With the load stopped, the process released 19 MB of
+348, about 5 percent, and then held flat at 329 MB for the remaining 4 minutes. Memory
+acquired during serving is not returned when serving stops. That rules out the benign
+explanations: a cache high-water mark, arena reuse, or a pool warming to steady state would
+all give back far more than 5 percent once the work stops.
+
+This corrects the caution in the previous subsection. The oscillation was real and the
+short-window fits were unreliable, but the underlying reading of the 12-minute run was
+right: the growth rate of roughly 8 MB per minute is genuine and sustained. Sustained
+growth with retention after idle is the definition of a leak, and the term is now used
+deliberately rather than hedged.
+
+### Consequence: this outranks the refactor
+
+A serverless runtime whose selling point is long-lived pooled runtimes leaks about 8 MB per
+minute under continuous load on the default configuration, with no observed bound. At this
+rate a container with a 512 MB limit is at risk within an hour of sustained traffic. The
+`/_health` arm proves the server layer is clean, so the defect is in the engine, the pool,
+or per-request state, on the path that executes JS.
+
+This is a defect, not a design smell, and it takes priority over every simplification in
+this plan. Fix it before wave 1. Concretely, the next steps are to narrow which execution
+path retains: compare a trivial inline handler, a plain JSON handler, and a JSX handler; and
+compare pool sizes, since a per-runtime leak and a per-request leak scale differently. That
+matrix is running now.
+
+Note also what this does to section 4.4 and to wave 5 item 3. The dormant generational
+collector was described there as machinery serving a load-time-only collector, and the
+proposal was to reduce it. With a confirmed leak on the serving path, in a default
+configuration where `minorGC` and `majorGC` are no-ops, the collector's dormancy is now a
+prime suspect rather than a saving. No GC code is deleted until the leak is understood.
 
 What this does not say: it does not prove a leak. Bytecode caches, inline caches, the
 string intern table, and pool warmup all legitimately grow, and 12 minutes on a noisy host
