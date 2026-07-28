@@ -659,21 +659,103 @@ An earlier arm combining pool size 1 with a 64 MB limit did appear bounded, osci
 30 to 48 MB band. That reading is not repeatable against the two arms above and is treated
 as noise, not as evidence that either knob helps.
 
+### Measurement 4e, instrumented run: the driver is runtime recycling
+
+Temporary instrumentation was added to the pool release path, used, and then reverted. It
+exposed the engine counters plus the recycle count, and added an environment override for
+the recycle threshold so recycling could be switched off without changing the handler.
+
+The first attempt instrumented `Runtime.resetForNextRequest` and printed nothing at all.
+That was itself the first clue: `reset_after` is `self.owns_resources`
+(`packages/runtime/src/zruntime.zig:1603`), and pooled runtimes are created by
+`initFromPool` with `owns_resources = false` (`:429`). The pooled serving path never calls
+that reset. The real per-request path is `HandlerPool.releaseForRequest`
+(`packages/runtime/src/runtime_pool.zig:690`), which consults a lifecycle policy and either
+returns the runtime to the pool or destroys it.
+
+The policy is the finding. `PoolingThresholds.max_requests` defaults to **64**
+(`packages/runtime/src/contract_runtime.zig:62`), and `derivePoolingPolicy` falls back to
+`.reuse_bounded_by_count` for any handler that is not proven pure, deterministic, and
+state-isolated (`:76-83`). So by default every pooled runtime is destroyed and rebuilt every
+64 requests.
+
+A/B on that threshold alone, single runtime, identical inline handler and load:
+
+| Arm | RSS over 6 min | Recycles | Releases |
+| --- | --- | ---: | ---: |
+| `max_requests=64`, the default | 13.9 MB climbing to 50 MB | 12,812 | 820,000 |
+| recycling effectively disabled | 13.9 MB falling to 6.3 MB, flat | 0 | 800,000 |
+
+Same request volume, same handler, one runtime. With recycling off the process is stable and
+settles below its startup footprint. With recycling on it climbs steadily. The counters
+printed alongside confirm what is not happening: interned atoms held at 131 and hidden
+classes at 265 in both arms, so neither grows.
+
+### Measurement 4f: nothing is leaked in the Zig sense
+
+The obvious next hypothesis was that teardown misses a free. It does not. A Debug build uses
+`std.heap.DebugAllocator` (`packages/runtime/src/runtime_cli.zig:23-28`), which reports
+leaks on exit. Run with an aggressive recycle threshold, about 375 recycles over 3,000
+requests, then shut down through SIGINT so the allocator's report runs, it found exactly one
+leak, and not in the recycle path:
+
+```
+error(DebugAllocator): memory address 0x103e401c0 leaked:
+  cli_shared.zig:108:26 in stripInlineSource
+  runtime_cli.zig:625:76 in parseServeArgs
+```
+
+That is a one-time startup dupe of the `-e` inline source, a genuine but trivial leak worth
+fixing on its own. Nothing from the recycle path appears. Every runtime teardown frees what
+it allocated.
+
+The mechanism is therefore allocator retention, not a missing free. ReleaseFast uses
+`std.heap.smp_allocator` (`runtime_cli.zig:28`), whose design keeps a per-thread freelist
+per size class and returns memory to those freelists rather than to the operating system;
+only large allocations are mapped and unmapped directly. Building a complete JS runtime
+allocates thousands of small objects: context, builtins, module state, atom table, hidden
+classes, bytecode structures. Destroying it returns all of them to thread freelists that
+never shrink. At roughly 39 recycles per second on this host, that churn is what the RSS
+curve measures. Debug does not show it because `DebugAllocator` releases pages back.
+
+This also explains why the memory limit cannot help. The bytes are not owned by any runtime
+when they accumulate; they sit in the allocator between a destroy and the next create, where
+no per-runtime budget can see them.
+
+### The fix, and what it is worth
+
+The defect is a design interaction, not a bug in one function: an aggressive default recycle
+policy (every 64 requests) combined with a general-purpose allocator that does not return
+freed small objects to the operating system, in a server that runs for days.
+
+Three candidate directions, in the order they should be evaluated:
+
+1. Stop destroying and rebuilding. Recycling exists to bound per-runtime state such as the
+   interned atom table, but the measured state does not grow on ordinary traffic (atoms held
+   at 131). Resetting the state that actually accumulates is cheaper and does not churn the
+   allocator. This looks like the right fix.
+2. Raise the default threshold. 64 requests is very aggressive and no evidence in the repo
+   justifies that number. This is a mitigation, not a fix: it slows the curve proportionally.
+3. Give pooled runtimes their own arena or slab so a rebuild reuses one large mapping
+   instead of thousands of small allocations, which keeps recycling available where it is
+   genuinely needed without the churn.
+
+Whichever is chosen, the acceptance test now exists and is cheap: sustained load for 30
+minutes with the default policy, RSS flat within a band, plus the recycling-disabled arm as
+the control.
+
+Note the irony worth recording for the reset: recycling is a correctness mechanism
+protecting request isolation, and it is the thing consuming the memory. That is exactly the
+kind of interaction the simplification waves must not break, which is why this is fixed
+first and with a regression test attached.
+
 ### Where this investigation stands
 
-Black-box narrowing is now exhausted. Established: the growth requires handler execution,
-is independent of handler content, is present with a single runtime, is not contained by
-the memory limit, and is not returned when load stops. Excluded: the server and HTTP
-layers, arena overflow, hidden class explosion, and atom interning as the primary cause.
-
-The next step requires instrumentation rather than more load runs. Add a temporary periodic
-dump of the counters that already exist but are not exposed: `HybridAllocator.persistent_used`
-(`arena.zig:382`), `Arena.getStats` including the high-water mark, `AtomTable` entry count,
-`HiddenClassPool.count`, `BytecodeCache.count` (`bytecode_cache.zig:712`), and
-`StringTable.getStats` (`string.zig:1076`). Sample every few thousand requests under load
-and identify which counter tracks the RSS curve. That single run should name the leak,
-because one of those counters either follows the curve or none of them do, and both answers
-are decisive.
+Resolved by measurements 4e and 4f above. The growth is driven by the default runtime
+recycling policy, and the mechanism is allocator retention under that churn rather than a
+missing free. The counter dump was the decisive step, and it answered in the second way the
+plan anticipated: none of the engine counters tracked the curve, which pointed below them to
+the allocator.
 
 A related gap this exposes: none of these counters is reachable from a running server. There
 is no metrics endpoint; `/_health` and `/_readiness` return bare status codes
