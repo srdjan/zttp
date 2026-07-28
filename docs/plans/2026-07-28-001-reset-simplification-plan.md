@@ -749,6 +749,56 @@ protecting request isolation, and it is the thing consuming the memory. That is 
 kind of interaction the simplification waves must not break, which is why this is fixed
 first and with a regression test attached.
 
+### The fix, applied and measured
+
+Landed as a per-runtime lifetime arena in `packages/zts/src/pool.zig`: every
+runtime-lifetime allocation draws from one `std.heap.ArenaAllocator`, so destroying a
+runtime unmaps once instead of returning about 1,400 small blocks to per-thread freelists.
+The per-step errdefers stay, because they release JIT code pages and file descriptors that
+an arena does not track, and `destroy` no longer frees individual members through the
+caller's allocator, which would now be a mismatched free.
+
+The allocation profile that justified the instrument was measured, not assumed: creating one
+runtime performs 1,419 allocations, 1,411 of them under 4 KiB, and a counting allocator
+showed live bytes returning to approximately zero on destroy, which is the same "no leak"
+answer the Debug build gave.
+
+Like-for-like against the pre-fix 45-minute run, same handler, default 28-runtime pool,
+concurrency 8:
+
+| | At 30 minutes | Released when load stopped | Slope |
+| --- | ---: | ---: | ---: |
+| Before | 234 MB, still climbing | 19 MB of 348, about 5 percent | +8.3 to +8.9 MB/min |
+| After | 76 MB, oscillating 51 to 137 | 76 MB to 38 MB, about 50 percent | +1.0 MB/min |
+
+Verification: `zig build test-zts` green, `scripts/verify.sh` green (exit 0, matching the
+baseline recorded before the change), 1,000,000 responses in the soak all 200.
+
+**Not yet closed.** The dominant term is gone and memory is returned on idle again, but the
+residual is about 1 MB per minute and the band swings widely enough that a 30-minute linear
+fit is not trustworthy, which is the same estimator trap documented earlier in this section.
+Before declaring this defect closed, run the acceptance soak for two hours and confirm the
+band is stationary rather than drifting. If a residual survives, the likely candidates are
+the same churn mechanism applied to allocations that still bypass the runtime arena, and the
+next step is to profile those the same way rather than to guess.
+
+One test was updated rather than weakened: it allocated module state from the testing
+allocator but freed it through `ctx.allocator`, which is now arena-backed. Production
+installers allocate from `ctx.allocator`, so the test now matches how the code it covers
+owns memory, and the ordering it asserts is unchanged.
+
+Still outstanding from this investigation, and not addressed by this fix:
+
+- The one genuine leak the Debug build found, a startup dupe of the `-e` inline source
+  (`packages/runtime/src/cli_shared.zig:108`).
+- Unbounded atom interning of arbitrary header names and query-parameter keys
+  (`packages/runtime/src/runtime_natives.zig:61`, `:273`) into a table never reset per
+  request. Not the cause of this leak, but an unbounded-growth risk under varying traffic.
+- `memory_limit` defaulting to unlimited, and applying per runtime while the pool sizes from
+  CPU count.
+- Whether recycling every 64 requests is the right default at all, now that its memory cost
+  is understood. That is a design question for the reset, not a bug.
+
 ### Where this investigation stands
 
 Resolved by measurements 4e and 4f above. The growth is driven by the default runtime
