@@ -611,13 +611,11 @@ Four plausible explanations were checked in the source and do not hold:
   keyed on the from-class and property atom, and returns the existing class on a hit
   (`packages/zts/src/object.zig:1107-1114`), so repeated identical object shapes do not
   allocate new classes.
-- Unbounded atom interning as the primary cause. The request path does intern arbitrary
-  header names and query-parameter keys (`packages/runtime/src/runtime_natives.zig:61`,
-  `:273`), and the `AtomTable` is never reset per request, with `reset` called only at
-  `packages/zts/src/context.zig:824` and in a test. That is a genuine unbounded-growth risk
-  for traffic with varying header or parameter names, and it should be fixed on its own
-  merits, but interning deduplicates, and the load used here sends a fixed header set with
-  no query string, so it cannot explain this leak.
+- Atom interning. The request path does intern arbitrary header names and query-parameter
+  keys (`packages/runtime/src/runtime_natives.zig:61`, `:273`) into an `AtomTable` never
+  reset per request, but interning deduplicates, the load used here sends a fixed header set
+  with no query string, and the pooling policies bound the table's lifetime anyway (see the
+  correction later in this section). It cannot explain this leak.
 
 What remains, and where the next look should go: allocations made during handler invocation
 that are neither arena-backed nor freed. Note the shape of the design. `HybridAllocator`
@@ -705,9 +703,10 @@ error(DebugAllocator): memory address 0x103e401c0 leaked:
   runtime_cli.zig:625:76 in parseServeArgs
 ```
 
-That is a one-time startup dupe of the `-e` inline source, a genuine but trivial leak worth
-fixing on its own. Nothing from the recycle path appears. Every runtime teardown frees what
-it allocated.
+That is the `-e` inline source, which the serve path holds for the process lifetime by
+design (`cli_shared.zig:98-99`), so the allocator reports it only because nothing frees it
+before exit. It is not a defect. Nothing from the recycle path appears. Every runtime
+teardown frees what it allocated.
 
 The mechanism is therefore allocator retention, not a missing free. ReleaseFast uses
 `std.heap.smp_allocator` (`runtime_cli.zig:28`), whose design keeps a per-thread freelist
@@ -787,15 +786,30 @@ allocator but freed it through `ctx.allocator`, which is now arena-backed. Produ
 installers allocate from `ctx.allocator`, so the test now matches how the code it covers
 owns memory, and the ordering it asserts is unchanged.
 
-Still outstanding from this investigation, and not addressed by this fix:
+Two items listed earlier as outstanding were checked and withdrawn. Both were overstated:
 
-- The one genuine leak the Debug build found, a startup dupe of the `-e` inline source
-  (`packages/runtime/src/cli_shared.zig:108`).
-- Unbounded atom interning of arbitrary header names and query-parameter keys
-  (`packages/runtime/src/runtime_natives.zig:61`, `:273`) into a table never reset per
-  request. Not the cause of this leak, but an unbounded-growth risk under varying traffic.
-- `memory_limit` defaulting to unlimited, and applying per runtime while the pool sizes from
-  CPU count.
+- The Debug build's report of a leaked `-e` source dupe
+  (`packages/runtime/src/cli_shared.zig:108`) is not a defect. The function documents the
+  behavior at `:98-99`: the serve path holds the inline handler source for the process
+  lifetime, so it is live-until-exit by design and the allocator flags it only because
+  nothing frees it before the process ends. No change needed.
+- Atom interning is not unbounded. The request path does intern arbitrary header names and
+  query-parameter keys (`packages/runtime/src/runtime_natives.zig:61`, `:273`) into a table
+  never reset per request, but every pooling policy bounds how long a runtime lives to
+  accumulate them: `reuse_bounded_by_count` recycles after 64 requests,
+  `reuse_bounded_by_ttl` after 30 seconds, `ephemeral` after one request, and
+  `reuse_unbounded` recycles once the table reaches 32,768 atoms
+  (`packages/runtime/src/contract_runtime.zig:62-71`, `runtime_pool.zig:720-726`). That
+  threshold is precisely what those policies exist to enforce. Worth noting for the reset:
+  this is a second correctness job the recycle mechanism is doing, so any change to the
+  recycle policy must preserve it.
+
+Genuinely still outstanding:
+
+- `memory_limit` defaults to unlimited, and when set applies per runtime while the pool
+  sizes from CPU count, so `-m 128m` authorizes roughly 3.5 GB on a 14-core host. This is a
+  user-facing surprise for anyone sizing a container, and it is a documentation and
+  semantics question rather than a leak.
 - Whether recycling every 64 requests is the right default at all, now that its memory cost
   is understood. That is a design question for the reset, not a bug.
 
