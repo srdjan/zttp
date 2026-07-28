@@ -43,6 +43,24 @@ pub const LockFreePool = struct {
         heap_state: *heap.Heap,
         strings: string.StringTable,
 
+        /// Owns every runtime-lifetime allocation, so teardown returns whole
+        /// mappings to the OS instead of ~1400 small blocks per runtime.
+        ///
+        /// The pooling policy recycles a runtime (destroy plus rebuild) every
+        /// `max_requests` requests by default, and ReleaseFast runs on
+        /// `std.heap.smp_allocator`, which returns freed small allocations to
+        /// per-thread freelists rather than to the OS. Building a runtime makes
+        /// about 1400 sub-4-KiB allocations, so recycling under sustained load
+        /// grew RSS without bound (measured: 15 MB to 348 MB over 45 minutes,
+        /// still climbing, with only ~5 percent returned when load stopped).
+        /// Nothing was leaked in the Zig sense; the memory sat in freelists.
+        /// Routing runtime-lifetime allocations through one arena makes destroy
+        /// an unmap. See docs/plans/2026-07-28-001-reset-simplification-plan.md.
+        lifetime_arena: *std.heap.ArenaAllocator,
+        /// The allocator `lifetime_arena` draws from, and the one that owns the
+        /// arena struct itself. Kept so `destroy` can release it last.
+        backing: std.mem.Allocator,
+
         // Request-scoped state (reset per request)
         request_arena: ?*arena_mod.Arena,
         hybrid: ?arena_mod.HybridAllocator,
@@ -66,7 +84,19 @@ pub const LockFreePool = struct {
         /// Optional user-data cleanup hook (called before core runtime destroy)
         user_deinit: ?*const fn (*Runtime, std.mem.Allocator) void,
 
-        pub fn create(allocator: std.mem.Allocator, config: PoolConfig) !*Runtime {
+        pub fn create(backing: std.mem.Allocator, config: PoolConfig) !*Runtime {
+            // Every allocation below draws from `lifetime_arena`, so a failed
+            // create unwinds by dropping the arena and a successful one is
+            // released in a single unmap by `destroy`. The per-step errdefers
+            // are kept because they release non-memory resources (JIT code
+            // pages, file descriptors) that an arena does not know about.
+            const arena_owner = try backing.create(std.heap.ArenaAllocator);
+            errdefer backing.destroy(arena_owner);
+            arena_owner.* = std.heap.ArenaAllocator.init(backing);
+            errdefer arena_owner.deinit();
+
+            const allocator = arena_owner.allocator();
+
             const rt = try allocator.create(Runtime);
             errdefer allocator.destroy(rt);
 
@@ -124,6 +154,8 @@ pub const LockFreePool = struct {
                 .gc_state = gc_state,
                 .heap_state = heap_state,
                 .strings = string.StringTable.init(allocator),
+                .lifetime_arena = arena_owner,
+                .backing = backing,
                 .request_arena = request_arena,
                 .hybrid = hybrid,
                 .in_use = false,
@@ -143,14 +175,22 @@ pub const LockFreePool = struct {
             return rt;
         }
 
+        /// `allocator` is accepted for call-site compatibility but unused:
+        /// runtime-lifetime memory belongs to `lifetime_arena`, and freeing any
+        /// of it through another allocator would be a mismatched free.
         pub fn destroy(self: *Runtime, allocator: std.mem.Allocator) void {
+            _ = allocator;
+
             // Higher-level wrappers may hold borrowed pointers into this
             // context. Let them clear their state before the engine-owned
             // context, heap, and string table are destroyed.
             if (self.user_deinit) |deinit_fn| {
-                deinit_fn(self, allocator);
+                deinit_fn(self, self.backing);
             }
 
+            // These deinits still run: they release JIT code pages, file
+            // descriptors, and other non-arena resources. Their internal frees
+            // land in the arena and are no-ops, which is the point.
             // Builtin and bytecode teardown may still walk persistent strings
             // owned by this pooled runtime.
             self.ctx.deinit();
@@ -158,12 +198,14 @@ pub const LockFreePool = struct {
             self.heap_state.deinit();
             if (self.request_arena) |arena| {
                 arena.deinit();
-                allocator.destroy(arena);
             }
-            allocator.destroy(self.gc_state);
-            allocator.destroy(self.heap_state);
             self.strings.deinit();
-            allocator.destroy(self);
+
+            // Read the fields out before the arena frees the struct they live in.
+            const arena_owner = self.lifetime_arena;
+            const backing = self.backing;
+            arena_owner.deinit();
+            backing.destroy(arena_owner);
         }
 
         /// Reset runtime state for reuse - O(1) with hybrid allocation
@@ -462,7 +504,11 @@ test "Runtime destroy clears user data before context teardown" {
     rt.user_data = &sequence;
     rt.user_deinit = Hooks.userDeinit;
 
-    const state = try allocator.create(Hooks.State);
+    // Allocate module state from the runtime's own allocator, which is what
+    // production installers use (see zruntime's install*ModuleState) and what
+    // `moduleDeinit` frees through. Both are the runtime's lifetime arena, so
+    // ownership stays with the runtime and is released by `destroy`.
+    const state = try rt.ctx.allocator.create(Hooks.State);
     state.* = .{ .sequence = &sequence };
     rt.ctx.module_state[0] = .{
         .ptr = state,
