@@ -684,6 +684,42 @@ Resolved by teaching the codec to say what the wire says, rather than by rebuild
 
 None of the five defects were introduced by this plan. All five were already in the tree, reachable through `parseFromJson` by every analyzer consumer and through `fromHandlerContract` by the live-reload path. The differential harness is what made them visible.
 
+## Measurements, Task 4
+
+Measured 2026-07-29 on darwin/aarch64. Before is `1bfa1a0d` (pre-B1), after is `55581883`.
+Both trees built with `zig build -Doptimize=ReleaseFast`. The startup probe is
+`<deployed-binary> attest`, which parses the embedded contract and exits, so it isolates the
+path this plan changed. The artifact comes from `zttp init probe` then `zttp deploy`.
+
+| Metric | Before | After | Delta |
+| --- | --- | --- | --- |
+| `zig-out/bin/zttp-runtime` | 5,495,104 B | 5,637,504 B | +142,400 B, +2.59% |
+| deploy artifact | 5,500,753 B | 5,643,153 B | +142,400 B, +2.59% |
+| 200 x `attest`, warm, interleaved (3 rounds) | 1.386 s, 1.448 s, 1.428 s | 1.397 s, 1.368 s, 1.490 s | none measurable |
+
+The `attest` output is byte-identical before and after, including the policy hash, the
+artifact hash, and the capability hash.
+
+### Reading
+
+The swap costs 142,400 bytes, 2.59 percent of the runtime binary. That is the canonical
+codec being linked in where it previously was not: Zig discards unreferenced declarations,
+so importing `zts` had not been enough to pull `contract_json_parser` into the runtime. The
+plan flagged this as unknown, and it is now measured rather than estimated.
+
+Startup shows no measurable cost. A first, unwarmed reading suggested a three-fold
+regression; interleaving the two binaries and warming both removed it entirely, so that
+reading was page-cache noise rather than parse cost. The two are indistinguishable across
+three interleaved rounds.
+
+The size delta is worth 654 deleted lines, one reader instead of two on the artifact the
+product signs, and five defects that the deleted reader was masking. `zig build bench-check`
+reports geomean 0.48 percent and 0.84 percent on two runs after the change. Note the
+per-benchmark `intArithmetic` gate trips intermittently at 8 to 13 percent on this machine
+on both the modified and the unmodified tree, while the geomean stays flat, so it is machine
+noise and not attributable to this change. The diff contains no interpreter, value, GC, or
+bytecode code.
+
 ## Done when
 
 - `packages/runtime/src/contract_runtime.zig` contains exactly one contract reader.
