@@ -123,10 +123,12 @@ changes shape, and this is the amendment section 5.3 of the design doc needs:
 
 - The renderer must be correct field by field against the BINDINGS, proven per field so a
   divergence names the field rather than the file. That is Task 2's unit tests.
-- The two files that were already in sync, `data/cache.json` and `data/sql.json`, must come
-  out byte-identical. They are the only remaining byte-identity evidence, and they are worth
-  having: they cover formatting, key order, capabilities, `contractExtractions`, and
-  `failureSeverity`.
+- `data/cache.json` and `data/sql.json`, the only two files whose sole drift is `params`,
+  must match the rendered output exactly once `params` is stripped. See finding 6: they are
+  not byte-identical outright, and no file is. Stripped, they are still the only evidence
+  that comes from a file no generator wrote, and they cover formatting, key order,
+  capabilities, `contractExtractions` with an omitted `argPosition`, `failureSeverity`, and a
+  bare-string law.
 - Every other file's diff must be reviewed field by field and match the four findings in
   section 6 exactly. A diff line that no finding predicts means the renderer is wrong, not
   that the file was stale.
@@ -255,7 +257,8 @@ four things.
 | 2 | `security/decode.json` omits `laws: ["pure"]` on all four exports, which the bindings declare | JSON stale, Zig right | Regenerate. One file |
 | 3 | `workflow/workflow.json` omits the `contractExtractions` entry `{category: workflow_call}` that `workflow.call` declares | JSON stale, Zig right. This one is worth naming: `contractExtractions` is the field that drives contract extraction, so the spec was describing a module as extracting nothing while the binding extracted a workflow call | Regenerate. One file |
 | 4 | The committed files are internally inconsistent about `argPosition`. 23 extractions omit it, 5 write `argPosition: 0` explicitly, and 2 write `argPosition: 1`. Since 0 is the Zig default, the 5 explicit zeros are redundant | neither side wrong, the convention was never settled | Emit when non-zero, omit when 0, which is what 23 of 30 already do. Three files lose a redundant key. Confirms the omission rule stated in section 2 and refutes nothing else there |
-| 5 | Only `data/cache.json` and `data/sql.json` were already identical to their bindings | - | Consequence of findings 1 to 4, not a separate defect |
+| 5 | `net/fetch.json` orders extraction keys `argPosition, category, transform` while `workflow/durable.json` uses `category, argPosition`. A second unsettled convention, found while reading the exact layout for the renderer | neither side wrong | One canonical order in the renderer: `category`, `argPosition`, `transform` |
+| 6 | Correction to my own first measurement. It reported `data/cache.json` and `data/sql.json` as "already identical"; they are not, because they gain `params` like the other 22. What is true, and what the renderer's tests now assert, is that those two are the only files whose ONLY drift is `params` | - | They are still the byte-identity evidence, compared with `params` stripped. Every other formatting decision - indentation, key order, non-empty capabilities, an extraction with an omitted `argPosition`, `failureSeverity`, a bare-string law - is checked against a file no generator wrote. Zero files come out byte-identical, so the section 3.1 amendment stands with this correction |
 
 ## 7. Measurements
 

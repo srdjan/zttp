@@ -133,6 +133,7 @@ pub const semantics_smt = @import("semantics_smt.zig");
 pub const semantics_audit = @import("semantics_audit.zig");
 pub const semantics_corpus = @import("semantics_corpus.zig");
 pub const semantics_render = @import("semantics_render.zig");
+pub const module_spec_render = @import("module_spec_render.zig");
 
 // ============================================================================
 // Stable public surface: primary types and entry points for embedding the
