@@ -10,6 +10,9 @@
       "name": "sha256",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -18,6 +21,10 @@
       "name": "hmacSha256",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string",
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -26,6 +33,9 @@
       "name": "base64Encode",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure",
         {
@@ -37,6 +47,9 @@
       "name": "base64Decode",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure",
         {

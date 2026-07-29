@@ -10,22 +10,38 @@
     {
       "name": "logDebug",
       "effect": "write",
-      "returns": "unknown"
+      "returns": "unknown",
+      "params": [
+        "string",
+        "object"
+      ]
     },
     {
       "name": "logInfo",
       "effect": "write",
-      "returns": "unknown"
+      "returns": "unknown",
+      "params": [
+        "string",
+        "object"
+      ]
     },
     {
       "name": "logWarn",
       "effect": "write",
-      "returns": "unknown"
+      "returns": "unknown",
+      "params": [
+        "string",
+        "object"
+      ]
     },
     {
       "name": "logError",
       "effect": "write",
-      "returns": "unknown"
+      "returns": "unknown",
+      "params": [
+        "string",
+        "object"
+      ]
     }
   ]
 }

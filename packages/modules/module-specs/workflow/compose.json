@@ -7,7 +7,10 @@
     {
       "name": "guard",
       "effect": "none",
-      "returns": "string"
+      "returns": "string",
+      "params": [
+        "string"
+      ]
     },
     {
       "name": "pipe",

@@ -11,9 +11,12 @@
       "name": "fetch",
       "effect": "write",
       "returns": "object",
+      "params": [
+        "string",
+        "object"
+      ],
       "contractExtractions": [
         {
-          "argPosition": 0,
           "category": "fetch_host",
           "transform": "extract_host"
         }
@@ -23,9 +26,13 @@
       "name": "fetchWithRetry",
       "effect": "write",
       "returns": "object",
+      "params": [
+        "string",
+        "object",
+        "object"
+      ],
       "contractExtractions": [
         {
-          "argPosition": 0,
           "category": "fetch_host",
           "transform": "extract_host"
         }

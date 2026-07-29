@@ -10,36 +10,58 @@
       "name": "send",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string",
+        "unknown"
+      ],
       "failureSeverity": "expected"
     },
     {
       "name": "request",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string",
+        "unknown"
+      ],
       "failureSeverity": "expected"
     },
     {
       "name": "receive",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string"
+      ],
       "failureSeverity": "expected"
     },
     {
       "name": "ack",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string"
+      ],
       "failureSeverity": "expected"
     },
     {
       "name": "nack",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string",
+        "string"
+      ],
       "failureSeverity": "expected"
     },
     {
       "name": "reply",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string",
+        "unknown"
+      ],
       "failureSeverity": "expected"
     }
   ]

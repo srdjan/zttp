@@ -10,6 +10,10 @@
       "name": "scope",
       "effect": "write",
       "returns": "unknown",
+      "params": [
+        "string",
+        "unknown"
+      ],
       "contractExtractions": [
         {
           "category": "scope_name"
@@ -19,12 +23,19 @@
     {
       "name": "using",
       "effect": "write",
-      "returns": "unknown"
+      "returns": "unknown",
+      "params": [
+        "unknown",
+        "unknown"
+      ]
     },
     {
       "name": "ensure",
       "effect": "write",
-      "returns": "undefined"
+      "returns": "undefined",
+      "params": [
+        "unknown"
+      ]
     }
   ]
 }

@@ -10,6 +10,10 @@
       "name": "run",
       "effect": "write",
       "returns": "unknown",
+      "params": [
+        "string",
+        "unknown"
+      ],
       "contractExtractions": [
         {
           "category": "durable_key"
@@ -20,6 +24,10 @@
       "name": "step",
       "effect": "write",
       "returns": "unknown",
+      "params": [
+        "string",
+        "unknown"
+      ],
       "contractExtractions": [
         {
           "category": "durable_step"
@@ -30,6 +38,11 @@
       "name": "stepWithTimeout",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string",
+        "number",
+        "unknown"
+      ],
       "failureSeverity": "expected",
       "contractExtractions": [
         {
@@ -40,17 +53,26 @@
     {
       "name": "sleep",
       "effect": "write",
-      "returns": "undefined"
+      "returns": "undefined",
+      "params": [
+        "number"
+      ]
     },
     {
       "name": "sleepUntil",
       "effect": "write",
-      "returns": "undefined"
+      "returns": "undefined",
+      "params": [
+        "number"
+      ]
     },
     {
       "name": "waitSignal",
       "effect": "write",
       "returns": "unknown",
+      "params": [
+        "string"
+      ],
       "contractExtractions": [
         {
           "category": "durable_signal"
@@ -61,6 +83,10 @@
       "name": "signal",
       "effect": "write",
       "returns": "boolean",
+      "params": [
+        "string",
+        "string"
+      ],
       "contractExtractions": [
         {
           "category": "durable_producer_key"
@@ -75,6 +101,11 @@
       "name": "signalAt",
       "effect": "write",
       "returns": "boolean",
+      "params": [
+        "string",
+        "string",
+        "number"
+      ],
       "contractExtractions": [
         {
           "category": "durable_producer_key"

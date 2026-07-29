@@ -12,6 +12,11 @@
       "name": "serviceCall",
       "effect": "write",
       "returns": "object",
+      "params": [
+        "string",
+        "string",
+        "object"
+      ],
       "contractExtractions": [
         {
           "category": "service_call"

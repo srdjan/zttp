@@ -7,16 +7,23 @@
     {
       "name": "parseCookies",
       "effect": "none",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "string"
+      ]
     },
     {
       "name": "setCookie",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string",
+        "string",
+        "object"
+      ],
       "contractExtractions": [
         {
-          "category": "cookie_name",
-          "argPosition": 0
+          "category": "cookie_name"
         }
       ]
     },
@@ -24,21 +31,31 @@
       "name": "negotiate",
       "effect": "none",
       "returns": "optional_string",
+      "params": [
+        "string",
+        "string"
+      ],
       "failureSeverity": "expected"
     },
     {
       "name": "parseContentType",
       "effect": "none",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "string"
+      ]
     },
     {
       "name": "cors",
       "effect": "none",
       "returns": "object",
+      "params": [
+        "string",
+        "object"
+      ],
       "contractExtractions": [
         {
-          "category": "cors_origin",
-          "argPosition": 0
+          "category": "cors_origin"
         }
       ]
     }

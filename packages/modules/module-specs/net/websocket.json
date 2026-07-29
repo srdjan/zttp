@@ -15,37 +15,55 @@
       "name": "send",
       "effect": "write",
       "returns": "undefined",
-      "params": ["object", "string"]
+      "params": [
+        "object",
+        "string"
+      ]
     },
     {
       "name": "close",
       "effect": "write",
       "returns": "undefined",
-      "params": ["object", "number", "string"]
+      "params": [
+        "object",
+        "number",
+        "string"
+      ]
     },
     {
       "name": "serializeAttachment",
       "effect": "write",
       "returns": "undefined",
-      "params": ["object", "string"]
+      "params": [
+        "object",
+        "string"
+      ]
     },
     {
       "name": "deserializeAttachment",
       "effect": "read",
       "returns": "optional_string",
-      "params": ["object"]
+      "params": [
+        "object"
+      ]
     },
     {
       "name": "getWebSockets",
       "effect": "read",
       "returns": "object",
-      "params": ["string"]
+      "params": [
+        "string"
+      ]
     },
     {
       "name": "setAutoResponse",
       "effect": "write",
       "returns": "undefined",
-      "params": ["object", "string", "string"]
+      "params": [
+        "object",
+        "string",
+        "string"
+      ]
     }
   ]
 }

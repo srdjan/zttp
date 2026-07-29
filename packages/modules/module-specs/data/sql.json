@@ -11,6 +11,10 @@
       "name": "sql",
       "effect": "write",
       "returns": "boolean",
+      "params": [
+        "string",
+        "string"
+      ],
       "contractExtractions": [
         {
           "category": "sql_registration"
@@ -21,17 +25,29 @@
       "name": "sqlOne",
       "effect": "read",
       "returns": "optional_object",
+      "params": [
+        "string",
+        "object"
+      ],
       "failureSeverity": "expected"
     },
     {
       "name": "sqlMany",
       "effect": "read",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "string",
+        "object"
+      ]
     },
     {
       "name": "sqlExec",
       "effect": "write",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "string",
+        "object"
+      ]
     }
   ]
 }

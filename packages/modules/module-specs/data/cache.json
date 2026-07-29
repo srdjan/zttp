@@ -11,6 +11,10 @@
       "name": "cacheGet",
       "effect": "read",
       "returns": "optional_string",
+      "params": [
+        "string",
+        "string"
+      ],
       "failureSeverity": "expected",
       "contractExtractions": [
         {
@@ -22,6 +26,12 @@
       "name": "cacheSet",
       "effect": "write",
       "returns": "boolean",
+      "params": [
+        "string",
+        "string",
+        "string",
+        "number"
+      ],
       "contractExtractions": [
         {
           "category": "cache_namespace"
@@ -35,6 +45,10 @@
       "name": "cacheDelete",
       "effect": "write",
       "returns": "boolean",
+      "params": [
+        "string",
+        "string"
+      ],
       "contractExtractions": [
         {
           "category": "cache_namespace"
@@ -48,6 +62,12 @@
       "name": "cacheIncr",
       "effect": "write",
       "returns": "number",
+      "params": [
+        "string",
+        "string",
+        "number",
+        "number"
+      ],
       "contractExtractions": [
         {
           "category": "cache_namespace"

@@ -8,6 +8,10 @@
       "name": "schemaCompile",
       "effect": "write",
       "returns": "boolean",
+      "params": [
+        "string",
+        "string"
+      ],
       "contractExtractions": [
         {
           "category": "schema_compile"
@@ -18,6 +22,10 @@
       "name": "validateJson",
       "effect": "none",
       "returns": "result",
+      "params": [
+        "string",
+        "string"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
@@ -32,6 +40,10 @@
       "name": "validateObject",
       "effect": "none",
       "returns": "result",
+      "params": [
+        "string",
+        "object"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
@@ -46,6 +58,10 @@
       "name": "coerceJson",
       "effect": "none",
       "returns": "result",
+      "params": [
+        "string",
+        "string"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
@@ -59,7 +75,10 @@
     {
       "name": "schemaDrop",
       "effect": "write",
-      "returns": "boolean"
+      "returns": "boolean",
+      "params": [
+        "string"
+      ]
     }
   ]
 }

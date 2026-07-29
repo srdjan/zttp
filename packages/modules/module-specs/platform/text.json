@@ -8,6 +8,9 @@
       "name": "escapeHtml",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -16,6 +19,9 @@
       "name": "unescapeHtml",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -24,6 +30,9 @@
       "name": "slugify",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -32,6 +41,11 @@
       "name": "truncate",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string",
+        "number",
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -40,6 +54,10 @@
       "name": "mask",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string",
+        "number"
+      ],
       "laws": [
         "pure"
       ]

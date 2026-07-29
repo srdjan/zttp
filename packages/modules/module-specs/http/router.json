@@ -8,6 +8,10 @@
       "name": "routerMatch",
       "effect": "none",
       "returns": "optional_object",
+      "params": [
+        "object",
+        "object"
+      ],
       "failureSeverity": "expected",
       "contractExtractions": [
         {

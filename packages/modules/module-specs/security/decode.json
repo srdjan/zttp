@@ -8,44 +8,73 @@
       "name": "decodeJson",
       "effect": "none",
       "returns": "result",
+      "params": [
+        "string",
+        "string"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
           "category": "request_schema"
         }
+      ],
+      "laws": [
+        "pure"
       ]
     },
     {
       "name": "decodeForm",
       "effect": "none",
       "returns": "result",
+      "params": [
+        "string",
+        "string"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
           "category": "request_schema"
         }
+      ],
+      "laws": [
+        "pure"
       ]
     },
     {
       "name": "decodeQuery",
       "effect": "none",
       "returns": "result",
+      "params": [
+        "string",
+        "object"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
           "category": "request_schema"
         }
+      ],
+      "laws": [
+        "pure"
       ]
     },
     {
       "name": "decodeFormMultipart",
       "effect": "none",
       "returns": "result",
+      "params": [
+        "string",
+        "string",
+        "string"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
           "category": "request_schema"
         }
+      ],
+      "laws": [
+        "pure"
       ]
     }
   ]

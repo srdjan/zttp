@@ -9,22 +9,42 @@
     {
       "name": "call",
       "effect": "write",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "string",
+        "unknown"
+      ],
+      "contractExtractions": [
+        {
+          "category": "workflow_call"
+        }
+      ]
     },
     {
       "name": "saga",
       "effect": "write",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "unknown"
+      ]
     },
     {
       "name": "fanout",
       "effect": "write",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "unknown"
+      ]
     },
     {
       "name": "follow",
       "effect": "write",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "unknown",
+        "string",
+        "unknown"
+      ]
     }
   ]
 }

@@ -294,25 +294,7 @@ fn renderBySpecifier(a: std.mem.Allocator, specifier: []const u8) ![]u8 {
     return error.NoSuchModule;
 }
 
-/// Strip every `"params": [...]` block from a rendered document. Used to prove
-/// that the generator's only difference from a pre-generator committed file is
-/// the `params` field those files had lost (B3 plan, section 6, finding 1).
-fn stripParams(a: std.mem.Allocator, src: []const u8) ![]u8 {
-    var out: Buf = .empty;
-    errdefer out.deinit(a);
-    var rest = src;
-    while (std.mem.indexOf(u8, rest, "      \"params\": [")) |at| {
-        // Drop the preceding ",\n" that joined this field to the one before it.
-        const keep_to = at - ",\n".len;
-        try out.appendSlice(a, rest[0..keep_to]);
-        const close = std.mem.indexOfPos(u8, rest, at, "\n      ]").? + "\n      ]".len;
-        rest = rest[close..];
-    }
-    try out.appendSlice(a, rest);
-    return out.toOwnedSlice(a);
-}
-
-fn expectMatchesCommittedExceptParams(a: std.mem.Allocator, specifier: []const u8) !void {
+fn expectMatchesCommitted(a: std.mem.Allocator, specifier: []const u8) !void {
     var spec_path: []const u8 = "";
     for (builtin_modules.builtin_governance_entries) |gov| {
         if (std.mem.eql(u8, gov.specifier, specifier)) spec_path = gov.spec_path;
@@ -323,27 +305,28 @@ fn expectMatchesCommittedExceptParams(a: std.mem.Allocator, specifier: []const u
     defer a.free(committed);
     const rendered = try renderBySpecifier(a, specifier);
     defer a.free(rendered);
-    const stripped = try stripParams(a, rendered);
-    defer a.free(stripped);
 
-    testing.expectEqualStrings(committed, stripped) catch |err| {
-        std.debug.print("\nmodule spec drift beyond params: {s} ({s})\n", .{ specifier, spec_path });
+    testing.expectEqualStrings(committed, rendered) catch |err| {
+        std.debug.print("\nmodule spec drift: {s} ({s})\n", .{ specifier, spec_path });
         return err;
     };
 }
 
-test "cache differs from its pre-generator spec only by params" {
-    // cache and sql were the two modules whose ONLY drift was the lost `params`
-    // field, so they are the byte-identity evidence for everything else the
-    // renderer decides: formatting, indentation, key order, non-empty
-    // requiredCapabilities, contractExtractions with an omitted argPosition,
-    // failureSeverity, and a bare-string law. Nothing generated wrote the file
-    // being compared against.
-    try expectMatchesCommittedExceptParams(testing.allocator, "zttp:cache");
+test "cache renders byte-identical to its committed spec" {
+    // Before the files were generated, cache and sql were the only two whose
+    // sole drift from their bindings was the lost `params` field. They were
+    // checked with `params` stripped against the hand-written files then, which
+    // is what proved the renderer's formatting, indentation, key order,
+    // non-empty requiredCapabilities, contractExtractions with an omitted
+    // argPosition, failureSeverity, and bare-string law rendering. That
+    // evidence is recorded in the B3 plan, section 6, finding 6. Now that the
+    // files are generated this is a plain byte comparison, the same thing
+    // `module-spec-render --check` enforces outside the test suite.
+    try expectMatchesCommitted(testing.allocator, "zttp:cache");
 }
 
-test "sql differs from its pre-generator spec only by params" {
-    try expectMatchesCommittedExceptParams(testing.allocator, "zttp:sql");
+test "sql renders byte-identical to its committed spec" {
+    try expectMatchesCommitted(testing.allocator, "zttp:sql");
 }
 
 test "renders every builtin module without error" {

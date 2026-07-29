@@ -20,7 +20,10 @@
     {
       "name": "nanoid",
       "effect": "read",
-      "returns": "string"
+      "returns": "string",
+      "params": [
+        "number"
+      ]
     }
   ]
 }

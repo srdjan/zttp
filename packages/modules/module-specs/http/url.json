@@ -8,6 +8,9 @@
       "name": "urlParse",
       "effect": "none",
       "returns": "object",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -16,6 +19,9 @@
       "name": "urlSearchParams",
       "effect": "none",
       "returns": "object",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -24,6 +30,9 @@
       "name": "urlEncode",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]
@@ -32,6 +41,9 @@
       "name": "urlDecode",
       "effect": "none",
       "returns": "string",
+      "params": [
+        "string"
+      ],
       "laws": [
         "pure"
       ]

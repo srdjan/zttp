@@ -10,18 +10,25 @@
       "name": "rateCheck",
       "effect": "write",
       "returns": "result",
+      "params": [
+        "string",
+        "number",
+        "number"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
-          "category": "rate_limit_key",
-          "argPosition": 0
+          "category": "rate_limit_key"
         }
       ]
     },
     {
       "name": "rateReset",
       "effect": "write",
-      "returns": "boolean"
+      "returns": "boolean",
+      "params": [
+        "string"
+      ]
     }
   ]
 }
