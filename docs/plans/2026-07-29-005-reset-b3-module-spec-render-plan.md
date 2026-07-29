@@ -118,6 +118,22 @@ Either way the design doc's "byte-identical on first run" gets amended to what w
 true. Forcing byte-identity by teaching the renderer to reproduce a stale file would make
 the generator lie, which defeats the point of making the bindings authoritative.
 
+**Measured: 22 of the 24 files had drifted.** See section 6. The acceptance test therefore
+changes shape, and this is the amendment section 5.3 of the design doc needs:
+
+- The renderer must be correct field by field against the BINDINGS, proven per field so a
+  divergence names the field rather than the file. That is Task 2's unit tests.
+- The two files that were already in sync, `data/cache.json` and `data/sql.json`, must come
+  out byte-identical. They are the only remaining byte-identity evidence, and they are worth
+  having: they cover formatting, key order, capabilities, `contractExtractions`, and
+  `failureSeverity`.
+- Every other file's diff must be reviewed field by field and match the four findings in
+  section 6 exactly. A diff line that no finding predicts means the renderer is wrong, not
+  that the file was stale.
+
+The last rule is what keeps this honest. Regenerating 22 files is only safe because the
+expected change was enumerated BEFORE the renderer existed.
+
 ### 3.2 Existing consumers must not change behavior
 
 `packages/tools/src/module_audit.zig` and `packages/zts/src/manifest_registry.zig` read
@@ -219,8 +235,27 @@ Read the recorded code, not a tail of the log.
 
 To be filled in during execution.
 
+Measured by dumping every binding as canonical JSON from a throwaway test and diffing
+against the committed files field by field, ignoring formatting. The dump had no formatting
+contract, so it could not be tuned to reproduce a stale file.
+
+**The headline: 22 of 24 files have drifted, so byte-identity on first run is not
+achievable.** Section 5.3 of the design doc and section 3.1 of this plan both assumed it
+might be. It is not, and the reason is that the drift is the JSON having LOST data the
+bindings carry.
+
+Good news first, because it bounds the risk: `effect`, `returns`, `failureSeverity`,
+`requiredCapabilities`, and the export set and its order agree in 24 of 24 files, on all 90
+exports. Every semantically load-bearing field is already in sync. The drift is confined to
+four things.
+
 | # | Finding | Direction | Resolution |
 | --- | --- | --- | --- |
+| 1 | `param_types` is declared on 84 of 90 exports, and only `net/websocket.json` records it. 22 files lost the data entirely | JSON stale, Zig right. No functional effect: nothing loads these files at runtime, the bindings are already authoritative for behavior | Emit `params` whenever `param_types` is non-empty. The alternative, dropping websocket's six, discards real data and would leave the builtin specs strictly less informative than the partner manifests that describe the same shape: `module_manifest.zig:262` accepts and validates `params` on the partner path. 22 files gain the field |
+| 2 | `security/decode.json` omits `laws: ["pure"]` on all four exports, which the bindings declare | JSON stale, Zig right | Regenerate. One file |
+| 3 | `workflow/workflow.json` omits the `contractExtractions` entry `{category: workflow_call}` that `workflow.call` declares | JSON stale, Zig right. This one is worth naming: `contractExtractions` is the field that drives contract extraction, so the spec was describing a module as extracting nothing while the binding extracted a workflow call | Regenerate. One file |
+| 4 | The committed files are internally inconsistent about `argPosition`. 23 extractions omit it, 5 write `argPosition: 0` explicitly, and 2 write `argPosition: 1`. Since 0 is the Zig default, the 5 explicit zeros are redundant | neither side wrong, the convention was never settled | Emit when non-zero, omit when 0, which is what 23 of 30 already do. Three files lose a redundant key. Confirms the omission rule stated in section 2 and refutes nothing else there |
+| 5 | Only `data/cache.json` and `data/sql.json` were already identical to their bindings | - | Consequence of findings 1 to 4, not a separate defect |
 
 ## 7. Measurements
 
