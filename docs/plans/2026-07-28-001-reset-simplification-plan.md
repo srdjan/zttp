@@ -1253,10 +1253,14 @@ passing.
 
 ### Wave 3: test and build hygiene
 
-1. Stop double-executing the zruntime and server suites. `main.zig:10-18` imports both
-   `zruntime.zig` and `server.zig` into the aggregate test root while standalone roots run
-   the same tests again. Keep the separate processes that the macOS teardown note requires
-   (`build.zig:744-747`); change only the membership.
+1. DONE, and the premise did not hold. Measured: no duplication exists. The server half was
+   never true (the standalone step roots at `server_test.zig`, a different file from
+   `server.zig`), and the zruntime half was fixed earlier, with `zruntime_test_step` left out
+   of `test_step` for the macOS teardown reason. What remained was a misleading import:
+   `zruntime.zig` is the root of its own module, so importing it from `main.zig`'s test block
+   collected none of its 96 test blocks. Deleting it moved the collected count by zero, against
+   a positive control where adding one test moved it by one. See
+   `docs/plans/2026-07-30-002-wave3-item1-test-duplication.md`.
 2. Remove the redundant `test-docs-drift` invocation in CI and in `verify.sh` step 2, and
    add `test-doc-links` to the `test` step.
 3. Table-drive the nine host-tool and pi test roots and the five `embedded_handler` stub

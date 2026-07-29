@@ -706,8 +706,12 @@ pub fn build(b: *std.Build) void {
         .root_module = runtime_dep.module("runtime_main_tests"),
     });
 
-    // Runtime-side tests (main.zig root) — covers runtime_cli, zruntime,
-    // server, proof_adapter, cli_shared via the test block in main.zig.
+    // Runtime-side tests (main.zig root) — covers runtime_cli, cli_shared,
+    // server, edge_server, studio, and proof_adapter via the test block in
+    // main.zig. NOT zruntime: it is the root of its own module, so a file
+    // import from main.zig collects none of its tests. Measured at 521 tests
+    // with and without that import. `zig build test-zruntime` is the only step
+    // that runs that root, and `scripts/verify.sh` runs it separately.
     unit_tests.root_module.addAnonymousImport("embedded_handler", .{
         .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
         .imports = &.{
