@@ -865,7 +865,7 @@ pub fn build(b: *std.Build) void {
 
     // Compile-time microbench: parse + codegen ns/bytes/IR-nodes per compile
     // across a small synthesized corpus. Scaffolding for Phase 8 tuning of
-    // reserveCapacity and intern_pool capacity hints.
+    // reserveCapacity capacity hints.
     const compile_bench_exe = b.addExecutable(.{
         .name = "zttp-compile-bench",
         .root_module = runtime_dep.module("compile_benchmark"),

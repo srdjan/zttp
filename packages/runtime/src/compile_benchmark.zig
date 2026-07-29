@@ -5,7 +5,7 @@
 //! programs. Scaffolding only: this harness collects the numbers that
 //! Phase 8 of the perf plan uses to tune
 //! `packages/zts/src/parser/codegen.zig#reserveCapacity` and
-//! `packages/zts/src/intern_pool.zig` capacity hints. No tuning here.
+//! parser and codegen capacity hints. No tuning here.
 //!
 //! Usage: `zig build compile-bench -Doptimize=ReleaseFast -- [flags]`
 //! Flags:
