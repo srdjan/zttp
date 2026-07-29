@@ -268,6 +268,69 @@ pub fn renderModuleSpec(
     return buf.toOwnedSlice(allocator);
 }
 
+/// Render the Module Catalog table for `docs/virtual-modules/README.md`.
+/// Caller owns the result.
+///
+/// Rows are alphabetical by specifier, which is the order that file already
+/// uses. That deliberately differs from the JSON specs, which follow `builtins`
+/// registration order: each artifact keeps the order it had. Within a row,
+/// export and capability order is binding order.
+///
+/// Takes the bindings as a slice rather than reading the registry, so this file
+/// stays free of a dependency on `builtin_modules.zig` and matches
+/// `renderModuleSpec`'s shape.
+pub fn renderModuleCatalogTable(
+    allocator: std.mem.Allocator,
+    bindings: []const ModuleBinding,
+) ![]u8 {
+    var order_buf: [64]usize = undefined;
+    std.debug.assert(bindings.len <= order_buf.len);
+    const order = order_buf[0..bindings.len];
+    for (order, 0..) |*slot, i| slot.* = i;
+
+    const Sort = struct {
+        list: []const ModuleBinding,
+        fn lessThan(ctx: @This(), a: usize, b: usize) bool {
+            return std.mem.lessThan(u8, ctx.list[a].specifier, ctx.list[b].specifier);
+        }
+    };
+    std.mem.sort(usize, order, Sort{ .list = bindings }, Sort.lessThan);
+
+    var buf: Buf = .empty;
+    errdefer buf.deinit(allocator);
+
+    try buf.appendSlice(allocator, "| Module | Exports | Capabilities |\n");
+    try buf.appendSlice(allocator, "|---|---|---|\n");
+
+    for (order) |idx| {
+        const binding = bindings[idx];
+        try buf.appendSlice(allocator, "| `");
+        try buf.appendSlice(allocator, binding.specifier);
+        try buf.appendSlice(allocator, "` | ");
+        for (binding.exports, 0..) |exp, i| {
+            if (i > 0) try buf.appendSlice(allocator, ", ");
+            try buf.append(allocator, '`');
+            try buf.appendSlice(allocator, exp.name);
+            try buf.append(allocator, '`');
+        }
+        try buf.appendSlice(allocator, " | ");
+        // `none` rather than an empty cell, matching the existing file.
+        if (binding.required_capabilities.len == 0) {
+            try buf.appendSlice(allocator, "none");
+        } else {
+            for (binding.required_capabilities, 0..) |cap, i| {
+                if (i > 0) try buf.appendSlice(allocator, ", ");
+                try buf.append(allocator, '`');
+                try buf.appendSlice(allocator, @tagName(cap));
+                try buf.append(allocator, '`');
+            }
+        }
+        try buf.appendSlice(allocator, " |\n");
+    }
+
+    return buf.toOwnedSlice(allocator);
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 //

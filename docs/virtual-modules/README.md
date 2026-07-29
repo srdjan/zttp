@@ -8,6 +8,7 @@ Use `zttp modules --json` for the live export list from the built binary.
 
 ## Module Catalog
 
+<!-- BEGIN GENERATED: module catalog. Edit the Zig bindings, then run `zttp module-spec-render`. -->
 | Module | Exports | Capabilities |
 |---|---|---|
 | `zttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | `crypto`, `clock` |
@@ -34,6 +35,7 @@ Use `zttp modules --json` for the live export list from the built binary.
 | `zttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` | none |
 | `zttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `setAutoResponse` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` |
 | `zttp:workflow` | `call`, `saga`, `fanout`, `follow` | `runtime_callback` |
+<!-- END GENERATED: module catalog -->
 
 ## Common Usage
 
