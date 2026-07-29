@@ -103,7 +103,7 @@ fn executeBuildTimeHandler(
         source_to_parse = strip_result.?.code;
     }
 
-    var p = zts.Parser.init(allocator, source_to_parse, &strings, &ctx.atoms);
+    var p = try zts.Parser.init(allocator, source_to_parse, &strings, &ctx.atoms);
     defer p.deinit();
     if (std.mem.endsWith(u8, handler_filename, ".jsx") or is_tsx) {
         p.enableJsx();

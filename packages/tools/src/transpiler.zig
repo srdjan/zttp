@@ -2724,7 +2724,7 @@ fn transpileForTest(arena: std.mem.Allocator, source: []const u8) ![]const u8 {
     const atoms = try arena.create(zts.context.AtomTable);
     atoms.* = zts.context.AtomTable.init(arena);
     const js_parser = try arena.create(zts.parser.JsParser);
-    js_parser.* = zts.parser.JsParser.init(arena, source);
+    js_parser.* = try zts.parser.JsParser.init(arena, source);
     js_parser.setAtomTable(atoms);
     const root = try js_parser.parse();
     const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);

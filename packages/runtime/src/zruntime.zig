@@ -1170,7 +1170,7 @@ pub const Runtime = struct {
         }
 
         // Parse the source code
-        var p = try zq.Parser.initFallible(self.allocator, source_to_parse, self.strings, &self.ctx.atoms);
+        var p = try zq.Parser.init(self.allocator, source_to_parse, self.strings, &self.ctx.atoms);
         defer p.deinit();
 
         // Enable JSX mode for .jsx and .tsx files

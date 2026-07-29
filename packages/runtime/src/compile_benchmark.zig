@@ -301,7 +301,7 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !Compi
     var atoms = zq.context.AtomTable.init(parser_alloc);
     defer atoms.deinit();
 
-    var p = zq.Parser.init(parser_alloc, source, &strings, &atoms);
+    var p = try zq.Parser.init(parser_alloc, source, &strings, &atoms);
     defer p.deinit();
     if (jsx) p.enableJsx();
 

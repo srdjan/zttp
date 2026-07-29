@@ -342,7 +342,7 @@ fn buildContractForServiceContext(
     var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
@@ -1095,7 +1095,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
@@ -1445,7 +1445,7 @@ pub fn runGenTests(
     var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
@@ -1566,7 +1566,7 @@ pub fn compileHandler(
     defer atoms.deinit();
 
     // Parse the source code (single pass for IR + bytecode)
-    var js_parser = zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -3279,7 +3279,7 @@ fn buildTestContractForSource(
     var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = zts.parser.JsParser.init(allocator, source);
+    var js_parser = try zts.parser.JsParser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -3312,7 +3312,7 @@ test "contract construction propagates type-check allocation failure" {
     defer atoms.deinit();
 
     const source = "function handler(req) { return Response.text('ok'); }";
-    var js_parser = zts.parser.JsParser.init(allocator, source);
+    var js_parser = try zts.parser.JsParser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     const root = try js_parser.parse();
