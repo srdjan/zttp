@@ -358,14 +358,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // separately below: it builds a binary here but precompiles to .zig in
     // `zts`, so it is deliberately excluded from the shared registry.
     if (zts_cli.isAnalyzerCommand(command)) {
-        // Inject the persistent-keypair signer so `zttp link` emits a signed
-        // kind=workflow receipt over the hypermedia verdict. The keyless `zts`
-        // binary leaves this null and prints no receipt.
-        zts_cli.system_build.receipt_probe = @import("hypermedia_probe_lib.zig").recordWorkflowReceipt;
-        const analyzer_context: zts_cli.RunContext = .{
-            .receipt_probe = @import("semantics_probe_lib.zig").recordSemanticsReceipt,
-        };
-        zts_cli.runWithContext(allocator, user_args, analyzer_context) catch |err| {
+        zts_cli.run(allocator, user_args) catch |err| {
             if (err == error.NoProjectConfig) {
                 printNoProjectConfigDiagnostic(command);
                 std.process.exit(1);

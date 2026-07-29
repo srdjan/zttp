@@ -12,18 +12,6 @@ const precompile = @import("precompile.zig");
 const system_linker = zts.system_linker;
 const handler_contract = zts.handler_contract;
 
-/// Optional signed-receipt hook. The keyless tools layer cannot reach the
-/// persistent attest identity, so the developer CLI injects a runtime signer
-/// (`hypermedia_probe_lib.recordWorkflowReceipt`) here at startup. Null in the
-/// standalone `zts` binary, which emits no receipt. Called after a successful
-/// link with the bundle's output dir and analysis.
-pub var receipt_probe: ?*const fn (
-    std.mem.Allocator,
-    []const u8,
-    []const u8,
-    *const system_linker.SystemAnalysis,
-) void = null;
-
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var system_path: ?[]const u8 = null;
     var output_dir: []const u8 = "./";
@@ -244,9 +232,6 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
     // signer is injected (the developer `zttp` binary). Emitted only AFTER the
     // failure gates above, so a failed link never leaves a signed receipt on
     // disk to be mistaken for a passing bundle. Best-effort.
-    if (receipt_probe) |probe| {
-        probe(allocator, system_path, output_dir, &analysis);
-    }
 }
 
 fn printHelp() void {

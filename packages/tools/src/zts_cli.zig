@@ -29,8 +29,6 @@ const zts = @import("zts");
 const zts_file_io = zts.file_io;
 const writeContractJson = zts.handler_contract.writeContractJson;
 
-pub const RunContext = semantics_cli.RunContext;
-
 /// Help-grouping for the canonical analyzer surface. `analyze` commands act on
 /// a handler/system; `machine` commands emit JSON metadata for IDE and
 /// review-bot integrations.
@@ -45,7 +43,6 @@ pub const Category = enum { analyze, machine };
 pub const Command = struct {
     name: []const u8,
     run: *const fn (std.mem.Allocator, []const []const u8) anyerror!void,
-    runWithContext: ?*const fn (std.mem.Allocator, []const []const u8, RunContext) anyerror!void = null,
     /// Full usage line shown by `zts --help` (without the leading `zts `).
     usage: []const u8,
     /// Short argument hint shown by `zttp help --all`.
@@ -73,7 +70,7 @@ pub const commands = [_]Command{
     .{ .name = "meta", .run = expert.runMeta, .category = .machine, .args = "", .blurb = "Compiler and policy metadata", .usage = "meta [--json]" },
     .{ .name = "describe-rule", .run = describe_rule.runWithArgs, .category = .machine, .args = "[name|code]", .blurb = "Look up a diagnostic rule", .usage = "describe-rule [rule-name|code] [--json] [--hash]" },
     .{ .name = "search", .run = search_rules.runWithArgs, .category = .machine, .args = "<keyword>", .blurb = "Search rules by keyword", .usage = "search <keyword> [--json]" },
-    .{ .name = "spec-check", .run = semantics_cli.runSpecCheckCommand, .runWithContext = semantics_cli.runSpecCheckCommandWithContext, .category = .machine, .args = "", .blurb = "Check the semantics registry against the IR/bytecode tables", .usage = "spec-check [--json]" },
+    .{ .name = "spec-check", .run = semantics_cli.runSpecCheckCommand, .category = .machine, .args = "", .blurb = "Check the semantics registry against the IR/bytecode tables", .usage = "spec-check [--json]" },
     .{ .name = "spec-hash", .run = semantics_cli.runSpecHashCommand, .category = .machine, .args = "[--json]", .blurb = "Print the semantics-registry hash", .usage = "spec-hash [--json]" },
     .{ .name = "spec-render", .run = semantics_cli.runSpecRenderCommand, .category = .machine, .args = "[--out path] [--check path]", .blurb = "Render the semantics registry as a readable TypeScript spec", .usage = "spec-render [--out path] [--check path]" },
     .{ .name = "verify-paths", .run = expert.runVerifyPaths, .category = .machine, .args = "<file>...", .blurb = "Behavior-path verification", .usage = "verify-paths <file>... [--json]" },
@@ -124,10 +121,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 
 pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    try runWithContext(allocator, argv, .{});
-}
-
-pub fn runWithContext(allocator: std.mem.Allocator, argv: []const []const u8, context: RunContext) !void {
     if (argv.len == 0 or std.mem.eql(u8, argv[0], "--help") or std.mem.eql(u8, argv[0], "help")) {
         printHelp();
         return;
@@ -154,11 +147,7 @@ pub fn runWithContext(allocator: std.mem.Allocator, argv: []const []const u8, co
     }
     for (commands) |c| {
         if (std.mem.eql(u8, command, c.name)) {
-            if (c.runWithContext) |run_contextual| {
-                try run_contextual(allocator, argv[1..], context);
-            } else {
-                try c.run(allocator, argv[1..]);
-            }
+            try c.run(allocator, argv[1..]);
             return;
         }
     }

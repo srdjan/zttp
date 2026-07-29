@@ -4,12 +4,6 @@ const zts = @import("zts");
 
 const zts_file_io = zts.file_io;
 
-pub const ReceiptProbe = *const fn (std.mem.Allocator, zts.semantics_check.Receipt) void;
-
-pub const RunContext = struct {
-    receipt_probe: ?ReceiptProbe = null,
-};
-
 fn isHelpToken(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help");
 }
@@ -125,11 +119,7 @@ const SpecCheckReport = struct {
     }
 };
 
-pub fn runSpecCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    try runSpecCheckCommandWithContext(allocator, argv, .{});
-}
-
-pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []const u8, context: RunContext) !void {
+pub fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     var want_audit = false;
     for (argv) |arg| {
@@ -198,20 +188,6 @@ pub fn runSpecCheckCommandWithContext(_: std.mem.Allocator, argv: []const []cons
     }
 
     const all_ok = report.ok();
-
-    // Emit a signed kind=semantics receipt when the runtime supplied the
-    // persistent signer. Only on a clean pass - a failing registry should not be
-    // attested.
-    if (all_ok) {
-        if (context.receipt_probe) |probe| {
-            const receipt = zts.semantics_check.buildReceiptFromInput(&result, .{
-                .differential = .{ .passed = @intCast(corpus.cases_passed), .total = @intCast(corpus.cases_total) },
-                .smt = .{ .available = smt.available, .proved = @intCast(smt.proved), .total = @intCast(smt.total) },
-                .audit = .{ .available = audit.available, .refuted = @intCast(audit.refuted), .total = @intCast(audit.total) },
-            });
-            probe(allocator, receipt);
-        }
-    }
 
     // exit 0 conform, 1 divergence (2 for internal error handled above).
     if (!all_ok) std.process.exit(1);
