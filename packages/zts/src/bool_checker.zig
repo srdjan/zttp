@@ -1672,34 +1672,6 @@ pub const BoolChecker = struct {
         }
     }
 
-    /// Pre-C1 implementation, kept only for the differential test below.
-    fn scanImportsLegacy(self: *BoolChecker) void {
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .import_decl) continue;
-
-            const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
-            const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
-
-            if (builtin_modules.fromSpecifier(module_str) == null) continue;
-
-            var j: u8 = 0;
-            while (j < import_decl.specifiers_count) : (j += 1) {
-                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, j);
-                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
-                const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
-                const entry = findModuleReturnEntry(module_str, imported_name) orelse continue;
-
-                self.module_fn_types.put(self.allocator, spec.local_binding.slot, entry.ret) catch self.markAllocationFailure();
-                if (entry.is_result) {
-                    self.module_result_fn_slots.put(self.allocator, spec.local_binding.slot, {}) catch self.markAllocationFailure();
-                }
-            }
-        }
-    }
-
     fn resolveAtomName(self: *const BoolChecker, atom_idx: u16) ?[]const u8 {
         if (self.atoms) |table| {
             // With atom table: predefined atoms first, then dynamic table
@@ -2635,54 +2607,37 @@ test "sound: result.error is string, catches arithmetic on it" {
 
 const import_corpus = @import("tests/import_corpus.zig");
 
-test "the facts-backed import scan derives the same maps as the legacy scan" {
+test "the import scan maps builtin slots to return types in both atom modes" {
+    // Replaces the differential that proved this scan matches the pre-C1
+    // implementation (commit 383ea758). Both atom-table modes, because the
+    // no-table path is where the two atom resolvers disagreed.
     const allocator = std.testing.allocator;
 
-    // Both atom-table modes. The first version of this test ran only WITH a
-    // table and passed while nine sound-mode tests failed, because
-    // `checkSourceFull` builds a checker with no table and the two atom
-    // resolvers disagreed on that path. Running both ways is what makes the
-    // differential trustworthy.
-    for ([_]bool{ true, false }) |use_atoms| for (import_corpus.cases) |case| {
-        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+    for ([_]bool{ true, false }) |use_atoms| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator,
+            \\import { env } from "zttp:env";
+            \\import { jwtVerify } from "zttp:auth";
+            \\import { thing } from "zttp-ext:unknown";
+        );
         defer parser.deinit();
         var atoms = context.AtomTable.init(allocator);
         defer atoms.deinit();
         if (use_atoms) parser.setAtomTable(&atoms);
         _ = try parser.parse();
         const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-        const atoms_arg: ?*context.AtomTable = if (use_atoms) &atoms else null;
 
-        var legacy = BoolChecker.init(allocator, ir_view, atoms_arg);
-        defer legacy.deinit();
-        legacy.scanImportsLegacy();
+        var checker = BoolChecker.init(allocator, ir_view, if (use_atoms) &atoms else null);
+        defer checker.deinit();
+        checker.scanImports();
 
-        var migrated = BoolChecker.init(allocator, ir_view, atoms_arg);
-        defer migrated.deinit();
-        migrated.scanImports();
-
-        std.testing.expectEqual(legacy.module_fn_types.count(), migrated.module_fn_types.count()) catch |err| {
-            std.debug.print("\ncase \"{s}\" (atoms={}): legacy types {d}, migrated types {d}\n", .{
-                case.label, use_atoms, legacy.module_fn_types.count(), migrated.module_fn_types.count(),
-            });
+        // env and jwtVerify are builtins and typed; the unresolved module is
+        // skipped, which is this analyzer's filter and differs from
+        // strict_checker and effect_inference.
+        std.testing.expectEqual(@as(u32, 2), checker.module_fn_types.count()) catch |err| {
+            std.debug.print("\natoms={}: expected 2 typed slots, found {d}\n", .{ use_atoms, checker.module_fn_types.count() });
             return err;
         };
-        var it = legacy.module_fn_types.iterator();
-        while (it.next()) |e| {
-            const got = migrated.module_fn_types.get(e.key_ptr.*) orelse {
-                std.debug.print("\ncase \"{s}\": slot {d} missing after migration\n", .{ case.label, e.key_ptr.* });
-                return error.SlotMissing;
-            };
-            if (got != e.value_ptr.*) {
-                std.debug.print("\ncase \"{s}\": slot {d} type {any} -> {any}\n", .{ case.label, e.key_ptr.*, e.value_ptr.*, got });
-                return error.TypeChanged;
-            }
-        }
-        std.testing.expectEqual(legacy.module_result_fn_slots.count(), migrated.module_result_fn_slots.count()) catch |err| {
-            std.debug.print("\ncase \"{s}\" (atoms={}): legacy result slots {d}, migrated {d}\n", .{
-                case.label, use_atoms, legacy.module_result_fn_slots.count(), migrated.module_result_fn_slots.count(),
-            });
-            return err;
-        };
-    };
+        // jwtVerify returns a Result; env returns an optional string.
+        try std.testing.expectEqual(@as(u32, 1), checker.module_result_fn_slots.count());
+    }
 }
