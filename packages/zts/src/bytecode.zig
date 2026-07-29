@@ -435,8 +435,6 @@ pub const CompilationTier = enum(u8) {
     interpreted, // Running in bytecode interpreter
     baseline_candidate, // Hit threshold, queued for baseline compilation
     baseline, // Simple native code (dispatch elimination)
-    optimized_candidate, // Hit optimized threshold, queued for optimized compilation
-    optimized, // With type specialization (loop-level guards)
 };
 
 /// Call count threshold before a function becomes a JIT candidate

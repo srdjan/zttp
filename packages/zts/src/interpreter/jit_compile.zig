@@ -57,43 +57,6 @@ pub fn tryCompileBaseline(interp: *Interpreter, func: *bytecode.FunctionBytecode
     interp.ctx.enforceJitCodeBudget();
 }
 
-/// Try to compile a function using the optimized JIT tier.
-/// On success, stores compiled code in func.compiled_code and sets tier to .optimized.
-/// On UnsupportedOpcode (no optimizable loops), stays at baseline tier.
-pub fn tryCompileOptimized(interp: *Interpreter, func: *bytecode.FunctionBytecode) !void {
-    const code_alloc = try interp.ctx.getOrCreateCodeAllocator();
-
-    var timer: ?compat.Timer = null;
-    if (context.enable_jit_metrics) {
-        timer = compat.Timer.start() catch null;
-    }
-
-    const compiled = jit.compileOptimized(interp.ctx.allocator, code_alloc, func, interp.ctx.hidden_class_pool) catch |err| {
-        switch (err) {
-            jit.CompileError.UnsupportedOpcode => {
-                setTier(interp, func, .baseline);
-                return;
-            },
-            else => return err,
-        }
-    };
-
-    if (timer) |*t| {
-        interp.ctx.recordJitCompile(t.read(), compiled.code.len, func.code.len);
-    }
-
-    if (func.compiled_code) |old_ptr| {
-        const old_code: *jit.CompiledCode = @ptrCast(@alignCast(old_ptr));
-        interp.ctx.allocator.destroy(old_code);
-    }
-
-    const compiled_ptr = try interp.ctx.allocator.create(jit.CompiledCode);
-    compiled_ptr.* = compiled;
-    func.compiled_code = compiled_ptr;
-    setTier(interp, func, .optimized);
-    interp.ctx.enforceJitCodeBudget();
-}
-
 /// Allocate type feedback vector for a function.
 /// Scans bytecode to count and map feedback sites.
 ///
@@ -357,12 +320,5 @@ pub fn maybePromote(interp: *Interpreter, func: *bytecode.FunctionBytecode, mode
                 }
             }
         },
-    }
-
-    // Optimized tier promotion: compile when promoted from baseline by hot loop.
-    if (!jit_policy.jitDisabled() and func.tier == .optimized_candidate) {
-        tryCompileOptimized(interp, func) catch {
-            setTier(interp, func, .baseline);
-        };
     }
 }

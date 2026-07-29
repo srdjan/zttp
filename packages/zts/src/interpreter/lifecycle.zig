@@ -36,7 +36,6 @@ pub fn resetProfilingCounters(self: *Interpreter) void {
     self.tier_promotions = [_]u32{0} ** perf.tier_count;
     self.promotion_attempted = 0;
     self.promotion_succeeded = 0;
-    self.promotion_rejected_deopt_storm = 0;
     self.opcode_histogram = [_]u32{0} ** 256;
 }
 
@@ -65,7 +64,6 @@ pub fn snapshotPerfStats(self: *const Interpreter) PerfStats {
         .tier_promotions = self.tier_promotions,
         .promotion_attempted = self.promotion_attempted,
         .promotion_succeeded = self.promotion_succeeded,
-        .promotion_rejected_deopt_storm = self.promotion_rejected_deopt_storm,
         .opcode_histogram_enabled = perf.enable_opcode_histogram,
         .opcode_histogram_nonzero = if (perf.enable_opcode_histogram)
             perf.countNonZeroHistogramEntries(self.opcode_histogram[0..])

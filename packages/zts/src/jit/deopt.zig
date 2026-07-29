@@ -101,11 +101,7 @@ pub export fn jitDeoptimize(ctx: *context.Context, bytecode_offset: u32, reason:
     const mut_func = @constCast(func);
     mut_func.deopt_count +|= 1;
     mut_func.last_deopt_exec_count = mut_func.execution_count;
-    if (func.tier == .optimized) {
-        // Demote optimized to baseline - the type feedback was wrong
-        // Don't try to re-optimize immediately, let it run in baseline
-        mut_func.tier = .baseline;
-    } else if (func.tier == .baseline) {
+    if (func.tier == .baseline) {
         // Demote to candidate so it gets recompiled on next hot call
         mut_func.tier = .baseline_candidate;
     }

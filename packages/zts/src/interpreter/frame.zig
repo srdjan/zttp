@@ -191,7 +191,7 @@ pub fn callBytecodeFunction(
     // Check if function is JIT-compiled and execute via JIT. A jit-inhibited
     // context (durable) never enters compiled code even if the shared bytecode
     // was compiled elsewhere - the interpreter tier preserves the suspend.
-    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and (func_bc.tier == .baseline or func_bc.tier == .optimized)) {
+    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and func_bc.tier == .baseline) {
         if (func_bc.compiled_code) |cc_opaque| {
             const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
             // On a fault executeCompiled returns the error; the errdefer above
@@ -254,7 +254,7 @@ pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) Interpret
     // Check if function is JIT-compiled and execute via JIT. A jit-inhibited
     // context (durable) never enters compiled code even if the shared bytecode
     // was compiled elsewhere - the interpreter tier preserves the suspend.
-    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and (func.tier == .baseline or func.tier == .optimized)) {
+    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and func.tier == .baseline) {
         if (func.compiled_code) |cc_opaque| {
             const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
             return try executeCompiled(self, func, cc);

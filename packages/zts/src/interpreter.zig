@@ -86,7 +86,6 @@ pub const Interpreter = struct {
     tier_promotions: [tier_count]u32 = [_]u32{0} ** tier_count,
     promotion_attempted: u32 = 0, // Phase 6: every profileFunctionEntry tier transition attempt
     promotion_succeeded: u32 = 0, // Phase 6: attempts that resulted in a tier bump
-    promotion_rejected_deopt_storm: u32 = 0, // Phase 6: optimized_candidate promotions blocked by deopt storm
     opcode_histogram: [256]u32 = [_]u32{0} ** 256,
     last_op: bytecode.Opcode = .nop,
     last_error_location: ?bytecode.LineEntry = null,
@@ -104,23 +103,6 @@ pub const Interpreter = struct {
         if (func.execution_count == getJitThreshold() and func.tier == .interpreted) {
             self.promotion_attempted +%= 1;
             jit_compile.setTier(self, func, .baseline_candidate);
-            self.promotion_succeeded +%= 1;
-            return true;
-        }
-        // Promote baseline to optimized_candidate after OPTIMIZED_THRESHOLD calls
-        if (func.execution_count == bytecode.OPTIMIZED_THRESHOLD and func.tier == .baseline) {
-            self.promotion_attempted +%= 1;
-            if (isTieringDeoptSuppressEnabled() and
-                type_feedback.InliningPolicy.shouldSuppressOnDeoptStorm(
-                    func.deopt_count,
-                    func.execution_count,
-                    func.last_deopt_exec_count,
-                ))
-            {
-                self.promotion_rejected_deopt_storm +%= 1;
-                return false;
-            }
-            jit_compile.setTier(self, func, .optimized_candidate);
             self.promotion_succeeded +%= 1;
             return true;
         }
@@ -5641,95 +5623,6 @@ test "JIT profiling: execution counting" {
     const promoted2 = interp.profileFunctionEntry(&func);
     try std.testing.expect(!promoted2);
     try std.testing.expectEqual(bytecode.CompilationTier.baseline_candidate, func.tier);
-}
-
-test "tiering: deopt storm suppresses optimized promotion when enabled" {
-    const allocator = std.testing.allocator;
-    const gc = @import("gc.zig");
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // Force the feature on for this test. Restore default after.
-    jit_policy.setTieringDeoptSuppressForTests(true);
-    defer jit_policy.setTieringDeoptSuppressForTests(null);
-
-    var func = bytecode.FunctionBytecode{
-        .header = .{},
-        .name_atom = 0,
-        .arg_count = 0,
-        .local_count = 0,
-        .stack_size = 1,
-        .flags = .{},
-        .code = &.{},
-        .constants = &.{},
-        .source_map = null,
-        .line_table = null,
-    };
-
-    // Simulate a function that already reached .baseline and has just deopted
-    // DEOPT_SUPPRESS_COUNT times, with the most recent deopt at the current
-    // exec count.
-    func.tier = bytecode.CompilationTier.baseline;
-    func.execution_count = bytecode.OPTIMIZED_THRESHOLD - 1;
-    func.deopt_count = type_feedback.InliningPolicy.DEOPT_SUPPRESS_COUNT;
-    func.last_deopt_exec_count = func.execution_count;
-
-    var interp = Interpreter.init(ctx);
-
-    // Next profile bumps exec_count to OPTIMIZED_THRESHOLD and should reject
-    // promotion because of the recent deopt storm.
-    const promoted = interp.profileFunctionEntry(&func);
-    try std.testing.expect(!promoted);
-    try std.testing.expectEqual(bytecode.CompilationTier.baseline, func.tier);
-    try std.testing.expectEqual(@as(u32, 1), interp.promotion_attempted);
-    try std.testing.expectEqual(@as(u32, 0), interp.promotion_succeeded);
-    try std.testing.expectEqual(@as(u32, 1), interp.promotion_rejected_deopt_storm);
-}
-
-test "tiering: deopt storm does not suppress when feature is disabled" {
-    const allocator = std.testing.allocator;
-    const gc = @import("gc.zig");
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // Feature explicitly off.
-    jit_policy.setTieringDeoptSuppressForTests(false);
-    defer jit_policy.setTieringDeoptSuppressForTests(null);
-
-    var func = bytecode.FunctionBytecode{
-        .header = .{},
-        .name_atom = 0,
-        .arg_count = 0,
-        .local_count = 0,
-        .stack_size = 1,
-        .flags = .{},
-        .code = &.{},
-        .constants = &.{},
-        .source_map = null,
-        .line_table = null,
-    };
-
-    func.tier = bytecode.CompilationTier.baseline;
-    func.execution_count = bytecode.OPTIMIZED_THRESHOLD - 1;
-    func.deopt_count = type_feedback.InliningPolicy.DEOPT_SUPPRESS_COUNT + 5;
-    func.last_deopt_exec_count = func.execution_count;
-
-    var interp = Interpreter.init(ctx);
-
-    const promoted = interp.profileFunctionEntry(&func);
-    try std.testing.expect(promoted);
-    try std.testing.expectEqual(bytecode.CompilationTier.optimized_candidate, func.tier);
-    try std.testing.expectEqual(@as(u32, 1), interp.promotion_attempted);
-    try std.testing.expectEqual(@as(u32, 1), interp.promotion_succeeded);
-    try std.testing.expectEqual(@as(u32, 0), interp.promotion_rejected_deopt_storm);
 }
 
 test "tiering: shouldSuppressOnDeoptStorm boundary conditions" {

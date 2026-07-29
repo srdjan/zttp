@@ -17,7 +17,6 @@ pub const PerfStats = struct {
     tier_promotions: [tier_count]u32 = [_]u32{0} ** tier_count,
     promotion_attempted: u32 = 0,
     promotion_succeeded: u32 = 0,
-    promotion_rejected_deopt_storm: u32 = 0,
     opcode_histogram_enabled: bool = enable_opcode_histogram,
     opcode_histogram_nonzero: u32 = 0,
     opcode_histogram: [256]u32 = [_]u32{0} ** 256,

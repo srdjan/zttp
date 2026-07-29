@@ -280,8 +280,6 @@ fn tierName(index: usize) []const u8 {
         .interpreted => "interpreted",
         .baseline_candidate => "baseline_candidate",
         .baseline => "baseline",
-        .optimized_candidate => "optimized_candidate",
-        .optimized => "optimized",
     };
 }
 
@@ -296,7 +294,7 @@ fn writeTierPromotionsJson(writer: anytype, counts: []const u32) !void {
 
 fn writePerfStatsJson(writer: anytype, perf: PerfStats) !void {
     try writer.print(
-        "{{\"backedge_count\":{d},\"pic_hits\":{d},\"pic_misses\":{d},\"deopt_count\":{d},\"mega_recoveries\":{d},\"promotion_attempted\":{d},\"promotion_succeeded\":{d},\"promotion_rejected_deopt_storm\":{d},\"opcode_histogram_enabled\":{s},\"opcode_histogram_nonzero\":{d},\"tier_promotions\":",
+        "{{\"backedge_count\":{d},\"pic_hits\":{d},\"pic_misses\":{d},\"deopt_count\":{d},\"mega_recoveries\":{d},\"promotion_attempted\":{d},\"promotion_succeeded\":{d},\"opcode_histogram_enabled\":{s},\"opcode_histogram_nonzero\":{d},\"tier_promotions\":",
         .{
             perf.backedge_count,
             perf.pic_hits,
@@ -305,7 +303,6 @@ fn writePerfStatsJson(writer: anytype, perf: PerfStats) !void {
             perf.mega_recoveries,
             perf.promotion_attempted,
             perf.promotion_succeeded,
-            perf.promotion_rejected_deopt_storm,
             if (perf.opcode_histogram_enabled) "true" else "false",
             perf.opcode_histogram_nonzero,
         },

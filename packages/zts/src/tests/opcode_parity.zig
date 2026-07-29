@@ -1,7 +1,7 @@
 //! Opcode-semantic parity gate.
 //!
 //! Pins that the three execution tiers - the bytecode interpreter, the baseline
-//! JIT, and the optimized JIT - agree on opcode semantics for a corpus of small
+//! JIT - agree on opcode semantics for a corpus of small
 //! programs. This guards the write-barrier / property-store work (which touched
 //! all three tiers) and the future VM-loop deduplication (which collapses the
 //! three hand-written opcode implementations into one source of truth): any tier
@@ -349,7 +349,7 @@ fn checkExpected(case: Case, result: JSValue) !void {
     }
 }
 
-test "opcode parity: interpreter, baseline, and optimized tiers agree" {
+test "opcode parity: interpreter and baseline tiers agree" {
     const allocator = std.testing.allocator;
 
     const prev_policy = jit_policy.getJitPolicy();
@@ -386,7 +386,6 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
     const jit_available = !jit_policy.jitDisabled();
 
     var baseline_compiled: usize = 0;
-    var optimized_reached: usize = 0;
 
     for (cases) |case| {
         errdefer std.debug.print("opcode parity: failing case '{s}'\n", .{case.name});
@@ -414,26 +413,6 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
         baseline_compiled += 1;
         try checkExpected(case, base_result);
         try std.testing.expect(sameValue(interp_result, base_result));
-
-        // Tier 3: optimized JIT. Pin the auto-ladder off, warm the interpreter so
-        // type feedback records, then compile explicitly. Non-loop cases may not
-        // reach .optimized on every arch; parity is asserted only when reached.
-        jit_policy.setJitPolicy(.lazy);
-        jit_policy.setJitThreshold(std.math.maxInt(u32));
-        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-        var opt_func = buildFunc(case);
-        defer jit_compile.cleanupCompiledCode(allocator, &opt_func);
-        defer jit_compile.cleanupTypeFeedback(allocator, &opt_func);
-        try jit_compile.allocateTypeFeedback(&interp, &opt_func);
-        var w: usize = 0;
-        while (w < 8) : (w += 1) _ = try interp.run(&opt_func);
-        jit_compile.tryCompileOptimized(&interp, &opt_func) catch {};
-        if (opt_func.tier == .optimized) {
-            optimized_reached += 1;
-            const opt_result = try interp.run(&opt_func);
-            try checkExpected(case, opt_result);
-            try std.testing.expect(sameValue(interp_result, opt_result));
-        }
     }
 
     if (jit_available) {
@@ -446,7 +425,7 @@ test "opcode parity: interpreter, baseline, and optimized tiers agree" {
 // do (createBytecodeFunction stores a heap pointer), so it cannot be a comptime
 // `Case` literal like the corpus above. This second gate builds the callee at
 // runtime and runs the same three-tier protocol, asserting the call returns 42
-// identically on interpreter, baseline JIT, and (when reached) optimized JIT.
+// identically on interpreter and baseline JIT.
 test "opcode parity: call returns identical value across tiers" {
     const allocator = std.testing.allocator;
 
@@ -525,24 +504,6 @@ test "opcode parity: call returns identical value across tiers" {
     try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
     try checkExpected(call_case, base_result);
     try std.testing.expect(sameValue(interp_result, base_result));
-
-    // Tier 3: optimized JIT. Loopless, so it won't reach .optimized on most archs;
-    // parity is asserted only when it does, exactly like the corpus above.
-    jit_policy.setJitPolicy(.lazy);
-    jit_policy.setJitThreshold(std.math.maxInt(u32));
-    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-    var opt_func = buildFunc(call_case);
-    defer jit_compile.cleanupCompiledCode(allocator, &opt_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &opt_func);
-    try jit_compile.allocateTypeFeedback(&interp, &opt_func);
-    var w: usize = 0;
-    while (w < 8) : (w += 1) _ = try interp.run(&opt_func);
-    jit_compile.tryCompileOptimized(&interp, &opt_func) catch {};
-    if (opt_func.tier == .optimized) {
-        const opt_result = try interp.run(&opt_func);
-        try checkExpected(call_case, opt_result);
-        try std.testing.expect(sameValue(interp_result, opt_result));
-    }
 }
 
 // String-valued results. The header's exclusion holds for RAW comparison: this
@@ -649,24 +610,6 @@ test "opcode parity: string-producing opcodes agree across tiers via in-VM compa
         baseline_compiled += 1;
         try checkExpected(case, base_result);
         try std.testing.expect(sameValue(interp_result, base_result));
-
-        // Tier 3: optimized JIT. Loopless bodies may not reach .optimized;
-        // parity is asserted only when reached, exactly like the corpus above.
-        jit_policy.setJitPolicy(.lazy);
-        jit_policy.setJitThreshold(std.math.maxInt(u32));
-        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-        var opt_func = buildFunc(case);
-        defer jit_compile.cleanupCompiledCode(allocator, &opt_func);
-        defer jit_compile.cleanupTypeFeedback(allocator, &opt_func);
-        try jit_compile.allocateTypeFeedback(&interp, &opt_func);
-        var w: usize = 0;
-        while (w < 8) : (w += 1) _ = try interp.run(&opt_func);
-        jit_compile.tryCompileOptimized(&interp, &opt_func) catch {};
-        if (opt_func.tier == .optimized) {
-            const opt_result = try interp.run(&opt_func);
-            try checkExpected(case, opt_result);
-            try std.testing.expect(sameValue(interp_result, opt_result));
-        }
     }
 
     if (jit_available) {
@@ -861,24 +804,6 @@ test "opcode parity: a fault makes run() return an error on every tier, not a po
     try std.testing.expect(runReturnedError(&interp, &base_func));
     interp.ctx.clearException();
 
-    // Tier 3: optimized JIT, when reached. Same boundary contract.
-    jit_policy.setJitPolicy(.lazy);
-    jit_policy.setJitThreshold(std.math.maxInt(u32));
-    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-    var opt_func = faultFunc(case);
-    defer jit_compile.cleanupCompiledCode(allocator, &opt_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &opt_func);
-    try jit_compile.allocateTypeFeedback(&interp, &opt_func);
-    var w: usize = 0;
-    while (w < 8) : (w += 1) {
-        interp.ctx.clearException();
-        _ = interp.run(&opt_func) catch {};
-    }
-    jit_compile.tryCompileOptimized(&interp, &opt_func) catch {};
-    if (opt_func.tier == .optimized) {
-        interp.ctx.clearException();
-        try std.testing.expect(runReturnedError(&interp, &opt_func));
-    }
     interp.ctx.clearException();
 }
 
