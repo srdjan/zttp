@@ -83,6 +83,12 @@ echo "policy hash OK: $ACTUAL"
 step "bash scripts/check-semantics-spec.sh  (strict semantics spec gate)"
 bash scripts/check-semantics-spec.sh
 
+step "zts module-spec-render --check  (module specs match the Zig bindings)"
+# The bindings are the source of truth; packages/modules/module-specs/*.json is
+# generated. This reports every stale path, and treats an unreadable file as
+# stale rather than skipping it.
+./zig-out/bin/zts module-spec-render --check
+
 step "verify expert subsystem  (ci.yml: Verify expert subsystem)"
 if ! command -v jq >/dev/null 2>&1; then
   echo "error: jq is required for the expert-subsystem check (matches ci.yml)" >&2
