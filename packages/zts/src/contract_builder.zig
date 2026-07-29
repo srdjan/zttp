@@ -19,6 +19,7 @@ const context = @import("context.zig");
 const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
+const module_facts_mod = @import("module_facts.zig");
 const module_manifest = @import("module_manifest.zig");
 const bytecode = @import("bytecode.zig");
 const handler_analyzer = @import("handler_analyzer.zig");
@@ -89,13 +90,14 @@ pub const ContractBuilder = struct {
     /// Borrowed; the registry must outlive the builder.
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
 
-    // Binding tracking: maps local slot -> function binding metadata for call-site analysis.
-    // Populated during scanImports from the module binding registry.
-    generic_bindings: std.ArrayList(GenericBinding),
+    /// The import and binding index, built once at the start of `build` and
+    /// not mutated after. Owns the module list, the per-module function names,
+    /// and the slot-keyed bindings that the call-site scan resolves against.
+    /// The contract gets copies, not the originals, so the index stays readable
+    /// after `build` returns.
+    facts: module_facts_mod.ModuleFacts,
 
     // Collected data (all strings are duped/owned)
-    modules_list: std.ArrayList([]const u8),
-    functions_map: std.ArrayList(HandlerContract.FunctionEntry),
     env_literals: std.ArrayList([]const u8),
     env_dynamic: bool,
     egress_hosts: std.ArrayList([]const u8),
@@ -135,9 +137,8 @@ pub const ContractBuilder = struct {
     api_schemas_dynamic: bool,
     api_routes_dynamic: bool,
 
-    // Partner extension tracking: bindings discovered in scanImports for
-    // partner-registered modules, and the per-specifier extracted facts.
-    extension_bindings: std.ArrayList(ExtensionBinding) = .empty,
+    // Partner extension tracking: the per-specifier extracted facts. The
+    // bindings themselves live in `facts.extension_bindings`.
     extensions: std.StringHashMapUnmanaged(contract_types.ExtensionContract) = .empty,
 
     // Effect tracking
@@ -176,25 +177,10 @@ pub const ContractBuilder = struct {
         }
     };
 
-    /// A tracked binding from scanImports: maps a local variable slot to its
-    /// FunctionBinding metadata from the module registry.
-    const GenericBinding = struct {
-        slot: u16,
-        module_specifier: []const u8,
-        binding_name: []const u8,
-        extractions: []const module_binding.ContractExtraction,
-        flags: module_binding.ContractFlags,
-    };
-
-    /// Like GenericBinding but for partner-registered modules. The extraction
-    /// rules borrow from the live ManifestRegistry (which outlives the
-    /// builder), so no extra storage is allocated here.
-    const ExtensionBinding = struct {
-        slot: u16,
-        module_specifier: []const u8,
-        binding_name: []const u8,
-        extractions: []const module_manifest.ContractExtractionRule,
-    };
+    // The binding types moved to module_facts.zig with the walk that builds
+    // them. Aliased here so existing references keep resolving.
+    const GenericBinding = module_facts_mod.GenericBinding;
+    const ExtensionBinding = module_facts_mod.ExtensionBinding;
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -209,9 +195,10 @@ pub const ContractBuilder = struct {
             .atoms = atoms,
             .type_env = type_env,
             .type_checker = type_checker,
-            .generic_bindings = .empty,
-            .modules_list = .empty,
-            .functions_map = .empty,
+            // An empty index. `build` replaces it with the real one; the
+            // property helpers that tests call directly read an empty index
+            // rather than requiring a parse.
+            .facts = .{ .allocator = allocator },
             .env_literals = .empty,
             .env_dynamic = false,
             .egress_hosts = .empty,
@@ -246,9 +233,24 @@ pub const ContractBuilder = struct {
     /// Free all builder-owned resources. Safe to call whether or not build()
     /// was called: if build() moved the lists into a HandlerContract, the
     /// items slices are empty and these loops are no-ops.
+    /// Replace `facts` with a freshly built index over the current IR. Called
+    /// once from `build`; the tests that used to call `scanImports` directly
+    /// call this instead, so both go through one path.
+    fn buildFacts(self: *ContractBuilder) !void {
+        // Build into a temporary and swap, so a failure here leaves the
+        // existing (empty) index intact rather than dangling for deinit.
+        const built = try module_facts_mod.ModuleFacts.build(
+            self.allocator,
+            self.ir_view,
+            self.atoms,
+            self.manifest_registry,
+        );
+        self.facts.deinit();
+        self.facts = built;
+    }
+
     pub fn deinit(self: *ContractBuilder) void {
-        self.generic_bindings.deinit(self.allocator);
-        self.extension_bindings.deinit(self.allocator);
+        self.facts.deinit();
         var ext_it = self.extensions.iterator();
         while (ext_it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -282,14 +284,6 @@ pub const ContractBuilder = struct {
         for (self.durable_producer_key_literals.items) |s| self.allocator.free(s);
         self.durable_producer_key_literals.deinit(self.allocator);
         self.durable_workflow.deinit(self.allocator);
-        for (self.modules_list.items) |s| self.allocator.free(s);
-        self.modules_list.deinit(self.allocator);
-        for (self.functions_map.items) |*entry| {
-            self.allocator.free(entry.module);
-            for (entry.names.items) |n| self.allocator.free(n);
-            entry.names.deinit(self.allocator);
-        }
-        self.functions_map.deinit(self.allocator);
         for (self.api_schemas.items) |schema| {
             self.allocator.free(schema.name);
             self.allocator.free(schema.schema_json);
@@ -330,8 +324,9 @@ pub const ContractBuilder = struct {
         defer effects.deinit();
         try effects.analyze(root);
 
-        // Phase 1: Scan imports to discover modules, functions, and binding slots
-        try self.scanImports();
+        // Phase 1: Build the import index. Modules, imported names, and the
+        // slot-keyed bindings the call-site scan resolves against.
+        try self.buildFacts();
 
         // Phase 2: Scan all call sites for env/fetchSync/cache usage
         try self.scanCallSites();
@@ -438,8 +433,12 @@ pub const ContractBuilder = struct {
                 .column = if (handler_loc) |loc| loc.column else 0,
             },
             .routes = routes,
-            .modules = self.modules_list,
-            .functions = self.functions_map,
+            // Copies, not the index's own lists. Moving them would empty the
+            // index, and every reader after this point (detectRateLimiting,
+            // computeGlobalEffectSummary, and the six analyzers that will
+            // adopt the index) would see a handler with no imports.
+            .modules = try self.facts.cloneModules(self.allocator),
+            .functions = try self.facts.cloneFunctions(self.allocator),
             .env = .{
                 .literal = self.env_literals,
                 .dynamic = self.env_dynamic,
@@ -547,9 +546,9 @@ pub const ContractBuilder = struct {
         // cross-handler resolution and belongs here, not there.
         try self.emitSagaCompensationDiagnostics(&contract);
 
-        // Clear moved lists so deinit() won't double-free
-        self.modules_list = .empty;
-        self.functions_map = .empty;
+        // Clear moved lists so deinit() won't double-free. `facts.modules` and
+        // `facts.functions` are absent here on purpose: the contract got
+        // copies, so the index still owns and still frees its own.
         self.env_literals = .empty;
         self.egress_hosts = .empty;
         self.egress_urls = .empty;
@@ -1107,7 +1106,7 @@ pub const ContractBuilder = struct {
     fn emitWebSocketConsistencyDiagnostics(self: *ContractBuilder) !void {
         const ws_consistency = @import("ws_consistency.zig");
         const inputs = ws_consistency.Inputs{
-            .imports_websocket_module = containsString(self.modules_list.items, "zttp:websocket"),
+            .imports_websocket_module = containsString(self.facts.modules.items, "zttp:websocket"),
             .exports_on_open = self.websocket.on_open,
             .exports_on_message = self.websocket.on_message,
             .exports_on_close = self.websocket.on_close,
@@ -1130,106 +1129,6 @@ pub const ContractBuilder = struct {
                 f.message,
                 f.help,
             });
-        }
-    }
-
-    fn scanImports(self: *ContractBuilder) !void {
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .import_decl) continue;
-
-            const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
-            const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
-
-            // Only track virtual modules: either built-in or partner-registered.
-            if (builtin_modules.fromSpecifier(module_str) == null) {
-                if (self.manifest_registry == null or self.manifest_registry.?.fromSpecifier(module_str) == null) continue;
-            }
-
-            // Add module to list (deduplicated, duped)
-            if (!containsString(self.modules_list.items, module_str)) {
-                const duped = try self.allocator.dupe(u8, module_str);
-                errdefer self.allocator.free(duped);
-                try self.modules_list.append(self.allocator, duped);
-            }
-
-            // Scan specifiers to track function names and binding slots
-            var func_names: std.ArrayList([]const u8) = .empty;
-            var func_module_str: []const u8 = "";
-
-            var j: u8 = 0;
-            while (j < import_decl.specifiers_count) : (j += 1) {
-                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, j);
-                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
-                const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
-
-                const name_duped = try self.allocator.dupe(u8, imported_name);
-                errdefer self.allocator.free(name_duped);
-                try func_names.append(self.allocator, name_duped);
-                func_module_str = module_str;
-
-                // Look up the function in the binding registry and track its
-                // contract extraction rules and flags for scanCallSites.
-                if (builtin_modules.findExport(module_str, imported_name)) |entry| {
-                    const has_extractions = entry.func.contract_extractions.len > 0;
-                    const has_flags = entry.func.contract_flags.sets_scope_used or
-                        entry.func.contract_flags.sets_durable_used or
-                        entry.func.contract_flags.sets_durable_timers or
-                        entry.func.contract_flags.sets_bearer_auth or
-                        entry.func.contract_flags.sets_jwt_auth;
-                    if (has_extractions or has_flags) {
-                        try self.generic_bindings.append(self.allocator, .{
-                            .slot = spec.local_binding.slot,
-                            .module_specifier = entry.binding.specifier,
-                            .binding_name = imported_name,
-                            .extractions = entry.func.contract_extractions,
-                            .flags = entry.func.contract_flags,
-                        });
-                    }
-                } else if (self.manifest_registry) |registry| {
-                    if (registry.findExport(module_str, imported_name)) |partner_exp| {
-                        if (partner_exp.contract_extractions.items.len > 0) {
-                            try self.extension_bindings.append(self.allocator, .{
-                                .slot = spec.local_binding.slot,
-                                .module_specifier = registry.fromSpecifier(module_str).?.specifier,
-                                .binding_name = imported_name,
-                                .extractions = partner_exp.contract_extractions.items,
-                            });
-                        }
-                    }
-                }
-            }
-
-            if (func_names.items.len > 0) {
-                // Merge with existing entry for same module, or add new
-                var merged = false;
-                for (self.functions_map.items) |*existing| {
-                    if (std.mem.eql(u8, existing.module, func_module_str)) {
-                        for (func_names.items) |name| {
-                            if (!containsString(existing.names.items, name)) {
-                                try existing.names.append(self.allocator, name);
-                            } else {
-                                self.allocator.free(name);
-                            }
-                        }
-                        func_names.deinit(self.allocator);
-                        merged = true;
-                        break;
-                    }
-                }
-                if (!merged) {
-                    const module_duped = try self.allocator.dupe(u8, func_module_str);
-                    errdefer self.allocator.free(module_duped);
-                    try self.functions_map.append(self.allocator, .{
-                        .module = module_duped,
-                        .names = func_names,
-                    });
-                }
-            } else {
-                func_names.deinit(self.allocator);
-            }
         }
     }
 
@@ -1277,7 +1176,7 @@ pub const ContractBuilder = struct {
                 }
 
                 // Check generic bindings from the module binding registry
-                for (self.generic_bindings.items) |gb| {
+                for (self.facts.generic_bindings.items) |gb| {
                     if (gb.slot != binding.slot) continue;
 
                     // Apply contract flags
@@ -1316,7 +1215,7 @@ pub const ContractBuilder = struct {
                 // extensions map. `fetch_host` rules also mirror into the
                 // top-level egress.hosts so runtime egress policy enforcement
                 // sees one uniform list.
-                for (self.extension_bindings.items) |eb| {
+                for (self.facts.extension_bindings.items) |eb| {
                     if (eb.slot != binding.slot) continue;
                     for (eb.extractions) |rule| {
                         try self.applyExtensionExtraction(call, eb.module_specifier, rule);
@@ -1372,7 +1271,7 @@ pub const ContractBuilder = struct {
     fn isDurableStepCall(self: *ContractBuilder, call: Node.CallExpr) bool {
         if (self.ir_view.getTag(call.callee) != .identifier) return false;
         const binding = self.ir_view.getBinding(call.callee) orelse return false;
-        for (self.generic_bindings.items) |gb| {
+        for (self.facts.generic_bindings.items) |gb| {
             if (gb.slot != binding.slot) continue;
             return std.mem.eql(u8, gb.module_specifier, "zttp:durable") and
                 std.mem.eql(u8, gb.binding_name, "step");
@@ -1647,7 +1546,7 @@ pub const ContractBuilder = struct {
 
     /// Check if a binding slot is tracked for a specific contract category.
     fn isBindingCategory(self: *const ContractBuilder, slot: u16, category: module_binding.ContractCategory) bool {
-        for (self.generic_bindings.items) |gb| {
+        for (self.facts.generic_bindings.items) |gb| {
             if (gb.slot != slot) continue;
             for (gb.extractions) |ext| {
                 if (ext.category == category) return true;
@@ -1809,7 +1708,7 @@ pub const ContractBuilder = struct {
         if (tag != .identifier) return false;
 
         const binding = self.ir_view.getBinding(callee) orelse return false;
-        for (self.generic_bindings.items) |gb| {
+        for (self.facts.generic_bindings.items) |gb| {
             if (gb.slot == binding.slot and std.mem.eql(u8, gb.binding_name, expected)) return true;
         }
 
@@ -3261,7 +3160,7 @@ pub const ContractBuilder = struct {
                         }
                     } else {
                         // Check for auth flags via generic bindings
-                        for (self.generic_bindings.items) |gb| {
+                        for (self.facts.generic_bindings.items) |gb| {
                             if (gb.slot == binding.slot) {
                                 if (gb.flags.sets_bearer_auth) route.requires_bearer = true;
                                 if (gb.flags.sets_jwt_auth) route.requires_jwt = true;
@@ -3847,7 +3746,7 @@ pub const ContractBuilder = struct {
     fn computeGlobalEffectSummary(self: *const ContractBuilder) EffectSummary {
         var summary = EffectSummary{};
 
-        for (self.functions_map.items) |entry| {
+        for (self.facts.functions.items) |entry| {
             if (builtin_modules.fromSpecifier(entry.module)) |binding| {
                 const is_durable = std.mem.eql(u8, binding.specifier, "zttp:durable");
                 const is_cache = std.mem.eql(u8, binding.specifier, "zttp:cache");
@@ -4044,7 +3943,7 @@ pub const ContractBuilder = struct {
             }
         }
 
-        for (self.generic_bindings.items) |gb| {
+        for (self.facts.generic_bindings.items) |gb| {
             if (gb.slot != binding.slot) continue;
             summary.has_any_call = true;
             if (builtin_modules.fromSpecifier(gb.module_specifier)) |module| {
@@ -4065,7 +3964,7 @@ pub const ContractBuilder = struct {
         }
 
         if (self.manifest_registry) |registry| {
-            for (self.extension_bindings.items) |eb| {
+            for (self.facts.extension_bindings.items) |eb| {
                 if (eb.slot != binding.slot) continue;
                 summary.has_any_call = true;
                 const manifest = registry.fromSpecifier(eb.module_specifier) orelse return;
@@ -4155,10 +4054,10 @@ pub const ContractBuilder = struct {
     /// short-circuit before the handler, and cacheIncr atomically increments
     /// a counter - the standard rate-limit-and-reject flow.
     fn detectRateLimiting(self: *const ContractBuilder) ?RateLimitInfo {
-        if (!containsString(self.modules_list.items, "zttp:compose")) return null;
+        if (!containsString(self.facts.modules.items, "zttp:compose")) return null;
 
         var uses_cache_incr = false;
-        for (self.functions_map.items) |entry| {
+        for (self.facts.functions.items) |entry| {
             if (std.mem.eql(u8, entry.module, "zttp:cache") and containsString(entry.names.items, "cacheIncr")) {
                 uses_cache_incr = true;
                 break;
@@ -4269,7 +4168,7 @@ fn appendTrackedFunction(
 
     try names.append(builder.allocator, try builder.allocator.dupe(u8, func_name));
 
-    try builder.functions_map.append(builder.allocator, .{
+    try builder.facts.functions.append(builder.allocator, .{
         .module = try builder.allocator.dupe(u8, module_name),
         .names = names,
     });
@@ -4909,12 +4808,12 @@ test "registered partner manifest contributes effect class to handler properties
     builder.manifest_registry = &registry;
     defer builder.deinit();
 
-    try builder.scanImports();
+    try builder.buildFacts();
 
-    try std.testing.expect(containsString(builder.modules_list.items, "zttp-ext:stripe"));
-    try std.testing.expectEqual(@as(usize, 1), builder.functions_map.items.len);
-    try std.testing.expectEqualStrings("zttp-ext:stripe", builder.functions_map.items[0].module);
-    try std.testing.expect(containsString(builder.functions_map.items[0].names.items, "chargeCard"));
+    try std.testing.expect(containsString(builder.facts.modules.items, "zttp-ext:stripe"));
+    try std.testing.expectEqual(@as(usize, 1), builder.facts.functions.items.len);
+    try std.testing.expectEqualStrings("zttp-ext:stripe", builder.facts.functions.items[0].module);
+    try std.testing.expect(containsString(builder.facts.functions.items[0].names.items, "chargeCard"));
 
     const props = try builder.computeProperties(null, null);
     try std.testing.expect(!props.read_only);
@@ -4969,7 +4868,7 @@ test "partner manifest contractExtractions populate extensions section" {
     builder.manifest_registry = &registry;
     defer builder.deinit();
 
-    try builder.scanImports();
+    try builder.buildFacts();
     try builder.scanCallSites();
 
     // Top-level egress mirrors the partner-declared fetch_host (shared-section
@@ -5009,7 +4908,7 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
     defer builder.deinit();
 
-    try builder.scanImports();
+    try builder.buildFacts();
     try builder.scanCallSites();
 
     try std.testing.expect(containsString(builder.egress_hosts.items, "api.open-meteo.com"));
@@ -5060,7 +4959,7 @@ test "resource() affordances are extracted strict-literal with method default an
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
     defer builder.deinit();
 
-    try builder.scanImports();
+    try builder.buildFacts();
     try builder.scanCallSites();
 
     try std.testing.expect(!builder.affordances_dynamic);
@@ -5102,7 +5001,7 @@ test "resource() with a computed affordances argument fails closed as affordance
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
     defer builder.deinit();
 
-    try builder.scanImports();
+    try builder.buildFacts();
     try builder.scanCallSites();
 
     try std.testing.expect(builder.affordances_dynamic);
@@ -5133,7 +5032,7 @@ test "resource() affordance with a non-literal href is recorded dynamic, not res
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
     defer builder.deinit();
 
-    try builder.scanImports();
+    try builder.buildFacts();
     try builder.scanCallSites();
 
     // The set is enumerable (object literal), so affordances_dynamic stays false,
@@ -5319,8 +5218,8 @@ test "missing manifest registry skips partner imports" {
     var builder = ContractBuilder.init(allocator, ir_view, &atoms, null, null);
     defer builder.deinit();
 
-    try builder.scanImports();
+    try builder.buildFacts();
 
-    try std.testing.expect(!containsString(builder.modules_list.items, "zttp-ext:unknown"));
-    try std.testing.expectEqual(@as(usize, 0), builder.functions_map.items.len);
+    try std.testing.expect(!containsString(builder.facts.modules.items, "zttp-ext:unknown"));
+    try std.testing.expectEqual(@as(usize, 0), builder.facts.functions.items.len);
 }
