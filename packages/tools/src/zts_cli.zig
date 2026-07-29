@@ -24,6 +24,7 @@ const review_patch = @import("review_patch.zig");
 const prove_behavior = @import("prove_behavior.zig");
 const expert = @import("expert.zig");
 const semantics_cli = @import("semantics_cli.zig");
+const module_spec_cli = @import("module_spec_cli.zig");
 const project_config_mod = @import("project_config");
 const zts = @import("zts");
 const zts_file_io = zts.file_io;
@@ -73,6 +74,7 @@ pub const commands = [_]Command{
     .{ .name = "spec-check", .run = semantics_cli.runSpecCheckCommand, .category = .machine, .args = "", .blurb = "Check the semantics registry against the IR/bytecode tables", .usage = "spec-check [--json]" },
     .{ .name = "spec-hash", .run = semantics_cli.runSpecHashCommand, .category = .machine, .args = "[--json]", .blurb = "Print the semantics-registry hash", .usage = "spec-hash [--json]" },
     .{ .name = "spec-render", .run = semantics_cli.runSpecRenderCommand, .category = .machine, .args = "[--out path] [--check path]", .blurb = "Render the semantics registry as a readable TypeScript spec", .usage = "spec-render [--out path] [--check path]" },
+    .{ .name = "module-spec-render", .run = module_spec_cli.runModuleSpecRenderCommand, .category = .machine, .args = "[--check]", .blurb = "Generate the module spec JSON from the Zig bindings", .usage = "module-spec-render [--check] [--json]" },
     .{ .name = "verify-paths", .run = expert.runVerifyPaths, .category = .machine, .args = "<file>...", .blurb = "Behavior-path verification", .usage = "verify-paths <file>... [--json]" },
     .{ .name = "verify-modules", .run = expert.runVerifyModules, .category = .machine, .args = "<file>...", .blurb = "Module-contract verification", .usage = "verify-modules <file>... [--strict] [--json] | --builtins" },
     .{ .name = "verify-module-manifest", .run = expert.runVerifyModuleManifest, .category = .machine, .args = "<manifest.json>", .blurb = "Verify a module manifest", .usage = "verify-module-manifest <manifest.json> [--json]" },
