@@ -120,6 +120,7 @@ pub const module_binding = @import("module_binding.zig");
 pub const module_manifest = @import("module_manifest.zig");
 pub const manifest_registry = @import("manifest_registry.zig");
 pub const builtin_modules = @import("builtin_modules.zig");
+pub const module_facts = @import("module_facts.zig");
 pub const security_events = @import("security_events.zig");
 pub const wasm = @import("wasm/root.zig");
 pub const sqlite = @import("sqlite.zig");
