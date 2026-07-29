@@ -1,6 +1,6 @@
 # Reset B3 Implementation Plan: generate the module specs from the bindings
 
-**Status:** planned, not started.
+**Status:** done. Closes wave 4 item 0b and Reset B.
 
 **Source:** section 5 of `docs/plans/2026-07-29-002-reset-b-design.md`. B1
 (`2026-07-29-003`) and B2 (`2026-07-29-004`) are done, B2 at commit `2075264b`.
@@ -267,9 +267,25 @@ To be filled in during execution.
 
 | Measurement | Value |
 | --- | --- |
-| Spec files byte-identical on first generator run | |
-| Files needing regeneration, and why | |
-| `bash scripts/verify.sh` | |
+| Spec files byte-identical on first generator run | 1 of 24, `workflow/io.json`, the only module whose exports declare no `param_types` |
+| Files regenerated | 23, at 363 insertions and 35 deletions |
+| Data restored to the specs | `params` on 84 exports across 22 files, `laws: ["pure"]` on 4 exports, one `contractExtractions` entry |
+| Redundant data removed | `argPosition: 0` from 5 extractions across 3 files |
+| Diff lines not predicted before the generator existed | 1, finding 7 |
+| New code | 390 lines of renderer including tests, 117 lines of CLI |
+| `module-spec-render --check` on a deliberate mutation | exit 1, names the mutated file |
+| `module-spec-render --check` on the regenerated tree | exit 0 |
+| `bash scripts/verify.sh` | exit 0 with the new step |
+| `zig fmt --check build.zig packages` | clean |
+
+The number worth keeping is the one in the middle: 84 exports had lost their parameter
+types, and a count-only tripwire had been reporting the module specs as healthy the whole
+time. The generator's value is not the 507 lines it adds, it is that `--check` makes that
+class of loss impossible to repeat.
+
+Two documents claimed the specs were a source of truth and were corrected:
+`docs/roadmap.md` listed `packages/modules/module-specs/` alongside `builtin_modules.zig`,
+and `AGENTS.md` described the directory without saying it is generated.
 
 ## 8. Done when
 

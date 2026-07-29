@@ -4,7 +4,7 @@
 - `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
 - `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `zruntime.zig`).
 - `packages/zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, modules).
-- `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with module specs under `module-specs/`.
+- `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with generated module specs under `module-specs/` (produced by `zttp module-spec-render` from the Zig bindings; do not hand-edit).
 - `packages/zts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
 - `packages/pi/` contains the interactive expert agent; `packages/proof-review/` contains the proof-review tooling.
 - `packages/zts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.

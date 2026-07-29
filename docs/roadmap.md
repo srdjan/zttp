@@ -48,9 +48,11 @@ behavior lives in [User Guide](user-guide.md).
 - Keep near-term module work limited to table-stakes gaps: fetch resilience,
   capability surfacing, and build-feature diagnostics. Cloud-adapter modules
   stay in a separate evaluated track.
-- Keep `zttp help --all`, `packages/zts/src/builtin_modules.zig`, and
-  `packages/modules/module-specs/` as the sources of truth for CLI and module
-  docs.
+- Keep `zttp help --all` and `packages/zts/src/builtin_modules.zig` as the
+  sources of truth for CLI and module docs. `packages/modules/module-specs/` is
+  no longer one of them: it is generated from the typed Zig module bindings by
+  `zttp module-spec-render`, and `--check` gates it in `scripts/verify.sh`. Edit
+  the binding, then regenerate.
 - Add server-level rate limiting only if the standalone server becomes a
   first-class unproxied deployment target; application limits are currently
   handled with `zttp:ratelimit`.
