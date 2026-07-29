@@ -57,6 +57,30 @@ pub const ExtensionBinding = struct {
     extractions: []const module_manifest.ContractExtractionRule,
 };
 
+/// One imported specifier, recorded whatever its module resolves to.
+///
+/// This is the collection the analyzers read. It is deliberately UNFILTERED:
+/// `strict_checker` and `effect_inference` record every import including
+/// modules that are neither builtin nor partner-registered, while
+/// `path_generator`, `flow_checker`, `bool_checker`, and `handler_verifier`
+/// record only resolved ones. A superset here lets each apply its own filter at
+/// read time, so no analyzer's behavior changes.
+///
+/// It is also distinct from `generic_bindings`, which records only functions
+/// carrying contract extractions or flags: `sha256` has no `generic_bindings`
+/// entry but does have an `ImportRecord`.
+pub const ImportRecord = struct {
+    pub const Resolution = enum { builtin, partner, unresolved };
+
+    /// Local binding slot, the key every analyzer looks up by.
+    slot: u16,
+    module_specifier: []const u8,
+    /// The name as written in the import, not the local alias. For
+    /// `import { env as e }` this is `env` while `slot` is `e`'s slot.
+    imported_name: []const u8,
+    resolution: Resolution,
+};
+
 /// The immutable import index. All strings in `modules` and `functions` are
 /// owned; both binding lists hold borrowed extraction rules.
 pub const ModuleFacts = struct {
@@ -74,6 +98,8 @@ pub const ModuleFacts = struct {
     /// Slot-keyed bindings for partner modules whose exports carry extraction
     /// rules.
     extension_bindings: std.ArrayList(ExtensionBinding) = .empty,
+    /// Every imported specifier, unfiltered. See `ImportRecord`.
+    imports: std.ArrayList(ImportRecord) = .empty,
 
     /// Walk every `import_decl` in the IR and index the virtual-module imports.
     ///
@@ -99,13 +125,22 @@ pub const ModuleFacts = struct {
             const import_decl = ir_view.getImportDecl(idx) orelse continue;
             const module_str = ir_view.getString(import_decl.module_idx) orelse continue;
 
-            // Only track virtual modules: either built-in or partner-registered.
-            if (builtin_modules.fromSpecifier(module_str) == null) {
-                if (registry == null or registry.?.fromSpecifier(module_str) == null) continue;
-            }
+            // Classify rather than skip. The four collections below still see
+            // only virtual modules - built-in or partner-registered - exactly as
+            // before, so `ContractBuilder`'s output and the contract goldens are
+            // unaffected. `imports` sees everything, because two analyzers need
+            // the unresolved ones.
+            const resolution: ImportRecord.Resolution = blk: {
+                if (builtin_modules.fromSpecifier(module_str) != null) break :blk .builtin;
+                if (registry) |reg| {
+                    if (reg.fromSpecifier(module_str) != null) break :blk .partner;
+                }
+                break :blk .unresolved;
+            };
+            const resolved = resolution != .unresolved;
 
             // Add module to list (deduplicated, duped)
-            if (!containsString(self.modules.items, module_str)) {
+            if (resolved and !containsString(self.modules.items, module_str)) {
                 const duped = try allocator.dupe(u8, module_str);
                 errdefer allocator.free(duped);
                 try self.modules.append(allocator, duped);
@@ -133,6 +168,24 @@ pub const ModuleFacts = struct {
                 const spec_idx = ir_view.getListIndex(import_decl.specifiers_start, j);
                 const spec = ir_view.getImportSpec(spec_idx) orelse continue;
                 const imported_name = resolveAtomName(atoms, spec.imported_atom) orelse continue;
+
+                // Record the import whatever its module resolved to. Owned
+                // strings, because the facts outlive the parser and the atom
+                // table these borrow from.
+                {
+                    const mod_duped = try allocator.dupe(u8, module_str);
+                    errdefer allocator.free(mod_duped);
+                    const nm_duped = try allocator.dupe(u8, imported_name);
+                    errdefer allocator.free(nm_duped);
+                    try self.imports.append(allocator, .{
+                        .slot = spec.local_binding.slot,
+                        .module_specifier = mod_duped,
+                        .imported_name = nm_duped,
+                        .resolution = resolution,
+                    });
+                }
+
+                if (!resolved) continue;
 
                 // No errdefer on `name_duped`: after a successful append the
                 // list owns it and the scope errdefer above frees it, so an
@@ -233,6 +286,11 @@ pub const ModuleFacts = struct {
         self.functions.deinit(self.allocator);
         self.generic_bindings.deinit(self.allocator);
         self.extension_bindings.deinit(self.allocator);
+        for (self.imports.items) |rec| {
+            self.allocator.free(rec.module_specifier);
+            self.allocator.free(rec.imported_name);
+        }
+        self.imports.deinit(self.allocator);
     }
 
     /// True when this handler imports `specifier`.
@@ -527,6 +585,112 @@ test "cloned modules and functions match the index and own their storage" {
         for (want.names.items, got.names.items) |wn, gn| {
             try testing.expectEqualStrings(wn, gn);
             try testing.expect(wn.ptr != gn.ptr);
+        }
+    }
+}
+
+const import_corpus = @import("tests/import_corpus.zig");
+
+test "every import is recorded, whatever its module resolves to" {
+    const a = testing.allocator;
+
+    // A builtin, an unresolved module, and an alias. All three appear in
+    // `imports`; only the builtin reaches `modules`.
+    const h = try Harness.init(a,
+        \\import { env as e } from "zttp:env";
+        \\import { thing } from "zttp-ext:unknown";
+    );
+    defer h.deinit(a);
+
+    var facts = try ModuleFacts.build(a, h.view(), &h.atoms, null);
+    defer facts.deinit();
+
+    try testing.expectEqual(@as(usize, 2), facts.imports.items.len);
+
+    const first = facts.imports.items[0];
+    try testing.expectEqualStrings("zttp:env", first.module_specifier);
+    // The imported name, not the local alias.
+    try testing.expectEqualStrings("env", first.imported_name);
+    try testing.expectEqual(ImportRecord.Resolution.builtin, first.resolution);
+
+    const second = facts.imports.items[1];
+    try testing.expectEqualStrings("zttp-ext:unknown", second.module_specifier);
+    try testing.expectEqualStrings("thing", second.imported_name);
+    try testing.expectEqual(ImportRecord.Resolution.unresolved, second.resolution);
+
+    // The unresolved module must NOT leak into the four legacy collections:
+    // that is what keeps ContractBuilder's output and the contract goldens
+    // unchanged.
+    try testing.expectEqual(@as(usize, 1), facts.modules.items.len);
+    try testing.expectEqualStrings("zttp:env", facts.modules.items[0]);
+    try testing.expectEqual(@as(usize, 1), facts.functions.items.len);
+    try testing.expectEqualStrings("zttp:env", facts.functions.items[0].module);
+}
+
+test "a function with no extractions is in imports but not generic_bindings" {
+    const a = testing.allocator;
+    // The gap that made the index unusable by the six analyzers before C1.
+    const h = try Harness.init(a, "import { sha256 } from \"zttp:crypto\";\n");
+    defer h.deinit(a);
+
+    var facts = try ModuleFacts.build(a, h.view(), &h.atoms, null);
+    defer facts.deinit();
+
+    try testing.expectEqual(@as(usize, 0), facts.generic_bindings.items.len);
+    try testing.expectEqual(@as(usize, 1), facts.imports.items.len);
+    try testing.expectEqualStrings("sha256", facts.imports.items[0].imported_name);
+    try testing.expectEqual(ImportRecord.Resolution.builtin, facts.imports.items[0].resolution);
+}
+
+test "a partner import is recorded as partner" {
+    const a = testing.allocator;
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:stripe",
+        \\  "backend": "native-zig",
+        \\  "requiredCapabilities": ["network"],
+        \\  "exports": [
+        \\    { "name": "chargeCard", "effect": "write", "returns": "result" }
+        \\  ]
+        \\}
+    ;
+    var manifest = try module_manifest.parse(a, manifest_json);
+    errdefer manifest.deinit(a);
+    var registry = manifest_registry_mod.Registry.init(a);
+    defer registry.deinit();
+    try registry.register(manifest);
+
+    const h = try Harness.init(a, "import { chargeCard } from \"zttp-ext:stripe\";\n");
+    defer h.deinit(a);
+
+    var facts = try ModuleFacts.build(a, h.view(), &h.atoms, &registry);
+    defer facts.deinit();
+
+    try testing.expectEqual(@as(usize, 1), facts.imports.items.len);
+    try testing.expectEqual(ImportRecord.Resolution.partner, facts.imports.items[0].resolution);
+}
+
+test "the whole shared corpus builds an index without error" {
+    // Cheap coverage that every case the six differential tests will run over
+    // is at least parseable and indexable. A corpus entry that fails to parse
+    // would make a later differential test vacuously pass.
+    const a = testing.allocator;
+    for (import_corpus.cases) |case| {
+        const h = Harness.init(a, case.source) catch |err| {
+            std.debug.print("\ncorpus case failed to parse: {s}\n", .{case.label});
+            return err;
+        };
+        defer h.deinit(a);
+
+        var facts = try ModuleFacts.build(a, h.view(), &h.atoms, null);
+        defer facts.deinit();
+
+        // Every recorded import must carry a non-empty specifier and name, so a
+        // later test comparing against a scan cannot match on empty strings.
+        for (facts.imports.items) |rec| {
+            try testing.expect(rec.module_specifier.len > 0);
+            try testing.expect(rec.imported_name.len > 0);
         }
     }
 }
