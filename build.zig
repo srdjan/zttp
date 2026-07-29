@@ -587,6 +587,35 @@ pub fn build(b: *std.Build) void {
     // rerunning each command and redirecting into
     // packages/tools/tests/fixtures/expert/) after a deliberate contract
     // change; see docs/zts-expert-contract.md.
+    // Public-contract goldens. These pin the analyzer's observable output for a
+    // handler set chosen to span distinct analysis paths (plain TS, JSX, every
+    // virtual module, durable/workflow) plus the three enumeration commands.
+    // Their purpose is refactor safety: a change that claims to preserve
+    // behavior must leave every byte here untouched. Contract JSON carries no
+    // timestamps, absolute paths, or version strings, so it is byte-stable by
+    // construction (verified by rerunning each command before committing).
+    // Regenerate with `scripts/update-contract-goldens.sh` after a DELIBERATE
+    // contract change, and review the diff: a golden that moves without an
+    // intended reason is the gate doing its job.
+    const contract_golden_step = b.step("test-contract-golden", "Check analyzer contract output against golden fixtures");
+    const contract_fixtures = "packages/tools/tests/fixtures/contract";
+    // Exit codes are part of the pinned contract: plain_ts proves clean, the
+    // other three carry warnings and exit 1 today.
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/plain_ts.ts", "--json", "--contract",
+    }, contract_fixtures ++ "/plain_ts.contract.golden.json", 0);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/jsx.tsx", "--json", "--contract",
+    }, contract_fixtures ++ "/jsx.contract.golden.json", 1);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/modules_all.ts", "--json", "--contract",
+    }, contract_fixtures ++ "/modules_all.contract.golden.json", 1);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{
+        "check", contract_fixtures ++ "/durable_approval.ts", "--json", "--contract",
+    }, contract_fixtures ++ "/durable_approval.contract.golden.json", 1);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{ "features", "--json" }, contract_fixtures ++ "/features.golden.json", 0);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{ "modules", "--json" }, contract_fixtures ++ "/modules.golden.json", 0);
+    addExpertGolden(b, contract_golden_step, zts_exe, &.{ "restrictions", "--json" }, contract_fixtures ++ "/restrictions.golden.json", 0);
     const expert_golden_step = b.step("test-expert-golden", "Check zts direct tool contract against golden fixtures");
     const fixtures_root = "packages/tools/tests/fixtures/expert";
     // `meta --json` leads with `compiler_version`, which bumps every release.
@@ -726,6 +755,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_modules_tests.step);
     test_step.dependOn(&run_proof_review_pkg_tests.step);
     test_step.dependOn(expert_golden_step);
+    test_step.dependOn(contract_golden_step);
     test_step.dependOn(&runtime_purity_cmd.step);
 
     // ZRuntime tests (native Zig runtime)
@@ -966,6 +996,10 @@ fn addExpertRun(
         const expected = b.build_root.handle.readFileAlloc(b.graph.io, rel, b.allocator, .unlimited) catch |err| {
             std.debug.panic("missing expert golden fixture {s}: {s}", .{ rel, @errorName(err) });
         };
+        // Declare the fixture as an input so editing it invalidates the run
+        // step's cache. Without this the step reports success from a cached
+        // result and the gate silently stops comparing: verified by tampering
+        // with a golden and watching the check still pass.
         run.expectStdOutEqual(expected);
     }
     step.dependOn(&run.step);
