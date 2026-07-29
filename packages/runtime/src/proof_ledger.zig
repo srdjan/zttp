@@ -1,5 +1,5 @@
-//! Append-only ledger of proof events. One JSONL line per `zttp deploy`,
-//! per `dev --watch --prove` swap, and per `zts check` success.
+//! Append-only ledger of proof events. One JSONL line per `zttp deploy`
+//! and per `dev --watch --prove` swap.
 //!
 //! Storage: `.zttp/proofs.jsonl`. Lines are appended via POSIX `O_APPEND`;
 //! concurrent writers within the PIPE_BUF window (4 KiB on Linux/macOS)
@@ -18,12 +18,11 @@ const json_util = @import("zttp_proof_review").json_util;
 pub const EventKind = enum {
     deploy,
     swap,
-    check,
     /// Slice H: a signed perf-as-proof receipt attached to an applied edit.
     /// Carries a `perf` JSON object alongside `facts` (callers building a
     /// perf row supply a minimal ReviewFacts whose only meaningful field
-    /// is `contract_sha`). Existing consumers that only know `deploy`,
-    /// `swap`, `check` keep working: they ignore the extra `perf` key.
+    /// is `contract_sha`). Existing consumers that only know `deploy` and
+    /// `swap` keep working: they ignore the extra `perf` key.
     perf,
     /// A signed behavioral-equivalence verdict (proof-carrying changes):
     /// the classification `contract_diff` computes between two handler
@@ -36,7 +35,6 @@ pub const EventKind = enum {
         return switch (self) {
             .deploy => "deploy",
             .swap => "swap",
-            .check => "check",
             .perf => "perf",
             .equivalence => "equivalence",
         };
@@ -45,7 +43,6 @@ pub const EventKind = enum {
     pub fn fromString(s: []const u8) ?EventKind {
         if (std.mem.eql(u8, s, "deploy")) return .deploy;
         if (std.mem.eql(u8, s, "swap")) return .swap;
-        if (std.mem.eql(u8, s, "check")) return .check;
         if (std.mem.eql(u8, s, "perf")) return .perf;
         if (std.mem.eql(u8, s, "equivalence")) return .equivalence;
         return null;
@@ -619,7 +616,7 @@ test "appendEvent appends in order across calls" {
     defer f3.deinit(testing.allocator);
 
     try appendEvent(testing.allocator, .{
-        .kind = .check,
+        .kind = .perf,
         .facts = &f1,
         .handler_path = "src/handler.ts",
         .now_unix_ms = 1,
@@ -642,7 +639,7 @@ test "appendEvent appends in order across calls" {
     defer freeEvents(testing.allocator, events);
 
     try testing.expectEqual(@as(usize, 3), events.len);
-    try testing.expectEqual(EventKind.check, events[0].kind);
+    try testing.expectEqual(EventKind.perf, events[0].kind);
     try testing.expectEqual(EventKind.swap, events[1].kind);
     try testing.expectEqual(EventKind.deploy, events[2].kind);
     try testing.expectEqualStrings("sha-1", events[0].facts.contract_sha);
@@ -675,7 +672,7 @@ test "resolve handles HEAD, HEAD~N, sha prefix" {
     defer f3.deinit(allocator);
 
     const events = [_]Event{
-        .{ .ts_unix_ms = 1, .kind = .check, .handler_path = "h", .service_name = null, .facts = f1 },
+        .{ .ts_unix_ms = 1, .kind = .perf, .handler_path = "h", .service_name = null, .facts = f1 },
         .{ .ts_unix_ms = 2, .kind = .swap, .handler_path = "h", .service_name = null, .facts = f2 },
         .{ .ts_unix_ms = 3, .kind = .deploy, .handler_path = "h", .service_name = null, .facts = f3 },
     };

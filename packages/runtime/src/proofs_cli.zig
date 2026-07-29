@@ -1247,7 +1247,7 @@ test "printRows: prints only events from start_idx onward" {
 
     try proof_ledger.appendEvent(testing.allocator, .{ .kind = .deploy, .facts = &f1, .handler_path = "h.ts", .now_unix_ms = 1 });
     try proof_ledger.appendEvent(testing.allocator, .{ .kind = .swap, .facts = &f2, .handler_path = "h.ts", .now_unix_ms = 2 });
-    try proof_ledger.appendEvent(testing.allocator, .{ .kind = .check, .facts = &f3, .handler_path = "h.ts", .now_unix_ms = 3 });
+    try proof_ledger.appendEvent(testing.allocator, .{ .kind = .perf, .facts = &f3, .handler_path = "h.ts", .now_unix_ms = 3 });
 
     const events = try proof_ledger.readEvents(testing.allocator);
     defer proof_ledger.freeEvents(testing.allocator, events);
