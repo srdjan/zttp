@@ -123,8 +123,8 @@ Decision: preserve current behavior exactly. The codec-plus-projection path must
 no new startup failure.
 
 Evidence: a differential test, written and landed as the first task of B1, before any
-deletion. It keeps the old reader alive under a private name and runs both readers over
-three corpora:
+deletion. It adds the composed reader under a private name, leaves the hand-written reader
+in place and public, and runs both over three corpora:
 
 - writer round-trips. A `HandlerContract` is serialized with
   `contract_json_writer.writeContractJson` and fed to both readers. This is the wire format
