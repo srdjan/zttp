@@ -123,17 +123,45 @@ Decision: preserve current behavior exactly. The codec-plus-projection path must
 no new startup failure.
 
 Evidence: a differential test, written and landed as the first task of B1, before any
-deletion. It runs both readers over
+deletion. It keeps the old reader alive under a private name and runs both readers over
+three corpora:
 
-- the four committed contract goldens in `packages/tools/tests/fixtures/contract/`,
-- the contract JSON inline in the existing `contract_runtime.zig` tests,
+- writer round-trips. A `HandlerContract` is serialized with
+  `contract_json_writer.writeContractJson` and fed to both readers. This is the wire format
+  by construction. The existing test at `contract_runtime.zig:1337` already uses this shape.
+- the contract JSON inline in the existing `parseContractJson` tests, which covers the
+  sandbox block, websocket flags, durable workflow properties, routes, and header params.
 - a corpus of hand-built malformed contracts covering a missing `env` object, a missing
   `api` object, a route missing `method`, a route with a non-string `path`, an unknown
-  top-level section, an empty object, and a truncated document,
+  top-level section, an empty object, and a truncated document.
 
-and asserts field-identical `RawRuntimeContract` results, including the error case where
-both must fail with the same error. Any divergence found is recorded in the B1 plan and
-decided one at a time. The deletion lands only after the differential test is green.
+Note the four committed goldens in `packages/tools/tests/fixtures/contract/` are NOT valid
+input here. They are `check --json --contract` envelopes of the form
+`{"success":true,"proof":{...}}`, not the contract.json wire format. They are B2's
+acceptance artifact, not B1's.
+
+The test asserts field-identical `RawRuntimeContract` results, and for rejected input that
+both readers fail. Three divergences are predicted from reading the two implementations,
+and each must be confirmed or refuted by the test before the deletion lands:
+
+1. **`reads_request_state` backfill.** `backfillApiRouteCollections`
+   (`contract_json_parser.zig:1794-1804`) synthesizes `request_bodies` entries from
+   `requestSchemaRefs` and ORs `request_bodies_dynamic` with `request_schema_dynamic`. The
+   hand-written `routeReadsRequestState` (`contract_runtime.zig:471`) reads the raw
+   `requestBodies` and `requestBodiesDynamic` keys only. A route with a non-empty
+   `requestSchemaRefs` and an empty `requestBodies` therefore reads as request-dependent
+   through the codec and request-independent through the old reader. The direction is safe:
+   the codec disables the proof cache more often, never less.
+2. **Error identity on malformed input.** The codec returns `error.InvalidJson`; the
+   hand-written reader returns `error.InvalidContract` or a `std.json` error. Neither call
+   site switches on the value: `server.zig:2113` logs it and returns it, `runtime_cli.zig:235`
+   discards it. The change is observable in one log line.
+3. **Syntax tolerance.** The codec is a hand-rolled scanner and may accept documents that
+   `std.json.parseFromSlice` rejects, such as trailing bytes after the closing brace. The
+   direction is fewer startup failures, not more.
+
+A divergence whose direction is unsafe blocks the deletion. A safe-direction divergence is
+recorded in the plan, and the affected test is updated with the reason written down.
 
 ### 3.5 Risk 2: artifact size and cold start
 
@@ -274,7 +302,7 @@ Carried forward from Reset A, because they were earned:
 
 | Plan | Gate |
 | --- | --- |
-| B1 | Differential reader equivalence over the goldens, the existing inline test contracts, and the malformed corpus; recorded `zttp-runtime` release binary size and cold-start timing, before and after |
+| B1 | Differential reader equivalence over writer round-trips, the existing inline test contracts, and the malformed corpus; the two allocation-failure ladder tests still green against the composed path; recorded `zttp-runtime` release binary size and cold-start timing, before and after |
 | B2 | Byte-identical contract goldens, all four |
 | B3 | Generated JSON byte-identical to the 24 committed files on first run, before the `--check` gate is added to `scripts/verify.sh` |
 | All | `bash scripts/verify.sh` exit 0, which includes `zig fmt --check` at `scripts/verify.sh:96-97`, plus `zig build bench-check` run separately |
