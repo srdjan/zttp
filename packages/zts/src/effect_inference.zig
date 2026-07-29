@@ -17,6 +17,7 @@ const context = @import("context.zig");
 const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
+const module_facts_mod = @import("module_facts.zig");
 const bool_checker = @import("bool_checker.zig");
 
 const NodeIndex = ir.NodeIndex;
@@ -122,6 +123,12 @@ pub const Analyzer = struct {
     functions: std.ArrayListUnmanaged(FunctionEffect),
     /// Imported callee metadata keyed by local binding slot.
     imports: std.AutoHashMapUnmanaged(u16, ImportedFunction),
+    /// Shared import index, injected by the orchestrator when one exists for
+    /// this compile. Borrowed; it must outlive the analyzer. When null the
+    /// analyzer builds `owned_facts` for itself, which is what the in-file
+    /// tests and any un-migrated caller do.
+    facts: ?*const module_facts_mod.ModuleFacts = null,
+    owned_facts: ?module_facts_mod.ModuleFacts = null,
     /// Map binding slot to index into `functions`. Used to resolve identifier
     /// callees back to a user-defined function.
     user_fn_by_slot: std.AutoHashMapUnmanaged(u16, usize),
@@ -163,6 +170,7 @@ pub const Analyzer = struct {
     }
 
     pub fn deinit(self: *Analyzer) void {
+        if (self.owned_facts) |*owned| owned.deinit();
         self.functions.deinit(self.allocator);
         self.imports.deinit(self.allocator);
         self.user_fn_by_slot.deinit(self.allocator);
@@ -192,7 +200,39 @@ pub const Analyzer = struct {
 
     // ----- internal -----
 
+    /// Resolve the index to read: the injected one, or a private one built on
+    /// first use.
+    fn resolveFacts(self: *Analyzer) !*const module_facts_mod.ModuleFacts {
+        if (self.facts) |f| return f;
+        if (self.owned_facts == null) {
+            self.owned_facts = try module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                self.manifest_registry,
+            );
+        }
+        return &self.owned_facts.?;
+    }
+
+    /// Record every import, with no filter: this analyzer tracks imports from
+    /// modules that are neither builtin nor partner-registered, which is a
+    /// deliberate difference from path_generator, flow_checker, bool_checker,
+    /// and handler_verifier.
     fn scanImports(self: *Analyzer) !void {
+        const facts = try self.resolveFacts();
+        for (facts.imports.items) |rec| {
+            try self.imports.put(self.allocator, rec.slot, .{
+                .module = rec.module_specifier,
+                .name = rec.imported_name,
+            });
+        }
+    }
+
+    /// Pre-C1 implementation, kept only so the differential test below can
+    /// prove the facts-backed scan derives the identical map. Deleted in the
+    /// next commit.
+    fn scanImportsLegacy(self: *Analyzer) !void {
         const node_count = self.ir_view.nodeCount();
         var idx: usize = 0;
         while (idx < node_count) : (idx += 1) {
@@ -931,4 +971,84 @@ test "empty program is a no-op" {
     defer analyzer.deinit();
     try analyzer.analyze(root);
     try testing.expectEqual(@as(usize, 0), analyzer.all().len);
+}
+
+const import_corpus = @import("tests/import_corpus.zig");
+
+test "the facts-backed import scan derives the same map as the legacy scan" {
+    // Differential evidence for item 4 C1. Both scans run over the shared
+    // corpus and must agree key by key. Reports the diverging slot rather than
+    // just "maps differ": B1 learned that a harness which cannot name the
+    // divergence costs a full cycle per finding.
+    const allocator = std.testing.allocator;
+
+    for (import_corpus.cases) |case| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+        defer parser.deinit();
+        var atoms = context.AtomTable.init(allocator);
+        defer atoms.deinit();
+        parser.setAtomTable(&atoms);
+        _ = try parser.parse();
+        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+        var legacy = Analyzer.init(allocator, ir_view, &atoms);
+        defer legacy.deinit();
+        try legacy.scanImportsLegacy();
+
+        var migrated = Analyzer.init(allocator, ir_view, &atoms);
+        defer migrated.deinit();
+        try migrated.scanImports();
+
+        std.testing.expectEqual(legacy.imports.count(), migrated.imports.count()) catch |err| {
+            std.debug.print("\ncorpus case \"{s}\": legacy has {d} imports, migrated has {d}\n", .{
+                case.label, legacy.imports.count(), migrated.imports.count(),
+            });
+            return err;
+        };
+
+        var it = legacy.imports.iterator();
+        while (it.next()) |entry| {
+            const slot = entry.key_ptr.*;
+            const want = entry.value_ptr.*;
+            const got = migrated.imports.get(slot) orelse {
+                std.debug.print("\ncorpus case \"{s}\": slot {d} ({s}.{s}) missing after migration\n", .{
+                    case.label, slot, want.module, want.name,
+                });
+                return error.SlotMissing;
+            };
+            if (!std.mem.eql(u8, want.module, got.module) or !std.mem.eql(u8, want.name, got.name)) {
+                std.debug.print("\ncorpus case \"{s}\": slot {d} was {s}.{s}, now {s}.{s}\n", .{
+                    case.label, slot, want.module, want.name, got.module, got.name,
+                });
+                return error.SlotChanged;
+            }
+        }
+    }
+}
+
+test "this analyzer records imports from unresolved modules" {
+    // The filter difference that must SURVIVE the migration. strict_checker and
+    // effect_inference record every import; the other four record builtins
+    // only. A migration that unified the six filters would silently widen
+    // analysis, so it is asserted here rather than assumed.
+    const allocator = std.testing.allocator;
+    const source = "import { thing } from \"zttp-ext:unknown\";\n";
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var analyzer = Analyzer.init(allocator, ir_view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.scanImports();
+
+    try std.testing.expectEqual(@as(u32, 1), analyzer.imports.count());
+    var it = analyzer.imports.iterator();
+    const entry = it.next().?;
+    try std.testing.expectEqualStrings("zttp-ext:unknown", entry.value_ptr.module);
+    try std.testing.expectEqualStrings("thing", entry.value_ptr.name);
 }
