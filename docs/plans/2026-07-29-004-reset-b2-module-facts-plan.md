@@ -76,22 +76,32 @@ the index is built, and settle one ordering question.
 part of `zig build test` (`build.zig:759`) and checks seven fixtures, four of which are the
 contract goldens named in section 4.4 of the design doc.
 
-Two checks, both read-only:
+The ordering question is already settled, during planning rather than during execution,
+because the answer changes what Task 3 is allowed to do. Both late readers of the two moved
+lists run before the move at `:551`:
+
+- `detectRateLimiting` (`:4157`, reads `:4158` and `:4161`) is called at `:377`.
+- `computeGlobalEffectSummary` (`:3847`, reads `functions_map` at `:3850`) is reached
+  through `computeProperties` (`:4093`) and `computeEffectSummary` (`:3835`), and
+  `computeProperties` is called at `:374`.
+
+So no site reads an emptied list today. Had one existed, B2 would have silently fixed it and
+the goldens would have moved bytes for a reason unrelated to the refactor, which would have
+destroyed the acceptance test. That fix would have had to land as its own commit with its own
+golden update before Task 2.
+
+One check remains:
 
 1. Confirm every one of the four goldens contains a non-empty `modules` array and a
    non-empty `functions` array. A golden that carries neither cannot detect a regression in
-   the index, and section 4.4 claims all four are the acceptance artifact.
-2. Confirm `computeGlobalEffectSummary` (`:3847`, reads `functions_map` at `:3850`) is
-   called before the move at `:551`. `detectRateLimiting` (`:4157`) is called at `:377`, so
-   it is safe. If `computeGlobalEffectSummary` is called after `:551` it currently reads
-   emptied lists, which is a latent defect: B2 would silently fix it and the goldens would
-   move bytes for a reason unrelated to the refactor. In that case the fix lands as its own
-   commit with its own golden update, before Task 2.
+   the index, and section 4.4 of the design doc claims all four are the acceptance artifact.
+   If a golden is blind to the index, say so in the Findings table rather than treating the
+   count of four as the strength of the gate.
 
-**Verify:** `zig build test-contract-golden` exits 0; the two findings are written into the
+**Verify:** `zig build test-contract-golden` exits 0; the coverage answer is written into the
 Findings table in section 5.
 
-**Commit:** only if check 2 finds the defect. Otherwise this task produces no diff.
+**Commit:** none. This task produces no diff.
 
 ### Task 2: add `ModuleFacts` beside the builder, not inside it
 
@@ -255,6 +265,7 @@ To be filled in during execution. One row per divergence between the transcribed
 
 | # | Finding | Direction | Resolution |
 | --- | --- | --- | --- |
+| 1 | Both late readers of the moved lists (`detectRateLimiting` at `:377`, `computeProperties` at `:374`) run before the move at `:551`, so no site reads an emptied list | none, no defect | Settled during planning. Task 1 no longer needs the check, and Task 3 must keep both call sites where they are |
 
 ## 6. Measurements
 
