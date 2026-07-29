@@ -50,7 +50,7 @@ Common `dev` and `serve` flags:
 | `-p`, `--port <port>` | Listen port. |
 | `-h`, `--host <host>` | Listen host. |
 | `-e`, `--eval <code>` | Inline handler source. |
-| `-m`, `--memory <size>` | Per-runtime JS memory ceiling. |
+| `-m`, `--memory <size>` | Per-runtime JS memory ceiling. Unset means unlimited. The ceiling applies to each pooled runtime, not to the process: the pool defaults to twice the CPU count, so `-m 128m` on a 14-core host authorizes roughly 3.5 GB in total. Size the value against the pool, or pin the pool with `-n`. |
 | `--max-body-size <size>` | Request body limit (default 1m); oversize returns 413. |
 | `--max-websocket-connections <count>` | Live WebSocket limit (default 1024; `0` disables upgrades). |
 | `-n`, `--pool <count>` | Runtime pool size. |

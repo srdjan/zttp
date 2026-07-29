@@ -1036,9 +1036,11 @@ Two items listed earlier as outstanding were checked and withdrawn. Both were ov
 Genuinely still outstanding:
 
 - `memory_limit` defaults to unlimited, and when set applies per runtime while the pool
-  sizes from CPU count, so `-m 128m` authorizes roughly 3.5 GB on a 14-core host. This is a
-  user-facing surprise for anyone sizing a container, and it is a documentation and
-  semantics question rather than a leak.
+  sizes from CPU count, so `-m 128m` authorizes roughly 3.5 GB on a 14-core host.
+  DOCUMENTED: `docs/cli.md` and the CLAUDE.md serve-options line now state the per-runtime
+  scope, the unlimited default, and the pool-multiplied process ceiling. The semantics are
+  unchanged; making `-m` process-wide would be a behavior change and remains an open product
+  question.
 - Whether recycling every 64 requests is the right default at all, now that its memory cost
   is understood. That is a design question for the reset, not a bug.
 
