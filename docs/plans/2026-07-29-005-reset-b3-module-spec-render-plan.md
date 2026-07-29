@@ -1,6 +1,14 @@
 # Reset B3 Implementation Plan: generate the module specs from the bindings
 
-**Status:** done. Closes wave 4 item 0b and Reset B.
+**Status:** done, with one sub-clause of wave 4 item 0b deliberately not closed. Item 0b asks
+for "the module spec JSON AND documentation mirrors" to be generated. B3 generated the JSON.
+The mirror, `docs/virtual-modules/README.md`, is still hand-maintained: it repeats the export
+list and capabilities per module and is guarded only by the regexes in
+`scripts/check-docs-drift.sh`. That is the same shape of tripwire that let 84 exports lose
+their parameter types, so the mirror is a live candidate for the same treatment. The Reset B
+design doc scoped it out (section 5 covers the JSON only, section 8 keeps the drift script),
+so this is a scope boundary that was chosen, not an oversight - but item 0b is not fully
+closed until the mirror is generated too.
 
 **Source:** section 5 of `docs/plans/2026-07-29-002-reset-b-design.md`. B1
 (`2026-07-29-003`) and B2 (`2026-07-29-004`) are done, B2 at commit `2075264b`.
@@ -297,4 +305,5 @@ and `AGENTS.md` described the directory without saying it is generated.
 - `bash scripts/verify.sh` exits 0 and `zig fmt --check` is clean.
 - Sections 6 and 7 are filled in.
 
-That closes wave 4 item 0b and Reset B.
+That closes Reset B as designed. See the status note at the top for the one sub-clause of
+wave 4 item 0b that remains: generating `docs/virtual-modules/README.md` from the bindings.
