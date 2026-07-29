@@ -468,6 +468,51 @@ SQLite, and libc together (`build.zig:550-558`) and is hardcoded false for the m
 (`build.zig:112`). There is no option that removes only the JIT. This needs a temporary
 build flag before the number exists.
 
+### Measurement 6, the pooled-server tier probe: the JIT never compiles on the request path
+
+Run to close the wave 5 item 1 question, with temporary instrumentation in the pool release
+path (added, used, reverted). Conditions were chosen to be the most favorable possible for
+the optimized tier: a handler proven pure, deterministic, and state-isolated so the policy is
+`reuse_unbounded` (forced with `--lifecycle reuse`), pool size 1 so a single runtime
+accumulates every execution, and sustained load.
+
+First attempt, a trivial `Response.json({ok:true})` handler, 1.4 million requests, zero
+recycles: every counter zero, including `promotion_attempted`. That result was not what it
+appeared. `zruntime.zig:1610` holds an AOT fast-path dispatch which, in its own comment,
+"does not execute JS bytecode" for static-route handlers. No JS ran, so nothing could be
+profiled.
+
+Second attempt with a recursive compute handler that provably executes JS (verified by its
+response value), 458,449 requests through one runtime: still every counter zero.
+
+Third attempt with `ZTS_JIT_POLICY=eager` and `ZTS_JIT_THRESHOLD=1`, the most aggressive
+settings available, 40,000 requests:
+
+```
+attempted=1 succeeded=1 interpreted=0 baseline_cand=1 baseline=0 optimized_cand=0 optimized=0
+```
+
+The handler is promoted to baseline *candidate* exactly once and never compiles: not to
+baseline, and never to optimized. This also validates the probe, since the counters do move.
+
+Two conclusions, of different strength:
+
+1. **The optimized tier question is settled.** It is never entered, under conditions
+   deliberately stacked in its favor, at default settings and at forced ones. Wave 5 item 1
+   is evidence-backed rather than corpus-backed.
+2. **A larger question opens.** The whole JIT appears not to compile anything on the server
+   request path, which the benchmark harness does not reveal because it runs in-process and
+   never touches the pool (`benchmark.zig` has zero references to `HandlerPool`). Whether
+   that is a defect (the JIT silently inert in production) or an intended interaction is not
+   established here, and it should be investigated before any decision about the *baseline*
+   tier. Deleting the optimized tier is unaffected either way, since it is unreachable in
+   both readings.
+
+This also revises measurement 2 below. The end-to-end A/B found no difference with the JIT
+on and off, and attributed that to JS being a small share of request time. That reading was
+incomplete: for those handler shapes the fast path meant little or no JS ran, and the JIT was
+compiling nothing regardless. The measured numbers stand; the explanation is now better.
+
 ### Measurement 2, end-to-end server load: no measurable JIT effect
 
 Protocol: `zttp serve` on `examples/handler/handler-full.tsx`, request logging disabled
