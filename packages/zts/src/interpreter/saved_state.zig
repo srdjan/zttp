@@ -14,6 +14,5 @@ pub const SavedState = struct {
     sp: usize,
     fp: usize,
     call_depth: usize,
-    catch_depth: usize,
     exception: value.JSValue,
 };

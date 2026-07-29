@@ -195,13 +195,6 @@ pub const CallFrame = struct {
     this: value.JSValue,
 };
 
-/// Exception handler entry
-pub const CatchHandler = struct {
-    catch_pc: usize, // PC to jump to on exception
-    sp: usize, // Stack pointer to restore
-    fp: usize, // Frame pointer at entry
-};
-
 /// Maximum number of virtual module state slots.
 /// Sized to accommodate all built-in and extension module state slots.
 pub const MAX_MODULE_STATE_SLOTS = 16;
@@ -270,9 +263,6 @@ pub const Context = struct {
     atoms: AtomTable,
     /// Exception value (if any)
     exception: value.JSValue,
-    /// Catch handler stack
-    catch_stack: [32]CatchHandler,
-    catch_depth: usize,
     /// Configuration
     config: ContextConfig,
     /// Optional hybrid allocator for request-scoped allocation
@@ -396,8 +386,6 @@ pub const Context = struct {
             .result_prototype = null,
             .atoms = AtomTable.init(allocator),
             .exception = value.JSValue.undefined_val,
-            .catch_stack = undefined,
-            .catch_depth = 0,
             .config = config,
             .hybrid = null,
             .enforce_arena_escape = true,
@@ -1915,36 +1903,6 @@ pub const Context = struct {
     }
 
     // ========================================================================
-    // Exception Handler Stack
-    // ========================================================================
-
-    /// Push a catch handler
-    pub fn pushCatch(self: *Context, catch_pc: usize) !void {
-        if (self.catch_depth >= self.catch_stack.len) {
-            return error.CallStackOverflow;
-        }
-        self.catch_stack[self.catch_depth] = .{
-            .catch_pc = catch_pc,
-            .sp = self.sp,
-            .fp = self.fp,
-        };
-        self.catch_depth += 1;
-    }
-
-    /// Pop a catch handler (normal exit from try block)
-    pub fn popCatch(self: *Context) void {
-        if (self.catch_depth > 0) {
-            self.catch_depth -= 1;
-        }
-    }
-
-    /// Get current catch handler (for exception dispatch)
-    pub fn getCatchHandler(self: *Context) ?CatchHandler {
-        if (self.catch_depth == 0) return null;
-        return self.catch_stack[self.catch_depth - 1];
-    }
-
-    // ========================================================================
     // Local Variable Access
     // ========================================================================
 
@@ -2422,29 +2380,6 @@ test "computed member access round-trips string and integer keys" {
     try std.testing.expect(ctx.jitGetElem(obj_val, absent).isUndefined());
 }
 
-test "Context catch handler" {
-    const allocator = std.testing.allocator;
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-
-    var ctx = try Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // No handler initially
-    try std.testing.expect(ctx.getCatchHandler() == null);
-
-    // Push a catch handler
-    try ctx.pushCatch(100);
-    const handler = ctx.getCatchHandler();
-    try std.testing.expect(handler != null);
-    try std.testing.expectEqual(@as(usize, 100), handler.?.catch_pc);
-
-    // Pop the handler
-    ctx.popCatch();
-    try std.testing.expect(ctx.getCatchHandler() == null);
-}
-
 test "Context stack overflow surfaces typed errors" {
     const allocator = std.testing.allocator;
 
@@ -2477,13 +2412,6 @@ test "Context stack overflow surfaces typed errors" {
         error.CallStackOverflow,
         ctx.pushFrame(value.JSValue.undefined_val, value.JSValue.undefined_val, 0),
     );
-
-    // Catch-handler stack: fixed depth, then pushCatch returns CallStackOverflow.
-    var handlers: usize = 0;
-    while (handlers < ctx.catch_stack.len) : (handlers += 1) {
-        try ctx.pushCatch(handlers);
-    }
-    try std.testing.expectError(error.CallStackOverflow, ctx.pushCatch(999));
 }
 
 test "Context global variables" {
@@ -2577,34 +2505,6 @@ test "AtomTable reset" {
 
     atoms.reset();
     try std.testing.expectEqual(@as(usize, 0), atoms.count());
-}
-
-test "Context nested catch handlers" {
-    const allocator = std.testing.allocator;
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-
-    var ctx = try Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // Push two nested handlers
-    try ctx.pushCatch(100);
-    try ctx.pushCatch(200);
-
-    // Should get most recent handler
-    const handler1 = ctx.getCatchHandler();
-    try std.testing.expect(handler1 != null);
-    try std.testing.expectEqual(@as(usize, 200), handler1.?.catch_pc);
-
-    // Pop and get outer handler
-    ctx.popCatch();
-    const handler2 = ctx.getCatchHandler();
-    try std.testing.expect(handler2 != null);
-    try std.testing.expectEqual(@as(usize, 100), handler2.?.catch_pc);
-
-    ctx.popCatch();
-    try std.testing.expect(ctx.getCatchHandler() == null);
 }
 
 test "Context popFrame on empty returns null" {

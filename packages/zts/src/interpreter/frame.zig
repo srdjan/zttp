@@ -24,7 +24,6 @@ pub fn pushState(self: *Interpreter) InterpreterError!void {
         .sp = self.ctx.sp,
         .fp = self.ctx.fp,
         .call_depth = self.ctx.call_depth,
-        .catch_depth = self.ctx.catch_depth,
         .exception = self.ctx.exception,
     };
     self.state_depth += 1;
@@ -41,7 +40,6 @@ pub fn popState(self: *Interpreter) void {
     self.ctx.sp = state.sp;
     self.ctx.fp = state.fp;
     self.ctx.call_depth = state.call_depth;
-    self.ctx.catch_depth = state.catch_depth;
     self.ctx.exception = state.exception;
 }
 
