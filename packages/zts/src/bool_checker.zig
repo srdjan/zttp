@@ -15,6 +15,7 @@ const std = @import("std");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
+const module_facts_mod = @import("module_facts.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -165,6 +166,10 @@ pub const BoolChecker = struct {
     /// Local slots bound to Result-producing module functions (jwtVerify, etc.).
     /// Used in walkStmt to detect `const r = jwtVerify(...)` and track result_bindings.
     module_result_fn_slots: std.AutoHashMapUnmanaged(u16, void),
+    /// Shared import index, injected by the orchestrator when one exists.
+    /// Borrowed; must outlive the checker. Null means build a private one.
+    facts: ?*const module_facts_mod.ModuleFacts = null,
+    owned_facts: ?module_facts_mod.ModuleFacts = null,
     /// Binding slots that hold Result objects (from jwtVerify, validateJson, etc.).
     /// Used to infer result.ok as boolean. Key: packed(scope_id, slot).
     result_bindings: std.AutoHashMapUnmanaged(u32, void),
@@ -213,6 +218,7 @@ pub const BoolChecker = struct {
         self.const_types.deinit(self.allocator);
         self.fn_return_types.deinit(self.allocator);
         self.narrowed_types.deinit(self.allocator);
+        if (self.owned_facts) |*owned| owned.deinit();
         self.module_fn_types.deinit(self.allocator);
         self.module_result_fn_slots.deinit(self.allocator);
         self.result_bindings.deinit(self.allocator);
@@ -1628,8 +1634,46 @@ pub const BoolChecker = struct {
         };
     }
 
-    /// Scan all import declarations to map local binding slots to known return types.
+    /// Resolve the index to read: injected, or private on first use.
+    fn resolveFacts(self: *BoolChecker) ?*const module_facts_mod.ModuleFacts {
+        if (self.facts) |f| return f;
+        if (self.owned_facts == null) {
+            self.owned_facts = module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                null,
+            ) catch {
+                self.markAllocationFailure();
+                return null;
+            };
+        }
+        return &self.owned_facts.?;
+    }
+
+    /// Map local binding slots to known return types.
+    ///
+    /// Reads only `.builtin` records. That is the exact translation of the
+    /// legacy filter `builtin_modules.fromSpecifier(module) == null` skip:
+    /// `fromSpecifier` searches `builtin_modules.all`, which is
+    /// `builtins ++ extension_bindings.all`, and does NOT consult a manifest
+    /// registry. So a partner-registered module was skipped before and must
+    /// stay skipped, which is why `.partner` is excluded here alongside
+    /// `.unresolved`.
     fn scanImports(self: *BoolChecker) void {
+        const facts = self.resolveFacts() orelse return;
+        for (facts.imports.items) |rec| {
+            if (rec.resolution != .builtin) continue;
+            const entry = findModuleReturnEntry(rec.module_specifier, rec.imported_name) orelse continue;
+            self.module_fn_types.put(self.allocator, rec.slot, entry.ret) catch self.markAllocationFailure();
+            if (entry.is_result) {
+                self.module_result_fn_slots.put(self.allocator, rec.slot, {}) catch self.markAllocationFailure();
+            }
+        }
+    }
+
+    /// Pre-C1 implementation, kept only for the differential test below.
+    fn scanImportsLegacy(self: *BoolChecker) void {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -2587,4 +2631,58 @@ test "sound: result.error is string, catches arithmetic on it" {
         \\const result = validateJson("schema", "data");
         \\const r = result.error - 1;
     , 1);
+}
+
+const import_corpus = @import("tests/import_corpus.zig");
+
+test "the facts-backed import scan derives the same maps as the legacy scan" {
+    const allocator = std.testing.allocator;
+
+    // Both atom-table modes. The first version of this test ran only WITH a
+    // table and passed while nine sound-mode tests failed, because
+    // `checkSourceFull` builds a checker with no table and the two atom
+    // resolvers disagreed on that path. Running both ways is what makes the
+    // differential trustworthy.
+    for ([_]bool{ true, false }) |use_atoms| for (import_corpus.cases) |case| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+        defer parser.deinit();
+        var atoms = context.AtomTable.init(allocator);
+        defer atoms.deinit();
+        if (use_atoms) parser.setAtomTable(&atoms);
+        _ = try parser.parse();
+        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        const atoms_arg: ?*context.AtomTable = if (use_atoms) &atoms else null;
+
+        var legacy = BoolChecker.init(allocator, ir_view, atoms_arg);
+        defer legacy.deinit();
+        legacy.scanImportsLegacy();
+
+        var migrated = BoolChecker.init(allocator, ir_view, atoms_arg);
+        defer migrated.deinit();
+        migrated.scanImports();
+
+        std.testing.expectEqual(legacy.module_fn_types.count(), migrated.module_fn_types.count()) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): legacy types {d}, migrated types {d}\n", .{
+                case.label, use_atoms, legacy.module_fn_types.count(), migrated.module_fn_types.count(),
+            });
+            return err;
+        };
+        var it = legacy.module_fn_types.iterator();
+        while (it.next()) |e| {
+            const got = migrated.module_fn_types.get(e.key_ptr.*) orelse {
+                std.debug.print("\ncase \"{s}\": slot {d} missing after migration\n", .{ case.label, e.key_ptr.* });
+                return error.SlotMissing;
+            };
+            if (got != e.value_ptr.*) {
+                std.debug.print("\ncase \"{s}\": slot {d} type {any} -> {any}\n", .{ case.label, e.key_ptr.*, e.value_ptr.*, got });
+                return error.TypeChanged;
+            }
+        }
+        std.testing.expectEqual(legacy.module_result_fn_slots.count(), migrated.module_result_fn_slots.count()) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): legacy result slots {d}, migrated {d}\n", .{
+                case.label, use_atoms, legacy.module_result_fn_slots.count(), migrated.module_result_fn_slots.count(),
+            });
+            return err;
+        };
+    };
 }

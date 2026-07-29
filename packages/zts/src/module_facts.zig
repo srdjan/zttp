@@ -167,7 +167,7 @@ pub const ModuleFacts = struct {
             while (j < import_decl.specifiers_count) : (j += 1) {
                 const spec_idx = ir_view.getListIndex(import_decl.specifiers_start, j);
                 const spec = ir_view.getImportSpec(spec_idx) orelse continue;
-                const imported_name = resolveAtomName(atoms, spec.imported_atom) orelse continue;
+                const imported_name = resolveAtomName(ir_view, atoms, spec.imported_atom) orelse continue;
 
                 // Record the import whatever its module resolved to. Owned
                 // strings, because the facts outlive the parser and the atom
@@ -349,16 +349,27 @@ pub const ModuleFacts = struct {
     }
 };
 
-fn resolveAtomName(atoms: ?*context.AtomTable, atom_idx: u16) ?[]const u8 {
-    // Try predefined atoms first
-    const atom: object.Atom = @enumFromInt(atom_idx);
-    if (atom.toPredefinedName()) |name| return name;
-
-    // Try dynamic atom table
+fn resolveAtomName(ir_view: IrView, atoms: ?*context.AtomTable, atom_idx: u16) ?[]const u8 {
     if (atoms) |table| {
+        // With atom table: predefined atoms first, then the dynamic table.
+        const atom: object.Atom = @enumFromInt(atom_idx);
+        if (atom.toPredefinedName()) |name| return name;
         return table.getName(atom);
     }
-    return null;
+    // Without an atom table (standalone parser): predefined atoms and string
+    // constants share the u16 index space. String constants take priority
+    // because import specifiers, the main use case here, go through addString;
+    // predefined atom names are keywords and builtins, never import specifier
+    // names.
+    //
+    // This branch exists because `bool_checker` had it and the index did not.
+    // Its `checkSourceFull` harness builds a checker with no atom table, so
+    // without this fallback the index resolved no names there and nine sound-mode
+    // tests failed. Copied verbatim from `bool_checker.resolveAtomName` rather
+    // than reinvented, so the two cannot drift.
+    if (ir_view.getString(atom_idx)) |name| return name;
+    const atom: object.Atom = @enumFromInt(atom_idx);
+    return atom.toPredefinedName();
 }
 
 // ---------------------------------------------------------------------------
@@ -730,4 +741,26 @@ test "module facts survive allocation failure at every step" {
         }
     };
     try testing.checkAllAllocationFailures(testing.allocator, Ctx.run, .{ h.view(), &h.atoms });
+}
+
+test "the index resolves import names with no atom table" {
+    // The gap that nine bool_checker sound-mode tests found and this file's
+    // corpus test missed: `checkSourceFull` builds a checker with no atom table,
+    // and without the string-constant fallback the index resolves no names at
+    // all. Pinned here so the fallback cannot be removed as dead code.
+    const a = testing.allocator;
+
+    var parser = try @import("parser/parse.zig").Parser.init(a, "import { env } from \"zttp:env\";\n");
+    defer parser.deinit();
+    // No setAtomTable: this is the standalone-parser path.
+    _ = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var facts = try ModuleFacts.build(a, view, null, null);
+    defer facts.deinit();
+
+    try testing.expectEqual(@as(usize, 1), facts.imports.items.len);
+    try testing.expectEqualStrings("zttp:env", facts.imports.items[0].module_specifier);
+    try testing.expectEqualStrings("env", facts.imports.items[0].imported_name);
+    try testing.expect(facts.importsModule("zttp:env"));
 }
