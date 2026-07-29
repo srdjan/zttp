@@ -513,6 +513,76 @@ on and off, and attributed that to JS being a small share of request time. That 
 incomplete: for those handler shapes the fast path meant little or no JS ran, and the JIT was
 compiling nothing regardless. The measured numbers stand; the explanation is now better.
 
+### Measurement 7, root cause: the request deadline inhibits the JIT
+
+The open question from measurement 6 is answered. The JIT is not merely unused on the server
+request path; it is switched off, on every request, by design of another feature.
+
+The chain, each link verified in source:
+
+1. `ServerConfig.timeout_ms` defaults to 30,000 (`packages/runtime/src/server.zig:1364`),
+   and `server.zig:2149` copies it into the pool's `request_timeout_ms`.
+2. `HandlerPool` arms that deadline before every handler execution
+   (`packages/runtime/src/runtime_pool.zig:863`).
+3. `armRequestDeadlineMs` sets `ctx.jit_inhibited = true` whenever the deadline is non-zero
+   (`packages/runtime/src/zruntime.zig:1446-1456`), saving the prior value for
+   `clearRequestDeadline` to restore after the request.
+4. `maybePromote` returns at its first line when `jit_inhibited`
+   (`packages/zts/src/interpreter/jit_compile.zig`), so `profileFunctionEntry` never runs.
+
+Because the profile call is what increments `execution_count`, the counter never leaves
+zero, no function ever reaches a threshold, and nothing is ever compiled. Instrumented trace
+at the decision point, default configuration, 60,000 requests:
+
+```
+jittrace calls=4380000 exec=0 tier=interpreted tf_ptr=false site_map=false inhibited=true
+```
+
+4.38 million promotion decisions, execution count still zero.
+
+Causality was then confirmed by disabling that one assignment and rebuilding. Same handler,
+same load:
+
+```
+jittrace calls=4260000 exec=4200002 tier=baseline tf_ptr=true site_map=true inhibited=false
+```
+
+The function reaches baseline and compiles. Both temporary changes have been reverted.
+
+**Why the inhibit exists, and why it is not simply a bug.** The deadline is enforced by the
+interpreter polling `ctx.interrupt_requested` on a back-edge counter
+(`packages/zts/src/interpreter.zig:118`, `:127`). Compiled code does not poll it: the string
+`interrupt_requested` does not appear in `jit/baseline.zig`, `jit/x86.zig`, or `jit/arm64.zig`.
+So a handler running in compiled code cannot be preempted, and inhibiting the JIT while a
+deadline is armed is what makes request timeouts enforceable at all. It is a deliberate
+trade of throughput for a safety property.
+
+**What is a defect is the silence and the reach.** There is no `--timeout` flag on `serve`
+(the only timeout option is `--outbound-timeout-ms`), so the 30-second default cannot be
+turned off from the CLI, and no documentation states that running a server disables the JIT.
+The result is that the entire remaining JIT, about 12,000 lines including two hand-written
+machine-code emitters, cannot execute in any supported server configuration. It runs only in
+the in-process benchmark harness, which arms no deadline, which is exactly why the benchmarks
+showed promotions while the server showed none.
+
+This also completes the explanation of measurements 1 and 2. The A/B found no difference
+between JIT on and JIT off end-to-end because on the server there is no difference to find.
+
+**Decision for the owner, not taken here.** Three coherent directions:
+
+1. Teach compiled code to poll the interrupt flag, in both emitters, and drop the inhibit.
+   This is the only option that makes the JIT usable in production, and it is real work in
+   the part of the codebase with the least test coverage.
+2. Accept that timeouts win and delete the rest of the JIT. Roughly 12,000 lines, two
+   emitters, and the third encoding of opcode semantics all go, and the interpreter becomes
+   the single execution path. This is the largest simplification available in the repository
+   and it is consistent with the measured evidence.
+3. Keep both and make the trade explicit: add a timeout flag, document that setting it to
+   zero enables the JIT, and state the safety consequence.
+
+Doing nothing is the one option that should be ruled out, because today the code carries the
+full maintenance cost of a JIT that cannot run.
+
 ### Measurement 2, end-to-end server load: no measurable JIT effect
 
 Protocol: `zttp serve` on `examples/handler/handler-full.tsx`, request logging disabled
