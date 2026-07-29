@@ -61,9 +61,6 @@ The current runtime includes:
 - polymorphic inline caches for property access;
 - binary search for larger object property tables;
 - lazy string hashing and pre-interned HTTP atoms;
-- type feedback for JIT decisions;
-- per-context native JIT code cap with full-context eviction at compile safe
-  points;
 - specialized bytecode for type-directed boolean and comparison paths;
 - request-scoped allocation with bulk reset.
 

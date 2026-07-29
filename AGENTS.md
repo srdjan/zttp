@@ -3,11 +3,10 @@
 ## Project Structure & Module Organization
 - `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
 - `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `zruntime.zig`).
-- `packages/zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, JIT, modules).
+- `packages/zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, modules).
 - `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with module specs under `module-specs/`.
 - `packages/zts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
 - `packages/pi/` contains the interactive expert agent; `packages/proof-review/` contains the proof-review tooling.
-- `packages/zts/src/jit/` contains the tiered JIT compiler (baseline and optimized tiers) for x86-64 and ARM64.
 - `packages/zts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
 - `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zts_cli.zig` for the compiler CLI).
 - `packages/zttp-sdk/` contains the extension SDK.

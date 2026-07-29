@@ -642,6 +642,44 @@ The evidence now says: the baseline JIT cannot run on the server path, cannot co
 handler-shaped code even where it can run, and costs 3 percent when forced. Removal is the
 option the measurements support.
 
+### Outcome: the JIT is removed, the interpreter is the single execution path
+
+Executed after measurements 6 to 8 and a cross-model second opinion. Both tiers are gone:
+the optimized tier first, then the baseline tier and everything that served it, for 15,473
+deletions across 34 files. Removed: the `jit/` directory (baseline compiler, x86 and arm64
+emitters, code allocator, deopt protocol), `type_feedback.zig`,
+`jit_compile`/`jit_intrinsics`/`jit_policy`, the roughly 55 `jit*` runtime helpers compiled
+code called into, the `CompilationTier` concept and its counters, and the `ZTS_JIT_*`
+environment surface. Both trees are recoverable from the annotated tags
+`jit-optimized-tier-intact` and `jit-baseline-tier-intact`.
+
+Measured cost, recorded rather than hidden: `functionCalls` -26.7 percent and `recursion`
+-22.1 percent, the two benchmarks the JIT actually compiled. The other eleven moved within
+host skew in both directions, `intArithmetic` +8.6 percent through `stringConcat` -10.2
+percent against a 4.6 percent run spread. `benchmarks/perf-baseline.json` was rebaselined
+for the interpreter-only engine and the two advisory thresholds for those benchmarks were
+lowered; no other threshold changed. Rebaselining is the move that can hide a regression, so
+the justification is explicit: the previous file was recorded against an engine that no
+longer exists.
+
+The deadline defect from measurement 7 is dissolved rather than fixed. `jit_inhibited` no
+longer exists, so `armRequestDeadlineMs` disables nothing and the durable executor's
+`StepDeadlineGuard` no longer saves and restores it. Request timeouts can no longer silently
+switch off compilation, because there is nothing to switch off.
+
+Two coverage notes. `opcode_parity.zig` was converted rather than deleted: its corpus,
+expected values, and fault cases survive as an interpreter-only test, since those are the
+substantive coverage and are what a future second execution tier would be checked against.
+Two `HandlerPool` stress tests that merely guarded on `ZTS_DISABLE_JIT_TESTS` were kept with
+the guard stripped.
+
+**A gap in the verification gate, found by this work and not yet fixed.**
+`scripts/verify.sh` passed while the benchmark binary was broken: it does not build
+`zttp-bench`, so `benchmark.zig` referencing the deleted `type_feedback` module went
+undetected through a green gate. The gate should compile the bench binary, or run
+`bench-check`, before it can be trusted as the pre-commit authority. Until then, any change
+touching engine internals needs `zig build bench-check` run separately.
+
 ### Measurement 2, end-to-end server load: no measurable JIT effect
 
 Protocol: `zttp serve` on `examples/handler/handler-full.tsx`, request logging disabled
