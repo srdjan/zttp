@@ -1,6 +1,6 @@
 # Reset B Design: ModuleFacts and the Canonical Contract Codec
 
-**Status:** approved design, not yet planned into tasks.
+**Status:** done. All three plans executed: B1 (`2026-07-29-003`), B2 (`2026-07-29-004`), B3 (`2026-07-29-005`). Each plan records where it corrected this document.
 
 **Source:** wave 4 item 0b of `docs/plans/2026-07-28-001-reset-simplification-plan.md`,
 which sections 5.5 and 5.6 of that document describe. Reset A
