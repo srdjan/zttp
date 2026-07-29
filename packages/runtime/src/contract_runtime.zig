@@ -11,8 +11,6 @@ const zq = @import("zts");
 const runtime_config = @import("runtime_config.zig");
 const HandlerContract = zq.HandlerContract;
 const HandlerProperties = zq.handler_contract.HandlerProperties;
-const Bound = zq.handler_contract.Bound;
-const BoundProvenance = zq.handler_contract.BoundProvenance;
 const CostEnvelope = zq.handler_contract.CostEnvelope;
 const ModuleCapability = zq.module_binding.ModuleCapability;
 const capability_count = zq.module_binding.capability_count;
@@ -292,293 +290,13 @@ pub fn validate(
     return validatedFromInner(inner);
 }
 
-/// Canonical read path: the shared contract codec followed by the runtime
-/// projection. It lives beside the hand-written reader only while the
-/// differential tests prove the two agree. Task 3 of the B1 plan deletes the
-/// hand-written reader and renames this to `parseContractJson`.
-fn parseContractJsonCanonical(allocator: std.mem.Allocator, source: []const u8) !RawRuntimeContract {
+/// Parse a contract JSON blob into a RuntimeContract: the shared contract
+/// codec followed by the runtime projection. The runtime and the analyzer
+/// therefore read one wire format through one reader.
+pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawRuntimeContract {
     var hc = try zq.handler_contract.parseFromJson(allocator, source);
     defer hc.deinit(allocator);
     return fromHandlerContract(allocator, &hc);
-}
-
-/// Parse a contract JSON blob into a RuntimeContract.
-/// Extracts only the fields needed at runtime; ignores everything else.
-pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawRuntimeContract {
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, source, .{});
-    defer parsed.deinit();
-
-    if (parsed.value != .object) return error.InvalidContract;
-    const root = parsed.value.object;
-
-    // Parse env.literal[]
-    var env_vars: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (env_vars.items) |v| allocator.free(v);
-        env_vars.deinit(allocator);
-    }
-    var env_dynamic = false;
-    if (root.get("env")) |env_val| {
-        if (env_val == .object) {
-            const env_obj = env_val.object;
-            if (env_obj.get("literal")) |literal_val| {
-                if (literal_val == .array) {
-                    for (literal_val.array.items) |item| {
-                        if (item == .string) {
-                            // Stage the dupe so a failing append() does not
-                            // leak it; ownership transfers to env_vars on
-                            // successful append, and the outer errdefer
-                            // walks env_vars.items.
-                            const duped = try allocator.dupe(u8, item.string);
-                            errdefer allocator.free(duped);
-                            try env_vars.append(allocator, duped);
-                        }
-                    }
-                }
-            }
-            if (env_obj.get("dynamic")) |dyn_val| {
-                env_dynamic = dyn_val == .bool and dyn_val.bool;
-            }
-        }
-    }
-
-    // Parse api.routes[] for method+path
-    var routes: std.ArrayList(Route) = .empty;
-    errdefer {
-        for (routes.items) |r| {
-            allocator.free(r.method);
-            allocator.free(r.path);
-        }
-        routes.deinit(allocator);
-    }
-    var routes_dynamic = false;
-    var reads_request_state = false;
-    if (root.get("api")) |api_val| {
-        if (api_val == .object) {
-            const api_obj = api_val.object;
-            if (api_obj.get("routesDynamic")) |dyn_val| {
-                routes_dynamic = dyn_val == .bool and dyn_val.bool;
-            }
-            if (api_obj.get("routes")) |routes_val| {
-                if (routes_val == .array) {
-                    for (routes_val.array.items) |route_val| {
-                        if (route_val != .object) continue;
-                        const route_obj = route_val.object;
-                        const method_val = route_obj.get("method") orelse continue;
-                        const path_val = route_obj.get("path") orelse continue;
-                        if (method_val != .string or path_val != .string) continue;
-                        if (routeReadsRequestState(route_obj)) reads_request_state = true;
-                        // Stage both dupes so a failure on the second one
-                        // (or on append) does not leak the first.
-                        const method = try allocator.dupe(u8, method_val.string);
-                        errdefer allocator.free(method);
-                        const path = try allocator.dupe(u8, path_val.string);
-                        errdefer allocator.free(path);
-                        try routes.append(allocator, .{ .method = method, .path = path });
-                    }
-                }
-            }
-        }
-    }
-
-    // Parse properties
-    const properties = parseProperties(root);
-    const durable_workflow_properties = parseDurableWorkflowProperties(root);
-    var cost_envelope = try parseCostEnvelope(root, allocator);
-    errdefer if (cost_envelope) |*envelope| envelope.deinit(allocator);
-
-    var capabilities: ?CapabilityMatrix = null;
-    var artifact_sha256 = [_]u8{0} ** 32;
-    var policy_hash = [_]u8{0} ** 32;
-    if (root.get("sandbox")) |sandbox_val| {
-        if (sandbox_val == .object) {
-            const obj = sandbox_val.object;
-            capabilities = parseCapabilityMatrix(obj);
-            readSandboxHex(obj, "artifactSha256", &artifact_sha256);
-            readSandboxHex(obj, "policyHash", &policy_hash);
-        }
-    }
-
-    // Parse websocket.{onOpen,onMessage,onClose,onError}
-    var websocket: WebSocketInfo = .{};
-    if (root.get("websocket")) |ws_val| {
-        if (ws_val == .object) {
-            websocket.on_open = getBool(ws_val.object, "onOpen");
-            websocket.on_message = getBool(ws_val.object, "onMessage");
-            websocket.on_close = getBool(ws_val.object, "onClose");
-            websocket.on_error = getBool(ws_val.object, "onError");
-        }
-    }
-
-    // Parse modules[] so the startup drift check has the handler's import set
-    var modules: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (modules.items) |m| allocator.free(m);
-        modules.deinit(allocator);
-    }
-    if (root.get("modules")) |mods_val| {
-        if (mods_val == .array) {
-            for (mods_val.array.items) |item| {
-                if (item != .string) continue;
-                const duped = try allocator.dupe(u8, item.string);
-                errdefer allocator.free(duped);
-                try modules.append(allocator, duped);
-            }
-        }
-    }
-
-    // toOwnedSlice transfers ownership out of the ArrayList, so the outer
-    // errdefers above stop covering the duped strings once each conversion
-    // succeeds. Each conversion gets its own errdefer that walks the new
-    // slice on subsequent failure, otherwise a later toOwnedSlice failure
-    // would leak the strings already moved into earlier slices.
-    const env_vars_slice = try env_vars.toOwnedSlice(allocator);
-    errdefer {
-        for (env_vars_slice) |v| allocator.free(v);
-        allocator.free(env_vars_slice);
-    }
-
-    const routes_slice = try routes.toOwnedSlice(allocator);
-    errdefer {
-        for (routes_slice) |r| {
-            allocator.free(r.method);
-            allocator.free(r.path);
-        }
-        allocator.free(routes_slice);
-    }
-
-    const modules_slice = try modules.toOwnedSlice(allocator);
-    errdefer {
-        for (modules_slice) |m| allocator.free(m);
-        allocator.free(modules_slice);
-    }
-    const cost_envelope_out = cost_envelope;
-    cost_envelope = null;
-
-    return .{ .inner = .{
-        .env_vars = env_vars_slice,
-        .env_dynamic = env_dynamic,
-        .routes = routes_slice,
-        .routes_dynamic = routes_dynamic,
-        .reads_request_state = reads_request_state,
-        .properties = properties,
-        .durable_workflow_properties = durable_workflow_properties,
-        .websocket = websocket,
-        .capabilities = capabilities,
-        .artifact_sha256 = artifact_sha256,
-        .policy_hash = policy_hash,
-        .modules = modules_slice,
-        .cost_envelope = cost_envelope_out,
-        .allocator = allocator,
-    } };
-}
-
-/// True when a contract.json route object reads request headers or body: a
-/// non-empty `headerParams`/`bodyParams` array or a `headerParamsDynamic`/
-/// `bodyParamsDynamic` flag. The proof cache (method+URL key) is unsound for
-/// such handlers. `queryParams` are deliberately excluded - the query string is
-/// part of the URL and therefore already in the cache key.
-fn routeReadsRequestState(route_obj: std.json.ObjectMap) bool {
-    inline for (.{ "headerParams", "requestBodies" }) |list_key| {
-        if (route_obj.get(list_key)) |v| {
-            if (v == .array and v.array.items.len > 0) return true;
-        }
-    }
-    inline for (.{ "headerParamsDynamic", "requestBodiesDynamic" }) |dyn_key| {
-        if (route_obj.get(dyn_key)) |v| {
-            if (v == .bool and v.bool) return true;
-        }
-    }
-    return false;
-}
-
-fn parseCostEnvelope(root: std.json.ObjectMap, allocator: std.mem.Allocator) !?CostEnvelope {
-    const value = root.get("costEnvelope") orelse return null;
-    if (value == .null) return null;
-    if (value != .object) return error.InvalidContract;
-
-    var envelope = CostEnvelope{};
-    errdefer envelope.deinit(allocator);
-
-    const obj = value.object;
-    if (obj.get("exhaustive")) |v| {
-        if (v == .bool) envelope.exhaustive = v.bool;
-    }
-    if (obj.get("total")) |v| {
-        const total = try parseBoundValue(v, allocator);
-        envelope.total.deinitOwned(allocator);
-        envelope.total = total;
-    }
-    if (obj.get("perModule")) |v| {
-        if (v != .array) return error.InvalidContract;
-        for (v.array.items) |item| {
-            if (item != .object) return error.InvalidContract;
-            const entry_obj = item.object;
-            const module_value = entry_obj.get("module") orelse return error.InvalidContract;
-            const bound_value = entry_obj.get("bound") orelse return error.InvalidContract;
-            if (module_value != .string) return error.InvalidContract;
-
-            var module: ?[]const u8 = try allocator.dupe(u8, module_value.string);
-            errdefer if (module) |m| allocator.free(m);
-            var bound: ?Bound = try parseBoundValue(bound_value, allocator);
-            errdefer if (bound) |*owned| owned.deinitOwned(allocator);
-
-            try envelope.entries.append(allocator, .{
-                .module = module.?,
-                .bound = bound.?,
-            });
-            module = null;
-            bound = null;
-        }
-    }
-
-    return envelope;
-}
-
-fn parseBoundValue(value: std.json.Value, allocator: std.mem.Allocator) !Bound {
-    if (value != .object) return error.InvalidContract;
-    const obj = value.object;
-    const class_value = obj.get("class") orelse return error.InvalidContract;
-    if (class_value != .string) return error.InvalidContract;
-    const class_name = class_value.string;
-
-    if (std.mem.eql(u8, class_name, "constant")) {
-        return .{ .constant = readU32(obj, "value") orelse 0 };
-    }
-    if (std.mem.eql(u8, class_name, "linear")) {
-        return .{ .linear = .{
-            .coefficient = readU32(obj, "coefficient") orelse return error.InvalidContract,
-            .base = readU32(obj, "base") orelse 0,
-            .source = try parseBoundProvenanceValue(obj.get("source") orelse return error.InvalidContract, allocator),
-        } };
-    }
-    if (std.mem.eql(u8, class_name, "unbounded")) {
-        return .{ .unbounded = try parseBoundProvenanceValue(obj.get("source") orelse return error.InvalidContract, allocator) };
-    }
-    return error.InvalidContract;
-}
-
-fn parseBoundProvenanceValue(value: std.json.Value, allocator: std.mem.Allocator) !BoundProvenance {
-    if (value != .object) return error.InvalidContract;
-    const obj = value.object;
-    const desc_value = obj.get("desc");
-    const desc = if (desc_value) |v| blk: {
-        if (v != .string) return error.InvalidContract;
-        break :blk v.string;
-    } else "";
-
-    return .{
-        .line = readU32(obj, "line") orelse 0,
-        .column = readU32(obj, "column") orelse 0,
-        .desc = try allocator.dupe(u8, desc),
-    };
-}
-
-fn readU32(obj: std.json.ObjectMap, key: []const u8) ?u32 {
-    const value = obj.get(key) orelse return null;
-    if (value != .integer) return null;
-    if (value.integer < 0 or value.integer > std.math.maxInt(u32)) return null;
-    return @intCast(value.integer);
 }
 
 pub fn deriveCostCeilings(envelope_opt: ?CostEnvelope, body_limit_bytes: u64) ?CostCeilings {
@@ -607,93 +325,6 @@ pub fn deriveCostCeilings(envelope_opt: ?CostEnvelope, body_limit_bytes: u64) ?C
     }
 
     return ceilings;
-}
-
-fn readSandboxHex(obj: std.json.ObjectMap, key: []const u8, out: *[32]u8) void {
-    const val = obj.get(key) orelse return;
-    if (val != .string or val.string.len != 64) return;
-    _ = std.fmt.hexToBytes(out, val.string) catch return;
-}
-
-fn parseCapabilityMatrix(obj: std.json.ObjectMap) CapabilityMatrix {
-    var matrix: CapabilityMatrix = .{};
-    if (obj.get("capabilities")) |caps_val| {
-        if (caps_val == .array) {
-            var seen = [_]bool{false} ** capability_count;
-            for (caps_val.array.items) |item| {
-                if (item != .string) continue;
-                const cap = std.meta.stringToEnum(ModuleCapability, item.string) orelse continue;
-                seen[@intFromEnum(cap)] = true;
-            }
-            for (std.enums.values(ModuleCapability)) |c| {
-                if (seen[@intFromEnum(c)]) {
-                    matrix.items[matrix.len] = c;
-                    matrix.len += 1;
-                }
-            }
-        }
-    }
-
-    var stored_hash = [_]u8{0} ** 32;
-    readSandboxHex(obj, "capabilityHash", &stored_hash);
-    matrix.hash = if (std.mem.allEqual(u8, &stored_hash, 0))
-        zq.module_binding.capabilityHash(matrix.slice())
-    else
-        stored_hash;
-    return matrix;
-}
-
-fn parseProperties(root: std.json.ObjectMap) Properties {
-    var props = Properties{};
-    const prop_val = root.get("properties") orelse return props;
-    if (prop_val != .object) return props;
-    const obj = prop_val.object;
-
-    props.pure = getBool(obj, "pure");
-    props.read_only = getBool(obj, "readOnly");
-    props.stateless = getBool(obj, "stateless");
-    props.retry_safe = getBool(obj, "retrySafe");
-    props.deterministic = getBool(obj, "deterministic");
-    props.has_egress = getBool(obj, "hasEgress");
-    props.no_secret_leakage = getBool(obj, "noSecretLeakage");
-    props.no_credential_leakage = getBool(obj, "noCredentialLeakage");
-    props.input_validated = getBool(obj, "inputValidated");
-    props.pii_contained = getBool(obj, "piiContained");
-    props.injection_safe = getBool(obj, "injectionSafe");
-    props.idempotent = getBool(obj, "idempotent");
-    props.state_isolated = getBool(obj, "stateIsolated");
-    props.fault_covered = getBool(obj, "faultCovered");
-    props.result_safe = getBool(obj, "resultSafe");
-    props.optional_safe = getBool(obj, "optionalSafe");
-
-    if (obj.get("maxIoDepth")) |depth_val| {
-        if (depth_val == .integer and depth_val.integer >= 0 and depth_val.integer <= std.math.maxInt(u32)) {
-            props.max_io_depth = @intCast(depth_val.integer);
-        }
-    }
-
-    return props;
-}
-
-fn parseDurableWorkflowProperties(root: std.json.ObjectMap) DurableWorkflowProperties {
-    var props = DurableWorkflowProperties{};
-    const durable_val = root.get("durable") orelse return props;
-    if (durable_val != .object) return props;
-    const workflow_val = durable_val.object.get("workflow") orelse return props;
-    if (workflow_val != .object) return props;
-    const prop_val = workflow_val.object.get("properties") orelse return props;
-    if (prop_val != .object) return props;
-
-    const obj = prop_val.object;
-    props.retry_safe = getBool(obj, "retrySafe");
-    props.idempotent = getBool(obj, "idempotent");
-    props.fault_covered = getBool(obj, "faultCovered");
-    return props;
-}
-
-fn getBool(obj: std.json.ObjectMap, key: []const u8) bool {
-    const val = obj.get(key) orelse return false;
-    return val == .bool and val.bool;
 }
 
 /// Match a route pattern (e.g. "/users/:id") against a request path (e.g. "/users/42").
@@ -828,10 +459,34 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
     const cost_envelope_out = cost_envelope;
     cost_envelope = null;
 
+    // Take ownership of the three lists one at a time, each with its own
+    // errdefer. Doing this inline in the struct literal below leaks: a
+    // successful `toOwnedSlice` empties its list, which disarms that list's
+    // errdefer, so a later allocation failure in the same literal drops the
+    // slices already taken.
+    const env_vars_out = try env_vars.toOwnedSlice(allocator);
+    errdefer {
+        for (env_vars_out) |v| allocator.free(v);
+        allocator.free(env_vars_out);
+    }
+    const routes_out = try routes.toOwnedSlice(allocator);
+    errdefer {
+        for (routes_out) |r| {
+            allocator.free(r.method);
+            allocator.free(r.path);
+        }
+        allocator.free(routes_out);
+    }
+    const modules_out = try modules.toOwnedSlice(allocator);
+    errdefer {
+        for (modules_out) |m| allocator.free(m);
+        allocator.free(modules_out);
+    }
+
     return .{ .inner = .{
-        .env_vars = try env_vars.toOwnedSlice(allocator),
+        .env_vars = env_vars_out,
         .env_dynamic = hc.env.dynamic,
-        .routes = try routes.toOwnedSlice(allocator),
+        .routes = routes_out,
         .routes_dynamic = hc.api.routes_dynamic,
         .reads_request_state = reads_request_state,
         .properties = runtime_properties,
@@ -849,7 +504,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .capabilities = hc.capabilities,
         .artifact_sha256 = hc.artifact_sha256,
         .policy_hash = hc.policy_hash,
-        .modules = try modules.toOwnedSlice(allocator),
+        .modules = modules_out,
         .cost_envelope = cost_envelope_out,
         .allocator = allocator,
     } };
@@ -937,8 +592,6 @@ test "parseContractJson extracts websocket event presence flags" {
     try std.testing.expect(contract.websocket.on_close);
     try std.testing.expect(!contract.websocket.on_error);
     try std.testing.expect(contract.websocket.any());
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson defaults websocket to all-false when section absent" {
@@ -975,8 +628,6 @@ test "parseContractJson defaults websocket to all-false when section absent" {
     try std.testing.expect(!contract.websocket.on_close);
     try std.testing.expect(!contract.websocket.on_error);
     try std.testing.expect(!contract.websocket.any());
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson minimal" {
@@ -1018,8 +669,6 @@ test "parseContractJson minimal" {
     try std.testing.expect(!contract.durable_workflow_properties.retry_safe);
     try std.testing.expect(!contract.durable_workflow_properties.idempotent);
     try std.testing.expect(!contract.durable_workflow_properties.fault_covered);
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson reads durable workflow properties" {
@@ -1044,8 +693,6 @@ test "parseContractJson reads durable workflow properties" {
     try std.testing.expect(raw.inner.durable_workflow_properties.retry_safe);
     try std.testing.expect(raw.inner.durable_workflow_properties.idempotent);
     try std.testing.expect(raw.inner.durable_workflow_properties.fault_covered);
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson with properties and routes" {
@@ -1107,8 +754,6 @@ test "parseContractJson with properties and routes" {
     // Both routes carry empty headerParams, so the handler is input-independent
     // and the proof cache stays eligible.
     try std.testing.expect(!contract.reads_request_state);
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson flags reads_request_state when a route reads headers" {
@@ -1125,8 +770,6 @@ test "parseContractJson flags reads_request_state when a route reads headers" {
     var raw = try parseContractJson(allocator, source);
     defer raw.deinit();
     try std.testing.expect(raw.inner.reads_request_state);
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson flags reads_request_state on dynamic header access" {
@@ -1139,8 +782,6 @@ test "parseContractJson flags reads_request_state on dynamic header access" {
     var raw = try parseContractJson(allocator, source);
     defer raw.deinit();
     try std.testing.expect(raw.inner.reads_request_state);
-
-    try expectReadersAgree(allocator, source);
 }
 
 // Regression: parseContractJson handles allocator failure at every internal
@@ -1471,8 +1112,6 @@ test "parseContractJson reads sandbox block" {
     try std.testing.expect(contract.hasCapability(.crypto));
     try std.testing.expect(!contract.hasCapability(.stderr));
     try std.testing.expectEqual(@as(usize, 2), contract.modules.len);
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "validate promotes Raw to Validated when integrity checks pass" {
@@ -1531,8 +1170,6 @@ test "parseContractJson returns null capabilities when sandbox block is absent" 
     const contract = &raw.inner;
     try std.testing.expect(contract.capabilities == null);
     try std.testing.expect(!contract.hasCapability(.crypto));
-
-    try expectReadersAgree(allocator, source);
 }
 
 test "verifyCapabilityMatrix passes for a live-derived matrix" {
@@ -1851,226 +1488,16 @@ test "parseContractJson: errdefer ladders close every failure path" {
 }
 
 // ---------------------------------------------------------------------------
-// Reset B1 differential harness. Temporary: it compares the hand-written
-// reader against the canonical codec plus the runtime projection. Task 3 of
-// docs/plans/2026-07-29-003-reset-b1-runtime-codec-plan.md deletes this whole
-// block together with the hand-written reader it compares against.
+// Regression guards for the defects the B1 differential harness exposed. The
+// harness itself is gone with the second reader it compared against; these
+// pin the behavior it proved.
 // ---------------------------------------------------------------------------
 
-const differential_body_limit: u64 = 1 << 20;
-
-fn expectSameHash(comptime label: []const u8, want: *const [32]u8, got: *const [32]u8) !void {
-    if (std.mem.eql(u8, want, got)) return;
-    std.debug.print("divergence: {s}: hand-written {s}, codec {s}\n", .{
-        label,
-        &std.fmt.bytesToHex(want.*, .lower),
-        &std.fmt.bytesToHex(got.*, .lower),
-    });
-    return error.ReaderDivergence;
-}
-
-fn expectSameRuntimeContract(want: *const RuntimeContract, got: *const RuntimeContract) !void {
-    const t = std.testing;
-
-    try t.expectEqual(want.env_vars.len, got.env_vars.len);
-    for (want.env_vars, got.env_vars) |w, g| try t.expectEqualStrings(w, g);
-    try t.expectEqual(want.env_dynamic, got.env_dynamic);
-
-    try t.expectEqual(want.routes.len, got.routes.len);
-    for (want.routes, got.routes) |w, g| {
-        try t.expectEqualStrings(w.method, g.method);
-        try t.expectEqualStrings(w.path, g.path);
-    }
-    try t.expectEqual(want.routes_dynamic, got.routes_dynamic);
-    // B1 finding 4, accepted. `backfillApiRouteCollections` in the codec
-    // synthesizes request_bodies from request_schema_refs, so the codec reports
-    // reads_request_state on routes the hand-written reader called
-    // request-independent. The codec is the conservative side: the only effect
-    // is that the proof cache is skipped more often, never less. The assertion
-    // is narrowed rather than deleted, so a regression in the other direction
-    // still fails.
-    if (want.reads_request_state != got.reads_request_state) {
-        try t.expect(got.reads_request_state);
-    }
-
-    // Field-by-field, reporting every diverging field rather than the first,
-    // so one run gives the whole picture.
-    var properties_diverged = false;
-    inline for (@typeInfo(Properties).@"struct".fields) |field| {
-        const w = @field(want.properties, field.name);
-        const g = @field(got.properties, field.name);
-        if (!std.meta.eql(w, g)) {
-            std.debug.print("divergence: properties.{s}: hand-written {any}, codec {any}\n", .{ field.name, w, g });
-            properties_diverged = true;
-        }
-    }
-    if (properties_diverged) return error.ReaderDivergence;
-    try t.expectEqual(want.durable_workflow_properties, got.durable_workflow_properties);
-    try t.expectEqual(want.websocket, got.websocket);
-
-    if ((want.capabilities == null) != (got.capabilities == null)) {
-        std.debug.print("divergence: capabilities present: hand-written {}, codec {}\n", .{
-            want.capabilities != null,
-            got.capabilities != null,
-        });
-        return error.ReaderDivergence;
-    }
-    if (want.capabilities) |w| {
-        const g = got.capabilities.?;
-        try expectSameHash("capabilities.hash", &w.hash, &g.hash);
-        try t.expectEqual(w.len, g.len);
-        try t.expectEqualSlices(ModuleCapability, w.items[0..w.len], g.items[0..g.len]);
-    }
-
-    try expectSameHash("artifact_sha256", &want.artifact_sha256, &got.artifact_sha256);
-    try expectSameHash("policy_hash", &want.policy_hash, &got.policy_hash);
-
-    try t.expectEqual(want.modules.len, got.modules.len);
-    for (want.modules, got.modules) |w, g| try t.expectEqualStrings(w, g);
-
-    try t.expectEqual(want.cost_envelope == null, got.cost_envelope == null);
-    if (want.cost_envelope) |w| {
-        const g = got.cost_envelope.?;
-        try t.expectEqual(w.exhaustive, g.exhaustive);
-        try t.expectEqual(w.entries.items.len, g.entries.items.len);
-        for (w.entries.items, g.entries.items) |we, ge| {
-            try t.expectEqualStrings(we.module, ge.module);
-        }
-    }
-    try t.expectEqual(
-        deriveCostCeilings(want.cost_envelope, differential_body_limit),
-        deriveCostCeilings(got.cost_envelope, differential_body_limit),
-    );
-}
-
-/// Run both readers over one document. Error identity is deliberately not
-/// compared (see divergence 2 in the B1 plan); accept-versus-reject is.
-fn expectReadersAgree(allocator: std.mem.Allocator, source: []const u8) !void {
-    const legacy_result = parseContractJson(allocator, source);
-    const canonical_result = parseContractJsonCanonical(allocator, source);
-
-    if (legacy_result) |legacy_ok| {
-        var legacy_mut = legacy_ok;
-        defer legacy_mut.deinit();
-        var canonical_mut = canonical_result catch |err| {
-            std.debug.print("divergence: hand-written accepted, codec rejected with {}\n", .{err});
-            return error.ReaderDivergence;
-        };
-        defer canonical_mut.deinit();
-        try expectSameRuntimeContract(&legacy_mut.inner, &canonical_mut.inner);
-    } else |legacy_err| {
-        if (canonical_result) |canonical_ok| {
-            var canonical_mut = canonical_ok;
-            canonical_mut.deinit();
-            std.debug.print("divergence: hand-written rejected with {}, codec accepted\n", .{legacy_err});
-            return error.ReaderDivergence;
-        } else |_| {}
-    }
-}
-
-fn writeAndCompare(allocator: std.mem.Allocator, hc: *const HandlerContract) !void {
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
-    try zq.writeContractJson(hc, &aw.writer);
-    try expectReadersAgree(allocator, aw.writer.buffered());
-}
-
-fn emptyDifferentialContract(allocator: std.mem.Allocator) !HandlerContract {
-    return HandlerContract{
-        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .urls = .empty, .dynamic = false },
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-            .timers = false,
-            .signals = .{ .literal = .empty, .dynamic = false },
-            .producer_keys = .{ .literal = .empty, .dynamic = false },
-        },
-        .scope = .{ .used = false, .names = .empty, .dynamic = false, .max_depth = 0 },
-        .api = .{
-            .schemas = .empty,
-            .requests = .{ .schema_refs = .empty, .dynamic = false },
-            .auth = .{ .bearer = false, .jwt = false },
-            .routes = .empty,
-            .schemas_dynamic = false,
-            .routes_dynamic = false,
-        },
-        .verification = null,
-        .aot = null,
-        .properties = .{
-            .pure = false,
-            .read_only = true,
-            .stateless = false,
-            .retry_safe = true,
-            .deterministic = true,
-            .has_egress = false,
-        },
-    };
-}
-
-test "B1 differential: writer round-trip, populated contract" {
-    const allocator = std.testing.allocator;
-
-    var hc = try emptyDifferentialContract(allocator);
-    defer hc.deinit(allocator);
-
-    try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
-    try hc.modules.append(allocator, try allocator.dupe(u8, "zttp:crypto"));
-    hc.durable.workflow.properties.retry_safe = true;
-    hc.durable.workflow.properties.idempotent = true;
-    hc.durable.workflow.properties.fault_covered = true;
-    hc.websocket.on_open = true;
-    hc.websocket.on_message = true;
-    try hc.api.routes.append(allocator, .{
-        .method = try allocator.dupe(u8, "GET"),
-        .path = try allocator.dupe(u8, "/users"),
-        .request_schema_refs = .empty,
-        .request_schema_dynamic = false,
-        .requires_bearer = false,
-        .requires_jwt = false,
-    });
-
-    try writeAndCompare(allocator, &hc);
-}
-
-test "B1 differential: writer round-trip, route with requestSchemaRefs only" {
-    // Targets predicted divergence 1. `backfillApiRouteCollections` in the
-    // codec synthesizes request_bodies from request_schema_refs; the
-    // hand-written reader does not look at request_schema_refs at all, so it
-    // reports reads_request_state = false where the codec reports true.
-    const allocator = std.testing.allocator;
-
-    var hc = try emptyDifferentialContract(allocator);
-    defer hc.deinit(allocator);
-
-    var route: zq.handler_contract.ApiRouteInfo = .{
-        .method = try allocator.dupe(u8, "POST"),
-        .path = try allocator.dupe(u8, "/users"),
-        .request_schema_refs = .empty,
-        .request_schema_dynamic = false,
-        .requires_bearer = false,
-        .requires_jwt = false,
-    };
-    try route.request_schema_refs.append(allocator, try allocator.dupe(u8, "CreateUser"));
-    try hc.api.routes.append(allocator, route);
-
-    try writeAndCompare(allocator, &hc);
-}
-
-test "B1 differential: a no-sandbox contract must still validate" {
-    // Finding 2 and 3 of the B1 plan. The hand-written reader returns
-    // capabilities = null for a contract with no sandbox block, which makes
-    // verifyCapabilityMatrix skip. The codec cannot express "absent" and
-    // yields an empty matrix with an all-zero hash, so the check runs and
-    // fails. This test pins the requirement: both readers must produce a
-    // contract that validate() accepts.
+test "a contract with no sandbox block still validates" {
+    // A null capability matrix means "this contract makes no capability
+    // statement", which makes verifyCapabilityMatrix skip. Collapsing that
+    // into an empty matrix made the check compare the live matrix against an
+    // all-zero hash, so every pre-sandbox binary refused to serve.
     const allocator = std.testing.allocator;
     const source =
         \\{
@@ -2083,54 +1510,93 @@ test "B1 differential: a no-sandbox contract must still validate" {
         \\}
     ;
 
-    const legacy = try parseContractJson(allocator, source);
-    var legacy_validated = try validate(legacy, .{});
-    legacy_validated.deinit();
+    var raw = try parseContractJson(allocator, source);
+    try std.testing.expect(raw.rawView().capabilities == null);
 
-    const canonical = try parseContractJsonCanonical(allocator, source);
-    var canonical_validated = try validate(canonical, .{});
-    canonical_validated.deinit();
+    var validated = try validate(raw, .{});
+    defer validated.deinit();
 }
 
-test "B1 differential: malformed corpus" {
+test "the module list survives the read" {
+    // The codec dropped the top-level `modules` array entirely. The runtime
+    // derives the live capability matrix from that list, so an empty one made
+    // verifyCapabilityMatrix compare a real stored hash against the
+    // empty-set hash.
     const allocator = std.testing.allocator;
-
-    const sources = [_][]const u8{
-        "",
-        "{}",
-        "[]",
-        "not json at all",
-        \\{"version": 10, "api": {"routes": [{"path": "/x"}], "routesDynamic": false}}
-        ,
-        \\{"version": 10, "env": {"literal": ["A"], "dynamic": false}, "unknownSection": {"a": 1}}
-        ,
-        \\{"version": 10, "env": {"literal": ["A"], "dynamic": false}
-        ,
-    };
-
-    for (sources) |source| try expectReadersAgree(allocator, source);
-}
-
-test "B1 differential: the codec may reject what the hand-written reader tolerated" {
-    // B1 finding 6, accepted with the direction pinned. The hand-written
-    // reader walks a std.json.Value tree and silently skips a field whose type
-    // is wrong. The codec is a scanner, so a type mismatch desynchronizes it
-    // and the whole document is rejected.
-    //
-    // Rejecting is the safer side. The hand-written reader's silent skip
-    // produced a route table that was missing a route, and `matchesRoute`
-    // treats an empty table as "allow everything", so quiet data loss here
-    // could widen the pre-filter rather than narrow it. A contract this
-    // malformed cannot come from the writer, and the embedded artifact is
-    // hash-verified, so reaching this state already means something is wrong.
-    const allocator = std.testing.allocator;
-
     const source =
-        \\{"version": 10, "api": {"routes": [{"method": "GET", "path": 7}], "routesDynamic": false}}
+        \\{
+        \\  "version": 13,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": ["zttp:crypto", "zttp:auth"],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
     ;
 
-    var legacy = try parseContractJson(allocator, source);
-    legacy.deinit();
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
 
-    try std.testing.expectError(error.InvalidJson, parseContractJsonCanonical(allocator, source));
+    const contract = raw.rawView();
+    try std.testing.expectEqual(@as(usize, 2), contract.modules.len);
+    try std.testing.expectEqualStrings("zttp:crypto", contract.modules[0]);
+    try std.testing.expectEqualStrings("zttp:auth", contract.modules[1]);
+}
+
+test "a contract with no properties block proves nothing" {
+    // HandlerProperties defaults six flow and isolation fields to true, which
+    // is right for the analyzer that computes them and wrong for a reader.
+    // Relying on those defaults turned "asserted nothing" into "six security
+    // properties hold", and state_isolated also drives derivePoolingPolicy.
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 13,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+
+    const p = raw.rawView().properties;
+    try std.testing.expect(!p.no_secret_leakage);
+    try std.testing.expect(!p.no_credential_leakage);
+    try std.testing.expect(!p.input_validated);
+    try std.testing.expect(!p.pii_contained);
+    try std.testing.expect(!p.injection_safe);
+    try std.testing.expect(!p.state_isolated);
+}
+
+test "a route with no method never enters the route table" {
+    // matchesRoute treats an empty table as "allow everything", so a single
+    // unmatchable entry would flip the pre-filter from allow-all to
+    // reject-all.
+    const allocator = std.testing.allocator;
+    const source =
+        \\{"version": 13, "api": {"routes": [{"path": "/x"}], "routesDynamic": false}}
+    ;
+
+    var raw = try parseContractJson(allocator, source);
+    defer raw.deinit();
+
+    const contract = raw.rawView();
+    try std.testing.expectEqual(@as(usize, 0), contract.routes.len);
+    try std.testing.expect(contract.matchesRoute("GET", "/anything"));
+}
+
+test "a wrong-typed route field is rejected outright" {
+    // The scanner cannot resynchronize after a type mismatch, so the whole
+    // document is refused. That is the safe side: silently skipping the route
+    // would empty the route table and widen the pre-filter.
+    const allocator = std.testing.allocator;
+    const source =
+        \\{"version": 13, "api": {"routes": [{"method": "GET", "path": 7}], "routesDynamic": false}}
+    ;
+
+    try std.testing.expectError(error.InvalidJson, parseContractJson(allocator, source));
 }

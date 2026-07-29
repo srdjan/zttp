@@ -96,7 +96,12 @@ test "Server.start rejects a malformed present contract" {
     });
     defer srv.deinit();
 
-    try std.testing.expectError(error.SyntaxError, srv.start());
+    // The contract is now read through the shared codec, which reports
+    // error.InvalidJson where the runtime's own reader reported std.json's
+    // error.SyntaxError. The outcome is unchanged: a malformed contract is
+    // refused and the binary does not serve. Neither call site switches on the
+    // value; server.zig logs it and returns it.
+    try std.testing.expectError(error.InvalidJson, srv.start());
 }
 
 test "Server.start accepts an absent contract" {

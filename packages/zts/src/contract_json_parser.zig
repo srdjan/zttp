@@ -2912,7 +2912,12 @@ fn parseStringArray(parser: *JsonParser, allocator: std.mem.Allocator, list: *st
         parser.skipWhitespace();
 
         const val = parser.readString() orelse return error.InvalidJson;
-        try list.append(allocator, try allocator.dupe(u8, val));
+        // Stage the dupe so a failing append does not leak it. Ownership
+        // transfers to the list only on a successful append; the caller's
+        // errdefer walks the list.
+        const duped = try allocator.dupe(u8, val);
+        errdefer allocator.free(duped);
+        try list.append(allocator, duped);
     }
 }
 
