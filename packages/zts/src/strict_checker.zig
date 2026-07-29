@@ -14,6 +14,7 @@ const type_pool_mod = @import("type_pool.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 const bool_checker = @import("bool_checker.zig");
 const repair_intent_mod = @import("repair_intent.zig");
+const module_facts_mod = @import("module_facts.zig");
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
 
@@ -116,6 +117,16 @@ pub const StrictChecker = struct {
     static_literal_bindings: std.AutoHashMapUnmanaged(u32, void),
     call_counts: std.AutoHashMapUnmanaged(u32, u32),
     imported_functions: std.ArrayList(ImportedFunction),
+    /// Shared import index, injected by the orchestrator when one exists.
+    /// Borrowed; must outlive the checker. Null means build a private one.
+    ///
+    /// A private index is built with no manifest registry, so a
+    /// partner-registered module classifies as `unresolved` rather than
+    /// `partner`. That is immaterial here: this checker records every import
+    /// regardless of resolution, which is exactly why it needs the unfiltered
+    /// collection.
+    facts: ?*const module_facts_mod.ModuleFacts = null,
+    owned_facts: ?module_facts_mod.ModuleFacts = null,
     /// Sticky failure for diagnostics and profile facts used to decide which
     /// strict rules fire. The void walkers may continue, but no partial result
     /// escapes `check`.
@@ -145,6 +156,7 @@ pub const StrictChecker = struct {
     }
 
     pub fn deinit(self: *StrictChecker) void {
+        if (self.owned_facts) |*owned| owned.deinit();
         self.imported_functions.deinit(self.allocator);
         self.call_counts.deinit(self.allocator);
         self.static_literal_bindings.deinit(self.allocator);
@@ -899,7 +911,38 @@ pub const StrictChecker = struct {
         return true;
     }
 
+    /// Resolve the index to read: injected, or private on first use.
+    fn resolveFacts(self: *StrictChecker) ?*const module_facts_mod.ModuleFacts {
+        if (self.facts) |f| return f;
+        if (self.owned_facts == null) {
+            self.owned_facts = module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                null,
+            ) catch {
+                self.markAllocationFailure();
+                return null;
+            };
+        }
+        return &self.owned_facts.?;
+    }
+
+    /// Record every import, unfiltered. This checker deliberately tracks
+    /// imports from modules that are neither builtin nor partner-registered.
     fn scanImports(self: *StrictChecker) void {
+        const facts = self.resolveFacts() orelse return;
+        for (facts.imports.items) |rec| {
+            self.imported_functions.append(self.allocator, .{
+                .slot = rec.slot,
+                .module = rec.module_specifier,
+                .name = rec.imported_name,
+            }) catch self.markAllocationFailure();
+        }
+    }
+
+    /// Pre-C1 implementation, kept only for the differential test below.
+    fn scanImportsLegacy(self: *StrictChecker) void {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx| {
             const node: NodeIndex = @intCast(idx);
@@ -1670,4 +1713,73 @@ test "canonical_unused_index_alias diagnostic carries repair_intent" {
         }
     }
     try testing.expect(saw);
+}
+
+const import_corpus = @import("tests/import_corpus.zig");
+
+test "the facts-backed import scan derives the same list as the legacy scan" {
+    // Differential evidence for item 4 C1. Unlike effect_inference this derives
+    // an ordered list, so order is part of equivalence: `imports` is in node
+    // order then specifier order, which is what the legacy walk produced.
+    const allocator = std.testing.allocator;
+
+    for (import_corpus.cases) |case| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+        defer parser.deinit();
+        var atoms = context.AtomTable.init(allocator);
+        defer atoms.deinit();
+        parser.setAtomTable(&atoms);
+        _ = try parser.parse();
+        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+        var legacy = StrictChecker.init(allocator, ir_view, &atoms, null, null);
+        defer legacy.deinit();
+        legacy.scanImportsLegacy();
+
+        var migrated = StrictChecker.init(allocator, ir_view, &atoms, null, null);
+        defer migrated.deinit();
+        migrated.scanImports();
+
+        std.testing.expectEqual(legacy.imported_functions.items.len, migrated.imported_functions.items.len) catch |err| {
+            std.debug.print("\ncorpus case \"{s}\": legacy has {d} entries, migrated has {d}\n", .{
+                case.label, legacy.imported_functions.items.len, migrated.imported_functions.items.len,
+            });
+            return err;
+        };
+
+        for (legacy.imported_functions.items, migrated.imported_functions.items, 0..) |want, got, i| {
+            if (want.slot != got.slot or
+                !std.mem.eql(u8, want.module, got.module) or
+                !std.mem.eql(u8, want.name, got.name))
+            {
+                std.debug.print("\ncorpus case \"{s}\" entry {d}: was slot {d} {s}.{s}, now slot {d} {s}.{s}\n", .{
+                    case.label, i, want.slot, want.module, want.name, got.slot, got.module, got.name,
+                });
+                return error.EntryChanged;
+            }
+        }
+    }
+}
+
+test "this checker records imports from unresolved modules" {
+    // The filter difference that must survive the migration. See the same test
+    // in effect_inference.zig; the other four analyzers record builtins only.
+    const allocator = std.testing.allocator;
+    const source = "import { thing } from \"zttp-ext:unknown\";\n";
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var checker = StrictChecker.init(allocator, ir_view, &atoms, null, null);
+    defer checker.deinit();
+    checker.scanImports();
+
+    try std.testing.expectEqual(@as(usize, 1), checker.imported_functions.items.len);
+    try std.testing.expectEqualStrings("zttp-ext:unknown", checker.imported_functions.items[0].module);
+    try std.testing.expectEqualStrings("thing", checker.imported_functions.items[0].name);
 }
