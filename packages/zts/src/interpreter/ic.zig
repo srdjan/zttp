@@ -8,7 +8,6 @@
 
 const std = @import("std");
 const object = @import("../object.zig");
-const type_feedback = @import("../type_feedback.zig");
 const env_cache = @import("env_cache.zig");
 
 var pic_mega_recovery_window_cache: ?u16 = null;
@@ -39,18 +38,13 @@ pub const PICEntry = struct {
 /// while keeping memory overhead reasonable per IC site
 pub const PIC_ENTRIES = 8;
 
-/// When true, cap the number of distinct shapes the PIC caches at
-/// `type_feedback.MAX_POLYMORPHIC_SHAPES` so that PIC and the upstream
-/// type-feedback layer agree on what counts as megamorphic. The underlying
-/// `entries` array stays at PIC_ENTRIES to preserve memory layout and the
-/// JIT's inline PIC_CHECK_COUNT assumptions. Flip to false for reversion.
-pub const pic_entries_tracks_feedback = true;
-
-/// Effective cap on distinct shapes the PIC will cache before going megamorphic.
-pub const effective_pic_cap: u8 = if (pic_entries_tracks_feedback)
-    type_feedback.MAX_POLYMORPHIC_SHAPES
-else
-    PIC_ENTRIES;
+/// Cap on distinct shapes the PIC caches before treating a site as megamorphic.
+/// The `entries` array stays at PIC_ENTRIES to preserve memory layout.
+///
+/// This was `type_feedback.MAX_POLYMORPHIC_SHAPES` (4) until the JIT was
+/// removed; the value is inlined here because the PIC is an interpreter
+/// feature and no longer has an upstream feedback layer to agree with.
+pub const effective_pic_cap: u8 = 4;
 
 /// Polymorphic Inline Cache for property access optimization
 /// Caches up to `effective_pic_cap` (hidden_class, slot_offset) pairs per access site

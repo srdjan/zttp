@@ -37,11 +37,8 @@ pub const RuntimeConfig = struct {
     use_hybrid_allocation: bool = true,
     arena_size: usize = 1024 * 1024,
     enforce_arena_escape: bool = true,
-    jit_policy: ?zq.interpreter.JitPolicy = null,
-    jit_threshold: ?u32 = null,
     /// Soft cap for native JIT code bytes per runtime context. 0 disables
     /// native-code eviction.
-    jit_code_max_bytes: usize = 16 * 1024 * 1024,
     outbound_http_enabled: bool = false,
     outbound_allow_host: ?[]const u8 = null,
     outbound_max_response_bytes: usize = 1024 * 1024,
@@ -184,21 +181,6 @@ pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.he
             h.setMemoryLimit(config.memory_limit);
         }
     }
-
-    if (config.jit_policy) |policy| {
-        zq.interpreter.setJitPolicy(policy);
-    }
-    if (config.jit_threshold) |threshold| {
-        zq.interpreter.setJitThreshold(threshold);
-    }
-    ctx.setJitCodeMaxBytes(config.jit_code_max_bytes);
-
-    // Durable execution must stay on the interpreter tier: the JIT loses the
-    // suspend (jitCall swallows error.DurableSuspended into a sentinel and runs
-    // on), so a hot durable handler would 500 instead of suspending and could
-    // fire side effects past a suspend point. Inhibit JIT for the whole context
-    // when a durable oplog is configured (the server runs in one mode).
-    ctx.jit_inhibited = config.durable_oplog_dir != null;
 }
 
 pub fn applyEmbeddedCapabilityPolicy(ctx: *zq.Context, config: RuntimeConfig) void {

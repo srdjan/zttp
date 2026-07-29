@@ -200,14 +200,14 @@ test "SystemRuntime dispatches a request to a named co-located handler in-proces
         "payments",
         "function handler(req) { return Response.json({ from: 'payments' }); }",
         "<payments>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
     try sys.addHandler(
         "orders",
         "function handler(req) { return Response.json({ from: 'orders' }); }",
         "<orders>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -244,7 +244,7 @@ test "workflow.call dispatches to a co-located sub-handler and copies out its re
         "greeter",
         "function handler(req) { return Response.json({ hello: req.method, at: req.url }); }",
         "<greeter>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -258,7 +258,7 @@ test "workflow.call dispatches to a co-located sub-handler and copies out its re
     ;
     var orch = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        .{ .system_registry = @ptrCast(&sys) },
         orchestrator_src,
         "<orchestrator>",
         1,
@@ -293,7 +293,7 @@ test "workflow.call to an unknown handler fails soft as a 599 error response" {
         "greeter",
         "function handler(req) { return Response.json({ ok: true }); }",
         "<greeter>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -308,7 +308,7 @@ test "workflow.call to an unknown handler fails soft as a 599 error response" {
     ;
     var orch = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        .{ .system_registry = @ptrCast(&sys) },
         orchestrator_src,
         "<orchestrator>",
         1,
@@ -352,14 +352,14 @@ test "workflow.follow routes a resolved affordance href to a co-located handler 
         "payments",
         "function handler(req) { return Response.json({ from: 'payments', at: req.url }); }",
         "<payments>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
     try sys.addHandler(
         "orders",
         "function handler(req) { return Response.json({ from: 'orders' }); }",
         "<orders>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -376,7 +376,7 @@ test "workflow.follow routes a resolved affordance href to a co-located handler 
     ;
     var orch = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        .{ .system_registry = @ptrCast(&sys) },
         orchestrator_src,
         "<orchestrator>",
         1,
@@ -405,7 +405,7 @@ test "workflow.follow routes hrefs by path while preserving parsed query" {
         "greet",
         "function handler(req) { return Response.json({ path: req.path, url: req.url, lang: req.query.lang }); }",
         "<greet>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -418,7 +418,7 @@ test "workflow.follow routes hrefs by path while preserving parsed query" {
         \\  return follow(r, "hello");
         \\}
     ;
-    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    var orch = try HandlerPool.init(allocator, .{ .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
     defer orch.deinit();
 
     var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
@@ -443,7 +443,7 @@ test "workflow.follow to an unmounted href fails soft as a 599" {
         "payments",
         "function handler(req) { return Response.json({ ok: true }); }",
         "<payments>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -456,7 +456,7 @@ test "workflow.follow to an unmounted href fails soft as a 599" {
     ;
     var orch = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        .{ .system_registry = @ptrCast(&sys) },
         orchestrator_src,
         "<orchestrator>",
         1,
@@ -483,7 +483,7 @@ test "workflow.follow on a missing affordance rel fails soft as a 599" {
         "payments",
         "function handler(req) { return Response.json({ ok: true }); }",
         "<payments>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -496,7 +496,7 @@ test "workflow.follow on a missing affordance rel fails soft as a 599" {
     ;
     var orch = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) },
+        .{ .system_registry = @ptrCast(&sys) },
         orchestrator_src,
         "<orchestrator>",
         1,
@@ -523,7 +523,7 @@ test "workflow.follow substitutes {param} from init.params before dispatch" {
         "orders",
         "function handler(req) { return Response.json({ from: 'orders', at: req.url }); }",
         "<orders>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -536,7 +536,7 @@ test "workflow.follow substitutes {param} from init.params before dispatch" {
         \\  return follow(r, "item", { params: { id: "42" } });
         \\}
     ;
-    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    var orch = try HandlerPool.init(allocator, .{ .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
     defer orch.deinit();
 
     var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
@@ -560,7 +560,7 @@ test "workflow.follow percent-encodes templated params before dispatch" {
         "orders",
         "function handler(req) { return Response.json({ at: req.url, path: req.path }); }",
         "<orders>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -571,7 +571,7 @@ test "workflow.follow percent-encodes templated params before dispatch" {
         \\  return follow(r, "item", { params: { id: "42/refund?admin=1#frag" } });
         \\}
     ;
-    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    var orch = try HandlerPool.init(allocator, .{ .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
     defer orch.deinit();
 
     var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
@@ -595,7 +595,7 @@ test "workflow.follow on a templated href with no params fails soft as a 599" {
         "orders",
         "function handler(req) { return Response.json({ ok: true }); }",
         "<orders>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -606,7 +606,7 @@ test "workflow.follow on a templated href with no params fails soft as a 599" {
         \\  return follow(r, "item");
         \\}
     ;
-    var orch = try HandlerPool.init(allocator, .{ .jit_policy = .disabled, .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
+    var orch = try HandlerPool.init(allocator, .{ .system_registry = @ptrCast(&sys) }, orchestrator_src, "<orchestrator>", 1, 0);
     defer orch.deinit();
 
     var headers: std.ArrayListUnmanaged(http_types.HttpHeader) = .empty;
@@ -650,7 +650,7 @@ test "buildFromSystemConfig fails when a handler source file is unreadable" {
 
     try std.testing.expectError(
         error.FileNotFound,
-        SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1),
+        SystemRuntime.buildFromSystemConfig(allocator, system_path, .{}, 1),
     );
 }
 
@@ -681,7 +681,7 @@ test "buildFromSystemConfig resolves handler paths relative to the manifest" {
     defer allocator.free(system_path);
     try zq.file_io.writeFile(allocator, system_path, manifest);
 
-    var sys = try SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1);
+    var sys = try SystemRuntime.buildFromSystemConfig(allocator, system_path, .{}, 1);
     defer sys.deinit();
 
     try std.testing.expectEqual(@as(usize, 1), sys.targets.items.len);
@@ -732,7 +732,6 @@ test "buildFromSystemConfig applies each target's contract-derived egress policy
         allocator,
         system_path,
         .{
-            .jit_policy = .disabled,
             .outbound_http_enabled = true,
             .dev_capability_policy = .{
                 .egress = .{ .enabled = true, .values = &[_][]const u8{"localhost"} },
@@ -803,7 +802,6 @@ test "buildFromSystemConfig includes imported capabilities in each target policy
         allocator,
         system_path,
         .{
-            .jit_policy = .disabled,
             .outbound_http_enabled = true,
             .dev_capability_policy = .{
                 .egress = .{ .enabled = true, .values = &[_][]const u8{"denied.example"} },
@@ -847,6 +845,6 @@ test "buildFromSystemConfig rejects a target whose contract cannot compile" {
 
     try std.testing.expectError(
         error.UnexpectedToken,
-        SystemRuntime.buildFromSystemConfig(allocator, system_path, .{ .jit_policy = .disabled }, 1),
+        SystemRuntime.buildFromSystemConfig(allocator, system_path, .{}, 1),
     );
 }

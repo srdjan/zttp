@@ -5,7 +5,6 @@
 const std = @import("std");
 const compat = @import("compat.zig");
 const value = @import("value.zig");
-const type_feedback = @import("type_feedback.zig");
 const object = @import("object.zig");
 
 /// Bytecode file magic number ("ZQJS")
@@ -430,13 +429,6 @@ pub const UpvalueInfo = struct {
     index: u8, // Index in parent's locals or upvalues array
 };
 
-/// Compilation tier for JIT profiling (Phase 11)
-pub const CompilationTier = enum(u8) {
-    interpreted, // Running in bytecode interpreter
-    baseline_candidate, // Hit threshold, queued for baseline compilation
-    baseline, // Simple native code (dispatch elimination)
-};
-
 /// Call count threshold before a function becomes a JIT candidate
 pub const JIT_THRESHOLD: u32 = 100;
 
@@ -499,47 +491,9 @@ pub const FunctionBytecode = struct {
     source_map: ?[]const u8,
     line_table: ?[]const LineEntry = null,
 
-    // JIT profiling fields (Phase 11)
-    execution_count: u32 = 0, // Incremented on each call
-    backedge_count: u32 = 0, // Loop back-edge counter for hot loop detection
-    tier: CompilationTier = .interpreted,
-    compiled_code: ?*anyopaque = null, // Pointer to CompiledCode when JIT'd
-
-    // Tiering deopt-storm suppression (Phase 6)
-    // Saturating count of deopts this function has incurred; paired with the
-    // exec_count at which the most recent deopt landed. Used by
-    // type_feedback.InliningPolicy.shouldSuppressOnDeoptStorm().
-    deopt_count: u16 = 0,
-    last_deopt_exec_count: u32 = 0,
-
-    // Unique identifier for JIT guard fast path
-    // Enables single 64-bit comparison instead of multiple field checks
-    guard_id: u64 = 0,
-
-    // Type feedback for speculative optimization (Phase 12)
-    type_feedback_ptr: ?*type_feedback.TypeFeedback = null,
-    feedback_site_map: ?[]u16 = null, // bytecode_offset -> site_index
-
     // HTTP handler fast path (native dispatch)
     pattern_dispatch: ?*PatternDispatchTable = null,
     handler_flags: HandlerFlags = .{},
-
-    /// Get the type feedback vector if allocated
-    pub fn getTypeFeedback(self: *const FunctionBytecode) ?*type_feedback.TypeFeedback {
-        return self.type_feedback_ptr;
-    }
-
-    /// Set the type feedback vector
-    pub fn setTypeFeedback(self: *FunctionBytecode, tf: *type_feedback.TypeFeedback) void {
-        self.type_feedback_ptr = tf;
-    }
-
-    /// Initialize guard_id if not already set
-    pub fn ensureGuardId(self: *FunctionBytecode) void {
-        if (self.guard_id == 0) {
-            self.guard_id = nextGuardId();
-        }
-    }
 };
 
 pub const FunctionFlags = packed struct(u8) {
@@ -948,30 +902,6 @@ test "nextGuardId carries INT_PREFIX so the GC cannot mark the slot as a heap po
         try std.testing.expect(!seen.contains(id));
         try seen.put(id, {});
     }
-}
-
-test "guard_id stored in FUNC_GUARD_ID slot is GC-safe under isPtr" {
-    // End-to-end check: take a fresh FunctionBytecode, run the same path
-    // that `object.zig:createBytecodeFunction` and `createClosure` use to
-    // populate the slot, and confirm the resulting JSValue.raw is not
-    // pointer-typed from the GC's perspective.
-    var bc = FunctionBytecode{
-        .header = .{},
-        .name_atom = 0,
-        .arg_count = 0,
-        .local_count = 0,
-        .stack_size = 0,
-        .flags = .{},
-        .code = &.{},
-        .constants = &.{},
-        .source_map = null,
-        .line_table = null,
-    };
-    bc.ensureGuardId();
-
-    const slot_value: value.JSValue = .{ .raw = bc.guard_id };
-    try std.testing.expect(!slot_value.isPtr());
-    try std.testing.expect(!slot_value.isExternPtr());
 }
 
 test "FunctionBytecodeCompact creation and access" {

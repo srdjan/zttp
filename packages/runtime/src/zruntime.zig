@@ -171,7 +171,6 @@ pub const Runtime = struct {
     heap: *zq.heap.Heap,
     interpreter: zq.Interpreter,
     last_opt_stats: zq.OptStats,
-    last_feedback_summary: zq.type_feedback.FeedbackSummary,
     strings: *zq.StringTable,
     owned_strings: ?zq.StringTable,
     handler_atom: ?zq.Atom,
@@ -199,7 +198,6 @@ pub const Runtime = struct {
     active_request: ?HttpRequestView,
     active_durable_run: ?ActiveDurableRun,
     pending_durable_recovery: ?PendingDurableRecovery,
-    request_deadline_jit_inhibited_prev: ?bool = null,
     // Hybrid allocation support
     arena_state: ?*zq.arena.Arena,
     hybrid_state: ?*zq.arena.HybridAllocator,
@@ -344,7 +342,6 @@ pub const Runtime = struct {
             .heap = heap_state,
             .interpreter = interp,
             .last_opt_stats = .{},
-            .last_feedback_summary = .{},
             .strings = undefined,
             .owned_strings = zq.StringTable.init(allocator),
             .handler_atom = null,
@@ -369,7 +366,6 @@ pub const Runtime = struct {
             .active_request = null,
             .active_durable_run = null,
             .pending_durable_recovery = null,
-            .request_deadline_jit_inhibited_prev = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
             .ws_pool_ref = null,
@@ -412,7 +408,6 @@ pub const Runtime = struct {
             .heap = pool_rt.heap_state,
             .interpreter = interp,
             .last_opt_stats = .{},
-            .last_feedback_summary = .{},
             .strings = &pool_rt.strings,
             .owned_strings = null,
             .handler_atom = null,
@@ -437,7 +432,6 @@ pub const Runtime = struct {
             .active_request = null,
             .active_durable_run = null,
             .pending_durable_recovery = null,
-            .request_deadline_jit_inhibited_prev = null,
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
@@ -1107,17 +1101,6 @@ pub const Runtime = struct {
         });
     }
 
-    fn summarizeFeedbackRecursive(summary: *zq.type_feedback.FeedbackSummary, func: *const zq.FunctionBytecode) void {
-        if (func.getTypeFeedback()) |tf| {
-            summary.merge(tf.summary());
-        }
-        for (func.constants) |constant| {
-            if (constant.isExternPtr()) {
-                summarizeFeedbackRecursive(summary, constant.toExternPtr(zq.FunctionBytecode));
-            }
-        }
-    }
-
     fn verifyBytecodeRecursive(func: *const zq.FunctionBytecode) !void {
         const verify_result = zq.BytecodeVerifier.verify(func);
         if (!verify_result.valid) {
@@ -1143,10 +1126,8 @@ pub const Runtime = struct {
         return constant.toExternPtr(zq.FunctionBytecode);
     }
 
-    fn captureCompilationStats(self: *Self, parser: *const zq.Parser, func: *const zq.FunctionBytecode) void {
+    fn captureCompilationStats(self: *Self, parser: *const zq.Parser) void {
         self.last_opt_stats = if (parser.code_gen) |cg| cg.getOptStats() else .{};
-        self.last_feedback_summary = .{};
-        summarizeFeedbackRecursive(&self.last_feedback_summary, func);
     }
 
     /// Load and compile JavaScript code
@@ -1172,7 +1153,6 @@ pub const Runtime = struct {
 
     fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8, refresh_handler: bool) !?[]const u8 {
         self.last_opt_stats = .{};
-        self.last_feedback_summary = .{};
         self.interpreter.resetProfilingCounters();
         var source_to_parse: []const u8 = code;
         var strip_result: ?zq.StripResult = null;
@@ -1321,7 +1301,7 @@ pub const Runtime = struct {
 
         // Execute the compiled code to define functions
         _ = try self.interpreter.run(&func);
-        self.captureCompilationStats(&p, &func);
+        self.captureCompilationStats(&p);
         if (refresh_handler) {
             try self.refreshHandlerCache();
         }
@@ -1374,7 +1354,6 @@ pub const Runtime = struct {
 
     fn loadFromCachedBytecodeImpl(self: *Self, cached_data: []const u8, refresh_handler: bool) !void {
         self.last_opt_stats = .{};
-        self.last_feedback_summary = .{};
         self.interpreter.resetProfilingCounters();
         var reader = bytecode_cache.SliceReader{ .data = cached_data };
 
@@ -1416,7 +1395,6 @@ pub const Runtime = struct {
 
         // Execute the deserialized bytecode
         _ = try self.interpreter.run(result.func);
-        summarizeFeedbackRecursive(&self.last_feedback_summary, result.func);
         if (refresh_handler) {
             try self.refreshHandlerCache();
         }
@@ -1449,20 +1427,12 @@ pub const Runtime = struct {
         if (ms == 0) return;
         const now = compat.monotonicNowNs() catch return;
         self.ctx.deadline_ns = now + @as(u64, ms) * std.time.ns_per_ms;
-        if (self.request_deadline_jit_inhibited_prev == null) {
-            self.request_deadline_jit_inhibited_prev = self.ctx.jit_inhibited;
-            self.ctx.jit_inhibited = true;
-        }
     }
 
     /// Clear the per-request execution deadline and interrupt flag.
     pub fn clearRequestDeadline(self: *Self) void {
         self.ctx.deadline_ns = 0;
         self.ctx.interrupt_requested.store(false, .monotonic);
-        if (self.request_deadline_jit_inhibited_prev) |prev| {
-            self.ctx.jit_inhibited = prev;
-            self.request_deadline_jit_inhibited_prev = null;
-        }
     }
 
     /// Execute the handler function with a request
@@ -2757,7 +2727,6 @@ test "zttp:queue sends receives and acks JSON payloads" {
     defer queue.deinit();
 
     const rt = try Runtime.init(allocator, .{
-        .jit_policy = .disabled,
         .queue_system = @ptrCast(&queue),
         .queue_actor_name = "main",
     });
@@ -3122,7 +3091,7 @@ test "runtime type fault is preserved as HandlerTypeFault for proof-explained 50
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try Runtime.init(allocator, .{ .jit_policy = .disabled });
+    const rt = try Runtime.init(allocator, .{});
     defer rt.deinit();
 
     // `o.missing` is undefined at runtime; calling it raises NotCallable in the
@@ -3144,7 +3113,7 @@ test "non-Response return 500 is proof-explained against exhaustive_returns" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try Runtime.init(allocator, .{ .jit_policy = .disabled });
+    const rt = try Runtime.init(allocator, .{});
     defer rt.deinit();
 
     // Returns a primitive, not a Response -> extractResponseInternal's Path B
@@ -3177,7 +3146,6 @@ test "soundness incident on a proven path is written to the incident log" {
     // handler_proof claims both guarding chips proven, so a runtime type fault is
     // a soundness incident that must be recorded to the log.
     const rt = try Runtime.init(allocator, .{
-        .jit_policy = .disabled,
         .handler_proof = .{ .optional_safe = true, .result_safe = true },
         .incident_log_fd = fd,
     });
@@ -3210,7 +3178,6 @@ test "exceeding a constant cost ceiling records a soundness incident" {
     defer std.Io.Threaded.closeFd(fd);
 
     const rt = try Runtime.init(allocator, .{
-        .jit_policy = .disabled,
         .incident_log_fd = fd,
         .cost_ceilings = .{
             .total = 1,
@@ -3257,7 +3224,6 @@ test "requests within the ceiling record no incident" {
     defer std.Io.Threaded.closeFd(fd);
 
     const rt = try Runtime.init(allocator, .{
-        .jit_policy = .disabled,
         .incident_log_fd = fd,
         .cost_ceilings = .{
             .total = 2,
@@ -3299,7 +3265,6 @@ test "cost meter resets between pooled requests" {
     defer std.Io.Threaded.closeFd(fd);
 
     const rt = try Runtime.init(allocator, .{
-        .jit_policy = .disabled,
         .incident_log_fd = fd,
         .cost_ceilings = .{
             .total = 1,
@@ -3522,7 +3487,7 @@ test "workflow.call inside durable run replays a completed step from cache (no r
         "greet",
         "function handler(req) { return Response.json({ cached: false }); }",
         "<greet>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -3571,7 +3536,7 @@ test "workflow.call inside durable run records its dispatch as a durable step" {
         "greet",
         "function handler(req) { return Response.json({ from: 'greet' }); }",
         "<greet>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -3631,7 +3596,7 @@ test "workflow.call queue mode persists child result before durable step result"
         "greet",
         "function handler(req) { return Response.json({ from: 'greet', method: req.method, body: req.body, trace: req.headers.get('x-trace') }); }",
         "<greet>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -3690,7 +3655,7 @@ test "workflow-queue dead letter suspends the parent, and replay resolves it" {
         "greet",
         "function handler(req) { return Response.json({ from: 'greet' }); }",
         "<greet>",
-        .{ .jit_policy = .disabled },
+        .{},
         1,
     );
 
@@ -3976,9 +3941,9 @@ test "workflow.fanout returns sub-handler responses in declaration order" {
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
-    try sys.addHandler("a", "function handler(req) { return Response.json({ who: 'a' }); }", "<a>", .{ .jit_policy = .disabled }, 1);
-    try sys.addHandler("b", "function handler(req) { return Response.json({ who: 'b' }); }", "<b>", .{ .jit_policy = .disabled }, 1);
-    try sys.addHandler("c", "function handler(req) { return Response.json({ who: 'c' }); }", "<c>", .{ .jit_policy = .disabled }, 1);
+    try sys.addHandler("a", "function handler(req) { return Response.json({ who: 'a' }); }", "<a>", .{}, 1);
+    try sys.addHandler("b", "function handler(req) { return Response.json({ who: 'b' }); }", "<b>", .{}, 1);
+    try sys.addHandler("c", "function handler(req) { return Response.json({ who: 'c' }); }", "<c>", .{}, 1);
 
     const rt = try Runtime.init(allocator, .{ .system_registry = @ptrCast(&sys) });
     defer rt.deinit();
@@ -4015,8 +3980,8 @@ test "workflow.fanout records the whole fan-out as one durable step" {
 
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
-    try sys.addHandler("a", "function handler(req) { return Response.json({ who: 'a' }); }", "<a>", .{ .jit_policy = .disabled }, 1);
-    try sys.addHandler("b", "function handler(req) { return Response.json({ who: 'b' }); }", "<b>", .{ .jit_policy = .disabled }, 1);
+    try sys.addHandler("a", "function handler(req) { return Response.json({ who: 'a' }); }", "<a>", .{}, 1);
+    try sys.addHandler("b", "function handler(req) { return Response.json({ who: 'b' }); }", "<b>", .{}, 1);
 
     const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir, .system_registry = @ptrCast(&sys) });
     defer rt.deinit();
@@ -4071,8 +4036,8 @@ test "workflow.fanout replays its aggregate from cache without re-dispatching" {
     // Live sub-handlers would return "live-*" if (wrongly) re-dispatched.
     var sys = SystemRuntime.init(allocator);
     defer sys.deinit();
-    try sys.addHandler("a", "function handler(req) { return Response.json({ v: 'live-a' }); }", "<a>", .{ .jit_policy = .disabled }, 1);
-    try sys.addHandler("b", "function handler(req) { return Response.json({ v: 'live-b' }); }", "<b>", .{ .jit_policy = .disabled }, 1);
+    try sys.addHandler("a", "function handler(req) { return Response.json({ v: 'live-a' }); }", "<a>", .{}, 1);
+    try sys.addHandler("b", "function handler(req) { return Response.json({ v: 'live-b' }); }", "<b>", .{}, 1);
 
     const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir, .system_registry = @ptrCast(&sys) });
     defer rt.deinit();
@@ -4142,71 +4107,6 @@ test "durable sleepUntil returns pending response without duplicating wait" {
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"type\":\"wait_timer\""));
     try std.testing.expectEqual(@as(usize, 0), std.mem.count(u8, source, "\"type\":\"resume_timer\""));
-}
-
-// A durable run() callback that suspends must keep suspending correctly even when
-// it gets hot enough to JIT-compile. The JIT signals a fault by setting
-// ctx.exception and returning a sentinel; jitCall swallows the durable runtime's
-// error.DurableSuspended into that sentinel, so a JIT-compiled suspending callback
-// loses the suspend (durableRun's catch never sees DurableSuspended) and the
-// request errors out instead of returning the 202 pending response. Worse, the
-// compiled callback runs its opcodes PAST the suspend point (side effects that
-// must wait). The fix keeps durable execution on the interpreter tier (the JIT is
-// inhibited when the runtime is durable), where suspend is exact. This test forces
-// eager compilation and drives the callback well past the compile threshold with
-// distinct keys; every request must still return the timer-pending 202.
-test "durable suspend survives JIT promotion of the run() callback" {
-    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null or std.c.getenv("ZTS_DISABLE_JIT") != null) {
-        return error.SkipZigTest;
-    }
-
-    const prev_policy = zq.interpreter.getJitPolicy();
-    const prev_threshold = zq.interpreter.getJitThreshold();
-    const prev_warmup = zq.interpreter.getJitFeedbackWarmup();
-    defer {
-        zq.interpreter.setJitPolicy(prev_policy);
-        zq.interpreter.setJitThreshold(prev_threshold);
-        zq.interpreter.setJitFeedbackWarmup(prev_warmup);
-    }
-    zq.interpreter.setJitPolicy(.eager);
-    zq.interpreter.setJitThreshold(1);
-    zq.interpreter.setJitFeedbackWarmup(1);
-
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var tmp_dir = std.testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
-    const durable_dir = try durableTestDirPath(allocator, &tmp_dir);
-
-    const rt = try Runtime.init(allocator, .{ .durable_oplog_dir = durable_dir });
-    defer rt.deinit();
-
-    // Distinct key per request (req.url) so the callback genuinely executes and
-    // suspends every time (no replay dedup) - that accumulates the profile counts
-    // that promote its shared bytecode to the baseline JIT.
-    const handler_code =
-        \\import { run, sleepUntil } from "zttp:durable";
-        \\function handler(req) {
-        \\  return run(req.url, () => {
-        \\    sleepUntil(4102444800000);
-        \\    return Response.json({ ok: true });
-        \\  });
-        \\}
-    ;
-    try rt.loadHandler(handler_code, "<durable-jit-suspend>");
-
-    var i: usize = 0;
-    while (i < 16) : (i += 1) {
-        const path = try std.fmt.allocPrint(allocator, "/k{d}", .{i});
-        var request = try makeTestRequest(allocator, "GET", path, null);
-        defer request.deinit(allocator);
-        var response = try rt.executeHandler(request.asView());
-        defer response.deinit();
-        try std.testing.expectEqual(@as(u16, 202), response.status);
-        try std.testing.expect(std.mem.indexOf(u8, response.body, "\"type\":\"timer\"") != null);
-    }
 }
 
 test "durable waitSignal resumes from queued signal" {
@@ -6094,7 +5994,7 @@ test "Runtime rejects malformed cached bytecode before execution" {
     );
 }
 
-test "request deadline temporarily inhibits JIT" {
+test "request deadline arms and clears" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -6102,19 +6002,10 @@ test "request deadline temporarily inhibits JIT" {
     var rt = try Runtime.init(allocator, .{ .request_timeout_ms = 50 });
     defer rt.deinit();
 
-    try std.testing.expect(!rt.ctx.jit_inhibited);
     rt.armRequestDeadline();
     try std.testing.expect(rt.ctx.deadline_ns != 0);
-    try std.testing.expect(rt.ctx.jit_inhibited);
     rt.clearRequestDeadline();
     try std.testing.expectEqual(@as(u64, 0), rt.ctx.deadline_ns);
-    try std.testing.expect(!rt.ctx.jit_inhibited);
-
-    rt.ctx.jit_inhibited = true;
-    rt.armRequestDeadline();
-    try std.testing.expect(rt.ctx.jit_inhibited);
-    rt.clearRequestDeadline();
-    try std.testing.expect(rt.ctx.jit_inhibited);
 }
 
 test "Runtime rejects malformed nested cached bytecode before execution" {
@@ -6244,78 +6135,6 @@ test "AOT override fallback and success" {
     var aot_response = try rt.executeHandler(request.asView());
     defer aot_response.deinit();
     try std.testing.expectEqualStrings("{\"ok\":true}", aot_response.body);
-}
-
-test "HandlerPool concurrent stress" {
-    // Expensive opt-in stress test. Stable on Zig 0.16.0 (5/5 runs).
-    // Run explicitly with: ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
-    if (std.c.getenv("ZTS_RUN_STRESS_TESTS") == null) return error.SkipZigTest;
-
-    const allocator = std.heap.c_allocator;
-
-    // Allow disabling JIT for this test via env var during debugging.
-    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
-        zq.interpreter.disableJitForTests();
-    }
-
-    const handler_code = "function handler(req) { return Response.text('ok'); }";
-    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8, 0);
-    defer pool.deinit();
-
-    const thread_count: usize = 8;
-    const iterations: usize = 200;
-
-    var errors = std.atomic.Value(u32).init(0);
-
-    const ThreadCtx = struct {
-        pool: *HandlerPool,
-        allocator: std.mem.Allocator,
-        errors: *std.atomic.Value(u32),
-    };
-
-    const Worker = struct {
-        fn run(ctx: *ThreadCtx) void {
-            const method = ctx.allocator.dupe(u8, "GET") catch {
-                _ = ctx.errors.fetchAdd(1, .acq_rel);
-                return;
-            };
-            const url = ctx.allocator.dupe(u8, "/") catch {
-                ctx.allocator.free(method);
-                _ = ctx.errors.fetchAdd(1, .acq_rel);
-                return;
-            };
-            var request = HttpRequestOwned{
-                .method = method,
-                .url = url,
-                .headers = .empty,
-                .body = null,
-            };
-            defer request.deinit(ctx.allocator);
-
-            var i: usize = 0;
-            while (i < iterations) : (i += 1) {
-                var response = ctx.pool.executeHandler(request.asView()) catch {
-                    _ = ctx.errors.fetchAdd(1, .acq_rel);
-                    continue;
-                };
-                response.deinit();
-            }
-        }
-    };
-
-    var threads: [thread_count]std.Thread = undefined;
-    var contexts: [thread_count]ThreadCtx = undefined;
-    for (0..thread_count) |i| {
-        contexts[i] = .{
-            .pool = &pool,
-            .allocator = allocator,
-            .errors = &errors,
-        };
-        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
-    }
-    for (threads) |t| t.join();
-
-    try std.testing.expectEqual(@as(u32, 0), errors.load(.acquire));
 }
 
 test "string prototype methods are callable" {
@@ -6852,46 +6671,6 @@ test "HandlerPool does not leak request data across pooled requests" {
     }
 }
 
-test "JIT object literal overflow slots remain valid" {
-    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null or std.c.getenv("ZTS_DISABLE_JIT") != null) {
-        return error.SkipZigTest;
-    }
-
-    const prev_policy = zq.interpreter.getJitPolicy();
-    const prev_threshold = zq.interpreter.getJitThreshold();
-    const prev_warmup = zq.interpreter.getJitFeedbackWarmup();
-    defer {
-        zq.interpreter.setJitPolicy(prev_policy);
-        zq.interpreter.setJitThreshold(prev_threshold);
-        zq.interpreter.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    zq.interpreter.setJitPolicy(.eager);
-    zq.interpreter.setJitThreshold(1);
-    zq.interpreter.setJitFeedbackWarmup(1);
-
-    const allocator = std.heap.c_allocator;
-    const script =
-        \\function handler(req) { return Response.text('ok'); }
-        \\function run(seed) {
-        \\  const obj = { p0: 1, p1: 2, p2: 3, p3: 4, p4: 5, p5: 6, p6: 7, p7: 8, p8: 9 };
-        \\  return obj.p8;
-        \\}
-    ;
-
-    const rt = try Runtime.init(allocator, .{});
-    defer rt.deinit();
-    try rt.loadCode(script, "<jit-overflow-slots>");
-
-    var i: usize = 0;
-    while (i < 64) : (i += 1) {
-        const args = [_]zq.JSValue{zq.JSValue.fromInt(@intCast(i))};
-        const result = try rt.callGlobalFunction("run", &args);
-        try std.testing.expect(result.isInt());
-        try std.testing.expectEqual(@as(i32, 9), result.getInt());
-    }
-}
-
 test "loadCodeNoHandler supports benchmark-style scripts" {
     const allocator = std.heap.c_allocator;
 
@@ -6909,7 +6688,6 @@ test "loadCodeNoHandler supports benchmark-style scripts" {
     const result = try rt.callGlobalFunction("run", &args);
     try std.testing.expect(result.isInt());
     try std.testing.expectEqual(@as(i32, 11), result.getInt());
-    try std.testing.expectEqual(@as(u32, 0), rt.interpreter.snapshotPerfStats().deopt_count);
 }
 
 test "loadCodeNoHandler supports imported benchmark-style scripts" {
@@ -6951,87 +6729,6 @@ test "loadCodeNoHandler supports imported benchmark-style scripts" {
     const result = try rt.callGlobalFunction("run", &args);
     try std.testing.expect(result.isInt());
     try std.testing.expectEqual(@as(i32, 12), result.getInt());
-}
-
-test "HandlerPool high contention stress" {
-    const allocator = std.heap.c_allocator;
-
-    // Allow disabling JIT for this test via env var during debugging.
-    if (std.c.getenv("ZTS_DISABLE_JIT_TESTS") != null) {
-        zq.interpreter.disableJitForTests();
-    }
-
-    const handler_code = "function handler(req) { return Response.text('ok'); }";
-    // Use larger pool (8 slots) with reasonable timeout for contention
-    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8, 0);
-    defer pool.deinit();
-
-    const thread_count: usize = 16;
-    const iterations: usize = 25;
-
-    var errors = std.atomic.Value(u32).init(0);
-    var completed = std.atomic.Value(u32).init(0);
-
-    const ThreadCtx = struct {
-        pool: *HandlerPool,
-        allocator: std.mem.Allocator,
-        errors: *std.atomic.Value(u32),
-        completed: *std.atomic.Value(u32),
-    };
-
-    const Worker = struct {
-        fn run(ctx: *ThreadCtx) void {
-            const method = ctx.allocator.dupe(u8, "GET") catch {
-                _ = ctx.errors.fetchAdd(1, .acq_rel);
-                return;
-            };
-            const url = ctx.allocator.dupe(u8, "/") catch {
-                ctx.allocator.free(method);
-                _ = ctx.errors.fetchAdd(1, .acq_rel);
-                return;
-            };
-            var request = HttpRequestOwned{
-                .method = method,
-                .url = url,
-                .headers = .empty,
-                .body = null,
-            };
-            defer request.deinit(ctx.allocator);
-
-            var i: usize = 0;
-            while (i < iterations) : (i += 1) {
-                var response = ctx.pool.executeHandler(request.asView()) catch {
-                    _ = ctx.errors.fetchAdd(1, .acq_rel);
-                    continue;
-                };
-                response.deinit();
-                _ = ctx.completed.fetchAdd(1, .acq_rel);
-            }
-        }
-    };
-
-    var threads: [thread_count]std.Thread = undefined;
-    var contexts: [thread_count]ThreadCtx = undefined;
-    for (0..thread_count) |i| {
-        contexts[i] = .{
-            .pool = &pool,
-            .allocator = allocator,
-            .errors = &errors,
-            .completed = &completed,
-        };
-        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
-    }
-    for (threads) |t| t.join();
-
-    // Verify results - primary goal is no crashes under contention
-    const error_count = errors.load(.acquire);
-    const completed_count = completed.load(.acquire);
-    const total = error_count + completed_count;
-
-    // All requests should be accounted for (either completed or errored)
-    try std.testing.expectEqual(thread_count * iterations, total);
-    // At least some requests should succeed (proves pool works under contention)
-    try std.testing.expect(completed_count > 0);
 }
 
 test "reloadHandler swaps handler code and new requests use new handler" {
@@ -7239,4 +6936,149 @@ test "durable run refuses the oplog while a recovery claim holds it" {
     const source = try zq.file_io.readFile(allocator, path, 1024 * 1024);
     try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, source, "\"fn\":\"Math.random\""));
     try std.testing.expect(!std.mem.containsAtLeast(u8, source, 1, "\"type\":\"complete\""));
+}
+
+test "HandlerPool concurrent stress" {
+    // Expensive opt-in stress test. Stable on Zig 0.16.0 (5/5 runs).
+    // Run explicitly with: ZTS_RUN_STRESS_TESTS=1 zig build test-zruntime
+    if (std.c.getenv("ZTS_RUN_STRESS_TESTS") == null) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+
+    // Allow disabling JIT for this test via env var during debugging.
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8, 0);
+    defer pool.deinit();
+
+    const thread_count: usize = 8;
+    const iterations: usize = 200;
+
+    var errors = std.atomic.Value(u32).init(0);
+
+    const ThreadCtx = struct {
+        pool: *HandlerPool,
+        allocator: std.mem.Allocator,
+        errors: *std.atomic.Value(u32),
+    };
+
+    const Worker = struct {
+        fn run(ctx: *ThreadCtx) void {
+            const method = ctx.allocator.dupe(u8, "GET") catch {
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            const url = ctx.allocator.dupe(u8, "/") catch {
+                ctx.allocator.free(method);
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            var request = HttpRequestOwned{
+                .method = method,
+                .url = url,
+                .headers = .empty,
+                .body = null,
+            };
+            defer request.deinit(ctx.allocator);
+
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                var response = ctx.pool.executeHandler(request.asView()) catch {
+                    _ = ctx.errors.fetchAdd(1, .acq_rel);
+                    continue;
+                };
+                response.deinit();
+            }
+        }
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    var contexts: [thread_count]ThreadCtx = undefined;
+    for (0..thread_count) |i| {
+        contexts[i] = .{
+            .pool = &pool,
+            .allocator = allocator,
+            .errors = &errors,
+        };
+        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
+    }
+    for (threads) |t| t.join();
+
+    try std.testing.expectEqual(@as(u32, 0), errors.load(.acquire));
+}
+
+test "HandlerPool high contention stress" {
+    const allocator = std.heap.c_allocator;
+
+    // Allow disabling JIT for this test via env var during debugging.
+    const handler_code = "function handler(req) { return Response.text('ok'); }";
+    // Use larger pool (8 slots) with reasonable timeout for contention
+    var pool = try HandlerPool.init(allocator, .{}, handler_code, "<handler>", 8, 0);
+    defer pool.deinit();
+
+    const thread_count: usize = 16;
+    const iterations: usize = 25;
+
+    var errors = std.atomic.Value(u32).init(0);
+    var completed = std.atomic.Value(u32).init(0);
+
+    const ThreadCtx = struct {
+        pool: *HandlerPool,
+        allocator: std.mem.Allocator,
+        errors: *std.atomic.Value(u32),
+        completed: *std.atomic.Value(u32),
+    };
+
+    const Worker = struct {
+        fn run(ctx: *ThreadCtx) void {
+            const method = ctx.allocator.dupe(u8, "GET") catch {
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            const url = ctx.allocator.dupe(u8, "/") catch {
+                ctx.allocator.free(method);
+                _ = ctx.errors.fetchAdd(1, .acq_rel);
+                return;
+            };
+            var request = HttpRequestOwned{
+                .method = method,
+                .url = url,
+                .headers = .empty,
+                .body = null,
+            };
+            defer request.deinit(ctx.allocator);
+
+            var i: usize = 0;
+            while (i < iterations) : (i += 1) {
+                var response = ctx.pool.executeHandler(request.asView()) catch {
+                    _ = ctx.errors.fetchAdd(1, .acq_rel);
+                    continue;
+                };
+                response.deinit();
+                _ = ctx.completed.fetchAdd(1, .acq_rel);
+            }
+        }
+    };
+
+    var threads: [thread_count]std.Thread = undefined;
+    var contexts: [thread_count]ThreadCtx = undefined;
+    for (0..thread_count) |i| {
+        contexts[i] = .{
+            .pool = &pool,
+            .allocator = allocator,
+            .errors = &errors,
+            .completed = &completed,
+        };
+        threads[i] = try std.Thread.spawn(.{}, Worker.run, .{&contexts[i]});
+    }
+    for (threads) |t| t.join();
+
+    // Verify results - primary goal is no crashes under contention
+    const error_count = errors.load(.acquire);
+    const completed_count = completed.load(.acquire);
+    const total = error_count + completed_count;
+
+    // All requests should be accounted for (either completed or errored)
+    try std.testing.expectEqual(thread_count * iterations, total);
+    // At least some requests should succeed (proves pool works under contention)
+    try std.testing.expect(completed_count > 0);
 }

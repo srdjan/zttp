@@ -164,10 +164,6 @@ test "interpreter TypeError records source line" {
     const parser_mod = @import("../parser/root.zig");
     const string_mod = @import("../string.zig");
 
-    const prev_policy = interpreter.getJitPolicy();
-    defer interpreter.setJitPolicy(prev_policy);
-    interpreter.setJitPolicy(.disabled);
-
     var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
     defer gc_state.deinit();
 

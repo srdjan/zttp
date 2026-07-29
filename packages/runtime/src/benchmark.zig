@@ -11,7 +11,6 @@ const zq = @import("zts");
 const Runtime = zruntime.Runtime;
 const RuntimeConfig = zruntime.RuntimeConfig;
 const PerfStats = zq.interpreter.PerfStats;
-const FeedbackSummary = zq.type_feedback.FeedbackSummary;
 const OptStats = zq.OptStats;
 
 pub const std_options: std.Options = .{
@@ -167,7 +166,6 @@ const BenchmarkResult = struct {
     error_name: ?[]const u8 = null,
     perf: PerfStats = .{},
     opt_stats: OptStats = .{},
-    feedback_summary: FeedbackSummary = .{},
 };
 
 const Options = struct {
@@ -275,39 +273,18 @@ fn printFmt(comptime fmt: []const u8, args: anytype) void {
     println(msg);
 }
 
-fn tierName(index: usize) []const u8 {
-    return switch (@as(zq.bytecode.CompilationTier, @enumFromInt(index))) {
-        .interpreted => "interpreted",
-        .baseline_candidate => "baseline_candidate",
-        .baseline => "baseline",
-    };
-}
-
-fn writeTierPromotionsJson(writer: anytype, counts: []const u32) !void {
-    try writer.writeAll("{");
-    for (counts, 0..) |count, idx| {
-        if (idx > 0) try writer.writeAll(",");
-        try writer.print("\"{s}\":{d}", .{ tierName(idx), count });
-    }
-    try writer.writeAll("}");
-}
-
 fn writePerfStatsJson(writer: anytype, perf: PerfStats) !void {
     try writer.print(
-        "{{\"backedge_count\":{d},\"pic_hits\":{d},\"pic_misses\":{d},\"deopt_count\":{d},\"mega_recoveries\":{d},\"promotion_attempted\":{d},\"promotion_succeeded\":{d},\"opcode_histogram_enabled\":{s},\"opcode_histogram_nonzero\":{d},\"tier_promotions\":",
+        "{{\"backedge_count\":{d},\"pic_hits\":{d},\"pic_misses\":{d},\"mega_recoveries\":{d},\"opcode_histogram_enabled\":{s},\"opcode_histogram_nonzero\":{d}",
         .{
             perf.backedge_count,
             perf.pic_hits,
             perf.pic_misses,
-            perf.deopt_count,
             perf.mega_recoveries,
-            perf.promotion_attempted,
-            perf.promotion_succeeded,
             if (perf.opcode_histogram_enabled) "true" else "false",
             perf.opcode_histogram_nonzero,
         },
     );
-    try writeTierPromotionsJson(writer, perf.tier_promotions[0..]);
     if (perf.opcode_histogram_enabled) {
         try writer.writeAll(",\"opcode_histogram\":[");
         var first = true;
@@ -342,8 +319,6 @@ fn writeBenchmarkResultJson(writer: anytype, result: BenchmarkResult) !void {
     try writePerfStatsJson(writer, result.perf);
     try writer.writeAll(",\"opt_stats\":");
     try result.opt_stats.writeJson(writer);
-    try writer.writeAll(",\"feedback_summary\":");
-    try result.feedback_summary.writeJson(writer);
     try writer.writeAll("}");
 }
 
@@ -683,9 +658,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
                     perf.pic_hits, pic_total, hit_rate,
                 });
             }
-            if (perf.deopt_count > 0) {
-                printFmt("  deopts: {}", .{perf.deopt_count});
-            }
             return;
         }
         return;
@@ -737,7 +709,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
             0;
         results[i].perf = perf;
         results[i].opt_stats = runtime.last_opt_stats;
-        results[i].feedback_summary = runtime.last_feedback_summary;
 
         if (!options.quiet and !options.json) {
             printFmt("{s}: {d:.3}ms ({} ops/sec)", .{ bench.name, results[i].time_ms, results[i].ops_per_sec });
@@ -748,9 +719,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 printFmt("  IC: {} hits / {} total ({d:.1}%)", .{
                     results[i].perf.pic_hits, pic_total, hit_rate,
                 });
-            }
-            if (results[i].perf.deopt_count > 0) {
-                printFmt("  deopts: {}", .{results[i].perf.deopt_count});
             }
         }
     }
@@ -790,8 +758,8 @@ pub fn main(init: std.process.Init.Minimal) !void {
         .{ .name = "objectCreate", .ops_per_sec = 9923588 },
         .{ .name = "propertyAccess", .ops_per_sec = 17985611 },
         .{ .name = "arrayOps", .ops_per_sec = 13231594 },
-        .{ .name = "functionCalls", .ops_per_sec = 16688684 },
-        .{ .name = "recursion", .ops_per_sec = 2855 },
+        .{ .name = "functionCalls", .ops_per_sec = 12000000 },
+        .{ .name = "recursion", .ops_per_sec = 2500 },
         .{ .name = "jsonOps", .ops_per_sec = 85355 },
         .{ .name = "gcPressure", .ops_per_sec = 274482 },
         .{ .name = "httpHandler", .ops_per_sec = 1131466 },

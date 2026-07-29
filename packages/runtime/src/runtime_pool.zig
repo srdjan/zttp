@@ -1036,7 +1036,7 @@ test "WorkerRuntimeLease deinit is a no-op after quarantine" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<runtime-pool-test>",
         1,
@@ -1067,7 +1067,7 @@ test "acquireForRequest waits out contention up to the timeout, not a retry cap"
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<runtime-pool-test>",
         1, // single slot: the second acquire must wait for a release
@@ -1107,7 +1107,7 @@ test "acquireForRequest with timeout 0 fails fast and records exhaustion" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<runtime-pool-test>",
         1, // single slot
@@ -1127,7 +1127,7 @@ test "reuse_unbounded runtime recycles once its dynamic atom count reaches the t
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<runtime-pool-test>",
         1,
@@ -1158,7 +1158,7 @@ test "reuse_unbounded runtime under the atom threshold is not recycled" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<runtime-pool-test>",
         1,
@@ -1228,7 +1228,7 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
     // loadHandlerCached's embedded fast path) must fail cleanly instead.
     const result = HandlerPool.initWithEmbedded(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "",
         "<embedded>",
         1,

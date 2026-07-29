@@ -51,13 +51,11 @@ const splitHeaderKV = zruntime.splitHeaderKV;
 const StepDeadlineGuard = struct {
     deadline_ns: u64,
     interrupt_requested: bool,
-    jit_inhibited: bool,
 
     fn arm(rt: *Runtime, timeout_ms: i64) StepDeadlineGuard {
         const guard: StepDeadlineGuard = .{
             .deadline_ns = rt.ctx.deadline_ns,
             .interrupt_requested = rt.ctx.interrupt_requested.load(.monotonic),
-            .jit_inhibited = rt.ctx.jit_inhibited,
         };
         const now = compat.monotonicNowNs() catch return guard;
         const timeout_ns = if (timeout_ms <= 0)
@@ -67,14 +65,12 @@ const StepDeadlineGuard = struct {
         const step_deadline = now +| timeout_ns;
         rt.ctx.deadline_ns = if (guard.deadline_ns == 0) step_deadline else @min(guard.deadline_ns, step_deadline);
         rt.ctx.interrupt_requested.store(false, .monotonic);
-        rt.ctx.jit_inhibited = true;
         return guard;
     }
 
     fn restore(self: StepDeadlineGuard, rt: *Runtime) void {
         rt.ctx.deadline_ns = self.deadline_ns;
         rt.ctx.interrupt_requested.store(self.interrupt_requested, .monotonic);
-        rt.ctx.jit_inhibited = self.jit_inhibited;
     }
 };
 

@@ -1514,18 +1514,6 @@ pub const JSObject = extern struct {
             if (gop.found_existing) return;
         }
 
-        const jit = @import("jit/alloc.zig");
-
-        if (func.compiled_code) |cc| {
-            const compiled: *jit.CompiledCode = @ptrCast(@alignCast(cc));
-            allocator.destroy(compiled);
-        }
-        if (func.type_feedback_ptr) |tf| {
-            tf.deinit();
-        }
-        if (func.feedback_site_map) |site_map| {
-            allocator.free(site_map);
-        }
         if (func.pattern_dispatch) |dispatch| {
             dispatch.deinit();
             allocator.destroy(dispatch);
@@ -1715,12 +1703,6 @@ pub const JSObject = extern struct {
         // Store bytecode function data and marker
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
-
-        // Store guard_id for fast JIT monomorphic call checks
-        // This enables single 64-bit comparison instead of 5-check guard sequence
-        const bc_mut = @constCast(bytecode_ptr);
-        bc_mut.ensureGuardId();
-        obj.inline_slots[Slots.FUNC_GUARD_ID] = .{ .raw = bc_mut.guard_id };
         return obj;
     }
 
@@ -1782,11 +1764,6 @@ pub const JSObject = extern struct {
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
         obj.inline_slots[Slots.FUNC_IS_CLOSURE] = value.JSValue.true_val;
-
-        // Store guard_id for fast JIT monomorphic call checks
-        const bc_mut = @constCast(bytecode_ptr);
-        bc_mut.ensureGuardId();
-        obj.inline_slots[Slots.FUNC_GUARD_ID] = .{ .raw = bc_mut.guard_id };
         return obj;
     }
 

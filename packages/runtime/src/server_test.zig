@@ -5,7 +5,6 @@
 //!   - `Server.init` / `Server.deinit` lifecycle (server.zig)
 //!   - `HandlerPool.executeHandler` / `.executeHandlerBorrowed` request flow,
 //!     pool occupancy via `.getInUse` / `.max_size` (engine_adapter facade)
-//!   - `RuntimeConfig` (jit_policy/jit_threshold) to drive engine behavior
 //!     instead of poking `zq.interpreter.*` globals directly.
 //!
 //! It deliberately does NOT reach into interpreter/JIT internals. The JIT and
@@ -123,7 +122,7 @@ test "executeHandler returns 200 with the handler body" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.json({ ok: true }); }",
         "<server-test>",
         1,
@@ -147,7 +146,7 @@ test "executeHandler echoes request method and url back to the handler" {
     // surfaces the request line as method + url.
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text(req.method + ' ' + req.url); }",
         "<server-test>",
         1,
@@ -169,7 +168,7 @@ test "pool occupancy is zero before and after a completed request" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<server-test>",
         2,
@@ -200,7 +199,7 @@ test "assert guard rejection short-circuits with the guard response" {
     // through. This is the documented error path for declarative guards.
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { assert req.method === 'POST', Response.text('method not allowed', { status: 405 }); return Response.text('ok'); }",
         "<server-test>",
         1,
@@ -221,7 +220,7 @@ test "B6: handler returning a non-Response primitive yields 500, not silent empt
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return 42; }",
         "<server-test>",
         1,
@@ -244,7 +243,7 @@ test "handler returning a string body yields a 200 with that body" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return 'plain body'; }",
         "<server-test>",
         1,
@@ -265,7 +264,7 @@ test "executeHandlerBorrowed releases the runtime even when the handler errors" 
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<server-test>",
         1,
@@ -308,7 +307,7 @@ test "B2: per-request timeout aborts a slow handler and returns RequestTimeout" 
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .request_timeout_ms = 50 },
+        .{ .request_timeout_ms = 50 },
         "function handler(req) { let x = 0; for (let i of range(1000000000)) { x = x + 1; } return Response.text('unreachable'); }",
         "<server-test>",
         1,
@@ -324,7 +323,7 @@ test "B2: per-request timeout aborts a slow handler and returns RequestTimeout" 
     // Use a separate pool with a fast handler to prove the slot recycle works.
     var fast_pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .request_timeout_ms = 5000 },
+        .{ .request_timeout_ms = 5000 },
         "function handler(req) { return Response.text('alive'); }",
         "<server-test>",
         1,
@@ -360,7 +359,7 @@ test "coverage note: health/readiness socket path is exercised in server.zig" {
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('ok'); }",
         "<server-test>",
         2,
@@ -383,7 +382,7 @@ test "B1: panic isolation: HandlerPanicked leaves pool reusable (needs test-root
     const allocator = std.heap.c_allocator;
     var pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         "function handler(req) { return Response.text('alive'); }",
         "<server-test>",
         1,

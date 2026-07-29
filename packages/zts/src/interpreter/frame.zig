@@ -4,9 +4,6 @@ const std = @import("std");
 const value = @import("../value.zig");
 const bytecode = @import("../bytecode.zig");
 const object = @import("../object.zig");
-const jit = @import("../jit/root.zig");
-const jit_compile = @import("jit_compile.zig");
-const jit_policy = @import("jit_policy.zig");
 const trace = @import("trace.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
@@ -100,57 +97,6 @@ pub fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
     }
 }
 
-/// Execute a JIT-compiled function body and reconcile its fault representation
-/// with the interpreter's. The JIT signals a fault by setting ctx.exception and
-/// returning the exception_val sentinel as an ordinary value (it does not poll
-/// ctx.exception in straight-line code), so a pending exception after the call
-/// means the compiled code faulted: surface it as error.NativeFunctionError - the
-/// interpreter's canonical "an exception is pending" tag (call.zig, interpreter.zig)
-/// - so a caller's `try` aborts the enclosing frame instead of running on over a
-/// sentinel-poisoned stack. The JIT cannot reconstruct the specific dispatch tag
-/// the interpreter fallback would return (TypeError/NotCallable), only that a fault
-/// occurred. CONSUME the side channel (clearException) when converting - otherwise a
-/// stale sentinel would trip this same check on a later execution (run() is the top
-/// frame and has no popState to restore it). Saves/restores the interpreter's code
-/// cursor and JIT-frame bookkeeping; the single boundary for `run` and
-/// `callBytecodeFunction`. `inline` to preserve the pre-extraction codegen (this was
-/// literal inline code at both call sites on the JIT-call hot path).
-inline fn executeCompiled(
-    self: *Interpreter,
-    func: *const bytecode.FunctionBytecode,
-    cc: *jit.CompiledCode,
-) InterpreterError!value.JSValue {
-    const prev_func = self.current_func;
-    const prev_constants = self.constants;
-    const prev_code_end = self.code_end;
-    const prev_pc = self.pc;
-    self.current_func = func;
-    self.constants = func.constants;
-    self.code_end = func.code.ptr + func.code.len;
-    self.pc = func.code.ptr;
-    defer {
-        self.current_func = prev_func;
-        self.constants = prev_constants;
-        self.code_end = prev_code_end;
-        self.pc = prev_pc;
-    }
-    const prev_interp = interpreter.current_interpreter;
-    interpreter.current_interpreter = self;
-    defer interpreter.current_interpreter = prev_interp;
-    self.ctx.enterJitFrame();
-    defer self.ctx.leaveJitFrame();
-    // Set interpreter pointer in context for IC fast path
-    self.ctx.jit_interpreter = @ptrCast(self);
-    defer self.ctx.jit_interpreter = null;
-
-    const result_raw = cc.execute(self.ctx);
-    if (self.ctx.hasException()) {
-        self.ctx.clearException();
-        return error.NativeFunctionError;
-    }
-    return value.JSValue{ .raw = result_raw };
-}
-
 pub fn callBytecodeFunction(
     self: *Interpreter,
     func_val: value.JSValue,
@@ -161,10 +107,6 @@ pub fn callBytecodeFunction(
     if (self.ctx.deadline_ns != 0 and self.ctx.interrupt_requested.load(.monotonic)) return error.RequestTimeout;
     trace.traceCall(self, "bc enter", @intCast(args.len), false);
     defer trace.traceCall(self, "bc exit", @intCast(args.len), false);
-    // const_cast safe: only profiling fields are mutated below.
-    const func_bc_mut = @constCast(func_bc);
-
-    jit_compile.maybePromote(self, func_bc_mut, .nested);
 
     try pushState(self);
     defer popState(self);
@@ -188,28 +130,6 @@ pub fn callBytecodeFunction(
         }
     }
 
-    // Check if function is JIT-compiled and execute via JIT. A jit-inhibited
-    // context (durable) never enters compiled code even if the shared bytecode
-    // was compiled elsewhere - the interpreter tier preserves the suspend.
-    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and func_bc.tier == .baseline) {
-        if (func_bc.compiled_code) |cc_opaque| {
-            const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
-            // On a fault executeCompiled returns the error; the errdefer above
-            // unwinds the pushed frame, exactly like the interpreter path below.
-            const result = try executeCompiled(self, func_bc, cc);
-
-            closeUpvaluesAbove(self, 0);
-            _ = self.ctx.popFrame();
-
-            // Allocate type feedback after function completes (safe boundary)
-            if (!jit_policy.jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
-                jit_compile.allocateTypeFeedbackDeferred(self, func_bc_mut) catch {};
-            }
-
-            return result;
-        }
-    }
-
     // Fall back to interpreter
     self.pc = func_bc.code.ptr;
     self.code_end = func_bc.code.ptr + func_bc.code.len;
@@ -225,11 +145,6 @@ pub fn callBytecodeFunction(
     closeUpvaluesAbove(self, 0);
     _ = self.ctx.popFrame();
 
-    // Allocate type feedback after function completes (safe boundary)
-    if (!jit_policy.jitDisabled() and func_bc_mut.tier == .baseline_candidate) {
-        jit_compile.allocateTypeFeedbackDeferred(self, func_bc_mut) catch {};
-    }
-
     return result;
 }
 
@@ -239,26 +154,12 @@ pub fn callBytecodeFunction(
 /// path returns directly without re-entering upvalue cleanup.
 pub fn run(self: *Interpreter, func: *const bytecode.FunctionBytecode) InterpreterError!value.JSValue {
     if (self.ctx.deadline_ns != 0 and self.ctx.interrupt_requested.load(.monotonic)) return error.RequestTimeout;
-    // const_cast safe: only profiling fields are mutated below.
-    const func_mut = @constCast(func);
-
-    jit_compile.maybePromote(self, func_mut, .entry);
 
     // Allocate space for locals
     const local_count = func.local_count;
     try self.ctx.ensureStack(local_count);
     for (0..local_count) |_| {
         try self.ctx.push(value.JSValue.undefined_val);
-    }
-
-    // Check if function is JIT-compiled and execute via JIT. A jit-inhibited
-    // context (durable) never enters compiled code even if the shared bytecode
-    // was compiled elsewhere - the interpreter tier preserves the suspend.
-    if (!jit_policy.jitDisabled() and !self.ctx.jit_inhibited and func.tier == .baseline) {
-        if (func.compiled_code) |cc_opaque| {
-            const cc: *jit.CompiledCode = @ptrCast(@alignCast(cc_opaque));
-            return try executeCompiled(self, func, cc);
-        }
     }
 
     // Fall back to interpreter

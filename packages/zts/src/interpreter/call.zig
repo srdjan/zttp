@@ -4,7 +4,6 @@ const std = @import("std");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
 const builtins = @import("../builtins/root.zig");
-const jit_compile = @import("jit_compile.zig");
 const trace = @import("trace.zig");
 const frame = @import("frame.zig");
 const interpreter = @import("../interpreter.zig");
@@ -102,8 +101,6 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
         bc_data.bytecode
     else
         null;
-
-    jit_compile.recordCallSiteFeedback(self, func_bc_opt);
 
     if (func_bc_opt) |func_bc| {
         const prev_closure = self.current_closure;

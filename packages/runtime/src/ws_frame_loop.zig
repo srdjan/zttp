@@ -443,7 +443,7 @@ test "onClose receives the parsed close code and reason" {
     ;
     var handler_pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled },
+        .{},
         source,
         "<ws-close-test>",
         1,
@@ -473,7 +473,7 @@ test "graceful shutdown budget shortens the WebSocket callback deadline" {
     ;
     var handler_pool = try HandlerPool.init(
         allocator,
-        .{ .jit_policy = .disabled, .request_timeout_ms = 5000 },
+        .{ .request_timeout_ms = 5000 },
         source,
         "<ws-timeout-test>",
         1,

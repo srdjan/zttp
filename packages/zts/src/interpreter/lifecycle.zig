@@ -31,11 +31,7 @@ pub fn resetProfilingCounters(self: *Interpreter) void {
     self.backedge_count = 0;
     self.pic_hits = 0;
     self.pic_misses = 0;
-    self.deopt_count = 0;
     self.mega_recoveries = 0;
-    self.tier_promotions = [_]u32{0} ** perf.tier_count;
-    self.promotion_attempted = 0;
-    self.promotion_succeeded = 0;
     self.opcode_histogram = [_]u32{0} ** 256;
 }
 
@@ -59,11 +55,7 @@ pub fn snapshotPerfStats(self: *const Interpreter) PerfStats {
         .backedge_count = self.backedge_count,
         .pic_hits = self.pic_hits,
         .pic_misses = self.pic_misses,
-        .deopt_count = self.deopt_count,
         .mega_recoveries = self.mega_recoveries,
-        .tier_promotions = self.tier_promotions,
-        .promotion_attempted = self.promotion_attempted,
-        .promotion_succeeded = self.promotion_succeeded,
         .opcode_histogram_enabled = perf.enable_opcode_histogram,
         .opcode_histogram_nonzero = if (perf.enable_opcode_histogram)
             perf.countNonZeroHistogramEntries(self.opcode_histogram[0..])

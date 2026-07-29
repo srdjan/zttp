@@ -64,11 +64,8 @@ pub const interpreter = @import("interpreter.zig");
 // build (wasm/freestanding) never reaches the JIT, so skip the anchor to keep
 // the interpreter/JIT/GC subtree out of the module graph.
 comptime {
-    if (!build_options.analyzer_only) {
-        _ = @import("interpreter/jit_intrinsics.zig");
-    }
+    if (!build_options.analyzer_only) {}
 }
-pub const type_feedback = @import("type_feedback.zig");
 pub const builtins = @import("builtins/root.zig");
 // New two-pass parser with proper function compilation
 pub const parser = @import("parser/root.zig");
@@ -129,7 +126,6 @@ pub const sqlite = @import("sqlite.zig");
 pub const sql_analysis = @import("sql_analysis.zig");
 pub const modules = @import("modules/root.zig");
 pub const compat = @import("compat.zig");
-pub const jit = @import("jit/root.zig");
 pub const semantics = @import("semantics.zig");
 pub const semantics_check = @import("semantics_check.zig");
 pub const semantics_smt = @import("semantics_smt.zig");
@@ -174,7 +170,6 @@ pub const BytecodeCache = bytecode_cache.BytecodeCache;
 pub const BytecodeOptimizer = bytecode_opt.BytecodeOptimizer;
 pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
 pub const OptStats = bytecode_opt.OptStats;
-pub const FeedbackSummary = type_feedback.FeedbackSummary;
 pub const HandlerAnalyzer = handler_analyzer.HandlerAnalyzer;
 pub const HandlerVerifier = handler_verifier.HandlerVerifier;
 pub const BoolChecker = bool_checker.BoolChecker;

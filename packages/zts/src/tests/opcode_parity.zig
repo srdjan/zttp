@@ -1,11 +1,16 @@
-//! Opcode-semantic parity gate.
+//! Opcode-semantic corpus.
 //!
-//! Pins that the three execution tiers - the bytecode interpreter, the baseline
-//! JIT - agree on opcode semantics for a corpus of small
-//! programs. This guards the write-barrier / property-store work (which touched
-//! all three tiers) and the future VM-loop deduplication (which collapses the
-//! three hand-written opcode implementations into one source of truth): any tier
-//! that diverges on arithmetic, comparison, or overflow turns this red.
+//! Pins the interpreter's opcode semantics against expected values for a corpus
+//! of small programs: arithmetic, comparison, overflow, string production, and
+//! the fault paths.
+//!
+//! This was a parity gate across three execution tiers. The optimized and
+//! baseline JIT tiers were removed (see
+//! docs/plans/2026-07-28-001-reset-simplification-plan.md, section 8.1), leaving
+//! the interpreter as the single execution path, so the cross-tier comparison
+//! has nothing left to compare. The corpus and its expected values are kept:
+//! they are the substantive coverage, and they are what a future second
+//! execution tier would be checked against.
 //!
 //! Each corpus case is a 0-argument FunctionBytecode whose body ends in `.ret`,
 //! so `interp.run` RETURNS the computed value. (A bare top-level expression is
@@ -30,8 +35,6 @@ const gc = @import("../gc.zig");
 const interpreter = @import("../interpreter.zig");
 const object = @import("../object.zig");
 const arena_mod = @import("../arena.zig");
-const jit_compile = @import("../interpreter/jit_compile.zig");
-const jit_policy = @import("../interpreter/jit_policy.zig");
 
 const O = bytecode.Opcode;
 const Interpreter = interpreter.Interpreter;
@@ -349,286 +352,6 @@ fn checkExpected(case: Case, result: JSValue) !void {
     }
 }
 
-test "opcode parity: interpreter and baseline tiers agree" {
-    const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // The property cases run `new_object`, which in non-hybrid mode allocates
-    // GC-managed objects from the raw allocator that this corpus never collects.
-    // A request-scoped arena (the production allocation path) reclaims every such
-    // object at deinit, so `testing.allocator` still flags genuine leaks in the
-    // JIT/feedback machinery. Inline NaN-boxed floats from the arithmetic cases
-    // need no heap, so the arena only catches the object allocations.
-    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 8192 });
-    defer req_arena.deinit();
-    var hybrid = arena_mod.HybridAllocator{ .persistent = allocator, .arena = &req_arena };
-    ctx.setHybridAllocator(&hybrid);
-
-    var interp = Interpreter.init(ctx);
-
-    // JIT may be disabled by environment or unavailable on the host arch. The
-    // interpreter tier always runs (so the corpus is never vacuous); the JIT
-    // tiers are gated, mirroring the existing JIT tests.
-    jit_policy.setJitPolicy(.eager);
-    const jit_available = !jit_policy.jitDisabled();
-
-    var baseline_compiled: usize = 0;
-
-    for (cases) |case| {
-        errdefer std.debug.print("opcode parity: failing case '{s}'\n", .{case.name});
-        // Tier 1: interpreter. Pin thresholds so maybePromote never compiles.
-        jit_policy.setJitThreshold(std.math.maxInt(u32));
-        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-        var interp_func = buildFunc(case);
-        const interp_result = try interp.run(&interp_func);
-        try std.testing.expectEqual(bytecode.CompilationTier.interpreted, interp_func.tier);
-        try checkExpected(case, interp_result);
-
-        if (!jit_available) continue;
-
-        // Tier 2: baseline JIT. Eager + threshold 1 forces compilation quickly.
-        jit_policy.setJitPolicy(.eager);
-        jit_policy.setJitThreshold(1);
-        jit_policy.setJitFeedbackWarmup(1);
-        var base_func = buildFunc(case);
-        defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-        defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-        var base_result: JSValue = undefined;
-        var i: usize = 0;
-        while (i < 6) : (i += 1) base_result = try interp.run(&base_func);
-        try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
-        baseline_compiled += 1;
-        try checkExpected(case, base_result);
-        try std.testing.expect(sameValue(interp_result, base_result));
-    }
-
-    if (jit_available) {
-        // Every case must have genuinely exercised the baseline tier.
-        try std.testing.expectEqual(cases.len, baseline_compiled);
-    }
-}
-
-// `call` needs a callee FUNCTION value that only exists once `ctx`/the allocator
-// do (createBytecodeFunction stores a heap pointer), so it cannot be a comptime
-// `Case` literal like the corpus above. This second gate builds the callee at
-// runtime and runs the same three-tier protocol, asserting the call returns 42
-// identically on interpreter and baseline JIT.
-test "opcode parity: call returns identical value across tiers" {
-    const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-    var interp = Interpreter.init(ctx);
-
-    jit_policy.setJitPolicy(.eager);
-    const jit_available = !jit_policy.jitDisabled();
-
-    // Callee body: push_i8 42; ret. Heap-allocated because createBytecodeFunction
-    // stores a pointer and destroyFull frees both the code and the FunctionBytecode.
-    // The callee runs via doCall's interpreter path (its own body is never JIT'd),
-    // so any opcodes are fair game here - only the OUTER body is tier-forced.
-    const callee_code = try allocator.alloc(u8, 3);
-    callee_code[0] = op(.push_i8);
-    callee_code[1] = 42;
-    callee_code[2] = op(.ret);
-    const callee_func = try allocator.create(bytecode.FunctionBytecode);
-    callee_func.* = .{
-        .header = .{},
-        .name_atom = 0,
-        .arg_count = 0,
-        .local_count = 0,
-        .stack_size = 4,
-        .flags = .{},
-        .code = callee_code,
-        .constants = &.{},
-        .source_map = null,
-        .line_table = null,
-    };
-    const callee_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
-    defer callee_obj.destroyFull(allocator); // frees callee_code + the FunctionBytecode
-
-    // Outer body: push_const 0 (the callee object); call argc=0; ret. push_const,
-    // call, and ret all baseline- AND optimized-compile (call routes through the
-    // extern jitCall -> doCall, the same dispatch the interpreter uses). MUST NOT
-    // use make_function/make_closure - those hit the UnsupportedOpcode else arm
-    // and would leave the outer function interpreted, so the callee lives in
-    // constants[0] instead (mirroring the existing call_ic parity test).
-    const call_consts = [_]JSValue{callee_obj.toValue()};
-    const call_code = [_]u8{ op(.push_const), 0, 0, op(.call), 0, op(.ret) };
-    const call_case = Case{ .name = "call", .code = &call_code, .constants = &call_consts, .kind = .number, .expected_num = 42 };
-
-    // Tier 1: interpreter. Pin thresholds so maybePromote never compiles.
-    jit_policy.setJitThreshold(std.math.maxInt(u32));
-    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-    var interp_func = buildFunc(call_case);
-    const interp_result = try interp.run(&interp_func);
-    try std.testing.expectEqual(bytecode.CompilationTier.interpreted, interp_func.tier);
-    try checkExpected(call_case, interp_result);
-
-    if (!jit_available) return;
-
-    // Tier 2: baseline JIT. Eager + threshold 1 forces compilation quickly.
-    jit_policy.setJitPolicy(.eager);
-    jit_policy.setJitThreshold(1);
-    jit_policy.setJitFeedbackWarmup(1);
-    var base_func = buildFunc(call_case);
-    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-    var base_result: JSValue = undefined;
-    var i: usize = 0;
-    while (i < 6) : (i += 1) base_result = try interp.run(&base_func);
-    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
-    try checkExpected(call_case, base_result);
-    try std.testing.expect(sameValue(interp_result, base_result));
-}
-
-// String-valued results. The header's exclusion holds for RAW comparison: this
-// harness must never toPtr/flatten a tier's string output. The dodge is doing
-// the comparison INSIDE the VM - concatenate, then strict_eq against an
-// expected constant - so every case still reduces to a boolean and sameValue
-// stays number/bool-only. That observable is also the only meaningful one: the
-// interpreter's add builds a rope while jitAdd builds a flat string, so the
-// tiers legitimately return different representations of the same content and
-// only in-VM content equality (which strictEquals defines across flat/rope/
-// slice) can compare them. String constants need ctx (arena-backed
-// allocation), so like `call` these cannot be comptime Case literals.
-test "opcode parity: string-producing opcodes agree across tiers via in-VM comparison" {
-    const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    // Arena-backed hybrid allocation (the production path): every string this
-    // corpus creates - the constants below and the concat results inside the
-    // VM - is reclaimed at arena deinit, so testing.allocator still flags
-    // genuine leaks in the JIT/feedback machinery.
-    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 8192 });
-    defer req_arena.deinit();
-    var hybrid = arena_mod.HybridAllocator{ .persistent = allocator, .arena = &req_arena };
-    ctx.setHybridAllocator(&hybrid);
-
-    var interp = Interpreter.init(ctx);
-
-    jit_policy.setJitPolicy(.eager);
-    const jit_available = !jit_policy.jitDisabled();
-
-    const s_foo = try ctx.createString("foo");
-    const s_bar = try ctx.createString("bar");
-    const s_foobar = try ctx.createString("foobar");
-    const s_foobaz = try ctx.createString("foobaz");
-    const s_foo_dup = try ctx.createString("foo");
-    const s_v = try ctx.createString("v");
-    const s_v5 = try ctx.createString("v5");
-
-    // add on two strings concatenates; strict_eq then compares content.
-    const concat_eq_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.add), op(.push_const), 2, 0, op(.strict_eq), op(.ret) };
-    const concat_eq_consts = [_]JSValue{ s_foo, s_bar, s_foobar };
-    // Negative control: the same concat against the wrong constant must read
-    // false, guarding against a tier (or strict_eq itself) degenerating to
-    // always-true.
-    const concat_wrong_consts = [_]JSValue{ s_foo, s_bar, s_foobaz };
-    // Content equality across two DISTINCT heap strings: pointer inequality
-    // with byte equality, so the raw-bits fast path cannot answer this one.
-    const content_eq_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.strict_eq), op(.ret) };
-    const content_eq_consts = [_]JSValue{ s_foo, s_foo_dup };
-    // Number-to-string coercion inside concat ("v" + 5 -> "v5") pins the
-    // int-toString lane (small-int cache) across tiers.
-    const num_concat_code = [_]u8{ op(.push_const), 0, 0, op(.push_i8), 5, op(.add), op(.push_const), 1, 0, op(.strict_eq), op(.ret) };
-    const num_concat_consts = [_]JSValue{ s_v, s_v5 };
-    // concat_n is the dedicated N-way concatenation opcode (template literals);
-    // +u8 count operand.
-    const concat_n_code = [_]u8{ op(.push_const), 0, 0, op(.push_const), 1, 0, op(.concat_n), 2, op(.push_const), 2, 0, op(.strict_eq), op(.ret) };
-
-    const string_cases = [_]Case{
-        .{ .name = "str_concat_eq", .code = &concat_eq_code, .constants = &concat_eq_consts, .kind = .boolean, .expected_bool = true },
-        .{ .name = "str_concat_wrong", .code = &concat_eq_code, .constants = &concat_wrong_consts, .kind = .boolean, .expected_bool = false },
-        .{ .name = "str_content_eq", .code = &content_eq_code, .constants = &content_eq_consts, .kind = .boolean, .expected_bool = true },
-        .{ .name = "str_num_concat", .code = &num_concat_code, .constants = &num_concat_consts, .kind = .boolean, .expected_bool = true },
-        .{ .name = "str_concat_n", .code = &concat_n_code, .constants = &concat_eq_consts, .kind = .boolean, .expected_bool = true },
-    };
-
-    var baseline_compiled: usize = 0;
-
-    for (string_cases) |case| {
-        errdefer std.debug.print("opcode parity: failing case '{s}'\n", .{case.name});
-        // Tier 1: interpreter. Pin thresholds so maybePromote never compiles.
-        jit_policy.setJitThreshold(std.math.maxInt(u32));
-        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-        var interp_func = buildFunc(case);
-        const interp_result = try interp.run(&interp_func);
-        try std.testing.expectEqual(bytecode.CompilationTier.interpreted, interp_func.tier);
-        try checkExpected(case, interp_result);
-
-        if (!jit_available) continue;
-
-        // Tier 2: baseline JIT. Eager + threshold 1 forces compilation quickly.
-        jit_policy.setJitPolicy(.eager);
-        jit_policy.setJitThreshold(1);
-        jit_policy.setJitFeedbackWarmup(1);
-        var base_func = buildFunc(case);
-        defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-        defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-        var base_result: JSValue = undefined;
-        var i: usize = 0;
-        while (i < 6) : (i += 1) base_result = try interp.run(&base_func);
-        try std.testing.expect(base_func.compiled_code != null); // genuinely compiled, not silently interpreted
-        baseline_compiled += 1;
-        try checkExpected(case, base_result);
-        try std.testing.expect(sameValue(interp_result, base_result));
-    }
-
-    if (jit_available) {
-        // Every case must have genuinely exercised the baseline tier.
-        try std.testing.expectEqual(string_cases.len, baseline_compiled);
-    }
-}
-
-// Failure-path parity. The two fault representations DIFFER BY DESIGN: the
-// interpreter returns an `error` from run(); the JIT does not poll ctx.exception
-// in straight-line code, so it returns the `exception_val` sentinel (with
-// ctx.exception set) as an ordinary JSValue and keeps going. A raw value compare
-// across tiers is therefore structurally impossible - sameValue(exception_val, _)
-// is false and the interpreter side is an `error`, not a value. The meaningful,
-// tier-stable comparison is the fault VERDICT ("did this fault?"). Each case is
-// the fault op immediately followed by `ret`, so the JIT's first post-fault value
-// is exactly the sentinel and `isException() or hasException()` is a reliable
-// normalizer; clear ctx.exception between runs so a sticky sentinel can't poison
-// the next case's verdict.
 const FaultCase = struct {
     name: []const u8,
     code: []const u8,
@@ -664,87 +387,7 @@ fn faultFunc(case: FaultCase) bytecode.FunctionBytecode {
 }
 
 /// A JIT run faulted iff it returned the sentinel or left ctx.exception set.
-fn jitFaulted(interp: *Interpreter, result: JSValue) bool {
-    return result.isException() or interp.ctx.hasException();
-}
-
-test "opcode parity: failure paths fault identically across tiers" {
-    const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-    var interp = Interpreter.init(ctx);
-
-    jit_policy.setJitPolicy(.eager);
-    const jit_available = !jit_policy.jitDisabled();
-
-    for (fault_cases) |case| {
-        // Tier 1: interpreter. The run() must return the pinned error tag.
-        jit_policy.setJitPolicy(.eager);
-        jit_policy.setJitThreshold(std.math.maxInt(u32));
-        jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-        interp.ctx.clearException();
-        var interp_func = faultFunc(case);
-        try std.testing.expectError(case.expect_err, interp.run(&interp_func));
-
-        if (!jit_available) continue;
-
-        // Tier 2: baseline JIT. Warm to force compilation, then assert the run
-        // faults (returns the sentinel and/or sets ctx.exception). The
-        // interpreter faulted, so baseline must too: faulted == faulted.
-        jit_policy.setJitPolicy(.eager);
-        jit_policy.setJitThreshold(1);
-        jit_policy.setJitFeedbackWarmup(1);
-        var base_func = faultFunc(case);
-        defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-        defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-        var base_faulted = false;
-        var i: usize = 0;
-        while (i < 6) : (i += 1) {
-            interp.ctx.clearException();
-            const r = interp.run(&base_func) catch {
-                // Pre-compile warm runs fall back to the interpreter and may
-                // return the error directly; that is still a fault.
-                base_faulted = true;
-                continue;
-            };
-            base_faulted = jitFaulted(&interp, r);
-        }
-        try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
-        try std.testing.expect(base_faulted); // interpreter faulted; baseline must agree
-        interp.ctx.clearException();
-    }
-}
-
-// Post-fault continuation. The body faults at `add` (undefined + undefined ->
-// TypeError) and is FOLLOWED by `push_i8 99; ret`. The interpreter aborts at the
-// fault: run() returns the error and the trailing opcodes never execute. A tier
-// that keeps running past the fault pushes 99 over the sentinel and `ret` returns
-// 99, so run() yields an ORDINARY value (not even the sentinel) for a program that
-// faulted. The tier-stable contract is "a fault makes run() return an error"; a
-// raw `cc.execute` boundary that never polls ctx.exception breaks it by handing
-// back a post-fault value instead. (`add` of undefineds is a guaranteed sentinel
-// path: undefined operands never earn .smi feedback, so the baseline emits the
-// general emitBinaryOp -> jitAdd helper call, not a deopt-to-interpreter.)
-const fault_then_continue_code = [_]u8{
-    op(.push_undefined), op(.push_undefined), op(.add), // faults: TypeError
-    op(.push_i8), 99, // executes only if the tier ran past the fault
-    op(.ret),
-};
-
-/// run() that returned a Zig error faulted; run() that returned ANY value did not
-/// (even the exception_val sentinel counts as "did not return an error").
+/// run() that returned a Zig error faulted; run() that returned ANY value did not.
 fn runReturnedError(interp: *Interpreter, func: *bytecode.FunctionBytecode) bool {
     if (interp.run(func)) |_| {
         return false;
@@ -753,323 +396,44 @@ fn runReturnedError(interp: *Interpreter, func: *bytecode.FunctionBytecode) bool
     }
 }
 
-test "opcode parity: a fault makes run() return an error on every tier, not a post-fault value" {
+test "opcode corpus: interpreter returns the expected value for every case" {
     const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
 
     var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
     defer gc_state.deinit();
     var ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
+
+    // The property cases run `new_object`, which in non-hybrid mode allocates
+    // GC-managed objects from the raw allocator that this corpus never collects.
+    // A request-scoped arena (the production allocation path) reclaims every such
+    // object at deinit, so `testing.allocator` still flags genuine leaks.
+    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 8192 });
+    defer req_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{ .persistent = allocator, .arena = &req_arena };
+    ctx.setHybridAllocator(&hybrid);
+
     var interp = Interpreter.init(ctx);
 
-    jit_policy.setJitPolicy(.eager);
-    const jit_available = !jit_policy.jitDisabled();
-
-    const case = FaultCase{ .name = "fault_then_continue", .code = &fault_then_continue_code, .expect_err = error.TypeError };
-
-    // Tier 1: interpreter aborts at the fault; run() returns the error.
-    jit_policy.setJitThreshold(std.math.maxInt(u32));
-    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-    interp.ctx.clearException();
-    var interp_func = faultFunc(case);
-    try std.testing.expectError(error.TypeError, interp.run(&interp_func));
-
-    if (!jit_available) return;
-
-    // Tier 2: baseline JIT. Warm to force compilation, then the compiled run must
-    // ALSO surface the fault as a run() error - not return 99 from the opcode that
-    // executed past the fault point.
-    jit_policy.setJitPolicy(.eager);
-    jit_policy.setJitThreshold(1);
-    jit_policy.setJitFeedbackWarmup(1);
-    var base_func = faultFunc(case);
-    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-    var i: usize = 0;
-    while (i < 6) : (i += 1) {
-        interp.ctx.clearException();
-        _ = interp.run(&base_func) catch {};
+    for (cases) |case| {
+        errdefer std.debug.print("opcode corpus: failing case '{s}'\n", .{case.name});
+        var func = buildFunc(case);
+        const result = try interp.run(&func);
+        try checkExpected(case, result);
     }
-    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
-    interp.ctx.clearException();
-    try std.testing.expect(runReturnedError(&interp, &base_func));
-    interp.ctx.clearException();
-
-    interp.ctx.clearException();
 }
 
-// A JIT fault must consume its own exception side channel. run() is the top frame
-// (no pushState/popState to restore ctx.exception), so if the boundary leaves the
-// sentinel set after converting it to a Zig error, the NEXT compiled run() on the
-// same Context sees the stale exception via hasException() and spuriously errors a
-// clean function. Run a faulting compiled function (leaving ctx.exception exactly
-// as the boundary left it - NO manual clear), then a clean compiled function: the
-// clean one must return its value, not inherit the prior fault.
-const clean_ret_42_code = [_]u8{ op(.push_i8), 42, op(.ret) };
-
-test "opcode parity: a JIT fault does not poison the next run() on the same context" {
+test "opcode corpus: a fault makes run() return an error, not a post-fault value" {
     const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 1 << 16 });
     defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
     var interp = Interpreter.init(ctx);
 
-    jit_policy.setJitPolicy(.eager);
-    if (jit_policy.jitDisabled()) return;
-
-    jit_policy.setJitThreshold(1);
-    jit_policy.setJitFeedbackWarmup(1);
-
-    var fault_func = faultFunc(.{ .name = "fault", .code = &fault_then_continue_code, .expect_err = error.TypeError });
-    defer jit_compile.cleanupCompiledCode(allocator, &fault_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &fault_func);
-    const clean_case = Case{ .name = "clean", .code = &clean_ret_42_code, .kind = .number, .expected_num = 42 };
-    var clean_func = buildFunc(clean_case);
-    defer jit_compile.cleanupCompiledCode(allocator, &clean_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &clean_func);
-
-    // Warm both to baseline (clear the fault between warm runs so warmup proceeds).
-    var i: usize = 0;
-    while (i < 6) : (i += 1) {
-        interp.ctx.clearException();
-        _ = interp.run(&fault_func) catch {};
-        interp.ctx.clearException();
-        _ = interp.run(&clean_func) catch {};
+    for (fault_cases) |case| {
+        var func = faultFunc(case);
+        try std.testing.expect(runReturnedError(&interp, &func));
+        ctx.clearException();
     }
-    try std.testing.expect(fault_func.compiled_code != null);
-    try std.testing.expect(clean_func.compiled_code != null);
-
-    // Clean slate, then fault and DO NOT clear afterward.
-    interp.ctx.clearException();
-    try std.testing.expect(runReturnedError(&interp, &fault_func));
-
-    // The boundary must have consumed the exception: a clean compiled run now
-    // returns 42, not a spurious error inherited from the fault above.
-    const result = try interp.run(&clean_func);
-    try checkExpected(clean_case, result);
-}
-
-// Optimized-tier coverage note. After the executeCompiled extraction there is ONE
-// compiled-execution boundary shared by `run`, `callBytecodeFunction`, AND both the
-// baseline and optimized tiers - the tier changes only how the BODY compiles, never
-// how a fault is reconciled (the optimized body faults through the same
-// Context.jitAdd / jitCall helpers as baseline) - so the baseline fault assertions
-// above are the guarantee for the optimized tier too. The "a fault makes run()
-// return an error on every tier" test above already asserts the optimized
-// fault->error path opportunistically (its `if (opt_func.tier == .optimized)`
-// block), though a loopless body never reaches .optimized on the dev host. A
-// dedicated forced-.optimized fault test is omitted because it needs a hot SMI loop
-// and the only post-loop faulting opcodes either are unsupported at the optimized
-// tier (push_undefined) or bail the optimized compiler (an always-faulting `call` ->
-// error.OutOfMemory on that synthetic shape, which real codegen never emits).
-
-// Post-fault SIDE EFFECTS in the innermost compiled frame. The boundary
-// (executeCompiled) converts a pending exception into a run() error, so the
-// return-value contract holds even when compiled code runs past a fault - but
-// any STORE the tail opcodes perform is an observable divergence: the
-// interpreter aborts at the fault and never executes it. The body calls a
-// non-callable (faults NotCallable via the jitCall sentinel), then stores 99
-// to a global. On every tier the global must stay undefined after a faulting
-// run: compiled call sites must bail to the fault exit on the sentinel
-// instead of executing the tail opcodes.
-test "opcode parity: compiled code performs no side effects past a faulted call" {
-    const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-    var interp = Interpreter.init(ctx);
-
-    jit_policy.setJitPolicy(.eager);
-    if (jit_policy.jitDisabled()) return;
-
-    const leak_atom = try ctx.atoms.intern("__parity_fault_leak");
-    const atom_idx: u16 = @intCast(@intFromEnum(leak_atom));
-
-    const code = [_]u8{
-        op(.push_i8), 1, // non-callable callee
-        op(.call), 0, // faults: NotCallable
-        op(.drop), // tail opcodes the interpreter never reaches
-        op(.push_i8),
-        99,
-        op(.put_global),
-        @intCast(atom_idx & 0xFF),
-        @intCast(atom_idx >> 8),
-        op(.ret_undefined),
-    };
-
-    // Interpreter: aborts at the fault; the store never runs.
-    jit_policy.setJitThreshold(std.math.maxInt(u32));
-    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-    interp.ctx.clearException();
-    var interp_func = faultFunc(.{ .name = "fault_store", .code = &code, .expect_err = error.NotCallable });
-    try std.testing.expectError(error.NotCallable, interp.run(&interp_func));
-    try std.testing.expect(ctx.getGlobal(leak_atom) == null);
-
-    // Baseline: warm to compiled, reset the global, then a compiled faulting
-    // run must leave the global unset - the tail store must not execute.
-    jit_policy.setJitThreshold(1);
-    jit_policy.setJitFeedbackWarmup(1);
-    var base_func = faultFunc(.{ .name = "fault_store", .code = &code, .expect_err = error.NotCallable });
-    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-    var i: usize = 0;
-    while (i < 6) : (i += 1) {
-        interp.ctx.clearException();
-        _ = interp.run(&base_func) catch {};
-    }
-    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
-    try ctx.setGlobal(leak_atom, JSValue.undefined_val);
-    interp.ctx.clearException();
-    _ = interp.run(&base_func) catch {};
-    interp.ctx.clearException();
-    const leaked = ctx.getGlobal(leak_atom) orelse JSValue.undefined_val;
-    try std.testing.expect(leaked.isUndefined());
-}
-
-// Post-fault tail CALLS in the innermost compiled frame. Store helpers refuse
-// writes while a fault is pending (Context.jitPutGlobal, jitPutFieldIC), but a
-// post-fault tail CALL would execute an entire callee - interpreted, with all
-// of its side effects unguarded - that the interpreter tier never reaches. The
-// jitCall/jitCallBytecode/jitCallBytecodeFast entry guards refuse the call on a
-// pending fault. Body: fault at `add` (undefined + undefined, a guaranteed
-// sentinel path), then call a callee that stores 77 to a global. The global
-// must stay undefined on every tier.
-test "opcode parity: compiled code does not invoke callees past a fault" {
-    const allocator = std.testing.allocator;
-
-    const prev_policy = jit_policy.getJitPolicy();
-    const prev_threshold = jit_policy.getJitThreshold();
-    const prev_warmup = jit_policy.getJitFeedbackWarmup();
-    defer {
-        jit_policy.setJitPolicy(prev_policy);
-        jit_policy.setJitThreshold(prev_threshold);
-        jit_policy.setJitFeedbackWarmup(prev_warmup);
-    }
-
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-    var interp = Interpreter.init(ctx);
-
-    jit_policy.setJitPolicy(.eager);
-    if (jit_policy.jitDisabled()) return;
-
-    const leak_atom = try ctx.atoms.intern("__parity_fault_callee_leak");
-    const atom_idx: u16 = @intCast(@intFromEnum(leak_atom));
-
-    // Callee: call_spread (interpreter no-op pushing undefined, but REJECTED by
-    // the baseline compiler) pins the callee to the interpreter tier even at
-    // threshold 1 - a compiled callee would route its store through the already
-    // guarded Context.jitPutGlobal and mask the call-entry hole. Then: drop;
-    // push_i8 77; put_global <atom>; ret_undefined. The interpreted put_global
-    // has no pending-fault guard - exactly the side effect the call-entry
-    // guards must prevent. Heap-allocated because createBytecodeFunction stores
-    // a pointer and destroyFull frees both the code and the FunctionBytecode.
-    const callee_code = try allocator.alloc(u8, 8);
-    callee_code[0] = op(.call_spread);
-    callee_code[1] = op(.drop);
-    callee_code[2] = op(.push_i8);
-    callee_code[3] = 77;
-    callee_code[4] = op(.put_global);
-    callee_code[5] = @intCast(atom_idx & 0xFF);
-    callee_code[6] = @intCast(atom_idx >> 8);
-    callee_code[7] = op(.ret_undefined);
-    const callee_func = try allocator.create(bytecode.FunctionBytecode);
-    callee_func.* = .{
-        .header = .{},
-        .name_atom = 0,
-        .arg_count = 0,
-        .local_count = 0,
-        .stack_size = 4,
-        .flags = .{},
-        .code = callee_code,
-        .constants = &.{},
-        .source_map = null,
-        .line_table = null,
-    };
-    const callee_obj = try object.JSObject.createBytecodeFunction(allocator, ctx.root_class_idx, callee_func, .length);
-    defer callee_obj.destroyFull(allocator); // frees callee_code + the FunctionBytecode
-
-    const consts = [_]JSValue{callee_obj.toValue()};
-    const code = [_]u8{
-        op(.push_undefined), op(.push_undefined), op(.add), // faults: TypeError
-        op(.drop), // tail opcodes the interpreter never reaches
-        op(.push_const),
-        0,
-        0,
-        op(.call),
-        0,
-        op(.drop),
-        op(.ret_undefined),
-    };
-
-    // Interpreter: aborts at the fault; the callee never runs.
-    jit_policy.setJitThreshold(std.math.maxInt(u32));
-    jit_policy.setJitFeedbackWarmup(std.math.maxInt(u32));
-    interp.ctx.clearException();
-    var interp_func = faultFunc(.{
-        .name = "fault_callee",
-        .code = &code,
-        .constants = &consts,
-        .expect_err = error.TypeError,
-    });
-    try std.testing.expectError(error.TypeError, interp.run(&interp_func));
-    try std.testing.expect(ctx.getGlobal(leak_atom) == null);
-
-    // Baseline: warm to compiled, reset the global, then a compiled faulting
-    // run must not invoke the callee - the global stays undefined.
-    jit_policy.setJitThreshold(1);
-    jit_policy.setJitFeedbackWarmup(1);
-    var base_func = faultFunc(.{
-        .name = "fault_callee",
-        .code = &code,
-        .constants = &consts,
-        .expect_err = error.TypeError,
-    });
-    defer jit_compile.cleanupCompiledCode(allocator, &base_func);
-    defer jit_compile.cleanupTypeFeedback(allocator, &base_func);
-    var i: usize = 0;
-    while (i < 6) : (i += 1) {
-        interp.ctx.clearException();
-        _ = interp.run(&base_func) catch {};
-    }
-    try std.testing.expect(base_func.compiled_code != null); // genuinely compiled
-    try ctx.setGlobal(leak_atom, JSValue.undefined_val);
-    interp.ctx.clearException();
-    _ = interp.run(&base_func) catch {};
-    interp.ctx.clearException();
-    const leaked = ctx.getGlobal(leak_atom) orelse JSValue.undefined_val;
-    try std.testing.expect(leaked.isUndefined());
 }
