@@ -714,49 +714,6 @@ pub const FlowChecker = struct {
         }
     }
 
-    /// Pre-C1 implementation, kept only for the differential test below.
-    fn scanImportsLegacy(self: *FlowChecker) void {
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx_usize| {
-            const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .import_decl) continue;
-
-            const import_decl = self.ir_view.getImportDecl(idx) orelse continue;
-            const module_str = self.ir_view.getString(import_decl.module_idx) orelse continue;
-            if (builtin_modules.fromSpecifier(module_str) == null) continue;
-
-            var j: u8 = 0;
-            while (j < import_decl.specifiers_count) : (j += 1) {
-                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, j);
-                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
-                const imported_name = self.resolveAtomName(spec.imported_atom) orelse continue;
-
-                if (builtin_modules.findExport(module_str, imported_name)) |entry| {
-                    if (!entry.func.return_labels.isEmpty()) {
-                        self.module_fn_labels.put(
-                            self.allocator,
-                            spec.local_binding.slot,
-                            entry.func.return_labels,
-                        ) catch self.markAllocationFailure();
-                    }
-                    self.module_fn_meta.put(
-                        self.allocator,
-                        spec.local_binding.slot,
-                        .{
-                            .module = entry.binding.name,
-                            .func = entry.func.name,
-                            .returns = entry.func.returns,
-                        },
-                    ) catch self.markAllocationFailure();
-                    if (std.mem.eql(u8, imported_name, "env")) {
-                        self.env_fn_slot = spec.local_binding.slot;
-                    }
-                }
-            }
-        }
-    }
-
     /// Index user function declarations (and function-valued const/let
     /// bindings) so call-label inference can summarize callee bodies instead
     /// of dropping labels at every user-defined call boundary.
@@ -3652,79 +3609,38 @@ test "FlowChecker keeps injection_safe for request data escaped through renderTo
 
 const import_corpus = @import("tests/import_corpus.zig");
 
-test "the facts-backed import scan derives the same three collections as the legacy scan" {
-    // Three collections plus env_fn_slot, both atom modes.
+test "the import scan populates labels, meta, and the env slot in both atom modes" {
+    // Replaces the differential that proved this scan matches the pre-C1
+    // implementation. Both atom modes, per C1 finding 2.
     const allocator = std.testing.allocator;
 
-    for ([_]bool{ true, false }) |use_atoms| for (import_corpus.cases) |case| {
-        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+    for ([_]bool{ true, false }) |use_atoms| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator,
+            \\import { env } from "zttp:env";
+            \\import { sha256 } from "zttp:crypto";
+            \\import { thing } from "zttp-ext:unknown";
+        );
         defer parser.deinit();
         var atoms = context.AtomTable.init(allocator);
         defer atoms.deinit();
         if (use_atoms) parser.setAtomTable(&atoms);
         _ = try parser.parse();
         const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-        const atoms_arg: ?*context.AtomTable = if (use_atoms) &atoms else null;
 
-        var legacy = FlowChecker.init(allocator, ir_view, atoms_arg);
-        defer legacy.deinit();
-        legacy.scanImportsLegacy();
+        var checker = FlowChecker.init(allocator, ir_view, if (use_atoms) &atoms else null);
+        defer checker.deinit();
+        checker.scanImports();
 
-        var migrated = FlowChecker.init(allocator, ir_view, atoms_arg);
-        defer migrated.deinit();
-        migrated.scanImports();
-
-        std.testing.expectEqual(legacy.env_fn_slot, migrated.env_fn_slot) catch |err| {
-            std.debug.print("\ncase \"{s}\" (atoms={}): env slot {?d} -> {?d}\n", .{
-                case.label, use_atoms, legacy.env_fn_slot, migrated.env_fn_slot,
-            });
+        // Two builtins get meta; the unresolved module gets none.
+        std.testing.expectEqual(@as(u32, 2), checker.module_fn_meta.count()) catch |err| {
+            std.debug.print("\natoms={}: expected 2 meta entries, found {d}\n", .{ use_atoms, checker.module_fn_meta.count() });
             return err;
         };
-
-        std.testing.expectEqual(legacy.module_fn_labels.count(), migrated.module_fn_labels.count()) catch |err| {
-            std.debug.print("\ncase \"{s}\" (atoms={}): labels {d} -> {d}\n", .{
-                case.label, use_atoms, legacy.module_fn_labels.count(), migrated.module_fn_labels.count(),
-            });
-            return err;
-        };
-        var lit = legacy.module_fn_labels.iterator();
-        while (lit.next()) |e| {
-            const got = migrated.module_fn_labels.get(e.key_ptr.*) orelse {
-                std.debug.print("\ncase \"{s}\" (atoms={}): label slot {d} missing\n", .{ case.label, use_atoms, e.key_ptr.* });
-                return error.LabelSlotMissing;
-            };
-            if (!std.meta.eql(got, e.value_ptr.*)) {
-                std.debug.print("\ncase \"{s}\" (atoms={}): label slot {d} changed\n", .{ case.label, use_atoms, e.key_ptr.* });
-                return error.LabelChanged;
-            }
-        }
-
-        std.testing.expectEqual(legacy.module_fn_meta.count(), migrated.module_fn_meta.count()) catch |err| {
-            std.debug.print("\ncase \"{s}\" (atoms={}): meta {d} -> {d}\n", .{
-                case.label, use_atoms, legacy.module_fn_meta.count(), migrated.module_fn_meta.count(),
-            });
-            return err;
-        };
-        var mit = legacy.module_fn_meta.iterator();
-        while (mit.next()) |e| {
-            const want = e.value_ptr.*;
-            const got = migrated.module_fn_meta.get(e.key_ptr.*) orelse {
-                std.debug.print("\ncase \"{s}\" (atoms={}): meta slot {d} ({s}.{s}) missing\n", .{
-                    case.label, use_atoms, e.key_ptr.*, want.module, want.func,
-                });
-                return error.MetaSlotMissing;
-            };
-            if (!std.mem.eql(u8, want.module, got.module) or
-                !std.mem.eql(u8, want.func, got.func) or
-                want.returns != got.returns)
-            {
-                std.debug.print("\ncase \"{s}\" (atoms={}): meta slot {d} was {s}.{s}, now {s}.{s}\n", .{
-                    case.label, use_atoms, e.key_ptr.*, want.module, want.func, got.module, got.func,
-                });
-                return error.MetaChanged;
-            }
-        }
-    };
+        try std.testing.expect(checker.env_fn_slot != null);
+        // Only functions with non-empty return labels land in the label map, so
+        // this is a strict subset of the meta map rather than the same size.
+        try std.testing.expect(checker.module_fn_labels.count() <= checker.module_fn_meta.count());
+    }
 }
 
 test "the env slot is found through an alias, and unresolved modules are skipped" {
