@@ -241,6 +241,7 @@ const FunctionProduces = enum {
 };
 
 const builtin_modules = @import("builtin_modules.zig");
+const module_facts_mod = @import("module_facts.zig");
 const mb = @import("module_binding.zig");
 
 /// Look up whether a function produces a value requiring caller-side checking.
@@ -310,6 +311,10 @@ pub const HandlerVerifier = struct {
     // Optional checking state (Check 6)
     optional_bindings: std.ArrayList(OptionalBindingState),
     optional_function_slots: std.ArrayList(OptionalFnSlot),
+    /// Shared import index, injected by the orchestrator when one exists.
+    /// Borrowed; must outlive the verifier. Null means build a private one.
+    facts: ?*const module_facts_mod.ModuleFacts = null,
+    owned_facts: ?module_facts_mod.ModuleFacts = null,
 
     // Dead variable tracking
     all_bindings: std.ArrayList(BindingState),
@@ -347,6 +352,7 @@ pub const HandlerVerifier = struct {
     pub fn deinit(self: *HandlerVerifier) void {
         self.diagnostics.deinit(self.allocator);
         self.result_bindings.deinit(self.allocator);
+        if (self.owned_facts) |*owned| owned.deinit();
         self.result_function_slots.deinit(self.allocator);
         self.optional_bindings.deinit(self.allocator);
         self.optional_function_slots.deinit(self.allocator);
@@ -549,8 +555,55 @@ pub const HandlerVerifier = struct {
     // -----------------------------------------------------------------------
 
     /// Scan top-level import declarations to identify which local bindings
-    /// map to tracked virtual module functions (result-producing or optional-producing).
+    /// Resolve the index to read: injected, or private on first use.
+    fn resolveFacts(self: *HandlerVerifier) ?*const module_facts_mod.ModuleFacts {
+        if (self.facts) |f| return f;
+        if (self.owned_facts == null) {
+            self.owned_facts = module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                null,
+            ) catch {
+                self.markAllocationFailure();
+                return null;
+            };
+        }
+        return &self.owned_facts.?;
+    }
+
+    /// Map local binding slots to tracked virtual module functions
+    /// (result-producing or optional-producing).
+    ///
+    /// The legacy scan pre-screened each module for having ANY tracked export
+    /// before looking at its specifiers. That screen is dropped here because it
+    /// is a pure short-circuit: `lookupTrackedFunction` goes through
+    /// `findExport`, so a module with no tracked export returns null for every
+    /// name anyway, and a module outside `builtin_modules.all` returns null too.
+    /// The differential test below is what establishes that rather than
+    /// assuming it.
     fn scanImports(self: *HandlerVerifier) void {
+        const facts = self.resolveFacts() orelse return;
+        for (facts.imports.items) |rec| {
+            if (rec.resolution != .builtin) continue;
+            const produces = lookupTrackedFunction(rec.module_specifier, rec.imported_name) orelse continue;
+            switch (produces) {
+                .result => self.result_function_slots.append(self.allocator, .{
+                    .slot = rec.slot,
+                    .func_name = rec.imported_name,
+                    .module_name = rec.module_specifier,
+                }) catch self.markAllocationFailure(),
+                .optional_string, .optional_object => self.optional_function_slots.append(self.allocator, .{
+                    .slot = rec.slot,
+                    .kind = produces.toOptionalKind().?,
+                }) catch self.markAllocationFailure(),
+            }
+        }
+    }
+
+    /// Pre-C1 implementation, kept only for the differential test below.
+    /// map to tracked virtual module functions (result-producing or optional-producing).
+    fn scanImportsLegacy(self: *HandlerVerifier) void {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -1762,4 +1815,103 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
         }
     }
     try std.testing.expect(saw_missing_return);
+}
+
+const import_corpus = @import("tests/import_corpus.zig");
+
+test "the facts-backed import scan derives the same slot lists as the legacy scan" {
+    // This is also the evidence that dropping the module-level pre-screen is
+    // safe: the legacy scan skipped a whole module unless it had at least one
+    // result or optional export, and the migrated scan relies on
+    // lookupTrackedFunction returning null instead.
+    //
+    // WITH an atom table only. The no-table path diverges on purpose and is
+    // pinned by the test below: this verifier's own resolveAtomName returns null
+    // for a non-predefined atom when there is no table, while the shared index
+    // falls back to string constants. Production always passes a table.
+    const allocator = std.testing.allocator;
+
+    for ([_]bool{true}) |use_atoms| for (import_corpus.cases) |case| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+        defer parser.deinit();
+        var atoms = context.AtomTable.init(allocator);
+        defer atoms.deinit();
+        if (use_atoms) parser.setAtomTable(&atoms);
+        _ = try parser.parse();
+        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        const atoms_arg: ?*context.AtomTable = if (use_atoms) &atoms else null;
+
+        var legacy = HandlerVerifier.init(allocator, ir_view, atoms_arg, null, null);
+        defer legacy.deinit();
+        legacy.scanImportsLegacy();
+
+        var migrated = HandlerVerifier.init(allocator, ir_view, atoms_arg, null, null);
+        defer migrated.deinit();
+        migrated.scanImports();
+
+        std.testing.expectEqual(legacy.result_function_slots.items.len, migrated.result_function_slots.items.len) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): result slots {d} -> {d}\n", .{
+                case.label, use_atoms, legacy.result_function_slots.items.len, migrated.result_function_slots.items.len,
+            });
+            return err;
+        };
+        for (legacy.result_function_slots.items, migrated.result_function_slots.items, 0..) |want, got, i| {
+            if (want.slot != got.slot or
+                !std.mem.eql(u8, want.func_name, got.func_name) or
+                !std.mem.eql(u8, want.module_name, got.module_name))
+            {
+                std.debug.print("\ncase \"{s}\" (atoms={}) result {d}: was slot {d} {s}.{s}, now slot {d} {s}.{s}\n", .{
+                    case.label, use_atoms, i, want.slot, want.module_name, want.func_name, got.slot, got.module_name, got.func_name,
+                });
+                return error.ResultSlotChanged;
+            }
+        }
+
+        std.testing.expectEqual(legacy.optional_function_slots.items.len, migrated.optional_function_slots.items.len) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): optional slots {d} -> {d}\n", .{
+                case.label, use_atoms, legacy.optional_function_slots.items.len, migrated.optional_function_slots.items.len,
+            });
+            return err;
+        };
+        for (legacy.optional_function_slots.items, migrated.optional_function_slots.items, 0..) |want, got, i| {
+            if (want.slot != got.slot or want.kind != got.kind) {
+                std.debug.print("\ncase \"{s}\" (atoms={}) optional {d}: slot {d}/{any} -> {d}/{any}\n", .{
+                    case.label, use_atoms, i, want.slot, want.kind, got.slot, got.kind,
+                });
+                return error.OptionalSlotChanged;
+            }
+        }
+    };
+}
+
+test "with no atom table the index resolves imports this verifier used to miss" {
+    // An ACCEPTED behavior change, recorded rather than hidden. See C1 finding 5.
+    //
+    // Three of the six analyzers had three different atom resolvers. Unifying
+    // them onto one index necessarily unifies atom resolution, and the resolver
+    // the index carries is bool_checker's, because nine sound-mode tests need
+    // its string-constant fallback. This verifier's own resolver returned null
+    // for a non-predefined atom with no table, so it tracked nothing at all on
+    // that path.
+    //
+    // Direction: strictly more imports seen, never fewer. Scope: no production
+    // path, because every production `ParsedModule.fromExisting` site passes a
+    // real atom table and precompile passes `&atoms` directly; the null-passing
+    // sites are test blocks. All 11 of this file's tests pass either way.
+    const allocator = std.testing.allocator;
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "import { env } from \"zttp:env\";\n");
+    defer parser.deinit();
+    // Deliberately no setAtomTable.
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var verifier = HandlerVerifier.init(allocator, ir_view, null, null, null);
+    defer verifier.deinit();
+    verifier.scanImports();
+
+    // `env` returns an optional string, so it lands in the optional list. Before
+    // C1 this was 0 on the no-table path.
+    try std.testing.expectEqual(@as(usize, 1), verifier.optional_function_slots.items.len);
+    try std.testing.expectEqual(@as(usize, 0), verifier.result_function_slots.items.len);
 }
