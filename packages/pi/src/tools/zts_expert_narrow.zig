@@ -83,7 +83,7 @@ fn execute(
 
     var atoms = zts.context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = zts.parser.JsParser.init(allocator, strip_result.code);
+    var js_parser = try zts.parser.JsParser.init(allocator, strip_result.code);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 

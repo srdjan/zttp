@@ -100,7 +100,7 @@ Task order follows the dependency order: scope, then parser, then the legacy wra
 - Consumes: nothing from earlier tasks.
 - Produces: `ScopeAnalyzer.init(allocator: std.mem.Allocator) !ScopeAnalyzer`. There is no longer any infallible constructor. `parse.zig` Task 2 calls this with `try`.
 
-- [ ] **Step 1: Confirm the current shape before touching it**
+- [x] **Step 1: Confirm the current shape before touching it**
 
 Run:
 ```bash
@@ -111,7 +111,7 @@ Expected: an `init` at `:150` whose body is `return initFallible(allocator) catc
 
 If the line numbers differ, the file moved since this plan was written. Re-derive them with the same commands and continue; do not edit by line number without confirming.
 
-- [ ] **Step 2: Delete the wrapper and rename the fallible constructor**
+- [x] **Step 2: Delete the wrapper and rename the fallible constructor**
 
 Delete the whole `pub fn init(allocator: std.mem.Allocator) ScopeAnalyzer { ... }` block, including its doc comment if it has one. Then rename `initFallible` to `init`:
 
@@ -119,7 +119,7 @@ Delete the whole `pub fn init(allocator: std.mem.Allocator) ScopeAnalyzer { ... 
     pub fn init(allocator: std.mem.Allocator) !ScopeAnalyzer {
 ```
 
-- [ ] **Step 3: Update every call site to `try`**
+- [x] **Step 3: Update every call site to `try`**
 
 For each of the 8 sites, add `try`:
 
@@ -129,7 +129,7 @@ For each of the 8 sites, add `try`:
 
 Where the enclosing function does not already return an error union, change its signature. For a test block, `test "name" { ... }` already permits `try`.
 
-- [ ] **Step 4: Build and run the engine tests**
+- [x] **Step 4: Build and run the engine tests**
 
 Run:
 ```bash
@@ -139,7 +139,7 @@ Expected: `EXIT=0`, no output from the grep.
 
 If you see `error: expected type 'ScopeAnalyzer', found '@typeInfo(...).error_union'`, a call site is missing its `try`. The message names the file and line.
 
-- [ ] **Step 5: Verify no infallible constructor remains in this file**
+- [x] **Step 5: Verify no infallible constructor remains in this file**
 
 Run:
 ```bash
@@ -147,7 +147,7 @@ grep -n 'catch unreachable' packages/zts/src/parser/scope.zig
 ```
 Expected: no output.
 
-- [ ] **Step 6: Format and commit**
+- [x] **Step 6: Format and commit**
 
 ```bash
 zig fmt packages/zts/src/parser/scope.zig packages/zts/src/parser/codegen.zig
@@ -175,7 +175,7 @@ Verified: zig build test-zts exit 0."
 - Consumes: `ScopeAnalyzer.init(...) !ScopeAnalyzer` from Task 1. The body of the parser's fallible constructor already calls it with `try`, so no change is needed there.
 - Produces: `Parser.init(allocator: std.mem.Allocator, source: []const u8) !Parser`, re-exported as `JsParser.init` from `packages/zts/src/parser/root.zig:64`. Tasks 3 through 6 call it with `try`.
 
-- [ ] **Step 1: Confirm the current shape**
+- [x] **Step 1: Confirm the current shape**
 
 Run:
 ```bash
@@ -184,7 +184,7 @@ grep -c 'Parser\.init(' packages/zts/src/parser/parse.zig
 ```
 Expected: `init` at `:131` delegating with `catch unreachable`, `initFallible` at `:135`, and 86 call sites in this file.
 
-- [ ] **Step 2: Delete the wrapper and rename**
+- [x] **Step 2: Delete the wrapper and rename**
 
 Delete:
 
@@ -200,7 +200,7 @@ Rename the next declaration:
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
 ```
 
-- [ ] **Step 3: Update this file's call sites**
+- [x] **Step 3: Update this file's call sites**
 
 Most are `var parser = Parser.init(allocator, source);` inside test blocks. Add `try`:
 
@@ -217,7 +217,7 @@ Expected: 86.
 
 Do not use a repository-wide substitution. `Parser.init` also names the legacy wrapper in `root.zig`, which Task 3 handles separately with a different signature.
 
-- [ ] **Step 4: Build and run the engine tests**
+- [x] **Step 4: Build and run the engine tests**
 
 Run:
 ```bash
@@ -225,7 +225,7 @@ zig build test-zts > /tmp/t.log 2>&1; echo "EXIT=$?"; grep -E 'error:|leaked' /t
 ```
 Expected: `EXIT=0` and no grep output. Callers outside this file still fail to compile at this point only if they use `JsParser.init`; those are Tasks 4 to 6 and `test-zts` covers `packages/zts` only, so expect failures naming other `packages/zts` files and fix them as part of this task if they appear.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/zts/src/parser/parse.zig
@@ -253,7 +253,7 @@ Verified: zig build test-zts exit 0."
 - Consumes: nothing from Tasks 1 and 2; this struct has its own constructor.
 - Produces: `parser.Parser.init(allocator, source, strings, atoms) !Parser`.
 
-- [ ] **Step 1: Confirm the current shape**
+- [x] **Step 1: Confirm the current shape**
 
 Run:
 ```bash
@@ -262,7 +262,7 @@ git grep -n 'parser\.Parser\.init(' -- '*.zig'
 ```
 Expected: the four-argument `init` at `:164` delegating with `catch unreachable`, and two production call sites in `packages/zts/src/compiler.zig`.
 
-- [ ] **Step 2: Delete the wrapper and rename**
+- [x] **Step 2: Delete the wrapper and rename**
 
 Delete the `pub fn init(...) Parser { return initFallible(...) catch unreachable; }` block and rename the declaration below it:
 
@@ -275,7 +275,7 @@ Delete the `pub fn init(...) Parser { return initFallible(...) catch unreachable
     ) !Parser {
 ```
 
-- [ ] **Step 3: Update the two compiler call sites**
+- [x] **Step 3: Update the two compiler call sites**
 
 In `packages/zts/src/compiler.zig`, both sites are inside functions that already return an error union (`compile` and `compileWithOptions` both return `!*bytecode.FunctionBytecode`):
 
@@ -283,11 +283,11 @@ In `packages/zts/src/compiler.zig`, both sites are inside functions that already
     var p = try parser.Parser.init(allocator, source, &strings, null);
 ```
 
-- [ ] **Step 4: Update this file's test call sites**
+- [x] **Step 4: Update this file's test call sites**
 
 Add `try` to each remaining `Parser.init(` in `packages/zts/src/parser/root.zig`.
 
-- [ ] **Step 5: Build and test**
+- [x] **Step 5: Build and test**
 
 Run:
 ```bash
@@ -295,7 +295,7 @@ zig build test-zts > /tmp/t.log 2>&1; echo "EXIT=$?"; grep -E 'error:|leaked' /t
 ```
 Expected: `EXIT=0`, no grep output.
 
-- [ ] **Step 6: Verify the parser package is free of the pattern**
+- [x] **Step 6: Verify the parser package is free of the pattern**
 
 Run:
 ```bash
@@ -303,7 +303,7 @@ grep -rn 'catch unreachable' packages/zts/src/parser/
 ```
 Expected: only `parse.zig:3554` (a `bufPrint` into a fixed stack buffer that cannot fail) and the two `_ = result catch unreachable;` lines in test blocks around `:5244` and `:5257`. Those are honest and stay. If anything else appears, it is a wrapper this plan missed; handle it the same way.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 zig fmt packages/zts/src/parser/root.zig packages/zts/src/compiler.zig
@@ -329,7 +329,7 @@ Verified: zig build test-zts exit 0."
 - Consumes: `JsParser.init(...) !Parser` from Task 2.
 - Produces: nothing new. This task only propagates `try`.
 
-- [ ] **Step 1: List the sites that still fail to compile**
+- [x] **Step 1: List the sites that still fail to compile**
 
 Run:
 ```bash
@@ -338,7 +338,7 @@ grep -E '^packages.*error:' /tmp/t.log | sort -u
 ```
 The compiler names every remaining site. Work the list top to bottom.
 
-- [ ] **Step 2: Add `try` at each site, and propagate the error type outward where needed**
+- [x] **Step 2: Add `try` at each site, and propagate the error type outward where needed**
 
 The usual shape:
 
@@ -351,7 +351,7 @@ Where the enclosing function returns a plain type, change it to an error union. 
 
 Do not silence a site with `catch unreachable` or `catch undefined`. That reintroduces exactly the defect this plan removes. If a site genuinely cannot propagate an error, stop and record why in the plan's Open Questions section rather than working around it.
 
-- [ ] **Step 3: Build and test until clean**
+- [x] **Step 3: Build and test until clean**
 
 Run:
 ```bash
@@ -359,7 +359,7 @@ zig build test-zts > /tmp/t.log 2>&1; echo "EXIT=$?"; grep -E 'error:|leaked' /t
 ```
 Expected: `EXIT=0`, no grep output.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 zig fmt packages/
@@ -386,7 +386,7 @@ Verified: zig build test-zts exit 0."
 - Consumes: `JsParser.init(...) !Parser` from Task 2.
 - Produces: nothing new.
 
-- [ ] **Step 1: Build the whole tree to surface the sites**
+- [x] **Step 1: Build the whole tree to surface the sites**
 
 Run:
 ```bash
@@ -394,7 +394,7 @@ zig build > /tmp/b.log 2>&1; echo "EXIT=$?"
 grep -E '^packages.*error:' /tmp/b.log | sort -u
 ```
 
-- [ ] **Step 2: Add `try` at each site and widen signatures as needed**
+- [x] **Step 2: Add `try` at each site and widen signatures as needed**
 
 Same shape as Task 4. `precompile.zig`'s sites are inside functions that already return error unions, so most need only `try`:
 
@@ -402,7 +402,7 @@ Same shape as Task 4. `precompile.zig`'s sites are inside functions that already
     var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
 ```
 
-- [ ] **Step 3: Build clean, then run the suites that cover these packages**
+- [x] **Step 3: Build clean, then run the suites that cover these packages**
 
 Run:
 ```bash
@@ -412,7 +412,7 @@ zig build test-zruntime > /tmp/r.log 2>&1; echo "ZRUNTIME=$?"
 ```
 Expected: all three `=0`.
 
-- [ ] **Step 4: Confirm the benchmark binaries still compile**
+- [x] **Step 4: Confirm the benchmark binaries still compile**
 
 Run:
 ```bash
@@ -420,7 +420,7 @@ zig build bench-check > /tmp/bc.log 2>&1; echo "EXIT=$?"; grep -E 'ok:|regress|e
 ```
 Expected: `EXIT=0` and an `ok:` line. If a benchmark regresses more than 8 percent, re-run once before believing it; `intArithmetic` has a measured run-to-run spread near 10 percent on a loaded host, and a false failure from it cost time in the previous session.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/
@@ -445,18 +445,18 @@ Verified: zig build test-precompile and test-zruntime exit 0, bench-check ok."
 - Consumes: `JsParser.init(...) !Parser` from Task 2.
 - Produces: nothing new. This is the last caller group.
 
-- [ ] **Step 1: Build and list remaining sites**
+- [x] **Step 1: Build and list remaining sites**
 
 Run:
 ```bash
 zig build > /tmp/b.log 2>&1; echo "EXIT=$?"; grep -E '^packages/pi.*error:' /tmp/b.log | sort -u
 ```
 
-- [ ] **Step 2: Add `try` at each site**
+- [x] **Step 2: Add `try` at each site**
 
 These are pi tools whose `execute` entry points already return error unions, so `try` should be sufficient. Confirm rather than assume: if a signature needs widening, the compiler says so.
 
-- [ ] **Step 3: Verify no infallible constructor survives anywhere**
+- [x] **Step 3: Verify no infallible constructor survives anywhere**
 
 Run:
 ```bash
@@ -470,7 +470,7 @@ git grep -n 'init(.*) Parser {\|init(.*) ScopeAnalyzer {' -- '*.zig'
 ```
 Expected: no output. Every parser and scope constructor now returns an error union.
 
-- [ ] **Step 4: Run the full gate**
+- [x] **Step 4: Run the full gate**
 
 Run:
 ```bash
@@ -478,7 +478,7 @@ bash scripts/verify.sh > /tmp/v.txt 2>&1; echo "EXIT=$?"; tail -3 /tmp/v.txt
 ```
 Expected: `EXIT=0` and the "all CI test-job steps passed" banner. Read the `EXIT=` line, not just the tail.
 
-- [ ] **Step 5: Prove the change did something, with a failure-injection test**
+- [x] **Step 5: Prove the change did something, with a failure-injection test**
 
 This is the acceptance criterion from the reset plan: construction failure must surface as an error. Add this test to `packages/zts/src/parser/parse.zig`, at the end of the file:
 
@@ -500,7 +500,7 @@ Expected: `EXIT=0`.
 
 If the test fails with "expected error.OutOfMemory, found ...", the first allocation in the constructor is not the one that fails; raise `fail_index` until it is the constructor's allocation, and leave the working index in the committed test.
 
-- [ ] **Step 6: Update the reset plan's section 4.5**
+- [x] **Step 6: Update the reset plan's section 4.5**
 
 In `docs/plans/2026-07-28-001-reset-simplification-plan.md`, in the "Compilation ownership, verified" subsection, append:
 
@@ -512,7 +512,7 @@ remaining part of this finding, the `CompileRequest` to `CompiledModule` session
 explicit stages and one idempotent deinit, is NOT done and needs its own plan.
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 zig fmt packages/

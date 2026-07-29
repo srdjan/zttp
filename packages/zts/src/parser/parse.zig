@@ -5384,3 +5384,11 @@ test "match as property name" {
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
 }
+
+test "parser construction reports allocation failure instead of panicking" {
+    // A failing allocator makes ScopeAnalyzer construction fail, which the
+    // parser must propagate. Before this was fallible, the same condition
+    // reached `catch unreachable` and was undefined behavior.
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    try std.testing.expectError(error.OutOfMemory, Parser.init(failing.allocator(), "const x = 1;"));
+}

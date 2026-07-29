@@ -184,6 +184,12 @@ into `pipeline.zig`: the orchestration move is the same work done properly.
 Acceptance is objective and stronger than a passing test suite: every compile path,
 including every failure stage, must report no leaks under `std.testing.allocator`.
 
+**Status, 2026-07-29:** The infallible constructors are removed. `ScopeAnalyzer.init`,
+the JS `Parser.init`, and the legacy wrapper's `init` all return error unions, and every
+call site propagates. A failure-injection test in `parse.zig` pins the behavior. The
+remaining part of this finding, the `CompileRequest` to `CompiledModule` session with
+explicit stages and one idempotent deinit, is NOT done and needs its own plan.
+
 ## 5. Proof and verification surface
 
 Slice measured at about 72,000 lines across zts, runtime, tools, and proof-review.
