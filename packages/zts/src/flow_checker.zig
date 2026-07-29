@@ -19,6 +19,7 @@ const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const builtin_modules = @import("builtin_modules.zig");
+const module_facts_mod = @import("module_facts.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const counterexample = @import("counterexample.zig");
@@ -302,6 +303,10 @@ pub const FlowChecker = struct {
     req_binding_key: ?u32,
     /// Slot of the `env` function import (for smart label refinement).
     env_fn_slot: ?u16,
+    /// Shared import index, injected by the orchestrator when one exists.
+    /// Borrowed; must outlive the checker. Null means build a private one.
+    facts: ?*const module_facts_mod.ModuleFacts = null,
+    owned_facts: ?module_facts_mod.ModuleFacts = null,
     /// Constraint stack maintained as `walkStmt` descends into conditional
     /// branches. Snapshotted onto every diagnostic at emission time.
     working_constraints: std.ArrayListUnmanaged(counterexample.WitnessConstraint),
@@ -362,6 +367,7 @@ pub const FlowChecker = struct {
         }
         self.diagnostics.deinit(self.allocator);
         self.binding_labels.deinit(self.allocator);
+        if (self.owned_facts) |*owned| owned.deinit();
         self.module_fn_labels.deinit(self.allocator);
         self.module_fn_meta.deinit(self.allocator);
         self.binding_origin.deinit(self.allocator);
@@ -656,7 +662,60 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Resolve the index to read: injected, or private on first use.
+    fn resolveFacts(self: *FlowChecker) ?*const module_facts_mod.ModuleFacts {
+        if (self.facts) |f| return f;
+        if (self.owned_facts == null) {
+            self.owned_facts = module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                null,
+            ) catch {
+                self.markAllocationFailure();
+                return null;
+            };
+        }
+        return &self.owned_facts.?;
+    }
+
+    /// Populate the three slot-keyed collections and the env slot.
+    ///
+    /// `.builtin` only, translating the legacy `fromSpecifier(module) == null`
+    /// skip: that lookup never consults a manifest registry, so a
+    /// partner-registered module was skipped before and stays skipped.
     fn scanImports(self: *FlowChecker) void {
+        const facts = self.resolveFacts() orelse return;
+        for (facts.imports.items) |rec| {
+            if (rec.resolution != .builtin) continue;
+            const entry = builtin_modules.findExport(rec.module_specifier, rec.imported_name) orelse continue;
+
+            if (!entry.func.return_labels.isEmpty()) {
+                self.module_fn_labels.put(
+                    self.allocator,
+                    rec.slot,
+                    entry.func.return_labels,
+                ) catch self.markAllocationFailure();
+            }
+            self.module_fn_meta.put(
+                self.allocator,
+                rec.slot,
+                .{
+                    .module = entry.binding.name,
+                    .func = entry.func.name,
+                    .returns = entry.func.returns,
+                },
+            ) catch self.markAllocationFailure();
+            // Matched on the imported name, not the local alias, exactly as
+            // before: `import { env as e }` still sets this slot.
+            if (std.mem.eql(u8, rec.imported_name, "env")) {
+                self.env_fn_slot = rec.slot;
+            }
+        }
+    }
+
+    /// Pre-C1 implementation, kept only for the differential test below.
+    fn scanImportsLegacy(self: *FlowChecker) void {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -3589,4 +3648,104 @@ test "FlowChecker keeps injection_safe for request data escaped through renderTo
     ;
     const r = try runJsxCheck(std.testing.allocator, source);
     try std.testing.expect(r.injection_safe);
+}
+
+const import_corpus = @import("tests/import_corpus.zig");
+
+test "the facts-backed import scan derives the same three collections as the legacy scan" {
+    // Three collections plus env_fn_slot, both atom modes.
+    const allocator = std.testing.allocator;
+
+    for ([_]bool{ true, false }) |use_atoms| for (import_corpus.cases) |case| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+        defer parser.deinit();
+        var atoms = context.AtomTable.init(allocator);
+        defer atoms.deinit();
+        if (use_atoms) parser.setAtomTable(&atoms);
+        _ = try parser.parse();
+        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        const atoms_arg: ?*context.AtomTable = if (use_atoms) &atoms else null;
+
+        var legacy = FlowChecker.init(allocator, ir_view, atoms_arg);
+        defer legacy.deinit();
+        legacy.scanImportsLegacy();
+
+        var migrated = FlowChecker.init(allocator, ir_view, atoms_arg);
+        defer migrated.deinit();
+        migrated.scanImports();
+
+        std.testing.expectEqual(legacy.env_fn_slot, migrated.env_fn_slot) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): env slot {?d} -> {?d}\n", .{
+                case.label, use_atoms, legacy.env_fn_slot, migrated.env_fn_slot,
+            });
+            return err;
+        };
+
+        std.testing.expectEqual(legacy.module_fn_labels.count(), migrated.module_fn_labels.count()) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): labels {d} -> {d}\n", .{
+                case.label, use_atoms, legacy.module_fn_labels.count(), migrated.module_fn_labels.count(),
+            });
+            return err;
+        };
+        var lit = legacy.module_fn_labels.iterator();
+        while (lit.next()) |e| {
+            const got = migrated.module_fn_labels.get(e.key_ptr.*) orelse {
+                std.debug.print("\ncase \"{s}\" (atoms={}): label slot {d} missing\n", .{ case.label, use_atoms, e.key_ptr.* });
+                return error.LabelSlotMissing;
+            };
+            if (!std.meta.eql(got, e.value_ptr.*)) {
+                std.debug.print("\ncase \"{s}\" (atoms={}): label slot {d} changed\n", .{ case.label, use_atoms, e.key_ptr.* });
+                return error.LabelChanged;
+            }
+        }
+
+        std.testing.expectEqual(legacy.module_fn_meta.count(), migrated.module_fn_meta.count()) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): meta {d} -> {d}\n", .{
+                case.label, use_atoms, legacy.module_fn_meta.count(), migrated.module_fn_meta.count(),
+            });
+            return err;
+        };
+        var mit = legacy.module_fn_meta.iterator();
+        while (mit.next()) |e| {
+            const want = e.value_ptr.*;
+            const got = migrated.module_fn_meta.get(e.key_ptr.*) orelse {
+                std.debug.print("\ncase \"{s}\" (atoms={}): meta slot {d} ({s}.{s}) missing\n", .{
+                    case.label, use_atoms, e.key_ptr.*, want.module, want.func,
+                });
+                return error.MetaSlotMissing;
+            };
+            if (!std.mem.eql(u8, want.module, got.module) or
+                !std.mem.eql(u8, want.func, got.func) or
+                want.returns != got.returns)
+            {
+                std.debug.print("\ncase \"{s}\" (atoms={}): meta slot {d} was {s}.{s}, now {s}.{s}\n", .{
+                    case.label, use_atoms, e.key_ptr.*, want.module, want.func, got.module, got.func,
+                });
+                return error.MetaChanged;
+            }
+        }
+    };
+}
+
+test "the env slot is found through an alias, and unresolved modules are skipped" {
+    const allocator = std.testing.allocator;
+    var parser = try @import("parser/parse.zig").Parser.init(allocator,
+        \\import { env as e } from "zttp:env";
+        \\import { thing } from "zttp-ext:unknown";
+    );
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    checker.scanImports();
+
+    // Matched on the imported name, not the local alias.
+    try std.testing.expect(checker.env_fn_slot != null);
+    // Builtins only: the unresolved module contributes no meta entry.
+    try std.testing.expectEqual(@as(u32, 1), checker.module_fn_meta.count());
 }
