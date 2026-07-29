@@ -1185,7 +1185,7 @@ that every later claim of "no regression" is made against one authority instead 
 Exit when the release profile covers every supported surface and `doctor --release --json`
 returns ready.
 
-### Wave 1: provably dead code, low risk
+### Wave 1: provably dead code, low risk (DONE, all eight rows)
 
 1. Delete `packages/zts/src/parser/parse.zig.tmp`.
 2. Delete the generator machinery and make `function*` a parse error with the same
@@ -1321,20 +1321,18 @@ dispatch state.
 
 Only with wave 0 numbers in hand.
 
-1. Cleared to proceed by wave 0. Optimized-tier entry is zero on every benchmark, so delete
-   the optimized tier and its deopt plumbing.
-2. Not cleared. The baseline tier pays where it promotes (+52.7 percent on `functionCalls`,
-   +39.1 percent on `recursion`), and no HTTP benchmark reaches it in this corpus. Run the
-   pooled-server promotion experiment named in section 8.1 before deciding. If it stays
-   unreached under sustained real traffic, delete the baseline tier,
-   `type_feedback.zig`, both machine-code emitters, the `Context` JIT fields, and the
-   `jit_inhibited` durable special case. This is roughly 14,900 lines and it is the single
-   largest simplification available.
-3. Blocked and inverted by the wave 0 RSS result in section 8.1. Warm-runtime memory grew
-   120 MB in 12 minutes without flattening, so no GC code is deleted until the growth is
-   attributed. If the cause is unbounded caches, the fix is eviction and this item returns
-   as written. If the cause is uncollected handler garbage, the collector is a missing call
-   site rather than dead weight, and this item is struck.
+1. DONE. Optimized-tier entry measured at zero on every benchmark; the tier and its deopt
+   plumbing were removed.
+2. DONE. The pooled-server probe and the forced-compilation ceiling test (section 8.1,
+   measurements 6 to 8) showed the tier never runs on the request path and cannot compile
+   handler-shaped code. The baseline tier, `type_feedback.zig`, both machine-code emitters,
+   the `Context` JIT fields, and the `jit_inhibited` durable special case are all removed:
+   15,473 deletions, the single largest simplification in this plan. The measured cost is
+   recorded in section 8.1.
+3. Blocked and inverted by the wave 0 RSS result in section 8.1. Note the memory defect
+   itself was found, fixed, and closed by a two-hour soak (per-runtime lifetime arena), but
+   that fix does not clear this item: the collector's role is still unexamined, so no GC code
+   is deleted until the remaining growth is attributed.
 4. Consider replacing `comptime.zig`'s separate tokenizer, parser, and value model with
    evaluation over the main IR after parse. This deletes about 1,800 lines and structurally
    resolves the `==` inconsistency, but it needs more comptime tests first.
@@ -1526,9 +1524,9 @@ commit that performs it.
 | D6 | `compiler.zig` `Compiler`, `compileParallel`, `CompileUnit`; all of `intern_pool.zig` | Only importer is `semantics_corpus.zig:34`, which uses the plain `compile()` helper; `intern_pool` is imported only by `compiler.zig` and re-exported by `root.zig` | `git grep -ln 'intern_pool.zig\|compileParallel'` | cleared |
 | D7 | `kind=check` ledger variant | Only `.kind = .check` producer is a test (`proof_ledger.zig:622`); module doc at `:1-2` claims production use that does not exist | `git grep -n '\.kind = \.check'` | cleared |
 | D8 | Semantics receipt signing (`semantics_probe_lib.zig`), workflow receipt signing (`hypermedia_probe_lib.zig`, `hypermedia_receipt.zig`) | Only references to `semantics-receipt` and `workflow-receipt` are inside their producers; the CI gate reads the `--json` summary (`scripts/verify.sh:83-84`), not the receipt | `git grep -n 'semantics-receipt\|workflow-receipt'` | cleared |
-| D9 | Optimized JIT tier and deopt plumbing | Wave 0 measurement: `tier_promotions.optimized` is 0 on all 13 benchmarks | re-run `zig build bench -Doptimize=ReleaseFast -- --json` and confirm | cleared by measurement |
-| D10 | Baseline JIT tier | Not cleared. Pays +52.7 percent on `functionCalls` and +39.1 percent on `recursion`; pooled-server promotion experiment outstanding | see section 8.1 | blocked |
-| D11 | Any `gc.zig` reduction | Not cleared. Warm-runtime RSS grows without flattening; growth unattributed | see section 8.1 | blocked |
+| D9 | Optimized JIT tier (DONE) | Wave 0 measurement: `tier_promotions.optimized` is 0 on all 13 benchmarks | re-run `zig build bench -Doptimize=ReleaseFast -- --json` and confirm | cleared by measurement |
+| D10 | Baseline JIT tier (DONE) | Not cleared. Pays +52.7 percent on `functionCalls` and +39.1 percent on `recursion`; pooled-server promotion experiment outstanding | see section 8.1 | blocked |
+| D11 | Any `gc.zig` reduction (still blocked) | Not cleared. Warm-runtime RSS grows without flattening; growth unattributed | see section 8.1 | blocked |
 
 Note on D5: the deletion is cleared for the runtime language, but `comptime.zig` genuinely
 supports `==` today (`comptime.zig:9`, `looseEquals` at `:134`). Removing it there is a
