@@ -1,6 +1,6 @@
 # Reset B Design: ModuleFacts and the Canonical Contract Codec
 
-**Status:** done. All three plans executed: B1 (`2026-07-29-003`), B2 (`2026-07-29-004`), B3 (`2026-07-29-005`). Each plan records where it corrected this document. One sub-clause of wave 4 item 0b is out of scope by design and still open: generating `docs/virtual-modules/README.md` from the bindings, as B3 now does for the JSON specs.
+**Status:** done. All three plans executed: B1 (`2026-07-29-003`), B2 (`2026-07-29-004`), B3 (`2026-07-29-005`). Each plan records where it corrected this document. The one sub-clause of wave 4 item 0b that this design scoped out, generating `docs/virtual-modules/README.md` from the bindings, was closed afterwards in `docs/plans/2026-07-30-001-module-doc-mirror-plan.md`. Item 0b is fully closed.
 
 **Source:** wave 4 item 0b of `docs/plans/2026-07-28-001-reset-simplification-plan.md`,
 which sections 5.5 and 5.6 of that document describe. Reset A

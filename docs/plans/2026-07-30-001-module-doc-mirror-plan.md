@@ -1,6 +1,6 @@
 # Generate the module documentation mirror
 
-**Status:** planned.
+**Status:** done. Closes wave 4 item 0b.
 
 **Source:** the remaining sub-clause of wave 4 item 0b, left open by B3
 (`docs/plans/2026-07-29-005-reset-b3-module-spec-render-plan.md`). Item 0b asks for the
@@ -90,6 +90,9 @@ To be filled in during execution.
 
 | # | Finding | Resolution |
 | --- | --- | --- |
+| 1 | The catalog table had NOT drifted. Every export name, every capability, and both orderings already matched the bindings across all 24 modules | Byte-identity held without regeneration, so it stayed the acceptance test. The contrast with B3, where 84 exports had lost their parameter types, is explained by the guard: `check-docs-drift.sh` compares this table's CONTENT against the specs, while it only ever compared the specs' COUNT. A content check held; a count check did not |
+| 2 | The first implementation surfaced a missing marker as an unhandled error with a stack trace | Caught and turned into a one-line message with exit 2. An operator reading a stack trace to learn that a comment is missing is a bad gate |
+| 3 | Two verification steps silently did nothing: `cp` is aliased to `cp -i` in this shell, so two restore-from-backup steps prompted and left the file mutated. The mutation test that followed hit the marker error rather than the drift path and still reported non-zero | Re-run with `command cp -f`. Worth recording because the failure mode was a test that PASSED for the wrong reason - the exit code was right and the path exercised was not |
 
 ## 6. Done when
 
@@ -97,3 +100,6 @@ To be filled in during execution.
 - The check has been observed failing on a deliberate mutation inside the region.
 - `bash scripts/verify.sh` exits 0 and `zig fmt --check` is clean.
 - Wave 4 item 0b is closed, and the two documents that say otherwise are updated.
+
+All met. `module-spec-render` writes 25 artifacts, `--check` covers all 25, `verify.sh` exits
+0, and `zig fmt --check` is clean.
