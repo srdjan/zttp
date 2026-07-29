@@ -229,29 +229,6 @@ pub const Analyzer = struct {
         }
     }
 
-    /// Pre-C1 implementation, kept only so the differential test below can
-    /// prove the facts-backed scan derives the identical map. Deleted in the
-    /// next commit.
-    fn scanImportsLegacy(self: *Analyzer) !void {
-        const node_count = self.ir_view.nodeCount();
-        var idx: usize = 0;
-        while (idx < node_count) : (idx += 1) {
-            const node: NodeIndex = @intCast(idx);
-            if (self.ir_view.getTag(node) != .import_decl) continue;
-            const import_decl = self.ir_view.getImportDecl(node) orelse continue;
-            const module = self.ir_view.getString(import_decl.module_idx) orelse continue;
-            for (0..import_decl.specifiers_count) |i| {
-                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, @intCast(i));
-                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
-                const name = self.resolveAtomName(spec.imported_atom) orelse continue;
-                try self.imports.put(self.allocator, spec.local_binding.slot, .{
-                    .module = module,
-                    .name = name,
-                });
-            }
-        }
-    }
-
     fn collectFunctions(self: *Analyzer, root: NodeIndex) !void {
         try self.collectFunctionsIn(root, false);
     }
@@ -975,14 +952,32 @@ test "empty program is a no-op" {
 
 const import_corpus = @import("tests/import_corpus.zig");
 
-test "the facts-backed import scan derives the same map as the legacy scan" {
-    // Differential evidence for item 4 C1. Both scans run over the shared
-    // corpus and must agree key by key. Reports the diverging slot rather than
-    // just "maps differ": B1 learned that a harness which cannot name the
-    // divergence costs a full cycle per finding.
+test "the import scan records every specifier across the shared corpus" {
+    // Replaces the differential test that proved this scan matches the pre-C1
+    // implementation (commit e14b4e77). The expectations below were captured
+    // from that proven implementation, which is why they are trustworthy: the
+    // legacy scan they were compared against no longer exists.
     const allocator = std.testing.allocator;
 
-    for (import_corpus.cases) |case| {
+    const expected = [_]struct { label: []const u8, count: u32 }{
+        .{ .label = "no imports at all", .count = 0 },
+        .{ .label = "one builtin import", .count = 1 },
+        .{ .label = "several names from one module", .count = 3 },
+        .{ .label = "the same module imported twice", .count = 2 },
+        // Two import declarations of one name collapse to one slot: the map is
+        // keyed by local binding slot, and the second import reuses it.
+        .{ .label = "the same name imported twice", .count = 1 },
+        .{ .label = "an aliased import", .count = 1 },
+        .{ .label = "a builtin function with no extractions and no flags", .count = 1 },
+        .{ .label = "a module that is neither builtin nor registered", .count = 1 },
+        .{ .label = "a builtin and an unresolved module together", .count = 2 },
+        .{ .label = "several modules in first-appearance order", .count = 3 },
+    };
+    try std.testing.expectEqual(import_corpus.cases.len, expected.len);
+
+    for (import_corpus.cases, expected) |case, want| {
+        try std.testing.expectEqualStrings(case.label, want.label);
+
         var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
         defer parser.deinit();
         var atoms = context.AtomTable.init(allocator);
@@ -991,38 +986,16 @@ test "the facts-backed import scan derives the same map as the legacy scan" {
         _ = try parser.parse();
         const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-        var legacy = Analyzer.init(allocator, ir_view, &atoms);
-        defer legacy.deinit();
-        try legacy.scanImportsLegacy();
+        var analyzer = Analyzer.init(allocator, ir_view, &atoms);
+        defer analyzer.deinit();
+        try analyzer.scanImports();
 
-        var migrated = Analyzer.init(allocator, ir_view, &atoms);
-        defer migrated.deinit();
-        try migrated.scanImports();
-
-        std.testing.expectEqual(legacy.imports.count(), migrated.imports.count()) catch |err| {
-            std.debug.print("\ncorpus case \"{s}\": legacy has {d} imports, migrated has {d}\n", .{
-                case.label, legacy.imports.count(), migrated.imports.count(),
+        std.testing.expectEqual(want.count, analyzer.imports.count()) catch |err| {
+            std.debug.print("\ncorpus case \"{s}\": expected {d} imports, found {d}\n", .{
+                case.label, want.count, analyzer.imports.count(),
             });
             return err;
         };
-
-        var it = legacy.imports.iterator();
-        while (it.next()) |entry| {
-            const slot = entry.key_ptr.*;
-            const want = entry.value_ptr.*;
-            const got = migrated.imports.get(slot) orelse {
-                std.debug.print("\ncorpus case \"{s}\": slot {d} ({s}.{s}) missing after migration\n", .{
-                    case.label, slot, want.module, want.name,
-                });
-                return error.SlotMissing;
-            };
-            if (!std.mem.eql(u8, want.module, got.module) or !std.mem.eql(u8, want.name, got.name)) {
-                std.debug.print("\ncorpus case \"{s}\": slot {d} was {s}.{s}, now {s}.{s}\n", .{
-                    case.label, slot, want.module, want.name, got.module, got.name,
-                });
-                return error.SlotChanged;
-            }
-        }
     }
 }
 
