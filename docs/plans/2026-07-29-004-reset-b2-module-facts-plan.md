@@ -281,6 +281,8 @@ To be filled in during execution. One row per divergence between the transcribed
 | 1 | Both late readers of the moved lists (`detectRateLimiting` at `:377`, `computeProperties` at `:374`) run before the move at `:551`, so no site reads an emptied list | none, no defect | Settled during planning. Task 1 no longer needs the check, and Task 3 must keep both call sites where they are |
 | 2 | The four contract goldens cover the index only partly. `modules_list` is emitted as `virtual_modules` (`json_diagnostics.zig:379`, `:463`) in order, but only `modules_all` (five modules, order-pinned) and `durable_approval` (one) carry any: `plain_ts` and `jsx` both emit `[]`. `functions_map` is never emitted at all. The two binding lists are covered only indirectly, through what `scanCallSites` derives using them | the gate is weaker than "all four goldens, one byte" reads | Goldens stay the integration gate but are not sufficient. Direct unit assertions on `functions_map` order, merge, and dedup are load-bearing in Task 2, not belt-and-braces. Section 4.4 of the design doc overstates the gate; this row is the correction |
 | 3 | `contract_json_writer.zig:105` writes a `functions` object into contract.json, but `contract_json_parser.zig` never parses the key. Same lossy-codec family as B1 finding 5, which was the identical gap for `modules` | write-only wire field, not a live defect: no production code reads `HandlerContract.functions` back from the wire | Reported, not fixed. Out of B2 scope. The consequence for B2 is concrete: a writer round-trip cannot serve as the `functions_map` gate, which is why finding 2 falls to unit tests |
+| 4 | `scanImports` leaked under allocation failure. `func_names` was a bare local `std.ArrayList` with no `errdefer`, so an OOM anywhere after the first specifier dropped the list and every name in it. Third leak of this family after B1's two | leak only, no wrong answer on the success path | Fixed in the transcription. The naive fix is worse than the leak: once the list owns a name, the per-name `errdefer` frees it a second time when a later allocation in the same iteration fails, which the ladder reported as a double free. Ownership is now explicit at both transfer points, with a `consumed` counter so the scope errdefer never sees a name the merge already dealt with |
+| 5 | `build()` moved `modules_list` and `functions_map` into the contract and cleared them. Harmless today because both readers run earlier (finding 1), but it means the index was single-use | latent, blocks the six-consumer migration rather than breaking anything now | The contract takes copies via `cloneModules` and `cloneFunctions`. This was decision 2.1, made during planning rather than discovered, and it is the one new allocation B2 adds |
 
 ## 6. Measurements
 
@@ -288,9 +290,21 @@ To be filled in during execution.
 
 | Measurement | Before | After |
 | --- | --- | --- |
-| `contract_builder.zig` lines | | |
-| Four contract goldens | byte-identical baseline at `9a795f90` | |
-| `zig build bench-check` geomean | | |
+| `contract_builder.zig` lines | 5,326 | 5,225, so 173 deletions against 72 insertions |
+| `module_facts.zig` lines | did not exist | 569, of which 296 are the tests finding 2 made load-bearing |
+| Four contract goldens | byte-identical baseline at `9a795f90` | byte-identical, `zig build test-contract-golden` exit 0 |
+| `bash scripts/verify.sh` | exit 0 | exit 0 |
+| `zig fmt --check build.zig packages` | clean | clean |
+| `zig build bench-check` | not run, B2 touches no interpreter, value, GC, or bytecode file | geomean 1.00521, regression 0.00%, all nine benchmarks compared |
+
+The line count is the least interesting number here. The builder shed a net 101 lines while
+the repository gained 569, because the walk moved into a file that documents why its
+ordering is load-bearing and carries the eight unit tests plus the allocation-failure ladder
+that the goldens cannot provide. B2 was never a deletion exercise: it removed a duplicated
+derivation, not code volume.
+
+Note the `intArithmetic` false positive that B1 recorded did not recur. One clean
+`bench-check` run at 0.00 percent regression, so no judgment call was needed this time.
 
 ## 7. Done when
 
@@ -302,6 +316,13 @@ To be filled in during execution.
 - No file outside `packages/zts/src/contract_builder.zig`,
   `packages/zts/src/module_facts.zig`, and the two plan documents is edited, unless Task 1
   finds the `computeGlobalEffectSummary` ordering defect, which lands separately.
+
+  One line outside that set was needed: `packages/zts/src/root.zig` gains
+  `pub const module_facts = @import("module_facts.zig")`. Without it the new file is
+  unreachable from the test root, `refAllDecls` never sees it, and its tests silently do not
+  run. Same class of trap as B1's reminder that Zig discards unreferenced declarations, so
+  importing a module does not prove it is linked in. A test that does not run is worse than
+  no test, because the summary still says green.
 - Sections 5 and 6 are filled in.
 
 Then write the B3 plan for descriptor generation, per section 5 of the design doc.
