@@ -292,6 +292,16 @@ pub fn validate(
     return validatedFromInner(inner);
 }
 
+/// Canonical read path: the shared contract codec followed by the runtime
+/// projection. It lives beside the hand-written reader only while the
+/// differential tests prove the two agree. Task 3 of the B1 plan deletes the
+/// hand-written reader and renames this to `parseContractJson`.
+fn parseContractJsonCanonical(allocator: std.mem.Allocator, source: []const u8) !RawRuntimeContract {
+    var hc = try zq.handler_contract.parseFromJson(allocator, source);
+    defer hc.deinit(allocator);
+    return fromHandlerContract(allocator, &hc);
+}
+
 /// Parse a contract JSON blob into a RuntimeContract.
 /// Extracts only the fields needed at runtime; ignores everything else.
 pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawRuntimeContract {
@@ -922,6 +932,8 @@ test "parseContractJson extracts websocket event presence flags" {
     try std.testing.expect(contract.websocket.on_close);
     try std.testing.expect(!contract.websocket.on_error);
     try std.testing.expect(contract.websocket.any());
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson defaults websocket to all-false when section absent" {
@@ -958,6 +970,8 @@ test "parseContractJson defaults websocket to all-false when section absent" {
     try std.testing.expect(!contract.websocket.on_close);
     try std.testing.expect(!contract.websocket.on_error);
     try std.testing.expect(!contract.websocket.any());
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson minimal" {
@@ -999,6 +1013,8 @@ test "parseContractJson minimal" {
     try std.testing.expect(!contract.durable_workflow_properties.retry_safe);
     try std.testing.expect(!contract.durable_workflow_properties.idempotent);
     try std.testing.expect(!contract.durable_workflow_properties.fault_covered);
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson reads durable workflow properties" {
@@ -1023,6 +1039,8 @@ test "parseContractJson reads durable workflow properties" {
     try std.testing.expect(raw.inner.durable_workflow_properties.retry_safe);
     try std.testing.expect(raw.inner.durable_workflow_properties.idempotent);
     try std.testing.expect(raw.inner.durable_workflow_properties.fault_covered);
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson with properties and routes" {
@@ -1084,6 +1102,8 @@ test "parseContractJson with properties and routes" {
     // Both routes carry empty headerParams, so the handler is input-independent
     // and the proof cache stays eligible.
     try std.testing.expect(!contract.reads_request_state);
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson flags reads_request_state when a route reads headers" {
@@ -1100,6 +1120,8 @@ test "parseContractJson flags reads_request_state when a route reads headers" {
     var raw = try parseContractJson(allocator, source);
     defer raw.deinit();
     try std.testing.expect(raw.inner.reads_request_state);
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "parseContractJson flags reads_request_state on dynamic header access" {
@@ -1112,6 +1134,8 @@ test "parseContractJson flags reads_request_state on dynamic header access" {
     var raw = try parseContractJson(allocator, source);
     defer raw.deinit();
     try std.testing.expect(raw.inner.reads_request_state);
+
+    try expectReadersAgree(allocator, source);
 }
 
 // Regression: parseContractJson handles allocator failure at every internal
@@ -1442,6 +1466,8 @@ test "parseContractJson reads sandbox block" {
     try std.testing.expect(contract.hasCapability(.crypto));
     try std.testing.expect(!contract.hasCapability(.stderr));
     try std.testing.expectEqual(@as(usize, 2), contract.modules.len);
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "validate promotes Raw to Validated when integrity checks pass" {
@@ -1500,6 +1526,8 @@ test "parseContractJson returns null capabilities when sandbox block is absent" 
     const contract = &raw.inner;
     try std.testing.expect(contract.capabilities == null);
     try std.testing.expect(!contract.hasCapability(.crypto));
+
+    try expectReadersAgree(allocator, source);
 }
 
 test "verifyCapabilityMatrix passes for a live-derived matrix" {
@@ -1815,4 +1843,230 @@ test "parseContractJson: errdefer ladders close every failure path" {
             try std.testing.expectEqual(error.OutOfMemory, err);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Reset B1 differential harness. Temporary: it compares the hand-written
+// reader against the canonical codec plus the runtime projection. Task 3 of
+// docs/plans/2026-07-29-003-reset-b1-runtime-codec-plan.md deletes this whole
+// block together with the hand-written reader it compares against.
+// ---------------------------------------------------------------------------
+
+const differential_body_limit: u64 = 1 << 20;
+
+fn expectSameHash(comptime label: []const u8, want: *const [32]u8, got: *const [32]u8) !void {
+    if (std.mem.eql(u8, want, got)) return;
+    std.debug.print("divergence: {s}: hand-written {s}, codec {s}\n", .{
+        label,
+        &std.fmt.bytesToHex(want.*, .lower),
+        &std.fmt.bytesToHex(got.*, .lower),
+    });
+    return error.ReaderDivergence;
+}
+
+fn expectSameRuntimeContract(want: *const RuntimeContract, got: *const RuntimeContract) !void {
+    const t = std.testing;
+
+    try t.expectEqual(want.env_vars.len, got.env_vars.len);
+    for (want.env_vars, got.env_vars) |w, g| try t.expectEqualStrings(w, g);
+    try t.expectEqual(want.env_dynamic, got.env_dynamic);
+
+    try t.expectEqual(want.routes.len, got.routes.len);
+    for (want.routes, got.routes) |w, g| {
+        try t.expectEqualStrings(w.method, g.method);
+        try t.expectEqualStrings(w.path, g.path);
+    }
+    try t.expectEqual(want.routes_dynamic, got.routes_dynamic);
+    try t.expectEqual(want.reads_request_state, got.reads_request_state);
+
+    // Field-by-field, reporting every diverging field rather than the first,
+    // so one run gives the whole picture.
+    var properties_diverged = false;
+    inline for (@typeInfo(Properties).@"struct".fields) |field| {
+        const w = @field(want.properties, field.name);
+        const g = @field(got.properties, field.name);
+        if (!std.meta.eql(w, g)) {
+            std.debug.print("divergence: properties.{s}: hand-written {any}, codec {any}\n", .{ field.name, w, g });
+            properties_diverged = true;
+        }
+    }
+    if (properties_diverged) return error.ReaderDivergence;
+    try t.expectEqual(want.durable_workflow_properties, got.durable_workflow_properties);
+    try t.expectEqual(want.websocket, got.websocket);
+
+    if ((want.capabilities == null) != (got.capabilities == null)) {
+        std.debug.print("divergence: capabilities present: hand-written {}, codec {}\n", .{
+            want.capabilities != null,
+            got.capabilities != null,
+        });
+        return error.ReaderDivergence;
+    }
+    if (want.capabilities) |w| {
+        const g = got.capabilities.?;
+        try expectSameHash("capabilities.hash", &w.hash, &g.hash);
+        try t.expectEqual(w.len, g.len);
+        try t.expectEqualSlices(ModuleCapability, w.items[0..w.len], g.items[0..g.len]);
+    }
+
+    try expectSameHash("artifact_sha256", &want.artifact_sha256, &got.artifact_sha256);
+    try expectSameHash("policy_hash", &want.policy_hash, &got.policy_hash);
+
+    try t.expectEqual(want.modules.len, got.modules.len);
+    for (want.modules, got.modules) |w, g| try t.expectEqualStrings(w, g);
+
+    try t.expectEqual(want.cost_envelope == null, got.cost_envelope == null);
+    if (want.cost_envelope) |w| {
+        const g = got.cost_envelope.?;
+        try t.expectEqual(w.exhaustive, g.exhaustive);
+        try t.expectEqual(w.entries.items.len, g.entries.items.len);
+        for (w.entries.items, g.entries.items) |we, ge| {
+            try t.expectEqualStrings(we.module, ge.module);
+        }
+    }
+    try t.expectEqual(
+        deriveCostCeilings(want.cost_envelope, differential_body_limit),
+        deriveCostCeilings(got.cost_envelope, differential_body_limit),
+    );
+}
+
+/// Run both readers over one document. Error identity is deliberately not
+/// compared (see divergence 2 in the B1 plan); accept-versus-reject is.
+fn expectReadersAgree(allocator: std.mem.Allocator, source: []const u8) !void {
+    const legacy_result = parseContractJson(allocator, source);
+    const canonical_result = parseContractJsonCanonical(allocator, source);
+
+    if (legacy_result) |legacy_ok| {
+        var legacy_mut = legacy_ok;
+        defer legacy_mut.deinit();
+        var canonical_mut = canonical_result catch |err| {
+            std.debug.print("divergence: hand-written accepted, codec rejected with {}\n", .{err});
+            return error.ReaderDivergence;
+        };
+        defer canonical_mut.deinit();
+        try expectSameRuntimeContract(&legacy_mut.inner, &canonical_mut.inner);
+    } else |legacy_err| {
+        if (canonical_result) |canonical_ok| {
+            var canonical_mut = canonical_ok;
+            canonical_mut.deinit();
+            std.debug.print("divergence: hand-written rejected with {}, codec accepted\n", .{legacy_err});
+            return error.ReaderDivergence;
+        } else |_| {}
+    }
+}
+
+fn writeAndCompare(allocator: std.mem.Allocator, hc: *const HandlerContract) !void {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    try zq.writeContractJson(hc, &aw.writer);
+    try expectReadersAgree(allocator, aw.writer.buffered());
+}
+
+fn emptyDifferentialContract(allocator: std.mem.Allocator) !HandlerContract {
+    return HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .urls = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+            .timers = false,
+            .signals = .{ .literal = .empty, .dynamic = false },
+            .producer_keys = .{ .literal = .empty, .dynamic = false },
+        },
+        .scope = .{ .used = false, .names = .empty, .dynamic = false, .max_depth = 0 },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+        .properties = .{
+            .pure = false,
+            .read_only = true,
+            .stateless = false,
+            .retry_safe = true,
+            .deterministic = true,
+            .has_egress = false,
+        },
+    };
+}
+
+test "B1 differential: writer round-trip, populated contract" {
+    const allocator = std.testing.allocator;
+
+    var hc = try emptyDifferentialContract(allocator);
+    defer hc.deinit(allocator);
+
+    try hc.env.literal.append(allocator, try allocator.dupe(u8, "API_KEY"));
+    try hc.modules.append(allocator, try allocator.dupe(u8, "zttp:crypto"));
+    hc.durable.workflow.properties.retry_safe = true;
+    hc.durable.workflow.properties.idempotent = true;
+    hc.durable.workflow.properties.fault_covered = true;
+    hc.websocket.on_open = true;
+    hc.websocket.on_message = true;
+    try hc.api.routes.append(allocator, .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+    });
+
+    try writeAndCompare(allocator, &hc);
+}
+
+test "B1 differential: writer round-trip, route with requestSchemaRefs only" {
+    // Targets predicted divergence 1. `backfillApiRouteCollections` in the
+    // codec synthesizes request_bodies from request_schema_refs; the
+    // hand-written reader does not look at request_schema_refs at all, so it
+    // reports reads_request_state = false where the codec reports true.
+    const allocator = std.testing.allocator;
+
+    var hc = try emptyDifferentialContract(allocator);
+    defer hc.deinit(allocator);
+
+    var route: zq.handler_contract.ApiRouteInfo = .{
+        .method = try allocator.dupe(u8, "POST"),
+        .path = try allocator.dupe(u8, "/users"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+    };
+    try route.request_schema_refs.append(allocator, try allocator.dupe(u8, "CreateUser"));
+    try hc.api.routes.append(allocator, route);
+
+    try writeAndCompare(allocator, &hc);
+}
+
+test "B1 differential: malformed corpus" {
+    const allocator = std.testing.allocator;
+
+    const sources = [_][]const u8{
+        "",
+        "{}",
+        "[]",
+        "not json at all",
+        \\{"version": 10, "api": {"routes": [{"path": "/x"}], "routesDynamic": false}}
+        ,
+        \\{"version": 10, "api": {"routes": [{"method": "GET", "path": 7}], "routesDynamic": false}}
+        ,
+        \\{"version": 10, "env": {"literal": ["A"], "dynamic": false}, "unknownSection": {"a": 1}}
+        ,
+        \\{"version": 10, "env": {"literal": ["A"], "dynamic": false}
+        ,
+    };
+
+    for (sources) |source| try expectReadersAgree(allocator, source);
 }
