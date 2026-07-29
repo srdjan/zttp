@@ -2993,7 +2993,7 @@ test "basic codegen" {
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
 
-    var scopes = ScopeAnalyzer.init(allocator);
+    var scopes = try ScopeAnalyzer.init(allocator);
     defer scopes.deinit();
 
     // Create a simple literal node
@@ -3014,7 +3014,7 @@ test "global binding codegen uses the binding name atom" {
     defer nodes.deinit();
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
-    var scopes = ScopeAnalyzer.init(allocator);
+    var scopes = try ScopeAnalyzer.init(allocator);
     defer scopes.deinit();
 
     const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };
@@ -3044,7 +3044,7 @@ test "binary op codegen" {
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
 
-    var scopes = ScopeAnalyzer.init(allocator);
+    var scopes = try ScopeAnalyzer.init(allocator);
     defer scopes.deinit();
 
     const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };

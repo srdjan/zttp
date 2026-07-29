@@ -147,11 +147,7 @@ pub const ScopeAnalyzer = struct {
     current_scope: ScopeId,
     next_scope_id: ScopeId,
 
-    pub fn init(allocator: std.mem.Allocator) ScopeAnalyzer {
-        return initFallible(allocator) catch unreachable;
-    }
-
-    pub fn initFallible(allocator: std.mem.Allocator) !ScopeAnalyzer {
+    pub fn init(allocator: std.mem.Allocator) !ScopeAnalyzer {
         var analyzer = ScopeAnalyzer{
             .allocator = allocator,
             .scopes = .empty,
@@ -462,7 +458,7 @@ pub fn getUpvalueInfo(analyzer: *const ScopeAnalyzer, function_scope: ScopeId) [
 // --- Tests ---
 
 test "basic scope and binding" {
-    var analyzer = ScopeAnalyzer.init(std.testing.allocator);
+    var analyzer = try ScopeAnalyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
     // Declare in global scope - returns .global kind (not .local)
@@ -481,7 +477,7 @@ test "basic scope and binding" {
 }
 
 test "nested function creates upvalue" {
-    var analyzer = ScopeAnalyzer.init(std.testing.allocator);
+    var analyzer = try ScopeAnalyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
     // Global scope: declare x
@@ -507,7 +503,7 @@ test "nested function creates upvalue" {
 }
 
 test "block scope inherits local slots" {
-    var analyzer = ScopeAnalyzer.init(std.testing.allocator);
+    var analyzer = try ScopeAnalyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
     // Enter function
@@ -530,7 +526,7 @@ test "block scope inherits local slots" {
 }
 
 test "function parameters" {
-    var analyzer = ScopeAnalyzer.init(std.testing.allocator);
+    var analyzer = try ScopeAnalyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
     // Enter function
@@ -551,7 +547,7 @@ test "function parameters" {
 }
 
 test "captured binding allocation failure propagates" {
-    var analyzer = ScopeAnalyzer.init(std.testing.allocator);
+    var analyzer = try ScopeAnalyzer.init(std.testing.allocator);
     defer analyzer.deinit();
 
     _ = try analyzer.pushScope(.function);
