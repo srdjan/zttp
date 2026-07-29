@@ -17,6 +17,7 @@ const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const builtin_modules = @import("builtin_modules.zig");
+const module_facts_mod = @import("module_facts.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const handler_contract = @import("handler_contract.zig");
@@ -138,6 +139,10 @@ pub const PathGenerator = struct {
 
     /// Binding tracking: local slot -> module function metadata.
     module_fn_bindings: std.AutoHashMapUnmanaged(u16, FnMeta),
+    /// Shared import index, injected by the orchestrator when one exists.
+    /// Borrowed; must outlive the generator. Null means build a private one.
+    facts: ?*const module_facts_mod.ModuleFacts = null,
+    owned_facts: ?module_facts_mod.ModuleFacts = null,
     /// Variable init tracking: packed(scope, slot) -> NodeIndex of init expression.
     var_inits: std.AutoHashMapUnmanaged(u32, NodeIndex),
     /// Request parameter binding key.
@@ -248,6 +253,7 @@ pub const PathGenerator = struct {
     }
 
     pub fn deinit(self: *PathGenerator) void {
+        if (self.owned_facts) |*owned| owned.deinit();
         self.module_fn_bindings.deinit(self.allocator);
         self.var_inits.deinit(self.allocator);
         self.constraints.deinit(self.allocator);
@@ -479,7 +485,43 @@ pub const PathGenerator = struct {
     // Phase 1: Scan imports and handler bindings
     // -------------------------------------------------------------------
 
+    /// Resolve the index to read: injected, or private on first use.
+    fn resolveFacts(self: *PathGenerator) error{OutOfMemory}!*const module_facts_mod.ModuleFacts {
+        if (self.facts) |f| return f;
+        if (self.owned_facts == null) {
+            self.owned_facts = module_facts_mod.ModuleFacts.build(
+                self.allocator,
+                self.ir_view,
+                self.atoms,
+                null,
+            ) catch return error.OutOfMemory;
+        }
+        return &self.owned_facts.?;
+    }
+
+    /// Map local binding slots to builtin module function metadata.
+    ///
+    /// `.builtin` only, which is the exact translation of the legacy
+    /// `fromSpecifier(module) orelse continue`: that lookup searches
+    /// `builtin_modules.all` and never a manifest registry, so a
+    /// partner-registered module was skipped before and stays skipped.
     fn scanImports(self: *PathGenerator) error{OutOfMemory}!void {
+        const facts = try self.resolveFacts();
+        for (facts.imports.items) |rec| {
+            if (rec.resolution != .builtin) continue;
+            const entry = builtin_modules.findExport(rec.module_specifier, rec.imported_name) orelse continue;
+            try self.module_fn_bindings.put(self.allocator, rec.slot, .{
+                // The binding's short name, not its specifier: that is what the
+                // legacy scan stored and what downstream comparisons expect.
+                .module = entry.binding.name,
+                .func = entry.func.name,
+                .returns = entry.func.returns,
+            });
+        }
+    }
+
+    /// Pre-C1 implementation, kept only for the differential test below.
+    fn scanImportsLegacy(self: *PathGenerator) error{OutOfMemory}!void {
         const node_count = self.ir_view.nodeCount();
         for (0..node_count) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
@@ -2328,4 +2370,83 @@ test "validated field without maxItems stays linear" {
     try std.testing.expectEqual(contract_types.BoundClass.linear, sql_bound.class());
     try std.testing.expectEqual(@as(u32, 1), sql_bound.linear.coefficient);
     try std.testing.expectEqualStrings("for...of over `items`", sql_bound.linear.source.desc);
+}
+
+const import_corpus = @import("tests/import_corpus.zig");
+
+test "the facts-backed import scan derives the same bindings as the legacy scan" {
+    // Both atom-table modes from the start: running only the with-table mode is
+    // what let the bool_checker atom-resolver divergence through (C1 finding 2).
+    const allocator = std.testing.allocator;
+
+    for ([_]bool{ true, false }) |use_atoms| for (import_corpus.cases) |case| {
+        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+        defer parser.deinit();
+        var atoms = context.AtomTable.init(allocator);
+        defer atoms.deinit();
+        if (use_atoms) parser.setAtomTable(&atoms);
+        _ = try parser.parse();
+        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+        const atoms_arg: ?*context.AtomTable = if (use_atoms) &atoms else null;
+
+        var legacy = PathGenerator.init(allocator, ir_view, atoms_arg);
+        defer legacy.deinit();
+        try legacy.scanImportsLegacy();
+
+        var migrated = PathGenerator.init(allocator, ir_view, atoms_arg);
+        defer migrated.deinit();
+        try migrated.scanImports();
+
+        std.testing.expectEqual(legacy.module_fn_bindings.count(), migrated.module_fn_bindings.count()) catch |err| {
+            std.debug.print("\ncase \"{s}\" (atoms={}): legacy {d} bindings, migrated {d}\n", .{
+                case.label, use_atoms, legacy.module_fn_bindings.count(), migrated.module_fn_bindings.count(),
+            });
+            return err;
+        };
+
+        var it = legacy.module_fn_bindings.iterator();
+        while (it.next()) |e| {
+            const slot = e.key_ptr.*;
+            const want = e.value_ptr.*;
+            const got = migrated.module_fn_bindings.get(slot) orelse {
+                std.debug.print("\ncase \"{s}\" (atoms={}): slot {d} ({s}.{s}) missing\n", .{
+                    case.label, use_atoms, slot, want.module, want.func,
+                });
+                return error.SlotMissing;
+            };
+            if (!std.mem.eql(u8, want.module, got.module) or
+                !std.mem.eql(u8, want.func, got.func) or
+                want.returns != got.returns)
+            {
+                std.debug.print("\ncase \"{s}\" (atoms={}): slot {d} was {s}.{s}, now {s}.{s}\n", .{
+                    case.label, use_atoms, slot, want.module, want.func, got.module, got.func,
+                });
+                return error.BindingChanged;
+            }
+        }
+    };
+}
+
+test "this generator skips imports from unresolved modules" {
+    // The filter difference: builtins only, unlike strict_checker and
+    // effect_inference which record every import.
+    const allocator = std.testing.allocator;
+    var parser = try @import("parser/parse.zig").Parser.init(allocator,
+        \\import { env } from "zttp:env";
+        \\import { thing } from "zttp-ext:unknown";
+    );
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var gen = PathGenerator.init(allocator, ir_view, &atoms);
+    defer gen.deinit();
+    try gen.scanImports();
+
+    try std.testing.expectEqual(@as(u32, 1), gen.module_fn_bindings.count());
+    var it = gen.module_fn_bindings.iterator();
+    try std.testing.expectEqualStrings("env", it.next().?.value_ptr.func);
 }
