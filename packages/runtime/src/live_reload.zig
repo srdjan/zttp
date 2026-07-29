@@ -835,7 +835,8 @@ pub fn factsFromContract(
         allocator.free(extract.routes_buf);
     }
 
-    const caps_slice = contract.capabilities.slice();
+    // No capability statement reads as no capabilities for display purposes.
+    const caps_slice = if (contract.capabilities) |*caps| caps.slice() else &[_]zts.module_binding.ModuleCapability{};
     const cap_names = try allocator.alloc([]const u8, caps_slice.len);
     defer allocator.free(cap_names);
     for (caps_slice, 0..) |cap, i| cap_names[i] = @tagName(cap);

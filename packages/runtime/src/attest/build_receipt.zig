@@ -78,8 +78,17 @@ fn buildJwsWithKey(
     const bytecode_sha_hex = std.fmt.bytesToHex(bytecode_sha, .lower);
 
     const policy_sha_hex = zts.rule_registry.policyHash();
-    const capability_hash_hex = std.fmt.bytesToHex(contract.capabilities.hash, .lower);
+    // An all-zero hash is the established "not stamped" sentinel, so a
+    // contract that makes no capability statement reads the same here as one
+    // whose sandbox block predates the hash.
+    const capability_hash_hex = std.fmt.bytesToHex(
+        if (contract.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
+        .lower,
+    );
 
+    // Name every field. HandlerProperties defaults the six flow and isolation
+    // fields to true, so relying on the defaults here would put proof chips
+    // for properties the contract never asserted into a signed claim.
     const props_or_default = contract.properties orelse zts.handler_contract.HandlerProperties{
         .pure = false,
         .read_only = false,
@@ -87,6 +96,12 @@ fn buildJwsWithKey(
         .retry_safe = false,
         .deterministic = false,
         .has_egress = false,
+        .no_secret_leakage = false,
+        .no_credential_leakage = false,
+        .input_validated = false,
+        .pii_contained = false,
+        .injection_safe = false,
+        .state_isolated = false,
     };
     const property_summary = try header_strings.formatProofChips(allocator, props_or_default);
     defer if (property_summary.len > 0) allocator.free(property_summary);

@@ -13,6 +13,7 @@ const ApiParamInfo = handler_contract.ApiParamInfo;
 const ApiBodyInfo = handler_contract.ApiBodyInfo;
 const ApiResponseInfo = handler_contract.ApiResponseInfo;
 const ServiceCallInfo = handler_contract.ServiceCallInfo;
+const CapabilityMatrix = contract_types.CapabilityMatrix;
 
 const writeJsonString = json_utils.writeJsonString;
 
@@ -67,14 +68,21 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("],\n");
 
     try writer.writeAll("  \"sandbox\": {\n");
+    // Every producer sets `capabilities` before writing, so the null case here
+    // only arises for a contract parsed from a pre-sandbox document and then
+    // re-serialized. Write an empty matrix for it rather than omitting the
+    // keys: the sandbox block's other fields must still be written, and a
+    // sandbox block without a `capabilities` key is a shape no reader has ever
+    // had to handle.
+    const caps = contract.capabilities orelse CapabilityMatrix.empty;
     try writer.writeAll("    \"capabilities\": [");
-    for (contract.capabilities.slice(), 0..) |cap, i| {
+    for (caps.slice(), 0..) |cap, i| {
         if (i > 0) try writer.writeAll(", ");
         try writeJsonString(writer, @tagName(cap));
     }
     try writer.writeAll("],\n");
     try writer.writeAll("    \"capabilityHash\": ");
-    try json_utils.writeJsonHex(writer, contract.capabilities.hash);
+    try json_utils.writeJsonHex(writer, caps.hash);
     try writer.writeAll(",\n");
     try writer.writeAll("    \"declaredBudget\": [");
     for (contract.capability_budget.slice(), 0..) |cap, i| {

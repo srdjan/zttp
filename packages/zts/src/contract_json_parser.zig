@@ -127,6 +127,13 @@ pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !Hand
             contract.version = parser.readU32() orelse contract.version;
         } else if (std.mem.eql(u8, key, "routes")) {
             try parseRoutes(&parser, allocator, &contract);
+        } else if (std.mem.eql(u8, key, "modules")) {
+            // The writer emits this list; without a branch here it was
+            // silently dropped, so a write-then-read round trip lost every
+            // module. The runtime derives the live capability matrix from
+            // this list, so an empty one makes verifyCapabilityMatrix
+            // compare a real stored hash against the empty-set hash.
+            try parseStringArray(&parser, allocator, &contract.modules);
         } else if (std.mem.eql(u8, key, "env")) {
             try parseDynamicSection(&parser, allocator, "literal", &contract.env.literal, &contract.env.dynamic);
         } else if (std.mem.eql(u8, key, "egress")) {
@@ -2277,6 +2284,11 @@ fn parseSandbox(parser: *JsonParser, contract: *HandlerContract) !void {
     var seen = [_]bool{false} ** module_binding.capability_count;
     var matrix: CapabilityMatrix = .{};
     var have_cap_hash = false;
+    // A sandbox block that omits `capabilities` makes no capability
+    // statement. Leave contract.capabilities null in that case, so
+    // verifyCapabilityMatrix skips rather than comparing against an
+    // invented empty matrix.
+    var have_capabilities = false;
 
     while (true) {
         parser.skipWhitespace();
@@ -2293,6 +2305,7 @@ fn parseSandbox(parser: *JsonParser, contract: *HandlerContract) !void {
         parser.skipWhitespace();
 
         if (std.mem.eql(u8, key, "capabilities")) {
+            have_capabilities = true;
             if (!parser.consume('[')) return error.InvalidJson;
             while (true) {
                 parser.skipWhitespace();
@@ -2338,10 +2351,14 @@ fn parseSandbox(parser: *JsonParser, contract: *HandlerContract) !void {
             matrix.len += 1;
         }
     }
-    if (!have_cap_hash) {
+    if (!have_cap_hash or std.mem.allEqual(u8, &matrix.hash, 0)) {
+        // An absent hash and an all-zero hash both mean "not stamped". The
+        // runtime's hand-written reader used the same rule; keeping it here
+        // stops a zero-hash contract from failing verifyCapabilityMatrix
+        // against a live matrix that hashes to a real value.
         matrix.hash = module_binding.capabilityHash(matrix.slice());
     }
-    contract.capabilities = matrix;
+    if (have_capabilities) contract.capabilities = matrix;
 }
 
 fn parseBehaviors(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {

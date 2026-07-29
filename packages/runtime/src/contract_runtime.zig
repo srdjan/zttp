@@ -763,6 +763,11 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
     }
     var reads_request_state = false;
     for (hc.api.routes.items) |api_route| {
+        // A route with no method or no path cannot be matched, and putting one
+        // in the table would be worse than dropping it: `matchesRoute` passes
+        // everything when the table is empty, so a single unmatchable entry
+        // turns the pre-filter from "allow all" into "reject all".
+        if (api_route.method.len == 0 or api_route.path.len == 0) continue;
         if (api_route.header_params.items.len > 0 or api_route.header_params_dynamic or
             api_route.request_bodies.items.len > 0 or api_route.request_bodies_dynamic)
         {
@@ -1877,7 +1882,16 @@ fn expectSameRuntimeContract(want: *const RuntimeContract, got: *const RuntimeCo
         try t.expectEqualStrings(w.path, g.path);
     }
     try t.expectEqual(want.routes_dynamic, got.routes_dynamic);
-    try t.expectEqual(want.reads_request_state, got.reads_request_state);
+    // B1 finding 4, accepted. `backfillApiRouteCollections` in the codec
+    // synthesizes request_bodies from request_schema_refs, so the codec reports
+    // reads_request_state on routes the hand-written reader called
+    // request-independent. The codec is the conservative side: the only effect
+    // is that the proof cache is skipped more often, never less. The assertion
+    // is narrowed rather than deleted, so a regression in the other direction
+    // still fails.
+    if (want.reads_request_state != got.reads_request_state) {
+        try t.expect(got.reads_request_state);
+    }
 
     // Field-by-field, reporting every diverging field rather than the first,
     // so one run gives the whole picture.
@@ -2088,8 +2102,6 @@ test "B1 differential: malformed corpus" {
         "not json at all",
         \\{"version": 10, "api": {"routes": [{"path": "/x"}], "routesDynamic": false}}
         ,
-        \\{"version": 10, "api": {"routes": [{"method": "GET", "path": 7}], "routesDynamic": false}}
-        ,
         \\{"version": 10, "env": {"literal": ["A"], "dynamic": false}, "unknownSection": {"a": 1}}
         ,
         \\{"version": 10, "env": {"literal": ["A"], "dynamic": false}
@@ -2097,4 +2109,28 @@ test "B1 differential: malformed corpus" {
     };
 
     for (sources) |source| try expectReadersAgree(allocator, source);
+}
+
+test "B1 differential: the codec may reject what the hand-written reader tolerated" {
+    // B1 finding 6, accepted with the direction pinned. The hand-written
+    // reader walks a std.json.Value tree and silently skips a field whose type
+    // is wrong. The codec is a scanner, so a type mismatch desynchronizes it
+    // and the whole document is rejected.
+    //
+    // Rejecting is the safer side. The hand-written reader's silent skip
+    // produced a route table that was missing a route, and `matchesRoute`
+    // treats an empty table as "allow everything", so quiet data loss here
+    // could widen the pre-filter rather than narrow it. A contract this
+    // malformed cannot come from the writer, and the embedded artifact is
+    // hash-verified, so reaching this state already means something is wrong.
+    const allocator = std.testing.allocator;
+
+    const source =
+        \\{"version": 10, "api": {"routes": [{"method": "GET", "path": 7}], "routesDynamic": false}}
+    ;
+
+    var legacy = try parseContractJson(allocator, source);
+    legacy.deinit();
+
+    try std.testing.expectError(error.InvalidJson, parseContractJsonCanonical(allocator, source));
 }

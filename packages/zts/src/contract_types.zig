@@ -1733,7 +1733,13 @@ pub const HandlerContract = struct {
     /// Per-module worst-path cost bounds derived from path enumeration.
     /// Null when no handler function was found (mirrors properties == null).
     cost_envelope: ?CostEnvelope = null,
-    capabilities: CapabilityMatrix = .empty,
+    /// Null when the contract carries no `sandbox` block at all, which an
+    /// older contract.json can do. That is a different statement from an
+    /// empty matrix, which says the handler needs no capabilities. The
+    /// runtime relies on the distinction: `verifyCapabilityMatrix` skips on
+    /// null and compares hashes otherwise, so collapsing the two would make
+    /// a pre-sandbox binary refuse to serve.
+    capabilities: ?CapabilityMatrix = null,
     /// The capability budget the handler declared via `Effects<...>` on its
     /// return type. Empty when the handler declares no budget. Serialized
     /// into contract.json under `sandbox.declaredBudget`.

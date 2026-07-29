@@ -1828,8 +1828,10 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
     var parsed = try parseFromJson(allocator, output.items);
     defer parsed.deinit(allocator);
 
-    try std.testing.expectEqual(contract.capabilities.len, parsed.capabilities.len);
-    try std.testing.expectEqualSlices(u8, &contract.capabilities.hash, &parsed.capabilities.hash);
-    try std.testing.expect(parsed.capabilities.has(.clock));
-    try std.testing.expect(parsed.capabilities.has(.crypto));
+    const written_caps = contract.capabilities.?;
+    const parsed_caps = parsed.capabilities.?;
+    try std.testing.expectEqual(written_caps.len, parsed_caps.len);
+    try std.testing.expectEqualSlices(u8, &written_caps.hash, &parsed_caps.hash);
+    try std.testing.expect(parsed_caps.has(.clock));
+    try std.testing.expect(parsed_caps.has(.crypto));
 }
