@@ -888,6 +888,16 @@ pub fn build(b: *std.Build) void {
     compile_bench_test_step.dependOn(&run_compile_bench_tests.step);
     test_step.dependOn(&run_compile_bench_tests.step);
 
+    // Compile (do not run) the benchmark binaries as part of `test`. They import
+    // engine internals, so a change that removes an engine symbol breaks them
+    // even though no test references them - which is exactly what happened when
+    // the JIT was removed: scripts/verify.sh passed while zttp-bench was broken,
+    // because the gate never built it. Compiling is enough to catch that class of
+    // breakage; running the benchmarks here would import their measurement noise
+    // into the gate, so `bench-check` stays a separate step.
+    test_step.dependOn(&bench_exe.step);
+    test_step.dependOn(&compile_bench_exe.step);
+
     // System linking step (cross-handler contract verification)
     if (system_path) |sys_path| {
         const run_system = b.addRunArtifact(zts_exe);
