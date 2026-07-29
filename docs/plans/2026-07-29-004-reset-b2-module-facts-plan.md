@@ -90,16 +90,29 @@ the goldens would have moved bytes for a reason unrelated to the refactor, which
 destroyed the acceptance test. That fix would have had to land as its own commit with its own
 golden update before Task 2.
 
-One check remains:
+One check remains: confirm the four goldens actually observe the index. Findings 2 and 3
+below record the answer, and it is not the one section 4.4 of the design doc assumes.
 
-1. Confirm every one of the four goldens contains a non-empty `modules` array and a
-   non-empty `functions` array. A golden that carries neither cannot detect a regression in
-   the index, and section 4.4 of the design doc claims all four are the acceptance artifact.
-   If a golden is blind to the index, say so in the Findings table rather than treating the
-   count of four as the strength of the gate.
+`modules_list` reaches the goldens as `virtual_modules` (`json_diagnostics.zig:379` and
+`:463`), in list order, so a reordering there does move bytes. But only two of the four
+goldens carry any modules: `modules_all` has five, order-pinned as
+`zttp:auth, zttp:env, zttp:validate, zttp:cache, zttp:crypto`, and `durable_approval` has
+one. `plain_ts` and `jsx` both emit `[]` and are blind to the index entirely.
 
-**Verify:** `zig build test-contract-golden` exits 0; the coverage answer is written into the
-Findings table in section 5.
+`functions_map` never reaches the goldens. `json_diagnostics.zig` has no `functions` field.
+
+The two binding lists are observed only indirectly, through the facts `scanCallSites`
+derives while consuming them: `env_vars`, `outbound_hosts`, seven of the seventeen
+`properties` fields, `proofTrace`, `declared_specs`, `proofCapsules`, `effectCapsules`, and
+`witnesses`.
+
+**Consequence for the rest of this plan.** The goldens remain the integration gate and the
+`modules_list` ordering gate. They are not a sufficient gate. Breaking the merge or the
+dedup in `functions_map` moves no golden byte, so the unit tests named in Task 2 are the
+only thing standing there and must be written before Task 3 deletes anything. This is the
+same discipline B1 used: build the evidence, then delete.
+
+**Verify:** `zig build test-contract-golden` exits 0 at `9a795f90`. Confirmed.
 
 **Commit:** none. This task produces no diff.
 
@@ -266,6 +279,8 @@ To be filled in during execution. One row per divergence between the transcribed
 | # | Finding | Direction | Resolution |
 | --- | --- | --- | --- |
 | 1 | Both late readers of the moved lists (`detectRateLimiting` at `:377`, `computeProperties` at `:374`) run before the move at `:551`, so no site reads an emptied list | none, no defect | Settled during planning. Task 1 no longer needs the check, and Task 3 must keep both call sites where they are |
+| 2 | The four contract goldens cover the index only partly. `modules_list` is emitted as `virtual_modules` (`json_diagnostics.zig:379`, `:463`) in order, but only `modules_all` (five modules, order-pinned) and `durable_approval` (one) carry any: `plain_ts` and `jsx` both emit `[]`. `functions_map` is never emitted at all. The two binding lists are covered only indirectly, through what `scanCallSites` derives using them | the gate is weaker than "all four goldens, one byte" reads | Goldens stay the integration gate but are not sufficient. Direct unit assertions on `functions_map` order, merge, and dedup are load-bearing in Task 2, not belt-and-braces. Section 4.4 of the design doc overstates the gate; this row is the correction |
+| 3 | `contract_json_writer.zig:105` writes a `functions` object into contract.json, but `contract_json_parser.zig` never parses the key. Same lossy-codec family as B1 finding 5, which was the identical gap for `modules` | write-only wire field, not a live defect: no production code reads `HandlerContract.functions` back from the wire | Reported, not fixed. Out of B2 scope. The consequence for B2 is concrete: a writer round-trip cannot serve as the `functions_map` gate, which is why finding 2 falls to unit tests |
 
 ## 6. Measurements
 
