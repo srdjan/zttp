@@ -635,6 +635,57 @@ than estimated."
 
 ---
 
+## Findings, Task 2
+
+Measured 2026-07-29 at commit `a4bba5ba`. Four divergences, one predicted and three not.
+
+| # | Divergence | Predicted? | Confirmed by | Direction | Resolution |
+| --- | --- | --- | --- | --- | --- |
+| 1 | Six `properties` flags (`no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`, `state_isolated`) read `true` through the codec where the hand-written reader reads `false`, on any contract with no `properties` block or `"properties": null` | No | 9 tests | **Unsafe** | Blocks. Fix `fromHandlerContract`. |
+| 2 | `capabilities` is always non-null through the codec; the hand-written reader returns null when the contract carries no `sandbox` block | No | `parseContractJson with properties and routes` | **Unsafe** | Blocks. Needs a way to express "absent". |
+| 3 | An all-zero stored `capabilityHash` is recomputed by the hand-written reader and kept as zeros by the codec | No | `B1 differential: writer round-trip, populated contract` | **Unsafe** | Blocks. One rule must win. |
+| 4 | `reads_request_state` is true through the codec on a route with `requestSchemaRefs` and no `requestBodies` | Yes | `B1 differential: writer round-trip, route with requestSchemaRefs only` | Safe | Accept. The codec is the conservative side; the only effect is that the proof cache is skipped more often. |
+
+### Why 1 is unsafe
+
+`HandlerProperties` (`contract_types.zig`) defaults `no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`, and `state_isolated` to `true`. `fromHandlerContract` (`contract_runtime.zig:769-776`) falls back with
+
+```zig
+const hp = hc.properties orelse HandlerProperties{
+    .pure = false, .read_only = false, .stateless = false,
+    .retry_safe = false, .deterministic = false, .has_egress = false,
+};
+```
+
+which names only the six non-defaulted fields, so the other six keep their `true` defaults. "The contract asserted nothing" therefore becomes "six security properties are proven". `state_isolated` also feeds `derivePoolingPolicy`, so `read_only + state_isolated` promotes a handler to TTL runtime reuse on a contract that never proved isolation.
+
+This is a live latent defect on the live-reload path (`live_reload.zig:460`, `:763`) today, independent of B1. It is only rarely reached there because a fresh compile usually produces a non-null `properties`.
+
+### Why 2 and 3 are unsafe, measured
+
+`RuntimeContract.capabilities` being null is the skip signal for `verifyCapabilityMatrix`. `HandlerContract.capabilities` is `CapabilityMatrix = .empty` (`contract_types.zig:1736`), not optional, so the codec path can never produce null. The empty matrix carries an all-zero hash, and finding 3 keeps it zero, while the live-derived matrix hashes to `e3b0c442...`. The check therefore runs and fails.
+
+Measured directly on a contract with no `sandbox` block:
+
+```
+hand-written path validated OK
+codec path REFUSED with error.CapabilityMatrixMismatch
+```
+
+Every deployed binary whose contract has no sandbox block would refuse to serve after the swap. That result is now pinned as `test "B1 differential: a no-sandbox contract must still validate"`.
+
+### Consequence for this plan
+
+The plan's premise was that composing two existing halves is behavior-preserving. Findings 2 and 3 falsify it: `HandlerContract` cannot represent "the contract carried no sandbox block", so the projection cannot reconstruct a distinction the wire format makes and the codec discards. Task 3 is blocked until that is resolved. See "Blocked" below.
+
+## Blocked
+
+Task 3 must not proceed as written. Three options, none of them inside the original scope:
+
+1. **Teach `HandlerContract` to express absence.** Make `capabilities` optional, or add a `has_sandbox: bool`. Touches the engine contract type, the writer, the codec, and every consumer. It is the correct fix and it makes the codec able to represent what the wire format says.
+2. **Reconstruct absence in the projection.** Have `parseContractJson` pre-scan for the `sandbox` key and null out `capabilities` when it is missing. Keeps the change inside `contract_runtime.zig`, but re-introduces a second partial reader, which is the thing B1 exists to remove.
+3. **Fix findings 1 and 3 only, and defer the swap.** Findings 1 and 3 are independent defects worth their own commits. Finding 2 then remains, and B1 stops short of the deletion.
+
 ## Done when
 
 - `packages/runtime/src/contract_runtime.zig` contains exactly one contract reader.

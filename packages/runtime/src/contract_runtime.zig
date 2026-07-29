@@ -2050,6 +2050,34 @@ test "B1 differential: writer round-trip, route with requestSchemaRefs only" {
     try writeAndCompare(allocator, &hc);
 }
 
+test "B1 differential: a no-sandbox contract must still validate" {
+    // Finding 2 and 3 of the B1 plan. The hand-written reader returns
+    // capabilities = null for a contract with no sandbox block, which makes
+    // verifyCapabilityMatrix skip. The codec cannot express "absent" and
+    // yields an empty matrix with an all-zero hash, so the check runs and
+    // fails. This test pins the requirement: both readers must produce a
+    // contract that validate() accepts.
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 13,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+
+    const legacy = try parseContractJson(allocator, source);
+    var legacy_validated = try validate(legacy, .{});
+    legacy_validated.deinit();
+
+    const canonical = try parseContractJsonCanonical(allocator, source);
+    var canonical_validated = try validate(canonical, .{});
+    canonical_validated.deinit();
+}
+
 test "B1 differential: malformed corpus" {
     const allocator = std.testing.allocator;
 
