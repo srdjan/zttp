@@ -270,14 +270,23 @@ The fix is to replace the hand-written reader with the canonical codec followed 
 runtime-specific projection. The `RawRuntimeContract` to `ValidatedRuntimeContract`
 promotion is not the problem and must be preserved: it is a real trust boundary, and the
 capability, policy, and artifact-hash checks that hang off it stay exactly as they are.
-The same principle applies to contract construction on the producing side, where
-`ContractBuilder` accumulates facts through repeated mutable scans; one immutable
-`ModuleFacts` index built once from parsed and checked source, with pure projections for
-routes, effects, capabilities, workflows, and proof data, replaces both the seven scans
-and the accumulation.
+A related but narrower fix applies to contract construction on the producing side.
+`ContractBuilder` accumulates facts through repeated mutable scans, but only one of those
+scans is a re-derivable index. `scanImports` was a pure function of the import declarations
+and the module binding registry, and it was the scan duplicated across six other engine
+files. It becomes one immutable `ModuleFacts` index, built once and read rather than
+re-derived. The other four traversals stay: `scanCallSites`, `walkScopeDepth`,
+`walkWorkflowBlock`, and `scanFunctionNodeForApiFacts` each carry their own traversal order
+and their own state, and merging them is exactly the grand unified visitor that section 5.5
+rejects. This paragraph originally asked for pure projections to replace all seven scans
+and the accumulation, which contradicted 5.5; measurement supported 5.5, so the index-only
+reading is what Reset B implemented.
 
 Acceptance for this whole area is byte-identical contract and artifact fixtures. If a
-single byte moves, the change is wrong.
+single byte moves, the change is wrong. That is necessary but not sufficient, and Reset B
+measured the gap: the four contract goldens observe the module list but nothing emits the
+per-module function names, so part of the index needs unit evidence of its own. Check what
+a fixture actually covers before treating it as the gate.
 
 ## 6. Runtime and CLI
 
