@@ -110,36 +110,6 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
         self.current_closure = closure_data;
         defer self.current_closure = prev_closure;
 
-        if (func_obj.flags.is_generator) {
-            // Materialize a generator object instead of executing.
-            const root_class_idx = self.ctx.root_class_idx;
-            const gen_obj = if (self.ctx.hybrid) |h|
-                (object.JSObject.createGeneratorWithArena(
-                    h.arena,
-                    root_class_idx,
-                    func_bc,
-                    self.ctx.generator_prototype,
-                ) orelse return error.OutOfMemory)
-            else
-                (object.JSObject.createGenerator(
-                    self.ctx.allocator,
-                    root_class_idx,
-                    func_bc,
-                    self.ctx.generator_prototype,
-                ) catch return error.OutOfMemory);
-
-            const gen_data = gen_obj.getGeneratorData().?;
-            var local_idx: usize = 0;
-            while (local_idx < gen_data.locals.len) : (local_idx += 1) {
-                if (local_idx < argc) {
-                    gen_data.locals[local_idx] = args[local_idx];
-                }
-            }
-
-            try self.ctx.push(gen_obj.toValue());
-            return;
-        }
-
         if (func_obj.flags.is_async) {
             // Simplified async: execute synchronously, return a resolved
             // Promise-like {value, then}. Full async support requires an

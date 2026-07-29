@@ -685,11 +685,14 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume 'function'
 
-        var flags = FunctionFlags{};
+        const flags = FunctionFlags{};
 
-        // Check for generator
+        // Generators are not supported: `yield` is rejected below, so a
+        // `function*` could only ever produce an object nothing can advance.
+        // Reject it at the same place, with the same shape of diagnostic.
         if (self.match(.star)) {
-            flags.is_generator = true;
+            self.errors.addErrorAt(.unsupported_feature, self.current, "generators are not supported; 'function*' has no supported use");
+            return error.ParseError;
         }
 
         // Function name

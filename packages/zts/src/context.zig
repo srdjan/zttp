@@ -257,7 +257,6 @@ pub const Context = struct {
     string_prototype: ?*object.JSObject,
     object_prototype: ?*object.JSObject,
     function_prototype: ?*object.JSObject,
-    generator_prototype: ?*object.JSObject,
     result_prototype: ?*object.JSObject,
     /// Atom table for dynamic atoms
     atoms: AtomTable,
@@ -382,7 +381,6 @@ pub const Context = struct {
             .string_prototype = null,
             .object_prototype = null,
             .function_prototype = null,
-            .generator_prototype = null,
             .result_prototype = null,
             .atoms = AtomTable.init(allocator),
             .exception = value.JSValue.undefined_val,
@@ -1075,7 +1073,6 @@ pub const Context = struct {
             if (self.string_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
             if (self.object_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
             if (self.function_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
-            if (self.generator_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
             if (self.result_prototype) |proto| proto.scrubBuiltin(self.allocator, pool);
 
             for (self.builtin_objects.items) |obj| {
@@ -1088,7 +1085,6 @@ pub const Context = struct {
             if (self.string_prototype) |proto| proto.destroy(self.allocator);
             if (self.object_prototype) |proto| proto.destroy(self.allocator);
             if (self.function_prototype) |proto| proto.destroy(self.allocator);
-            if (self.generator_prototype) |proto| proto.destroy(self.allocator);
             if (self.result_prototype) |proto| proto.destroy(self.allocator);
 
             for (self.builtin_objects.items) |obj| {

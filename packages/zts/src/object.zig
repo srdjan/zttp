@@ -886,24 +886,6 @@ pub const ClosureData = struct {
     }
 };
 
-/// Generator state - stores suspended execution state
-pub const GeneratorState = enum(u8) {
-    suspended_start, // Initial state, not yet started
-    suspended_yield, // Suspended at yield
-    executing, // Currently running
-    completed, // Done (returned or threw)
-};
-
-/// Generator data stored in generator objects
-pub const GeneratorData = struct {
-    bytecode: *const @import("bytecode.zig").FunctionBytecode,
-    state: GeneratorState,
-    pc_offset: u32, // Current PC offset within bytecode
-    locals: []value.JSValue, // Local variables
-    stack: []value.JSValue, // Saved stack values
-    stack_len: u32, // Number of values on stack
-};
-
 /// Property descriptor flags
 pub const PropertyFlags = packed struct(u8) {
     writable: bool = true,
@@ -1816,89 +1798,6 @@ pub const JSObject = extern struct {
         const slot = self.inline_slots[Slots.FUNC_DATA];
         if (!slot.isExternPtr()) return null;
         return slot.toExternPtr(ClosureData);
-    }
-
-    /// Create a generator object from bytecode function
-    pub fn createGenerator(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, prototype: ?*JSObject) !*JSObject {
-        // Allocate generator data
-        const data = try allocator.create(GeneratorData);
-        errdefer allocator.destroy(data);
-
-        // Allocate space for locals
-        const locals = try allocator.alloc(value.JSValue, bytecode_ptr.local_count);
-        errdefer allocator.free(locals);
-        @memset(locals, value.JSValue.undefined_val);
-
-        // Allocate initial stack space
-        const stack = try allocator.alloc(value.JSValue, 64);
-        errdefer allocator.free(stack);
-
-        data.* = .{
-            .bytecode = bytecode_ptr,
-            .state = .suspended_start,
-            .pc_offset = 0,
-            .locals = locals,
-            .stack = stack,
-            .stack_len = 0,
-        };
-
-        // Create generator object
-        const obj = try allocator.create(JSObject);
-        obj.* = .{
-            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class_idx = class_idx,
-            .prototype = prototype,
-            .class_id = .generator,
-            .flags = .{},
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
-            .overflow_slots = null,
-            .overflow_capacity = 0,
-            .arena_ptr = null,
-        };
-        // Store generator data pointer
-        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromExternPtr(data);
-        return obj;
-    }
-
-    /// Create a generator object using arena allocation (ephemeral)
-    pub fn createGeneratorWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, prototype: ?*JSObject) ?*JSObject {
-        const data = arena.create(GeneratorData) orelse return null;
-        const locals = arena.allocSlice(value.JSValue, bytecode_ptr.local_count) orelse return null;
-        @memset(locals, value.JSValue.undefined_val);
-        const stack = arena.allocSlice(value.JSValue, 64) orelse return null;
-        @memset(stack, value.JSValue.undefined_val);
-
-        data.* = .{
-            .bytecode = bytecode_ptr,
-            .state = .suspended_start,
-            .pc_offset = 0,
-            .locals = locals,
-            .stack = stack,
-            .stack_len = 0,
-        };
-
-        const obj = arena.create(JSObject) orelse return null;
-        obj.* = .{
-            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
-            .hidden_class_idx = class_idx,
-            .prototype = prototype,
-            .class_id = .generator,
-            .flags = .{ .is_arena = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
-            .overflow_slots = null,
-            .overflow_capacity = 0,
-            .arena_ptr = arena,
-        };
-        obj.inline_slots[Slots.GENERATOR_DATA] = value.JSValue.fromExternPtr(data);
-        return obj;
-    }
-
-    /// Get generator data (if this is a generator object)
-    pub fn getGeneratorData(self: *const JSObject) ?*GeneratorData {
-        if (self.class_id != .generator) return null;
-        const slot = self.inline_slots[Slots.GENERATOR_DATA];
-        if (!slot.isExternPtr()) return null;
-        return slot.toExternPtr(GeneratorData);
     }
 
     /// Fast property access by slot offset
