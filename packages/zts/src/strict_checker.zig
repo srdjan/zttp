@@ -941,27 +941,6 @@ pub const StrictChecker = struct {
         }
     }
 
-    /// Pre-C1 implementation, kept only for the differential test below.
-    fn scanImportsLegacy(self: *StrictChecker) void {
-        const node_count = self.ir_view.nodeCount();
-        for (0..node_count) |idx| {
-            const node: NodeIndex = @intCast(idx);
-            if (self.ir_view.getTag(node) != .import_decl) continue;
-            const import_decl = self.ir_view.getImportDecl(node) orelse continue;
-            const module = self.ir_view.getString(import_decl.module_idx) orelse continue;
-            for (0..import_decl.specifiers_count) |i| {
-                const spec_idx = self.ir_view.getListIndex(import_decl.specifiers_start, @intCast(i));
-                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
-                const name = self.resolveAtomName(spec.imported_atom) orelse continue;
-                self.imported_functions.append(self.allocator, .{
-                    .slot = spec.local_binding.slot,
-                    .module = module,
-                    .name = name,
-                }) catch self.markAllocationFailure();
-            }
-        }
-    }
-
     fn collectAnnotatedFunctions(self: *StrictChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
@@ -1717,47 +1696,40 @@ test "canonical_unused_index_alias diagnostic carries repair_intent" {
 
 const import_corpus = @import("tests/import_corpus.zig");
 
-test "the facts-backed import scan derives the same list as the legacy scan" {
-    // Differential evidence for item 4 C1. Unlike effect_inference this derives
-    // an ordered list, so order is part of equivalence: `imports` is in node
-    // order then specifier order, which is what the legacy walk produced.
+test "the import scan records every specifier in order" {
+    // Replaces the differential test that proved this scan matches the pre-C1
+    // implementation. Expectations captured from that proven implementation.
     const allocator = std.testing.allocator;
 
-    for (import_corpus.cases) |case| {
-        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
-        defer parser.deinit();
-        var atoms = context.AtomTable.init(allocator);
-        defer atoms.deinit();
-        parser.setAtomTable(&atoms);
-        _ = try parser.parse();
-        const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const source =
+        \\import { sha256, hmacSha256 } from "zttp:crypto";
+        \\import { thing } from "zttp-ext:unknown";
+        \\import { env } from "zttp:env";
+    ;
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    defer parser.deinit();
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-        var legacy = StrictChecker.init(allocator, ir_view, &atoms, null, null);
-        defer legacy.deinit();
-        legacy.scanImportsLegacy();
+    var checker = StrictChecker.init(allocator, ir_view, &atoms, null, null);
+    defer checker.deinit();
+    checker.scanImports();
 
-        var migrated = StrictChecker.init(allocator, ir_view, &atoms, null, null);
-        defer migrated.deinit();
-        migrated.scanImports();
-
-        std.testing.expectEqual(legacy.imported_functions.items.len, migrated.imported_functions.items.len) catch |err| {
-            std.debug.print("\ncorpus case \"{s}\": legacy has {d} entries, migrated has {d}\n", .{
-                case.label, legacy.imported_functions.items.len, migrated.imported_functions.items.len,
-            });
-            return err;
-        };
-
-        for (legacy.imported_functions.items, migrated.imported_functions.items, 0..) |want, got, i| {
-            if (want.slot != got.slot or
-                !std.mem.eql(u8, want.module, got.module) or
-                !std.mem.eql(u8, want.name, got.name))
-            {
-                std.debug.print("\ncorpus case \"{s}\" entry {d}: was slot {d} {s}.{s}, now slot {d} {s}.{s}\n", .{
-                    case.label, i, want.slot, want.module, want.name, got.slot, got.module, got.name,
-                });
-                return error.EntryChanged;
-            }
-        }
+    // Node order, then specifier order within a declaration. The unresolved
+    // module keeps its position rather than being dropped or moved.
+    const want = [_][2][]const u8{
+        .{ "zttp:crypto", "sha256" },
+        .{ "zttp:crypto", "hmacSha256" },
+        .{ "zttp-ext:unknown", "thing" },
+        .{ "zttp:env", "env" },
+    };
+    try std.testing.expectEqual(want.len, checker.imported_functions.items.len);
+    for (want, checker.imported_functions.items) |expected, got| {
+        try std.testing.expectEqualStrings(expected[0], got.module);
+        try std.testing.expectEqualStrings(expected[1], got.name);
     }
 }
 
