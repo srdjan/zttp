@@ -915,9 +915,9 @@ pub const IRStore = struct {
     ///
     /// Infallible on purpose: the reservation is an optimization, never a
     /// requirement, so a failed reservation degrades to on-demand growth
-    /// instead of failing the parse. That also keeps `Parser.init`'s
-    /// `catch unreachable` honest - parser construction performs no allocation
-    /// that can turn an out-of-memory condition into a panic.
+    /// instead of failing the parse. It is therefore not a silent failure
+    /// path inside the now-fallible `Parser.init`; the allocations that can
+    /// genuinely fail there are reported as errors.
     pub fn initCapacity(allocator: std.mem.Allocator, source_len: usize) IRStore {
         var self = init(allocator);
 

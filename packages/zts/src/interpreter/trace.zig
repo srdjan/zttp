@@ -185,7 +185,7 @@ test "interpreter TypeError records source line" {
         \\handler(undefined);
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();

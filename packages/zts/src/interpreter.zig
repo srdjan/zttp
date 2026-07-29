@@ -2733,7 +2733,7 @@ test "End-to-end: parse and execute JS" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = parser_mod.Parser.init(allocator, "function f() { return 1 + 2; } f()", &strings, null);
+    var p = try parser_mod.Parser.init(allocator, "function f() { return 1 + 2; } f()", &strings, null);
     defer p.deinit();
 
     const code = try p.parse();
@@ -2794,7 +2794,7 @@ test "Hybrid: reject arena escape to global" {
         \\let x = { a: 1 };
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();
@@ -2840,7 +2840,7 @@ test "End-to-end: closure captures local" {
         \\let result = f();
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();
@@ -2907,7 +2907,7 @@ test "End-to-end: JSX parse, compile, and execute" {
         \\let link = renderToString(<a href="/api/health">GET /api/health</a>);
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
     p.enableJsx();
 
@@ -3263,7 +3263,7 @@ test "End-to-end: function declaration" {
     defer strings.deinit();
 
     const code_str = "function outer() { function add(a, b) { return a + b; } return add(3, 4); } outer()";
-    var p = parser_mod.Parser.init(allocator, code_str, &strings, null);
+    var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
     defer p.deinit();
 
     const code = try p.parse();
@@ -3406,7 +3406,7 @@ test "End-to-end: default parameters" {
     var strings = string_mod.StringTable.init(allocator);
 
     const code_str = "function outer() { function greet(name = 'World') { return name; } return greet(); } outer()";
-    var p = parser_mod.Parser.init(allocator, code_str, &strings, null);
+    var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
     defer p.deinit();
 
     const code = try p.parse();
@@ -3450,7 +3450,7 @@ test "End-to-end: optional method call short-circuits on nullish receiver" {
 
     var strings = string_mod.StringTable.init(allocator);
     const code_str = "function outer() { const a = undefined; return a?.foo(); } outer()";
-    var p = parser_mod.Parser.init(allocator, code_str, &strings, null);
+    var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
     defer p.deinit();
 
     const code = try p.parse();
@@ -4217,7 +4217,7 @@ test "End-to-end: computed compound assignment evaluates key once (object)" {
         \\let result = calls * 1000 + obj.x;
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();
@@ -4277,7 +4277,7 @@ test "End-to-end: computed compound assignment evaluates key once (array)" {
         \\let result = n * 1000 + arr[1];
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();
@@ -4516,7 +4516,7 @@ test "End-to-end: polymorphic property access" {
         \\let result = getX(a) + getX(b) + getX(c) + getX(d);
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();
@@ -4587,7 +4587,7 @@ test "End-to-end: object destructuring binds property values" {
         \\let result = a + renamed;
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();
@@ -4653,7 +4653,7 @@ test "End-to-end: nested destructuring with a default binds from the default" {
         \\let result = b;
     ;
 
-    var p = parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
     const code = try p.parse();

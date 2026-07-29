@@ -27,7 +27,7 @@ pub fn compile(
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = parser.Parser.init(allocator, source, &strings, null);
+    var p = try parser.Parser.init(allocator, source, &strings, null);
     defer p.deinit();
 
     const code = try p.parse();
@@ -76,7 +76,7 @@ pub fn compileWithOptions(
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = parser.Parser.init(allocator, source, &strings, null);
+    var p = try parser.Parser.init(allocator, source, &strings, null);
     defer p.deinit();
 
     // Apply options

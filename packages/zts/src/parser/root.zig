@@ -166,15 +166,6 @@ pub const Parser = struct {
         source: []const u8,
         strings: *string.StringTable,
         atoms: ?*context.AtomTable,
-    ) Parser {
-        return initFallible(allocator, source, strings, atoms) catch unreachable;
-    }
-
-    pub fn initFallible(
-        allocator: std.mem.Allocator,
-        source: []const u8,
-        strings: *string.StringTable,
-        atoms: ?*context.AtomTable,
     ) !Parser {
         var p = Parser{
             .allocator = allocator,
@@ -354,7 +345,7 @@ test "legacy Parser API" {
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = Parser.init(allocator, "let x = 1;", &strings, null);
+    var p = try Parser.init(allocator, "let x = 1;", &strings, null);
     defer p.deinit();
 
     const bytecode_data = try p.parse();
@@ -370,7 +361,7 @@ test "legacy Parser API getImports returns imported names" {
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var p = Parser.init(
+    var p = try Parser.init(
         allocator,
         \\import { sha256 as hash, base64Encode } from "zttp:crypto";
         \\const out = hash("abc");
@@ -397,7 +388,7 @@ test "JSX parsing with enableJsx" {
     defer strings.deinit();
 
     // Simple JSX element - use lowercase to avoid component detection
-    var p = Parser.init(allocator, "let x = <div>hello</div>;", &strings, null);
+    var p = try Parser.init(allocator, "let x = <div>hello</div>;", &strings, null);
     defer p.deinit();
 
     p.enableJsx();
@@ -422,7 +413,7 @@ test "JSX rendering integration" {
     defer strings.deinit();
 
     // Parse and compile JSX
-    var p = Parser.init(allocator, "let x = <div>hello</div>;", &strings, null);
+    var p = try Parser.init(allocator, "let x = <div>hello</div>;", &strings, null);
     defer p.deinit();
 
     p.enableJsx();
@@ -448,7 +439,7 @@ test "JSX parsing preserves text with punctuation" {
     defer strings.deinit();
 
     const source = "let x = <div><span>GET /api/health</span> - ok</div>;";
-    var p = Parser.init(allocator, source, &strings, null);
+    var p = try Parser.init(allocator, source, &strings, null);
     defer p.deinit();
     p.enableJsx();
 
@@ -468,7 +459,7 @@ test "JSX parsing reports malformed JSX" {
     defer strings.deinit();
 
     const source = "let x = <div><span></div>;";
-    var p = Parser.init(allocator, source, &strings, null);
+    var p = try Parser.init(allocator, source, &strings, null);
     defer p.deinit();
     p.enableJsx();
 
@@ -482,7 +473,7 @@ test "var keyword is rejected with helpful error" {
     defer strings.deinit();
 
     const source = "var x = 1;";
-    var p = Parser.init(allocator, source, &strings, null);
+    var p = try Parser.init(allocator, source, &strings, null);
     defer p.deinit();
 
     _ = p.parse() catch {};
@@ -504,7 +495,7 @@ test "postfix increment is rejected with helpful error" {
     defer strings.deinit();
 
     const source = "let x = 0; x++;";
-    var p = Parser.init(allocator, source, &strings, null);
+    var p = try Parser.init(allocator, source, &strings, null);
     defer p.deinit();
 
     _ = p.parse() catch {};
@@ -525,7 +516,7 @@ test "prefix increment is rejected with helpful error" {
     defer strings.deinit();
 
     const source = "let x = 0; ++x;";
-    var p = Parser.init(allocator, source, &strings, null);
+    var p = try Parser.init(allocator, source, &strings, null);
     defer p.deinit();
 
     _ = p.parse() catch {};
