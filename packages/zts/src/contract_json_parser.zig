@@ -1886,6 +1886,13 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
     if (parser.readNull()) return null;
 
     if (!parser.consume('{')) return error.InvalidJson;
+    // Baseline every field to "not asserted". HandlerProperties defaults the
+    // six flow and isolation fields to true, which is the right default for
+    // the analyzer that computes them but the wrong one for a parser reading
+    // a wire document: a key the document omits was never proven. Relying on
+    // the type's defaults here would read a partial `properties` block as
+    // proving no_secret_leakage, no_credential_leakage, input_validated,
+    // pii_contained, injection_safe, and state_isolated.
     var props = HandlerProperties{
         .pure = false,
         .read_only = false,
@@ -1893,6 +1900,12 @@ fn parseProperties(parser: *JsonParser) !?HandlerProperties {
         .retry_safe = false,
         .deterministic = false,
         .has_egress = false,
+        .no_secret_leakage = false,
+        .no_credential_leakage = false,
+        .input_validated = false,
+        .pii_contained = false,
+        .injection_safe = false,
+        .state_isolated = false,
     };
 
     while (true) {

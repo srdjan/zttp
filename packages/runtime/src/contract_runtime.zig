@@ -775,15 +775,33 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         try routes.append(allocator, .{ .method = method, .path = path });
     }
 
-    // Convert properties
-    const hp = hc.properties orelse HandlerProperties{
-        .pure = false,
-        .read_only = false,
-        .stateless = false,
-        .retry_safe = false,
-        .deterministic = false,
-        .has_egress = false,
-    };
+    // Convert properties. A contract that carried no `properties` block
+    // asserted nothing, so every runtime property stays false. Do NOT fall
+    // back to a default-constructed HandlerProperties here: that type defaults
+    // no_secret_leakage, no_credential_leakage, input_validated,
+    // pii_contained, injection_safe, and state_isolated to true, which would
+    // turn "nothing was proven" into "six security properties are proven".
+    // state_isolated also feeds derivePoolingPolicy, so the mistake would
+    // promote a handler to TTL runtime reuse on an unproven contract.
+    const runtime_properties: Properties = if (hc.properties) |hp| .{
+        .pure = hp.pure,
+        .read_only = hp.read_only,
+        .stateless = hp.stateless,
+        .retry_safe = hp.retry_safe,
+        .deterministic = hp.deterministic,
+        .has_egress = hp.has_egress,
+        .no_secret_leakage = hp.no_secret_leakage,
+        .no_credential_leakage = hp.no_credential_leakage,
+        .input_validated = hp.input_validated,
+        .pii_contained = hp.pii_contained,
+        .injection_safe = hp.injection_safe,
+        .idempotent = hp.idempotent,
+        .state_isolated = hp.state_isolated,
+        .max_io_depth = hp.max_io_depth,
+        .fault_covered = hp.fault_covered,
+        .result_safe = hp.result_safe,
+        .optional_safe = hp.optional_safe,
+    } else .{};
 
     var modules: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -811,25 +829,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
         .routes = try routes.toOwnedSlice(allocator),
         .routes_dynamic = hc.api.routes_dynamic,
         .reads_request_state = reads_request_state,
-        .properties = .{
-            .pure = hp.pure,
-            .read_only = hp.read_only,
-            .stateless = hp.stateless,
-            .retry_safe = hp.retry_safe,
-            .deterministic = hp.deterministic,
-            .has_egress = hp.has_egress,
-            .no_secret_leakage = hp.no_secret_leakage,
-            .no_credential_leakage = hp.no_credential_leakage,
-            .input_validated = hp.input_validated,
-            .pii_contained = hp.pii_contained,
-            .injection_safe = hp.injection_safe,
-            .idempotent = hp.idempotent,
-            .state_isolated = hp.state_isolated,
-            .max_io_depth = hp.max_io_depth,
-            .fault_covered = hp.fault_covered,
-            .result_safe = hp.result_safe,
-            .optional_safe = hp.optional_safe,
-        },
+        .properties = runtime_properties,
         .durable_workflow_properties = .{
             .retry_safe = hc.durable.workflow.properties.retry_safe,
             .idempotent = hc.durable.workflow.properties.idempotent,
