@@ -3360,8 +3360,6 @@ pub const BaselineCompiler = struct {
             .call_spread,
             .array_spread,
             .object_spread,
-            .await_val,
-            .make_async,
             .import_module,
             .import_name,
             .export_name,

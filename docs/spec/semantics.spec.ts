@@ -3,9 +3,9 @@
 //
 // semanticsHash:   f7b6a0fb20d14e65e7df47bb54963527b00fe2b6a6c9a0a6bbf2d2064318001f
 // irTableHash:     19ac13b87ab1996a21f39fc7464884765854558b9d2337a5ec47ecdd715a2e20
-// opcodeTableHash: 26613d2f883af91815590308415a7215c9d0c4688b305bece42794dfed39210c
+// opcodeTableHash: 6821f0d79ecd2d45211219f8a003bac9d2fea9d2409449d06d5173f935e76b00
 //
-// Coverage: 10/81 IR nodes, 7/132 bytecode opcodes specified.
+// Coverage: 10/81 IR nodes, 7/130 bytecode opcodes specified.
 // `denote` is what the node computes; `lower` is the bytecode it compiles to.
 // A value node's lower, symbolically executed, equals its denote (spec-check
 // mechanism 3), and the real compiler agrees on a corpus (mechanism 4).

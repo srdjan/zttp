@@ -1360,25 +1360,6 @@ pub const Interpreter = struct {
                 try self.ctx.push(func_obj.toValue());
                 continue :sw @enumFromInt(self.pc[0]);
             },
-            .make_async => {
-                self.advanceOp();
-                const const_idx = util.readU16(self.pc);
-                self.pc += 2;
-                const bc_val = try alloc.getConstant(self, const_idx);
-                if (!bc_val.isExternPtr()) return error.TypeError;
-                const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
-                const root_class_idx = self.ctx.root_class_idx;
-                const func_obj = try object.JSObject.createBytecodeFunction(
-                    self.ctx.allocator,
-                    root_class_idx,
-                    bc_ptr,
-                    @enumFromInt(bc_ptr.name_atom),
-                );
-                func_obj.flags.is_async = true;
-                try self.ctx.bytecode_functions.append(self.ctx.allocator, func_obj);
-                try self.ctx.push(func_obj.toValue());
-                continue :sw @enumFromInt(self.pc[0]);
-            },
             .make_closure => {
                 self.advanceOp();
                 const const_idx = util.readU16(self.pc);
@@ -1473,12 +1454,6 @@ pub const Interpreter = struct {
             // ========================================
             // Await / typeof / spread
             // ========================================
-            .await_val => {
-                self.advanceOp();
-                const awaited = self.ctx.peek();
-                _ = awaited;
-                continue :sw @enumFromInt(self.pc[0]);
-            },
             .typeof => {
                 self.advanceOp();
                 const a = self.ctx.pop();

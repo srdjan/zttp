@@ -98,7 +98,7 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
 
         // Phase 3: validate constant pool indices for relevant opcodes
         switch (op) {
-            .push_const, .make_function, .make_async => {
+            .push_const, .make_function => {
                 const idx = readU16(code, pc + 1);
                 if (idx >= constants_len) {
                     return .{

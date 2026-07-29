@@ -158,8 +158,6 @@ pub const Opcode = enum(u8) {
     to_number = 0x91, // Unary +: coerce top of stack to number
 
     // Async operations (kept for future implementation)
-    await_val = 0x98, // Await a value/Promise, suspends execution
-    make_async = 0x99, // Create async function from bytecode
 
     // Module operations
     import_module = 0x9A, // +u16 module_name_idx (load module, push namespace)
@@ -356,8 +354,6 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .to_number => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "to_number" },
 
         // Async operations
-        .await_val => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "await_val" },
-        .make_async => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "make_async" },
 
         // Module operations
         .import_module => .{ .size = 3, .n_pop = 0, .n_push = 1, .name = "import_module" },

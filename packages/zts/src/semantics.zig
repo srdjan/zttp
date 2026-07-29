@@ -372,7 +372,7 @@ pub fn isSpecifiedOpcode(op: Opcode) bool {
 // the receipt's irTableHash/opcodeTableHash at check time. A per-member
 // rule-or-pending list plus SMT-checked coverage is the northstar's version.
 pub const expected_nodes = 81;
-pub const expected_opcodes = 132;
+pub const expected_opcodes = 130;
 
 comptime {
     const n = @typeInfo(NodeTag).@"enum".fields.len;
