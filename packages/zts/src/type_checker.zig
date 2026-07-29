@@ -1389,7 +1389,7 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
 
         return switch (bin.op) {
-            .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op, .eq, .neq => pool.idx_boolean,
+            .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op => pool.idx_boolean,
             .and_op, .or_op => {
                 const lt = self.inferType(bin.left);
                 const rt = self.inferType(bin.right);

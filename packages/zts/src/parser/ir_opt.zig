@@ -300,8 +300,8 @@ pub const IROptimizer = struct {
             const right_val = self.ir_store.getData(opt_right).toInt();
 
             const result_val: ?bool = switch (op) {
-                .eq, .strict_eq => left_val == right_val,
-                .neq, .strict_neq => left_val != right_val,
+                .strict_eq => left_val == right_val,
+                .strict_neq => left_val != right_val,
                 .lt => left_val < right_val,
                 .lte => left_val <= right_val,
                 .gt => left_val > right_val,

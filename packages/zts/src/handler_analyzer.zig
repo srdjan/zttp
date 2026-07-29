@@ -428,11 +428,6 @@ pub const HandlerAnalyzer = struct {
                 // If exact match fails, try prefix match
                 return self.analyzePrefixMatch(binary);
             }
-
-            // Pattern 2: url.indexOf('/api/greet/') === 0
-            if (binary.op == .eq) {
-                return self.analyzePrefixMatch(binary);
-            }
         }
 
         return null;

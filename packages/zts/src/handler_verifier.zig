@@ -797,8 +797,7 @@ pub const HandlerVerifier = struct {
 
                 // Check 6: optional used in non-nullish, non-comparison binary ops
                 if (binary.op != .nullish and
-                    binary.op != .strict_eq and binary.op != .strict_neq and
-                    binary.op != .eq and binary.op != .neq)
+                    binary.op != .strict_eq and binary.op != .strict_neq)
                 {
                     self.checkOptionalUse(binary.left);
                     self.checkOptionalUse(binary.right);
@@ -956,7 +955,7 @@ pub const HandlerVerifier = struct {
         // Comparison: result.ok === true, etc.
         if (tag == .binary_op) {
             const binary = self.ir_view.getBinary(cond_node) orelse return null;
-            if (binary.op == .strict_eq or binary.op == .eq) {
+            if (binary.op == .strict_eq) {
                 if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| return binding;
                 if (self.extractResultMemberSlot(binary.right, &ok_atoms)) |binding| return binding;
             }
@@ -989,13 +988,13 @@ pub const HandlerVerifier = struct {
         // Comparison: result.ok === false, result.ok !== true
         if (tag == .binary_op) {
             const binary = self.ir_view.getBinary(cond_node) orelse return null;
-            if (binary.op == .strict_neq or binary.op == .neq) {
+            if (binary.op == .strict_neq) {
                 // result.ok !== true
                 if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
                     if (self.isTrueLiteral(binary.right)) return binding;
                 }
             }
-            if (binary.op == .strict_eq or binary.op == .eq) {
+            if (binary.op == .strict_eq) {
                 // result.ok === false
                 if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
                     if (self.isFalseLiteral(binary.right)) return binding;

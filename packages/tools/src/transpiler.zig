@@ -341,7 +341,7 @@ pub const IrTranspiler = struct {
                         if (lt == .f64_type or rt == .f64_type) break :blk .f64_type;
                         break :blk .jsvalue_type;
                     },
-                    .eq, .neq, .strict_eq, .strict_neq, .lt, .lte, .gt, .gte => break :blk .bool_type,
+                    .strict_eq, .strict_neq, .lt, .lte, .gt, .gte => break :blk .bool_type,
                     .and_op, .or_op => {
                         const lt = self.inferExprType(bin.left);
                         break :blk lt;
@@ -2002,8 +2002,8 @@ pub const IrTranspiler = struct {
                     return;
                 };
                 switch (bin.op) {
-                    .strict_eq, .eq => self.transpileEqCondition(bin),
-                    .strict_neq, .neq => {
+                    .strict_eq => self.transpileEqCondition(bin),
+                    .strict_neq => {
                         self.emit("!");
                         self.transpileEqCondition(bin);
                     },

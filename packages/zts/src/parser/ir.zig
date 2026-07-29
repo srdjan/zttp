@@ -80,8 +80,9 @@ pub const BinaryOp = enum(u8) {
     pow,
 
     // Comparison
-    eq,
-    neq,
+    // Loose `==`/`!=` are parse errors, so BinaryOp carries only the strict
+    // forms. The `eq`/`neq` *opcodes* remain: they are modeled in the
+    // semantics registry with an SMT-proved lowering.
     strict_eq,
     strict_neq,
     lt,

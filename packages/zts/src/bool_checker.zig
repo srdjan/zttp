@@ -756,9 +756,6 @@ pub const BoolChecker = struct {
                 // unknown ?? T -> unknown (conservative)
                 return .unknown;
             },
-
-            // Legacy eq/neq (banned by parser, but handle gracefully)
-            .eq, .neq => .boolean,
         };
     }
 
