@@ -637,14 +637,16 @@ than estimated."
 
 ## Findings, Task 2
 
-Measured 2026-07-29 at commit `a4bba5ba`. Four divergences, one predicted and three not.
+Measured 2026-07-29, starting at commit `a4bba5ba`. Six divergences, one predicted and five not. Findings 5 and 6 only became visible after earlier ones were resolved and the comparison could reach further into the contract.
 
 | # | Divergence | Predicted? | Confirmed by | Direction | Resolution |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Six `properties` flags (`no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`, `state_isolated`) read `true` through the codec where the hand-written reader reads `false`, on any contract with no `properties` block or `"properties": null` | No | 9 tests | **Unsafe** | Blocks. Fix `fromHandlerContract`. |
-| 2 | `capabilities` is always non-null through the codec; the hand-written reader returns null when the contract carries no `sandbox` block | No | `parseContractJson with properties and routes` | **Unsafe** | Blocks. Needs a way to express "absent". |
-| 3 | An all-zero stored `capabilityHash` is recomputed by the hand-written reader and kept as zeros by the codec | No | `B1 differential: writer round-trip, populated contract` | **Unsafe** | Blocks. One rule must win. |
-| 4 | `reads_request_state` is true through the codec on a route with `requestSchemaRefs` and no `requestBodies` | Yes | `B1 differential: writer round-trip, route with requestSchemaRefs only` | Safe | Accept. The codec is the conservative side; the only effect is that the proof cache is skipped more often. |
+| 1 | Six `properties` flags (`no_secret_leakage`, `no_credential_leakage`, `input_validated`, `pii_contained`, `injection_safe`, `state_isolated`) read `true` through the codec where the hand-written reader reads `false`, on any contract with a missing or partial `properties` block | No | 9 tests | **Unsafe** | Fixed in `d39b17f6`. Both the codec's `parseProperties` baseline and `fromHandlerContract`'s fallback now name every field. |
+| 2 | `capabilities` is always non-null through the codec; the hand-written reader returns null when the contract carries no `sandbox` block | No | `parseContractJson with properties and routes` | **Unsafe** | Fixed in `20cc00a9`. `HandlerContract.capabilities` is now optional and the parser sets it only when the sandbox block carries a `capabilities` key. |
+| 3 | An all-zero stored `capabilityHash` is recomputed by the hand-written reader and kept as zeros by the codec | No | `B1 differential: writer round-trip, populated contract` | **Unsafe** | Fixed in `20cc00a9`. The codec adopts the runtime's rule: all-zero means "not stamped", so recompute. |
+| 4 | `reads_request_state` is true through the codec on a route with `requestSchemaRefs` and no `requestBodies` | Yes | `B1 differential: writer round-trip, route with requestSchemaRefs only` | Safe | Accepted. The assertion is narrowed at that field, with the reason inline, so a regression in the other direction still fails. |
+| 5 | The codec never parsed the top-level `modules` array, so `parseFromJson` always returned an empty module list | No | `parseContractJson reads sandbox block` | **Unsafe** | Fixed in `20cc00a9`. The runtime derives the live capability matrix from this list, so an empty one made `verifyCapabilityMatrix` compare a real hash against the empty-set hash. |
+| 6 | A route object with a wrong-typed field desynchronizes the codec's scanner and the whole document is rejected, where the hand-written reader silently skipped the route | No | `B1 differential: malformed corpus` | Safe, after a projection fix | Accepted, with the direction pinned by a test. The hand-written reader's silent skip could empty the route table, and `matchesRoute` treats an empty table as "allow everything", so quiet data loss there widens the pre-filter. Separately, `fromHandlerContract` now drops a route with an empty method or path, because one unmatchable entry turns the pre-filter from "allow all" into "reject all". |
 
 ### Why 1 is unsafe
 
@@ -676,15 +678,11 @@ Every deployed binary whose contract has no sandbox block would refuse to serve 
 
 ### Consequence for this plan
 
-The plan's premise was that composing two existing halves is behavior-preserving. Findings 2 and 3 falsify it: `HandlerContract` cannot represent "the contract carried no sandbox block", so the projection cannot reconstruct a distinction the wire format makes and the codec discards. Task 3 is blocked until that is resolved. See "Blocked" below.
+The plan's premise was that composing two existing halves is behavior-preserving. Findings 2, 3, and 5 falsified it: the canonical codec was lossy. It dropped the module list outright and could not represent "the contract carried no sandbox block", so the projection had no way to reconstruct distinctions the wire format makes.
 
-## Blocked
+Resolved by teaching the codec to say what the wire says, rather than by rebuilding the lost information in the runtime. That keeps one reader, which is the point of B1. The unblocking work is `d39b17f6` and `20cc00a9`.
 
-Task 3 must not proceed as written. Three options, none of them inside the original scope:
-
-1. **Teach `HandlerContract` to express absence.** Make `capabilities` optional, or add a `has_sandbox: bool`. Touches the engine contract type, the writer, the codec, and every consumer. It is the correct fix and it makes the codec able to represent what the wire format says.
-2. **Reconstruct absence in the projection.** Have `parseContractJson` pre-scan for the `sandbox` key and null out `capabilities` when it is missing. Keeps the change inside `contract_runtime.zig`, but re-introduces a second partial reader, which is the thing B1 exists to remove.
-3. **Fix findings 1 and 3 only, and defer the swap.** Findings 1 and 3 are independent defects worth their own commits. Finding 2 then remains, and B1 stops short of the deletion.
+None of the five defects were introduced by this plan. All five were already in the tree, reachable through `parseFromJson` by every analyzer consumer and through `fromHandlerContract` by the live-reload path. The differential harness is what made them visible.
 
 ## Done when
 
