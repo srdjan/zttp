@@ -583,6 +583,65 @@ between JIT on and JIT off end-to-end because on the server there is no differen
 Doing nothing is the one option that should be ruled out, because today the code carries the
 full maintenance cost of a JIT that cannot run.
 
+### Measurement 8, the falsification experiment: the JIT's reachable set is narrow by construction
+
+Run to establish the ceiling of what fixing the deadline inhibit could buy, before committing
+to that work. Protocol: `zig build bench -Doptimize=ReleaseFast` with
+`ZTS_JIT_POLICY=eager ZTS_JIT_THRESHOLD=1 ZTS_JIT_FEEDBACK_WARMUP=1` against
+`ZTS_JIT_POLICY=disabled`, five interleaved rounds, best-of-N. The harness arms no deadline,
+so the inhibit is not a factor here.
+
+Result: **-3.06 percent geomean with the JIT forced on**. Only two of thirteen benchmarks
+actually compiled, and the compiled ones are the same two as always: `functionCalls` +0.8
+percent (`baseline=2`) and `recursion` +23.5 percent (`baseline=1`). The other eleven show
+`baseline=0` and `interpreted=0`, meaning compilation was never attempted, not attempted and
+bailed. `httpHandler` measured -4.6 percent and `httpHandlerHeavy` -2.1 percent, but neither
+compiled, so those numbers are profiling and feedback-allocation overhead with no payoff,
+not a compiled-versus-interpreted comparison.
+
+**The experiment failed at its stated goal, and the reason is the finding.** It could not
+force handler-shaped code to compile, because two gates make that impossible:
+
+1. `allocateTypeFeedback` returns early only for functions with no feedback sites
+   (`binary_op_count == 0 and call_site_count == 0`). Those compile immediately through the
+   first path in `maybePromote`. Every function containing arithmetic, property access, or
+   calls gets a feedback vector instead and must wait for the post-warmup path, which
+   requires `execution_count >= threshold + feedback_warmup`.
+2. The harness's `httpHandler` is a single call, `runHttpHandler(5000)`, with the loop
+   *inside* the function. Its `execution_count` is 1 forever; iterations increment
+   `backedge_count`. The hot-loop path in `maybePromote` requires
+   `backedge_count >= LOOP_JIT_THRESHOLD` **and** `execution_count >= 5`.
+
+So a function that is called once and loops internally can never be compiled, no matter how
+hot the loop is. That shape, one invocation doing bounded work over a collection, is the
+common shape of a request handler. Note this gate is independent of the deadline inhibit:
+even with interruptible compiled code, this code would not compile.
+
+The reachable set for the baseline JIT is therefore: functions called at least `threshold`
+times that either have no feedback sites at all, or accumulate enough separate invocations
+to clear the warmup. On the server, the first condition is blocked outright by the deadline
+inhibit (measurement 7).
+
+**What is still unmeasured**, stated plainly: the throughput of a genuinely compiled HTTP
+handler. Establishing it requires a handler called thousands of times with feedback sites,
+with the inhibit bypassed. Both gates would have to be worked around to get the number, which
+is itself the point: the number is hard to obtain because the configuration that produces it
+does not occur in this product.
+
+**Recommendation, with the second opinion.** A cross-model review (GPT-5.6 Sol, consulted on
+the same evidence) recommends deleting the remaining JIT, and rejects the middle option of a
+documented timeout flag on the grounds that timeout enforcement must never depend on an
+operator knowingly disabling safety. That reasoning is sound and is adopted here. It also
+corrected a technical error in the earlier sketch of the fix: having compiled code poll
+`interrupt_requested` would enforce nothing, because nothing sets that flag during CPU-bound
+compiled execution. Verified: the only deadline-related setter is `interpreter.zig:118`,
+inside the interpreter's own check, and there is no watchdog thread. A real fix is a
+cancellation architecture with safe points that read the clock, not a flag poll.
+
+The evidence now says: the baseline JIT cannot run on the server path, cannot compile
+handler-shaped code even where it can run, and costs 3 percent when forced. Removal is the
+option the measurements support.
+
 ### Measurement 2, end-to-end server load: no measurable JIT effect
 
 Protocol: `zttp serve` on `examples/handler/handler-full.tsx`, request logging disabled
