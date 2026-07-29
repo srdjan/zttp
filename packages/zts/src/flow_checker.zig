@@ -2231,7 +2231,7 @@ pub const FlowChecker = struct {
 test "FlowChecker fails closed when taint state cannot allocate" {
     const allocator = std.testing.allocator;
     const source = "function handler(req) { return Response.json(req); }";
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2247,7 +2247,7 @@ test "FlowChecker fails closed when taint state cannot allocate" {
 test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     const allocator = std.testing.allocator;
     const source = "function handler() { return Response.json({ ok: true }); }";
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2280,7 +2280,7 @@ test "FlowChecker captures witness constraints on secret-in-response" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2336,7 +2336,7 @@ test "FlowChecker does not leak sibling-branch I/O calls into the witness" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2383,7 +2383,7 @@ test "FlowChecker captures stub_truthy on if-else with negated condition" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2426,7 +2426,7 @@ test "FlowChecker captures req_method constraint from literal comparison" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2469,7 +2469,7 @@ test "FlowChecker captures AND chain as multiple constraints" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2528,7 +2528,7 @@ test "FlowChecker captures one concrete negated request constraint for else AND 
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2585,7 +2585,7 @@ test "FlowChecker keeps repeated module call constraints tied to call index" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2657,7 +2657,7 @@ test "FlowChecker captures result_ok constraint on validated path" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2700,7 +2700,7 @@ test "FlowChecker records validated defended path reaching egress body" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2747,7 +2747,7 @@ test "FlowChecker flags a secret reaching a module fetch body" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2782,7 +2782,7 @@ test "FlowChecker flags a secret reaching a var-bound module fetch body" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2816,7 +2816,7 @@ test "FlowChecker flags a secret reaching a module fetch query field" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2851,7 +2851,7 @@ test "FlowChecker flags a secret reaching egress via an options spread" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2881,7 +2881,7 @@ test "FlowChecker proves no_secret_leakage for a benign module fetch" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2910,7 +2910,7 @@ test "FlowChecker records validated defended path reaching an HTML response" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2948,7 +2948,7 @@ test "FlowChecker records never_reached defended path for unused secret" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2986,7 +2986,7 @@ test "FlowChecker records no defended path for a leaking secret" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3209,7 +3209,7 @@ test "secret_in_response diagnostic carries repair_intent = insert_guard_before_
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3251,7 +3251,7 @@ test "FlowChecker flags secret returned through a variable-held response" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3284,7 +3284,7 @@ test "FlowChecker flags unvalidated input in a variable-held Response.html" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3318,7 +3318,7 @@ test "FlowChecker flags secret returned through a ternary response" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3354,7 +3354,7 @@ test "FlowChecker keeps taint through a user-defined wrapper call" {
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3391,7 +3391,7 @@ test "FlowChecker keeps validated label through a wrapper returning a validator 
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3416,7 +3416,7 @@ test "FlowChecker keeps validated label through a wrapper returning a validator 
 /// Shared harness: parse `source`, run the FlowChecker on its handler, and
 /// return whether no_secret_leakage was proven. Frees everything it owns.
 fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3543,7 +3543,7 @@ const JsxCheckResult = struct { no_secret_leakage: bool, injection_safe: bool };
 /// JSX-enabled harness: parse `source` with JSX on, run the FlowChecker, and
 /// return the two properties the JSX-laundering tests assert on.
 fn runJsxCheck(allocator: std.mem.Allocator, source: []const u8) !JsxCheckResult {
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     parser.enableJsx();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();

@@ -2171,7 +2171,7 @@ const writeJsonString = json_utils.writeJsonString;
 
 test "TypeChecker fails closed when binding analysis cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "let count = 1;");
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "let count = 1;");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2189,7 +2189,7 @@ test "TypeChecker fails closed when binding analysis cannot allocate" {
 
 test "TypeChecker fails closed when diagnostic storage cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "");
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2214,7 +2214,7 @@ test "TypeChecker fails closed when diagnostic storage cannot allocate" {
 
 test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "");
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2243,7 +2243,7 @@ test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
 
 test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "");
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2277,7 +2277,7 @@ fn checkTypedSourceWithServiceContext(
     var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -2910,7 +2910,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
     var strip_result = try @import("stripper.zig").strip(allocator, aw.writer.buffered(), .{});
     defer strip_result.deinit();
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();

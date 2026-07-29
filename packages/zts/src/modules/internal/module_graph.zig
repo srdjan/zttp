@@ -156,7 +156,7 @@ pub const ModuleGraph = struct {
         const source = module.stripped_source orelse module.source;
 
         // Quick-parse to extract import declarations
-        var js_parser = zts_parser.JsParser.init(self.allocator, source);
+        var js_parser = try zts_parser.JsParser.init(self.allocator, source);
         defer js_parser.deinit();
 
         // Enable JSX if needed

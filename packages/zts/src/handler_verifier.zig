@@ -1637,7 +1637,7 @@ test "diagnostic formatting" {
 
 test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "function handler(req) {}");
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "function handler(req) {}");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1655,7 +1655,7 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match
     var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -1737,7 +1737,7 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
     var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();

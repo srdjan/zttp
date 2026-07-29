@@ -223,7 +223,7 @@ test "discharge records proven facts and skips the handler" {
         \\function nowMs() { return Date.now(); }
         \\function handler(req) { return clean(req); }
     ;
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -261,7 +261,7 @@ test "discharge records non-total facts for a helper that may not return" {
     defer atoms.deinit();
     // The `if` has no else, so one path falls through without returning.
     const source = "function maybe(n) { if (n) { return n; } }";
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();

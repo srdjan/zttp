@@ -430,7 +430,7 @@ pub fn extractContract(
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = parser_mod.JsParser.init(allocator, source_to_parse);
+    var js_parser = try parser_mod.JsParser.init(allocator, source_to_parse);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     if (std.mem.endsWith(u8, filename, ".jsx") or is_tsx) {
@@ -598,7 +598,7 @@ fn parseSourceForTest(allocator: std.mem.Allocator, source: []const u8) !struct 
     js_parser: JsParser,
     root: NodeIndex,
 } {
-    var js_parser = JsParser.init(allocator, source);
+    var js_parser = try JsParser.init(allocator, source);
     errdefer js_parser.deinit();
     const root = try js_parser.parse();
     return .{ .js_parser = js_parser, .root = root };
@@ -735,7 +735,7 @@ test "pipeline.resolve flags pointless object truthy condition" {
     // Mirror bool_checker.zig:2258 — object literal in `if` is always truthy.
     const source: []const u8 = "if ({}) { let x = 1; }";
 
-    var js_parser = JsParser.init(allocator, source);
+    var js_parser = try JsParser.init(allocator, source);
     defer js_parser.deinit();
     const root = try js_parser.parse();
     const ir_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);

@@ -1043,7 +1043,7 @@ test "HandlerAnalyzer extracts match route patterns" {
         \\}
     ;
 
-    var js_parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var js_parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -1092,7 +1092,7 @@ test "HandlerAnalyzer does not fast-path match-object arms that constrain method
         \\}
     ;
 
-    var js_parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var js_parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -1131,7 +1131,7 @@ test "HandlerAnalyzer detects Response.json(JSON.parse(request.body))" {
         \\}
     ;
 
-    var js_parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var js_parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 

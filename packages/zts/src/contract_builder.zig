@@ -4295,7 +4295,7 @@ fn buildTestContract(source: []const u8) !HandlerContract {
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -4896,7 +4896,7 @@ test "registered partner manifest contributes effect class to handler properties
         \\const r = chargeCard("tok");
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4956,7 +4956,7 @@ test "partner manifest contractExtractions populate extensions section" {
         \\const r = charge("api.stripe.com", "card_charge");
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4997,7 +4997,7 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
         \\const r = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m&timezone=auto", { headers: { "Accept": "application/json" } });
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5048,7 +5048,7 @@ test "resource() affordances are extracted strict-literal with method default an
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5090,7 +5090,7 @@ test "resource() with a computed affordances argument fails closed as affordance
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5121,7 +5121,7 @@ test "resource() affordance with a non-literal href is recorded dynamic, not res
         \\}
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5307,7 +5307,7 @@ test "missing manifest registry skips partner imports" {
         \\const r = unknownFn();
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);

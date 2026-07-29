@@ -1719,7 +1719,7 @@ pub fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
 
 test "BoolChecker fails closed when analysis state cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "if ({}) { const enabled = true; }");
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "if ({}) { const enabled = true; }");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1737,7 +1737,7 @@ fn checkSource(source: []const u8, expect_errors: u32) !void {
 fn checkSourceFull(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     const allocator = std.testing.allocator;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     defer parser.deinit();
 
     const root = parser.parse() catch |err| return err;
@@ -1928,7 +1928,7 @@ test "sound: untracked function call is unknown (passes)" {
 test "sound: diagnostic includes operator context for object" {
     const allocator = std.testing.allocator;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, "if ({}) { let x = 1; }");
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, "if ({}) { let x = 1; }");
     defer parser.deinit();
 
     const root = try parser.parse();

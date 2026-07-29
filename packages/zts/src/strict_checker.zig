@@ -1287,7 +1287,7 @@ const testing = std.testing;
 
 test "strict checker flags avoidable let" {
     const source = "function handler(req) { let x = 1; return Response.json({x}); }";
-    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1299,7 +1299,7 @@ test "strict checker flags avoidable let" {
 
 test "strict checker accepts reassigned let" {
     const source = "function handler(req) { let x = 1; x = 2; return Response.json({x}); }";
-    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1313,7 +1313,7 @@ test "strict checker accepts reassigned let" {
 
 test "canonical profile warns on reused arrow helper" {
     const source = "const parse = (x) => x; function handler(req) { const a = parse(1); const b = parse(2); return Response.json({a,b}); }";
-    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1344,7 +1344,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
     var stripped = try @import("stripper.zig").strip(testing.allocator, source, .{});
     defer stripped.deinit();
 
-    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, stripped.code);
+    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, stripped.code);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1368,7 +1368,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
 
 test "strict checker accepts one-off arrow helper value" {
     const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({a}); }";
-    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1392,7 +1392,7 @@ fn expectKind(checker: *const StrictChecker, kind: DiagnosticKind) !void {
 
 test "StrictChecker fails closed when profile facts cannot allocate" {
     const allocator = testing.allocator;
-    var parser = @import("parser/root.zig").JsParser.init(allocator, "let answer = 42;");
+    var parser = try @import("parser/root.zig").JsParser.init(allocator, "let answer = 42;");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1404,7 +1404,7 @@ test "StrictChecker fails closed when profile facts cannot allocate" {
 }
 
 fn checkSource(source: []const u8) !StrictChecker {
-    var parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1437,7 +1437,7 @@ const TypedHarness = struct {
 fn checkSourceTyped(source: []const u8) !*TypedHarness {
     const h = try testing.allocator.create(TypedHarness);
     errdefer testing.allocator.destroy(h);
-    h.parser = @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    h.parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
     const root = try h.parser.parse();
     const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
     h.pool = type_pool_mod.TypePool.init(testing.allocator);

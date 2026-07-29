@@ -68,7 +68,7 @@ pub const ModuleCompiler = struct {
             const source = module.stripped_source orelse module.source;
 
             // Parse with shared atom table
-            var js_parser = try zts_parser.JsParser.initFallible(self.allocator, source);
+            var js_parser = try zts_parser.JsParser.init(self.allocator, source);
             js_parser.setAtomTable(self.atoms);
 
             // Enable JSX if needed
@@ -176,10 +176,10 @@ test "compileAll returns a clean error instead of panicking when parser-init all
     defer strings.deinit();
 
     // Fail the very first allocation ModuleCompiler.compileAll makes on
-    // self.allocator: the ScopeAnalyzer.initFallible call inside
-    // JsParser.initFallible. Before this fix, compileAll went through the
-    // panicking JsParser.init wrapper, so this allocation failure aborted
-    // the process instead of returning an error.
+    // self.allocator: the ScopeAnalyzer.init call inside JsParser.init.
+    // Before this fix, compileAll went through a panicking JsParser.init
+    // wrapper, so this allocation failure aborted the process instead of
+    // returning an error.
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     var module_compiler = ModuleCompiler.init(failing.allocator(), &atoms, &strings);
 

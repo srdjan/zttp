@@ -643,7 +643,7 @@ test "leaf pure function has empty effect row" {
     const allocator = testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = JsParser.init(allocator, "function clean(s) { return s; }");
+    var parser = try JsParser.init(allocator, "function clean(s) { return s; }");
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -663,7 +663,7 @@ test "Date.now marks the enclosing function non-deterministic" {
     const allocator = testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = JsParser.init(allocator, "function nowSeconds() { return Date.now(); }");
+    var parser = try JsParser.init(allocator, "function nowSeconds() { return Date.now(); }");
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -681,7 +681,7 @@ test "Date.now inside durable step callback preserves determinism" {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = JsParser.init(allocator,
+    var parser = try JsParser.init(allocator,
         \\import { step } from "zttp:durable";
         \\function handler(req) { return step("ts", () => Date.now()); }
     );
@@ -701,7 +701,7 @@ test "Date.now as eager durable step argument is non-deterministic" {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = JsParser.init(allocator,
+    var parser = try JsParser.init(allocator,
         \\import { step } from "zttp:durable";
         \\function handler(req) { return step("ts", Date.now()); }
     );
@@ -725,7 +725,7 @@ test "transitive non-determinism flows through callers" {
         \\function inner() { return Date.now(); }
         \\function outer() { return inner(); }
     ;
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -743,7 +743,7 @@ test "self-recursive function is flagged" {
     const allocator = testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = JsParser.init(allocator, "function loop(n) { return loop(n); }");
+    var parser = try JsParser.init(allocator, "function loop(n) { return loop(n); }");
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -764,7 +764,7 @@ test "mutual recursion is flagged for both participants" {
         \\function a(n) { return b(n); }
         \\function b(n) { return a(n); }
     ;
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -783,7 +783,7 @@ test "Math.random marks function non-deterministic" {
     const allocator = testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = JsParser.init(allocator, "function pick() { return Math.random(); }");
+    var parser = try JsParser.init(allocator, "function pick() { return Math.random(); }");
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -804,7 +804,7 @@ test "pure helper next to non-deterministic helper stays pure" {
         \\function clean(s) { return s; }
         \\function rnd() { return Math.random(); }
     ;
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -829,7 +829,7 @@ test "calling a write-classified import marks the function as writing" {
         \\function store(k) { return cacheSet("ns", k, "v"); }
         \\function clean(s) { return s; }
     ;
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -855,7 +855,7 @@ test "write effect propagates transitively to callers" {
         \\function inner(k) { return cacheSet("ns", k, "v"); }
         \\function outer(k) { return inner(k); }
     ;
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -897,7 +897,7 @@ test "partner write-classified import marks function and callers as writing" {
         \\function wrapper(tok) { return charge(tok); }
         \\function clean(tok) { return tok; }
     ;
-    var parser = JsParser.init(allocator, source);
+    var parser = try JsParser.init(allocator, source);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -922,7 +922,7 @@ test "empty program is a no-op" {
     const allocator = testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = JsParser.init(allocator, "");
+    var parser = try JsParser.init(allocator, "");
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();

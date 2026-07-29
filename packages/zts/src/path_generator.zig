@@ -1695,7 +1695,7 @@ test "scanImports tracks virtual module functions with binding names" {
         \\const value = env("NAME");
     ;
 
-    var parser = @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1818,7 +1818,7 @@ const FailNextAllocation = struct {
 
 fn expectGenerationFailsOnFirstAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    var parser = parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -1856,7 +1856,7 @@ test "generate fails closed when handler binding allocation fails" {
 
 fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    var parser = parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -1908,7 +1908,7 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
         \\  return Response.json(true);
         \\}
     ;
-    var parser = parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -1963,7 +1963,7 @@ test "generate cleans every fatal allocation failure" {
         \\  return Response.json(true);
         \\}
     ;
-    var parser = parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -2039,7 +2039,7 @@ test "behavior path conversion cleans every allocation failure" {
 }
 
 fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGeneratorFixture {
-    var parser = parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.Parser.init(allocator, source);
     errdefer parser.deinit();
 
     var atoms = context.AtomTable.init(allocator);
