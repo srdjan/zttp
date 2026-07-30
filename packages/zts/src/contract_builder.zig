@@ -312,6 +312,13 @@ pub const ContractBuilder = struct {
         verification: ?VerificationInfo,
     ) !HandlerContract {
         if (self.type_checker) |tc| try tc.ensureHealthy();
+        // Phase 1: Build the import index. Modules, imported names, and the
+        // slot-keyed bindings the call-site scan resolves against. Built before
+        // the effect analyzer so that analyzer can share it instead of building
+        // an identical private one; the index depends only on the IR, the atom
+        // table, and the registry, so it does not care that effects has not run.
+        try self.buildFacts();
+
         // Proof-carrying functions: infer per-function effect rows across the
         // call graph. The handler's composed row tightens computeProperties;
         // the full table drives capsule discharge after the contract is built.
@@ -321,12 +328,11 @@ pub const ContractBuilder = struct {
             self.atoms,
             self.manifest_registry,
         );
+        // `self` is a stable address for the duration of `build`, so the borrow
+        // outlives the analyzer.
+        effects.facts = &self.facts;
         defer effects.deinit();
         try effects.analyze(root);
-
-        // Phase 1: Build the import index. Modules, imported names, and the
-        // slot-keyed bindings the call-site scan resolves against.
-        try self.buildFacts();
 
         // Phase 2: Scan all call sites for env/fetchSync/cache usage
         try self.scanCallSites();
