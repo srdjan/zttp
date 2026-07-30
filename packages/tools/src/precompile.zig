@@ -4607,3 +4607,131 @@ test {
     _ = @import("precompile_args.zig");
     _ = @import("transpiler.zig");
 }
+
+// ---------------------------------------------------------------------------
+// Serialized-bytecode goldens
+//
+// The four contract goldens pin what the analyzer SAYS about a handler. Nothing
+// pinned what the compiler EMITS for one, which is the artifact the product
+// signs and ships. These do.
+//
+// Sources are inline, not the fixtures under tests/fixtures/contract/. Two
+// approaches were tried and rejected first: `@embedFile` with a relative path is
+// rejected by Zig ("embed of file outside package path"), and injecting the
+// fixtures as anonymous build imports broke every OTHER test root that includes
+// this file - system_rollout.zig and canonicalize.zig among them - because those
+// roots have no such import. `zig build test-precompile` was green while
+// `zig build test` was not.
+//
+// Inline sources are chosen to cover four codegen shapes: plain control flow and
+// arithmetic, virtual-module imports, JSX, and a durable workflow with nested
+// closures.
+//
+// To regenerate after a DELIBERATE codegen change: run the test, read the actual
+// hash it prints, and paste it in. There is no update script on purpose - a hash
+// change should cost a moment's thought about why the bytes moved. Verified
+// capable of failing: renumbering `push_const` in bytecode.zig drifts all four.
+// ---------------------------------------------------------------------------
+
+const bytecode_golden_cases = [_]struct {
+    name: []const u8,
+    source: []const u8,
+    /// sha256 of the serialized bytecode, lowercase hex.
+    sha256: []const u8,
+}{
+    .{
+        .name = "plain",
+        .source =
+        \\function handler(req: Request): Response {
+        \\    const n = 1 + 2;
+        \\    if (req.path === "/health") {
+        \\        return Response.json({ ok: true, n: n });
+        \\    }
+        \\    return Response.text("not found", { status: 404 });
+        \\}
+        ,
+        .sha256 = "0c6cba6b15e14cdf3d02be205df66039453c474e1eba741285d01faec4aa899a",
+    },
+    .{
+        .name = "virtual modules",
+        .source =
+        \\import { env } from "zttp:env";
+        \\import { sha256 } from "zttp:crypto";
+        \\import { cacheGet, cacheSet } from "zttp:cache";
+        \\
+        \\function handler(req: Request): Response {
+        \\    const token = env("API_TOKEN") ?? "";
+        \\    const cached = cacheGet("sessions", token);
+        \\    if (cached) {
+        \\        return Response.json({ hit: true, value: cached });
+        \\    }
+        \\    const digest = sha256(token);
+        \\    cacheSet("sessions", token, digest, 60);
+        \\    return Response.json({ hit: false, digest: digest });
+        \\}
+        ,
+        .sha256 = "3b784399545f2a1880f66ce4175521ff30bc7f21854f49e28a9f21cfe3234544",
+    },
+    .{
+        .name = "jsx",
+        .source =
+        \\function handler(req: Request): Response {
+        \\    const title = "hello";
+        \\    return Response.html(<div class="page"><h1>{title}</h1></div>);
+        \\}
+        ,
+        .sha256 = "3c1db8a7ed4dee866f0d1166cee7232768aaf6db4f30b4553d5fc96d0c45fd2e",
+    },
+    .{
+        .name = "durable workflow",
+        .source =
+        \\import { run, step } from "zttp:durable";
+        \\
+        \\function handler(req: Request): unknown {
+        \\    return run("order:42", () => {
+        \\        const draft = step("createDraft", () => {
+        \\            return { id: 42, status: "draft" };
+        \\        });
+        \\        return Response.json({ id: draft.id });
+        \\    });
+        \\}
+        ,
+        .sha256 = "d0f3192b21758b1a6bc5568d40e86baae68d38889e798117f26729af1222c43f",
+    },
+};
+
+test "serialized bytecode matches the committed goldens" {
+    const allocator = std.testing.allocator;
+    var drifted: usize = 0;
+
+    for (bytecode_golden_cases) |case| {
+        // The extension drives type stripping and JSX mode, so it is derived from
+        // the case rather than fixed.
+        const filename = if (std.mem.eql(u8, case.name, "jsx")) "golden.tsx" else "golden.ts";
+        var compiled = compileHandler(allocator, case.source, filename, .{}) catch |err| {
+            std.debug.print("\nbytecode golden: {s} failed to compile: {t}\n", .{ case.name, err });
+            return err;
+        };
+        defer compiled.deinit(allocator);
+
+        // A fixture that fails verification emits no bytecode, so an empty
+        // golden would pass vacuously. Refuse that.
+        try std.testing.expect(!compiled.verify_failed);
+        try std.testing.expect(compiled.bytecode.len > 0);
+
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(compiled.bytecode, &digest, .{});
+        const actual = std.fmt.bytesToHex(digest, .lower);
+
+        if (!std.mem.eql(u8, case.sha256, &actual)) {
+            // Report every drifting fixture before failing. A gate that names one
+            // when four moved costs a full cycle per fixture.
+            std.debug.print(
+                "\nbytecode golden drift: {s}\n  expected {s}\n  actual   {s}\n  ({d} bytes)\n",
+                .{ case.name, case.sha256, actual, compiled.bytecode.len },
+            );
+            drifted += 1;
+        }
+    }
+    if (drifted > 0) return error.BytecodeGoldenDrift;
+}
