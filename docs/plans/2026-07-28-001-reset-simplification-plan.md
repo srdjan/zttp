@@ -1587,7 +1587,17 @@ artifact size recorded.
 
 Run this last, so the docs describe the simplified system rather than the current one.
 
-1. Rewrite `CLAUDE.md`. Today its CLI paragraph is a single roughly 5,900-character
+1. DONE. `CLAUDE.md` went from 288 lines and 26,948 characters to 219 lines and 13,977.
+   The spec-check, SMT, exclusion-audit, and generated-artifact content moved to
+   `docs/internals/semantics-verification.md`; the binary trio, the deferred cloud deploy,
+   and the compiled-out surfaces moved to `docs/cli.md`; the CLI Options section became a
+   ten-line surface summary that links to both. Both stale claims were confirmed and fixed.
+   One deviation from the wording below: the General Rules block (94 lines, 3,352
+   characters, 12 percent of the file) was kept verbatim rather than cut to reach a literal
+   120 lines. It is behavioral instruction, not engine internals, and the 70 percent figure
+   the item quotes is about the internals half. The original wording follows.
+
+   Rewrite `CLAUDE.md`. Today its CLI paragraph is a single roughly 5,900-character
    sentence chain. Its content survived accuracy spot-checks, but about 70 percent of it is
    engine internals that belong in a document, not in the instruction file loaded into
    every agent turn. Target about 120 lines: build commands, module table, subset summary,
@@ -1597,17 +1607,45 @@ Run this last, so the docs describe the simplified system rather than the curren
    `zig fmt --check` but `verify.sh:96-97` does, and line 283 points benchmarks at
    `../zttp-bench`, which does not exist on this machine while the repository itself ships
    `zig build bench`.
-2. Fix the six-command hole in `docs/cli.md`: `doctor`, `build`, `compile`, `ratchet`,
+2. DONE, and it was already done before wave 6 started. All six commands have sections in
+   `docs/cli.md`, and `check-docs-drift.sh:191-242` asserts that every command in the two
+   dispatch registries appears there as `zttp <name>`, with `.unlisted` entries exempt and
+   a zero-iteration guard so a renamed registry table cannot pass silently. Nothing was
+   changed for this item. The original wording follows.
+
+   Fix the six-command hole in `docs/cli.md`: `doctor`, `build`, `compile`, `ratchet`,
    `witnesses`, and `ledger` are advertised by `help --all` (`cli_help.zig:62-98`) and
    documented nowhere. Then make it a gate: extend `check-docs-drift.sh` to assert that
    every `help --all` command name appears in `docs/cli.md`. This converts a one-time fix
    into a standing invariant, which is why the generated surfaces in this repository never
    drift and the hand-written ones do.
-3. Merge overlapping documents: `typescript-patterns.md` into `typescript.md`, and
+3. DONE, all three merges, one commit each. `docs/proofs-and-receipts.md` now holds the
+   four proof documents as sections; `canonical-profile.md` is the "Canonicalize And
+   Normalize" section of `docs/cli.md`; `typescript-patterns.md` is a section of
+   `docs/typescript.md`. The docs directory went from 21 top-level Markdown files to 17.
+
+   Two notes for whoever repeats a merge like this. First, the "zttp mock --replay" prose
+   ban in `check-docs-drift.sh` carried an exclusion pinned to `^docs/witnesses.md:`, so
+   deleting that file would have silently moved the excluded sentence into a firing path;
+   an exclusion keyed to a filename is a hidden dependency of every rename. Second,
+   demoting headings during a concatenation must skip fenced code blocks: a naive
+   `sed 's/^#/##/'` rewrites the `#` comments inside bash and YAML samples. And the note
+   from wave 3 holds: `cp` is interactive in this shell, so a merge script must redirect
+   rather than copy.
+
+   Left alone deliberately: the "Sources inspected" list in
+   `docs/zts-formal-spec-northstar-advanced.md` still names three of the merged paths,
+   because that list records what was read when the document was written. The two
+   `docs/ideation/` HTML files also name them, and item 4 already proposes moving those out.
+
+   The original wording follows.
+
+   Merge overlapping documents: `typescript-patterns.md` into `typescript.md`, and
    `counterexamples.md` plus `witnesses.md` plus `proof-card.md` plus `proof-gate.md` into
    one proofs and receipts reference, and `canonical-profile.md` into the `canonicalize`
    section of `docs/cli.md`.
-4. Archive the dated planning residue: `docs/plans/`, `docs/ideation/`, `docs/vision/`, the
+4. DEFERRED by the owner on 2026-07-30, because wave 4 and wave 5 are not finished and this
+   directory still holds their live plans. Archive the dated planning residue: `docs/plans/`, `docs/ideation/`, `docs/vision/`, the
    root `plans/` directory, `IMPROVEMENT_PLAN.md`, `DEFERRED_VM_LOOP_DEDUPE_PLAN.md`, and
    `packages/zts/src/docs/v0.1-v0.2-gap-analysis.md`. That is 8,187 lines, about 39 percent
    of all prose, referenced by no gate. Keep `docs/solutions/`, which agents are pointed at.
