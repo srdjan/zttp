@@ -1431,8 +1431,28 @@ follow them, and they should be sequenced first.
    compile emits, which nothing had pinned. See
    `docs/plans/2026-07-30-006-item4-c3-findings.md` and
    `docs/plans/2026-07-30-007-lowered-module-plan.md`.
-5. Replace `ui_payload.zig`'s 44 hand-written clone and deinit functions with arena-owned
-   payloads. About 1,500 to 2,000 lines of 3,013.
+5. DONE for the duplication, and the estimate was about twice the real figure. Measured, the
+   file held 18 clone and 18 deinit methods totaling 633 lines (clone 346, deinit 287), not
+   1,500 to 2,000; the rest of the 3,014 is `writeJson`, `parse`, `writeLegible`, and the
+   getters, which are not duplication.
+
+   The 17 struct types now delegate to one reflective walk in `payload_memory.zig`
+   (115 lines): ownership is already encoded in the field type, so `[]u8` dupes, `[][]u8`
+   and `[]Struct` recurse per element, `?T` recurses or stays null, and scalars copy. A
+   `[]const u8` field is a compile error rather than a silent borrow-then-free. Only the
+   `UiPayload` union keeps hand-written methods, because a union clone has to name the
+   active variant and its `deinit` has to choose which variant a freed payload becomes.
+   3,014 to 2,585 lines with the new tests included, and 126 call sites are untouched
+   because the method signatures did not change.
+
+   The walk also closes a defect the hand-written versions shared: they duped straight into
+   a struct literal with no unwind, so an allocation failure partway through leaked every
+   field already duped. The generic clones into a scratch value and frees the completed
+   prefix on failure; a FailingAllocator sweep over every failure index now pins that.
+
+   NOT done: arena-owned payloads. With `deinit` reduced to one line per type, the arena
+   would buy a different thing - removing the need to call `deinit` at all across those 126
+   sites - which is an ownership change to schedule on its own evidence, not a line count.
 6. DONE, but not as a registration-time wrapper, and the line saving is not the point.
    Measured: 90 export entries carry an implementation, and their failure vocabulary on a
    bad argument is not uniform (47 `undefined_val`, 15 `false_val`, 12 `resultErr` with

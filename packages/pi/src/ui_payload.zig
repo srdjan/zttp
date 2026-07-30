@@ -1,5 +1,6 @@
 const std = @import("std");
 const json_writer = @import("providers/anthropic/json_writer.zig");
+const payload_memory = @import("payload_memory.zig");
 
 pub const DiagnosticItem = struct {
     code: []u8,
@@ -32,32 +33,11 @@ pub const DiagnosticItem = struct {
     }
 
     pub fn clone(self: DiagnosticItem, allocator: std.mem.Allocator) !DiagnosticItem {
-        return init(
-            allocator,
-            self.code,
-            self.severity,
-            self.path,
-            self.line,
-            self.column,
-            self.message,
-            self.introduced_by_patch,
-        );
+        return payload_memory.cloneOwned(DiagnosticItem, self, allocator);
     }
 
     pub fn deinit(self: *DiagnosticItem, allocator: std.mem.Allocator) void {
-        allocator.free(self.code);
-        allocator.free(self.severity);
-        allocator.free(self.path);
-        allocator.free(self.message);
-        self.* = .{
-            .code = &.{},
-            .severity = &.{},
-            .path = &.{},
-            .line = 0,
-            .column = 0,
-            .message = &.{},
-            .introduced_by_patch = null,
-        };
+        payload_memory.freeOwned(DiagnosticItem, self, allocator);
     }
 };
 
@@ -66,31 +46,11 @@ pub const DiagnosticsPayload = struct {
     items: []DiagnosticItem,
 
     pub fn clone(self: DiagnosticsPayload, allocator: std.mem.Allocator) !DiagnosticsPayload {
-        const owned_items = try allocator.alloc(DiagnosticItem, self.items.len);
-        errdefer allocator.free(owned_items);
-        for (owned_items) |*item| item.* = undefined;
-        var i: usize = 0;
-        errdefer {
-            while (i > 0) {
-                i -= 1;
-                owned_items[i].deinit(allocator);
-            }
-            allocator.free(owned_items);
-        }
-        while (i < self.items.len) : (i += 1) {
-            owned_items[i] = try self.items[i].clone(allocator);
-        }
-        return .{
-            .summary = try allocator.dupe(u8, self.summary),
-            .items = owned_items,
-        };
+        return payload_memory.cloneOwned(DiagnosticsPayload, self, allocator);
     }
 
     pub fn deinit(self: *DiagnosticsPayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.summary);
-        for (self.items) |*item| item.deinit(allocator);
-        allocator.free(self.items);
-        self.* = .{ .summary = &.{}, .items = &.{} };
+        payload_memory.freeOwned(DiagnosticsPayload, self, allocator);
     }
 };
 
@@ -107,38 +67,11 @@ pub const ProofCardPayload = struct {
     highlights: [][]u8,
 
     pub fn clone(self: ProofCardPayload, allocator: std.mem.Allocator) !ProofCardPayload {
-        const highlights = try allocator.alloc([]u8, self.highlights.len);
-        errdefer allocator.free(highlights);
-        var i: usize = 0;
-        errdefer {
-            while (i > 0) {
-                i -= 1;
-                allocator.free(highlights[i]);
-            }
-            allocator.free(highlights);
-        }
-        while (i < self.highlights.len) : (i += 1) {
-            highlights[i] = try allocator.dupe(u8, self.highlights[i]);
-        }
-        return .{
-            .title = try allocator.dupe(u8, self.title),
-            .summary = try allocator.dupe(u8, self.summary),
-            .stats = self.stats,
-            .highlights = highlights,
-        };
+        return payload_memory.cloneOwned(ProofCardPayload, self, allocator);
     }
 
     pub fn deinit(self: *ProofCardPayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.title);
-        allocator.free(self.summary);
-        for (self.highlights) |highlight| allocator.free(highlight);
-        allocator.free(self.highlights);
-        self.* = .{
-            .title = &.{},
-            .summary = &.{},
-            .stats = .{ .total = 0, .new = 0, .preexisting = null },
-            .highlights = &.{},
-        };
+        payload_memory.freeOwned(ProofCardPayload, self, allocator);
     }
 };
 
@@ -150,27 +83,11 @@ pub const CommandOutcomePayload = struct {
     command: []u8,
 
     pub fn clone(self: CommandOutcomePayload, allocator: std.mem.Allocator) !CommandOutcomePayload {
-        return .{
-            .title = try allocator.dupe(u8, self.title),
-            .exit_code = self.exit_code,
-            .stdout = try allocator.dupe(u8, self.stdout),
-            .stderr = try allocator.dupe(u8, self.stderr),
-            .command = try allocator.dupe(u8, self.command),
-        };
+        return payload_memory.cloneOwned(CommandOutcomePayload, self, allocator);
     }
 
     pub fn deinit(self: *CommandOutcomePayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.title);
-        allocator.free(self.stdout);
-        allocator.free(self.stderr);
-        allocator.free(self.command);
-        self.* = .{
-            .title = &.{},
-            .exit_code = null,
-            .stdout = &.{},
-            .stderr = &.{},
-            .command = &.{},
-        };
+        payload_memory.freeOwned(CommandOutcomePayload, self, allocator);
     }
 };
 
@@ -205,33 +122,11 @@ pub const RepairCandidatePayload = struct {
     }
 
     pub fn clone(self: RepairCandidatePayload, allocator: std.mem.Allocator) !RepairCandidatePayload {
-        return init(
-            allocator,
-            self.path,
-            self.plan_id,
-            self.intent_kind,
-            self.proposed_content,
-            self.verification_ok,
-            self.verification_summary,
-            self.stats,
-        );
+        return payload_memory.cloneOwned(RepairCandidatePayload, self, allocator);
     }
 
     pub fn deinit(self: *RepairCandidatePayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.path);
-        allocator.free(self.plan_id);
-        allocator.free(self.intent_kind);
-        allocator.free(self.proposed_content);
-        allocator.free(self.verification_summary);
-        self.* = .{
-            .path = &.{},
-            .plan_id = &.{},
-            .intent_kind = &.{},
-            .proposed_content = &.{},
-            .verification_ok = false,
-            .verification_summary = &.{},
-            .stats = .{ .total = 0, .new = 0, .preexisting = null },
-        };
+        payload_memory.freeOwned(RepairCandidatePayload, self, allocator);
     }
 };
 
@@ -254,14 +149,11 @@ pub const FeaturePlanStep = struct {
     }
 
     pub fn clone(self: FeaturePlanStep, allocator: std.mem.Allocator) !FeaturePlanStep {
-        return init(allocator, self.id, self.title, self.detail);
+        return payload_memory.cloneOwned(FeaturePlanStep, self, allocator);
     }
 
     pub fn deinit(self: *FeaturePlanStep, allocator: std.mem.Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.title);
-        allocator.free(self.detail);
-        self.* = .{ .id = &.{}, .title = &.{}, .detail = &.{} };
+        payload_memory.freeOwned(FeaturePlanStep, self, allocator);
     }
 };
 
@@ -325,49 +217,11 @@ pub const FeaturePlanPayload = struct {
     }
 
     pub fn clone(self: FeaturePlanPayload, allocator: std.mem.Allocator) !FeaturePlanPayload {
-        return init(
-            allocator,
-            self.plan_id,
-            self.file,
-            self.feature_kind,
-            self.method,
-            self.path,
-            self.handler_name,
-            self.steps,
-            self.proposed_content,
-            self.unified_diff,
-            self.verification_ok,
-            self.verification_summary,
-            self.stats,
-        );
+        return payload_memory.cloneOwned(FeaturePlanPayload, self, allocator);
     }
 
     pub fn deinit(self: *FeaturePlanPayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.plan_id);
-        allocator.free(self.file);
-        allocator.free(self.feature_kind);
-        allocator.free(self.method);
-        allocator.free(self.path);
-        allocator.free(self.handler_name);
-        for (self.steps) |*step| step.deinit(allocator);
-        allocator.free(self.steps);
-        allocator.free(self.proposed_content);
-        allocator.free(self.unified_diff);
-        allocator.free(self.verification_summary);
-        self.* = .{
-            .plan_id = &.{},
-            .file = &.{},
-            .feature_kind = &.{},
-            .method = &.{},
-            .path = &.{},
-            .handler_name = &.{},
-            .steps = &.{},
-            .proposed_content = &.{},
-            .unified_diff = &.{},
-            .verification_ok = false,
-            .verification_summary = &.{},
-            .stats = .{ .total = 0, .new = 0, .preexisting = null },
-        };
+        payload_memory.freeOwned(FeaturePlanPayload, self, allocator);
     }
 };
 
@@ -393,15 +247,11 @@ pub const ForgeRunStep = struct {
     }
 
     pub fn clone(self: ForgeRunStep, allocator: std.mem.Allocator) !ForgeRunStep {
-        return init(allocator, self.id, self.title, self.state, self.detail);
+        return payload_memory.cloneOwned(ForgeRunStep, self, allocator);
     }
 
     pub fn deinit(self: *ForgeRunStep, allocator: std.mem.Allocator) void {
-        allocator.free(self.id);
-        allocator.free(self.title);
-        allocator.free(self.state);
-        allocator.free(self.detail);
-        self.* = .{ .id = &.{}, .title = &.{}, .state = &.{}, .detail = &.{} };
+        payload_memory.freeOwned(ForgeRunStep, self, allocator);
     }
 };
 
@@ -468,52 +318,11 @@ pub const ForgeRunPayload = struct {
     }
 
     pub fn clone(self: ForgeRunPayload, allocator: std.mem.Allocator) !ForgeRunPayload {
-        return init(
-            allocator,
-            self.run_id,
-            self.file,
-            self.feature_kind,
-            self.method,
-            self.path,
-            self.handler_name,
-            self.steps,
-            self.final_content,
-            self.unified_diff,
-            self.success,
-            self.terminal_reason,
-            self.verification_summary,
-            self.stats,
-        );
+        return payload_memory.cloneOwned(ForgeRunPayload, self, allocator);
     }
 
     pub fn deinit(self: *ForgeRunPayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.run_id);
-        allocator.free(self.file);
-        allocator.free(self.feature_kind);
-        allocator.free(self.method);
-        allocator.free(self.path);
-        allocator.free(self.handler_name);
-        for (self.steps) |*step| step.deinit(allocator);
-        allocator.free(self.steps);
-        allocator.free(self.final_content);
-        allocator.free(self.unified_diff);
-        allocator.free(self.terminal_reason);
-        allocator.free(self.verification_summary);
-        self.* = .{
-            .run_id = &.{},
-            .file = &.{},
-            .feature_kind = &.{},
-            .method = &.{},
-            .path = &.{},
-            .handler_name = &.{},
-            .steps = &.{},
-            .final_content = &.{},
-            .unified_diff = &.{},
-            .success = false,
-            .terminal_reason = &.{},
-            .verification_summary = &.{},
-            .stats = .{ .total = 0, .new = 0, .preexisting = null },
-        };
+        payload_memory.freeOwned(ForgeRunPayload, self, allocator);
     }
 };
 
@@ -625,32 +434,11 @@ pub const ViolationDeltaItem = struct {
     }
 
     pub fn clone(self: ViolationDeltaItem, allocator: std.mem.Allocator) !ViolationDeltaItem {
-        return init(
-            allocator,
-            self.stable_key,
-            self.code,
-            self.severity,
-            self.message,
-            self.line,
-            self.column,
-            self.introduced_by_patch,
-        );
+        return payload_memory.cloneOwned(ViolationDeltaItem, self, allocator);
     }
 
     pub fn deinit(self: *ViolationDeltaItem, allocator: std.mem.Allocator) void {
-        allocator.free(self.stable_key);
-        allocator.free(self.code);
-        allocator.free(self.severity);
-        allocator.free(self.message);
-        self.* = .{
-            .stable_key = &.{},
-            .code = &.{},
-            .severity = &.{},
-            .message = &.{},
-            .line = 0,
-            .column = 0,
-            .introduced_by_patch = false,
-        };
+        payload_memory.freeOwned(ViolationDeltaItem, self, allocator);
     }
 };
 
@@ -669,35 +457,11 @@ pub const ProveSummary = struct {
     laws_used: [][]u8,
 
     pub fn clone(self: ProveSummary, allocator: std.mem.Allocator) !ProveSummary {
-        const laws_used = try cloneStringSlice(allocator, self.laws_used);
-        errdefer freeStringSlice(allocator, laws_used);
-        const counterexample = if (self.counterexample) |text|
-            try allocator.dupe(u8, text)
-        else
-            null;
-        errdefer if (counterexample) |text| allocator.free(text);
-        return .{
-            .classification = try allocator.dupe(u8, self.classification),
-            .proof_level = try allocator.dupe(u8, self.proof_level),
-            .recommendation = try allocator.dupe(u8, self.recommendation),
-            .counterexample = counterexample,
-            .laws_used = laws_used,
-        };
+        return payload_memory.cloneOwned(ProveSummary, self, allocator);
     }
 
     pub fn deinit(self: *ProveSummary, allocator: std.mem.Allocator) void {
-        allocator.free(self.classification);
-        allocator.free(self.proof_level);
-        allocator.free(self.recommendation);
-        if (self.counterexample) |text| allocator.free(text);
-        freeStringSlice(allocator, self.laws_used);
-        self.* = .{
-            .classification = &.{},
-            .proof_level = &.{},
-            .recommendation = &.{},
-            .counterexample = null,
-            .laws_used = &.{},
-        };
+        payload_memory.freeOwned(ProveSummary, self, allocator);
     }
 };
 
@@ -718,44 +482,11 @@ pub const SystemProofSummary = struct {
     warnings: [][]u8,
 
     pub fn clone(self: SystemProofSummary, allocator: std.mem.Allocator) !SystemProofSummary {
-        return .{
-            .system_path = try allocator.dupe(u8, self.system_path),
-            .proof_level = try allocator.dupe(u8, self.proof_level),
-            .all_links_resolved = self.all_links_resolved,
-            .all_responses_covered = self.all_responses_covered,
-            .payload_compatible = self.payload_compatible,
-            .injection_safe = self.injection_safe,
-            .no_secret_leakage = self.no_secret_leakage,
-            .no_credential_leakage = self.no_credential_leakage,
-            .retry_safe = self.retry_safe,
-            .fault_covered = self.fault_covered,
-            .state_isolated = self.state_isolated,
-            .max_system_io_depth = self.max_system_io_depth,
-            .dynamic_links = self.dynamic_links,
-            .warnings = try cloneStringSlice(allocator, self.warnings),
-        };
+        return payload_memory.cloneOwned(SystemProofSummary, self, allocator);
     }
 
     pub fn deinit(self: *SystemProofSummary, allocator: std.mem.Allocator) void {
-        allocator.free(self.system_path);
-        allocator.free(self.proof_level);
-        freeStringSlice(allocator, self.warnings);
-        self.* = .{
-            .system_path = &.{},
-            .proof_level = &.{},
-            .all_links_resolved = false,
-            .all_responses_covered = false,
-            .payload_compatible = false,
-            .injection_safe = false,
-            .no_secret_leakage = false,
-            .no_credential_leakage = false,
-            .retry_safe = false,
-            .fault_covered = false,
-            .state_isolated = false,
-            .max_system_io_depth = null,
-            .dynamic_links = 0,
-            .warnings = &.{},
-        };
+        payload_memory.freeOwned(SystemProofSummary, self, allocator);
     }
 };
 
@@ -769,24 +500,11 @@ pub const WitnessStub = struct {
     result_json: []u8,
 
     pub fn clone(self: WitnessStub, allocator: std.mem.Allocator) !WitnessStub {
-        const module_copy = try allocator.dupe(u8, self.module);
-        errdefer allocator.free(module_copy);
-        const func_copy = try allocator.dupe(u8, self.func);
-        errdefer allocator.free(func_copy);
-        const result_copy = try allocator.dupe(u8, self.result_json);
-        return .{
-            .seq = self.seq,
-            .module = module_copy,
-            .func = func_copy,
-            .result_json = result_copy,
-        };
+        return payload_memory.cloneOwned(WitnessStub, self, allocator);
     }
 
     pub fn deinit(self: *WitnessStub, allocator: std.mem.Allocator) void {
-        allocator.free(self.module);
-        allocator.free(self.func);
-        allocator.free(self.result_json);
-        self.* = .{ .seq = 0, .module = &.{}, .func = &.{}, .result_json = &.{} };
+        payload_memory.freeOwned(WitnessStub, self, allocator);
     }
 };
 
@@ -811,72 +529,11 @@ pub const WitnessBody = struct {
     io_stubs: []WitnessStub,
 
     pub fn clone(self: WitnessBody, allocator: std.mem.Allocator) !WitnessBody {
-        const key_copy = try allocator.dupe(u8, self.key);
-        errdefer allocator.free(key_copy);
-        const property_copy = try allocator.dupe(u8, self.property);
-        errdefer allocator.free(property_copy);
-        const summary_copy = try allocator.dupe(u8, self.summary);
-        errdefer allocator.free(summary_copy);
-        const method_copy = try allocator.dupe(u8, self.request_method);
-        errdefer allocator.free(method_copy);
-        const url_copy = try allocator.dupe(u8, self.request_url);
-        errdefer allocator.free(url_copy);
-        const body_copy: ?[]u8 = if (self.request_body) |b| try allocator.dupe(u8, b) else null;
-        errdefer if (body_copy) |b| allocator.free(b);
-
-        const stubs_copy = try allocator.alloc(WitnessStub, self.io_stubs.len);
-        errdefer allocator.free(stubs_copy);
-        for (stubs_copy) |*stub| stub.* = undefined;
-        var i: usize = 0;
-        errdefer {
-            while (i > 0) {
-                i -= 1;
-                stubs_copy[i].deinit(allocator);
-            }
-        }
-        while (i < self.io_stubs.len) : (i += 1) {
-            stubs_copy[i] = try self.io_stubs[i].clone(allocator);
-        }
-
-        return .{
-            .key = key_copy,
-            .property = property_copy,
-            .summary = summary_copy,
-            .origin_line = self.origin_line,
-            .origin_column = self.origin_column,
-            .sink_line = self.sink_line,
-            .sink_column = self.sink_column,
-            .request_method = method_copy,
-            .request_url = url_copy,
-            .request_has_auth = self.request_has_auth,
-            .request_body = body_copy,
-            .io_stubs = stubs_copy,
-        };
+        return payload_memory.cloneOwned(WitnessBody, self, allocator);
     }
 
     pub fn deinit(self: *WitnessBody, allocator: std.mem.Allocator) void {
-        allocator.free(self.key);
-        allocator.free(self.property);
-        allocator.free(self.summary);
-        allocator.free(self.request_method);
-        allocator.free(self.request_url);
-        if (self.request_body) |b| allocator.free(b);
-        for (self.io_stubs) |*stub| stub.deinit(allocator);
-        allocator.free(self.io_stubs);
-        self.* = .{
-            .key = &.{},
-            .property = &.{},
-            .summary = &.{},
-            .origin_line = 0,
-            .origin_column = 0,
-            .sink_line = 0,
-            .sink_column = 0,
-            .request_method = &.{},
-            .request_url = &.{},
-            .request_has_auth = false,
-            .request_body = null,
-            .io_stubs = &.{},
-        };
+        payload_memory.freeOwned(WitnessBody, self, allocator);
     }
 };
 
@@ -947,136 +604,11 @@ pub const VerifiedPatchPayload = struct {
     rewrite_trace: [][]u8 = &.{},
 
     pub fn clone(self: VerifiedPatchPayload, allocator: std.mem.Allocator) !VerifiedPatchPayload {
-        const file_copy = try allocator.dupe(u8, self.file);
-        errdefer allocator.free(file_copy);
-        const policy_copy = try allocator.dupe(u8, self.policy_hash);
-        errdefer allocator.free(policy_copy);
-        const before_copy: ?[]u8 = if (self.before) |b| try allocator.dupe(u8, b) else null;
-        errdefer if (before_copy) |b| allocator.free(b);
-        const after_copy = try allocator.dupe(u8, self.after);
-        errdefer allocator.free(after_copy);
-        const unified_diff_copy = try allocator.dupe(u8, self.unified_diff);
-        errdefer allocator.free(unified_diff_copy);
-        const hunks_copy = try allocator.dupe(DiffHunk, self.hunks);
-        errdefer allocator.free(hunks_copy);
-        const violations_copy = try allocator.alloc(ViolationDeltaItem, self.violations.len);
-        errdefer allocator.free(violations_copy);
-        for (violations_copy) |*item| item.* = undefined;
-        var violation_index: usize = 0;
-        errdefer {
-            while (violation_index > 0) {
-                violation_index -= 1;
-                violations_copy[violation_index].deinit(allocator);
-            }
-            allocator.free(violations_copy);
-        }
-        while (violation_index < self.violations.len) : (violation_index += 1) {
-            violations_copy[violation_index] = try self.violations[violation_index].clone(allocator);
-        }
-        var prove_copy = if (self.prove) |summary|
-            try summary.clone(allocator)
-        else
-            null;
-        errdefer if (prove_copy) |*summary| summary.deinit(allocator);
-        var system_copy = if (self.system) |summary|
-            try summary.clone(allocator)
-        else
-            null;
-        errdefer if (system_copy) |*summary| summary.deinit(allocator);
-        const citations_copy = try cloneStringSlice(allocator, self.rule_citations);
-        errdefer freeStringSlice(allocator, citations_copy);
-        const repair_plan_ids_copy = try cloneStringSlice(allocator, self.repair_plan_ids);
-        errdefer freeStringSlice(allocator, repair_plan_ids_copy);
-        const closed_witness_ids_copy = try cloneStringSlice(allocator, self.closed_witness_ids);
-        errdefer freeStringSlice(allocator, closed_witness_ids_copy);
-        const goal_context_copy = try cloneStringSlice(allocator, self.goal_context);
-        errdefer freeStringSlice(allocator, goal_context_copy);
-        const witnesses_defeated_copy = try cloneWitnessBodySlice(allocator, self.witnesses_defeated);
-        errdefer freeWitnessBodySlice(allocator, witnesses_defeated_copy);
-        const witnesses_new_copy = try cloneWitnessBodySlice(allocator, self.witnesses_new);
-        errdefer freeWitnessBodySlice(allocator, witnesses_new_copy);
-        const post_apply_summary_copy: ?[]u8 = if (self.post_apply_summary) |s|
-            try allocator.dupe(u8, s)
-        else
-            null;
-        errdefer if (post_apply_summary_copy) |s| allocator.free(s);
-        const rewrite_trace_copy = try cloneStringSlice(allocator, self.rewrite_trace);
-        errdefer freeStringSlice(allocator, rewrite_trace_copy);
-        return .{
-            .file = file_copy,
-            .policy_hash = policy_copy,
-            .applied_at_unix_ms = self.applied_at_unix_ms,
-            .stats = self.stats,
-            .before = before_copy,
-            .after = after_copy,
-            .unified_diff = unified_diff_copy,
-            .hunks = hunks_copy,
-            .violations = violations_copy,
-            .before_properties = self.before_properties,
-            .after_properties = self.after_properties,
-            .prove = prove_copy,
-            .system = system_copy,
-            .rule_citations = citations_copy,
-            .repair_plan_ids = repair_plan_ids_copy,
-            .closed_witness_ids = closed_witness_ids_copy,
-            .patch_hash = self.patch_hash,
-            .parent_hash = self.parent_hash,
-            .goal_context = goal_context_copy,
-            .witnesses_defeated = witnesses_defeated_copy,
-            .witnesses_new = witnesses_new_copy,
-            .post_apply_ok = self.post_apply_ok,
-            .post_apply_summary = post_apply_summary_copy,
-            .capsule_total = self.capsule_total,
-            .capsule_regressed = self.capsule_regressed,
-            .is_canonical = self.is_canonical,
-            .rewrite_trace = rewrite_trace_copy,
-        };
+        return payload_memory.cloneOwned(VerifiedPatchPayload, self, allocator);
     }
 
     pub fn deinit(self: *VerifiedPatchPayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.file);
-        allocator.free(self.policy_hash);
-        if (self.before) |b| allocator.free(b);
-        allocator.free(self.after);
-        allocator.free(self.unified_diff);
-        allocator.free(self.hunks);
-        for (self.violations) |*item| item.deinit(allocator);
-        allocator.free(self.violations);
-        if (self.prove) |*summary| summary.deinit(allocator);
-        if (self.system) |*summary| summary.deinit(allocator);
-        freeStringSlice(allocator, self.rule_citations);
-        freeStringSlice(allocator, self.repair_plan_ids);
-        freeStringSlice(allocator, self.closed_witness_ids);
-        freeStringSlice(allocator, self.goal_context);
-        freeWitnessBodySlice(allocator, self.witnesses_defeated);
-        freeWitnessBodySlice(allocator, self.witnesses_new);
-        if (self.post_apply_summary) |s| allocator.free(s);
-        freeStringSlice(allocator, self.rewrite_trace);
-        self.* = .{
-            .file = &.{},
-            .policy_hash = &.{},
-            .applied_at_unix_ms = 0,
-            .stats = .{ .total = 0, .new = 0, .preexisting = null },
-            .before = null,
-            .after = &.{},
-            .unified_diff = &.{},
-            .hunks = &.{},
-            .violations = &.{},
-            .before_properties = null,
-            .after_properties = null,
-            .prove = null,
-            .system = null,
-            .rule_citations = &.{},
-            .repair_plan_ids = &.{},
-            .closed_witness_ids = &.{},
-            .patch_hash = null,
-            .parent_hash = null,
-            .goal_context = &.{},
-            .witnesses_defeated = &.{},
-            .witnesses_new = &.{},
-            .post_apply_ok = false,
-            .post_apply_summary = null,
-        };
+        payload_memory.freeOwned(VerifiedPatchPayload, self, allocator);
     }
 };
 
@@ -1111,30 +643,11 @@ pub const SessionTreeNode = struct {
     is_orphan_root: bool,
 
     pub fn clone(self: SessionTreeNode, allocator: std.mem.Allocator) !SessionTreeNode {
-        return .{
-            .session_id = try allocator.dupe(u8, self.session_id),
-            .parent_id = if (self.parent_id) |parent_id|
-                try allocator.dupe(u8, parent_id)
-            else
-                null,
-            .created_at_unix_ms = self.created_at_unix_ms,
-            .depth = self.depth,
-            .is_current = self.is_current,
-            .is_orphan_root = self.is_orphan_root,
-        };
+        return payload_memory.cloneOwned(SessionTreeNode, self, allocator);
     }
 
     pub fn deinit(self: *SessionTreeNode, allocator: std.mem.Allocator) void {
-        allocator.free(self.session_id);
-        if (self.parent_id) |parent_id| allocator.free(parent_id);
-        self.* = .{
-            .session_id = &.{},
-            .parent_id = null,
-            .created_at_unix_ms = 0,
-            .depth = 0,
-            .is_current = false,
-            .is_orphan_root = false,
-        };
+        payload_memory.freeOwned(SessionTreeNode, self, allocator);
     }
 };
 
@@ -1142,27 +655,11 @@ pub const SessionTreePayload = struct {
     nodes: []SessionTreeNode,
 
     pub fn clone(self: SessionTreePayload, allocator: std.mem.Allocator) !SessionTreePayload {
-        const owned = try allocator.alloc(SessionTreeNode, self.nodes.len);
-        errdefer allocator.free(owned);
-        for (owned) |*node| node.* = undefined;
-        var i: usize = 0;
-        errdefer {
-            while (i > 0) {
-                i -= 1;
-                owned[i].deinit(allocator);
-            }
-            allocator.free(owned);
-        }
-        while (i < self.nodes.len) : (i += 1) {
-            owned[i] = try self.nodes[i].clone(allocator);
-        }
-        return .{ .nodes = owned };
+        return payload_memory.cloneOwned(SessionTreePayload, self, allocator);
     }
 
     pub fn deinit(self: *SessionTreePayload, allocator: std.mem.Allocator) void {
-        for (self.nodes) |*node| node.deinit(allocator);
-        allocator.free(self.nodes);
-        self.* = .{ .nodes = &.{} };
+        payload_memory.freeOwned(SessionTreePayload, self, allocator);
     }
 };
 
@@ -1178,6 +675,9 @@ pub const UiPayload = union(enum) {
     plain_text: []u8,
 
     pub fn clone(self: UiPayload, allocator: std.mem.Allocator) !UiPayload {
+        // Hand-written where the struct payloads are generic: a union clone has
+        // to name the active variant to rebuild the tag, and `deinit` has to
+        // choose which variant a freed payload becomes.
         return switch (self) {
             .session_tree => |payload| .{ .session_tree = try payload.clone(allocator) },
             .diagnostics => |payload| .{ .diagnostics = try payload.clone(allocator) },
@@ -2492,6 +1992,78 @@ test "plain_text payload round-trips" {
         .plain_text => |text| try testing.expectEqualStrings("hello", text),
         else => return error.TestFailed,
     }
+}
+
+test "generic clone deep-copies nested slices and frees idempotently" {
+    const a = testing.allocator;
+
+    const steps = try a.alloc(ForgeRunStep, 1);
+    steps[0] = try ForgeRunStep.init(a, "step-1", "edit handler", "ok", "applied");
+    var payload = try ForgeRunPayload.init(
+        a,
+        "run-7",
+        "handler.ts",
+        "route",
+        "GET",
+        "/things",
+        "listThings",
+        steps,
+        "final",
+        "diff",
+        true,
+        "done",
+        "verified",
+        .{ .total = 3, .new = 1, .preexisting = 2 },
+    );
+    // `init` clones the steps it is given, so release the caller-owned originals.
+    for (steps) |*step| step.deinit(a);
+    a.free(steps);
+    defer payload.deinit(a);
+
+    var copy = try payload.clone(a);
+    defer copy.deinit(a);
+
+    // A deep copy, not an aliasing one.
+    try testing.expectEqualStrings("run-7", copy.run_id);
+    try testing.expectEqualStrings("step-1", copy.steps[0].id);
+    try testing.expect(copy.run_id.ptr != payload.run_id.ptr);
+    try testing.expect(copy.steps.ptr != payload.steps.ptr);
+    try testing.expect(copy.steps[0].id.ptr != payload.steps[0].id.ptr);
+    try testing.expectEqual(@as(u32, 2), copy.stats.preexisting.?);
+
+    // Freeing twice is a no-op: the walk blanks pointer fields as it goes, so a
+    // caller that deinits a payload it already released does not double free.
+    copy.deinit(a);
+}
+
+test "generic clone leaks nothing when an allocation fails partway" {
+    const a = testing.allocator;
+
+    const items = try a.alloc(DiagnosticItem, 2);
+    items[0] = try DiagnosticItem.init(a, "ZTS001", "error", "handler.ts", 1, 1, "first", null);
+    items[1] = try DiagnosticItem.init(a, "ZTS002", "warning", "handler.ts", 2, 2, "second", true);
+    var source: DiagnosticsPayload = .{
+        .summary = try a.dupe(u8, "2 violations"),
+        .items = items,
+    };
+    defer source.deinit(a);
+
+    // The hand-written clones duped straight into a struct literal with no
+    // unwind, so a failure on a later field leaked every field already duped.
+    // Walk every failure index: each must report OutOfMemory and leave nothing
+    // behind, which the testing allocator asserts at teardown.
+    var fail_index: usize = 0;
+    while (fail_index < 32) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(a, .{ .fail_index = fail_index });
+        if (source.clone(failing.allocator())) |cloned| {
+            var owned = cloned;
+            owned.deinit(failing.allocator());
+            break;
+        } else |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+        }
+    }
+    try testing.expect(fail_index > 0);
 }
 
 test "diagnostics payload round-trips" {
