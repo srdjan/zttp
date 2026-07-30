@@ -1307,11 +1307,18 @@ passing.
 6. DONE. The eight one-off if/grep blocks are one `prose_bans` table of seven rows
    (kind, pattern, paths, exclude, message) driven by a single loop; the exclusion that
    `zttp mock --replay` needs for `docs/witnesses.md` is a table field rather than a piped
-   `grep -v`. Only one ban was retired, and not for the stated reason: the full-path ban on
-   `packages/runtime/src/generated/embedded_handler.zig` was already covered as a substring
-   by the shorter `src/generated/embedded_handler.zig` row. Every other row still has a live
-   target - the only absent file is `docs/capabilities.md`, which is precisely what its row
-   enforces.
+   `grep -v`. Only one ban was retired, and not for the stated reason: the ban on the full
+   `packages/runtime/src/generated/embedded_handler.zig` path was already covered as a
+   substring by the shorter `src/generated/embedded_handler.zig` row. Every other row still
+   has a live target - the only absent file is `docs/capabilities.md`, which is precisely
+   what its row enforces.
+
+   One scope change came out of writing this entry: `docs/plans/` is now excluded from every
+   prose ban. Two rows fired on the paragraph above, because the bans search `docs` and a
+   plan that records retiring a path has to be able to name the path it retired. The bans
+   exist to keep the documents a reader is pointed at accurate; dated plan records are
+   archives, and wave 6 item 4 already proposes moving them out. The cost is real and
+   deliberate: a stale claim inside `docs/plans/` is no longer caught.
 
    The gate that mattered here is that a data table can silently match nothing. Each of the
    seven rows was verified to fire by appending a violating line to the real doc and
