@@ -1,33 +1,15 @@
-//! Low-level I/O and HTTP utility helpers extracted from server.zig.
+//! Thin OS-facing helpers: raw file-descriptor writes, a socket pair, the
+//! wall clock, the default pool size, and I/O backend init.
 //!
-//! All pure free functions over file descriptors, header slices, or
-//! HttpHeader values — no Server struct coupling. Sibling to
-//! server_response.zig and server_static.zig; these three together hold
-//! the framing-and-IO primitives that server.zig composes into the
-//! request lifecycle.
+//! Free functions with no Server struct coupling, which is why the WebSocket
+//! codec, the WebSocket pool, and the edge server reach them directly rather
+//! than through server.zig. It was called `server_io.zig` while it also held
+//! HTTP header helpers; those moved to http_types.zig, next to the
+//! `HttpHeader` type they read, and the name now says what is left.
 
 const std = @import("std");
 const Io = std.Io;
 const engine = @import("engine_adapter.zig");
-const http_types = @import("http_types.zig");
-
-const HttpHeader = http_types.HttpHeader;
-
-/// True when a request's `Upgrade` header advertises a WebSocket upgrade.
-/// Tolerant of multi-token upgrade values (rare, but legal per RFC 7230).
-pub fn requestIsWebSocketUpgrade(headers: []const HttpHeader) bool {
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.key, "upgrade")) {
-            var it = std.mem.splitScalar(u8, h.value, ',');
-            while (it.next()) |token| {
-                const trimmed = std.mem.trim(u8, token, " \t");
-                if (std.ascii.eqlIgnoreCase(trimmed, "websocket")) return true;
-            }
-        }
-    }
-    return false;
-}
-
 pub fn unixMillisNow() i64 {
     return engine.unixMillis();
 }
@@ -47,16 +29,6 @@ pub fn writeAllFd(fd: std.posix.fd_t, data: []const u8) !void {
         if (n == 0) return error.WriteFailed;
         remaining = remaining[n..];
     }
-}
-
-/// True when `If-None-Match` header value matches `etag_hex`. Tolerant of
-/// `W/` weak-validator prefix and surrounding double quotes per RFC 9110.
-pub fn etagMatchesIfNoneMatch(if_none_match: ?[]const u8, etag_hex: []const u8) bool {
-    const raw = if_none_match orelse return false;
-    var trimmed = raw;
-    if (std.mem.startsWith(u8, trimmed, "W/")) trimmed = trimmed[2..];
-    trimmed = std.mem.trim(u8, trimmed, "\"");
-    return std.mem.eql(u8, trimmed, etag_hex);
 }
 
 pub fn createUnixSocketPair() ![2]std.posix.fd_t {
@@ -150,15 +122,6 @@ pub fn isExpectedNetworkError(err: anyerror) bool {
         => true,
         else => false,
     };
-}
-
-pub fn findHeaderValue(headers: []const HttpHeader, name: []const u8) ?[]const u8 {
-    for (headers) |header| {
-        if (std.ascii.eqlIgnoreCase(header.key, name)) {
-            return header.value;
-        }
-    }
-    return null;
 }
 
 pub fn defaultPoolSize() usize {

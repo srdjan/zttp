@@ -261,3 +261,43 @@ test "putHeader accepts normal values" {
     try response.putHeader("X-Custom", "value with spaces and 1234");
     try std.testing.expectEqual(@as(usize, 2), response.headers.items.len);
 }
+
+// ---------------------------------------------------------------------------
+// Header lookups. Free functions over a header slice, moved here from
+// server_io.zig (now posix_util.zig): they read `HttpHeader`, which this
+// file owns, and have nothing to do with file descriptors.
+// ---------------------------------------------------------------------------
+
+/// True when a request's `Upgrade` header advertises a WebSocket upgrade.
+/// Tolerant of multi-token upgrade values (rare, but legal per RFC 7230).
+pub fn requestIsWebSocketUpgrade(headers: []const HttpHeader) bool {
+    for (headers) |h| {
+        if (std.ascii.eqlIgnoreCase(h.key, "upgrade")) {
+            var it = std.mem.splitScalar(u8, h.value, ',');
+            while (it.next()) |token| {
+                const trimmed = std.mem.trim(u8, token, " \t");
+                if (std.ascii.eqlIgnoreCase(trimmed, "websocket")) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// True when `If-None-Match` header value matches `etag_hex`. Tolerant of
+/// `W/` weak-validator prefix and surrounding double quotes per RFC 9110.
+pub fn etagMatchesIfNoneMatch(if_none_match: ?[]const u8, etag_hex: []const u8) bool {
+    const raw = if_none_match orelse return false;
+    var trimmed = raw;
+    if (std.mem.startsWith(u8, trimmed, "W/")) trimmed = trimmed[2..];
+    trimmed = std.mem.trim(u8, trimmed, "\"");
+    return std.mem.eql(u8, trimmed, etag_hex);
+}
+
+pub fn findHeaderValue(headers: []const HttpHeader, name: []const u8) ?[]const u8 {
+    for (headers) |header| {
+        if (std.ascii.eqlIgnoreCase(header.key, name)) {
+            return header.value;
+        }
+    }
+    return null;
+}

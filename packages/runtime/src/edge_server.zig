@@ -8,7 +8,7 @@ const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const response_mod = @import("server_response.zig");
-const io_mod = @import("server_io.zig");
+const io_mod = @import("posix_util.zig");
 const runtime_natives = @import("runtime_natives.zig");
 
 const Io = std.Io;

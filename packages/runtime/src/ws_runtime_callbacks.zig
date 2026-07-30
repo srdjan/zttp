@@ -244,7 +244,7 @@ test "close callback writes one valid boundary-truncated close frame and shuts d
     const allocator = std.testing.allocator;
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
-    const fds = try @import("server_io.zig").createUnixSocketPair();
+    const fds = try @import("posix_util.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);
     defer std.Io.Threaded.closeFd(fds[1]);
 
@@ -281,7 +281,7 @@ test "close callback rejects reserved codes and non-string reasons without writi
     const allocator = std.testing.allocator;
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
-    const fds = try @import("server_io.zig").createUnixSocketPair();
+    const fds = try @import("posix_util.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);
     defer std.Io.Threaded.closeFd(fds[1]);
 

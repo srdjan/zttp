@@ -670,7 +670,7 @@ fn listAttachmentIds(
 const testing = std.testing;
 
 test "outbound lease pins state and fd across unregister and pool teardown" {
-    const fds = try @import("server_io.zig").createUnixSocketPair();
+    const fds = try @import("posix_util.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[1]);
 
     var pool = Pool.init(testing.allocator);
@@ -691,10 +691,10 @@ test "outbound lease pins state and fd across unregister and pool teardown" {
 }
 
 test "a blocked peer does not delay an independent connection" {
-    const a_fds = try @import("server_io.zig").createUnixSocketPair();
+    const a_fds = try @import("posix_util.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(a_fds[0]);
     defer std.Io.Threaded.closeFd(a_fds[1]);
-    const b_fds = try @import("server_io.zig").createUnixSocketPair();
+    const b_fds = try @import("posix_util.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(b_fds[0]);
     defer std.Io.Threaded.closeFd(b_fds[1]);
 
@@ -744,7 +744,7 @@ test "a blocked peer does not delay an independent connection" {
 }
 
 test "a close frame shuts the outbound boundary before later sends" {
-    const fds = try @import("server_io.zig").createUnixSocketPair();
+    const fds = try @import("posix_util.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);
     defer std.Io.Threaded.closeFd(fds[1]);
 
@@ -762,7 +762,7 @@ test "a close frame shuts the outbound boundary before later sends" {
 }
 
 test "concurrent large sends to one peer remain complete frames" {
-    const fds = try @import("server_io.zig").createUnixSocketPair();
+    const fds = try @import("posix_util.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);
     defer std.Io.Threaded.closeFd(fds[1]);
     const send_buffer: c_int = 256;

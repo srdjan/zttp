@@ -28,7 +28,7 @@
 const std = @import("std");
 const ascii = std.ascii;
 const http_types = @import("http_types.zig");
-const server_io = @import("server_io.zig");
+const posix_util = @import("posix_util.zig");
 
 /// Re-exports so downstream callers don't need to import std.http.Server
 /// directly and can swap this module's adapters in and out uniformly.
@@ -275,12 +275,12 @@ pub fn writeServerFrame(fd: std.posix.fd_t, opcode: Opcode, payload: []const u8)
     var header_buf: [10]u8 = undefined;
     const header = writeFrameHeader(&header_buf, opcode, payload.len);
 
-    if (payload.len == 0) return server_io.writeAllFd(fd, header);
+    if (payload.len == 0) return posix_util.writeAllFd(fd, header);
     var iovecs: [2]std.posix.iovec_const = .{
         .{ .base = header.ptr, .len = header.len },
         .{ .base = payload.ptr, .len = payload.len },
     };
-    try server_io.writevAllFd(fd, &iovecs);
+    try posix_util.writevAllFd(fd, &iovecs);
 }
 
 fn isControlOpcode(opcode: Opcode) bool {
