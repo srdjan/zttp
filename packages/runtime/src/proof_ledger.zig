@@ -729,7 +729,7 @@ test "appendEvent round-trips a kind=perf row with embedded JWS" {
 
     // The signature value is opaque to the ledger; we use a placeholder
     // string here and exercise the real JWS path in the runtime end-to-end
-    // test (see test "Slice H end-to-end" in zruntime.zig).
+    // test (see test "Slice H end-to-end" in zruntime_tests.zig).
     const perf: PerfPayload = .{
         .handler_hash = "f" ** 64,
         .p50_us = 17,

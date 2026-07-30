@@ -1,6 +1,6 @@
 //! Lock-free pool of per-request JS runtimes plus the lifecycle/audit
 //! machinery that decides when to reuse, recycle, or evict a runtime.
-//! `HandlerInstance` itself lives in zruntime.zig and is reached via back-import.
+//! `HandlerInstance` itself lives in handler_instance.zig and is reached via back-import.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -1253,7 +1253,7 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
 }
 
 // ---------------------------------------------------------------------------
-// HandlerPool behavior tests. Moved here from zruntime.zig, which held them
+// HandlerPool behavior tests. Moved here from the old zruntime.zig god-file, which held them
 // only for historical reasons and had to back-import this file to compile them.
 // ---------------------------------------------------------------------------
 

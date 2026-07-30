@@ -1,12 +1,12 @@
 //! Workflow / saga / fan-out / follow native callbacks extracted from
-//! zruntime.zig (review finding M1).
+//! handler_instance.zig (review finding M1).
 //!
 //! These implement the runtime side of `zttp:workflow` (call, saga, fanout,
 //! follow). They orchestrate co-located sub-handlers through the in-process
 //! `SystemRuntime` registry and copy borrowed sub-handler responses into
 //! orchestrator-owned JS values. They reach their runtime through the Context
 //! (`HandlerInstance.fromContext`) and use the response/request helpers that remain in
-//! zruntime.zig, reached here by back-import. zruntime depends on this module only for the
+//! handler_instance.zig, reached here by back-import. That module depends on this one only for the
 //! four callbacks registered in `HandlerInstance.installWorkflowModuleState`.
 
 const std = @import("std");

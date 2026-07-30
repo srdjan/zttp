@@ -2,7 +2,7 @@
 //! `zttp:websocket` module exports (send / close / serializeAttachment /
 //! deserializeAttachment / getWebSockets / setAutoResponse).
 //!
-//! Extracted from zruntime.zig to keep the request-lifecycle struct focused.
+//! Extracted from handler_instance.zig to keep the request-lifecycle struct focused.
 //! These are registered by `HandlerInstance.installWebSocketModuleState`; each callback
 //! receives the owning HandlerInstance as an opaque pointer and dispatches against its
 //! WebSocket pool (`HandlerInstance.ws_pool_ref`), and takes the connection id from its

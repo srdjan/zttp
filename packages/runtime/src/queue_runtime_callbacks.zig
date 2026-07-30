@@ -91,7 +91,7 @@ pub fn queueReplyCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, id_text: []
     return queueIdResult(ctx, reply_id);
 }
 
-/// pub for the queue tests in zruntime.zig, which drive send/request
+/// pub for the queue tests in zruntime_tests.zig, which drive send/request
 /// without a JS handler in the loop.
 pub fn queueSendInternal(self: *HandlerInstance, ctx: *zq.Context, target: []const u8, payload: zq.JSValue, comptime request_reply: bool) !zq.JSValue {
     const queue = queueRef(self) orelse return zq.modules.util.createPlainResultErr(ctx, "queue runtime is not installed");

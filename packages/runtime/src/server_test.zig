@@ -8,7 +8,7 @@
 //!     instead of poking `zq.interpreter.*` globals directly.
 //!
 //! It deliberately does NOT reach into interpreter/JIT internals. The JIT and
-//! profiling tests in zruntime.zig (the `setJitPolicy`/`getJitPolicy`/
+//! profiling tests in zruntime_tests.zig (the `setJitPolicy`/`getJitPolicy`/
 //! `snapshotPerfStats` sites flagged by the facade audit) should migrate here
 //! and be re-expressed against `RuntimeConfig` + a future public perf-stats
 //! accessor on `Runtime`.

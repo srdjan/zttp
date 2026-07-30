@@ -1,5 +1,5 @@
 //! Outbound HTTP / fetch / service native implementations extracted from
-//! zruntime.zig (review finding M1).
+//! handler_instance.zig (review finding M1).
 //!
 //! This module owns the request/response/headers JS constructors, the
 //! synchronous `fetch` bridge, durable-fetch caching, the `zttp:service`

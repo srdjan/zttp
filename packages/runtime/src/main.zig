@@ -10,7 +10,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 test {
     _ = @import("runtime_cli.zig");
     _ = @import("cli_shared.zig");
-    // `zruntime.zig`, the handler-instance test root, is deliberately absent,
+    // `zruntime_tests.zig`, the handler-instance test root, is deliberately absent,
     // and importing it here would be worse than useless. It is the root of its
     // own build module, so a file import from this root collects NONE of its
     // test blocks: measured, the aggregate root reports 521 tests with or

@@ -97,8 +97,11 @@ pub fn build(b: *std.Build) void {
     cli_main_tests.addImport("zttp_proof_review", proof_review_mod);
     cli_main_tests.addOptions("runtime_feature_options", cli_features);
 
+    // Named `zruntime` for the `test-zruntime` step it backs. The root is the
+    // end-to-end test file: the runtime itself is handler_instance.zig, and
+    // this module carries no product code of its own.
     const zruntime = b.addModule("zruntime", .{
-        .root_source_file = b.path("src/zruntime.zig"),
+        .root_source_file = b.path("src/zruntime_tests.zig"),
         .target = target,
         .optimize = optimize,
     });

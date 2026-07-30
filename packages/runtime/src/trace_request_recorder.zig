@@ -1,6 +1,6 @@
 //! Per-request trace recording: lazily creates the request's TraceRecorder,
 //! records the request, and on completion records timing meta + flushes.
-//! Extracted from zruntime.zig's executeHandlerInternal hot path to keep that
+//! Extracted from handler_instance.zig's executeHandlerInternal hot path to keep that
 //! function focused; the trace_file / trace_mutex / trace_recorder state stays
 //! on HandlerInstance (these operate on it through `rt`).
 //!

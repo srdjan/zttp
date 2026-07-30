@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
-- `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `zruntime.zig`).
+- `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `handler_instance.zig`); `zruntime_tests.zig` is the end-to-end test root behind `zig build test-zruntime`.
 - `packages/zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, modules).
 - `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with generated module specs under `module-specs/` (produced by `zttp module-spec-render` from the Zig bindings; do not hand-edit).
 - `packages/zts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
@@ -44,7 +44,7 @@
 ## Coding Style & Naming Conventions
 - Format Zig code with `zig fmt` and follow existing patterns.
 - Zig identifiers: types in `UpperCamelCase`, functions and variables in `lowerCamelCase`.
-- Files are short, descriptive, and lowercase (e.g., `server.zig`, `zruntime.zig`).
+- Files are short, descriptive, and lowercase (e.g., `server.zig`, `handler_instance.zig`).
 - Keep APIs explicit: the engine/runtime use native Zig error unions (`!T`); `Result<T>` is a user-facing JS/verification construct in handlers, not a Zig engine pattern.
 - Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 

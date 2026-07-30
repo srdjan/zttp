@@ -4,7 +4,7 @@
 //!
 //! Pure Zig on top of zts, no C dependencies. `runtime_pool.zig` owns
 //! instances of this type and decides when to reuse, recycle, or evict one.
-//! The tests that drive it live in zruntime.zig, which is the test root for
+//! The tests that drive it live in zruntime_tests.zig, which is the test root for
 //! this file.
 
 const std = @import("std");
@@ -1767,7 +1767,7 @@ pub const HandlerInstance = struct {
         return zq.JSValue.fromPtr(caps_obj);
     }
 
-    /// pub for the request-object tests in zruntime.zig.
+    /// pub for the request-object tests in zruntime_tests.zig.
     pub fn createRequestObject(self: *Self, request: HttpRequestView) !zq.JSValue {
         // Use pre-shaped request object for faster creation (direct slot access).
         // http_shapes is initialized by default (use_http_shape_cache = true).

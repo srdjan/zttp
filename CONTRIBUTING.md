@@ -53,7 +53,7 @@ Rules live in the checker cluster (`type_checker.zig`, `flow_checker.zig`, `faul
 ## Code style
 
 - `zig fmt` before every commit. CI does not auto-format.
-- Types `UpperCamelCase`, functions/variables `lowerCamelCase`, files lowercase (`server.zig`, `zruntime.zig`).
+- Types `UpperCamelCase`, functions/variables `lowerCamelCase`, files lowercase (`server.zig`, `handler_instance.zig`).
 - Prefer `Result(T)` over exceptions for expected failures across the engine/runtime.
 - `errdefer` every allocation. `orelse` over `?` unwrap on hot paths.
 - No `catch unreachable` on request paths. If the invariant is real, return a typed error and handle it.

@@ -1,6 +1,6 @@
 //! Pure native helpers: string-data readout, header-atom routing,
 //! prototype walking, status normalisation, query object construction.
-//! Threadlocal-aware natives stay in zruntime.zig.
+//! Threadlocal-aware natives stay in handler_instance.zig.
 
 const std = @import("std");
 const zq = @import("zts");

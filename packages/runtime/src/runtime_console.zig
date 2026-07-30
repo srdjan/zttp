@@ -1,4 +1,4 @@
-//! Console native callbacks extracted from zruntime.zig.
+//! Console native callbacks extracted from handler_instance.zig.
 //!
 //! `consoleLog` and `consoleError` are registered as the JS `console.*`
 //! methods. They write directly to the process stdio file descriptors and
