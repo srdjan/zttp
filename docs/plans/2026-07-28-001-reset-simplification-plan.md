@@ -1316,14 +1316,28 @@ follow them, and they should be sequenced first.
    editing either by hand. This resolves the module-specs governance question in section 10
    without deleting the tripwire.
 
-0c. Introduce `HandlerInstance` as the owner of the engine runtime, installed builtins,
-   loaded handler, invocation state, and reset lifecycle, owned directly by the pool. This
-   removes the runtime-to-pool back-imports and the alias bridges.
+0c. PARTLY DONE. The alias bridges are gone and the cycle is measured: `Runtime`'s
+   implementation never mentions `HandlerPool` or `runtime_pool`, so the zruntime-to-pool
+   edge was never a production dependency. Two of the four re-exports had no users at all.
+   What still forces the import is 15 test blocks (711 lines) in `zruntime.zig` that are
+   named for `HandlerPool` behavior and belong in `runtime_pool.zig`; the import is now
+   private so no production code can reach the pool through this module. Remaining: move
+   those tests (per-block, because non-test declarations are interleaved), then extract
+   `Runtime` into `HandlerInstance` owned directly by the pool. See
+   `docs/plans/2026-07-30-010-reset-0c-0d-ownership-design.md`.
 
-0d. Replace the ambient state in section 6.1 with an explicit `InvocationContext` passed to
-   native callbacks, and introduce the data-only `ExecutionSpec` mapped from `ServerConfig`
-   at the composition edge so durable scheduling and recovery stop depending on the full
-   server configuration.
+0d. DONE, with one deviation: there is no `InvocationContext` type. The ambient state did
+   not need a new carrier, it needed the callbacks to have a context at all. `Context` grew
+   a `host` slot, `CallFunctionFn` grew a `ctx` parameter and moved onto the Context, and
+   the fault location became a `Runtime` field copied out at the pool boundary. All five
+   threadlocals from section 6.1 are retired except `aot_override`, which is file-local
+   test-only state: `current_runtime` and `active_ws_connection` deleted outright (the
+   second had no reader - three save/set/restore triples guarding a value nothing read),
+   `call_function_callback` and `last_fault_location` replaced by owned state. That also
+   removed the 12 save/restore pairs in `runtime_workflow.zig`. `ExecutionSpec` shipped as
+   two fields of `ServerConfig`'s 27, mapped at the composition edge by
+   `ServerConfig.executionSpec()`. See
+   `docs/plans/2026-07-30-010-reset-0c-0d-ownership-design.md`.
 
 1. DONE, and the count was five, not four. Measured, the change-verdict family held
    `contract_diff.Classification`, `upgrade_verifier.UpgradeVerdict`,
