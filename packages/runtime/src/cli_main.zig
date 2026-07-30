@@ -9,6 +9,12 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 test {
     _ = @import("dev_cli.zig");
+    // `dev_cli` imports these, but Zig's lazy analysis only reaches a decl that
+    // is actually referenced, and their entry points are referenced solely from
+    // dispatch branches no test calls. Without these explicit anchors their
+    // `test` blocks are never collected: measured, adding a test to
+    // `witnesses_cli.zig` moved the collected count by zero.
+    _ = @import("witnesses_cli.zig");
 
     // Force-link the proof-review submodules used by the developer CLI.
     // Lazy analysis through the package boundary won't reach decls that

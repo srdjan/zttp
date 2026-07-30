@@ -2303,3 +2303,113 @@ pub fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, det
     try stream.endObject();
     return try aw.toOwnedSlice();
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// This file had zero test blocks across 2,305 lines, which the reset plan named
+// as the repository's highest-risk untested file. Most of its surface takes a
+// live `Runtime` or a `Context`; these cover the parts whose behavior can be
+// pinned without standing up a request, plus the egress-host check, which is a
+// security boundary and worth a Runtime.
+//
+// Collection was confirmed with a positive control before any of these were
+// written: a trivial test here moves `test-zruntime` from 494 to 495.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "a zero outbound timeout means no timeout, not an instant one" {
+    // The distinction that matters: 0 is the "unset" sentinel from config, and
+    // reading it as a zero-duration deadline would fail every outbound request
+    // immediately instead of allowing an unbounded one.
+    try testing.expectEqual(std.meta.Tag(std.Io.Timeout).none, std.meta.activeTag(outboundTimeout(0)));
+
+    const bounded = outboundTimeout(1500);
+    try testing.expect(std.meta.activeTag(bounded) != .none);
+}
+
+test "header splitting copies every pair and reports the count" {
+    const Hdr = struct { key: []const u8, value: []const u8 };
+    var names: [64][]const u8 = undefined;
+    var values: [64][]const u8 = undefined;
+
+    const headers = [_]Hdr{
+        .{ .key = "content-type", .value = "application/json" },
+        .{ .key = "x-trace", .value = "abc" },
+    };
+    const n = splitHeaderKV(&headers, &names, &values);
+    try testing.expectEqual(@as(usize, 2), n);
+    try testing.expectEqualStrings("content-type", names[0]);
+    try testing.expectEqualStrings("application/json", values[0]);
+    try testing.expectEqualStrings("x-trace", names[1]);
+    try testing.expectEqualStrings("abc", values[1]);
+}
+
+test "header splitting is empty-safe and caps at the buffer size" {
+    const Hdr = struct { key: []const u8, value: []const u8 };
+    var names: [64][]const u8 = undefined;
+    var values: [64][]const u8 = undefined;
+
+    const empty: []const Hdr = &.{};
+    try testing.expectEqual(@as(usize, 0), splitHeaderKV(empty, &names, &values));
+
+    // 70 pairs into a 64-slot buffer: the cap must hold, or this writes past the
+    // caller's fixed arrays.
+    var many: [70]Hdr = undefined;
+    for (&many, 0..) |*h, i| {
+        _ = i;
+        h.* = .{ .key = "k", .value = "v" };
+    }
+    try testing.expectEqual(@as(usize, 64), splitHeaderKV(&many, &names, &values));
+}
+
+test "host resolution accepts a plain host and rejects a missing one" {
+    var buf: [std.Io.net.HostName.max_len]u8 = undefined;
+
+    // A normal URL resolves. The exact accessor for the resolved name is not
+    // asserted here; the behavior that matters is that this succeeds and the
+    // hostless case below does not.
+    const ok = try std.Uri.parse("https://example.com/path");
+    _ = try resolveHostSafe(ok, &buf);
+
+    // A URI with no host must surface an error rather than resolving to
+    // something empty that later reads as "any host".
+    const no_host = try std.Uri.parse("file:///tmp/x");
+    try testing.expectError(error.UriMissingHost, resolveHostSafe(no_host, &buf));
+}
+
+test "the egress allowlist rejects a host it does not name" {
+    // A security boundary, so it gets a real Runtime. `outbound_allow_host`
+    // restricts the bridge to one exact host; a mismatch must be reported.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{ .outbound_allow_host = "api.example.com" });
+    defer rt.deinit();
+
+    // Exact match passes the allowlist check. Whether the capability policy also
+    // allows it is a separate gate, so only assert the allowlist verdict here.
+    const violation = outboundHostViolation(rt, "evil.example.com");
+    try testing.expect(violation != null);
+    try testing.expectEqualStrings("api.example.com", violation.?);
+}
+
+test "the egress allowlist is case-insensitive on the host" {
+    // DNS is case-insensitive, so "API.Example.com" is the same host. Treating it
+    // as a mismatch would break legitimate callers; treating a DIFFERENT host as
+    // a match would be a hole. This pins the first.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try Runtime.init(allocator, .{ .outbound_allow_host = "api.example.com" });
+    defer rt.deinit();
+
+    // Not the allowlist's complaint: any violation here comes from the
+    // capability policy, never from a case difference.
+    if (outboundHostViolation(rt, "API.Example.COM")) |reason| {
+        try testing.expectEqualStrings("capability policy", reason);
+    }
+}

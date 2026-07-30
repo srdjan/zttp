@@ -380,3 +380,79 @@ fn writeSpecList(writer: *std.Io.Writer, cause_only: bool) !void {
 fn shortKey(key: []const u8) []const u8 {
     return key[0..@min(key.len, 12)];
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// This file had none, and until `cli_main.zig` anchored it explicitly its tests
+// would not have run: Zig's lazy analysis never reached it, because `run` is
+// referenced only from a dev_cli dispatch branch no test calls. Measured with a
+// positive control - a trivial test here moved the collected count by zero
+// before the anchor and by one after.
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+
+test "every user-facing error is classified as expected" {
+    // The contract with dev_cli: an error this returns true for has already been
+    // explained on stderr, so the caller exits 1 quietly instead of printing a
+    // second, rawer message. A new error added to the list below without being
+    // added to isExpectedUserError would leak a Zig error name to users.
+    const expected = [_]anyerror{
+        error.UnknownSubcommand,
+        error.MissingHandlerArgument,
+        error.MissingKeyArgument,
+        error.MissingSpecArgument,
+        error.UnsupportedSpec,
+        error.WitnessNotFound,
+        error.WitnessAmbiguous,
+        error.WitnessCorpusMissing,
+        error.MissingArgValue,
+        error.InvalidArgument,
+        error.UnknownArgument,
+    };
+    for (expected) |err| {
+        testing.expect(isExpectedUserError(err)) catch |e| {
+            std.debug.print("\nnot classified as expected: {t}\n", .{err});
+            return e;
+        };
+    }
+}
+
+test "an unexplained error is not classified as expected" {
+    // The other half of the contract. If this ever returns true for an
+    // arbitrary error, dev_cli would swallow real failures silently.
+    try testing.expect(!isExpectedUserError(error.OutOfMemory));
+    try testing.expect(!isExpectedUserError(error.AccessDenied));
+    try testing.expect(!isExpectedUserError(error.Unexpected));
+}
+
+test "subcommand parsing accepts every documented spelling" {
+    try testing.expectEqual(Subcommand.list, parseSub("list").?);
+    try testing.expectEqual(Subcommand.pin, parseSub("pin").?);
+    try testing.expectEqual(Subcommand.unpin, parseSub("unpin").?);
+    try testing.expectEqual(Subcommand.prune, parseSub("prune").?);
+    try testing.expectEqual(Subcommand.synthesize, parseSub("synthesize").?);
+    // All three help spellings, since the CLI advertises them.
+    try testing.expectEqual(Subcommand.help, parseSub("help").?);
+    try testing.expectEqual(Subcommand.help, parseSub("--help").?);
+    try testing.expectEqual(Subcommand.help, parseSub("-h").?);
+}
+
+test "subcommand parsing rejects anything else" {
+    try testing.expect(parseSub("") == null);
+    try testing.expect(parseSub("List") == null);
+    try testing.expect(parseSub("lis") == null);
+    try testing.expect(parseSub("listx") == null);
+    try testing.expect(parseSub("--halp") == null);
+}
+
+test "shortKey truncates without slicing out of bounds" {
+    // The hazard is a key shorter than the truncation width: @min guards it, and
+    // this pins that it stays guarded.
+    try testing.expectEqualStrings("", shortKey(""));
+    try testing.expectEqualStrings("abc", shortKey("abc"));
+    try testing.expectEqualStrings("0123456789ab", shortKey("0123456789ab"));
+    try testing.expectEqualStrings("0123456789ab", shortKey("0123456789abcdef"));
+    try testing.expect(shortKey("0123456789abcdef").len == 12);
+}
