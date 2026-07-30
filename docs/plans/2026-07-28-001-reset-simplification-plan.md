@@ -1313,9 +1313,17 @@ follow them, and they should be sequenced first.
 3. Fold `ratchet check` into `check` behind a fail-on-undischarged flag over the spec
    diagnostics that already exist, and either build the announced waiver system or delete
    its comment.
-4. Add the shared import and binding index computed once after parse, and the shared IR
-   shape helper library. Move `precompile.zig`'s orchestration into `pipeline.zig` so
-   `PathGenerator` and `FlowChecker` run exactly once per compile.
+4. PARTLY DONE, and the last clause's premise is false. The shared import and binding index
+   exists and is shared: `packages/zts/src/module_facts.zig`, adopted by all six analyzers
+   (C1) and injected once per compile through `resolve`/`check` (C2). The shared IR shape
+   helper library is deliberately deferred; see `docs/plans/2026-07-30-003-item4-design.md`.
+   The claim that `PathGenerator` and `FlowChecker` run more than once per compile does not
+   hold: measured, both construct exactly once, the two `PathGenerator` sites in
+   `compileHandler` are the mutually exclusive failure and success branches, and
+   `buildContractWithPolicy` already reuses a precomputed `FlowChecker`. The orchestration
+   move therefore has no performance or correctness justification left, only the
+   architectural one `pipeline.zig`'s header states, and needs its own plan. See
+   `docs/plans/2026-07-30-006-item4-c3-findings.md`.
 5. Replace `ui_payload.zig`'s 44 hand-written clone and deinit functions with arena-owned
    payloads. About 1,500 to 2,000 lines of 3,013.
 6. Add the comptime argument-decode wrapper for module impl functions, generated from the
