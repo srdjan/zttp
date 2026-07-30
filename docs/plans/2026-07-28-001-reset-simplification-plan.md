@@ -1344,7 +1344,16 @@ follow them, and they should be sequenced first.
    stages. Move compile benchmarking off the arena that currently masks nested-function
    ownership, and measure the real production pipeline.
 
-0b. Build the immutable `ModuleFacts` index from section 5.6 and convert contract
+0b. DONE, in three plans. `ModuleFacts` is built once per compile and read by six
+   analyzers (`2026-07-29-004`); the runtime's hand-written wire reader is deleted and
+   `parseContractJson` is now the canonical codec plus the existing projection
+   (`2026-07-29-003`), which cost 142,400 bytes of runtime binary, no measurable startup
+   time, and exposed five latent defects the second reader had been masking; the 24 module
+   spec JSON files and the Module Catalog table are generated from the typed bindings with
+   a `--check` drift gate in `scripts/verify.sh` (`2026-07-29-005`, `2026-07-30-001`).
+   The original wording follows.
+
+   Build the immutable `ModuleFacts` index from section 5.6 and convert contract
    construction to pure projections. Replace the runtime's hand-written wire reader with
    the canonical codec plus a runtime projection, keeping the raw-to-validated promotion and
    every capability, policy, and hash check intact. Make typed module descriptors
@@ -1353,7 +1362,14 @@ follow them, and they should be sequenced first.
    editing either by hand. This resolves the module-specs governance question in section 10
    without deleting the tripwire.
 
-0c. PARTLY DONE. The alias bridges are gone and the cycle is measured: `Runtime`'s
+0c. DONE 2026-07-30. `HandlerInstance` lives in `handler_instance.zig` (2,255 lines) and
+   `zruntime.zig` is a test root no production file imports (4,305 lines). The 15 pool
+   tests moved to `runtime_pool.zig` and the last eleven re-export aliases are gone. Not
+   met: the acyclic gate. The runtime-to-pool cycle is gone, but six cycles remain between
+   the instance and the sibling files its methods were extracted into, which is a
+   different problem with a different fix. See the design doc.
+
+   The earlier reading follows. The alias bridges are gone and the cycle is measured: `Runtime`'s
    implementation never mentions `HandlerPool` or `runtime_pool`, so the zruntime-to-pool
    edge was never a production dependency. Two of the four re-exports had no users at all.
    What still forces the import is 15 test blocks (711 lines) in `zruntime.zig` that are

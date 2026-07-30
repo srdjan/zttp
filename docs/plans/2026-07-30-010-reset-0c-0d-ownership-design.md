@@ -202,6 +202,45 @@ depend on earlier ones; earlier slices are useful on their own.
    -> verify: the dependency graph is acyclic (no file imports both directions), full
    `verify.sh`, byte-identical contract and receipt fixtures.
 
+   DONE 2026-07-30, in three commits, and the tests did not move with the type.
+
+   The 15 pool tests moved first (`92410b90`). Measured, they referenced exactly one
+   zruntime file-scope declaration, `HttpRequestOwned`, so the design's "promote three
+   helpers to `pub`" was not needed. Collection was proven by breaking a moved test and
+   watching `test-zruntime` fail with it.
+
+   The eleven remaining re-exports went next (`2ffe2ad5`): the six HTTP types,
+   `RuntimeConfig`, `getStringData`, `beginBodyRead`, `createFetchResponse`, and
+   `splitHeaderKV`. Sixteen sites reached their real owner through `zruntime` only because
+   the name used to live there. Seven of the eleven had no in-file reader either.
+
+   The extraction itself (`03fe1b99`) put `HandlerInstance` in `handler_instance.zig` and
+   left the 86 tests, plus the loopback HTTP server they need, in `zruntime.zig`. The
+   design said the tests move with the type; they did not, because that would have
+   reproduced today's 6,455-line file under a new name. The split is 2,255 lines of type
+   against 4,305 lines of test root, and `zruntime.zig` is now imported by no production
+   file. The rename had to skip `zq.LockFreePool.Runtime`, a different type the pool also
+   holds.
+
+   Two methods became `pub` for the tests, `queueSendInternal` and `createRequestObject`.
+   That is the real cost of the split: a test-only coupling that was invisible inside one
+   file is now declared.
+
+   ### The acyclic gate is not met, and the remaining cycles are a different shape
+
+   The runtime-to-pool cycle is gone: nothing imports `zruntime.zig`, and
+   `handler_instance.zig` never mentions `runtime_pool.zig`. Six cycles remain, all of one
+   kind, between `handler_instance.zig` and the sibling files its methods were extracted
+   into: `runtime_http`, `runtime_natives`, `runtime_workflow`, `durable_executor`,
+   `trace_request_recorder`, and `ws_runtime_callbacks`. Each takes `*HandlerInstance` as a
+   parameter, and the instance imports each to register its callbacks.
+
+   Breaking them is a separate piece of work with its own shape: either the registration
+   moves out of the instance into a file that imports both sides, or the helpers take
+   `anytype` and lose their type check. Neither is what item 0c described, so this is
+   reported rather than done. Two unrelated pre-existing cycles also remain
+   (`durable_store`/`idempotency_ledger`, `live_reload`/`runtime_features`).
+
 Slice 6 is the large one. Slices 1 to 5 are each self-contained and shrink it: by the time the
 extraction happens, `Runtime` no longer publishes ambient state, so the extracted type has a
 declared surface rather than a threadlocal one.
