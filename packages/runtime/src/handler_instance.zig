@@ -1772,7 +1772,7 @@ pub const HandlerInstance = struct {
         // Use pre-shaped request object for faster creation (direct slot access).
         // http_shapes is initialized by default (use_http_shape_cache = true).
         // If not available, fall back to dynamic object creation.
-        const shapes = self.ctx.http_shapes orelse return self.createRequestObjectDynamic(request);
+        const shapes = self.ctx.http.shapes orelse return self.createRequestObjectDynamic(request);
 
         const req_obj = try self.ctx.createObjectWithClass(shapes.request.class_idx, self.request_prototype);
 
@@ -1989,7 +1989,7 @@ pub const HandlerInstance = struct {
         const pool = self.ctx.hidden_class_pool orelse return response;
 
         // Fast path: use direct slot access if response matches pre-shaped class
-        if (self.ctx.http_shapes) |shapes| {
+        if (self.ctx.http.shapes) |shapes| {
             if (result_obj.hidden_class_idx == shapes.response.class_idx) {
                 // Status - direct slot access with bounds validation
                 const status_val = result_obj.getSlot(shapes.response.status_slot);

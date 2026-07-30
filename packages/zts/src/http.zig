@@ -45,7 +45,7 @@ pub fn createRequest(
     headers: []const [2][]const u8,
     body: ?[]const u8,
 ) !value.JSValue {
-    if (ctx.http_shapes) |shapes| {
+    if (ctx.http.shapes) |shapes| {
         const req_obj = try ctx.createObjectWithClass(shapes.request.class_idx, null);
 
         const method_str = try ctx.createString(method);
@@ -116,7 +116,7 @@ pub fn createResponse(
     status: u16,
     content_type: []const u8,
 ) !value.JSValue {
-    if (ctx.http_shapes) |shapes| {
+    if (ctx.http.shapes) |shapes| {
         const resp_obj = try ctx.createObjectWithClass(shapes.response.class_idx, null);
 
         const body_str = try ctx.createString(body);
@@ -162,7 +162,7 @@ pub fn createResponse(
     try ctx.setPropertyChecked(resp_obj, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
 
     // Set statusText
-    const status_text_atom = if (ctx.http_strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
+    const status_text_atom = if (ctx.http.strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
     const status_text = switch (status) {
         200 => "OK",
         201 => "Created",
@@ -185,7 +185,7 @@ pub fn createResponse(
 
     // Set headers (using predefined atom)
     const headers_obj = try ctx.createObject(null);
-    const ct_atom = if (ctx.http_strings) |cache| cache.content_type_atom else try ctx.atoms.intern("Content-Type");
+    const ct_atom = if (ctx.http.strings) |cache| cache.content_type_atom else try ctx.atoms.intern("Content-Type");
     const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
     try ctx.setPropertyChecked(headers_obj, ct_atom, ct_val);
     try ctx.setPropertyChecked(resp_obj, object.Atom.headers, headers_obj.toValue());
@@ -200,7 +200,7 @@ pub fn createResponseFromString(
     status: u16,
     content_type: []const u8,
 ) !value.JSValue {
-    if (ctx.http_shapes) |shapes| {
+    if (ctx.http.shapes) |shapes| {
         const resp_obj = try ctx.createObjectWithClass(shapes.response.class_idx, null);
 
         resp_obj.setSlot(shapes.response.body_slot, value.JSValue.fromPtr(body_str));
@@ -243,7 +243,7 @@ pub fn createResponseFromString(
     try ctx.setPropertyChecked(resp_obj, object.Atom.status, value.JSValue.fromInt(@intCast(status)));
 
     // Set statusText
-    const status_text_atom = if (ctx.http_strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
+    const status_text_atom = if (ctx.http.strings) |cache| cache.status_text_atom else try ctx.atoms.intern("statusText");
     const status_text = switch (status) {
         200 => "OK",
         201 => "Created",
@@ -266,7 +266,7 @@ pub fn createResponseFromString(
 
     // Set headers (using predefined atom)
     const headers_obj = try ctx.createObject(null);
-    const ct_atom = if (ctx.http_strings) |cache| cache.content_type_atom else try ctx.atoms.intern("Content-Type");
+    const ct_atom = if (ctx.http.strings) |cache| cache.content_type_atom else try ctx.atoms.intern("Content-Type");
     const ct_val: value.JSValue = if (ctx.getCachedContentType(content_type)) |cached| value.JSValue.fromPtr(cached) else try ctx.createString(content_type);
     try ctx.setPropertyChecked(headers_obj, ct_atom, ct_val);
     try ctx.setPropertyChecked(resp_obj, object.Atom.headers, headers_obj.toValue());
@@ -502,7 +502,7 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
     children_arr.setArrayLength(child_count);
 
     // Create vnode with preallocated shape for direct slot writes
-    if (ctx.vnode_shape) |shape| {
+    if (ctx.http.vnode) |shape| {
         const node = try ctx.createObjectWithClass(shape.class_idx, null);
         node.setSlot(shape.tag_slot, tag_val);
         node.setSlot(shape.props_slot, props_val);
@@ -1440,7 +1440,7 @@ test "createResponse" {
     try std.testing.expect(resp.isObject());
 
     const resp_obj = object.JSObject.fromValue(resp);
-    if (ctx.http_shapes) |shapes| {
+    if (ctx.http.shapes) |shapes| {
         try std.testing.expectEqual(shapes.response.class_idx, resp_obj.hidden_class_idx);
     }
     const status_atom = try ctx.atoms.intern("status");
@@ -1762,7 +1762,7 @@ test "buildHtmlFragment renders data dl and hx controls" {
 
 fn respBodyForTest(ctx: *context.Context, resp: value.JSValue) []const u8 {
     const obj = object.JSObject.fromValue(resp);
-    if (ctx.http_shapes) |shapes| {
+    if (ctx.http.shapes) |shapes| {
         const b = obj.getSlot(shapes.response.body_slot);
         if (b.isString()) return b.toPtr(string.JSString).data();
     }

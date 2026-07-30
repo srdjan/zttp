@@ -2891,7 +2891,7 @@ fn writeZigFile(
         try writer.writeAll("    const pool = ctx.hidden_class_pool orelse return error.AotBail;\n");
         try writer.writeAll("    var url_val: zq.JSValue = zq.JSValue.undefined_val;\n");
         try writer.writeAll("    var path_val: zq.JSValue = zq.JSValue.undefined_val;\n");
-        try writer.writeAll("    if (ctx.http_shapes) |shapes| {\n");
+        try writer.writeAll("    if (ctx.http.shapes) |shapes| {\n");
         try writer.writeAll("        if (req_obj.hidden_class_idx == shapes.request.class_idx) {\n");
         try writer.writeAll("            url_val = req_obj.getSlot(shapes.request.url_slot);\n");
         try writer.writeAll("            path_val = req_obj.getSlot(shapes.request.path_slot);\n");
@@ -3168,7 +3168,7 @@ fn writeBytecodeArray(writer: anytype, bytecode_data: []const u8) !void {
 
 fn emitAotBodyValExtraction(writer: anytype) !void {
     try writer.writeAll("        var body_val: zq.JSValue = zq.JSValue.undefined_val;\n");
-    try writer.writeAll("        if (ctx.http_shapes) |shapes| {\n");
+    try writer.writeAll("        if (ctx.http.shapes) |shapes| {\n");
     try writer.writeAll("            if (req_obj.hidden_class_idx == shapes.request.class_idx) {\n");
     try writer.writeAll("                body_val = req_obj.getSlot(shapes.request.body_slot);\n");
     try writer.writeAll("            } else if (req_obj.getOwnProperty(pool, zq.Atom.body)) |val| {\n");

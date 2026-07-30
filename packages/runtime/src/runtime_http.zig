@@ -158,7 +158,7 @@ fn snapshotResponseHead(allocator: std.mem.Allocator, head: anytype) !OwnedRespo
 }
 
 fn createResponseHeadersObject(rt: *HandlerInstance) !*zq.JSObject {
-    if (rt.ctx.http_shapes) |shapes| {
+    if (rt.ctx.http.shapes) |shapes| {
         return rt.ctx.createObjectWithClass(shapes.response_headers.class_idx, rt.headers_prototype);
     }
     return rt.ctx.createObject(rt.headers_prototype);
@@ -178,7 +178,7 @@ pub fn createFetchResponse(rt: *HandlerInstance, status: u16, status_text: []con
         response_obj.prototype = proto;
     }
 
-    const status_text_atom = if (rt.ctx.http_strings) |cache|
+    const status_text_atom = if (rt.ctx.http.strings) |cache|
         cache.status_text_atom
     else
         try rt.ctx.atoms.intern("statusText");

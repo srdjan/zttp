@@ -627,7 +627,7 @@ pub const IrTranspiler = struct {
         self.emit(
             \\fn extractRequestField(ctx: *zq.Context, req_obj: *zq.JSObject, comptime field: zq.Atom) ?[]const u8 {
             \\    const pool = ctx.hidden_class_pool orelse return null;
-            \\    if (ctx.http_shapes) |shapes| {
+            \\    if (ctx.http.shapes) |shapes| {
             \\        if (req_obj.hidden_class_idx == shapes.request.class_idx) {
             \\            const val = switch (field) {
             \\                .url => req_obj.getSlot(shapes.request.url_slot),
