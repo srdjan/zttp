@@ -16,6 +16,7 @@ const app = @import("app.zig");
 const ledger = @import("ledger.zig");
 const session_events = @import("session/events.zig");
 const skills_catalog = @import("skills/catalog.zig");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
 
@@ -263,10 +264,9 @@ fn tokenizeLine(
 }
 
 fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tools: bool) !ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     // Lead with how to drive the loop, not with a wall of internal tool names.
     // A new user who types `help` needs the two things they actually do: state a
@@ -347,18 +347,16 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
-    buf = aw.toArrayList();
-    return ToolResult.withPlainText(allocator, true, buf.items);
+    return ToolResult.withPlainText(allocator, true, buf.written());
 }
 
 const request_mod = @import("providers/anthropic/request.zig");
 const session_paths = @import("session/paths.zig");
 
 fn renderModel(allocator: std.mem.Allocator, session: *const agent.AgentSession) !ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     const current = session.currentModel() orelse "none";
     try w.print("Active model: {s}\n\nAvailable models:\n", .{current});
     if (session.activeProvider()) |provider| {
@@ -371,8 +369,7 @@ fn renderModel(allocator: std.mem.Allocator, session: *const agent.AgentSession)
         try w.writeAll("  (no active model provider)\n");
     }
     try w.writeAll("\nSwitch with: /model <model-id>\n");
-    buf = aw.toArrayList();
-    return ToolResult.withPlainText(allocator, true, buf.items);
+    return ToolResult.withPlainText(allocator, true, buf.written());
 }
 
 fn renderStudio(allocator: std.mem.Allocator, handler_path: []const u8) !ToolResult {
@@ -457,10 +454,9 @@ fn renderHotkeys(allocator: std.mem.Allocator) !ToolResult {
 }
 
 fn renderLedgerGuidance(allocator: std.mem.Allocator, summary: session_events.SessionSummary) !ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     if (summary.turn_count > 0) {
         try w.writeAll("This session so far:\n");
@@ -494,8 +490,7 @@ fn renderLedgerGuidance(allocator: std.mem.Allocator, summary: session_events.Se
             "  zttp ledger replay --input <path> --onto <git-ref>\n",
     );
 
-    buf = aw.toArrayList();
-    return ToolResult.withPlainText(allocator, true, buf.items);
+    return ToolResult.withPlainText(allocator, true, buf.written());
 }
 
 fn renderChatGuidance(allocator: std.mem.Allocator) !ToolResult {
@@ -505,29 +500,25 @@ fn renderChatGuidance(allocator: std.mem.Allocator) !ToolResult {
 }
 
 fn renderSkills(allocator: std.mem.Allocator) !ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     try w.writeAll("Available skills (invoke with /skill:<name>):\n");
     for (skills_catalog.catalog) |skill| {
         try w.print("  {s: <20}  {s}\n", .{ skill.name, skill.description });
     }
-    buf = aw.toArrayList();
-    return ToolResult.withPlainText(allocator, true, buf.items);
+    return ToolResult.withPlainText(allocator, true, buf.written());
 }
 
 fn renderTemplates(allocator: std.mem.Allocator) !ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     try w.writeAll("Available templates (invoke with /template:<name> [args...]):\n");
     for (prompts_catalog.catalog) |tmpl| {
         try w.print("  {s: <16}  {s}\n", .{ tmpl.name, tmpl.description });
     }
-    buf = aw.toArrayList();
-    return ToolResult.withPlainText(allocator, true, buf.items);
+    return ToolResult.withPlainText(allocator, true, buf.written());
 }
 
 fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
@@ -578,16 +569,14 @@ fn renderTree(allocator: std.mem.Allocator, current_session_id: ?[]const u8) !To
     const nodes = try buildSessionTreeNodes(allocator, entries, current_session_id);
     defer freeSessionTreeNodes(allocator, nodes);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     try w.print("Sessions for this workspace ({d} total):\n", .{entries.len});
     try writeSessionTree(w, nodes);
     try w.writeAll("\nUse /fork to branch the current session.\n");
     try w.writeAll("Use /resume or /continue to reload the newest session.\n");
-    buf = aw.toArrayList();
-    return try ToolResult.withSessionTree(allocator, true, buf.items, nodes);
+    return try ToolResult.withSessionTree(allocator, true, buf.written(), nodes);
 }
 
 fn buildSessionTreeNodes(

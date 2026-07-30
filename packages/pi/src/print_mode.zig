@@ -15,6 +15,7 @@ const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
 const session_events = @import("session/events.zig");
 const app = @import("app.zig");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 const Registry = registry_mod.Registry;
 const ExpertFlags = app.ExpertFlags;
@@ -228,12 +229,10 @@ fn writeOutLine(out: ?*std.Io.Writer, bytes: []const u8) !void {
 }
 
 fn emitRecord(allocator: std.mem.Allocator, out: ?*std.Io.Writer, record: EventRecord) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try session_events.writeEventLine(&aw.writer, record);
-    buf = aw.toArrayList();
-    try writeOut(out, buf.items);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try session_events.writeEventLine(buf.writer(), record);
+    try writeOut(out, buf.written());
 }
 
 fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const transcript_mod.OwnedEntry) !void {
@@ -276,10 +275,9 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
 /// consumer sees a failed turn in-band. `d` is an object with the error name
 /// and, for known provider failures, the one-line remediation text (else null).
 fn emitErrorEvent(allocator: std.mem.Allocator, out: ?*std.Io.Writer, err: anyerror) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    var s: std.json.Stringify = .{ .writer = buf.writer() };
     try s.beginObject();
     try s.objectField("v");
     try s.write(session_events.schema_version);
@@ -297,25 +295,22 @@ fn emitErrorEvent(allocator: std.mem.Allocator, out: ?*std.Io.Writer, err: anyer
     }
     try s.endObject();
     try s.endObject();
-    try aw.writer.writeByte('\n');
-    buf = aw.toArrayList();
-    try writeOut(out, buf.items);
+    try buf.writer().writeByte('\n');
+    try writeOut(out, buf.written());
 }
 
 fn emitEndEvent(allocator: std.mem.Allocator, out: ?*std.Io.Writer) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    var s: std.json.Stringify = .{ .writer = &aw.writer };
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    var s: std.json.Stringify = .{ .writer = buf.writer() };
     try s.beginObject();
     try s.objectField("v");
     try s.write(session_events.schema_version);
     try s.objectField("k");
     try s.write("end");
     try s.endObject();
-    try aw.writer.writeByte('\n');
-    buf = aw.toArrayList();
-    try writeOut(out, buf.items);
+    try buf.writer().writeByte('\n');
+    try writeOut(out, buf.written());
 }
 
 // ---------------------------------------------------------------------------
@@ -371,9 +366,8 @@ test "runWithClient: json mode emits user_text, model_text, end in order" {
         .response = .{ .final_text = "hi" },
     } };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try runWithClient(
         allocator,
@@ -381,14 +375,12 @@ test "runWithClient: json mode emits user_text, model_text, end in order" {
         client.asModelClient(),
         .{ .print = "hello", .json_mode = true, .no_session = true },
         .auto_reject,
-        &aw.writer,
+        buf.writer(),
     );
-
-    buf = aw.toArrayList();
 
     var lines: std.ArrayList([]const u8) = .empty;
     defer lines.deinit(allocator);
-    var it = std.mem.splitScalar(u8, buf.items, '\n');
+    var it = std.mem.splitScalar(u8, buf.written(), '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
         try lines.append(allocator, line);
@@ -414,9 +406,8 @@ test "runWithClient: non-json mode writes rendered text" {
         .response = .{ .final_text = "hi there" },
     } };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try runWithClient(
         allocator,
@@ -424,24 +415,21 @@ test "runWithClient: non-json mode writes rendered text" {
         client.asModelClient(),
         .{ .print = "hello", .json_mode = false, .no_session = true },
         .auto_reject,
-        &aw.writer,
+        buf.writer(),
     );
 
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "hi there") != null);
-    try testing.expect(buf.items[buf.items.len - 1] == '\n');
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "hi there") != null);
+    try testing.expect(buf.written()[buf.written().len - 1] == '\n');
 }
 
 test "emitErrorEvent: known provider error carries name and remediation in-band" {
     const allocator = testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
-    try emitErrorEvent(allocator, &aw.writer, error.AuthFailed);
-    buf = aw.toArrayList();
+    try emitErrorEvent(allocator, buf.writer(), error.AuthFailed);
 
-    const line = std.mem.trim(u8, buf.items, "\n");
+    const line = std.mem.trim(u8, buf.written(), "\n");
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
@@ -455,14 +443,12 @@ test "emitErrorEvent: known provider error carries name and remediation in-band"
 
 test "emitErrorEvent: non-provider error emits null remediation" {
     const allocator = testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
-    try emitErrorEvent(allocator, &aw.writer, error.MissingPrintPrompt);
-    buf = aw.toArrayList();
+    try emitErrorEvent(allocator, buf.writer(), error.MissingPrintPrompt);
 
-    const line = std.mem.trim(u8, buf.items, "\n");
+    const line = std.mem.trim(u8, buf.written(), "\n");
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
     const d = parsed.value.object.get("d").?.object;
@@ -494,14 +480,12 @@ test "writeVerifiedSummary ignores verified patches before current turn" {
     try tr.append(allocator, .{ .user_text = "resume diagnostics" });
     try tr.append(allocator, .{ .model_text = "no edit this turn" });
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
-    try writeVerifiedSummary(allocator, &aw.writer, &tr, turn_start_len);
-    buf = aw.toArrayList();
+    try writeVerifiedSummary(allocator, buf.writer(), &tr, turn_start_len);
 
-    try testing.expectEqual(@as(usize, 0), buf.items.len);
+    try testing.expectEqual(@as(usize, 0), buf.written().len);
 }
 
 test "writeVerifiedSummary emits verified patch from current turn" {
@@ -521,13 +505,11 @@ test "writeVerifiedSummary emits verified patch from current turn" {
         .ui_payload = null,
     } });
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
-    try writeVerifiedSummary(allocator, &aw.writer, &tr, turn_start_len);
-    buf = aw.toArrayList();
+    try writeVerifiedSummary(allocator, buf.writer(), &tr, turn_start_len);
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "current.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "old.ts") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "current.ts") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "old.ts") == null);
 }
