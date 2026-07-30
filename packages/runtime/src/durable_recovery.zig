@@ -16,7 +16,7 @@ const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
 const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
-const ServerConfig = @import("server.zig").ServerConfig;
+const ExecutionSpec = @import("execution_spec.zig").ExecutionSpec;
 const tryLockOplogFd = @import("runtime_config.zig").tryLockOplogFd;
 const handler_loader = @import("handler_loader.zig");
 const durable_executor = @import("durable_executor.zig");
@@ -143,18 +143,18 @@ pub const RetryTracker = struct {
 
 /// Scan the durable directory and recover any incomplete runs.
 /// Returns the number of runs recovered.
-pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, config: ServerConfig) !u32 {
-    return recoverIncompleteOplogsTracked(allocator, config, null);
+pub fn recoverIncompleteOplogs(allocator: std.mem.Allocator, spec: ExecutionSpec) !u32 {
+    return recoverIncompleteOplogsTracked(allocator, spec, null);
 }
 
 /// Like `recoverIncompleteOplogs`, with per-oplog retry backoff state for
 /// the polling scheduler.
 pub fn recoverIncompleteOplogsTracked(
     allocator: std.mem.Allocator,
-    config: ServerConfig,
+    spec: ExecutionSpec,
     tracker: ?*RetryTracker,
 ) !u32 {
-    const oplog_dir = config.runtime_config.durable_oplog_dir orelse return 0;
+    const oplog_dir = spec.runtime_config.durable_oplog_dir orelse return 0;
 
     const dir_path_z = try allocator.dupeZ(u8, oplog_dir);
     defer allocator.free(dir_path_z);
@@ -299,7 +299,7 @@ pub fn recoverIncompleteOplogsTracked(
         });
 
         var recover_err_name: []const u8 = "recovery failed";
-        const outcome = recoverOne(allocator, config, &parsed, full_path) catch |err| blk: {
+        const outcome = recoverOne(allocator, spec, &parsed, full_path) catch |err| blk: {
             if (!builtin.is_test) std.log.err("Recovery failed for '{s}': {}", .{ full_path, err });
             recover_err_name = @errorName(err);
             break :blk .failed;
@@ -424,7 +424,7 @@ const RecoverOutcome = enum { recovered, pending, failed };
 
 fn recoverOne(
     allocator: std.mem.Allocator,
-    config: ServerConfig,
+    spec: ExecutionSpec,
     parsed: *const trace.IncompleteOplog,
     oplog_path: []const u8,
 ) !RecoverOutcome {
@@ -433,12 +433,12 @@ fn recoverOne(
     const claim = OplogClaim.acquire(allocator, oplog_path) orelse return .pending;
     defer claim.release();
 
-    const recovery_config = config.runtime_config;
+    const recovery_config = spec.runtime_config;
 
     const rt = try Runtime.init(allocator, recovery_config);
     defer rt.deinit();
 
-    const loaded = handler_loader.load(allocator, config.handler) catch |err| {
+    const loaded = handler_loader.load(allocator, spec.handler) catch |err| {
         if (!builtin.is_test) {
             switch (err) {
                 error.UnsupportedHandlerSource => std.log.err("Durable recovery requires a file_path or inline_code handler source", .{}),
@@ -677,11 +677,11 @@ test "durable recovery: attempts (rather than skips) a run whose waitSignal time
     defer tracker.deinit();
     try testing.expect(tracker.shouldAttempt(filename, trace.unixMillis()));
 
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .file_path = "/nonexistent/handler-for-recovery-attempt-test.ts" },
         .runtime_config = .{ .durable_oplog_dir = durable_dir },
     };
-    const recovered = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    const recovered = try recoverIncompleteOplogsTracked(allocator, spec, &tracker);
     try testing.expectEqual(@as(u32, 0), recovered);
 
     // Skipped (the pre-fix behavior) would leave the tracker untouched
@@ -730,11 +730,11 @@ test "durable recovery: full dead-run lifecycle - quarantine writes a record, re
     try testing.expect(!tracker.isQuarantined(filename));
     try testing.expect(!(try dead_runs.hasDeadRun(allocator, durable_dir, dead_runs.deadRunId(filename).?)));
 
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .file_path = "/nonexistent/handler-for-dead-run-lifecycle-test.ts" },
         .runtime_config = .{ .durable_oplog_dir = durable_dir },
     };
-    const recovered = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    const recovered = try recoverIncompleteOplogsTracked(allocator, spec, &tracker);
     try testing.expectEqual(@as(u32, 0), recovered);
 
     // The 10th failure crossed the threshold through the real integration
@@ -756,7 +756,7 @@ test "durable recovery: full dead-run lifecycle - quarantine writes a record, re
 
     // A further poll does not re-write or duplicate the record, and does
     // not re-attempt recovery (still gated by the persisted record).
-    const recovered_again = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    const recovered_again = try recoverIncompleteOplogsTracked(allocator, spec, &tracker);
     try testing.expectEqual(@as(u32, 0), recovered_again);
     try testing.expectEqual(@as(u32, RetryTracker.quarantine_threshold), tracker.map.get(filename).?.consecutive_failures);
 
@@ -767,7 +767,7 @@ test "durable recovery: full dead-run lifecycle - quarantine writes a record, re
     try dead_runs.replayDeadRun(allocator, durable_dir, id);
     try testing.expect(!(try dead_runs.hasDeadRun(allocator, durable_dir, id)));
 
-    const recovered_after_replay = try recoverIncompleteOplogsTracked(allocator, config, &tracker);
+    const recovered_after_replay = try recoverIncompleteOplogsTracked(allocator, spec, &tracker);
     try testing.expectEqual(@as(u32, 0), recovered_after_replay);
     try testing.expect(!tracker.isQuarantined(filename));
     // recoverOne fails again (handler still missing) - resynced from zero,
@@ -806,13 +806,13 @@ test "durable recovery: the untracked startup path honors a standing dead-run re
     try dead_runs.writeDeadRun(allocator, durable_dir, id, run_key, filename, "handler error: boom", 1000, 10);
     try testing.expect(try dead_runs.hasDeadRun(allocator, durable_dir, id));
 
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .file_path = "/nonexistent/handler-for-startup-path-dead-run-test.ts" },
         .runtime_config = .{ .durable_oplog_dir = durable_dir },
     };
     // The untracked wrapper - exactly what runtime_cli.zig calls at server
     // startup, before any RetryTracker exists.
-    const recovered = try recoverIncompleteOplogs(allocator, config);
+    const recovered = try recoverIncompleteOplogs(allocator, spec);
     try testing.expectEqual(@as(u32, 0), recovered);
 
     // The record and the oplog must both be untouched.
@@ -846,12 +846,12 @@ test "durable recovery: dead-run lookup errors fail closed without retrying" {
 
     var tracker = RetryTracker.init(allocator);
     defer tracker.deinit();
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .file_path = "/nonexistent/handler-for-dead-run-lookup-error-test.ts" },
         .runtime_config = .{ .durable_oplog_dir = durable_dir },
     };
 
-    try testing.expectEqual(@as(u32, 0), try recoverIncompleteOplogsTracked(allocator, config, &tracker));
+    try testing.expectEqual(@as(u32, 0), try recoverIncompleteOplogsTracked(allocator, spec, &tracker));
     try testing.expect(tracker.map.get(filename) == null);
 }
 
@@ -896,11 +896,11 @@ test "durable recovery: recoverOne completes real JS execution without double-fr
         \\}
     ;
 
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = handler_code },
         .runtime_config = .{ .durable_oplog_dir = durable_dir },
     };
-    const recovered = try recoverIncompleteOplogsTracked(allocator, config, null);
+    const recovered = try recoverIncompleteOplogsTracked(allocator, spec, null);
     try testing.expectEqual(@as(u32, 1), recovered);
 }
 

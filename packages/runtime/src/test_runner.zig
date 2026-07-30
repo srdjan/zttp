@@ -22,7 +22,7 @@ const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
-const ServerConfig = @import("server.zig").ServerConfig;
+const ExecutionSpec = @import("execution_spec.zig").ExecutionSpec;
 const actor_queue = @import("actor_queue.zig");
 const handler_loader = @import("handler_loader.zig");
 const runtime_natives = @import("runtime_natives.zig");
@@ -44,8 +44,8 @@ const TestCase = struct {
     assertions: TestAssertions = .{},
 };
 
-pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
-    const test_path = config.runtime_config.test_file_path orelse return error.NoTestFile;
+pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
+    const test_path = spec.runtime_config.test_file_path orelse return error.NoTestFile;
 
     const test_source = readFile(allocator, test_path) catch |err| {
         std.log.err("Failed to read test file '{s}': {}", .{ test_path, err });
@@ -69,7 +69,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         return;
     }
 
-    const loaded = handler_loader.load(allocator, config.handler) catch |err| {
+    const loaded = handler_loader.load(allocator, spec.handler) catch |err| {
         switch (err) {
             error.UnsupportedHandlerSource => std.log.err("Handler tests require a file_path or inline_code handler source", .{}),
             else => std.log.err("Handler tests failed to load handler: {}", .{err}),
@@ -82,7 +82,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
 
     // Set replay_file_path sentinel so Runtime installs replay stubs
     // instead of real virtual module functions.
-    var test_config = config.runtime_config;
+    var test_config = spec.runtime_config;
     test_config.trace_file_path = null;
     test_config.replay_file_path = "test";
     // Disable arena escape enforcement: each test creates an isolated runtime

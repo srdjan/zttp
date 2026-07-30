@@ -14,6 +14,7 @@ const Dir = std.Io.Dir;
 const Runtime = engine.Runtime;
 const HandlerPool = engine.HandlerPool;
 const RuntimeConfig = engine.RuntimeConfig;
+const execution_spec = @import("execution_spec.zig");
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
 const HttpRequestView = http_types.HttpRequestView;
@@ -1435,27 +1436,21 @@ pub const ServerConfig = struct {
     /// for `zttp demo`, and all mutation is scoped to the generated
     /// workspace.
     studio_demo_root: ?[]const u8 = null,
+
+    /// The composition edge. Everything that executes a handler without
+    /// serving HTTP - durable recovery and scheduling, replay, handler tests -
+    /// takes this projection rather than the whole config, so the serving
+    /// surface stays out of their import graph.
+    pub fn executionSpec(self: *const ServerConfig) execution_spec.ExecutionSpec {
+        return .{ .handler = self.handler, .runtime_config = self.runtime_config };
+    }
 };
 
-pub const HandlerSource = union(enum) {
-    /// Inline JavaScript code
-    inline_code: []const u8,
-
-    /// Path to JavaScript file
-    file_path: []const u8,
-
-    /// Pre-compiled bytecode embedded at build time (via -Dhandler)
-    embedded_bytecode: []const u8,
-
-    /// Pre-compiled bytecode extracted from self-extracting binary at runtime
-    appended_payload: AppendedPayload,
-};
-
-pub const AppendedPayload = struct {
-    bytecode: []const u8,
-    dep_bytecodes: []const []const u8,
-    contract_json: ?[]const u8 = null,
-};
+// Declared in `execution_spec.zig`, next to the `ExecutionSpec` that carries
+// them below the server edge. Re-exported here because the whole CLI surface
+// spells them `server.HandlerSource`.
+pub const HandlerSource = execution_spec.HandlerSource;
+pub const AppendedPayload = execution_spec.AppendedPayload;
 
 // ============================================================================
 // Server Implementation

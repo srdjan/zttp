@@ -16,15 +16,15 @@ const Runtime = @import("zruntime.zig").Runtime;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
-const ServerConfig = @import("server.zig").ServerConfig;
+const ExecutionSpec = @import("execution_spec.zig").ExecutionSpec;
 const handler_loader = @import("handler_loader.zig");
 const runtime_natives = @import("runtime_natives.zig");
 
 const trace = zq.trace;
 
 /// Run the replay engine.
-pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
-    const replay_path = config.runtime_config.replay_file_path orelse return error.NoReplayFile;
+pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
+    const replay_path = spec.runtime_config.replay_file_path orelse return error.NoReplayFile;
 
     var loaded = try loadTraceGroups(allocator, replay_path);
     defer loaded.deinit(allocator);
@@ -35,7 +35,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
         return error.InvalidReplayFixture;
     }
 
-    const handler_source = handler_loader.load(allocator, config.handler) catch |err| {
+    const handler_source = handler_loader.load(allocator, spec.handler) catch |err| {
         switch (err) {
             error.UnsupportedHandlerSource => std.log.err("Replay requires a file_path or inline_code handler source", .{}),
             else => std.log.err("Replay failed to load handler: {}", .{err}),
@@ -46,7 +46,7 @@ pub fn run(allocator: std.mem.Allocator, config: ServerConfig) !void {
 
     // Build replay runtime config: keep replay_file_path set so Runtime
     // installs replay stubs instead of real virtual module functions.
-    var replay_config = config.runtime_config;
+    var replay_config = spec.runtime_config;
     replay_config.trace_file_path = null;
     // replay_file_path stays set to signal replay mode
 
@@ -579,12 +579,12 @@ test "replay mismatch returns verification failure" {
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = replay_exit_test_trace });
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: false }); }" },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try std.testing.expectError(error.ReplayVerificationFailed, run(allocator, config));
+    try std.testing.expectError(error.ReplayVerificationFailed, run(allocator, spec));
 }
 
 test "replay rejects a malformed trace line" {
@@ -596,12 +596,12 @@ test "replay rejects a malformed trace line" {
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = "not json\n" });
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try std.testing.expectError(error.InvalidTraceJson, run(allocator, config));
+    try std.testing.expectError(error.InvalidTraceJson, run(allocator, spec));
 }
 
 test "replay rejects an unknown trace entry type" {
@@ -618,12 +618,12 @@ test "replay rejects an unknown trace entry type" {
     ;
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = fixture });
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try std.testing.expectError(error.InvalidTraceEntry, run(allocator, config));
+    try std.testing.expectError(error.InvalidTraceEntry, run(allocator, spec));
 }
 
 test "replay rejects a truncated response-less trace" {
@@ -639,12 +639,12 @@ test "replay rejects a truncated response-less trace" {
     ;
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = fixture });
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try std.testing.expectError(error.InvalidTraceEntry, run(allocator, config));
+    try std.testing.expectError(error.InvalidTraceEntry, run(allocator, spec));
 }
 
 test "replay rejects a zero-trace fixture" {
@@ -656,12 +656,12 @@ test "replay rejects a zero-trace fixture" {
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = "" });
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try std.testing.expectError(error.InvalidReplayFixture, run(allocator, config));
+    try std.testing.expectError(error.InvalidReplayFixture, run(allocator, spec));
 }
 
 test "replay trace errors and mismatches are verification failures" {
@@ -673,7 +673,7 @@ test "replay trace errors and mismatches are verification failures" {
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = replay_mismatch_and_error_trace });
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code =
         \\function handler(req) {
         \\  if (req.path === "/error") return missing();
@@ -683,7 +683,7 @@ test "replay trace errors and mismatches are verification failures" {
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try std.testing.expectError(error.ReplayVerificationFailed, run(allocator, config));
+    try std.testing.expectError(error.ReplayVerificationFailed, run(allocator, spec));
 }
 
 test "replay hard error stays distinct from verification failure" {
@@ -694,12 +694,12 @@ test "replay hard error stays distinct from verification failure" {
     defer tmp.cleanup();
 
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try std.testing.expectError(error.FileNotFound, run(allocator, config));
+    try std.testing.expectError(error.FileNotFound, run(allocator, spec));
 }
 
 test "all-identical replay returns success" {
@@ -711,10 +711,10 @@ test "all-identical replay returns success" {
 
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "trace.jsonl", .data = replay_exit_test_trace });
     const trace_path = try replayExitTestPath(allocator, &tmp);
-    const config = ServerConfig{
+    const spec = ExecutionSpec{
         .handler = .{ .inline_code = "function handler(req) { return Response.json({ ok: true }); }" },
         .runtime_config = .{ .replay_file_path = trace_path },
     };
 
-    try run(allocator, config);
+    try run(allocator, spec);
 }

@@ -1,4 +1,4 @@
-//! Shared loader for `ServerConfig.handler` sources.
+//! Shared loader for `ExecutionSpec.handler` sources.
 //!
 //! Replay, handler-test, and durable-recovery runners share this loader so
 //! the embedded_bytecode and appended_payload branches are declared once.
@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const zq = @import("zts");
-const server = @import("server.zig");
+const execution_spec = @import("execution_spec.zig");
 
 pub const LoadedHandler = struct {
     /// Owned buffer holding the handler source code. Free with `allocator.free`.
@@ -18,7 +18,7 @@ pub const LoadedHandler = struct {
 
 pub fn load(
     allocator: std.mem.Allocator,
-    handler: server.HandlerSource,
+    handler: execution_spec.HandlerSource,
 ) !LoadedHandler {
     return switch (handler) {
         .file_path => |path| .{
@@ -53,7 +53,7 @@ test "load embedded_bytecode returns UnsupportedHandlerSource" {
 }
 
 test "load appended_payload returns UnsupportedHandlerSource" {
-    const payload: server.AppendedPayload = .{
+    const payload: execution_spec.AppendedPayload = .{
         .bytecode = &.{},
         .dep_bytecodes = &.{},
         .contract_json = null,

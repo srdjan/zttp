@@ -43,7 +43,7 @@ This profile therefore makes four decisions:
 | Restored data literals | `null`, only as an explicit value |
 | Added type syntax | Bounded generic parameters with `extends` |
 | Added type capability | Sound function generics and contractive recursive aliases |
-| Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes` |
+| Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes`, `HtmlNode` |
 | Added concurrency model | None; retain explicit `parallel` and `race` |
 | Added error channel | None; errors remain ordinary tagged values |
 
@@ -291,6 +291,10 @@ Rules:
   returns `Result` when decoding can fail.
 - Record shapes are fixed after allocation. Existing writable fields may be
   updated. Fields cannot be added or deleted dynamically.
+- A fixed record key that is a valid identifier MUST use the identifier in a
+  literal or type and dot access at a read site. Any other fixed key MUST use a
+  string literal and the same string literal in bracket form. Numeric record
+  keys are excluded; use a string key or a number-keyed `Dict`.
 - Arrays may be locally mutable. Aliased or captured mutation is visible as a
   state effect and may prevent purity, determinism, or isolation proofs.
 - `Dict` is immutable and has deterministic insertion-order iteration.
@@ -310,6 +314,7 @@ The profile permits:
 - `typeof` in value position
 - direct and optional static member access
 - numeric array and tuple indexing
+- literal bracket access to a quoted fixed record field
 - calls with fixed positional arguments
 - array and record literals
 - finite array spread
@@ -397,9 +402,9 @@ Rules:
 `assert predicate;` installs forward narrowing or halts with a typed runtime
 assertion fault.
 
-`assert predicate, fallback;` returns `fallback` from the current handler when
-the predicate is false. The fallback type MUST be assignable to the enclosing
-return type.
+`assert predicate, fallback;` returns `fallback` from the enclosing function
+when the predicate is false. The fallback type MUST be assignable to the
+enclosing return type.
 
 Use `assert` for an invariant. Use `Result` for expected failure.
 
@@ -486,7 +491,8 @@ merging, inheritance, and `implements` remain excluded.
 Admitted types are:
 
 - `unknown`, `never`, `undefined`, `null`, `boolean`, `number`, `string`,
-  `Bytes`, `Request`, `Response`, and capability-specific opaque types
+  `Bytes`, `HtmlNode`, `Request`, `Response`, and capability-specific opaque
+  types
 - boolean, number, and string literals
 - arrays, readonly arrays, and fixed tuples
 - fixed records with readonly and optional fields
@@ -536,9 +542,13 @@ core programs without erased annotations being used as runtime evidence.
 TSX is an optional surface elaboration into specified `h` and `Fragment`
 operations.
 
+- `HtmlNode` is an opaque immutable virtual-node type.
+- `HtmlChild` is `HtmlNode | string | number | boolean | null | undefined |
+  readonly HtmlChild[]`.
 - Components are named functions.
 - Props are fixed records.
-- Children are finite arrays.
+- A component returns `HtmlNode`.
+- Children are finite arrays of `HtmlChild`.
 - Rendered text is escaped by default.
 - Raw HTML requires an explicit capability-reviewed API.
 - The tokenizer MUST parse ordinary `<`, `<=`, `>`, and `>=` expressions
@@ -548,6 +558,36 @@ operations.
 
 JSX introduces no component lifecycle, ambient state, hooks, class
 components, or hidden effect scheduling.
+
+The surface elaborates through these typed intrinsics:
+
+```ts
+type HtmlChild =
+  | HtmlNode
+  | string
+  | number
+  | boolean
+  | null
+  | undefined
+  | readonly HtmlChild[];
+
+type Component<P> = (
+  props: P & { readonly children?: readonly HtmlChild[] },
+) => HtmlNode;
+
+jsxElement<P>(
+  tag: string | Component<P>,
+  props: P | undefined,
+  children: readonly HtmlChild[],
+): HtmlNode
+
+jsxFragment(children: readonly HtmlChild[]): HtmlNode
+renderToString(node: HtmlNode): string
+```
+
+The intrinsic names describe the semantics and are not additional source
+syntax. `null`, `undefined`, and boolean children render no text. Nested child
+arrays flatten in source order. Text and attribute values are escaped.
 
 ## 6. Pure application data abstractions
 
@@ -568,7 +608,10 @@ ok<T>(value: T): Result<T, never>
 err<E>(error: E): Result<never, E>
 mapResult<T, U, E>(result: Result<T, E>, f: (value: T) => U): Result<U, E>
 mapError<T, E, F>(result: Result<T, E>, f: (error: E) => F): Result<T, F>
-andThen<T, U, E>(result: Result<T, E>, f: (value: T) => Result<U, E>): Result<U, E>
+andThen<T, U, E, F>(
+  result: Result<T, E>,
+  f: (value: T) => Result<U, F>,
+): Result<U, E | F>
 ```
 
 The type is predeclared. Constructors and combinators are statically named
@@ -606,10 +649,6 @@ equals positive zero. String keys compare by scalar sequence. The pure
 operations are statically named imports from the zero-capability
 `zttp:collections` module.
 
-`Set<T>` does not need a new semantic primitive. If application evidence
-requires it, its pure API is defined as `Dict<T, true>` with the representation
-hidden by an alias.
-
 ### 6.3 `Bytes`
 
 `Bytes` prevents text strings from becoming an accidental binary container.
@@ -625,7 +664,48 @@ hex, Base64, and UTF-8 codecs.
 - Pure byte operations are statically named imports from the zero-capability
   `zttp:bytes` module.
 
-### 6.4 Arrays and higher-order functions
+### 6.4 JSON
+
+JSON uses the recursive `JsonValue` type from Section 5.7. Object nodes are
+`Dict<string, JsonValue>`, not dynamic-shape records.
+
+The canonical boundary is:
+
+```ts
+type JsonError =
+  | { kind: "invalid-syntax"; offset: number }
+  | { kind: "duplicate-key"; key: string; offset: number }
+  | { kind: "depth-limit"; limit: number }
+  | { kind: "size-limit"; limit: number }
+  | { kind: "non-finite-number" }
+  | { kind: "cycle" };
+
+decodeJson(text: string): Result<JsonValue, JsonError>
+encodeJson<T>(value: T): Result<string, JsonError>
+```
+
+Rules:
+
+- decoding validates UTF-8, syntax, depth, and configured input size,
+- duplicate object keys are rejected,
+- object insertion order follows wire order,
+- the checker admits `encodeJson<T>` only when `T` contains JSON scalars,
+  arrays, tuples, fixed records, or string-keyed `Dict` values,
+- encoding preserves array order, fixed-record declaration order, and
+  dictionary insertion order,
+- optional `undefined` fields are omitted and `undefined` array elements are
+  rejected,
+- non-finite numbers and cyclic values are rejected,
+- `null` round-trips as data,
+- and every failure is a typed `Result`.
+
+The limits are selected by the runtime policy and bound into checked and
+certified artifacts. Trapping `JSON.parse`, silent `undefined` on parse
+failure, and unchecked `JSON.stringify` are excluded from the canonical
+profile. Schema-directed decoders return a precise application type rather
+than `unknown`.
+
+### 6.5 Arrays and higher-order functions
 
 The canonical finite operations are fully generic:
 
@@ -638,9 +718,11 @@ some<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 every<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 ```
 
-Each operation uses snapshot-finite iteration. Callback effects compose into
-the caller. The callback cannot be treated as pure merely because it is an
-arrow expression.
+Each operation uses snapshot-finite iteration. Its callback MUST be pure. The
+checker verifies the callback body and every reachable helper rather than
+assuming that an arrow expression is pure. An effectful traversal uses
+`for...of`, which keeps sequencing and failure visible without adding
+effect-polymorphic callback types.
 
 The canonical source spelling is an intrinsic array method such as
 `items.map(f)`. Dispatch is resolved statically from the receiver type and
@@ -701,6 +783,107 @@ Rules:
 - There is no user-visible Promise, microtask queue, detached task, or
   implicit scheduler.
 
+### 7.2 Minimum application ABI
+
+The profile is not application-complete if its framework modules expose
+`object`, `unknown`, or an untagged failure where the application knows a more
+precise type. At minimum, the module registry MUST express the following
+contracts.
+
+#### HTTP
+
+```ts
+type HttpHandler = (request: Request) => Response;
+
+requestBody(request: Request): Bytes
+requestText(request: Request): Result<string, BodyError>
+requestJson(request: Request): Result<JsonValue, JsonError | BodyError>
+responseJson<T>(value: T, status: number): Result<Response, JsonError>
+fetch(
+  url: string,
+  options: FetchOptions,
+): Result<Response, FetchError>
+```
+
+`responseJson<T>` uses the JSON-encodability rule from Section 6.4. Request
+headers, method, URL, route parameters, status, and response headers have
+precise fixed or opaque types. Attacker-controlled data enters as `string`,
+`Bytes`, `JsonValue`, or a schema-decoded application type, never as silently
+trusted `unknown`.
+
+#### WebSocket
+
+```ts
+distinct type SocketId = string;
+
+type WebSocketEvent =
+  | { kind: "open"; socket: SocketId }
+  | { kind: "message"; socket: SocketId; data: string | Bytes }
+  | { kind: "close"; socket: SocketId; code: number; reason: string };
+
+type WebSocketCommand =
+  | { kind: "send"; socket: SocketId; data: string | Bytes }
+  | { kind: "close"; socket: SocketId; code: number; reason: string };
+
+type WebSocketHandler<E> = (
+  event: WebSocketEvent,
+) => Result<readonly WebSocketCommand[], E>;
+```
+
+The runtime executes returned commands at the effect boundary. Broadcast,
+attachment, and auto-response APIs use the same `SocketId`, payload, and
+typed-error contracts.
+
+#### Queue
+
+```ts
+distinct type MessageId = string;
+distinct type ReceiptId = string;
+
+type QueueMessage<T> = {
+  readonly id: MessageId;
+  readonly receipt: ReceiptId;
+  readonly attempt: number;
+  readonly payload: T;
+};
+
+type QueueDecision =
+  | { kind: "ack"; receipt: ReceiptId }
+  | { kind: "retry"; receipt: ReceiptId; afterMs: number; reason: string }
+  | { kind: "dead-letter"; receipt: ReceiptId; reason: string };
+
+send<T>(queue: string, payload: T): Result<MessageId, QueueError>
+```
+
+`send<T>` requires a statically JSON-encodable payload. A consumer returns a
+`QueueDecision` or calls typed `ack`, `retry`, or dead-letter operations.
+Delivery attempt, retry delay, idempotency key, and acknowledgement semantics
+are explicit in the module contract and replay trace.
+
+#### Durable workflow
+
+```ts
+run<I, O, E>(
+  id: string,
+  input: I,
+  body: (input: I) => Result<O, E>,
+): Result<O, E | DurableError>
+
+step<O, E>(
+  name: string,
+  body: () => Result<O, E>,
+): Result<O, E | StepError>
+```
+
+Inputs and outputs MUST be statically serializable. Workflow bodies and step
+bodies are named functions. The contract defines retry, timeout, cancellation,
+signal, compensation, versioning, and replay behavior. A replayed step returns
+its recorded typed result without silently running its effect twice.
+
+These are minimum type shapes, not a requirement that every module use these
+exact source names. The versioned registry binds each concrete exported name
+to one of the specified roles.
+
 ## 8. Compact grammar
 
 This grammar describes structure, not lexical details or precedence.
@@ -733,6 +916,7 @@ BindingDecl  ::= ("const" | "let") Bind [":" Type] "=" Expr ";"
 Bind         ::= Ident | ObjectBind | ArrayBind
 ObjectBind   ::= "{" BindField ("," BindField)* [","] "}"
 BindField    ::= Ident [":" Ident]
+               | String ":" Ident
 ArrayBind    ::= "[" Ident? ("," Ident?)* "]"
 
 Block        ::= "{" Stmt* "}"
@@ -769,7 +953,8 @@ ArrayExpr    ::= "[" [ArrayItem ("," ArrayItem)* [","]] "]"
 ArrayItem    ::= Expr | "..." Expr
 RecordExpr   ::= "{" ["..." Expr ","] [RecordField
                   ("," RecordField)* [","]] "}"
-RecordField  ::= Ident [":" Expr]
+RecordField  ::= Ident [":" Expr] | String ":" Expr
+PropertyName ::= Ident | String
 CallExpr     ::= Expr TypeArgs? "(" [Args] ")"
 Args         ::= Expr ("," Expr)* [","]
 TypeArgs     ::= "<" Type ("," Type)* ">"
@@ -784,7 +969,7 @@ MatchArm     ::= "when" Pattern ":" Expr [","]
 DefaultArm   ::= "default" ":" Expr [","]
 Pattern      ::= Literal | "{" PatternFields "}"
 PatternFields ::= PatternField ("," PatternField)* [","]
-PatternField ::= Ident ":" Literal
+PatternField ::= PropertyName ":" Literal
 
 Type         ::= Primitive
                | LiteralType
@@ -800,7 +985,12 @@ Type         ::= Primitive
 
 Primitive    ::= "unknown" | "never" | "undefined" | "null"
                | "boolean" | "number" | "string" | "Bytes"
-ScalarType   ::= "boolean" | "number" | "string"
+LiteralType  ::= String | Number | "true" | "false"
+TupleType    ::= ["readonly"] "[" [Type ("," Type)* [","]] "]"
+RecordType   ::= "{" [RecordTypeField (";" RecordTypeField)* [";"]] "}"
+RecordTypeField ::= ["readonly"] PropertyName ["?"] ":" Type
+FunctionType ::= TypeParams? "(" [Params] ")" "=>" Type
+ScalarType   ::= "number" | "string"
 ```
 
 The normative parser specification must define precedence, associativity,
@@ -1178,9 +1368,12 @@ The corpus MUST include:
 - precise `Result<T, E>`
 - immutable deterministic `Dict<K, V>`
 - immutable `Bytes`
+- opaque typed `HtmlNode` and finite `HtmlChild`
 - explicit JSON `null`
+- a typed, resource-bounded JSON codec
 - fully typed finite array operations
 - tuple-preserving `parallel` and tagged `race`
+- precise minimum HTTP, WebSocket, queue, and durable-workflow ABIs
 - snapshot semantics for every finite traversal
 - property-specific proof grades and an independent certificate verifier
 
@@ -1276,10 +1469,18 @@ type JsonValue =
   | Dict<string, JsonValue>;
 
 function depth(value: JsonValue): number {
-  if (value === null) return 1;
-  if (typeof value === "boolean") return 1;
-  if (typeof value === "number") return 1;
-  if (typeof value === "string") return 1;
+  if (value === null) {
+    return 1;
+  }
+  if (typeof value === "boolean") {
+    return 1;
+  }
+  if (typeof value === "number") {
+    return 1;
+  }
+  if (typeof value === "string") {
+    return 1;
+  }
 
   if (Array.isArray(value)) {
     let maximum = 0;

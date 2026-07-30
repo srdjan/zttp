@@ -342,7 +342,7 @@ fn serveCommandWithDebugPanicPath(
     }
 
     if (config.runtime_config.replay_file_path != null) {
-        replay_runner.run(allocator, config) catch |err| {
+        replay_runner.run(allocator, config.executionSpec()) catch |err| {
             if (err != error.ReplayVerificationFailed) {
                 std.log.err("Replay error: {}", .{err});
             }
@@ -352,7 +352,7 @@ fn serveCommandWithDebugPanicPath(
     }
 
     if (config.runtime_config.test_file_path != null) {
-        test_runner.run(allocator, config) catch |err| {
+        test_runner.run(allocator, config.executionSpec()) catch |err| {
             if (err != error.TestsFailed and err != error.InvalidTestFixture) {
                 std.log.err("Test error: {}", .{err});
             }
@@ -365,11 +365,11 @@ fn serveCommandWithDebugPanicPath(
     defer if (scheduler) |*worker| worker.deinit();
 
     if (config.runtime_config.durable_oplog_dir != null) {
-        _ = durable_recovery.recoverIncompleteOplogs(allocator, config) catch |err| {
+        _ = durable_recovery.recoverIncompleteOplogs(allocator, config.executionSpec()) catch |err| {
             std.log.err("Durable recovery error: {}", .{err});
             return;
         };
-        scheduler = .{ .config = config };
+        scheduler = .{ .spec = config.executionSpec() };
         scheduler.?.start() catch |err| {
             std.log.err("Durable scheduler error: {}", .{err});
             return;

@@ -97,6 +97,18 @@ depend on earlier ones; earlier slices are useful on their own.
    -> verify: those five files no longer import `server.zig`; `zig build test`,
    `test-zruntime`, examples.
 
+   DONE 2026-07-30. `execution_spec.zig` now holds `HandlerSource`,
+   `AppendedPayload`, and `ExecutionSpec`; `server.zig` re-exports the two unions and
+   exposes the mapping as `ServerConfig.executionSpec()`, called at the four
+   `runtime_cli.zig` sites. All five files stopped importing `server.zig`; the only
+   remaining importers are the CLI, live reload, and the server's own tests. The
+   `config` parameters became `spec` in the three files where the type changed - taking
+   care not to rename the `config: RuntimeConfig` parameters in the same files, which a
+   blanket rename did hit and which was reverted. Test collection for the new file was
+   confirmed by breaking its test and watching `zig build test` fail, since a file
+   reachable only through an import chain is exactly where the collection hazard lives.
+   `zig build test`, `test-zruntime`, and 43/43 examples pass.
+
 2. **`Context.host`** (enabler). Add the slot, set it from the runtime, and prove it round-trips
    through a native callback in a test. No behavior change yet.
    -> verify: `zig build test-zts test-zruntime`.

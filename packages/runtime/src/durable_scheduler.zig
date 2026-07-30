@@ -7,10 +7,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const durable_recovery = @import("durable_recovery.zig");
-const ServerConfig = @import("server.zig").ServerConfig;
+const ExecutionSpec = @import("execution_spec.zig").ExecutionSpec;
 
 pub const DurableScheduler = struct {
-    config: ServerConfig,
+    spec: ExecutionSpec,
     stop_requested: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     thread: ?std.Thread = null,
 
@@ -38,7 +38,7 @@ pub const DurableScheduler = struct {
         defer tracker.deinit();
 
         while (!self.stop_requested.load(.acquire)) {
-            _ = durable_recovery.recoverIncompleteOplogsTracked(allocator, self.config, &tracker) catch |err| {
+            _ = durable_recovery.recoverIncompleteOplogsTracked(allocator, self.spec, &tracker) catch |err| {
                 std.log.err("Durable scheduler poll failed: {}", .{err});
             };
             if (self.stop_requested.load(.acquire)) break;
