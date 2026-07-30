@@ -20,9 +20,10 @@ const http = @import("runtime_http.zig");
 const workflow_queue = @import("workflow_queue.zig");
 
 const Runtime = zruntime.Runtime;
-const HttpResponse = zruntime.HttpResponse;
-const HttpRequestView = zruntime.HttpRequestView;
-const QueryParam = zruntime.QueryParam;
+const http_types = @import("http_types.zig");
+const HttpResponse = http_types.HttpResponse;
+const HttpRequestView = http_types.HttpRequestView;
+const QueryParam = http_types.QueryParam;
 const SystemRuntime = @import("in_process_dispatch.zig").SystemRuntime;
 const Target = @import("in_process_dispatch.zig").Target;
 

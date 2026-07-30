@@ -9,7 +9,7 @@ const compat = @import("zts").compat;
 const zruntime = @import("zruntime.zig");
 const zq = @import("zts");
 const Runtime = zruntime.Runtime;
-const RuntimeConfig = zruntime.RuntimeConfig;
+const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 const PerfStats = zq.interpreter.PerfStats;
 const OptStats = zq.OptStats;
 

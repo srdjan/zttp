@@ -27,7 +27,6 @@ const console = @import("runtime_console.zig");
 const workflow = @import("runtime_workflow.zig");
 const http = @import("runtime_http.zig");
 const natives = @import("runtime_natives.zig");
-pub const getStringData = natives.getStringData;
 const buildQueryObject = natives.buildQueryObject;
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 
@@ -58,12 +57,6 @@ const buildFetchUrl = http.buildFetchUrl;
 const buildServiceUrl = http.buildServiceUrl;
 const parseFetchArgs = http.parseFetchArgs;
 const scopeCall1 = http.scopeCall1;
-// Re-exported for other runtime siblings (runtime_builtins.zig,
-// durable_executor.zig, trace_request_recorder.zig) that referenced these by
-// their original zruntime.* names before the runtime_http.zig split.
-pub const beginBodyRead = http.beginBodyRead;
-pub const createFetchResponse = http.createFetchResponse;
-pub const splitHeaderKV = http.splitHeaderKV;
 
 // Bytecode caching for faster cold starts
 const bytecode_cache = zq.bytecode_cache;
@@ -72,12 +65,9 @@ const bytecode_cache = zq.bytecode_cache;
 const http_types = @import("http_types.zig");
 const websocket_pool = @import("websocket_pool.zig");
 const ws_callbacks = @import("ws_runtime_callbacks.zig");
-pub const QueryParam = http_types.QueryParam;
-pub const HttpRequestView = http_types.HttpRequestView;
-pub const HttpRequestOwned = http_types.HttpRequestOwned;
-pub const HttpHeader = http_types.HttpHeader;
-pub const ResponseHeader = http_types.ResponseHeader;
-pub const HttpResponse = http_types.HttpResponse;
+const HttpRequestView = http_types.HttpRequestView;
+const HttpRequestOwned = http_types.HttpRequestOwned;
+const HttpResponse = http_types.HttpResponse;
 
 // ============================================================================
 // Runtime Configuration
@@ -86,7 +76,7 @@ pub const HttpResponse = http_types.HttpResponse;
 const runtime_config_mod = @import("runtime_config.zig");
 const cost_meter = zq.context.cost_meter;
 
-pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
+const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 
 /// In-process registry of co-located sub-handlers, used by zttp:workflow to
 /// dispatch from an orchestrator handler without HTTP.

@@ -25,7 +25,7 @@ const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const capsule = @import("capsule.zig");
 const replay_runner = @import("replay_runner.zig");
-const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
+const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 
 const trace = zts.trace;
 const file_io = zts.file_io;

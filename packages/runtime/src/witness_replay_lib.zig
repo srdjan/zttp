@@ -13,7 +13,7 @@ const std = @import("std");
 const zq = @import("zts");
 const pi_app = @import("pi_app");
 const replay_runner = @import("replay_runner.zig");
-const RuntimeConfig = @import("zruntime.zig").RuntimeConfig;
+const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 
 const trace = zq.trace;
 const Verdict = pi_app.witness_replay.Verdict;

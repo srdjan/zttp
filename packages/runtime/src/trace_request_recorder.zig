@@ -16,9 +16,9 @@ const zruntime = @import("zruntime.zig");
 const http_types = @import("http_types.zig");
 
 const Runtime = zruntime.Runtime;
-const HttpResponse = zruntime.HttpResponse;
+const HttpResponse = @import("http_types.zig").HttpResponse;
 const HttpRequestView = http_types.HttpRequestView;
-const splitHeaderKV = zruntime.splitHeaderKV;
+const splitHeaderKV = @import("runtime_http.zig").splitHeaderKV;
 
 /// Set up the per-request recorder (lazily creating it on first request) and
 /// record the inbound request. Returns the timer to hand to

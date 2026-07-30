@@ -22,9 +22,10 @@ const runtime_config_mod = @import("runtime_config.zig");
 const natives = @import("runtime_natives.zig");
 const trace_helpers = @import("trace_helpers.zig");
 const zruntime = @import("zruntime.zig");
+const runtime_http = @import("runtime_http.zig");
 
 const Runtime = zruntime.Runtime;
-const HttpResponse = zruntime.HttpResponse;
+const HttpResponse = @import("http_types.zig").HttpResponse;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const compat = zq.compat;
 const ActiveDurableRun = Runtime.ActiveDurableRun;
@@ -45,8 +46,8 @@ const tryLockOplogFd = runtime_config_mod.tryLockOplogFd;
 const parseHeadersFromJson = trace_helpers.parseHeadersFromJson;
 
 // The few helpers that genuinely live in zruntime (pub there).
-const createFetchResponse = zruntime.createFetchResponse;
-const splitHeaderKV = zruntime.splitHeaderKV;
+const createFetchResponse = runtime_http.createFetchResponse;
+const splitHeaderKV = runtime_http.splitHeaderKV;
 
 const StepDeadlineGuard = struct {
     deadline_ns: u64,

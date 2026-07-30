@@ -2,17 +2,18 @@
 //!
 //! Each `*Native` function matches the engine's native-fn signature
 //! (ctx_ptr, this, args) -> anyerror!zq.JSValue and is registered as a
-//! method on a JS prototype during runtime setup. Helpers used here
-//! (`beginBodyRead`, `getStringData`) live in zruntime.zig because most
-//! other natives in zruntime also depend on them.
+//! method on a JS prototype during runtime setup. The helpers used here
+//! (`beginBodyRead`, `getStringData`) live with the HTTP natives they
+//! belong to.
 
 const std = @import("std");
 const zq = @import("zts");
-const zruntime = @import("zruntime.zig");
+const http = @import("runtime_http.zig");
+const natives = @import("runtime_natives.zig");
 
 pub fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = zruntime.beginBodyRead(ctx, this);
+    const body_val = http.beginBodyRead(ctx, this);
     if (ctx.hasException()) return zq.JSValue.exception_val;
     if (body_val.isNull() or body_val.isUndefined()) {
         return ctx.createString("");
@@ -25,11 +26,11 @@ pub fn bodyTextNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSVal
 
 pub fn bodyJsonNative(ctx_ptr: *anyopaque, this: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const body_val = zruntime.beginBodyRead(ctx, this);
+    const body_val = http.beginBodyRead(ctx, this);
     if (ctx.hasException()) return zq.JSValue.exception_val;
     if (body_val.isNull() or body_val.isUndefined()) {
         return zq.JSValue.undefined_val;
     }
-    const body = zruntime.getStringData(body_val) orelse return zq.JSValue.undefined_val;
+    const body = natives.getStringData(body_val) orelse return zq.JSValue.undefined_val;
     return zq.builtins.parseJsonValue(ctx, body) catch zq.JSValue.undefined_val;
 }

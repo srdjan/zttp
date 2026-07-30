@@ -21,13 +21,14 @@ const http_parser = @import("http_parser.zig");
 const retry_backoff = @import("retry_backoff.zig");
 
 const Runtime = zruntime.Runtime;
-const HttpResponse = zruntime.HttpResponse;
-const HttpRequestView = zruntime.HttpRequestView;
-const HttpRequestOwned = zruntime.HttpRequestOwned;
-const QueryParam = zruntime.QueryParam;
-const HttpHeader = zruntime.HttpHeader;
-const ResponseHeader = zruntime.ResponseHeader;
-const RuntimeConfig = zruntime.RuntimeConfig;
+const http_types = @import("http_types.zig");
+const HttpResponse = http_types.HttpResponse;
+const HttpRequestView = http_types.HttpRequestView;
+const HttpRequestOwned = http_types.HttpRequestOwned;
+const QueryParam = http_types.QueryParam;
+const HttpHeader = http_types.HttpHeader;
+const ResponseHeader = http_types.ResponseHeader;
+const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 
 const FetchResponseObjects = struct {
     value: zq.JSValue,
