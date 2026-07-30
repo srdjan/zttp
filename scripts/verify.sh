@@ -9,6 +9,10 @@
 # that build.zig (see the comment above the test step) warns about. We invoke
 # them as separate processes here rather than adding a `verify` build step.
 #
+# The docs drift and link gates are NOT separate steps here: `test-docs-drift`
+# and `test-doc-links` are both dependencies of the `test` step (build.zig), and
+# neither is cached, so step 1 already runs them. Do not re-add them.
+#
 # The format gate is a separate CI job (ci.yml: Check formatting); it is run
 # LAST here so a local `bash scripts/verify.sh` still catches formatting drift
 # without gating the test suite on it. Note: the repo is fmt-clean only under
@@ -38,9 +42,6 @@ fi
 
 step "zig build test-zruntime  (standalone runtime root)"
 zig build test-zruntime
-
-step "zig build test-docs-drift test-doc-links  (docs drift and link gates)"
-zig build test-docs-drift test-doc-links
 
 step "zig build -Doptimize=ReleaseFast  (release binaries)"
 zig build -Doptimize=ReleaseFast

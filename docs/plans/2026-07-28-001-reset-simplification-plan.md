@@ -1261,8 +1261,16 @@ passing.
    collected none of its 96 test blocks. Deleting it moved the collected count by zero, against
    a positive control where adding one test moved it by one. See
    `docs/plans/2026-07-30-002-wave3-item1-test-duplication.md`.
-2. Remove the redundant `test-docs-drift` invocation in CI and in `verify.sh` step 2, and
-   add `test-doc-links` to the `test` step.
+2. DONE, and half the premise was already true. `test-doc-links` was already a dependency of
+   the `test` step, next to `test-docs-drift`. What remained was the redundancy: both are
+   uncached Run steps, so `zig build test` executes both scripts every time, and the separate
+   `zig build test-docs-drift test-doc-links` step ran them a second time. Measured before
+   cutting: two back-to-back invocations of the pair both re-executed (no caching), and
+   `zig build test -j1` prints `docs drift: OK` and `documentation links ok` on its own.
+   Removed that step from `verify.sh`, `ci.yml`, and `release.yml`, and recorded the
+   invariant in `build.zig` and in the `verify.sh` header so it does not come back. Cost:
+   a drift failure now surfaces inside the aggregate test job rather than under its own CI
+   step label.
 3. Table-drive the nine host-tool and pi test roots and the five `embedded_handler` stub
    attachments in `build.zig`. About 150 to 180 lines of 972.
 4. Delete the three unused package-local `test` steps.

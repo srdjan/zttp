@@ -66,9 +66,6 @@ jobs:
       - name: Run focused runtime tests
         run: zig build test-zruntime
 
-      - name: Run docs drift and link gates
-        run: zig build test-docs-drift test-doc-links
-
       - name: Build release binaries
         run: zig build -Doptimize=ReleaseFast
 

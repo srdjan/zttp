@@ -752,6 +752,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_cassette_tests.step);
     test_step.dependOn(&run_deploy_manifest_tests.step);
     test_step.dependOn(&capability_audit.step);
+    // The docs drift and link gates run here, and only here: neither Run step is
+    // cached, so `zig build test` always executes both scripts. CI and
+    // scripts/verify.sh deliberately do not invoke test-docs-drift or
+    // test-doc-links a second time.
     test_step.dependOn(&docs_drift.step);
     test_step.dependOn(&doc_links.step);
     test_step.dependOn(&run_module_governance.step);
