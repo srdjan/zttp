@@ -20,60 +20,33 @@
 
 const std = @import("std");
 const json_util = @import("json_util.zig");
+const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 
 const ProvenFacts = zts_cli.deploy_manifest.ProvenFacts;
 
-// Verdict mirrors `upgrade_verifier.UpgradeVerdict` so the deploy-time card
-// uses the same words the watch-loop diff already trains the user on. We do
-// not import that enum directly: the deploy review derives its verdict from
-// a lightweight `ReviewDelta` rather than a full HandlerContract pair, and
-// keeping a local enum lets the persisted facts stay simple.
-pub const Verdict = enum {
-    safe,
-    safe_with_additions,
-    breaking,
+/// The deploy decision, shared with `zttp dev --watch --prove` and with
+/// `zttp rollout` rather than mirrored. Both mirrors this file used to carry
+/// justified themselves as keeping review.zig independent of zts types, which
+/// was never true: the package already imports `zts` and `zts_cli`.
+///
+/// `classify` derives only `.safe`, `.safe_with_additions`, and `.breaking`
+/// from a `ReviewDelta`. `.needs_review` comes from property regressions and
+/// coverage gaps that only `upgrade_verifier.analyzeUpgrade` computes, so the
+/// deploy card never shows it.
+pub const Verdict = zts_cli.upgrade_verifier.UpgradeVerdict;
 
-    pub fn toString(self: Verdict) []const u8 {
-        return switch (self) {
-            .safe => "safe",
-            .safe_with_additions => "safe_with_additions",
-            .breaking => "breaking",
-        };
-    }
-};
+/// Contract-level proof completeness, owned by the engine.
+pub const ProofLevel = zts.contract_diff.ProofLevel;
 
-/// Mirrors `contract_diff.ProofLevel`. Duplicated locally so review.zig stays
-/// independent of zts contract types and so persisted JSON uses simple
-/// stable strings rather than re-exporting the engine enum.
-pub const ProofLevel = enum {
-    complete,
-    partial,
-    none,
-
-    pub fn toString(self: ProofLevel) []const u8 {
-        return switch (self) {
-            .complete => "complete",
-            .partial => "partial",
-            .none => "none",
-        };
-    }
-
-    pub fn fromString(s: []const u8) ProofLevel {
-        if (std.mem.eql(u8, s, "complete")) return .complete;
-        if (std.mem.eql(u8, s, "partial")) return .partial;
-        return .none;
-    }
-
-    /// Higher rank means stronger proof. Used to detect downgrades.
-    fn rank(self: ProofLevel) u8 {
-        return switch (self) {
-            .complete => 2,
-            .partial => 1,
-            .none => 0,
-        };
-    }
-};
+/// Higher rank means stronger proof. Used to detect downgrades.
+fn proofLevelRank(self: ProofLevel) u8 {
+    return switch (self) {
+        .complete => 2,
+        .partial => 1,
+        .none => 0,
+    };
+}
 
 pub const Route = struct {
     pattern: []const u8,
@@ -538,7 +511,7 @@ pub const ReviewDelta = struct {
         if (self.removed_capabilities.len > 0) return true;
         if (self.demoted_properties.len > 0) return true;
         if (self.proof_level_change) |change| {
-            if (change.old.rank() > change.new.rank()) return true;
+            if (proofLevelRank(change.old) > proofLevelRank(change.new)) return true;
         }
         return false;
     }
@@ -870,7 +843,7 @@ pub fn writeProofCardPlaintext(card: *const ProofCard, writer: *std.Io.Writer) !
         try renderDelta(writer, card.delta);
     }
 
-    try writeKv(writer, "  Verdict:    ", card.verdict().toString());
+    try writeKv(writer, "  Verdict:    ", card.verdict().slug());
 
     if (card.drift) |d| {
         try writeKv(writer, "  Drift:      ", d.reason);

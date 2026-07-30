@@ -1325,8 +1325,18 @@ follow them, and they should be sequenced first.
    at the composition edge so durable scheduling and recovery stop depending on the full
    server configuration.
 
-1. Collapse the four verdict vocabularies onto one type, and delete the hand-mirrored enum
-   at `proof-review/review.zig:27-30`.
+1. DONE, and the count was five, not four. Measured, the change-verdict family held
+   `contract_diff.Classification`, `upgrade_verifier.UpgradeVerdict`,
+   `system_rollout.RolloutVerdict` (a byte-for-byte duplicate of the second: same four
+   variants, same `exitCode`, same `toString`), `review.Verdict`, and `review.ProofLevel`,
+   the last two documenting their own mirroring. Their stated reason - keeping `review.zig`
+   independent of zts types - was false: the package already imports both `zts` and
+   `zts_cli`. Three deleted, leaving two types rather than one: `Classification` is what the
+   diff algorithm produces and `UpgradeVerdict` is the decision `synthesizeVerdict` derives
+   from it plus property regressions and coverage gaps. One enum would force every diff
+   switch to handle `needs_review`, which `diffContracts` cannot emit. Added
+   `UpgradeVerdict.slug` for the lowercase surfaces so no rendered byte moved. See
+   `docs/plans/2026-07-30-009-wave4-item1-verdict-vocabularies-plan.md`.
 2. Merge `zttp proof replay` into the `proofs` namespace, keeping the old spelling as a
    hidden alias for one release. This removes the naming collision that CLAUDE.md
    currently has to disclaim.

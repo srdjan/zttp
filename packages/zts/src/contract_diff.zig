@@ -34,6 +34,15 @@ pub const ProofLevel = enum {
             .none => "none",
         };
     }
+
+    /// Inverse of `toString`, for reading a persisted level back. An
+    /// unrecognized string reads as `.none`: a snapshot written by an older
+    /// binary must degrade to "no verification ran", never to a stronger claim.
+    pub fn fromString(s: []const u8) ProofLevel {
+        if (std.mem.eql(u8, s, "complete")) return .complete;
+        if (std.mem.eql(u8, s, "partial")) return .partial;
+        return .none;
+    }
 };
 
 pub fn deriveProofLevel(contract: *const HandlerContract) ProofLevel {

@@ -473,7 +473,7 @@ fn writeStatusBar(
     const verdict_text = try std.fmt.bufPrint(
         &verdict_buf,
         "Verdict: {s}",
-        .{card.verdict().toString()},
+        .{card.verdict().slug()},
     );
     const contract_text = try std.fmt.bufPrint(
         &contract_buf,

@@ -305,7 +305,7 @@ fn writeListRow(
         ts_str,
         ev.kind.toString(),
         sha_short,
-        review.classify(&delta).toString(),
+        review.classify(&delta).slug(),
         ev.facts.routes.len,
         ev.facts.env_keys.len,
         ev.facts.egress_hosts.len,
@@ -541,7 +541,7 @@ fn badgeCommand(
     try zts.file_io.writeFile(allocator, out_path, svg_buf.writer.buffered());
 
     const link: []const u8 = public_url orelse ev.facts.contract_sha;
-    try stdout.print("Wrote {s} ({s}).\n", .{ out_path, verdict.toString() });
+    try stdout.print("Wrote {s} ({s}).\n", .{ out_path, verdict.slug() });
     try stdout.print("Paste into your README:\n\n", .{});
     try stdout.print("[![zttp verified]({s})]({s})\n", .{ out_path, link });
 }
@@ -554,7 +554,7 @@ fn renderMarkdown(
     verdict: review.Verdict,
 ) !void {
     try stdout.writeAll("## Proof review\n\n");
-    try stdout.print("- **Verdict**: `{s}`\n", .{verdict.toString()});
+    try stdout.print("- **Verdict**: `{s}`\n", .{verdict.slug()});
     try stdout.print("- **Handler**: `{s}`\n", .{ev.handler_path});
     if (ev.service_name) |name| try stdout.print("- **Service**: {s}\n", .{name});
     try stdout.print("- **Kind**: {s}\n", .{ev.kind.toString()});
@@ -654,7 +654,7 @@ fn renderHtml(
         \\<h1>Proof review</h1>
         \\
     );
-    try stdout.print("<p><span class=\"verdict {s}\">{s}</span></p>\n", .{ verdict.toString(), verdict.toString() });
+    try stdout.print("<p><span class=\"verdict {s}\">{s}</span></p>\n", .{ verdict.slug(), verdict.slug() });
     try stdout.writeAll("<dl>\n<dt>Handler</dt><dd><code>");
     try writeHtmlEscaped(stdout, ev.handler_path);
     try stdout.writeAll("</code></dd>\n");
@@ -775,6 +775,10 @@ fn renderSvg(
     const fill = switch (verdict) {
         .safe => "#22c55e",
         .safe_with_additions => "#3b82f6",
+        // `review.classify` never derives `.needs_review` from a ReviewDelta;
+        // the arm exists because the verdict type is shared with the upgrade
+        // verifier, which does produce it. Amber reads as "look at this".
+        .needs_review => "#f59e0b",
         .breaking => "#ef4444",
     };
 
@@ -792,7 +796,7 @@ fn renderSvg(
         \\<svg xmlns="http://www.w3.org/2000/svg" width="320" height="30" role="img" aria-label="proven {s}">
         \\<rect width="320" height="30" rx="14" fill="{s}"/>
         \\<text x="160" y="20" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="13" fill="white" text-anchor="middle" font-weight="600">proven · {s}
-    , .{ verdict.toString(), fill, verdict.toString() });
+    , .{ verdict.slug(), fill, verdict.slug() });
     if (n > 0) {
         try stdout.writeAll(" · ");
         for (top_props[0..n], 0..) |label, idx| {

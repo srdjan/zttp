@@ -9,29 +9,10 @@ const writeJsonString = zts.json_utils.writeJsonString;
 const system_analysis = @import("system_analysis.zig");
 const upgrade_verifier = @import("upgrade_verifier.zig");
 
-pub const RolloutVerdict = enum {
-    safe,
-    safe_with_additions,
-    needs_review,
-    breaking,
-
-    pub fn exitCode(self: RolloutVerdict) u8 {
-        return switch (self) {
-            .safe, .safe_with_additions => 0,
-            .needs_review => 2,
-            .breaking => 1,
-        };
-    }
-
-    pub fn toString(self: RolloutVerdict) []const u8 {
-        return switch (self) {
-            .safe => "SAFE",
-            .safe_with_additions => "SAFE_WITH_ADDITIONS",
-            .needs_review => "NEEDS_REVIEW",
-            .breaking => "BREAKING",
-        };
-    }
-};
+/// The rollout verdict is the same decision, with the same words and the same
+/// exit codes, as the per-handler upgrade verdict. It was a byte-for-byte
+/// duplicate of `upgrade_verifier.UpgradeVerdict`; it is now that type.
+pub const RolloutVerdict = upgrade_verifier.UpgradeVerdict;
 
 const StageStatus = enum {
     safe,

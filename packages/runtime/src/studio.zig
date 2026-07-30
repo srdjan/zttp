@@ -656,7 +656,7 @@ fn factsJson(
     try json.objectField("handlerPath");
     try json.write(handler_path);
     try json.objectField("verdict");
-    try json.write(verdict.toString());
+    try json.write(verdict.slug());
     if (update.recompile_ms) |ms| {
         try json.objectField("recompileMs");
         try json.write(ms);
@@ -840,7 +840,7 @@ fn writeRecentJson(json: *std.json.Stringify, recent: []const RecentEntry) !void
         try json.objectField("timestampMs");
         try json.write(entry.timestamp_ms);
         try json.objectField("verdict");
-        try json.write(entry.verdict.toString());
+        try json.write(entry.verdict.slug());
         if (entry.recompile_ms) |ms| {
             try json.objectField("recompileMs");
             try json.write(ms);
@@ -876,7 +876,7 @@ fn writeReleaseReadinessJson(
     try json.objectField("declaredSpecsPass");
     try json.write(specs_ok);
     try json.objectField("deployVerdict");
-    try json.write(verdict.toString());
+    try json.write(verdict.slug());
     try json.objectField("deployReady");
     try json.write(deploy_ready);
     try json.endObject();
