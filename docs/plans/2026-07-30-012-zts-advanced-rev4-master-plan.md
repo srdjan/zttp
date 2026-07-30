@@ -28,31 +28,32 @@ this program.
    in code.
 5. Commit per task; never push.
 
-## Workstream D: companion design docs (week one, parallel to Phase 0)
+## Workstream D: companion design docs (written 2026-07-30)
 
 These unblock later phases; Phase 0 does not depend on them.
 
-- **D1 type-system spec** — the assignability relation (record width/depth,
-  function variance, readonly, optionals, distinct types, recursive-graph
-  unfolding), the generic-inference algorithm and its ambiguity criterion,
-  narrowing dataflow kill/persist rules (assignment invalidation, aliasing,
-  loop back edges), join/union normalization across aliases, the canonical
-  type serialization format. Interim rule until D1 lands: the existing
-  `type_pool.zig:1058 isAssignableTo` structural relation is the assignability
-  oracle, and every use is marked `// D1-interim`.
-- **D2 effects-and-purity spec** — the closed effect-row atom set and its
-  mapping to `ModuleCapability`, row syntax in `Effects<T, R>`, the inference
-  rules and row join, the purity predicate (the spec uses "pure" normatively
-  ~15 times without defining it), flow labels for the `assert`-on-user-input
-  rule. Interim rule: purity = empty inferred effect row per
-  `effect_inference.zig`, marked `// D2-interim`.
-- **D3 canonical-form and wire spec** — lexical grammar (numeric literals,
-  escapes, Unicode identifiers, templates, TSX), the byte-level formatter
-  layout, digest algorithm and pre-image encodings (source digest,
-  `module_graph_hash`, policy hash, type serialization), per-operation
-  protocol payload schemas, the frozen version-negotiation response, the
-  protocol error-code registry, the equivalence-validator method taxonomy
-  with a concrete method per idiom-table rewrite class.
+- **D1 type system** — `2026-07-30-014-d1-type-system-design.md`. Canonical
+  type serialization as the identity function (types are not interned, so
+  `TypeIndex` equality is not structural identity), six amendments to the
+  existing assignability relation, the join and union normalization, the
+  generic-inference algorithm with a decidable ambiguity criterion, and the
+  narrowing kill rules the spec omits.
+- **D2 effects and purity** — `2026-07-30-015-d2-effects-purity-design.md`.
+  Atom set = the 11 existing `ModuleCapability` members verbatim; capabilities
+  move from module-scoped to export-scoped; one purity predicate at three
+  scopes; three inference holes closed with function-type ceilings instead of
+  row variables; `Proof<T, P>`'s domain is the existing `CapsuleProperty`
+  enum, which the spec should adopt.
+- **D3 canonical form and wire** —
+  `2026-07-30-016-d3-canonical-form-wire-design.md`. The lexical grammar with
+  six divergences promoted to errors, the formatter that must be built from
+  scratch (none exists), digest pre-images, the five-method
+  equivalence-validator taxonomy, one repair vocabulary replacing three, and
+  the per-operation protocol payload schemas.
+
+Interim markers until D1/D2 land, both introduced in Phase 0:
+`// D1-interim` on `type_pool.zig` assignability as the join oracle;
+`// D2-interim` on the syntactic purity predicate in `strict_checker.zig`.
 
 Spec-editorial debt to fix alongside D1-D3 (from the review): the `Bytes`
 signature block is missing the promised hex and equality functions;
@@ -189,4 +190,36 @@ one of the phase.
 Every D-doc decision and every `D*-interim` marker gets a dated entry
 appended to this file's Decision log section when made or retired.
 
-(no entries yet)
+**2026-07-30 — D1-D3 written.** Decisions with the widest blast radius, and
+the spec edits they imply:
+
+1. Type identity is a canonical serialization string, memoized per
+   `TypeIndex`, not index equality. Forced by the measurement that the pool
+   never interns. Everything downstream (join step 2, union dedup, recursive
+   assignability, type digests) consumes it.
+2. Capabilities become export-scoped, not module-scoped. The current union of
+   a whole module's capabilities for a call to any of its exports makes every
+   mandatory ceiling wrong on its face.
+3. Function types carry an effect ceiling; absence means the empty row. This
+   is how calls through parameters and closures get sound rows without
+   introducing row variables, and it matches spec 6.5's pure-callback rule.
+4. `Proof<T, P>`'s domain is the existing `CapsuleProperty` enum
+   `{ total, pure, read_only, deterministic }`. **Spec edit owed:** rev 4
+   lists `P` as undefined; the code has defined it since before this program.
+5. The canonical formatter must be written from scratch; no printer exists
+   anywhere in the repo. It fails closed per-construct until total. This is
+   the largest unplanned cost in the program and it lands in Phase 6.
+6. Equivalence validators are five methods (layout identity, parse identity,
+   kernel-IR identity, declared law, contract behavioral). Only the first four
+   may auto-apply; contract-level equivalence is advisory-only because it is
+   blind to pure-computation changes.
+7. Six lexical divergences from JS become errors (line continuations, unknown
+   escapes, malformed radix prefixes, legacy octal, unterminated strings,
+   non-ASCII identifiers).
+
+**Spec edits owed from this workstream**, to be applied in the next
+editorial pass: adopt `CapsuleProperty` as `P`'s domain (item 4); add the
+missing `Bytes` hex and equality signatures; assign the `warning` severity to
+at least one rule or drop it from the gates; state that spec 5.8's TSX
+comparison requirement is already satisfied by prefix-position
+disambiguation; add the migration policy for `|>` and `interface`.
