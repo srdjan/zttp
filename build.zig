@@ -268,6 +268,10 @@ pub fn build(b: *std.Build) void {
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
 
+    const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-module-boundary.sh" });
+    const module_boundary_step = b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
+    module_boundary_step.dependOn(&module_boundary.step);
+
     const docs_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-docs-drift.sh" });
     const docs_drift_step = b.step("test-docs-drift", "Check docs against current registry and build paths");
     docs_drift_step.dependOn(&docs_drift.step);
@@ -661,6 +665,7 @@ pub fn build(b: *std.Build) void {
     // Every host test root from the table above; the aggregate runs all nine.
     for (host_test_runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
+    test_step.dependOn(&module_boundary.step);
     // The docs drift and link gates run here, and only here: neither Run step is
     // cached, so `zig build test` always executes both scripts. CI and
     // scripts/verify.sh deliberately do not invoke test-docs-drift or

@@ -1,0 +1,120 @@
+# Which zts internal modules each consumer package may name.
+#
+# `packages/zts/src/root.zig` re-exports a curated surface (JSValue, Context,
+# strip, ...) and, separately, ~74 internal implementation modules. Only the
+# internal tier is listed here; the curated surface is ungated.
+#
+# One row per (package, internal module). Enforced in both directions by
+# scripts/check-module-boundary.sh: an unlisted reach fails, and so does a row
+# nothing uses. The list only ratchets down - adding a row is a deliberate
+# widening of the boundary, and should come with a reason in the commit.
+#
+# Baseline captured from the tree as it stood when the gate was added; no row
+# here is an endorsement, only a record of the reach that already existed.
+
+# runtime
+runtime arena
+runtime bool_checker
+runtime builtin_modules
+runtime builtins
+runtime bytecode
+runtime bytecode_cache
+runtime compat
+runtime context
+runtime contract_diff
+runtime counterexample
+runtime equivalence_receipt
+runtime file_io
+runtime handler_contract
+runtime handler_policy
+runtime heap
+runtime http
+runtime interpreter
+runtime json_utils
+runtime module_binding
+runtime module_manifest
+runtime modules
+runtime object
+runtime parser
+runtime perf_receipt
+runtime pipeline
+runtime policy
+runtime rule_registry
+runtime security_events
+runtime spec_discharge
+runtime string
+runtime system_linker
+runtime trace
+runtime witness_corpus
+
+# tools
+tools bool_checker
+tools builtin_modules
+tools builtins
+tools bytecode
+tools bytecode_cache
+tools compat
+tools context
+tools contract_diff
+tools counterexample
+tools fault_coverage
+tools file_io
+tools flow_checker
+tools handler_contract
+tools handler_policy
+tools handler_verifier
+tools json_utils
+tools manifest_registry
+tools module_binding
+tools module_manifest
+tools module_spec_render
+tools modules
+tools object
+tools parser
+tools pipeline
+tools proof_trace
+tools property_diagnostics
+tools repair_intent
+tools route_match
+tools rule_error
+tools rule_registry
+tools semantics
+tools semantics_audit
+tools semantics_check
+tools semantics_corpus
+tools semantics_render
+tools semantics_smt
+tools service_types
+tools spec_discharge
+tools sql_analysis
+tools sqlite
+tools strict_checker
+tools string
+tools system_linker
+tools trace
+tools type_checker
+tools witness_corpus
+
+# pi
+pi compat
+pi context
+pi contract_diff
+pi counterexample
+pi effect_inference
+pi file_io
+pi flow_checker
+pi handler_contract
+pi handler_verifier
+pi json_utils
+pi manifest_registry
+pi module_manifest
+pi parser
+pi repair_intent
+pi repair_plan
+pi rule_registry
+pi system_linker
+pi witness_corpus
+
+# proof-review
+proof-review contract_diff
+proof-review file_io

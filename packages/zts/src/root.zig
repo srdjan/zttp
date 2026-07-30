@@ -37,9 +37,15 @@
 //!   the in-repo runtime, tools, and pi packages can share implementation; they
 //!   are NOT a curated public API and may change between releases without
 //!   notice. Depend on them only from within this repository, and prefer the
-//!   curated types above for anything new. (This is documentation, not a
-//!   compiler-enforced boundary: all consumers live in this monorepo and move
-//!   together under one test suite.)
+//!   curated types above for anything new.
+//!
+//! The second tier is gated, not merely documented.
+//! `scripts/module-boundary.allow` records which internal module each consumer
+//! package may name, and `scripts/check-module-boundary.sh` (the
+//! `test-module-boundary` build step, which `zig build test` depends on) fails
+//! both on an unlisted reach and on a listed row nothing uses any more. That
+//! is an allowlist, not a compiler-enforced split: every consumer still
+//! imports one `zts` module and they all move together under one test suite.
 
 const std = @import("std");
 const build_options = @import("build_options");
