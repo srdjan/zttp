@@ -121,14 +121,18 @@ zttp proofs diff HEAD~1 HEAD
 zttp proofs export --format md --ref HEAD
 zttp proofs badge
 zttp proofs gate --base origin/main --head HEAD
+zttp proofs replay <capsule>
 ```
 
-`zttp proof replay <capsule>` replays a capsule recorded by `zttp dev
+`zttp proofs replay <capsule>` replays a capsule recorded by `zttp dev
 --record-proof` against the current handler: exit 0 reproduced, 1 regression. It
 fails closed when the capsule's pinned handler, contract, or policy hash no
 longer matches (`--allow-version-mismatch` overrides). `zttp verify <url>`
 verifies a live endpoint's attestation. `zttp proofs verify <bundle-dir>`
 re-hashes a local proof bundle.
+
+The old spelling `zttp proof replay` still works as a deprecated alias for one
+release and prints a migration note. It is no longer listed in `zttp help --all`.
 
 `zttp verify --json` includes durable workflow receipt fields when a build was
 attested with a workflow contract: `durableWorkflowProofLevel`,

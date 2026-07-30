@@ -498,9 +498,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "proof")) {
-        // Proof Flight Recorder capsule replay. Expected user errors (missing
-        // capsule, policy mismatch, regression) are explained on stderr;
-        // only unexpected ones bubble.
+        // Deprecated alias for `zttp proofs replay`, kept for one release and
+        // deliberately absent from `help --all`. proof_cli.run prints the
+        // migration note. Expected user errors (missing capsule, policy
+        // mismatch, regression) are explained on stderr; only unexpected ones
+        // bubble.
         proof_cli.run(allocator, user_args[1..]) catch |err| {
             if (proof_cli.isExpectedUserError(err)) std.process.exit(1);
             return err;

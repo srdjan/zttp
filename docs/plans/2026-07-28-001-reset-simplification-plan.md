@@ -1388,9 +1388,15 @@ follow them, and they should be sequenced first.
    switch to handle `needs_review`, which `diffContracts` cannot emit. Added
    `UpgradeVerdict.slug` for the lowercase surfaces so no rendered byte moved. See
    `docs/plans/2026-07-30-009-wave4-item1-verdict-vocabularies-plan.md`.
-2. Merge `zttp proof replay` into the `proofs` namespace, keeping the old spelling as a
-   hidden alias for one release. This removes the naming collision that CLAUDE.md
-   currently has to disclaim.
+2. DONE. `replay` is now a `proofs` subcommand that delegates to `proof_cli.runReplay`; the
+   old top-level `zttp proof` still dispatches, prints a one-line migration note, and is
+   absent from `help --all`. The delegation had one thing worth getting right: error
+   classification. `proofs_cli.isExpectedUserError` now falls through to
+   `proof_cli.isExpectedUserError`, so a missing capsule or a policy mismatch still exits 1
+   with its own explanation instead of bubbling a Zig trace. Both spellings were exercised
+   for exit code and output, and two tests pin the subcommand and the delegated error class
+   (test-cli 770 to 772). The CLAUDE.md parenthetical that disclaimed the collision is
+   deleted; `docs/cli.md` documents the new spelling and the deprecation window.
 3. Fold `ratchet check` into `check` behind a fail-on-undischarged flag over the spec
    diagnostics that already exist, and either build the announced waiver system or delete
    its comment.

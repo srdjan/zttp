@@ -1,6 +1,11 @@
 //! `zttp proofs` subcommand. `list` and `show <ref>` render the proof
 //! ledger using the same card renderer as `zttp deploy`. `show`
 //! reconstructs a `DeployReview` over a borrowed historical snapshot.
+//!
+//! `replay` lives here too, delegating to `proof_cli.zig`. It used to be its
+//! own top-level `zttp proof` command, one letter away from this one, which
+//! CLAUDE.md had to disclaim in prose. `zttp proof replay` still works as a
+//! hidden deprecated alias for one release.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -9,6 +14,7 @@ const review = @import("zttp_proof_review").review;
 const printer_mod = @import("zttp_proof_review").printer;
 const bundle_mod = @import("proofs/bundle.zig");
 const pr_gate = @import("proofs/pr_gate.zig");
+const proof_cli = @import("proof_cli.zig");
 const shared = @import("cli_shared.zig");
 
 const Subcommand = enum {
@@ -21,6 +27,7 @@ const Subcommand = enum {
     bundle,
     verify,
     gate,
+    replay,
     help,
 };
 
@@ -49,7 +56,9 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.BadGitRef,
         error.UnknownFormat,
         => true,
-        else => false,
+        // `replay` delegates to proof_cli, which explains its own failures
+        // (missing capsule, policy drift, regression) on stderr.
+        else => proof_cli.isExpectedUserError(err),
     };
 }
 
@@ -91,6 +100,12 @@ pub fn runWith(
         .bundle => try bundleCommand(allocator, argv[1..], stdout, stderr),
         .verify => try verifyCommand(allocator, argv[1..], stdout, stderr),
         .gate => try gateCommand(allocator, argv[1..], stdout, stderr),
+        // proof_cli writes its own report to stdout via std.debug.print, so it
+        // takes no writers. Flush ours first so the two streams stay ordered.
+        .replay => {
+            try stdout.flush();
+            try proof_cli.runReplay(allocator, argv[1..]);
+        },
     }
 }
 
@@ -209,6 +224,7 @@ fn parseSubcommand(argv: []const []const u8) !Subcommand {
     if (std.mem.eql(u8, first, "bundle")) return .bundle;
     if (std.mem.eql(u8, first, "verify")) return .verify;
     if (std.mem.eql(u8, first, "gate")) return .gate;
+    if (std.mem.eql(u8, first, "replay")) return .replay;
     return error.UnknownSubcommand;
 }
 
@@ -245,6 +261,10 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                          [--out PATH] [--no-sign].
         \\                   Defaults: --base origin/main (then main), head is the
         \\                   working tree, --format md.
+        \\  replay <capsule> Replay a capsule recorded by `dev --record-proof`
+        \\                   against the current handler. Exit 0 reproduced,
+        \\                   1 regression; fails closed on schema/policy drift.
+        \\                   Flags: [--allow-version-mismatch].
         \\
         \\Refs may be HEAD, HEAD~N, or a contract sha prefix.
         \\Ledger file: .zttp/proofs.jsonl
@@ -1052,6 +1072,40 @@ test "help subcommand prints usage" {
     try testing.expect(std.mem.indexOf(u8, text, "Usage:") != null);
     try testing.expect(std.mem.indexOf(u8, text, "list") != null);
     try testing.expect(std.mem.indexOf(u8, text, "show <ref>") != null);
+}
+
+test "replay is a proofs subcommand, and its help advertises it" {
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+
+    // The subcommand parses rather than falling through to UnknownSubcommand,
+    // which is what the old top-level `zttp proof` spelling forced.
+    try testing.expectEqual(Subcommand.replay, try parseSubcommand(&.{"replay"}));
+
+    try runWith(testing.allocator, &.{"--help"}, &out.writer, &err.writer);
+    try testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "replay <capsule>") != null);
+}
+
+test "proofs replay reports a missing capsule as an expected user error" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+
+    // Delegation must preserve the error classification: dev_cli exits 1 on an
+    // expected user error instead of bubbling a Zig trace, and the replay
+    // errors come from proof_cli's set, not this file's.
+    const result = runWith(testing.allocator, &.{ "replay", "no-such-capsule" }, &out.writer, &err.writer);
+    try testing.expectError(proof_cli.Error.CapsuleNotFound, result);
+    try testing.expect(isExpectedUserError(proof_cli.Error.CapsuleNotFound));
 }
 
 test "diff: renders b's card with a as baseline" {

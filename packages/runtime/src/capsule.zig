@@ -9,7 +9,7 @@
 //!
 //! This module owns only the manifest format, its hashing, the redaction
 //! helpers that keep secrets out of recorded data, and the on-disk layout.
-//! Recording (`dev --record-proof`) and replay (`proof replay`) live in the
+//! Recording (`dev --record-proof`) and replay (`proofs replay`) live in the
 //! CLI and reuse `trace.zig` / `replay_runner.zig`; they call in here for the
 //! manifest. Manifest parsing fails closed on a schema-version mismatch so a
 //! capsule recorded under an incompatible format is never silently replayed.

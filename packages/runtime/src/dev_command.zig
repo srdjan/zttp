@@ -83,7 +83,7 @@ pub fn devCommand(allocator: std.mem.Allocator, program_path: []const u8, argv: 
             std.debug.print("zttp dev: --record-proof could not write the capsule manifest: {}\n", .{err});
         };
         std.debug.print("Recording a proof capsule to .zttp/capsules/{s}/ — requests this session are captured.\n", .{capsule_name});
-        std.debug.print("After an edit, replay it with: zttp proof replay {s}\n", .{capsule_name});
+        std.debug.print("After an edit, replay it with: zttp proofs replay {s}\n", .{capsule_name});
     }
 
     // Render the four-property explanation once, just before the serve child's
