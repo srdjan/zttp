@@ -128,14 +128,6 @@ const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapability
 const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
 
-// ============================================================================
-// Thread-local Runtime for native function callbacks
-// ============================================================================
-
-/// Thread-local reference to current runtime for use in native function callbacks
-/// (e.g., renderToString needs to call component functions)
-pub threadlocal var current_runtime: ?*Runtime = null;
-
 /// Source location of the most recent handler type fault on this worker thread,
 /// resolved from the bytecode line table (feature A). Set at the fault catch and
 /// read-and-cleared by the server's 500 site, which builds the response after the
@@ -144,10 +136,10 @@ pub threadlocal var last_fault_location: ?zq.bytecode.LineEntry = null;
 
 /// Clear thread-local interpreter state after a handler panic.
 /// Called from the setjmp recovery branch before returning error.HandlerPanicked.
-/// Must only touch thread-locals - the runtime heap may be mid-mutation.
+/// Must only touch thread-locals - the runtime heap may be mid-mutation. The
+/// runtime pointer and the JSX call callback used to be cleared here too; both
+/// now live on the Context, which the pool quarantines or recycles wholesale.
 pub fn clearThreadStateAfterPanic() void {
-    current_runtime = null;
-    zq.http.clearCallFunctionCallback();
     zq.interpreter.current_interpreter = null;
 }
 
@@ -1664,13 +1656,11 @@ pub const Runtime = struct {
 
         // === SLOW PATH: Full bytecode execution ===
 
-        // Set thread-local runtime for native function callbacks (e.g., renderToString)
-        current_runtime = self;
-        defer current_runtime = null;
-
-        // Set callback for JSX function component rendering
-        zq.http.setCallFunctionCallback(callFunctionWrapper);
-        defer zq.http.clearCallFunctionCallback();
+        // Set callback for JSX function component rendering. It lives on this
+        // Context, so a nested sub-handler dispatch on another Context cannot
+        // clear it.
+        zq.http.setCallFunctionCallback(self.ctx, callFunctionWrapper);
+        defer zq.http.clearCallFunctionCallback(self.ctx);
 
         try zq.modules.scope.beginRequest(self.ctx);
         defer zq.modules.scope.endRequest(self.ctx);
@@ -2081,9 +2071,13 @@ pub const Runtime = struct {
         return native_data.func(self.ctx, zq.JSValue.undefined_val, args);
     }
 
-    /// Wrapper for calling JS functions from http.zig (used for JSX function components)
-    fn callFunctionWrapper(func_obj: *zq.JSObject, args: []const zq.JSValue) anyerror!zq.JSValue {
-        const runtime = current_runtime orelse return error.NoRuntime;
+    /// Wrapper for calling JS functions from http.zig (used for JSX function
+    /// components and the array higher-order functions). The Context carries the
+    /// callback, so the runtime comes from the Context the engine passes back
+    /// rather than from thread-local state - which is what makes a nested
+    /// sub-handler dispatch safe.
+    fn callFunctionWrapper(ctx: *zq.Context, func_obj: *zq.JSObject, args: []const zq.JSValue) anyerror!zq.JSValue {
+        const runtime = Self.fromContext(ctx) orelse return error.NoRuntime;
         return runtime.callFunction(func_obj, args);
     }
 
@@ -4584,8 +4578,6 @@ test "durable step outside run fails" {
     defer request.deinit(allocator);
 
     const request_val = try rt.createRequestObject(request.asView());
-    current_runtime = rt;
-    defer current_runtime = null;
     try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}));
     rt.resetForNextRequest();
 }
@@ -4884,8 +4876,6 @@ test "body readers are single-use for inbound and constructed HTTP objects" {
     defer request.deinit(allocator);
 
     const request_val = try rt.createRequestObject(request.asView());
-    current_runtime = rt;
-    defer current_runtime = null;
     try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}));
     rt.resetForNextRequest();
 
@@ -7014,8 +7004,6 @@ test "durable run refuses the oplog while a recovery claim holds it" {
     defer request.deinit(allocator);
 
     const request_val = try rt.createRequestObject(request.asView());
-    current_runtime = rt;
-    defer current_runtime = null;
     try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}));
     rt.resetForNextRequest();
 

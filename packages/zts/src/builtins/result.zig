@@ -57,12 +57,13 @@ fn coerceResultLike(ctx: *context.Context, val: value.JSValue) ?value.JSValue {
 }
 
 fn invokeResultCallback(
+    ctx: *context.Context,
     callback: *object.JSObject,
     arg: value.JSValue,
 ) ?value.JSValue {
-    const call_fn = getCallFn() orelse return null;
+    const call_fn = getCallFn(ctx) orelse return null;
     const call_args = [_]value.JSValue{arg};
-    return invokeCallback(call_fn, callback, &call_args);
+    return invokeCallback(ctx, call_fn, callback, &call_args);
 }
 
 /// Create a Result.ok(value)
@@ -126,7 +127,7 @@ pub fn resultMap(ctx: *context.Context, this: value.JSValue, args: []const value
     if (!obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
-    const mapped = invokeResultCallback(callback, payload) orelse return value.JSValue.undefined_val;
+    const mapped = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
     return createResultOk(ctx, mapped);
 }
 
@@ -136,7 +137,7 @@ pub fn resultMapErr(ctx: *context.Context, this: value.JSValue, args: []const va
     if (obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
-    const mapped = invokeResultCallback(callback, payload) orelse return value.JSValue.undefined_val;
+    const mapped = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
     return createResultErrWithField(ctx, mapped, resultErrorFieldAtom(obj));
 }
 
@@ -146,7 +147,7 @@ pub fn resultAndThen(ctx: *context.Context, this: value.JSValue, args: []const v
     if (!obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
-    const next = invokeResultCallback(callback, payload) orelse return value.JSValue.undefined_val;
+    const next = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
     return coerceResultLike(ctx, next) orelse value.JSValue.undefined_val;
 }
 
@@ -170,14 +171,14 @@ pub fn resultMatch(ctx: *context.Context, this: value.JSValue, args: []const val
 
     const callback = case_val orelse return value.JSValue.undefined_val;
     if (!callback.isCallable()) return value.JSValue.undefined_val;
-    return invokeResultCallback(callback.toPtr(object.JSObject), payload) orelse value.JSValue.undefined_val;
+    return invokeResultCallback(ctx, callback.toPtr(object.JSObject), payload) orelse value.JSValue.undefined_val;
 }
 
 var active_test_ctx: ?*context.Context = null;
 
-fn dispatchTestCallback(func: *object.JSObject, args: []const value.JSValue) anyerror!value.JSValue {
+fn dispatchTestCallback(ctx: *context.Context, func: *object.JSObject, args: []const value.JSValue) anyerror!value.JSValue {
     const data = func.getNativeFunctionData() orelse return error.InvalidFunction;
-    return data.func(@ptrFromInt(1), value.JSValue.undefined_val, args);
+    return data.func(ctx, value.JSValue.undefined_val, args);
 }
 
 fn testAddOne(_: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
@@ -239,8 +240,8 @@ test "native Result map mapErr and andThen use callback support" {
     const pool = ctx.hidden_class_pool.?;
     active_test_ctx = ctx;
     defer active_test_ctx = null;
-    http.setCallFunctionCallback(dispatchTestCallback);
-    defer http.clearCallFunctionCallback();
+    http.setCallFunctionCallback(ctx, dispatchTestCallback);
+    defer http.clearCallFunctionCallback(ctx);
 
     const add_one = try object.JSObject.createNativeFunction(allocator, pool, ctx.root_class_idx, testAddOne, .map, 1);
     defer add_one.destroyFull(allocator);

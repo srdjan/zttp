@@ -134,6 +134,24 @@ depend on earlier ones; earlier slices are useful on their own.
    -> verify: the durable and workflow example suites, which are the only end-to-end coverage
    of nested invocation.
 
+   DONE 2026-07-30, and it went further than "an explicit parameter". The reason both
+   threadlocals needed save/restore is that `CallFunctionFn` had no context parameter, so
+   the engine could not tell the host which runtime to call back into. Giving it one
+   (`fn (ctx, func, args)`) and storing the callback on the Context makes a nested
+   dispatch harmless: the sub-handler has its own Context, so it cannot clear the
+   caller's callback. That threaded `ctx` through 12 `getCallFn()` sites in the array,
+   result, and helper builtins, including one comparator closure that had to capture it.
+   With `callFunctionWrapper` taking a Context, the last reader of `current_runtime` was
+   gone and the threadlocal was deleted outright, along with three test writers that only
+   existed to feed it. `clearThreadStateAfterPanic` is down to one line.
+
+   `current_runtime` and `call_function_callback` are both retired; the remaining
+   save/restore in `runtime_workflow.zig` is `current_interpreter` alone, which is
+   engine-owned and nulled by the panic path.
+
+   Verified: `test-zts`, `test-zruntime`, `zig build test`, 43/43 examples,
+   `test-panic-isolation`, `zig fmt --check`.
+
 5. **`active_ws_connection` and `last_fault_location`** (0d). Both are read-and-clear channels
    between the runtime and `engine_adapter.zig`; they become fields on the invocation state.
    -> verify: `test-zruntime`, the WebSocket examples, the panic-isolation smoke.

@@ -157,6 +157,20 @@ pub const CallFrame = struct {
 /// Sized to accommodate all built-in and extension module state slots.
 pub const MAX_MODULE_STATE_SLOTS = 16;
 
+/// Host callback for invoking a JS function the engine holds: JSX function
+/// components during SSR, and the array higher-order functions. Declared here
+/// rather than in `http.zig` because the Context stores it; `http.zig` aliases
+/// this name.
+///
+/// The `ctx` parameter is what makes the callback reentrant: the host recovers
+/// its own runtime from it, so a nested dispatch on a different Context cannot
+/// disturb the caller.
+pub const CallFunctionFn = *const fn (
+    ctx: *Context,
+    func: *object.JSObject,
+    args: []const value.JSValue,
+) anyerror!value.JSValue;
+
 /// Per-runtime state entry for a virtual module.
 /// Modules that need persistent state (caches, registries) store an opaque
 /// pointer here, along with a cleanup function called during Context.deinit.
@@ -279,6 +293,11 @@ pub const Context = struct {
     interrupt_requested: std.atomic.Value(bool),
     /// Monotonic deadline in ns for the current request. 0 = no deadline.
     deadline_ns: u64,
+    /// Callback the host installs so the engine can invoke a JS function it was
+    /// handed: JSX function components during SSR, and the array higher-order
+    /// functions. Per-Context rather than thread-local, so a nested dispatch on
+    /// another Context cannot clear the caller's.
+    call_function_callback: ?CallFunctionFn = null,
     /// Opaque pointer to whatever host object owns this Context, set by whoever
     /// created it. The engine never dereferences it and never frees it.
     ///
@@ -353,6 +372,7 @@ pub const Context = struct {
             .sdk_sqlite_allowlist = .{},
             .interrupt_requested = std.atomic.Value(bool).init(false),
             .deadline_ns = 0,
+            .call_function_callback = null,
             .host = null,
         };
         errdefer {

@@ -70,7 +70,7 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
         args[1].toPtr(object.JSObject)
     else
         null;
-    const call_fn = if (map_fn != null) getCallFn() else null;
+    const call_fn = if (map_fn != null) getCallFn(ctx) else null;
 
     // Create result array
     const result = ctx.createArray() catch return value.JSValue.undefined_val;
@@ -90,7 +90,7 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
             var elem = value.JSValue.fromPtr(char_str);
             if (map_fn) |mfn| if (call_fn) |cfn| {
                 const call_args = [2]value.JSValue{ elem, value.JSValue.fromInt(@intCast(idx)) };
-                elem = invokeCallback(cfn, mfn, &call_args) orelse elem;
+                elem = invokeCallback(ctx, cfn, mfn, &call_args) orelse elem;
             };
             ctx.setIndexChecked(result, idx, elem) catch return result.toValue();
             idx += 1;
@@ -118,7 +118,7 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
                     };
                     if (map_fn) |mfn| if (call_fn) |cfn| {
                         const call_args = [2]value.JSValue{ elem, value.JSValue.fromInt(idx) };
-                        elem = invokeCallback(cfn, mfn, &call_args) orelse elem;
+                        elem = invokeCallback(ctx, cfn, mfn, &call_args) orelse elem;
                     };
                     ctx.setIndexChecked(result, @intCast(idx), elem) catch return result.toValue();
                 }
@@ -653,7 +653,7 @@ pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const val
 pub fn arrayMap(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
-    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
     if (len <= 0) return (createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val).toValue();
 
@@ -662,7 +662,7 @@ pub fn arrayMap(ctx: *context.Context, this: value.JSValue, args: []const value.
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const mapped = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
+        const mapped = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
         result.arrayPush(ctx.allocator, mapped) catch return value.JSValue.undefined_val;
     }
     return result.toValue();
@@ -672,7 +672,7 @@ pub fn arrayMap(ctx: *context.Context, this: value.JSValue, args: []const value.
 pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
-    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
     if (len <= 0) return (createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val).toValue();
 
@@ -681,7 +681,7 @@ pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const val
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const keep = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        const keep = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (keep.toBoolean()) {
             result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
         }
@@ -709,13 +709,13 @@ pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const val
     }
 
     if (start_idx >= len_u32) return accumulator;
-    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
 
     var i: u32 = start_idx;
     while (i < len_u32) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ accumulator, elem, value.JSValue.fromInt(@intCast(i)), this };
-        accumulator = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
+        accumulator = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
     }
     return accumulator;
 }
@@ -724,14 +724,14 @@ pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const val
 pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
-    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        _ = invokeCallback(call_fn, callback, &call_args);
+        _ = invokeCallback(ctx, call_fn, callback, &call_args);
     }
     return value.JSValue.undefined_val;
 }
@@ -740,14 +740,14 @@ pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const va
 pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.true_val;
-    const call_fn = getCallFn() orelse return value.JSValue.true_val;
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.true_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (!result.toBoolean()) return value.JSValue.false_val;
     }
     return value.JSValue.true_val;
@@ -757,14 +757,14 @@ pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const valu
 pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.false_val;
-    const call_fn = getCallFn() orelse return value.JSValue.false_val;
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.false_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (result.toBoolean()) return value.JSValue.true_val;
     }
     return value.JSValue.false_val;
@@ -774,14 +774,14 @@ pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value
 pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
-    const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (result.toBoolean()) return elem;
     }
     return value.JSValue.undefined_val;
@@ -791,14 +791,14 @@ pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value
 pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.fromInt(-1);
-    const call_fn = getCallFn() orelse return value.JSValue.fromInt(-1);
+    const call_fn = getCallFn(ctx) orelse return value.JSValue.fromInt(-1);
     const len = getArrayLength(obj, ctx.hidden_class_pool);
 
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(call_fn, callback, &call_args) orelse value.JSValue.false_val;
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
         if (result.toBoolean()) return value.JSValue.fromInt(@intCast(i));
     }
     return value.JSValue.fromInt(-1);
@@ -832,8 +832,9 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
 
     if (compare_fn) |callback| {
         // Custom comparator: order by the sign of the callback's numeric result.
-        const call_fn = getCallFn() orelse return value.JSValue.undefined_val;
+        const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
         const CompareCtx = struct {
+            ctx: *context.Context,
             call_fn: http.CallFunctionFn,
             callback: *object.JSObject,
             pub fn lessThan(self: @This(), a: value.JSValue, b: value.JSValue) bool {
@@ -841,12 +842,12 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
                 if (a.isUndefined()) return false;
                 if (b.isUndefined()) return true;
                 const call_args = [_]value.JSValue{ a, b };
-                const result = invokeCallback(self.call_fn, self.callback, &call_args) orelse return false;
+                const result = invokeCallback(self.ctx, self.call_fn, self.callback, &call_args) orelse return false;
                 const n = result.toNumber() orelse return false;
                 return n < 0;
             }
         };
-        std.mem.sort(value.JSValue, temp, CompareCtx{ .call_fn = call_fn, .callback = callback }, CompareCtx.lessThan);
+        std.mem.sort(value.JSValue, temp, CompareCtx{ .ctx = ctx, .call_fn = call_fn, .callback = callback }, CompareCtx.lessThan);
     } else {
         // Default: lexicographic string comparison (per JS spec).
         std.mem.sort(value.JSValue, temp, ctx.allocator, struct {
@@ -979,14 +980,14 @@ test "arrayToSorted ascending numeric comparator ENG5" {
 
     // Stub comparator behaving like `(a,b) => a-b`.
     const stub = struct {
-        fn call(_: *object.JSObject, call_args: []const value.JSValue) anyerror!value.JSValue {
+        fn call(_: *context.Context, _: *object.JSObject, call_args: []const value.JSValue) anyerror!value.JSValue {
             const a = call_args[0].getInt();
             const b = call_args[1].getInt();
             return value.JSValue.fromInt(a - b);
         }
     };
-    http.setCallFunctionCallback(stub.call);
-    defer http.clearCallFunctionCallback();
+    http.setCallFunctionCallback(ctx, stub.call);
+    defer http.clearCallFunctionCallback(ctx);
 
     // A callable function object to pass as the comparator argument.
     const cmp = try ctx.createObject(null);

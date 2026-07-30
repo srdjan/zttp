@@ -112,13 +112,13 @@ pub fn valueToStringSimple(allocator: std.mem.Allocator, val: value.JSValue) !*s
     return try string.createString(allocator, "");
 }
 
-pub fn getCallFn() ?http.CallFunctionFn {
-    return http.call_function_callback;
+pub fn getCallFn(ctx: *context.Context) ?http.CallFunctionFn {
+    return ctx.call_function_callback;
 }
 
 /// Invoke a JS callback via a cached call function pointer.
-pub fn invokeCallback(call_fn: http.CallFunctionFn, func_obj: *object.JSObject, call_args: []const value.JSValue) ?value.JSValue {
-    return call_fn(func_obj, call_args) catch return null;
+pub fn invokeCallback(ctx: *context.Context, call_fn: http.CallFunctionFn, func_obj: *object.JSObject, call_args: []const value.JSValue) ?value.JSValue {
+    return call_fn(ctx, func_obj, call_args) catch return null;
 }
 
 /// Create an array with the proper prototype set (enables method chaining).

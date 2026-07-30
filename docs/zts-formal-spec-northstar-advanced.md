@@ -131,6 +131,14 @@ The important gaps are not more loop or class syntax:
 9. The earlier signed semantics receipt was removed because it had no
    consumer. A future certificate must start from a verifier and trust model,
    not from a producer-only artifact.
+10. Current return-coverage analysis can label a recursive function `total`,
+    and the cost path can label it bounded without a decreasing argument.
+11. Current path generation summarizes a `for...of` body once but may label
+    the resulting branch skeleton exhaustive.
+12. A caller-supplied extension manifest is not yet authenticated and bound to
+    a runtime implementation, so its declared effects cannot support a proof.
+13. Several current UI and upgrade summaries use proof-certificate language
+    for structural or textual evidence that has no independent verifier.
 
 The advanced profile treats those facts as its starting point.
 
@@ -225,7 +233,9 @@ Rules:
 - Default imports, anonymous default exports, namespace imports, side-effect
   imports, dynamic imports, and export-star forms are excluded.
 - Re-exports are excluded. Importing and then exporting a named declaration
-  keeps the module graph explicit.
+  is also excluded. Consumers import the original declaration, or the module
+  author declares an explicit named wrapper with its own type and effect
+  contract.
 - Module initialization MUST be pure. Handler-reachable mutable module state
   is excluded from the certified profile.
 - A top-level value binding MUST use `const`. Reassignment is local to a
@@ -284,9 +294,10 @@ Rules:
   and negative zero. JSON and capability boundaries MUST reject non-finite
   values when their wire format cannot represent them.
 - `string` contains valid Unicode and rejects invalid UTF-8 at ingress. The
-  observable `length`, indexing, and slicing contract retains ZTS's current
+  observable `length`, `charAt`, and slicing contract retains ZTS's current
   UTF-16 code-unit model. The formal string library MUST specify the behavior
-  of boundaries inside an astral scalar exactly.
+  of boundaries inside an astral scalar exactly. Numeric bracket indexing of
+  strings is excluded.
 - `Bytes` is an immutable sequence of octets. Text conversion is explicit and
   returns `Result` when decoding can fail.
 - Record shapes are fixed after allocation. Existing writable fields may be
@@ -342,8 +353,19 @@ The profile excludes:
 - `this` and `super`
 - `yield`, generators, `async`, `await`, and `Promise`
 
+Conditions in `if` and `assert`, operands of boolean operators, and predicate
+callback results MUST have type `boolean`. There is no general truthiness
+conversion. Optional values narrow through explicit comparisons with
+`undefined` or `null`.
+
+The pure intrinsic `String(value)` is the explicit conversion from a number or
+boolean to text. Number formatting uses the ECMAScript base-10
+shortest-round-trip representation; negative zero renders as `0`. This is the
+only scalar-to-text spelling; instance `.toString()` conversion is excluded.
+
 Template interpolation MUST contain a local, literal, or static property
-read. A call or other effectful expression is hoisted to a named `const`.
+read whose type is `string`. Every other expression, pure or effectful, MUST
+be converted if necessary and hoisted to a named `const`.
 
 ### 5.5 Control flow
 
@@ -366,6 +388,10 @@ local function declaration
 
 There is no `switch`, `while`, `do...while`, C-style `for`, `for...in`,
 `throw`, `try`, `catch`, or `finally`.
+
+Every declaration and statement shown with a trailing semicolon in the grammar
+MUST include it. The advanced profile has no automatic semicolon insertion. A
+newline never creates a token.
 
 #### `match`
 
@@ -390,8 +416,8 @@ Rules:
 
 - Arms are checked in source order.
 - Patterns are literals or fixed record-discriminant patterns.
-- A closed literal or discriminated union MUST be covered exactly and SHOULD
-  omit `default`.
+- A closed literal or discriminated union MUST be covered exactly and MUST NOT
+  include `default`.
 - An open domain such as `string`, `number`, or `unknown` MUST include
   `default`.
 - Duplicate, unreachable, and non-exhaustive arms are errors.
@@ -399,14 +425,17 @@ Rules:
 
 #### `assert`
 
-`assert predicate;` installs forward narrowing or halts with a typed runtime
-assertion fault.
+`assert predicate;` declares an invariant. It installs forward narrowing or
+halts with a typed runtime assertion fault.
 
 `assert predicate, fallback;` returns `fallback` from the enclosing function
 when the predicate is false. The fallback type MUST be assignable to the
-enclosing return type.
+enclosing return type. This form is an expected early-return guard, not an
+invariant fault and not a caller-recoverable result.
 
-Use `assert` for an invariant. Use `Result` for expected failure.
+Use `Result` when the caller can recover. Use a fallback assertion when the
+current function must return immediately. Use a bare assertion only for a
+violated programmer invariant.
 
 #### `for...of`
 
@@ -423,9 +452,10 @@ for (const item of items) {
 Its semantics are snapshot-finite:
 
 1. Evaluate the iterable once.
-2. Fix its ordered iteration sequence and length at loop entry.
+2. Snapshot the ordered element values and length at loop entry.
 3. Iterate each snapshot element at most once.
-4. Mutation of the original collection cannot add iterations.
+4. Later mutation of the original collection cannot add iterations or change
+   a value that the loop will observe.
 
 Admitted iterables are arrays, tuples, strings, `range(n)`, `Dict` entries,
 and other standard-library values whose contract supplies a finite snapshot.
@@ -488,6 +518,18 @@ distinct type UserId = string;
 aliases already provide its admitted behavior. Open interfaces, declaration
 merging, inheritance, and `implements` remain excluded.
 
+`distinct type UserId = string;` introduces:
+
+```ts
+UserId(value: string): UserId
+```
+
+The constructor is pure, total, and represented at runtime by the unchanged
+base value. Only that constructor or a function already returning `UserId` can
+create the nominal type. A distinct value supports the operations of its base
+type, but a raw base value or a different distinct type is not assignable to
+it.
+
 Admitted types are:
 
 - `unknown`, `never`, `undefined`, `null`, `boolean`, `number`, `string`,
@@ -506,7 +548,7 @@ Admitted types are:
 - contractive recursive aliases
 
 A recursive alias is contractive when every cycle passes through a record,
-tuple, array, `Dict`, or tagged union constructor:
+tuple, array, or `Dict` constructor:
 
 ```ts
 type JsonValue =
@@ -518,8 +560,21 @@ type JsonValue =
   | Dict<string, JsonValue>;
 ```
 
-Direct cycles such as `type Loop = Loop`, negative recursion through a
-function parameter, and recursive conditional expansion are errors.
+Union and intersection edges do not guard recursion. Direct cycles such as
+`type Loop = Loop`, negative recursion through a function parameter, and
+recursive conditional expansion are errors. Recursive aliases are represented
+as a finite named type graph. Assignability unfolds guarded nodes with
+memoized pair comparison and never expands a cycle into an infinite type.
+
+A function may return a type predicate:
+
+```ts
+function isUser(value: unknown): value is User { ... }
+```
+
+The checker validates the predicate body before using it for narrowing.
+`Array.isArray` is a specified intrinsic type guard that narrows a union to its
+array members. No annotation alone can install a false guard.
 
 Excluded type features are:
 
@@ -587,7 +642,8 @@ renderToString(node: HtmlNode): string
 
 The intrinsic names describe the semantics and are not additional source
 syntax. `null`, `undefined`, and boolean children render no text. Nested child
-arrays flatten in source order. Text and attribute values are escaped.
+arrays flatten in source order. A numeric child elaborates through the same
+explicit `String(number)` intrinsic. Text and attribute values are escaped.
 
 ## 6. Pure application data abstractions
 
@@ -617,18 +673,29 @@ andThen<T, U, E, F>(
 The type is predeclared. Constructors and combinators are statically named
 imports from the zero-capability `zttp:result` module.
 
+Callbacks to `mapResult`, `mapError`, and `andThen` MUST be pure, including
+every reachable helper. An effectful continuation uses explicit `match` and a
+named call so its sequencing and effect row stay visible.
+
 Use `match` or narrowing to consume it. Trapping `unwrap` and `unwrapErr` are
 not canonical. A checked extraction after an `ok` guard MAY lower directly to
 the value field.
 
-All fallible ingress APIs, decoders, capability calls, text codecs, and
-partial collection operations SHOULD return a typed `Result`.
+Every recoverable failure MUST use a typed `Result`. This includes fallible
+ingress APIs, decoders, capability calls, text codecs, and partial collection
+operations. `undefined` represents absence only. A typed halt represents a
+named programmer or resource fault, not a recoverable application error.
 
 ### 6.2 `Dict<K, V>`
 
 `Dict` supplies dynamic keyed data without dynamic record shapes:
 
 ```ts
+type DuplicateKey<K> = {
+  readonly kind: "duplicate-key";
+  readonly key: K;
+};
+
 dictEmpty<K extends DictKey, V>(): Dict<K, V>
 dictFromEntries<K extends DictKey, V>(
   entries: readonly (readonly [K, V])[]
@@ -640,7 +707,9 @@ dictHas<K extends DictKey, V>(dict: Dict<K, V>, key: K): boolean
 dictEntries<K extends DictKey, V>(dict: Dict<K, V>): readonly (readonly [K, V])[]
 ```
 
-`DictKey` is `string | number` or a `distinct type` over one of those bases.
+`DictKey` is a checker-recognized generic bound, not a source alias. It accepts
+`string`, `number`, or a `distinct type` over one of those bases. Nominal keys
+compare only within the same `K` instantiation, using the wrapped base value.
 
 `dictSet` and `dictRemove` return new dictionaries. Iteration order is the
 insertion order of the current value. Updating a present key does not move it.
@@ -655,10 +724,28 @@ operations are statically named imports from the zero-capability
 Its pure surface includes length, indexing, slicing, concatenation, equality,
 hex, Base64, and UTF-8 codecs.
 
+```ts
+type BytesError =
+  | { kind: "invalid-octet"; index: number; value: number }
+  | { kind: "invalid-encoding"; encoding: string; offset: number }
+  | { kind: "invalid-bounds"; start: number; end: number }
+  | { kind: "size-limit"; limit: number };
+
+bytesFromOctets(values: readonly number[]): Result<Bytes, BytesError>
+bytesLength(value: Bytes): number
+byteAt(value: Bytes, index: number): number | undefined
+sliceBytes(value: Bytes, start: number, end: number): Result<Bytes, BytesError>
+concatBytes(values: readonly Bytes[]): Result<Bytes, BytesError>
+encodeUtf8(value: string): Bytes
+decodeUtf8(value: Bytes): Result<string, BytesError>
+decodeBase64(value: string): Result<Bytes, BytesError>
+encodeBase64(value: Bytes): string
+```
+
 - Construction validates every octet.
 - Values are immutable.
-- Indexing is bounds checked.
-- Decoding returns `Result`.
+- An out-of-bounds single index returns `undefined`.
+- Invalid slice bounds, decoding, or size limits return `Result`.
 - Capability modules declare whether a payload is `string`, `Bytes`, or a
   structured value.
 - Pure byte operations are statically named imports from the zero-capability
@@ -680,16 +767,18 @@ type JsonError =
   | { kind: "non-finite-number" }
   | { kind: "cycle" };
 
-decodeJson(text: string): Result<JsonValue, JsonError>
-encodeJson<T>(value: T): Result<string, JsonError>
+parseJson(text: string): Result<JsonValue, JsonError>
+parseJsonBytes(value: Bytes): Result<JsonValue, JsonError | BytesError>
+stringifyJson<T>(value: T): Result<string, JsonError>
 ```
 
 Rules:
 
-- decoding validates UTF-8, syntax, depth, and configured input size,
+- `parseJson` validates syntax, depth, and configured input size,
+- `parseJsonBytes` first validates UTF-8 and then applies the same JSON rules,
 - duplicate object keys are rejected,
 - object insertion order follows wire order,
-- the checker admits `encodeJson<T>` only when `T` contains JSON scalars,
+- the checker admits `stringifyJson<T>` only when `T` contains JSON scalars,
   arrays, tuples, fixed records, or string-keyed `Dict` values,
 - encoding preserves array order, fixed-record declaration order, and
   dictionary insertion order,
@@ -700,14 +789,27 @@ Rules:
 - and every failure is a typed `Result`.
 
 The limits are selected by the runtime policy and bound into checked and
-certified artifacts. Trapping `JSON.parse`, silent `undefined` on parse
-failure, and unchecked `JSON.stringify` are excluded from the canonical
-profile. Schema-directed decoders return a precise application type rather
-than `unknown`.
+certified artifacts. The raw pair are named imports from the zero-capability
+`zttp:json` module. Trapping `JSON.parse`, silent `undefined` on parse failure,
+and unchecked `JSON.stringify` are excluded from the canonical profile.
+
+Schema-directed decoding remains a separate `zttp:decode` operation:
+
+```ts
+decodeJson<T>(
+  schema: Schema<T>,
+  text: string,
+): Result<T, DecodeError | JsonError>
+```
+
+`Schema<T>` is an opaque, checker-recognized schema value whose canonical
+schema digest is bound to `T` and to the build artifact. The decoder returns a
+precise application type rather than `unknown`.
 
 ### 6.5 Arrays and higher-order functions
 
-The canonical finite operations are fully generic:
+The canonical finite operations have these abstract semantic signatures. This
+block specifies types and is not additional source declaration syntax:
 
 ```ts
 map<T, U>(items: readonly T[], f: (value: T, index: number) => U): U[]
@@ -778,8 +880,15 @@ Rules:
 - The combined effect row is the union of task effects.
 - Replay order, cancellation, timeout, and loser cleanup are part of the
   module contract.
-- `race` returns a tagged result that identifies the winner. It does not erase
-  result types to `unknown`.
+- `race` returns a tagged union synthesized from the task tuple. For tasks
+  returning `A`, `B`, and `C`, its type is
+  `{ winner: 0; value: A } | { winner: 1; value: B } |
+  { winner: 2; value: C }`.
+- The winner is the first completion event in the governed runtime log.
+  Simultaneous completions choose the lowest tuple index. Replay uses the
+  recorded winner and ordering.
+- Losing tasks are canceled, their cleanup completes, and those events enter
+  the trace before `race` returns.
 - There is no user-visible Promise, microtask queue, detached task, or
   implicit scheduler.
 
@@ -794,6 +903,20 @@ contracts.
 
 ```ts
 type HttpHandler = (request: Request) => Response;
+
+type FetchOptions = {
+  readonly method?:
+    | "GET"
+    | "POST"
+    | "PUT"
+    | "PATCH"
+    | "DELETE"
+    | "HEAD"
+    | "OPTIONS";
+  readonly headers?: Dict<string, string>;
+  readonly body?: string | Bytes;
+  readonly timeoutMs?: number;
+};
 
 requestBody(request: Request): Bytes
 requestText(request: Request): Result<string, BodyError>
@@ -852,13 +975,17 @@ type QueueDecision =
   | { kind: "retry"; receipt: ReceiptId; afterMs: number; reason: string }
   | { kind: "dead-letter"; receipt: ReceiptId; reason: string };
 
+type QueueHandler<T, E> = (
+  message: QueueMessage<T>,
+) => Result<QueueDecision, E>;
+
 send<T>(queue: string, payload: T): Result<MessageId, QueueError>
 ```
 
 `send<T>` requires a statically JSON-encodable payload. A consumer returns a
-`QueueDecision` or calls typed `ack`, `retry`, or dead-letter operations.
-Delivery attempt, retry delay, idempotency key, and acknowledgement semantics
-are explicit in the module contract and replay trace.
+`QueueDecision` through `QueueHandler`. Delivery attempt, retry delay,
+idempotency key, and acknowledgement semantics are explicit in the module
+contract and replay trace.
 
 #### Durable workflow
 
@@ -886,8 +1013,9 @@ to one of the specified roles.
 
 ## 8. Compact grammar
 
-This grammar describes structure, not lexical details or precedence.
-Capitalized names are lexical classes.
+This grammar describes admitted structure. Unexpanded leaves such as `Ident`,
+`String`, `Number`, `Literal`, `Template`, `TemplateLiteralType`, and `JSXExpr`
+are lexical or separately specified syntactic classes.
 
 ```ebnf
 Module       ::= Import* TopDecl*
@@ -907,9 +1035,11 @@ TypeParams   ::= "<" TypeParam ("," TypeParam)* ">"
 TypeParam    ::= Ident ["extends" Type]
 
 FunctionDecl ::= "function" Ident TypeParams?
-                 "(" Params? ")" ":" Type Block
+                 "(" Params? ")" ":" ReturnType Block
 Params       ::= Param ("," Param)* [","]
 Param        ::= Ident ":" Type
+ReturnType   ::= Type | TypePredicate
+TypePredicate ::= Ident "is" Type
 
 TopBindingDecl ::= "const" Bind [":" Type] "=" Expr ";"
 BindingDecl  ::= ("const" | "let") Bind [":" Type] "=" Expr ";"
@@ -932,56 +1062,74 @@ Stmt         ::= BindingDecl
                | "continue" ";"
                | Block
 IfStmt       ::= "if" "(" Expr ")" Block ["else" (Block | IfStmt)]
-LValue       ::= Ident | MemberExpr | IndexExpr
+LValue       ::= Ident
+               | AssignableExpr "." Ident
+               | AssignableExpr "[" Expr "]"
+AssignableExpr ::= PrimaryExpr AssignableSuffix*
+AssignableSuffix ::= "." Ident
+                   | "[" Expr "]"
+                   | TypeArgs? "(" [Args] ")"
 
-Expr         ::= Literal
+Expr         ::= ArrowExpr | BinaryExpr
+BinaryExpr   ::= UnaryExpr (BinaryOp UnaryExpr)*
+UnaryExpr    ::= UnaryOp UnaryExpr | PostfixExpr
+PostfixExpr  ::= PrimaryExpr PostfixSuffix*
+PostfixSuffix ::= "." Ident
+                | "?." Ident
+                | "[" Expr "]"
+                | TypeArgs? "(" [Args] ")"
+PrimaryExpr  ::= Literal
                | Ident
                | ArrayExpr
                | RecordExpr
                | Template
-               | UnaryExpr
-               | BinaryExpr
-               | CallExpr
-               | MemberExpr
-               | IndexExpr
                | MatchExpr
-               | ArrowExpr
                | JSXExpr
                | "(" Expr ")"
+UnaryOp      ::= "!" | "+" | "-" | "~" | "typeof"
+BinaryOp     ::= "**" | "*" | "/" | "%"
+               | "+" | "-"
+               | "<<" | ">>" | ">>>"
+               | "<" | "<=" | ">" | ">="
+               | "===" | "!=="
+               | "&" | "^" | "|"
+               | "&&" | "||" | "??" | "|>"
 
 ArrayExpr    ::= "[" [ArrayItem ("," ArrayItem)* [","]] "]"
 ArrayItem    ::= Expr | "..." Expr
-RecordExpr   ::= "{" ["..." Expr ","] [RecordField
-                  ("," RecordField)* [","]] "}"
+RecordExpr   ::= "{" "}"
+               | "{" RecordField ("," RecordField)* [","] "}"
+               | "{" "..." Expr "," RecordField
+                  ("," RecordField)* [","] "}"
 RecordField  ::= Ident [":" Expr] | String ":" Expr
 PropertyName ::= Ident | String
-CallExpr     ::= Expr TypeArgs? "(" [Args] ")"
 Args         ::= Expr ("," Expr)* [","]
 TypeArgs     ::= "<" Type ("," Type)* ">"
-MemberExpr   ::= Expr ("." | "?.") Ident
-IndexExpr    ::= Expr "[" Expr "]"
 ArrowExpr    ::= "(" [ArrowParams] ")" "=>" (Expr | Block)
 ArrowParams  ::= ArrowParam ("," ArrowParam)* [","]
 ArrowParam   ::= Ident [":" Type]
 MatchExpr    ::= "match" "(" Expr ")" "{"
                   MatchArm+ [DefaultArm] "}"
-MatchArm     ::= "when" Pattern ":" Expr [","]
-DefaultArm   ::= "default" ":" Expr [","]
+MatchArm     ::= "when" Pattern ":" Expr
+DefaultArm   ::= "default" ":" Expr
 Pattern      ::= Literal | "{" PatternFields "}"
 PatternFields ::= PatternField ("," PatternField)* [","]
 PatternField ::= PropertyName ":" Literal
 
-Type         ::= Primitive
+Type         ::= UnionType
+UnionType    ::= IntersectionType ("|" IntersectionType)*
+IntersectionType ::= PostfixType ("&" PostfixType)*
+PostfixType  ::= PrimaryType ("[]")*
+               | "readonly" ArrayBaseType "[]"
+ArrayBaseType ::= NonTuplePrimaryType | "(" Type ")"
+PrimaryType  ::= NonTuplePrimaryType | TupleType
+NonTuplePrimaryType ::= Primitive
                | LiteralType
                | Ident TypeArgs?
-               | Type "[]"
-               | "readonly" Type "[]"
-               | TupleType
                | RecordType
                | FunctionType
-               | Type "|" Type
-               | Type "&" Type
                | TemplateLiteralType
+               | "(" Type ")"
 
 Primitive    ::= "unknown" | "never" | "undefined" | "null"
                | "boolean" | "number" | "string" | "Bytes"
@@ -989,14 +1137,21 @@ LiteralType  ::= String | Number | "true" | "false"
 TupleType    ::= ["readonly"] "[" [Type ("," Type)* [","]] "]"
 RecordType   ::= "{" [RecordTypeField (";" RecordTypeField)* [";"]] "}"
 RecordTypeField ::= ["readonly"] PropertyName ["?"] ":" Type
-FunctionType ::= TypeParams? "(" [Params] ")" "=>" Type
+FunctionType ::= TypeParams? "(" [Params] ")" "=>" ReturnType
 ScalarType   ::= "number" | "string"
 ```
 
-The normative parser specification must define precedence, associativity,
-automatic semicolon behavior if any, numeric literals, string escapes, Unicode
-identifiers, templates, patterns, and TSX without relying on JavaScript as an
-implicit specification.
+Postfix operations bind most tightly. Binary precedence, from tightest to
+loosest, is exponentiation; multiplication; addition; shifts; comparisons;
+strict equality; bitwise AND, XOR, and OR; boolean AND and OR; nullish
+coalescing; then pipe. Exponentiation is right-associative. Every other binary
+operator is left-associative. Parentheses override precedence. An `LValue`
+cannot contain an optional-chain suffix.
+
+The complete parser specification must also define numeric literals, string
+escapes, Unicode identifiers, templates, patterns, and TSX without relying on
+JavaScript as an implicit specification. It MUST implement the explicit
+semicolon rule from Section 5.5 and has no automatic semicolon insertion.
 
 ## 9. Surface elaboration
 
@@ -1120,9 +1275,15 @@ This can prove:
 
 > For every source step represented by the admitted profile, compiled
 > execution takes corresponding bytecode and VM steps with the same observable
-> result or fault.
+> result or fault and an equivalent governed effect trace.
 
-It does not by itself prove that either execution terminates.
+Trace equivalence includes capability calls and results, ordering,
+cancellation, and cleanup. A permitted refinement MUST be named explicitly and
+cannot add authority or observations. For divergence, every finite target
+trace prefix must correspond to a source trace prefix, and neither side may
+terminate or emit an unmatched effect while the related side diverges.
+
+This simulation does not by itself prove that either execution terminates.
 
 ### 11.2 Totality
 
@@ -1131,6 +1292,8 @@ A totality claim requires:
 - finite snapshot iteration,
 - no reachable recursive call cycle, or a proved decreasing measure,
 - total called intrinsics under their preconditions,
+- an authenticated completion, timeout, and retry bound for every reachable
+  capability operation,
 - and resource bounds sufficient for the proved execution.
 
 Failure to prove totality is not a compiler crash and is not silently accepted
@@ -1165,7 +1328,7 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | while and C-style for | explicit iteration domain | canonical simplicity plus easier termination analysis |
 | `for...in` and dynamic record keys | deterministic order and fixed shape | replaced by `Dict` and explicit key lists |
 | regex literal or ambient `RegExp` | predictable resource use and analyzable validation | use string operations or schema validation |
-| `any`, assertions, `satisfies` | type evidence integrity | essential to the selected checker model |
+| `any`, type assertions (`as` and angle-bracket forms), `satisfies` | type evidence integrity | essential to the selected checker model |
 | loose equality and implicit coercion | visible type-directed branches | essential to sound narrowing |
 | ternary, compound assignment, default/rest parameters | one canonical spelling | language-simplicity choice |
 | interface, enum, namespace, decorator | one closed data and module model | language-simplicity choice |
@@ -1196,7 +1359,7 @@ For a proof certificate:
 
 - the solver or proof checker is available,
 - every required obligation is present,
-- `proved == total`,
+- `proved_obligation_count == required_obligation_count`,
 - there are zero unknown, timeout, disabled, malformed, or solver-error
   outcomes,
 - every admitted reachable node, opcode, intrinsic, and module boundary is
@@ -1229,6 +1392,9 @@ For each edge, the certificate states one of:
 - or trusted as part of the TCB.
 
 No end-to-end label may be stronger than the weakest required edge.
+`tested but not proved` may appear as non-required metadata. If a named
+property depends on such an edge, the artifact is a checked report at most and
+MUST NOT be a proof certificate.
 
 ### 13.3 Certificate bundle
 
@@ -1298,8 +1464,9 @@ The advanced profile is ready to ship only when all gates are true.
   types, intrinsics, value kinds, opcodes, and module forms.
 - The parser, checker, documentation, diagnostics, and formal coverage consume
   or validate against that registry.
-- Accepted object methods, accessors, or other forms cannot disappear during
-  code generation.
+- Every accepted form is registry-backed and code-generated. Object methods,
+  getters, and setters are rejected before IR construction rather than
+  accepted and then omitted.
 - Generic functions instantiate soundly and never fall back to `unknown`.
 - `Result`, `Dict`, recursive aliases, `null`, `Bytes`, higher-order arrays,
   and structured-I/O tuples are fully typed.
@@ -1390,7 +1557,8 @@ The corpus MUST include:
 
 ### Keep excluded
 
-- classes, inheritance, constructors, prototypes, and dynamic receivers
+- classes, inheritance, class constructors, `new`, prototypes, and dynamic
+  receivers
 - exceptions
 - ambient async, promises, generators, and detached tasks
 - unbounded source loops and user-defined iterators
@@ -1427,10 +1595,15 @@ function describeRatio(numerator: number, denominator: number): string {
   const result = divide(numerator, denominator);
   return match (result) {
     when { ok: true }:
-      `ratio ${result.value}`
+      formatRatio(result.value)
     when { ok: false }:
       "undefined ratio"
   };
+}
+
+function formatRatio(value: number): string {
+  const text = String(value);
+  return `ratio ${text}`;
 }
 ```
 
@@ -1486,7 +1659,9 @@ function depth(value: JsonValue): number {
     let maximum = 0;
     for (const child of value) {
       const childDepth = depth(child);
-      if (childDepth > maximum) maximum = childDepth;
+      if (childDepth > maximum) {
+        maximum = childDepth;
+      }
     }
     return maximum + 1;
   }
@@ -1494,7 +1669,9 @@ function depth(value: JsonValue): number {
   let maximum = 0;
   for (const entry of dictEntries(value)) {
     const childDepth = depth(entry[1]);
-    if (childDepth > maximum) maximum = childDepth;
+    if (childDepth > maximum) {
+      maximum = childDepth;
+    }
   }
   return maximum + 1;
 }
@@ -1602,10 +1779,16 @@ That is the balance `zts-advanced-1` should preserve.
 - `packages/zts/src/type_checker.zig`
 - `packages/zts/src/strict_checker.zig`
 - `packages/zts/src/spec_discharge.zig`
+- `packages/zts/src/handler_verifier.zig`
+- `packages/zts/src/function_specs.zig`
+- `packages/zts/src/path_generator.zig`
+- `packages/zts/src/module_manifest.zig`
+- `packages/zts/src/contract_builder.zig`
 - `packages/zts/src/semantics.zig`
 - `packages/zts/src/semantics_check.zig`
 - `packages/zts/src/builtins/root.zig`
 - `packages/zts/src/builtins/result.zig`
+- `packages/tools/src/precompile.zig`
 - the live `zts meta`, `features`, `restrictions`, `modules`, and `spec-check`
   JSON surfaces
 - representative handlers under `examples/`

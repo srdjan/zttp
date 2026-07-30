@@ -4,9 +4,9 @@
 //! These implement the runtime side of `zttp:workflow` (call, saga, fanout,
 //! follow). They orchestrate co-located sub-handlers through the in-process
 //! `SystemRuntime` registry and copy borrowed sub-handler responses into
-//! orchestrator-owned JS values. They depend on the ambient `current_runtime`
-//! threadlocal plus the response/request helpers that remain in zruntime.zig,
-//! reached here by back-import. zruntime depends on this module only for the
+//! orchestrator-owned JS values. They reach their runtime through the Context
+//! (`Runtime.fromContext`) and use the response/request helpers that remain in
+//! zruntime.zig, reached here by back-import. zruntime depends on this module only for the
 //! four callbacks registered in `Runtime.installWorkflowModuleState`.
 
 const std = @import("std");
@@ -111,13 +111,9 @@ pub fn workflowCallCallback(
     // values and restore them unconditionally after dispatch. (current_interpreter
     // is already save/restored per interpreter frame, but the panic path nulls it,
     // so restore it here as well.)
-    const saved_runtime = zruntime.current_runtime;
     const saved_interpreter = zq.interpreter.current_interpreter;
-    const saved_call_cb = zq.http.call_function_callback;
     const dispatch_result = registry.dispatch(name, view);
-    zruntime.current_runtime = saved_runtime;
     zq.interpreter.current_interpreter = saved_interpreter;
-    zq.http.call_function_callback = saved_call_cb;
 
     var handle = dispatch_result catch |err| {
         return switch (err) {
@@ -187,13 +183,9 @@ fn workflowDirectDispatchParts(
     name: []const u8,
     view: HttpRequestView,
 ) !zq.JSValue {
-    const saved_runtime = zruntime.current_runtime;
     const saved_interpreter = zq.interpreter.current_interpreter;
-    const saved_call_cb = zq.http.call_function_callback;
     const dispatch_result = registry.dispatch(name, view);
-    zruntime.current_runtime = saved_runtime;
     zq.interpreter.current_interpreter = saved_interpreter;
-    zq.http.call_function_callback = saved_call_cb;
 
     var handle = dispatch_result catch |err| {
         const code = if (err == error.UnknownHandler) "UnknownHandler" else "WorkflowDispatchFailed";
@@ -210,13 +202,9 @@ fn workflowDirectTargetDispatchParts(
     target: *Target,
     view: HttpRequestView,
 ) !zq.JSValue {
-    const saved_runtime = zruntime.current_runtime;
     const saved_interpreter = zq.interpreter.current_interpreter;
-    const saved_call_cb = zq.http.call_function_callback;
     const dispatch_result = target.pool.executeHandlerBorrowed(view);
-    zruntime.current_runtime = saved_runtime;
     zq.interpreter.current_interpreter = saved_interpreter;
-    zq.http.call_function_callback = saved_call_cb;
 
     var handle = dispatch_result catch |err| {
         return workflowErrorParts(rt, ctx, "WorkflowDispatchFailed", @errorName(err));
@@ -300,13 +288,9 @@ fn completeQueuedDispatch(
     queued_request: *const workflow_queue.QueuedRequest,
     view: HttpRequestView,
 ) !void {
-    const saved_runtime = zruntime.current_runtime;
     const saved_interpreter = zq.interpreter.current_interpreter;
-    const saved_call_cb = zq.http.call_function_callback;
     const dispatch_result = registry.dispatch(queued_request.target, view);
-    zruntime.current_runtime = saved_runtime;
     zq.interpreter.current_interpreter = saved_interpreter;
-    zq.http.call_function_callback = saved_call_cb;
 
     var handle = dispatch_result catch |err| {
         const code = if (err == error.UnknownHandler) "UnknownHandler" else "WorkflowDispatchFailed";
@@ -529,13 +513,9 @@ pub fn workflowFollowCallback(
 
     // Guarded nested dispatch (see workflowCallCallback for the per-thread
     // global snapshot/restore rationale).
-    const saved_runtime = zruntime.current_runtime;
     const saved_interpreter = zq.interpreter.current_interpreter;
-    const saved_call_cb = zq.http.call_function_callback;
     const dispatch_result = target.pool.executeHandlerBorrowed(view);
-    zruntime.current_runtime = saved_runtime;
     zq.interpreter.current_interpreter = saved_interpreter;
-    zq.http.call_function_callback = saved_call_cb;
 
     var handle = dispatch_result catch |err| {
         return createFetchErrorResponse(rt, "WorkflowDispatchFailed", @errorName(err));
@@ -1076,16 +1056,12 @@ fn dispatchAllToPartsArray(rt: *Runtime, ctx: *zq.Context, registry: *SystemRunt
     defer view_arena.deinit();
     const arena = view_arena.allocator();
 
-    // Each nested dispatch clears these per-thread globals (see workflowCallCallback);
-    // snapshot once and restore after the whole fan-out.
-    const saved_runtime = zruntime.current_runtime;
+    // A nested dispatch still clears the interpreter threadlocal, and the panic
+    // path nulls it while the sub's restore-defers are skipped by longjmp, so
+    // snapshot it once and restore after the whole fan-out. The runtime and the
+    // JSX call callback no longer need this: both are reached from the Context.
     const saved_interpreter = zq.interpreter.current_interpreter;
-    const saved_call_cb = zq.http.call_function_callback;
-    defer {
-        zruntime.current_runtime = saved_runtime;
-        zq.interpreter.current_interpreter = saved_interpreter;
-        zq.http.call_function_callback = saved_call_cb;
-    }
+    defer zq.interpreter.current_interpreter = saved_interpreter;
 
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const parts_arr = try ctx.createArray();

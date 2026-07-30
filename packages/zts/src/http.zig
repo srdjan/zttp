@@ -17,19 +17,20 @@ const util = @import("modules/internal/util.zig");
 // Function Component Callback
 // ============================================================================
 
-/// Callback for calling JS function components during SSR
-/// Set by the runtime before executing handlers
-pub const CallFunctionFn = *const fn (func: *object.JSObject, args: []const value.JSValue) anyerror!value.JSValue;
-pub threadlocal var call_function_callback: ?CallFunctionFn = null;
+/// Callback for calling JS function components during SSR and from the array
+/// higher-order functions. Declared on the Context (see
+/// `context.CallFunctionFn`) rather than in thread-local state: a nested
+/// dispatch runs on its own Context, so it cannot clear the caller's callback.
+pub const CallFunctionFn = context.CallFunctionFn;
 
-/// Set the function calling callback (called by runtime before handler execution)
-pub fn setCallFunctionCallback(callback: CallFunctionFn) void {
-    call_function_callback = callback;
+/// Install the callback for this Context (called by the runtime at bind time).
+pub fn setCallFunctionCallback(ctx: *context.Context, callback: CallFunctionFn) void {
+    ctx.call_function_callback = callback;
 }
 
-/// Clear the callback (called by runtime after handler execution)
-pub fn clearCallFunctionCallback() void {
-    call_function_callback = null;
+/// Clear the callback for this Context.
+pub fn clearCallFunctionCallback(ctx: *context.Context) void {
+    ctx.call_function_callback = null;
 }
 
 // ============================================================================
@@ -579,7 +580,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
 
         // Handle function components (tag is a callable function)
         if (tag_val.isCallable()) {
-            const call_fn = call_function_callback orelse return;
+            const call_fn = ctx.call_function_callback orelse return;
 
             // Get props (or create empty object if not present but children exist)
             var props_val = obj.getProperty(pool, .props) orelse value.JSValue.null_val;
@@ -602,7 +603,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             // Call the component function with props
             const func_obj = object.JSObject.fromValue(tag_val);
             const call_args = [_]value.JSValue{props_val};
-            const component_result = call_fn(func_obj, &call_args) catch |err| {
+            const component_result = call_fn(ctx, func_obj, &call_args) catch |err| {
                 std.log.err("Component function call failed: {}", .{err});
                 return;
             };
