@@ -797,24 +797,33 @@ fn printAppendedHelp() void {
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
 }
 
+/// Every verb `main` dispatches, for the drift gate below. `serve` is also the
+/// bare-argument default, and `--version` / `--help` are spellings of two of
+/// these, so the list is the set of names a user can type as a subcommand.
+const dispatched_verbs = [_][]const u8{
+    "workflow-queue", "durable", "serve", "edge", "attest", "version", "help",
+};
+
 fn printHelp() void {
-    const help =
-        \\zttp - serverless runtime
-        \\
-        \\Usage:
-        \\  zttp serve [options] [handler.ts]    Run handler
-        \\  zttp edge [--config FILE]            Run in-process edge runtime
-        \\  zttp workflow-queue <cmd> --durable <DIR>  Inspect workflow queue dead letters
-        \\  zttp attest                           Inspect embedded proof artifact
-        \\  zttp version                          Show version
-        \\  zttp help                             Show this help
-        \\
-        \\For compile, prove, and expert commands, use `zts`.
-        \\For init, dev, and deploy commands, use `zttp`.
-        \\
-    ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    _ = std.c.write(std.c.STDOUT_FILENO, runtime_help_text.ptr, runtime_help_text.len);
 }
+
+const runtime_help_text =
+    \\zttp - serverless runtime
+    \\
+    \\Usage:
+    \\  zttp serve [options] [handler.ts]    Run handler
+    \\  zttp edge [--config FILE]            Run in-process edge runtime
+    \\  zttp workflow-queue <cmd> --durable <DIR>  Inspect workflow queue dead letters
+    \\  zttp durable dead-runs <cmd> --durable <DIR>  Inspect failed durable runs
+    \\  zttp attest                           Inspect embedded proof artifact
+    \\  zttp version                          Show version
+    \\  zttp help                             Show this help
+    \\
+    \\For compile, prove, and expert commands, use `zts`.
+    \\For init, dev, and deploy commands, use `zttp`.
+    \\
+;
 
 fn printEdgeHelp() void {
     const help =
@@ -1048,4 +1057,18 @@ test "replay exit codes distinguish verification failures from invalid fixtures"
     try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.InvalidTraceJson));
     try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.InvalidTraceEntry));
     try std.testing.expectEqual(@as(u8, 2), replayExitCode(error.FileNotFound));
+}
+
+test "the runtime help lists every verb the runtime dispatches" {
+    // The template binary had `durable` dispatched and unlisted until this
+    // gate was added. Same two-way check the developer CLI runs on its own
+    // table; this binary's dispatch is small enough not to need one.
+    for (dispatched_verbs) |verb| {
+        var needle: [48]u8 = undefined;
+        const line = try std.fmt.bufPrint(&needle, "  zttp {s}", .{verb});
+        std.testing.expect(std.mem.indexOf(u8, runtime_help_text, line) != null) catch |err| {
+            std.debug.print("runtime help does not list `zttp {s}`\n", .{verb});
+            return err;
+        };
+    }
 }
