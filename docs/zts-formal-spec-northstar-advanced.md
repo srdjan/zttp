@@ -3,9 +3,13 @@
 **Status:** proposed language and assurance profile  
 **Profile name:** `zts-advanced-1`  
 **Grounded against:** ZTS 0.18.0, policy 2026.04.2, 2026-07-30  
-**Revision:** 2, 2026-07-30. Applies the multi-lens design review: stronger
-`match`, effect-aware `Result` combinators, a completed pure standard surface,
-decidable canonical-choice rules, and a closed agent-protocol contract.  
+**Revision:** 3, 2026-07-30. Revision 2 applied the multi-lens design review:
+stronger `match`, effect-aware `Result` combinators, a completed pure
+standard surface, decidable canonical-choice rules, and a closed
+agent-protocol contract. Revision 3 raises the canonical-form law from
+"one spelling per operation" to "each thing exactly one way" by adding
+compositional uniqueness and its mechanical derivation table (Section
+4.2.1).  
 **Relationship to the earlier northstar:** this document replaces its design
 claims, not its historical record. The earlier artifact remains useful context,
 but it does not define the advanced profile.
@@ -228,10 +232,27 @@ materially reduces ambiguity, authority, proof burden, or repair risk.
 
 ### 4.2 One canonical source form
 
-If two constructs express the same operation with no meaningful semantic
-difference, keep one.
+Each thing that can be done can be done exactly one way. If two constructs
+express the same operation with no meaningful semantic difference, keep one.
 
-Examples:
+The rule binds at two levels, and both are normative:
+
+1. **Syntactic uniqueness.** No two token-level forms denote the same
+   operation. This is enforced by exclusion: the rejected form is not in the
+   language.
+2. **Compositional uniqueness.** When one operation is reachable through more
+   than one composition of admitted forms, exactly one composition is
+   canonical and every other is mechanically rewritten to it. This is
+   enforced by canonicalization, not by exclusion, because removing the
+   general form would cost expressiveness the profile needs.
+
+Level 2 is what keeps the rule true as the standard library grows: a richer
+operation set always adds derivation paths, so uniqueness is preserved by the
+normalizer rather than by restraint in the operation set. Section 4.2.1 is
+the normative table. An author's choice among derivable spellings never
+survives normalization, so it never becomes a decision an agent has to make.
+
+Examples of level-1 uniqueness:
 
 - `match`, not `switch`
 - explicit assignment, not compound assignment or increment/decrement
@@ -248,6 +269,79 @@ Examples:
 The canonical formatter MUST produce one deterministic, idempotent source
 layout. Normalizing canonical source a second time MUST produce identical
 bytes.
+
+#### 4.2.1 Derived forms and mechanical canonicalization
+
+Every entry below names one operation, its canonical spelling, the derivable
+spellings that `canonicalize` rewrites to it, and the precondition under
+which the rewrite preserves meaning. A rewrite whose precondition does not
+hold is not emitted, because a canonicalization that changes behavior would
+be worse than a second spelling. Each entry carries a registered equivalence
+validator and is eligible for automatic application under Section 4.8. The
+table is registry-generated and drift-gated; this document is its readable
+view.
+
+| Operation | Canonical spelling | Rewritten from | Precondition |
+|---|---|---|---|
+| absence default | `x ?? d` | `x === undefined ? d : x`, `x !== undefined ? x : d`, `match (x) { when undefined: d default: x }` | operand type excludes `null` and is neither a generic parameter nor `unknown` |
+| absent member read | `x?.f` | `x === undefined ? undefined : x.f` | same as above |
+| number in text | `` `${n}` `` | `` `${String(n)}` `` | interpolation of a `number` |
+| scalar to text | `String(n)` | a template whose entire content is one `number` interpolation | value position outside a template |
+| redundant template | the interpolated expression itself | a template whose entire content is one `string` interpolation | value position outside a template, and the interpolation's static type is exactly `string` |
+| string concatenation | left-associated `a + b + c` | a template with no literal text and two or more interpolations, all `string` | value position outside a template |
+| membership test | `items.includes(v)` | `items.indexOf(v) !== -1`, `items.indexOf(v) >= 0` | element type excludes `number` (`NaN` distinguishes the two equalities) |
+| existence test | `items.some(p)` | `items.find(p) !== undefined` | element type excludes `undefined` |
+| dictionary membership test | `dictHas(d, k)` | `dictGet(d, k) !== undefined` | `V` excludes `undefined` |
+| Result default | `unwrapOr(r, d)` | `r.ok ? r.value : d`, a two-arm `match` whose arms are the value and a constant | `d` is assignable to `T` |
+| Result sequence | `collectAll(rs)` | a `reduce` over `Result` values whose body is `andThen` | the fold has no other accumulator |
+| dictionary map | `dictMapValues(d, f)` | an entry round trip through `dictEntries` and `dictFromEntries` that changes only values | the rewrite spans the whole consumption site, including its `Result` handling |
+| dictionary filter | `dictFilter(d, p)` | an entry round trip that only drops entries | same as above |
+| dictionary fold | `dictFold(d, f, init)` | `dictEntries(d).reduce(...)` | the fold has one accumulator |
+| pure single-accumulator fold | `map`, then `filter`, then `some`, then `every`, then `find`, then `findIndex`, then `reduce`: the first that fits | `let` plus `for...of` with no `break`, `continue`, or effect | the body is pure and the loop head is already canonical under the element-iteration row |
+| pure search loop | `find`, `findIndex`, `some`, or `every`, by what the loop yields and whether its flag starts `false` or `true` | `let` plus `for...of` whose only early exit is `break` | the body is pure, carries one accumulator, uses no `continue`, and the loop head is already canonical under the element-iteration row |
+| field read | `const id = user.id;`, or `const first = pair[0];` for a tuple | a one-field or one-element destructuring pattern | none |
+| multi-field read | `const { id, name } = user;`, or `const [first, second] = pair;` for a tuple | two or more member or fixed-tuple index reads of the same binding in one block | the binding's type is a single record type or a fixed tuple, and no narrowing guard separates the reads |
+| matched field read | a binding pattern field | a `match` arm that reads the field off the scrutinee | none |
+| binding field name | shorthand `{ value }` | `{ value: value }` | none |
+| element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items` | none |
+
+Three canonical choices in that table are decisions rather than derivations,
+recorded here so no reader has to infer them:
+
+- `??` and `?.` are canonical for `undefined`-absence. The explicit
+  comparison is canonical wherever they are unavailable: when the operand
+  type includes `null` (Section 5.3), when the operand is generic or
+  `unknown` and a later instantiation could admit `null`, and in
+  `if`-position guards, where the comparison is a narrowing test rather than
+  a value selection.
+- Array spread is canonical for concatenation, so the profile ships no
+  `concat` even though the live runtime has one. Spread is the familiar
+  TypeScript form under law 4.1 and it generalizes to element-and-array
+  mixtures that a two-argument helper cannot express.
+- A record spread is canonical whenever at least one field is inherited
+  unchanged, including when the result type widens the base's type with new
+  fields. A spread that overrides every field inherits nothing and is
+  rewritten to an explicit literal.
+
+Where a derivation row matches a site, it takes precedence over the
+branch-selection rule of Section 5.4, the iteration rule of Section 6.5, and
+the consumption procedure of Section 6.1. Those rules choose among forms of
+equal standing; this table resolves forms that are not.
+
+Rows compose, so normalization is a fixed-point computation rather than a
+single pass: a `let` loop over `dictEntries` becomes a `reduce` by one row
+and then `dictFold` by another. Rewrites apply innermost first, so a row that
+matches an interpolation fires before a row that matches the enclosing
+template, and a row that matches a loop head fires before a row that matches
+the loop. That order makes the table confluent: any two rows that can match
+one program reach the same fixed point. The profile registry publishes the
+maximum pass count, and a second `normalize` of canonical source MUST produce
+identical bytes.
+
+A derivable spelling is never an error. It checks, runs, and means what it
+says; it simply is not the fixed point, so `normalize` replaces it. This is
+deliberate: a rewrite costs an agent nothing, while an exclusion would cost a
+diagnostic, a repair iteration, and a lost expressive path.
 
 ### 4.3 Local elaboration
 
@@ -367,7 +461,7 @@ The response envelope is:
 The closed operation set is:
 
 - `meta` for compiler, profile, policy, registry, limits, operation schemas,
-  built-in module catalog, and verifier discovery,
+  built-in module catalog, derivation table, and verifier discovery,
 - `features`, `restrictions`, and `describe_rule` for language discovery,
 - `modules` for resolution of one entry file,
 - `check` for source, type, effect, policy, and proof diagnostics,
@@ -393,6 +487,8 @@ The `meta` payload MUST also publish:
   instructions,
 - `ambient_names`: the closed table of ambient type and value names from
   Section 6,
+- `derivations`: the Section 4.2.1 table of derivable spellings, each with
+  its canonical form, its rewrite identifier, and its equivalence validator,
 - `validators`: the registered equivalence validators, each with an
   identifier, the rewrite classes it covers, and its validation method,
 - `type_serialization`: the versioned canonical type serialization artifact
@@ -480,9 +576,9 @@ automatic application.
 
 The launch validator registry MUST cover at least: layout-only rewrites,
 missing-semicolon insertion where the parser admits exactly one insertion
-point (the validator is the parser's unique-parse check), and
+point (the validator is the parser's unique-parse check),
 identifier-preserving canonical respellings with a specified local
-elaboration. Pre-parse lexical errors carry a dedicated lexical-repair grade
+elaboration, and every entry in the Section 4.2.1 derivation table. Pre-parse lexical errors carry a dedicated lexical-repair grade
 so a file that does not yet parse still has a mechanical exit; no agent or
 human hand-fixes profile syntax.
 
@@ -584,8 +680,13 @@ The profile permits:
 - named function declarations for reusable behavior
 - trailing parameters with closed compile-time scalar defaults
 - direct arrow expressions only as arguments to typed, finite callback APIs
-- one-level object or array destructuring
-- one leading object spread followed by explicit fields
+- one-level object or array destructuring, canonical when two or more fields
+  of a single record type are read in one block with no narrowing guard
+  between them, and canonical for two or more elements of a fixed tuple; a
+  single field, a union-typed binding, and any read after a guard use member
+  access
+- one leading object spread followed by explicit fields, canonical when at
+  least one field is inherited unchanged from the base
 
 It excludes:
 
@@ -681,16 +782,26 @@ Rules:
 TypeScript nullish behavior and therefore test both. Because that behavior
 silently erases the distinction, the rule is compiler-enforced, not
 remembered: `??` and `?.` are rejected with a targeted diagnostic and an
-exact repair when the static type of the operand includes `null`. Such a site
-uses an explicit `=== null` or `=== undefined` comparison or `match`, so
-JSON `null` can never be swallowed by an absence operator. On types without
-`null`, `??` and `?.` keep exactly one meaning: `undefined`-absence handling.
+exact repair when the static type of the operand includes `null`, or when it
+is a generic parameter or `unknown`, since a later instantiation could admit
+`null` under source the checker has already accepted. Such a site uses an
+explicit `=== null` or `=== undefined` comparison or `match`, so JSON `null`
+can never be swallowed by an absence operator.
+
+On concrete types without `null`, `??` and `?.` keep exactly one meaning,
+`undefined`-absence handling, and they are the canonical spelling of it. An
+`undefined` comparison written in value position to select a default or a
+member is rewritten to them (Section 4.2.1). The explicit comparison stays
+canonical in `if`-position guards, where it is a narrowing test rather than a
+value selection.
 
 ### 5.4 Operators and expressions
 
 The profile permits:
 
 - arithmetic, comparison, bitwise, and boolean operators
+- `+` over two `string` operands, yielding `string`, the canonical
+  concatenation
 - strict equality `===` and `!==`
 - `typeof` in value position
 - direct and optional static member access
@@ -768,32 +879,47 @@ The result type is the deterministic join `join(A, B)`:
 
 1. Remove `never`; if both sides were `never`, return `never`, and if one side
    remains, use it.
-2. If the types are identical, use that type.
+2. If the types are syntactically identical, use that type. Two unions
+   written in different member orders are not syntactically identical and
+   fall through to step 3.
 3. If both are mutually assignable, use the type of the `whenTrue` branch, a
    syntactic rule a reader can apply without a type-identity oracle.
 4. If exactly one type is assignable to the other, use the receiving type.
 5. Otherwise form and canonically normalize `A | B`.
 
 Union normalization flattens nested unions, removes `never` and duplicate
-canonical type identities, coalesces mutually assignable members to the lowest
-stable identity, removes a member strictly assignable to another member, and
-sorts remaining members by stable type-graph identity.
+canonical type identities, coalesces mutually assignable members to the one
+written first, removes a member strictly assignable to another member, and
+keeps the remaining members in first-appearance order. Every step is
+syntactic, so a reader can compute the normalized union from the source
+alone.
+
+Source order is display order only. The canonical type serialization
+published through `meta.payload.type_serialization` serializes a union over
+its member set, independent of the order in which the members were written,
+so `string | number` and `number | string` have one identity and one digest.
+That identity keys digests, registry entries, and `Schema<T>` bindings; it
+never decides which of two members a reader sees first.
 Literals do not widen unless a branch already supplies a receiving wider type.
 `null`, `undefined`, distinct types, and generic variables retain their own
 identities unless the ordinary assignability rules remove them. A contextual
 expected type does not change the join; assignability to it is checked
 afterward.
 
-The stable type-graph identity is derived from the profile's canonical type
-serialization, never from allocation or encounter order. The canonical type
-serialization is a versioned registry artifact published through
-`meta.payload.type_serialization`, so an independent implementation can
-reproduce every ordering decision.
+The stable type-graph identity of a type is derived from that canonical
+serialization, never from allocation order, and it is an identity rather than
+an ordering: no rule in this profile chooses between two types by comparing
+their identities. The serialization is a versioned registry artifact
+published through `meta.payload.type_serialization`, so an independent
+implementation can reproduce every digest.
 
 The pure intrinsic `String(value)` is the explicit conversion from a number or
-boolean to text. Number formatting uses the ECMAScript base-10
-shortest-round-trip representation; negative zero renders as `0`. This is the
-only scalar-to-text spelling; instance `.toString()` conversion is excluded.
+boolean to text in value position; inside a template, a `number`
+interpolation elaborates through the same intrinsic without the wrapper.
+Number formatting uses the ECMAScript base-10 shortest-round-trip
+representation; negative zero renders as `0`. That intrinsic is the only
+scalar-to-text conversion, with those two spellings partitioned by position;
+instance `.toString()` conversion is excluded.
 
 Template interpolation MAY contain any pure expression of type `string` or
 `number`. A `number` interpolation elaborates through the same implicit
@@ -879,6 +1005,10 @@ Rules:
   binding under a new name (`value: v`). A binding introduces an arm-scoped
   `const` of the narrowed field type; no double read of the scrutinee is
   needed.
+- The binding pattern is the canonical way for an arm to read a field of the
+  scrutinee: an arm that reads the field off the scrutinee instead is
+  rewritten to a binding, and a rename whose new name equals the field name
+  is rewritten to the shorthand (Section 4.2.1).
 - A closed literal or discriminated union MUST be covered exactly and MUST NOT
   include `default`.
 - An open domain such as `string`, `number`, or `unknown` MUST include
@@ -1224,20 +1354,32 @@ a per-element effect sequence belongs in `for...of`, while a `Result` chain
 is a linear once-per-step sequence the row and the source order both make
 manifest.
 
-Consumption has one canonical form per shape:
+Consumption is one ordered decision procedure, first match wins, so exactly
+one form is canonical for any given site:
 
-- `match` is the canonical consumption, including every effectful
-  continuation with statements.
-- The `ok`-guard early return (`if (!result.ok) { return ...; }` followed by
-  direct use of `result.value`) is canonical exactly for guard-shaped code
-  that exits the enclosing function on the error arm.
-- A combinator chain is canonical exactly for a single-expression
-  transformation of the value or error.
+1. The site's result type is `T` and the error arm supplies a constant of
+   type `T`: `unwrapOr`.
+2. The site's result type is a `Result`, it is not a defaulting call, and
+   the value or the error is transformed by a single expression: a
+   combinator chain.
+3. The error arm exits the enclosing function: the `ok`-guard early return,
+   `if (!result.ok) { return ...; }` followed by direct use of
+   `result.value`.
+4. Otherwise: `match`, including every continuation whose arms need
+   statements.
 
-Trapping `unwrap` and `unwrapErr` are not canonical; a pure default uses
-`unwrapOr`. A checked extraction after an `ok` guard MAY lower directly to
-the value field, and the narrowing rules of Section 5.4 make that extraction
-predictable.
+The order is most specific first, and the clauses are disjoint by
+construction: rules 1 and 2 are separated by the site's result type and by
+the defaulting test, so a nested `Result<Result<A, B>, E>` cannot satisfy
+both. `match` is the residual form, and a site whose result type is neither
+`T` nor a `Result` reaches it directly rather than through a `unwrapOr` of a
+combinator chain. Every consumption site therefore has exactly one canonical
+spelling. A `match` whose shape matches an earlier rule is rewritten to that
+rule's form.
+
+Trapping `unwrap` and `unwrapErr` are not canonical. A checked extraction
+after an `ok` guard MAY lower directly to the value field, and the narrowing
+rules of Section 5.4 make that extraction predictable.
 
 Every recoverable failure MUST use a typed `Result`. This includes fallible
 ingress APIs, decoders, capability calls, text codecs, and partial collection
@@ -1281,7 +1423,26 @@ dictFold<K extends DictKey, V, U>(
 The bulk operations iterate in insertion order with pure callbacks, preserve
 key uniqueness by construction, and return `Dict`, not `Result`, so a
 transformation of an existing dictionary never handles an impossible
-duplicate-key error and never leaves the type.
+duplicate-key error and never leaves the type. They are also the canonical
+spellings of their operations: an entry round trip through `dictEntries` and
+`dictFromEntries` is rewritten to `dictMapValues` or `dictFilter`, and a
+`reduce` over `dictEntries` is rewritten to `dictFold` (Section 4.2.1).
+
+Construction has one canonical form per input shape, separated by duplicate
+handling rather than by the shape of the source data:
+
+- `comptime(dictFromEntries([...]))` from a literal entry list, where a
+  duplicate fails the build.
+- `dictFromEntries(entries)` whenever an array of key-value tuples is
+  available, including one produced by a `map`, and a duplicate key is an
+  error the caller handles.
+- `dictEmpty` plus a `dictSet` fold when duplicate keys must merge or
+  overwrite rather than fail, which is the only behavior the fold can express
+  and `dictFromEntries` cannot.
+
+The two runtime forms are therefore never interchangeable: they differ on
+duplicate keys, so choosing between them is a semantic decision about the
+data, not a spelling choice.
 
 A static table uses `comptime(dictFromEntries([...]))` over a literal entry
 list: the duplicate-key check is discharged at compile time, the expression
@@ -1396,22 +1557,28 @@ map<T, U>(items: readonly T[], f: (value: T, index: number) => U): U[]
 filter<T>(items: readonly T[], f: (value: T, index: number) => boolean): T[]
 reduce<T, U>(items: readonly T[], f: (acc: U, value: T, index: number) => U, init: U): U
 find<T>(items: readonly T[], f: (value: T, index: number) => boolean): T | undefined
+findIndex<T>(items: readonly T[], f: (value: T, index: number) => boolean): number
 some<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 every<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 flatMap<T, U>(items: readonly T[], f: (value: T, index: number) => readonly U[]): U[]
 toSorted<T>(items: readonly T[], compare: (a: T, b: T) => number): T[]
 slice<T>(items: readonly T[], start: number, end: number): T[]
-concat<T>(items: readonly T[], other: readonly T[]): T[]
 indexOf<T>(items: readonly T[], value: T): number
 includes<T>(items: readonly T[], value: T): boolean
 join(items: readonly string[], separator: string): string
 ```
 
 `toSorted` is non-mutating, its comparator MUST be pure and total over the
-element type, and the sort is stable. `indexOf` and `includes` use strict
-equality. This closed set is a superset of the array members the live runtime
-already ships, so completing their types (Section 3, gap 6) does not narrow
-the baseline.
+element type, and the sort is stable. `indexOf` uses strict equality and
+`includes` uses SameValueZero, matching both the live runtime and the `Dict`
+key rule of Section 6.2, so they disagree on `NaN` and the rewrite between
+them is conditioned accordingly. `includes` is canonical for the boolean
+question and `indexOf` for the position, so neither is written through the
+other (Section 4.2.1). Concatenation has no operation because array spread
+already spells it: the set is otherwise a superset of the array members the
+live runtime ships, and `concat` is the one deliberate removal, so
+completing their types (Section 3, gap 6) does not otherwise narrow the
+baseline.
 
 Each operation uses snapshot-finite iteration. Its callback MUST be pure. The
 checker verifies the callback body and every reachable helper rather than
@@ -1428,9 +1595,14 @@ prototype lookup.
 The choice between the two iteration forms is decidable, not judgment: a
 `for...of` loop whose body is pure, carries one evolving accumulator, and has
 no `break` or `continue` is non-canonical, and `canonicalize` emits the
-rewrite to the equivalent higher-order operation. `for...of` is canonical
-when the algorithm needs `break`, `continue`, per-element effects, or more
-than one evolving accumulator.
+rewrite to the equivalent higher-order operation. A loop whose `break` is its
+only early exit, which uses no `continue`, and whose body is a pure search is
+likewise rewritten: to `find` when it yields the element, `findIndex` when it
+yields a position, `some` when it yields a boolean flag starting `false`, and
+`every` when it yields one starting `true`.
+`for...of` is canonical when the algorithm needs `continue`, a `break` that
+carries other work, per-element effects, or more than one evolving
+accumulator.
 
 ## 7. Effects and structured concurrency
 
@@ -1546,9 +1718,15 @@ fetch(
 
 `responseText` is total: a handler always has an infallible constructor for
 the error arm of a fallible one. `responseJson<T>` uses the JSON-encodability
-rule from Section 6.4; its residual runtime failures are non-finite numbers
-and cycles, and when the checker proves `T` excludes both, the call MAY be
-typed total. Request
+rule from Section 6.4 and is always fallible, with one result type at every
+call site. Its residual runtime failures are non-finite numbers, cyclic
+values, and the policy-selected size limit of Section 6.4, and the last of
+those cannot be discharged from `T` alone, so no payload type buys a total
+encoder. One type for one operation is also the cheaper agent contract: the
+error arm is always required and never depends on how much the checker can
+prove.
+
+Request
 headers, method, URL, route parameters, status, and response headers have
 precise fixed or opaque types. Attacker-controlled data enters as `string`,
 `Bytes`, `JsonValue`, or a schema-decoded application type, never as silently
@@ -1980,6 +2158,12 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | interface, enum, namespace, decorator | one closed data and module model | language-simplicity choice |
 | object methods, getters, setters | explicit functions and effects | language-simplicity choice |
 
+Derivable spellings are absent from this matrix by design. They are not
+restrictions and eliminate no failure class: they are rewritten to their
+canonical form by Section 4.2.1 rather than rejected, so they belong to the
+canonicalization table, not to the exclusion set. A machine-readable profile
+publishes both.
+
 This matrix MUST be generated from the versioned profile registry once that
 registry exists. A restriction list that omits the strict canonical rules is
 not a complete machine-readable profile.
@@ -2142,9 +2326,14 @@ The advanced profile is ready to ship only when all gates are true.
 - The version-2 agent envelope, complete module-graph identity, atomic repair
   application, and unified property verification operation are implemented.
 - The `meta` payload publishes the grammar productions, canonical per-form
-  examples, ambient-name table, validator registry, canonical type
-  serialization, default repair budget, and decision-kind registry, each
-  registry-generated and drift-gated.
+  examples, ambient-name table, derivation table, validator registry,
+  canonical type serialization, default repair budget, and decision-kind
+  registry, each registry-generated and drift-gated.
+- Every entry in the Section 4.2.1 derivation table has a registered
+  equivalence validator and a checked precondition, and normalizing a program
+  containing every derivable spelling reaches the canonical fixed point
+  within the published pass bound, after which a second normalization
+  produces identical bytes.
 - Version-1 JSON surfaces remain explicitly distinguishable and cannot be
   mistaken for advanced-profile results.
 
@@ -2283,6 +2472,9 @@ The corpus MUST include:
 - the completed array operation set and `push`
 - a total `responseText` constructor in the HTTP ABI
 - the ambient-name criterion and registry table
+- the derivation table that makes compositional uniqueness mechanical
+- an ordered `Result` consumption procedure with disjoint clauses
+- one `responseJson` result type at every call site
 - opaque typed `HtmlNode` and finite `HtmlChild`
 - explicit JSON `null`
 - a typed, resource-bounded JSON codec
@@ -2382,7 +2574,10 @@ function frequencies(words: readonly string[]): Dict<string, number> {
 
 A pure single-accumulator fold is a `reduce` by the decidable rule of
 Section 6.5; the `let` plus `for...of` spelling of the same fold is
-non-canonical and receives the rewrite.
+non-canonical and receives the rewrite. The `dictSet` fold is canonical here
+for the reason Section 6.2 gives: a repeated word must merge into the running
+count rather than fail as a duplicate key, and that is the one behavior
+`dictFromEntries` cannot express.
 
 ### 16.3 Recursive application data
 
@@ -2538,6 +2733,8 @@ The language stays AI-minimal where choice entropy compounds:
 - one data-contract form,
 - one recoverable-error form,
 - one branch form per branch shape, chosen by a decidable rule,
+- one canonical spelling for every derivable operation, reached by
+  normalization rather than by exclusion,
 - one source loop,
 - one absence convention,
 - one dynamic keyed collection,
