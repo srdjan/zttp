@@ -302,7 +302,13 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !Compi
     defer atoms.deinit();
 
     var p = try zq.Parser.init(parser_alloc, source, &strings, &atoms);
-    defer p.deinit();
+    defer {
+        // Nested `FunctionBytecode` payloads live in the codegen's constants and
+        // are released by this hook, not by `CodeGen.deinit`, because in the
+        // runtime the Context adopts them instead. Nothing adopts them here.
+        if (p.code_gen) |*cg| cg.freeOwnedConstantPayloads();
+        p.deinit();
+    }
     if (jsx) p.enableJsx();
 
     const bytecode_data = try p.parseWithCodegenAllocator(codegen_alloc);
@@ -505,13 +511,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 // -- Tests -------------------------------------------------------------------
 
 test "compile-bench runs one iteration per fixture under 2s" {
-    // Parser currently leaks nested-function bytecode duplicates when
-    // driven outside the runtime (zruntime's Context owns that memory).
-    // An arena isolates the test from that pre-existing behavior; every
-    // allocation is released at the end of the test regardless.
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = std.testing.allocator;
 
     const start = try compat.Instant.now();
     for (fixtures) |fx| {
