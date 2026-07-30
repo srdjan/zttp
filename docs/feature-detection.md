@@ -156,7 +156,7 @@ Arithmetic and bitwise compound assignments are supported and desugar to `x = x 
 
 `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`, `>>=`, `>>>=`
 
-**Canonical profile note:** the arithmetic compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`) emit `ZTS613 canonical_compound_assignment` and must be rewritten to the explicit form `x = x + e`. See `docs/canonical-profile.md` for the full canonical ruleset.
+**Canonical profile note:** the arithmetic compound assignments (`+=`, `-=`, `*=`, `/=`, `%=`, `**=`) emit `ZTS613 canonical_compound_assignment` and must be rewritten to the explicit form `x = x + e`. See [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) for the full canonical ruleset.
 
 ### Unsupported Logical Compound Assignments (3 total)
 
@@ -220,7 +220,7 @@ A third layer of detection runs alongside the parser: the strict checker enforce
 | `ZTS619` | unused index alias in `for...of` | iterate the array directly; drop `.entries()` and the destructure |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |
 
-The full reference with before/after pairs and rationale lives at `docs/canonical-profile.md`.
+The full reference lives at [Canonicalize And Normalize](cli.md#canonicalize-and-normalize).
 
 ## Workflow Proof Guardrails
 

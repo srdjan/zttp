@@ -34,8 +34,8 @@ path.
   exists.
 - [Sound Mode](sound-mode.md) - type-directed truthiness, arithmetic, and
   comparison diagnostics.
-- [Canonical Profile](canonical-profile.md) - canonical ZigTS rules and
-  `zttp normalize`.
+- [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) - canonical
+  ZigTS rules and `zttp normalize`.
 - [Proofs and Receipts](proofs-and-receipts.md) - the proof card, the
   counterexample block, the persisted witness corpus, and the pull-request
   proof gate.

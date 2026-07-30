@@ -304,6 +304,48 @@ Use JSON mode for IDEs, CI, and review-bot integrations.
 
 Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the five mechanisms, the SMT layer, the exclusion audit, and the generated artifacts these commands own.
 
+### Canonicalize And Normalize
+
+The canonical profile gives common operations one spelling. `zttp check` and
+`zttp verify-paths` enforce these rules as ZTS6xx diagnostics. `zttp normalize
+<file> --write` rewrites the rules that can be rewritten safely, and `zttp
+describe-rule <code>` prints the live rule record.
+
+| Code | Rule | Canonical form |
+|---|---|---|
+| ZTS604 | Avoidable `let` | Use `const` unless the binding is reassigned. |
+| ZTS605 | Dynamic computed property access | Use literal property names or explicit maps. |
+| ZTS608 | Reused arrow helper | Give reusable helpers named function declarations. |
+| ZTS609 | Exported function-valued `const` | Export a function declaration. |
+| ZTS610 | Public helper effects | Declare helper proof/effect capsules when required. |
+| ZTS611 | Proof capsules | Keep proof-carrying helper annotations explicit. |
+| ZTS612 | Ternary expression | Use `if`/`else` or `match`. |
+| ZTS613 | Compound assignment | Write the full assignment. |
+| ZTS614 | Non-leading object spread | Put spread first or write explicit fields. |
+| ZTS615 | Complex template interpolation | Bind the value first, then interpolate the binding. |
+| ZTS616 | Call-site spread | Pass explicit arguments. |
+| ZTS617 | Default parameter value | Use an explicit body-level default. |
+| ZTS618 | Nested destructuring | Destructure one level at a time. |
+| ZTS619 | Unused index alias in `for...of` | Iterate the array directly. |
+| ZTS620 | Boolean compared to boolean literal | Use the boolean expression or negation directly. |
+
+```bash
+zttp check --json examples/handler/handler.ts
+zttp normalize src/handler.ts --check
+zttp normalize src/handler.ts --write
+zttp describe-rule ZTS604 --json
+zttp describe-rule --hash
+```
+
+`normalize --check` exits non-zero when the file is not already canonical. It
+is the right CI gate when a project wants canonical form enforced before
+review.
+
+Canonical code reduces the number of equivalent shapes the analyzer and the
+expert agent must handle. A handler with no ZTS6xx diagnostics carries the
+`canonical` proof property, and `Response & Spec<"canonical">` can discharge
+against it.
+
 ## Expert Mode
 
 Configure a model key, then launch the interactive agent:

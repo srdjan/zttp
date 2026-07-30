@@ -37,7 +37,7 @@ document assumes the type-system mechanics covered in
 | 10 | Validate external data at runtime | Direct fit (built-in) | `zttp:validate` plus `zttp:decode` replace Zod -> [validate-external.ts](../examples/patterns/validate-external.ts) |
 | 11 | Avoid `enum` | Enforced | `enum` is a hard error; literal unions only -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 12 | Generics that infer automatically | Direct fit | generics plus inference (up to 8 params) -> [infer-and-generics.ts](../examples/patterns/infer-and-generics.ts) |
-| 13 | Strict compiler options | Adapted | no tsconfig; sound mode plus the canonical profile plus the analyzer are strict by construction ([sound-mode.md](sound-mode.md), [canonical-profile.md](canonical-profile.md)) |
+| 13 | Strict compiler options | Adapted | no tsconfig; sound mode plus the canonical profile plus the analyzer are strict by construction ([sound-mode.md](sound-mode.md), [canonicalize and normalize](cli.md#canonicalize-and-normalize)) |
 | 14 | Template literal types | Direct fit | template literal types supported -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 15 | Type-safe is not runtime-safe | Direct fit (thesis) | proof receipts, contracts, and runtime validation; the restrictions-to-proofs story ([restrictions-to-proofs.md](restrictions-to-proofs.md), the proof-receipt section of [user-guide.md](user-guide.md)) |
 
@@ -323,7 +323,7 @@ capability access must use literal keys, and an avoidable `let` is an error.
 Layered on top are sound mode (type-directed truthiness, arithmetic, and
 comparison diagnostics) and the canonical profile, both strict by construction
 rather than by flag. See [Sound Mode](sound-mode.md) and
-[Canonical Profile](canonical-profile.md). The canon's "turn on every strict
+[Canonicalize And Normalize](cli.md#canonicalize-and-normalize). The canon's "turn on every strict
 option" reduces to "the strict options are the only options."
 
 ## Type-Safe Is Not Runtime-Safe (Tip 15)

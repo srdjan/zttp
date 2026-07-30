@@ -175,7 +175,7 @@ References:
 - [TypeScript](typescript.md)
 - [Feature Detection](feature-detection.md)
 - [Restrictions to Proofs](restrictions-to-proofs.md)
-- [Canonical Profile](canonical-profile.md)
+- [Canonicalize And Normalize](cli.md#canonicalize-and-normalize)
 - [Sound Mode](sound-mode.md)
 
 ## JSX And TSX
