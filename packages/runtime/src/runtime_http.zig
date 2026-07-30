@@ -5,8 +5,9 @@
 //! synchronous `fetch` bridge, durable-fetch caching, the `zttp:service`
 //! call path, the parallel-I/O fetch workers, and the low-level
 //! `zttp:http.request` native. These are plain free functions taking an
-//! explicit `*Runtime` (or recovering it from the ambient `current_runtime`
-//! threadlocal), so they live here and back-import `Runtime` from zruntime.
+//! explicit `*Runtime`, or recovering it from the `*Context` the engine hands
+//! every native callback (`Runtime.fromContext`), so they live here and
+//! back-import `Runtime` from zruntime.
 //! zruntime registers the exported native callbacks during binding setup, and
 //! runtime_workflow reaches the response builders here by alias.
 
@@ -86,7 +87,7 @@ pub fn beginBodyRead(ctx: *zq.Context, this: zq.JSValue) zq.JSValue {
         return throwTypeError(ctx, "Body reader target must be an object");
     }
     const obj = this.toPtr(zq.JSObject);
-    if (zruntime.current_runtime) |rt| {
+    if (Runtime.fromContext(ctx)) |rt| {
         if (rt.consumed_body_objects.contains(obj)) {
             return throwTypeError(ctx, "Body has already been consumed");
         }
@@ -449,7 +450,8 @@ fn outboundHostViolation(rt: *Runtime, host: []const u8) ?[]const u8 {
 }
 
 pub fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const rt = zruntime.current_runtime orelse return error.RuntimeUnavailable;
+    const ctx_for_host: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const rt = Runtime.fromContext(ctx_for_host) orelse return error.RuntimeUnavailable;
     const result = fetchSyncResult(rt, args) catch |err| {
         return createFetchErrorResponse(rt, "InternalError", @errorName(err));
     };
@@ -2059,8 +2061,9 @@ pub fn ioBuildResponse(runtime_ptr: *anyopaque, result: *const zq.modules.io.Fet
     return created.value;
 }
 
-pub fn httpRequestNative(_: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const rt = zruntime.current_runtime orelse return error.RuntimeUnavailable;
+pub fn httpRequestNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
+    const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+    const rt = Runtime.fromContext(ctx) orelse return error.RuntimeUnavailable;
     const out = httpRequestResultJsonAlloc(rt, args) catch |err| {
         const fallback = try httpRequestErrorJsonAlloc(rt.allocator, "InternalError", @errorName(err));
         defer rt.allocator.free(fallback);

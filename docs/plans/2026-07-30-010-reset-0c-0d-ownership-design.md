@@ -113,10 +113,21 @@ depend on earlier ones; earlier slices are useful on their own.
    through a native callback in a test. No behavior change yet.
    -> verify: `zig build test-zts test-zruntime`.
 
+   DONE 2026-07-30. `Context.host` plus `Runtime.fromContext`. Both init paths set the
+   slot and `deinit` clears it, which matters on the pooled path: that Context outlives
+   the wrapper and is handed to the next one, so a stale pointer would be a
+   use-after-free. Three tests pin it, including the pooled re-point-and-clear cycle and
+   the null case for an engine-only Context.
+
 3. **Retire `current_runtime` from `runtime_http.zig`** (0d). Its three reads become
    `ctx.host` casts. This is the smallest ambient-state removal and it exercises slice 2 on
    the file whose own header documents the problem.
    -> verify: `test-zruntime`, `test-cli`, the outbound-HTTP example tests.
+
+   DONE 2026-07-30. All three reads gone: `beginBodyRead` already had the Context,
+   `fetchSyncNative` had it as `ctx_ptr` and was reading the threadlocal anyway, and
+   `httpRequestNative` was discarding its `ctx_ptr` with `_`. The file no longer mentions
+   `current_runtime`. Full `verify.sh` green.
 
 4. **Retire `current_runtime` and `call_function_callback` save/restore from
    `runtime_workflow.zig`** (0d). Twelve save/restore pairs become an explicit parameter.
