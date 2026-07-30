@@ -93,7 +93,7 @@ const help_all_mid =
 const help_all_tail =
     \\
     \\Advanced:
-    \\  zttp ratchet [show|check]            Property-regression gate
+    \\  zttp ratchet show <handler.ts>       Print declared vs proven spec sets
     \\  zttp witnesses [list|pin|unpin|prune|synthesize]  Falsifying-input corpus
     \\  zttp version                         Show version
     \\

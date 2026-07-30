@@ -10,18 +10,26 @@
 //! proven set does not cover it.
 //!
 //! Subcommands:
-//!   show  <handler.ts>     print provenSpecs
-//!   check <handler.ts>     compile, diff active vs proven, exit 1
-//!                          if any active spec is not proven
+//!   show  <handler.ts>     print the declared, proven, unmet, and extra sets
+//!   check <handler.ts>     deprecated alias; `zttp check` is the gate
 //!
 //! There is no `--baseline` file. The earlier hand-maintained baseline
 //! JSON has been retired: the obligation set lives in the compiled
 //! contract, with source `Spec<...>` acting as a narrowing override.
 //!
-//! Waiver signing (a signed file under `.zttp/waivers/` that lets the
-//! operator accept a regression with a recorded reason) lands in a
-//! follow-up. The current `check` exits 1 on any unmet declaration; that
-//! is the mechanically-correct default for a ratchet.
+//! `check` here is deprecated and unlisted, because the gate it provides
+//! already exists one layer down: `zttp check` compiles the same contract
+//! and exits 1 on an undischarged Spec (ZTS500) and on a non-monotonic
+//! declared name, measured on both. What this file still owns is the
+//! *view* - the declared/proven/unmet/extra read-out, which `show` now
+//! prints. See wave 4 item 3 in
+//! docs/plans/2026-07-28-001-reset-simplification-plan.md.
+//!
+//! No waiver system. An earlier draft of this header announced signed
+//! waivers under `.zttp/waivers/` as a follow-up; nothing was built, nothing
+//! asked for it, and a ratchet whose default is "exit 1 on any unmet
+//! declaration" is the mechanically correct one. The announcement is gone
+//! rather than left as a promise the code does not keep.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -110,17 +118,44 @@ fn runShow(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError!
     var sets = try collectSpecSets(allocator, handler);
     defer sets.deinit(allocator);
 
-    // `show` is a read-out of the proven set. It intentionally does NOT
-    // surface `sets.dropped` (non-monotonic declared names) — that
-    // warning belongs to `check`, where it actually changes the verdict.
-
-    std.debug.print("proven specs for {s}:\n", .{handler});
     if (sets.proven.names.items.len == 0) {
+        std.debug.print("proven specs for {s}:\n", .{handler});
         std.debug.print("  (none — compile failed or no properties proven)\n", .{});
         return;
     }
-    for (sets.proven.names.items) |name| {
-        std.debug.print("  - {s}\n", .{name});
+
+    // `show` is the read-out: declared, proven, and the two differences.
+    // It reports and never fails, because the gate lives in `zttp check`
+    // (ZTS500 on an undischarged Spec). Non-monotonic declared names are
+    // listed here rather than suppressed - a reader asking what holds wants
+    // to know one of their declarations can never be ratcheted.
+    std.debug.print("specs for {s}:\n", .{handler});
+    std.debug.print("  declared: ", .{});
+    printList(sets.declared.names.items);
+    std.debug.print("  proven:   ", .{});
+    printList(sets.proven.names.items);
+
+    var unmet = std.ArrayListUnmanaged([]const u8).empty;
+    defer unmet.deinit(allocator);
+    var extra = std.ArrayListUnmanaged([]const u8).empty;
+    defer extra.deinit(allocator);
+    for (sets.declared.names.items) |declared| {
+        if (!containsName(sets.proven.names.items, declared)) try unmet.append(allocator, declared);
+    }
+    for (sets.proven.names.items) |proven_name| {
+        if (!containsName(sets.declared.names.items, proven_name)) try extra.append(allocator, proven_name);
+    }
+    if (unmet.items.len > 0) {
+        std.debug.print("  - unmet (declared but not proven): ", .{});
+        printList(unmet.items);
+    }
+    if (extra.items.len > 0) {
+        std.debug.print("  + extra (proven beyond declared): ", .{});
+        printList(extra.items);
+    }
+    if (sets.dropped.names.items.len > 0) {
+        std.debug.print("  ! non-ratchetable (declared but not monotonic): ", .{});
+        printList(sets.dropped.names.items);
     }
 }
 
@@ -129,6 +164,12 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
         printHelp();
         return;
     }
+
+    std.debug.print(
+        "note: `zttp ratchet check` is deprecated. `zttp check` already exits 1 on an\n" ++
+            "      undischarged Spec (ZTS500); `zttp ratchet show` prints the declared/proven diff.\n",
+        .{},
+    );
 
     var handler_path: ?[]const u8 = null;
 
@@ -500,6 +541,32 @@ test "runCheck rejects multiple positional handler paths" {
     );
 }
 
+test "runShow reports the declared/proven differences without failing" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "unmet.ts",
+        .data =
+        \\import type { Spec } from "zttp:types";
+        \\type Guardrails = Spec<"fault_covered">;
+        \\function handler(req: Request): Response & Guardrails {
+        \\  return Response.json({ ok: true });
+        \\}
+        ,
+    });
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const tmp_len = try tmp.dir.realPath(std.testing.io, &path_buf);
+    const path = try std.fs.path.join(allocator, &.{ path_buf[0..tmp_len], "unmet.ts" });
+    defer allocator.free(path);
+
+    // `fault_covered` does not hold for this handler, which is what makes
+    // `zttp check` exit 1. `show` reports the same gap and exits 0: it is the
+    // read-out, not the gate.
+    try runShow(allocator, &.{path});
+}
+
 test "runShow rejects unknown -prefixed flags but not --help" {
     const allocator = std.testing.allocator;
     // `--help` is the project-wide help convention (hasHelpFlag in
@@ -585,16 +652,19 @@ test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
 
 fn printHelp() void {
     std.debug.print(
-        \\zttp ratchet — Spec-derived monotonicity gate (slice 4 of attest)
+        \\zttp ratchet — Spec read-out for proven properties
         \\
         \\Usage:
         \\  zttp ratchet show <handler.ts>
-        \\      Compile the handler and print the property set it currently proves.
+        \\      Compile the handler and print its declared and proven spec sets,
+        \\      plus anything declared-but-unproven, proven-beyond-declared, or
+        \\      declared-but-not-monotonic. Reports; never fails.
+        \\      A handler with no `Spec<...>` activates every supported spec.
         \\
         \\  zttp ratchet check <handler.ts>
-        \\      Compile the handler and diff the active spec obligations against
-        \\      the proven property set. Exits 1 if any active spec is not proven.
-        \\      A handler with no `Spec<...>` activates every supported spec.
+        \\      Deprecated. `zttp check` is the gate: it compiles the same
+        \\      contract and exits 1 on an undischarged Spec (ZTS500) and on a
+        \\      non-monotonic declared name. Kept working for one release.
         \\
         \\Declaring obligations:
         \\

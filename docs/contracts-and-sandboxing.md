@@ -437,7 +437,8 @@ property moved.
 
 ```bash
 zttp ratchet show <handler.ts>      # current proven set
-zttp ratchet check <handler.ts>     # diff active specs against proven; exit 1 if any unmet
+zttp ratchet show <handler.ts>      # print declared vs proven specs, and the differences
+zttp check <handler.ts>              # the gate: exit 1 on an undischarged Spec (ZTS500)
 ```
 
 Handlers that declare no `Spec<...>` ratchet against the default full

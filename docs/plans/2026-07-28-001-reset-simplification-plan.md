@@ -1397,9 +1397,23 @@ follow them, and they should be sequenced first.
    for exit code and output, and two tests pin the subcommand and the delegated error class
    (test-cli 770 to 772). The CLAUDE.md parenthetical that disclaimed the collision is
    deleted; `docs/cli.md` documents the new spelling and the deprecation window.
-3. Fold `ratchet check` into `check` behind a fail-on-undischarged flag over the spec
-   diagnostics that already exist, and either build the announced waiver system or delete
-   its comment.
+3. DONE, and the flag was unnecessary: `check` already fails on an undischarged Spec.
+   Measured on two handlers - one declaring `Spec<"fault_covered">` that does not hold, one
+   declaring the non-monotonic `Spec<"has_egress">` - `zts check` exits 1 on both (ZTS500),
+   with no flag. Adding `--fail-on-undischarged` would have been a switch for behavior that
+   is already the default, so the fold went the other way: `zttp check` is the gate,
+   `ratchet check` is deprecated and unlisted (kept working for one release, printing a
+   migration note), and what `ratchet` still owns is the *view*. `ratchet show` grew the
+   read-out that only `check` used to print: declared, proven, unmet, proven-beyond-declared,
+   and declared-but-not-monotonic. It reports and never fails.
+
+   The waiver system is deleted rather than built. The module header announced signed
+   waivers under `.zttp/waivers/` as a follow-up; nothing was built, nothing asked for it,
+   and "exit 1 on any unmet declaration" is the mechanically correct default for a ratchet.
+   The header now says so instead of promising something the code does not keep.
+
+   Not touched: `property_expectations.zig` (688 lines), the third mechanism section 5.3
+   names. Folding it is a separate decision about the build-time JSON surface.
 4. PARTLY DONE, and the last clause's premise is false. The shared import and binding index
    exists and is shared: `packages/zts/src/module_facts.zig`, adopted by all six analyzers
    (C1) and injected once per compile through `resolve`/`check` (C2). The shared IR shape
