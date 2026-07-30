@@ -27,17 +27,55 @@ const FunctionSig = type_env_mod.FunctionSig;
 const TypeChecker = type_checker_mod.TypeChecker;
 const null_type_idx = type_pool_mod.null_type_idx;
 
+/// The closed severity set (spec 4.8). Only `.err` may fail a check: a
+/// diagnostic that is not `.err` never changes an exit code, a success
+/// verdict, or a proof property. `.advisory` is the idiom channel - it names a
+/// better spelling for code that is already correct, so it is strictly weaker
+/// than `.warning`, which reports a real defect the checker chose not to fail
+/// on.
 pub const Severity = enum {
     err,
     warning,
+    advisory,
 
     pub fn label(self: Severity) []const u8 {
         return switch (self) {
             .err => "error",
             .warning => "warning",
+            .advisory => "advisory",
         };
     }
 };
+
+test "advisory severity label" {
+    try testing.expectEqualStrings("advisory", Severity.advisory.label());
+}
+
+test "advisory diagnostics do not count as errors" {
+    var checker = try checkSource("function handler(req) { return Response.json({ ok: true }); }");
+    defer checker.deinit();
+
+    const before = countErrors(&checker);
+    // No rule emits an advisory until the idiom channel is wired, so inject one
+    // directly: the invariant under test is that the error count is blind to it.
+    checker.addDiagnostic(.{
+        .severity = .advisory,
+        .kind = .canonical_redundant_bool_compare,
+        .node = 0,
+        .message = "test advisory",
+        .help = null,
+    });
+
+    try testing.expectEqual(before, countErrors(&checker));
+}
+
+fn countErrors(checker: *const StrictChecker) usize {
+    var count: usize = 0;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.severity == .err) count += 1;
+    }
+    return count;
+}
 
 pub const DiagnosticKind = enum {
     implicit_unknown,
