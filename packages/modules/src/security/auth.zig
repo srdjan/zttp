@@ -75,8 +75,7 @@ pub const binding = sdk.ModuleBinding{
 };
 
 fn parseBearerImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const header = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const header = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     if (header.len < 7 or !std.ascii.eqlIgnoreCase(header[0..7], "Bearer ")) return sdk.JSValue.undefined_val;
     const token = header[7..];
@@ -173,9 +172,7 @@ fn isExpired(now: i64, exp: i64) bool {
 }
 
 fn jwtSignImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len < 2) return sdk.JSValue.undefined_val;
-    const claims_json = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
-    const secret = sdk.extractString(args[1]) orelse return sdk.JSValue.undefined_val;
+    const claims_json, const secret = sdk.decodeArgs(&.{ .string, .string }, args) orelse return sdk.JSValue.undefined_val;
 
     const allocator = sdk.getAllocator(handle);
 
@@ -208,10 +205,7 @@ fn jwtSignImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSVa
 }
 
 fn verifyWebhookSignatureImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len < 3) return sdk.JSValue.false_val;
-    const payload = sdk.extractString(args[0]) orelse return sdk.JSValue.false_val;
-    const secret = sdk.extractString(args[1]) orelse return sdk.JSValue.false_val;
-    const sig_str = sdk.extractString(args[2]) orelse return sdk.JSValue.false_val;
+    const payload, const secret, const sig_str = sdk.decodeArgs(&.{ .string, .string, .string }, args) orelse return sdk.JSValue.false_val;
 
     var expected_mac: sdk.HmacSha256Mac = undefined;
     try sdk.hmacSha256(handle, payload, secret, &expected_mac);
@@ -227,9 +221,7 @@ fn verifyWebhookSignatureImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: [
 }
 
 fn timingSafeEqualImpl(_: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len < 2) return sdk.JSValue.false_val;
-    const a = sdk.extractString(args[0]) orelse return sdk.JSValue.false_val;
-    const b = sdk.extractString(args[1]) orelse return sdk.JSValue.false_val;
+    const a, const b = sdk.decodeArgs(&.{ .string, .string }, args) orelse return sdk.JSValue.false_val;
     if (a.len != b.len) return sdk.JSValue.false_val;
     return if (constTimeEqlSlice(a, b)) sdk.JSValue.true_val else sdk.JSValue.false_val;
 }

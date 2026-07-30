@@ -67,12 +67,47 @@ pub export fn zttpSdkWriteStderr(_: *sdk.ModuleHandle, _: [*]const u8, _: usize)
     return true;
 }
 
-pub export fn zttpSdkExtractString(_: sdk.JSValue, _: *[*]const u8, _: *usize) bool {
-    return false;
+// String support. The shim used to report every value as a non-string, which
+// made the success path of anything reading a string argument untestable. It
+// now keeps a small interning table: `internString` mints a value the shim
+// recognizes, and every other value (ints, undefined, objects) still extracts
+// as a non-string. Values are borrowed slices of caller memory, so a test
+// interning a temporary must not outlive it; `resetStrings` clears the table.
+const STRING_PREFIX: u64 = 0xFFFC_0000_0000_0000;
+const max_shim_strings = 32;
+var shim_strings: [max_shim_strings][]const u8 = undefined;
+var shim_string_count: usize = 0;
+
+/// Mint a JSValue the shim extracts as `text`. Borrows `text`.
+pub fn internString(text: []const u8) sdk.JSValue {
+    if (shim_string_count == max_shim_strings) @panic("sdk test shim string table is full");
+    shim_strings[shim_string_count] = text;
+    const index = shim_string_count;
+    shim_string_count += 1;
+    return .{ .raw = STRING_PREFIX | @as(u64, index) };
 }
 
-pub export fn zttpSdkCreateString(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, out: *sdk.JSValue) bool {
-    out.* = sdk.JSValue.undefined_val;
+/// Drop every interned string. Call when the borrowed memory goes out of scope.
+pub fn resetStrings() void {
+    shim_string_count = 0;
+}
+
+fn shimStringSlice(val: sdk.JSValue) ?[]const u8 {
+    if ((val.raw & 0xFFFF_0000_0000_0000) != STRING_PREFIX) return null;
+    const index: usize = @intCast(val.raw & 0xFFFF_FFFF);
+    if (index >= shim_string_count) return null;
+    return shim_strings[index];
+}
+
+pub export fn zttpSdkExtractString(val: sdk.JSValue, out_ptr: *[*]const u8, out_len: *usize) bool {
+    const slice = shimStringSlice(val) orelse return false;
+    out_ptr.* = slice.ptr;
+    out_len.* = slice.len;
+    return true;
+}
+
+pub export fn zttpSdkCreateString(_: *sdk.ModuleHandle, ptr: [*]const u8, len: usize, out: *sdk.JSValue) bool {
+    out.* = internString(ptr[0..len]);
     return true;
 }
 
@@ -143,8 +178,8 @@ pub export fn zttpSdkSetModuleState(_: *sdk.ModuleHandle, slot: usize, ptr: *any
     return true;
 }
 
-pub export fn zttpSdkIsString(_: sdk.JSValue) bool {
-    return false;
+pub export fn zttpSdkIsString(val: sdk.JSValue) bool {
+    return shimStringSlice(val) != null;
 }
 
 pub export fn zttpSdkIsObject(_: sdk.JSValue) bool {

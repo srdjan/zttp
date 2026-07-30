@@ -34,6 +34,47 @@ test "extractInt accepts int tag and whole-number floats" {
     try std.testing.expectEqual(@as(?i32, null), sdk.extractInt(sdk.JSValue.undefined_val));
 }
 
+test "decodeArgs returns null when a declared argument is missing" {
+    const none = [_]sdk.JSValue{};
+    try std.testing.expect(sdk.decodeArgs(&.{.string}, &none) == null);
+
+    const one = [_]sdk.JSValue{test_shim.internString("only")};
+    defer test_shim.resetStrings();
+    try std.testing.expect(sdk.decodeArgs(&.{ .string, .string }, &one) == null);
+}
+
+test "decodeArgs returns null when a declared argument is not a string" {
+    const args = [_]sdk.JSValue{ sdk.JSValue.fromInt(7), sdk.JSValue.undefined_val };
+    try std.testing.expect(sdk.decodeArgs(&.{.string}, &args) == null);
+    try std.testing.expect(sdk.decodeArgs(&.{ .string, .string }, &args) == null);
+}
+
+test "decodeArgs decodes a declared string list in argument order" {
+    defer test_shim.resetStrings();
+    const args = [_]sdk.JSValue{
+        test_shim.internString("first"),
+        test_shim.internString("second"),
+        test_shim.internString("third"),
+    };
+    const decoded = sdk.decodeArgs(&.{ .string, .string, .string }, &args) orelse
+        return error.ExpectedDecode;
+    try std.testing.expectEqualStrings("first", decoded[0]);
+    try std.testing.expectEqualStrings("second", decoded[1]);
+    try std.testing.expectEqualStrings("third", decoded[2]);
+}
+
+test "decodeArgs ignores arguments past the declared list" {
+    defer test_shim.resetStrings();
+    const args = [_]sdk.JSValue{ test_shim.internString("kept"), sdk.JSValue.fromInt(7) };
+    const decoded = sdk.decodeArgs(&.{.string}, &args) orelse return error.ExpectedDecode;
+    try std.testing.expectEqualStrings("kept", decoded[0]);
+}
+
+test "decodeArgs on an empty declared list accepts any arguments" {
+    const args = [_]sdk.JSValue{sdk.JSValue.fromInt(7)};
+    try std.testing.expect(sdk.decodeArgs(&.{}, &args) != null);
+}
+
 // Lives here, not in test_shim.zig: test_shim is imported as a separate module,
 // so refAllDecls references its decls but does NOT register its `test` blocks -
 // a test placed there never runs. test_root.zig is the actual test root.

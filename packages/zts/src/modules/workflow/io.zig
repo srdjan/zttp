@@ -47,8 +47,11 @@ pub const binding = mb.ModuleBinding{
         // race can return undefined on a no-winner / response-build-failure path
         // (see raceNative), so it is .optional_object: callers must narrow before
         // use, never .object. io.json must mirror both (ZVM009).
-        .{ .name = "parallel", .func = parallelNative, .arg_count = 1, .effect = .write, .returns = .object, .param_types = &.{}, .return_labels = .{ .external = true } },
-        .{ .name = "race", .func = raceNative, .arg_count = 1, .effect = .write, .returns = .optional_object, .param_types = &.{}, .return_labels = .{ .external = true } },
+        // `.required_arg_count = 0`: calling either with no arguments is valid
+        // (parallel() yields an empty array, race() yields undefined), so the
+        // declared parameter must not make the argument mandatory.
+        .{ .name = "parallel", .func = parallelNative, .arg_count = 1, .required_arg_count = 0, .effect = .write, .returns = .object, .param_types = &.{.object}, .return_labels = .{ .external = true } },
+        .{ .name = "race", .func = raceNative, .arg_count = 1, .required_arg_count = 0, .effect = .write, .returns = .optional_object, .param_types = &.{.object}, .return_labels = .{ .external = true } },
     },
 };
 

@@ -26,8 +26,7 @@ pub const binding = sdk.ModuleBinding{
 };
 
 fn envImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const name = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const name = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     if (!sdk.allowsEnv(handle, name)) {
         return util.throwCapabilityPolicyError(handle, "env access", name);

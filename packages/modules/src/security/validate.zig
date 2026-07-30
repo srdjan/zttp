@@ -150,9 +150,7 @@ pub fn getOrCreateRegistry(handle: *sdk.ModuleHandle) !*SchemaRegistry {
 }
 
 fn schemaCompileImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len < 2) return sdk.JSValue.false_val;
-    const name = sdk.extractString(args[0]) orelse return sdk.JSValue.false_val;
-    const schema_json = sdk.extractString(args[1]) orelse return sdk.JSValue.false_val;
+    const name, const schema_json = sdk.decodeArgs(&.{ .string, .string }, args) orelse return sdk.JSValue.false_val;
 
     const reg = getOrCreateRegistry(handle) catch return sdk.JSValue.false_val;
     const allocator = reg.allocator;
@@ -236,8 +234,7 @@ fn coerceJsonImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
 }
 
 fn schemaDropImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.false_val;
-    const name = sdk.extractString(args[0]) orelse return sdk.JSValue.false_val;
+    const name = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.false_val)[0];
     const reg = sdk.getModuleState(handle, SchemaRegistry, MODULE_STATE_SLOT) orelse return sdk.JSValue.false_val;
     if (reg.schemas.fetchRemove(name)) |entry| {
         entry.value.deinit(reg.allocator);

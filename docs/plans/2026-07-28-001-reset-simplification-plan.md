@@ -1352,8 +1352,19 @@ follow them, and they should be sequenced first.
    `docs/plans/2026-07-30-007-lowered-module-plan.md`.
 5. Replace `ui_payload.zig`'s 44 hand-written clone and deinit functions with arena-owned
    payloads. About 1,500 to 2,000 lines of 3,013.
-6. Add the comptime argument-decode wrapper for module impl functions, generated from the
-   `param_types` already declared in each binding.
+6. DONE, but not as a registration-time wrapper, and the line saving is not the point.
+   Measured: 90 export entries carry an implementation, and their failure vocabulary on a
+   bad argument is not uniform (47 `undefined_val`, 15 `false_val`, 12 `resultErr` with
+   per-function messages, 6 `throwTypeError`, 5 `createPlainResultErr`), so no generated
+   prologue can reproduce it and the binding does not declare which outcome a function wants.
+   Only 23 of 90 have a mechanical prologue at all, worth about 35 lines. The real defect was
+   drift: `param_types` is what the type checker enforces, the extraction is what runs, and
+   three entries (`cacheStats`, `io.parallel`, `io.race`) declared no parameters while reading
+   `args[0]`, so `cacheStats(123)` and `parallel("x")` produced no diagnostic. Shipped: a
+   comptime `sdk.decodeArgs` driven by the declared list, the 23 conversions, the three
+   declarations fixed, and a `param_types.len == arg_count` compile-time gate that makes the
+   declared signature executable rather than decorative. See
+   `docs/plans/2026-07-30-008-wave4-item6-arg-decode-plan.md`.
 7. Add the comptime JSON-tool generator for the 20 thin pi wrappers.
 8. Define typed `CommandDescriptor` records carrying name, help, options, capability
    requirements, handler, and output contract, and derive dispatch and help for all three

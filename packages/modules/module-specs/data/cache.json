@@ -77,7 +77,10 @@
     {
       "name": "cacheStats",
       "effect": "read",
-      "returns": "object"
+      "returns": "object",
+      "params": [
+        "string"
+      ]
     }
   ]
 }

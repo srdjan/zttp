@@ -1647,6 +1647,18 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             if (f.func == null and f.module_func == null) {
                 @compileError("function binding missing both func and module_func: " ++ f.name);
             }
+            // `param_types` is what the type checker enforces at the call site,
+            // so an under-declared list silently drops the diagnostic for that
+            // argument position. Three entries had drifted this way (cacheStats,
+            // io.parallel, io.race declared no parameters while reading args[0]).
+            // Declare one kind per argument; mark trailing optional arguments
+            // with `required_arg_count` rather than by omitting their type.
+            if (f.param_types.len != f.arg_count) {
+                @compileError(std.fmt.comptimePrint(
+                    "{s}.{s} declares arg_count={d} but {d} param_types; declare one kind per argument",
+                    .{ b.specifier, f.name, f.arg_count, f.param_types.len },
+                ));
+            }
             if (f.laws.len > 0) {
                 if (b.comptime_only) {
                     @compileError("laws are not allowed on comptime_only module '" ++ b.specifier ++ "' function '" ++ f.name ++ "'");
@@ -2077,6 +2089,7 @@ test "validateBindings accepts paired inverse_of laws" {
                     .name = "encode",
                     .func = dummy,
                     .arg_count = 1,
+                    .param_types = &.{.string},
                     .effect = .none,
                     .laws = &.{ .pure, .{ .inverse_of = "decode" } },
                 },
@@ -2084,6 +2097,7 @@ test "validateBindings accepts paired inverse_of laws" {
                     .name = "decode",
                     .func = dummy,
                     .arg_count = 1,
+                    .param_types = &.{.string},
                     .effect = .none,
                     .laws = &.{ .pure, .{ .inverse_of = "encode" } },
                 },
@@ -2109,6 +2123,7 @@ test "validateBindings accepts idempotent_call on write-effect function" {
                     .name = "kvSet",
                     .func = dummy,
                     .arg_count = 2,
+                    .param_types = &.{ .string, .string },
                     .effect = .write,
                     .laws = &.{.idempotent_call},
                 },

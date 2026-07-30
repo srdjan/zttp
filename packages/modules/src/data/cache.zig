@@ -81,9 +81,11 @@ pub const binding = sdk.ModuleBinding{
             .name = "cacheStats",
             .module_func = cacheStatsImpl,
             .arg_count = 1,
+            // The namespace is optional: `cacheStats()` reports the whole store.
+            .required_arg_count = 0,
             .effect = .read,
             .returns = .object,
-            .param_types = &.{},
+            .param_types = &.{.string},
         },
     },
 };

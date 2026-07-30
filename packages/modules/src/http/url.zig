@@ -124,8 +124,7 @@ fn buildSearchParamsObject(handle: *sdk.ModuleHandle, query: []const u8) !sdk.JS
 }
 
 fn urlParseImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const components = parseUrlComponents(input);
     const obj = try sdk.createObject(handle);
@@ -153,16 +152,14 @@ fn setOptionalProp(handle: *sdk.ModuleHandle, obj: sdk.JSValue, name: []const u8
 }
 
 fn urlSearchParamsImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const query = if (input.len > 0 and input[0] == '?') input[1..] else input;
     return buildSearchParamsObject(handle, query);
 }
 
 fn urlEncodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const allocator = sdk.getAllocator(handle);
     const max_encoded_len = maxUrlEncodedLen(input.len) orelse return sdk.JSValue.undefined_val;
@@ -191,8 +188,7 @@ fn maxUrlEncodedLen(input_len: usize) ?usize {
 }
 
 fn urlDecodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const allocator = sdk.getAllocator(handle);
     const buf = allocator.alloc(u8, input.len) catch return sdk.JSValue.undefined_val;

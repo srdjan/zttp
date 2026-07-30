@@ -91,8 +91,7 @@ fn formatHttpImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
 }
 
 fn parseIsoImpl(_: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const ms = parseIsoString(input) orelse return sdk.JSValue.undefined_val;
     return sdk.JSValue.fromFloat(@floatFromInt(ms));

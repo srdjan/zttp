@@ -54,8 +54,7 @@ pub const binding = sdk.ModuleBinding{
 };
 
 fn sha256Impl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const data = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const data = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     var digest: sdk.Sha256Digest = undefined;
     try sdk.sha256(handle, data, &digest);
@@ -65,9 +64,7 @@ fn sha256Impl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSVal
 }
 
 fn hmacSha256Impl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len < 2) return sdk.JSValue.undefined_val;
-    const key = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
-    const data = sdk.extractString(args[1]) orelse return sdk.JSValue.undefined_val;
+    const key, const data = sdk.decodeArgs(&.{ .string, .string }, args) orelse return sdk.JSValue.undefined_val;
 
     var mac: sdk.HmacSha256Mac = undefined;
     try sdk.hmacSha256(handle, data, key, &mac);
@@ -77,8 +74,7 @@ fn hmacSha256Impl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
 }
 
 fn base64EncodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const data = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const data = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const encoder = std.base64.standard;
     const encoded_len = encoder.Encoder.calcSize(data.len);
@@ -92,8 +88,7 @@ fn base64EncodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk
 }
 
 fn base64DecodeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const data = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const data = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const decoder = std.base64.standard;
     const decoded_len = decoder.Decoder.calcSizeForSlice(data) catch return sdk.JSValue.undefined_val;

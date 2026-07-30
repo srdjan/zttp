@@ -14,6 +14,7 @@ pub const callable = @import("callable.zig");
 pub const filesystem = @import("filesystem.zig");
 pub const env = @import("env.zig");
 pub const cache = @import("cache.zig");
+pub const args = @import("args.zig");
 
 pub const ModuleHandle = handles.ModuleHandle;
 pub const RuntimeError = handles.RuntimeError;
@@ -40,6 +41,9 @@ pub const Law = binding.Law;
 pub const FunctionBinding = binding.FunctionBinding;
 pub const ModuleBinding = binding.ModuleBinding;
 pub const validateBindings = binding.validateBindings;
+
+pub const DecodedArgs = args.DecodedArgs;
+pub const decodeArgs = args.decodeArgs;
 
 pub const hasCapability = capability.hasCapability;
 pub const requireCapability = capability.requireCapability;

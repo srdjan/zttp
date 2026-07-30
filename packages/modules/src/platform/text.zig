@@ -16,8 +16,7 @@ pub const binding = sdk.ModuleBinding{
 };
 
 fn escapeHtmlImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     if (std.mem.indexOfAny(u8, input, "&<>\"'") == null) {
         return sdk.createString(handle, input) catch sdk.JSValue.undefined_val;
@@ -40,8 +39,7 @@ fn escapeHtmlImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.J
 }
 
 fn unescapeHtmlImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     if (std.mem.indexOfScalar(u8, input, '&') == null) {
         return sdk.createString(handle, input) catch sdk.JSValue.undefined_val;
@@ -79,8 +77,7 @@ fn matchEntity(s: []const u8) ?Entity {
 }
 
 fn slugifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const input = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const allocator = sdk.getAllocator(handle);
     var buf = std.ArrayList(u8).empty;

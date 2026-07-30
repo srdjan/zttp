@@ -16,8 +16,7 @@ pub const binding = sdk.ModuleBinding{
 };
 
 fn parseCookiesImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const header = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const header = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const obj = try sdk.createObject(handle);
 
@@ -126,9 +125,7 @@ fn setCookieImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 }
 
 fn negotiateImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len < 2) return sdk.JSValue.undefined_val;
-    const accept_header = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
-    const available_str = sdk.extractString(args[1]) orelse return sdk.JSValue.undefined_val;
+    const accept_header, const available_str = sdk.decodeArgs(&.{ .string, .string }, args) orelse return sdk.JSValue.undefined_val;
 
     var available_types: [16][]const u8 = undefined;
     var available_count: usize = 0;
@@ -214,8 +211,7 @@ fn mediaTypeMatches(accept: []const u8, available: []const u8) bool {
 }
 
 fn parseContentTypeImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const header = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+    const header = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.undefined_val)[0];
 
     const obj = try sdk.createObject(handle);
 

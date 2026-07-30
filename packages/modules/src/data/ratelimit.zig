@@ -211,8 +211,7 @@ fn rateCheckImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
 }
 
 fn rateResetImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.false_val;
-    const key = sdk.extractString(args[0]) orelse return sdk.JSValue.false_val;
+    const key = (sdk.decodeArgs(&.{.string}, args) orelse return sdk.JSValue.false_val)[0];
     const store = getOrCreateStore(handle) catch return sdk.JSValue.false_val;
     return if (store.reset(key)) sdk.JSValue.true_val else sdk.JSValue.false_val;
 }
