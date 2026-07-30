@@ -1335,7 +1335,21 @@ This is the substance of the reset. The first four items are ownership resets ad
 the external review; they are larger and more valuable than the concept cleanups that
 follow them, and they should be sequenced first.
 
-0a. Introduce the fallible `CompileRequest` to `CompiledModule` API from section 4.5, with
+0a. DONE except the API itself, which collides with a decision already taken. The duplicated
+   type session is gone (two TypeCheckers, two TypeEnvs, and two TypePools per compile became
+   one of each, about 4 percent of the in-process run, contracts byte-identical); the compile
+   benchmark is off its arena and the "parser leaks nested function bytecode" comment it
+   carried was false, the harness simply never called the release hook the production path
+   already calls; and a 229-iteration failure sweep now asserts the acceptance criterion for
+   parse, resolve, check, and contract extraction. The sweep found three live defects,
+   including an out-of-memory inside the parser's error reporting that HUNG the compiler in an
+   endless recovery loop. The `CompileRequest` to `CompiledModule` type is not built, because
+   owning bytecode as well as the contract means spanning the IO boundary that the declined
+   orchestration move (`2026-07-30-007`) declined to span. See
+   `docs/plans/2026-07-30-011-reset-0a-compile-session-findings.md`. The original wording
+   follows.
+
+   Introduce the fallible `CompileRequest` to `CompiledModule` API from section 4.5, with
    explicit Parsed, Resolved, Checked, Contracted, Lowered stages and one idempotent
    `deinit`. Retire the infallible parser constructors (`parse.zig:131-133`,
    `parser/root.zig:170`, `parser/scope.zig:151`) and the legacy Parser wrapper
