@@ -623,10 +623,10 @@ fn appendDeployLedgerEntry(
     try proof_ledger.appendEvent(allocator, params);
 }
 
-/// Inputs to `buildArtifact`. Bundled so the three call sites
-/// (`compileCommand`, `buildCommand`, `localDeployCommand`) name what they
-/// pass rather than relying on positional order across a 5-param signature.
-const ArtifactBuildInput = struct {
+/// What to build. The three call sites (`compileCommand`, `buildCommand`,
+/// `localDeployCommand`) name what they pass rather than relying on positional
+/// order.
+pub const BuildRequest = struct {
     handler_path: []const u8,
     output_path: []const u8,
     /// Service name to record in the proof ledger entry. Null when the
@@ -637,11 +637,97 @@ const ArtifactBuildInput = struct {
     attest_requested: bool,
 };
 
-fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void {
-    const handler_path = input.handler_path;
-    const output_path = input.output_path;
-    const ledger_service_name = input.ledger_service_name;
-    const attest_requested = input.attest_requested;
+/// What the build did. `runBuild` used to return void, so the only account of
+/// a build was the lines it logged: a caller, and a test, had to read stderr to
+/// learn whether a receipt was signed or a ledger row written.
+pub const BuildReceipt = struct {
+    output_path: []const u8,
+    bytecode_len: usize,
+    /// Bytes of dependency bytecode embedded alongside the handler's own.
+    dep_bytecode_count: usize,
+    /// A contract was extracted and embedded.
+    has_contract: bool,
+    /// A proof receipt was requested. Whether one was produced also depends on
+    /// the signing capability, which reports through the tail.
+    attest_requested: bool,
+    /// A `kind=deploy` row was appended to the proof ledger.
+    ledger_recorded: bool,
+    /// SHA-256 of the handler source, as embedded in the ledger row. All zero
+    /// when no ledger row was written.
+    handler_sha256: [std.crypto.hash.sha2.Sha256.digest_length]u8 = [_]u8{0} ** std.crypto.hash.sha2.Sha256.digest_length,
+};
+
+/// Everything `runBuild` reaches outside its own arguments: the filesystem, the
+/// compiler, this process's own path, the code signer, and the proof ledger.
+/// Naming them is what makes a build reproducible in a test without a compiler
+/// or a filesystem; the innermost `ArtifactTailCapabilities` already worked
+/// this way, and this is the same treatment one level up.
+pub const BuildCapabilities = struct {
+    context: ?*anyopaque = null,
+    read_source: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror![]u8 = readSourceCapability,
+    compile: *const fn (?*anyopaque, std.mem.Allocator, []const u8, []const u8) anyerror!precompile.CompiledHandler = compileCapability,
+    resolve_runtime_binary: *const fn (?*anyopaque, std.mem.Allocator) anyerror![]const u8 = resolveRuntimeBinaryCapability,
+    write_tail: *const fn (?*anyopaque, std.mem.Allocator, ArtifactTailInput) anyerror!void = writeTailCapability,
+    codesign: *const fn (?*anyopaque, std.mem.Allocator, []const u8) void = codesignCapability,
+    append_ledger: *const fn (?*anyopaque, std.mem.Allocator, *const zts.HandlerContract, []const u8, []const u8, []const u8) anyerror!void = appendLedgerCapability,
+};
+
+fn readSourceCapability(_: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+    return zts.file_io.readFile(allocator, path, 10 * 1024 * 1024);
+}
+
+fn compileCapability(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    handler_path: []const u8,
+) anyerror!precompile.CompiledHandler {
+    return precompile.compileHandler(allocator, source, handler_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+    });
+}
+
+fn resolveRuntimeBinaryCapability(_: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]const u8 {
+    const dev_self_path = try self_extract.getSelfExePath(allocator);
+    defer allocator.free(dev_self_path);
+    return resolveRuntimeBinary(allocator, dev_self_path);
+}
+
+fn writeTailCapability(_: ?*anyopaque, allocator: std.mem.Allocator, input: ArtifactTailInput) anyerror!void {
+    return writeArtifactTail(allocator, input, production_artifact_tail_capabilities);
+}
+
+fn codesignCapability(_: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) void {
+    if (builtin.os.tag == .macos) codesignAdHoc(allocator, path);
+}
+
+fn appendLedgerCapability(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    contract: *const zts.HandlerContract,
+    handler_path: []const u8,
+    sha_hex: []const u8,
+    service_name: []const u8,
+) anyerror!void {
+    return appendDeployLedgerEntry(allocator, contract, handler_path, sha_hex, service_name);
+}
+
+const production_build_capabilities = BuildCapabilities{};
+
+fn buildArtifact(allocator: std.mem.Allocator, request: BuildRequest) !void {
+    _ = try runBuild(allocator, request, production_build_capabilities);
+}
+
+fn runBuild(
+    allocator: std.mem.Allocator,
+    request: BuildRequest,
+    caps: BuildCapabilities,
+) !BuildReceipt {
+    const handler_path = request.handler_path;
+    const output_path = request.output_path;
+    const ledger_service_name = request.ledger_service_name;
+    const attest_requested = request.attest_requested;
 
     // --no-attest skips proof-receipt signing; warn once so a scripted build
     // does not silently ship an unsigned artifact. Gated out of tests.
@@ -649,7 +735,7 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
         std.log.warn("--no-attest: this artifact will be built without a signed proof receipt", .{});
     }
 
-    const source = zts.file_io.readFile(allocator, handler_path, 10 * 1024 * 1024) catch |err| {
+    const source = caps.read_source(caps.context, allocator, handler_path) catch |err| {
         std.log.err("Failed to read handler '{s}': {}", .{ handler_path, err });
         return err;
     };
@@ -658,10 +744,7 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
     std.log.info("Compiling {s}...", .{handler_path});
     shared.step("Compiling handler...");
 
-    var compiled = precompile.compileHandler(allocator, source, handler_path, .{
-        .emit_verify = true,
-        .emit_contract = true,
-    }) catch |err| {
+    var compiled = caps.compile(caps.context, allocator, source, handler_path) catch |err| {
         // precompile already prints per-error lines to stderr; only surface
         // the remediation hint so the dev knows where to look.
         std.debug.print(
@@ -688,44 +771,49 @@ fn buildArtifact(allocator: std.mem.Allocator, input: ArtifactBuildInput) !void 
 
     // The compile subcommand splices bytecode onto the runtime binary, not
     // the dev CLI. Locate the runtime binary adjacent to this executable.
-    const dev_self_path = self_extract.getSelfExePath(allocator) catch |err| {
-        std.log.err("Failed to determine own executable path: {}", .{err});
+    const runtime_binary = caps.resolve_runtime_binary(caps.context, allocator) catch |err| {
+        std.log.err("Failed to locate the runtime binary: {}", .{err});
         return err;
     };
-    defer allocator.free(dev_self_path);
-
-    const runtime_binary = try resolveRuntimeBinary(allocator, dev_self_path);
     defer allocator.free(runtime_binary);
 
     const dep_bytecodes: []const []const u8 = compiled.dep_bytecodes orelse &.{};
     // Serialize the contract completely before signing or opening the output.
     // The policy borrows from the compiled contract for the duration of create.
-    try writeArtifactTail(allocator, .{
+    try caps.write_tail(caps.context, allocator, .{
         .runtime_binary = runtime_binary,
         .output_path = output_path,
         .attest_requested = attest_requested,
         .bytecode = compiled.bytecode,
         .dep_bytecodes = dep_bytecodes,
         .contract = if (compiled.contract) |*contract| contract else null,
-    }, production_artifact_tail_capabilities);
+    });
 
-    if (builtin.os.tag == .macos) {
-        codesignAdHoc(allocator, output_path);
-    }
+    caps.codesign(caps.context, allocator, output_path);
+
+    var receipt = BuildReceipt{
+        .output_path = output_path,
+        .bytecode_len = compiled.bytecode.len,
+        .dep_bytecode_count = dep_bytecodes.len,
+        .has_contract = compiled.contract != null,
+        .attest_requested = attest_requested,
+        .ledger_recorded = false,
+    };
 
     if (ledger_service_name) |service_name| {
         if (compiled.contract) |*contract| {
             shared.step("Recording proof ledger...");
-            var sha_digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-            std.crypto.hash.sha2.Sha256.hash(source, &sha_digest, .{});
-            const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
-            try appendDeployLedgerEntry(allocator, contract, handler_path, &sha_hex, service_name);
+            std.crypto.hash.sha2.Sha256.hash(source, &receipt.handler_sha256, .{});
+            const sha_hex = std.fmt.bytesToHex(receipt.handler_sha256, .lower);
+            try caps.append_ledger(caps.context, allocator, contract, handler_path, &sha_hex, service_name);
+            receipt.ledger_recorded = true;
         }
     }
 
     std.log.info("Compiled: {s} -> {s} (bytecode {d} bytes)", .{
         handler_path, output_path, compiled.bytecode.len,
     });
+    return receipt;
 }
 
 fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
@@ -1235,4 +1323,207 @@ test "compileCommand rejects unknown -prefixed flags symmetrically with buildCom
     // returns UnknownOption — same behaviour as buildCommand.
     try testing.expectEqualStrings("--ouptut", parseCompileCommandArgs(&.{ "--ouptut", "out.bin", "handler.ts" }).err.unknown_arg);
     try testing.expectEqualStrings("--json", parseCompileCommandArgs(&.{ "--json", "handler.ts", "-o", "out.bin" }).err.unknown_arg);
+}
+
+/// The smallest contract the build path accepts. Only its presence and its
+/// handler path matter here; every analysis field is empty on purpose.
+fn emptyProbeContract(allocator: std.mem.Allocator) !zts.HandlerContract {
+    return zts.HandlerContract{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .hosts = .empty, .urls = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
+        .durable = .{
+            .used = false,
+            .keys = .{ .literal = .empty, .dynamic = false },
+            .steps = .empty,
+            .timers = false,
+            .signals = .{ .literal = .empty, .dynamic = false },
+            .producer_keys = .{ .literal = .empty, .dynamic = false },
+        },
+        .scope = .{ .used = false, .names = .empty, .dynamic = false, .max_depth = 0 },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+        .properties = .{
+            .pure = false,
+            .read_only = true,
+            .stateless = false,
+            .retry_safe = true,
+            .deterministic = true,
+            .has_egress = false,
+        },
+    };
+}
+
+/// Records what `runBuild` asked its environment to do, and stands in for the
+/// real filesystem, compiler, code signer, and ledger. The point of naming the
+/// capabilities is that this exists at all: before, the only way to exercise
+/// the build was to run a compiler over a real file and write a real binary.
+const BuildProbe = struct {
+    source: []const u8 = "function handler(req) { return Response.text('ok'); }",
+    bytecode: []const u8 = &[_]u8{ 1, 2, 3, 4 },
+    with_contract: bool = true,
+    compile_error: ?anyerror = null,
+
+    read_calls: usize = 0,
+    compile_calls: usize = 0,
+    tail_calls: usize = 0,
+    codesign_calls: usize = 0,
+    ledger_calls: usize = 0,
+    tail_saw_contract: bool = false,
+    tail_saw_attest: bool = false,
+    ledger_service: ?[]const u8 = null,
+    ledger_sha_hex: ?[64]u8 = null,
+
+    fn of(context: ?*anyopaque) *BuildProbe {
+        return @ptrCast(@alignCast(context.?));
+    }
+
+    fn readSource(context: ?*anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]u8 {
+        const self = of(context);
+        self.read_calls += 1;
+        return allocator.dupe(u8, self.source);
+    }
+
+    fn compile(
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        _: []const u8,
+        _: []const u8,
+    ) anyerror!precompile.CompiledHandler {
+        const self = of(context);
+        self.compile_calls += 1;
+        if (self.compile_error) |err| return err;
+        return .{
+            .bytecode = try allocator.dupe(u8, self.bytecode),
+            .contract = if (self.with_contract) try emptyProbeContract(allocator) else null,
+        };
+    }
+
+    fn resolveRuntime(_: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]const u8 {
+        return allocator.dupe(u8, "/nonexistent/zttp-runtime");
+    }
+
+    fn writeTail(context: ?*anyopaque, _: std.mem.Allocator, input: ArtifactTailInput) anyerror!void {
+        const self = of(context);
+        self.tail_calls += 1;
+        self.tail_saw_contract = input.contract != null;
+        self.tail_saw_attest = input.attest_requested;
+    }
+
+    fn codesign(context: ?*anyopaque, _: std.mem.Allocator, _: []const u8) void {
+        of(context).codesign_calls += 1;
+    }
+
+    fn appendLedger(
+        context: ?*anyopaque,
+        _: std.mem.Allocator,
+        _: *const zts.HandlerContract,
+        _: []const u8,
+        sha_hex: []const u8,
+        service_name: []const u8,
+    ) anyerror!void {
+        const self = of(context);
+        self.ledger_calls += 1;
+        self.ledger_service = service_name;
+        var buf: [64]u8 = undefined;
+        @memcpy(&buf, sha_hex[0..64]);
+        self.ledger_sha_hex = buf;
+    }
+
+    fn capabilities(self: *BuildProbe) BuildCapabilities {
+        return .{
+            .context = self,
+            .read_source = readSource,
+            .compile = compile,
+            .resolve_runtime_binary = resolveRuntime,
+            .write_tail = writeTail,
+            .codesign = codesign,
+            .append_ledger = appendLedger,
+        };
+    }
+};
+
+test "a deploy build signs, codesigns, and records one ledger row" {
+    var probe = BuildProbe{};
+    const receipt = try runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = ".zttp/deploy/demo",
+        .ledger_service_name = "demo",
+        .attest_requested = true,
+    }, probe.capabilities());
+
+    try std.testing.expectEqual(@as(usize, 1), probe.read_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.compile_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.tail_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.codesign_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.ledger_calls);
+    try std.testing.expect(probe.tail_saw_contract);
+    try std.testing.expect(probe.tail_saw_attest);
+    try std.testing.expectEqualStrings("demo", probe.ledger_service.?);
+
+    try std.testing.expectEqualStrings(".zttp/deploy/demo", receipt.output_path);
+    try std.testing.expectEqual(@as(usize, 4), receipt.bytecode_len);
+    try std.testing.expect(receipt.has_contract);
+    try std.testing.expect(receipt.attest_requested);
+    try std.testing.expect(receipt.ledger_recorded);
+
+    // The receipt's digest is the one the ledger row carries, not a second
+    // hash of something else.
+    const hex = std.fmt.bytesToHex(receipt.handler_sha256, .lower);
+    try std.testing.expectEqualSlices(u8, &hex, &probe.ledger_sha_hex.?);
+}
+
+test "a build without a project name writes no ledger row" {
+    var probe = BuildProbe{};
+    const receipt = try runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "out",
+        .attest_requested = true,
+    }, probe.capabilities());
+
+    try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
+    try std.testing.expect(!receipt.ledger_recorded);
+    try std.testing.expectEqual(@as(u8, 0), receipt.handler_sha256[0]);
+}
+
+test "a build with no contract embeds none and records no ledger row" {
+    var probe = BuildProbe{ .with_contract = false };
+    const receipt = try runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "out",
+        .ledger_service_name = "demo",
+        .attest_requested = false,
+    }, probe.capabilities());
+
+    try std.testing.expect(!probe.tail_saw_contract);
+    try std.testing.expect(!probe.tail_saw_attest);
+    try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
+    try std.testing.expect(!receipt.has_contract);
+    try std.testing.expect(!receipt.ledger_recorded);
+}
+
+test "a compile failure stops before the artifact is written" {
+    var probe = BuildProbe{ .compile_error = error.ParseError };
+    try std.testing.expectError(error.ParseError, runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "out",
+        .attest_requested = true,
+    }, probe.capabilities()));
+
+    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.codesign_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
 }
