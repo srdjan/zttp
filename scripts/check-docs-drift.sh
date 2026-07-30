@@ -189,6 +189,58 @@ done < <(git ls-files -z 'packages/modules/module-specs/*.json')
   fail "module specs have $spec_count modules, registry has $module_count"
 
 # ---------------------------------------------------------------------------
+# CLI reference coverage.
+#
+# Every command the two dispatch registries advertise must appear in
+# docs/cli.md as `zttp <name>`. Without this, a command can ship, be listed by
+# `zttp help --all`, and never reach the reference: doctor, build, compile,
+# ratchet, ledger, witnesses, and version each had zero mentions when this gate
+# was written. `.unlisted` entries (the deprecated `proof` alias, `help`) are
+# exempt, because `help --all` does not advertise them either.
+# ---------------------------------------------------------------------------
+
+cli_doc="docs/cli.md"
+dev_cli="packages/runtime/src/dev_cli.zig"
+zts_cli="packages/tools/src/zts_cli.zig"
+
+[[ -f "$cli_doc" ]] || fail "missing $cli_doc"
+[[ -f "$dev_cli" ]] || fail "missing $dev_cli"
+[[ -f "$zts_cli" ]] || fail "missing $zts_cli"
+
+listed_commands() {
+  awk '
+    /^const commands = \[_\]cli_help\.Command\{/ { in_table = 1; next }
+    in_table && /^};/ { exit }
+    in_table && /\.section = \.unlisted/ { next }
+    in_table && match($0, /\.name = "[^"]+"/) {
+      field = substr($0, RSTART + 9, RLENGTH - 10)
+      print field
+    }
+  ' "$dev_cli"
+  awk '
+    /^pub const commands = \[_\]Command\{/ { in_table = 1; next }
+    in_table && /^};/ { exit }
+    in_table && match($0, /\.name = "[^"]+"/) {
+      field = substr($0, RSTART + 9, RLENGTH - 10)
+      print field
+    }
+  ' "$zts_cli"
+}
+
+command_count=0
+while IFS= read -r command_name; do
+  [[ -n "$command_name" ]] || continue
+  command_count=$((command_count + 1))
+  grep -q -F -- "zttp $command_name" "$cli_doc" ||
+    fail "$cli_doc does not document \`zttp $command_name\`"
+done < <(listed_commands)
+
+# A registry that stops parsing (renamed table, changed literal) would silently
+# pass the loop above with zero iterations.
+[[ "$command_count" -ge 40 ]] ||
+  fail "only $command_count commands parsed from the dispatch registries; the table format changed"
+
+# ---------------------------------------------------------------------------
 # Prose bans.
 #
 # Each row is one accumulated one-off, as data rather than as another hand-

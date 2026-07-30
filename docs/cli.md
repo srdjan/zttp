@@ -100,6 +100,44 @@ status, duration, request id; disable with `-q`), and pool/latency metrics are
 logged. There is no scrape-able `/metrics` endpoint yet; that is planned for a
 later release.
 
+## Inspect The Project
+
+`zttp doctor` validates the project discovered from the current directory, a
+handler path, or a `zttp.json` path, and prints a checklist for the manifest,
+entry, static directory, system file, test fixture, sqlite and durable
+settings, and outbound HTTP configuration:
+
+```bash
+zttp doctor
+zttp doctor src/handler.ts
+zttp doctor --release [--json] [--out FILE]
+```
+
+`--release` validates the current beta release evidence and prints a release
+proof passport. It reads existing files only: it runs neither the benchmark nor
+the test suite.
+
+`zttp version` (alias `--version`) prints the version and exits.
+
+## Build Commands
+
+Both commands verify the handler first: verification is mandatory, and a
+handler that fails a check produces no binary. Each emits a self-contained
+binary that wraps the `zttp-runtime` template, which must be installed
+alongside `zttp`.
+
+```bash
+zttp build [-o <bin>] [--no-attest]
+zttp compile <handler.ts> -o <bin> [--no-attest]
+```
+
+`build` takes no handler argument: it reads `zttp.json` from the current
+directory or a parent and defaults the output to `.zttp/build/<project-name>`.
+`compile` is the explicit-path form for scripts that name both sides. Both sign
+a proof receipt by default; `--no-attest` skips signing for that build.
+
+`zttp deploy` is the project-level verb built on the same path; see below.
+
 ## Deploy And Proof Receipts
 
 ```bash
@@ -164,6 +202,56 @@ zttp durable dead-runs discard --durable <dir> <id>
 See [Durable Workflows](durable-workflows.md#durable-run-recovery-and-dead-letters)
 for the quarantine/restart/replay/discard semantics.
 
+Expert-session ledgers (`zttp` only; `zts ledger` prints a pointer and exits
+non-zero):
+
+```bash
+zttp ledger export --session <id> --out <path>
+zttp ledger replay --input <path> --onto <git-ref>
+zttp ledger stats
+```
+
+`stats` aggregates every session summary for the current workspace into the
+staked metrics: expert success rate, median round-trips to a first green proof,
+and median proven-path ratio.
+
+## Spec Ratchet And Witnesses
+
+`zttp ratchet show` compiles a handler and prints its declared and proven spec
+sets, plus anything declared-but-unproven, proven-beyond-declared, or
+declared-but-not-monotonic. It reports and never fails:
+
+```bash
+zttp ratchet show src/handler.ts
+```
+
+A handler with no `Spec<...>` annotation activates every supported spec. The
+proven set is also written to `contract.json` under `provenSpecs` and rides
+inside the signed `Zttp-Attest` JWS, with the active set alongside it under
+`declaredSpecs`, so cross-build diffs are mechanical and attestable.
+
+`zttp ratchet check` is deprecated and kept working for one release. `zttp
+check` is the gate: it compiles the same contract and exits 1 on an
+undischarged Spec (`ZTS500`) and on a non-monotonic declared name.
+
+`zttp witnesses` inspects the on-disk corpus of compiler-discovered falsifying
+inputs under `.zttp/witnesses/<short-hash>/`:
+
+```bash
+zttp witnesses list [<handler>]
+zttp witnesses pin <handler> <key|prefix>
+zttp witnesses unpin <handler> <key|prefix>
+zttp witnesses prune <handler> [--older-than <seconds>]
+zttp witnesses synthesize <handler> <spec>
+```
+
+Pinned witnesses are never pruned. With no handler argument, `list` summarizes
+every corpus directory found. Flow-rich specs populate the corpus automatically
+through the analyzer; `synthesize` seeds a structural witness for a cause-only
+spec (`deterministic`, `read_only`, `retry_safe`, `idempotent`,
+`state_isolated`, `fault_covered`) from the per-property suggestion in
+spec discharge. See [Witnesses](witnesses.md).
+
 ## Analyzer Commands
 
 These commands are listed by `zttp help --all` from the shared `zts`
@@ -190,6 +278,7 @@ zttp search <keyword> [--json]
 zttp spec-check [--json]
 zttp spec-hash [--json]
 zttp spec-render [--out path] [--check path]
+zttp module-spec-render [--check] [--json]
 zttp verify-paths <file>... [--json]
 zttp verify-modules <file>... [--strict] [--json]
 zttp verify-modules --builtins --strict --json
