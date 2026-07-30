@@ -228,6 +228,8 @@ Rules:
   keeps the module graph explicit.
 - Module initialization MUST be pure. Handler-reachable mutable module state
   is excluded from the certified profile.
+- A top-level value binding MUST use `const`. Reassignment is local to a
+  function activation.
 
 ### 5.2 Declarations and bindings
 
@@ -281,9 +283,10 @@ Rules:
 - `number` has exact IEEE 754 binary64 semantics, including `NaN`, infinities,
   and negative zero. JSON and capability boundaries MUST reject non-finite
   values when their wire format cannot represent them.
-- `string` is a sequence of Unicode scalar values. Invalid UTF-8 is rejected
-  at ingress. Indexing and length are defined in scalar values, not storage
-  bytes.
+- `string` contains valid Unicode and rejects invalid UTF-8 at ingress. The
+  observable `length`, indexing, and slicing contract retains ZTS's current
+  UTF-16 code-unit model. The formal string library MUST specify the behavior
+  of boundaries inside an astral scalar exactly.
 - `Bytes` is an immutable sequence of octets. Text conversion is explicit and
   returns `Result` when decoding can fail.
 - Record shapes are fixed after allocation. Existing writable fields may be
@@ -568,6 +571,9 @@ mapError<T, E, F>(result: Result<T, E>, f: (error: E) => F): Result<T, F>
 andThen<T, U, E>(result: Result<T, E>, f: (value: T) => Result<U, E>): Result<U, E>
 ```
 
+The type is predeclared. Constructors and combinators are statically named
+imports from the zero-capability `zttp:result` module.
+
 Use `match` or narrowing to consume it. Trapping `unwrap` and `unwrapErr` are
 not canonical. A checked extraction after an `ok` guard MAY lower directly to
 the value field.
@@ -595,8 +601,10 @@ dictEntries<K extends DictKey, V>(dict: Dict<K, V>): readonly (readonly [K, V])[
 
 `dictSet` and `dictRemove` return new dictionaries. Iteration order is the
 insertion order of the current value. Updating a present key does not move it.
-Key equality is strict equality with one canonical rule for `NaN` and negative
-zero, defined by the library contract.
+Numeric key equality is SameValueZero: `NaN` equals `NaN`, and negative zero
+equals positive zero. String keys compare by scalar sequence. The pure
+operations are statically named imports from the zero-capability
+`zttp:collections` module.
 
 `Set<T>` does not need a new semantic primitive. If application evidence
 requires it, its pure API is defined as `Dict<T, true>` with the representation
@@ -614,6 +622,8 @@ hex, Base64, and UTF-8 codecs.
 - Decoding returns `Result`.
 - Capability modules declare whether a payload is `string`, `Bytes`, or a
   structured value.
+- Pure byte operations are statically named imports from the zero-capability
+  `zttp:bytes` module.
 
 ### 6.4 Arrays and higher-order functions
 
@@ -631,6 +641,11 @@ every<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 Each operation uses snapshot-finite iteration. Callback effects compose into
 the caller. The callback cannot be treated as pure merely because it is an
 arrow expression.
+
+The canonical source spelling is an intrinsic array method such as
+`items.map(f)`. Dispatch is resolved statically from the receiver type and
+lowers to an explicit intrinsic such as `arrayMap(items, f)`. It never performs
+prototype lookup.
 
 Use a higher-order operation for a direct transformation or fold. Use
 `for...of` when the algorithm needs `break`, `continue`, explicit effect
@@ -701,7 +716,7 @@ ImportName   ::= Ident ["as" Ident]
 TopDecl      ::= ["export"] TypeDecl
                | ["export"] DistinctDecl
                | ["export"] FunctionDecl
-               | ["export"] BindingDecl
+               | ["export"] TopBindingDecl
 
 TypeDecl     ::= "type" Ident TypeParams? "=" Type ";"
 DistinctDecl ::= "distinct" "type" Ident "=" ScalarType ";"
@@ -713,6 +728,7 @@ FunctionDecl ::= "function" Ident TypeParams?
 Params       ::= Param ("," Param)* [","]
 Param        ::= Ident ":" Type
 
+TopBindingDecl ::= "const" Bind [":" Type] "=" Expr ";"
 BindingDecl  ::= ("const" | "let") Bind [":" Type] "=" Expr ";"
 Bind         ::= Ident | ObjectBind | ArrayBind
 ObjectBind   ::= "{" BindField ("," BindField)* [","] "}"
@@ -724,13 +740,15 @@ Stmt         ::= BindingDecl
                | FunctionDecl
                | LValue "=" Expr ";"
                | Expr ";"
-               | "if" "(" Expr ")" Block ["else" (Block | IfStmt)]
+               | IfStmt
                | "for" "(" ("const" | "let") Bind "of" Expr ")" Block
                | "assert" Expr ["," Expr] ";"
                | "return" [Expr] ";"
                | "break" ";"
                | "continue" ";"
                | Block
+IfStmt       ::= "if" "(" Expr ")" Block ["else" (Block | IfStmt)]
+LValue       ::= Ident | MemberExpr | IndexExpr
 
 Expr         ::= Literal
                | Ident
@@ -747,20 +765,26 @@ Expr         ::= Literal
                | JSXExpr
                | "(" Expr ")"
 
-ArrayExpr    ::= "[" (Expr | "..." Expr)*
-                  separated-by "," "]"
-RecordExpr   ::= "{" ["..." Expr ","] RecordField*
-                  separated-by "," "}"
+ArrayExpr    ::= "[" [ArrayItem ("," ArrayItem)* [","]] "]"
+ArrayItem    ::= Expr | "..." Expr
+RecordExpr   ::= "{" ["..." Expr ","] [RecordField
+                  ("," RecordField)* [","]] "}"
 RecordField  ::= Ident [":" Expr]
-CallExpr     ::= Expr TypeArgs? "(" Args? ")"
+CallExpr     ::= Expr TypeArgs? "(" [Args] ")"
+Args         ::= Expr ("," Expr)* [","]
+TypeArgs     ::= "<" Type ("," Type)* ">"
 MemberExpr   ::= Expr ("." | "?.") Ident
 IndexExpr    ::= Expr "[" Expr "]"
-ArrowExpr    ::= "(" ArrowParams? ")" ["=>" Expr | "=>" Block]
+ArrowExpr    ::= "(" [ArrowParams] ")" "=>" (Expr | Block)
+ArrowParams  ::= ArrowParam ("," ArrowParam)* [","]
+ArrowParam   ::= Ident [":" Type]
 MatchExpr    ::= "match" "(" Expr ")" "{"
                   MatchArm+ [DefaultArm] "}"
 MatchArm     ::= "when" Pattern ":" Expr [","]
 DefaultArm   ::= "default" ":" Expr [","]
 Pattern      ::= Literal | "{" PatternFields "}"
+PatternFields ::= PatternField ("," PatternField)* [","]
+PatternField ::= Ident ":" Literal
 
 Type         ::= Primitive
                | LiteralType
@@ -776,6 +800,7 @@ Type         ::= Primitive
 
 Primitive    ::= "unknown" | "never" | "undefined" | "null"
                | "boolean" | "number" | "string" | "Bytes"
+ScalarType   ::= "boolean" | "number" | "string"
 ```
 
 The normative parser specification must define precedence, associativity,
@@ -1190,30 +1215,28 @@ The corpus MUST include:
 ### 16.1 Typed error flow
 
 ```ts
-type PortError =
-  | { kind: "missing" }
-  | { kind: "invalid"; input: string };
+import { err, ok } from "zttp:result";
 
-function parsePort(raw: string | undefined): Result<number, PortError> {
-  if (raw === undefined) {
-    return err({ kind: "missing" });
+type DivideError = { kind: "division-by-zero" };
+
+function divide(
+  numerator: number,
+  denominator: number,
+): Result<number, DivideError> {
+  if (denominator === 0) {
+    return err({ kind: "division-by-zero" });
   }
 
-  const value = parseInt(raw);
-  if (!isFinite(value)) {
-    return err({ kind: "invalid", input: raw });
-  }
-
-  return ok(value);
+  return ok(numerator / denominator);
 }
 
-function describePort(raw: string | undefined): string {
-  const result = parsePort(raw);
+function describeRatio(numerator: number, denominator: number): string {
+  const result = divide(numerator, denominator);
   return match (result) {
     when { ok: true }:
-      `port ${result.value}`
+      `ratio ${result.value}`
     when { ok: false }:
-      "invalid port"
+      "undefined ratio"
   };
 }
 ```
@@ -1242,6 +1265,8 @@ function frequencies(words: readonly string[]): Dict<string, number> {
 ### 16.3 Recursive application data
 
 ```ts
+import { dictEntries } from "zttp:collections";
+
 type JsonValue =
   | null
   | boolean
@@ -1283,22 +1308,38 @@ proving that recursive calls receive strict subvalues of a finite input.
 import { env } from "zttp:env";
 import { fetch } from "zttp:fetch";
 import { parallel } from "zttp:io";
+import { err } from "zttp:result";
+import type { FetchError } from "zttp:fetch";
 import type { Effects } from "zttp:types";
 
-function loadUser(): Result<User, FetchError> {
-  return fetchUser(fetch, env("USER_URL"));
+type LoadError =
+  | FetchError
+  | { kind: "missing-config"; name: string };
+
+function loadUser(): Result<Response, LoadError> {
+  const url = env("USER_URL");
+  if (url === undefined) {
+    return err({ kind: "missing-config", name: "USER_URL" });
+  }
+  return fetch(url, {});
 }
 
-function loadOrders(): Result<readonly Order[], FetchError> {
-  return fetchOrders(fetch, env("ORDER_URL"));
+function loadOrders(): Result<Response, LoadError> {
+  const url = env("ORDER_URL");
+  if (url === undefined) {
+    return err({ kind: "missing-config", name: "ORDER_URL" });
+  }
+  return fetch(url, {});
 }
 
 function loadDashboard(): Effects<
-  Result<Dashboard, DashboardError>,
+  readonly [
+    Result<Response, LoadError>,
+    Result<Response, LoadError>,
+  ],
   "env" | "network"
 > {
-  const [user, orders] = parallel([loadUser, loadOrders]);
-  return combineDashboard(user, orders);
+  return parallel([loadUser, loadOrders]);
 }
 ```
 
