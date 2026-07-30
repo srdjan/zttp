@@ -1,6 +1,6 @@
 # Plan: one orchestrator, and the `LoweredModule` phase it unblocks
 
-**Status:** planned, not started. Needs a go/no-go on section 8 before Task 1.
+**Status:** Task 1 done at commit `8c27464c`. Tasks 2-5 need the go/no-go in section 8.
 
 **Source:** the orchestration clause of wave 4 item 4. Its original justification, that
 `PathGenerator` and `FlowChecker` run more than once per compile, was measured and refuted
@@ -143,6 +143,21 @@ the move: it pins an artifact the product ships and currently nothing checks.
 fixture. A gate never observed failing is not known to work.
 
 **Commit:** `test(tools): pin serialized bytecode for the compile fixtures`.
+
+**DONE**, at `8c27464c`, with three deviations worth recording:
+
+- The golden covers four INLINE sources, not the four contract fixtures. Two ways of reaching
+  the fixture files were tried and rejected. `@embedFile` with a relative path is refused by
+  Zig ("embed of file outside package path"), and injecting the fixtures as anonymous build
+  imports broke every other test root that includes `precompile.zig` - `system_rollout.zig`
+  and `canonicalize.zig` among them - because those roots have no such import. Inline sources
+  cover the same four codegen shapes with no cross-root coupling.
+- `zig build test-precompile` was GREEN while `zig build test` was broken by that second
+  approach. Fourth instance this session of a narrow check passing while something was wrong;
+  the aggregate run is the one that counts.
+- Two mutation probes proved nothing before one worked. `CACHE_VERSION` belongs to a different
+  serializer than the compile path uses, and `nop` is never emitted. Renumbering `push_const`
+  drifts all four, which is the proof that matters.
 
 ### Task 2: extract the phase sequence with no move
 
