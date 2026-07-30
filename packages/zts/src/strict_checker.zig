@@ -88,7 +88,8 @@ pub const DiagnosticKind = enum {
     canonical_export_function_const,
     canonical_public_helper_effects,
     canonical_public_helper_proof,
-    canonical_ternary,
+    canonical_ternary_impure,
+    canonical_ternary_chain,
     canonical_compound_assignment,
     canonical_non_leading_spread,
     canonical_template_complex_interp,
@@ -104,7 +105,8 @@ pub const DiagnosticKind = enum {
             .canonical_export_function_const,
             .canonical_public_helper_effects,
             .canonical_public_helper_proof,
-            .canonical_ternary,
+            .canonical_ternary_impure,
+            .canonical_ternary_chain,
             .canonical_compound_assignment,
             .canonical_non_leading_spread,
             .canonical_template_complex_interp,
@@ -354,6 +356,124 @@ pub const StrictChecker = struct {
         }
     }
 
+    /// Spec 5.4: `condition ? whenTrue : whenFalse` is the idiomatic two-way
+    /// pure value selection. Both arms MUST be pure, and a conditional
+    /// expression MUST NOT appear as an arm of another conditional expression,
+    /// parenthesized or not. Parentheses produce no IR node, so the tag test on
+    /// each arm is exact.
+    ///
+    /// Chaining is reported instead of impurity when both apply: the nesting is
+    /// the structural defect, and its repair subsumes the other.
+    fn checkTernary(self: *StrictChecker, node: NodeIndex, ternary: anytype) void {
+        if (self.isTernaryNode(ternary.then_branch) or self.isTernaryNode(ternary.else_branch)) {
+            self.addDiagnostic(.{
+                .severity = self.canonicalSeverity(),
+                .kind = .canonical_ternary_chain,
+                .node = node,
+                .message = "a conditional expression may not appear as an arm of another conditional expression",
+                .help = "use `match` over one scrutinee, or an if/else chain feeding a named function",
+                .repair_intent = .replace_ternary_with_if,
+            });
+            return;
+        }
+
+        if (!self.isPureExpr(ternary.then_branch) or !self.isPureExpr(ternary.else_branch)) {
+            self.addDiagnostic(.{
+                .severity = self.canonicalSeverity(),
+                .kind = .canonical_ternary_impure,
+                .node = node,
+                .message = "a ?: arm must be a pure value; effectful selection uses match or if",
+                .help = "bind the effectful call first, or use `match` over the condition for an effectful two-way choice",
+                .repair_intent = .replace_ternary_with_if,
+            });
+        }
+    }
+
+    fn isTernaryNode(self: *const StrictChecker, node: NodeIndex) bool {
+        if (node == null_node) return false;
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return tag == .ternary;
+    }
+
+    // D2-interim: syntactic purity for ?: arms until the effects-and-purity
+    // design doc (2026-07-30-015) defines the real predicate. Pure = literals,
+    // identifiers, member reads, unary/binary operators, and template, array,
+    // and object literals over pure parts. A call, method call, or assignment
+    // is impure, and so is any composite containing one. Retire this when D2
+    // lands and the inferred effect row replaces the syntactic class.
+    fn isPureExpr(self: *const StrictChecker, node: NodeIndex) bool {
+        if (node == null_node) return true;
+        const tag = self.ir_view.getTag(node) orelse return true;
+        return switch (tag) {
+            .call, .method_call, .assignment => false,
+            .ternary => blk: {
+                const t = self.ir_view.getTernary(node) orelse break :blk true;
+                break :blk self.isPureExpr(t.condition) and
+                    self.isPureExpr(t.then_branch) and
+                    self.isPureExpr(t.else_branch);
+            },
+            .binary_op => blk: {
+                const bin = self.ir_view.getBinary(node) orelse break :blk true;
+                break :blk self.isPureExpr(bin.left) and self.isPureExpr(bin.right);
+            },
+            .unary_op, .spread => blk: {
+                const un = self.ir_view.getUnary(node) orelse break :blk true;
+                break :blk self.isPureExpr(un.operand);
+            },
+            .member_access, .optional_chain => blk: {
+                const member = self.ir_view.getMember(node) orelse break :blk true;
+                break :blk self.isPureExpr(member.object);
+            },
+            .computed_access => blk: {
+                const member = self.ir_view.getMember(node) orelse break :blk true;
+                break :blk self.isPureExpr(member.object) and self.isPureExpr(member.computed);
+            },
+            .array_literal => blk: {
+                const arr = self.ir_view.getArray(node) orelse break :blk true;
+                for (0..arr.elements_count) |i| {
+                    const el = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
+                    if (!self.isPureExpr(el)) break :blk false;
+                }
+                break :blk true;
+            },
+            .object_literal => blk: {
+                const obj = self.ir_view.getObject(node) orelse break :blk true;
+                for (0..obj.properties_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    const prop_tag = self.ir_view.getTag(prop_idx);
+                    if (prop_tag != null and prop_tag.? == .object_spread) {
+                        const value = self.ir_view.getOptValue(prop_idx) orelse continue;
+                        if (!self.isPureExpr(value)) break :blk false;
+                        continue;
+                    }
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    if (!self.isPureExpr(prop.value)) break :blk false;
+                }
+                break :blk true;
+            },
+            .template_literal => blk: {
+                const tmpl = self.ir_view.getTemplate(node) orelse break :blk true;
+                for (0..tmpl.parts_count) |i| {
+                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
+                    const value = self.ir_view.getOptValue(part) orelse continue;
+                    if (!self.isPureExpr(value)) break :blk false;
+                }
+                break :blk true;
+            },
+            .match_expr => blk: {
+                const match = self.ir_view.getMatchExpr(node) orelse break :blk true;
+                if (!self.isPureExpr(match.discriminant)) break :blk false;
+                for (0..match.arms_count) |i| {
+                    const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    if (!self.isPureExpr(arm.body)) break :blk false;
+                }
+                break :blk true;
+            },
+            else => true,
+        };
+    }
+
     fn walkExpr(self: *StrictChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
@@ -371,14 +491,7 @@ pub const StrictChecker = struct {
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node) orelse return;
-                self.addDiagnostic(.{
-                    .severity = self.canonicalSeverity(),
-                    .kind = .canonical_ternary,
-                    .node = node,
-                    .message = "ternary expression is not part of canonical ZigTS",
-                    .help = "use an if/else statement, a match expression, or an immediately-invoked block",
-                    .repair_intent = .replace_ternary_with_if,
-                });
+                self.checkTernary(node, ternary);
                 self.walkExpr(ternary.condition);
                 self.walkExpr(ternary.then_branch);
                 self.walkExpr(ternary.else_branch);
@@ -1550,10 +1663,53 @@ test "canonical_redundant_bool_compare does not fire without type info" {
     }
 }
 
-test "canonical_ternary fires on a ternary expression" {
+test "pure ternary is admitted" {
     var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 200 : 500; return Response.json({x}); }");
     defer checker.deinit();
-    try expectKind(&checker, .canonical_ternary);
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_ternary_impure);
+        try testing.expect(diag.kind != .canonical_ternary_chain);
+    }
+}
+
+test "ternary with a call arm fires impure diagnostic" {
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? load(req) : 500; return Response.json({x}); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "ternary with an assignment arm fires impure diagnostic" {
+    var checker = try checkSource("function handler(req) { let n = 0; const x = req.method === 'GET' ? (n = 1) : 500; return Response.json({x, n}); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "ternary over pure composite arms is admitted" {
+    // Array, object, and template arms are pure when every part is pure, so
+    // the recursion must reach into them rather than defaulting to pure.
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? [req.url, 1] : [req.url, 2]; return Response.json({x}); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .canonical_ternary_impure);
+    }
+}
+
+test "ternary with a call nested inside a composite arm fires impure diagnostic" {
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? [load(req)] : [500]; return Response.json({x}); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "chained ternary fires chain diagnostic" {
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 1 : req.method === 'POST' ? 2 : 3; return Response.json({x}); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_chain);
+}
+
+test "chained ternary in the then branch fires chain diagnostic" {
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? (req.url === '/a' ? 1 : 2) : 3; return Response.json({x}); }");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_chain);
 }
 
 test "canonical_compound_assignment fires on +=" {
@@ -1634,15 +1790,15 @@ test "canonical_destructure_depth accepts flat destructure" {
     }
 }
 
-test "canonical_ternary diagnostic carries repair_intent = replace_ternary_with_if" {
+test "canonical_ternary_impure diagnostic carries repair_intent = replace_ternary_with_if" {
     // Every veto-able strict diagnostic must populate the typed repair
     // primitive so the agent picks an apply step
     // directly. ZTS612 is the representative canonical-profile case.
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 200 : 500; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? load(req) : 500; return Response.json({x}); }");
     defer checker.deinit();
     var saw_ternary = false;
     for (checker.getDiagnostics()) |diag| {
-        if (diag.kind == .canonical_ternary) {
+        if (diag.kind == .canonical_ternary_impure) {
             saw_ternary = true;
             try testing.expectEqual(
                 @as(?RepairIntent, .replace_ternary_with_if),

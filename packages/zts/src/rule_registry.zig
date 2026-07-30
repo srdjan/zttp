@@ -285,11 +285,19 @@ const strict_meta = [_]struct {
         .repair = .add_spec_assertion,
     },
     .{
-        .kind = .canonical_ternary,
+        .kind = .canonical_ternary_impure,
         .code = "ZTS612",
-        .description = "Ternary expressions are not part of canonical ZigTS.",
-        .example = "const status = ok ? 200 : 500;",
-        .help = "Use an if/else statement, a match expression, or an immediately-invoked block.",
+        .description = "A ?: arm must be a pure value; effectful selection uses match or if.",
+        .example = "const status = ready ? load() : fallback;",
+        .help = "Bind the effectful call first, or use `match` over the condition for an effectful two-way choice.",
+        .repair = .replace_ternary_with_if,
+    },
+    .{
+        .kind = .canonical_ternary_chain,
+        .code = "ZTS621",
+        .description = "A conditional expression may not appear as an arm of another conditional expression.",
+        .example = "const tier = a ? 1 : b ? 2 : 3;",
+        .help = "Use `match` over one scrutinee, or an if/else chain feeding a named function.",
         .repair = .replace_ternary_with_if,
     },
     .{

@@ -920,7 +920,10 @@ fn buildStatementRewrites(
     result: *StatementRewriteResult,
 ) !void {
     for (diagnostics) |diag| {
-        if (std.mem.eql(u8, diag.code, "ZTS612")) {
+        // ZTS612 (impure arm) and ZTS621 (chained) share one rewrite: both are
+        // repaired by lifting the conditional into an expression-position
+        // `match`, and both report at the `?` token the scanner keys off.
+        if (std.mem.eql(u8, diag.code, "ZTS612") or std.mem.eql(u8, diag.code, "ZTS621")) {
             const rw = ternaryToMatchRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
@@ -954,9 +957,10 @@ fn buildStatementRewrites(
     }
 }
 
-/// ZTS612 canonical_ternary: rewrite `cond ? a : b` into an expression-position
-/// `match` so it works in const initializers and return positions, where an
-/// if/else statement cannot.
+/// ZTS612 canonical_ternary_impure and ZTS621 canonical_ternary_chain: rewrite
+/// `cond ? a : b` into an expression-position `match` so it works in const
+/// initializers and return positions, where an if/else statement cannot. A pure
+/// unchained `?:` is idiomatic under spec 5.4 and is never rewritten.
 ///
 /// Canonical target: `match (!!(cond)) { when true: a, default: b }` (the
 /// condition is parenthesized so `!!` coerces the whole expression).
@@ -3269,10 +3273,14 @@ test "normalizeSource: ternary is rewritten to an expression-position match and 
     // `match (!!(cond)) { when true: a, default: b }`, which is valid in the
     // const-initializer position the ternary occupied. The loop converges with
     // no residual canonical-band diagnostic.
+    // The vehicle is an impure arm: since spec 5.4 admitted the pure unchained
+    // `?:` as idiomatic, only an effectful or chained ternary reaches the
+    // rewriter at all.
     const source =
+        \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  const status = ok ? 200 : 500;
+        \\  const status = ok ? 200 : fallbackStatus();
         \\  return Response.json({ status });
         \\}
     ;
@@ -3282,7 +3290,7 @@ test "normalizeSource: ternary is rewritten to an expression-position match and 
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expect(nr.iterations >= 1);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(ok)) { when true: 200, default: 500 }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(ok)) { when true: 200, default: fallbackStatus() }") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "?") == null);
 
     var found = false;
@@ -3299,8 +3307,9 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
     // (Contract-diff equivalence compares surfaces, not expression semantics,
     // so this is asserted textually.)
     const source =
+        \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
-        \\  const status = req.method === "GET" ? 200 : 500;
+        \\  const status = req.method === "GET" ? 200 : fallbackStatus();
         \\  return Response.json({ status });
         \\}
     ;
@@ -3338,7 +3347,8 @@ test "normalizeSource: a ternary in an arrow body bounds the condition at `=>`" 
     // the arrow params into the condition (which would yield an always-truthy
     // `match (!!((x) => cond))`).
     const source =
-        \\const clamp = (x: number): number => x > 0 ? 1 : -1;
+        \\function minusOne(): number { return -1; }
+        \\const clamp = (x: number): number => x > 0 ? 1 : minusOne();
         \\function handler(req: Request): Response {
         \\  const v = clamp(2);
         \\  return Response.json({ v });
@@ -3507,10 +3517,11 @@ test "normalizeSource ternary rewrite is behavior-equivalent (contract diff)" {
     try std.testing.expect(diff.behavioralVerdict().isSafeNoOp());
 }
 
-test "normalizeSource confluently rewrites a right-associative nested ternary" {
-    // `a ? x : b ? y : z` is two ternaries; the normalizer resolves the inner
-    // one first (post-order) and the outer one the next pass, reaching a unique
-    // fixed point with both expressed as nested `match`.
+test "normalizeSource unchains a right-associative nested ternary and stops" {
+    // `a ? x : b ? y : z` is two ternaries. Only the outer one is a defect: a
+    // conditional expression may not be an arm of another (spec 5.4). Rewriting
+    // it leaves the inner `b ? y : z` standing alone, at which point it is a
+    // pure unchained `?:` and therefore idiomatic. The fixed point keeps it.
     const source =
         \\function handler(req: Request): Response {
         \\  const a = req.method === "GET";
@@ -3524,11 +3535,10 @@ test "normalizeSource confluently rewrites a right-associative nested ternary" {
     try std.testing.expect(nr.converged);
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "?") == null);
     try std.testing.expect(std.mem.indexOf(
         u8,
         nr.canonical_source,
-        "match (!!(a)) { when true: 200, default: match (!!(b)) { when true: 201, default: 500 } }",
+        "match (!!(a)) { when true: 200, default: b ? 201 : 500 }",
     ) != null);
 
     // Idempotence: the normalized output is a fixed point.
@@ -3539,10 +3549,14 @@ test "normalizeSource confluently rewrites a right-associative nested ternary" {
 }
 
 test "normalizeSource ternary rewrite preserves strings containing ? and :" {
+    // The chained form is the vehicle, so the scanner has to find the outer
+    // `:` past both the strings' punctuation and the inner ternary's own
+    // `?`/`:`. The inner ternary survives as an idiomatic pure `?:`.
     const source =
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  const msg = ok ? "yes? a:b" : "no:x?y";
+        \\  const alt = req.method === "POST";
+        \\  const msg = ok ? "yes? a:b" : alt ? "no:x?y" : "z";
         \\  return Response.text(msg);
         \\}
     ;
@@ -3550,14 +3564,15 @@ test "normalizeSource ternary rewrite preserves strings containing ? and :" {
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: \"yes? a:b\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: \"no:x?y\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: alt ? \"no:x?y\" : \"z\"") != null);
 }
 
 test "normalizeSource ternary inside an object-literal value is rewritten in place" {
     const source =
+        \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  return Response.json({ code: ok ? 200 : 500, ok });
+        \\  return Response.json({ code: ok ? 200 : fallbackStatus(), ok });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3566,7 +3581,7 @@ test "normalizeSource ternary inside an object-literal value is rewritten in pla
     try std.testing.expect(std.mem.indexOf(
         u8,
         nr.canonical_source,
-        "code: match (!!(ok)) { when true: 200, default: 500 }, ok",
+        "code: match (!!(ok)) { when true: 200, default: fallbackStatus() }, ok",
     ) != null);
 }
 

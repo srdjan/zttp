@@ -172,7 +172,7 @@ git add -A && git commit -m "feat(registry): seed the idiom registry and expose 
 - Consumes: `Severity.advisory` from Task 1 is NOT used here — impure and chained ternaries are hard errors per spec 5.4.
 - Produces: `DiagnosticKind.canonical_ternary_impure` and `DiagnosticKind.canonical_ternary_chain` replacing `canonical_ternary`; a file-local `fn isPureExpr(self: *StrictChecker, node: NodeIndex) bool` used by Task 3 only (D2-interim). Task 4 relies on ternaries reaching the type checker unrejected.
 
-- [ ] **Step 1: Replace the three ternary tests** at `strict_checker.zig:1515` with failing ones:
+- [x] **Step 1: Replace the three ternary tests** at `strict_checker.zig:1515` with failing ones:
 
 ```zig
 test "pure ternary is admitted" {
@@ -197,11 +197,11 @@ test "chained ternary fires chain diagnostic" {
 }
 ```
 
-- [ ] **Step 2: Run, expect compile failure** (kinds missing).
+- [x] **Step 2: Run, expect compile failure** (kinds missing).
 
 Run: `zig build test-zts -- --test-filter "ternary"`
 
-- [ ] **Step 3: Implement.** (a) In `DiagnosticKind`, replace `canonical_ternary` with `canonical_ternary_impure` and `canonical_ternary_chain`; update `isCanonicalProfile` to list both. (b) Define the D2-interim purity predicate:
+- [x] **Step 3: Implement.** (a) In `DiagnosticKind`, replace `canonical_ternary` with `canonical_ternary_impure` and `canonical_ternary_chain`; update `isCanonicalProfile` to list both. (b) Define the D2-interim purity predicate:
 
 ```zig
 // D2-interim: syntactic purity for ?: arms until the effects-and-purity
@@ -234,7 +234,7 @@ fn isPureExpr(self: *StrictChecker, node: NodeIndex) bool {
 
 Extend the composite cases (array/record/template/member) to recurse over children using the same `ir_view` accessors the surrounding walk uses — copy the child-iteration shapes from `walkExpr`. (c) Rewrite the `.ternary` arm: fire `canonical_ternary_chain` when either branch's tag is `.ternary` (spec: "parenthesized or not" — parens do not create nodes, so the tag test is exact); else fire `canonical_ternary_impure` when `!isPureExpr(then) or !isPureExpr(else)`; else no diagnostic. Always walk children afterward, as the current code does.
 
-- [ ] **Step 4: Update `rule_registry.zig`** — replace the ZTS612 entry with two entries (keep ZTS612 for impure, mint the next free code for chain — check the highest existing ZTS6xx first):
+- [x] **Step 4: Update `rule_registry.zig`** — replace the ZTS612 entry with two entries (keep ZTS612 for impure, mint the next free code for chain — check the highest existing ZTS6xx first):
 
 ```zig
 .{
@@ -255,14 +255,35 @@ Extend the composite cases (array/record/template/member) to recurse over childr
 },
 ```
 
-- [ ] **Step 5: Sweep for stale references.** `grep -rn "canonical_ternary\b" packages/` — fix every remaining site (canonicalize repair plans, docs, tests) to the new kinds.
+- [x] **Step 5: Sweep for stale references.** `grep -rn "canonical_ternary\b" packages/` — fix every remaining site (canonicalize repair plans, docs, tests) to the new kinds.
 
-- [ ] **Step 6: Run, expect PASS**, then run the full checker suite:
+**What the sweep actually found, 2026-07-31**, beyond the plan's file list:
+
+1. `canonicalize.zig:923` dispatches the ternary rewrite on the literal string
+   `"ZTS612"`. ZTS621 needed adding to that condition or chained ternaries
+   would report with a repair that never applied — `normalize` returned
+   `iterations: 0, fullyCanonical: false` with the chain as residual.
+2. Six `canonicalize.zig` tests drove the rewriter with a *pure unchained*
+   ternary, which this task admits, so the rewriter stopped running. Five were
+   re-pointed at an impure or chained vehicle, keeping the machinery each one
+   guards (condition parenthesization, the `=>` boundary, string-literal
+   `?`/`:` safety, object-literal in-place splicing).
+3. The nested-ternary test changed meaning, not just fixture. `a ? x : b ? y : z`
+   now unchains to `match (!!(a)) { when true: x, default: b ? y : z }` and
+   stops: only the outer conditional was a defect, and the freed inner one is
+   idiomatic. The old test asserted both became `match` and that no `?`
+   survived. Renamed to "unchains ... and stops".
+4. Adding a rule shifts the policy hash, so `policy-hash.txt` and the five
+   expert goldens under `packages/tools/tests/fixtures/expert/` regenerate via
+   `bash scripts/update-expert-goldens.sh`. The golden diff is confined to
+   `policy_hash`, `rule_count` 67 to 68, and `categories.verifier` 45 to 46.
+
+- [x] **Step 6: Run, expect PASS**, then run the full checker suite:
 
 Run: `zig build test-zts -- --test-filter "ternary"` then `zig build test-zts`
 Expected: PASS; no other test regressions.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 zig fmt packages/zts/src/strict_checker.zig packages/zts/src/rule_registry.zig
