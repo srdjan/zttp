@@ -23,7 +23,7 @@ const Runtime = zruntime.Runtime;
 const HttpResponse = zruntime.HttpResponse;
 const HttpRequestView = zruntime.HttpRequestView;
 const QueryParam = zruntime.QueryParam;
-const SystemRuntime = zruntime.SystemRuntime;
+const SystemRuntime = @import("in_process_dispatch.zig").SystemRuntime;
 const Target = @import("in_process_dispatch.zig").Target;
 
 // Response/request helpers now in runtime_http.zig and runtime_natives.zig,

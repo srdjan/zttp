@@ -13,7 +13,7 @@ const runtime_natives = @import("runtime_natives.zig");
 
 const Io = std.Io;
 const net = std.Io.net;
-const HandlerPool = zruntime.HandlerPool;
+const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 const RuntimeConfig = zruntime.RuntimeConfig;
 const HttpHeader = http_types.HttpHeader;
 const HttpRequestView = http_types.HttpRequestView;

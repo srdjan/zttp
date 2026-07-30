@@ -30,7 +30,6 @@ const natives = @import("runtime_natives.zig");
 pub const getStringData = natives.getStringData;
 const buildQueryObject = natives.buildQueryObject;
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
-pub const websocket_codec = @import("websocket_codec.zig");
 
 // Native callbacks and helpers that moved to runtime_http.zig (review M1).
 // Aliased here so the binding-registration sites and tests in this file keep
@@ -91,7 +90,17 @@ pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 
 /// In-process registry of co-located sub-handlers, used by zttp:workflow to
 /// dispatch from an orchestrator handler without HTTP.
-pub const SystemRuntime = @import("in_process_dispatch.zig").SystemRuntime;
+// The last edge of the runtime-to-pool cycle, and it exists only for tests:
+// 15 test blocks in this file (711 lines, named for HandlerPool behavior) still
+// live here rather than in runtime_pool.zig. Private, so no production code can
+// reach the pool through this module. Moving those tests to their real home
+// retires this import; see slice 6 of
+// docs/plans/2026-07-30-010-reset-0c-0d-ownership-design.md.
+const HandlerPool = @import("runtime_pool.zig").HandlerPool;
+
+// Private: `Runtime.system_registry_ref` is typed on it. Not re-exported -
+// callers that need the type import in_process_dispatch.zig directly.
+const SystemRuntime = @import("in_process_dispatch.zig").SystemRuntime;
 const Target = @import("in_process_dispatch.zig").Target;
 
 /// Recover the typed registry pointer from the type-erased `RuntimeConfig`
@@ -2276,7 +2285,6 @@ pub const Runtime = struct {
 /// Mutex-protected ring buffer that records nanosecond-resolution latency samples.
 /// Used only for diagnostic metrics in debug builds, so we prefer correctness
 /// under contention over lock-free writes.
-pub const PercentileTracker = @import("runtime_percentile.zig").PercentileTracker;
 
 // ============================================================================
 // Handler Pool (Lock-Free)
@@ -2284,7 +2292,6 @@ pub const PercentileTracker = @import("runtime_percentile.zig").PercentileTracke
 
 /// Lock-free pool of pre-initialized JavaScript runtimes, backed by zts.LockFreePool.
 /// Uses per-runtime wrappers to install builtins and load handler code once.
-pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 
 // ============================================================================
 // Tests

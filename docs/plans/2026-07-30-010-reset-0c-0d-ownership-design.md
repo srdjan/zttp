@@ -175,10 +175,30 @@ depend on earlier ones; earlier slices are useful on their own.
    All five ambient-dispatch threadlocals from the 6.1 census are now gone except
    `aot_override`, which is file-local test-only state and needs no context.
 
-6. **`HandlerInstance`** (0c). Extract `Runtime` from `zruntime.zig` into its own file as
+6. **`HandlerInstance`** (0c). PARTLY DONE 2026-07-30: the alias bridges are gone and the
+   cycle is measured. What was found and done first:
+
+   - `Runtime`'s implementation (lines 167 to 2245) does not mention `HandlerPool` or
+     `runtime_pool` at all. The zruntime-to-pool edge was never a production dependency.
+   - Of the four re-exports, `PercentileTracker` and `websocket_codec` had zero users,
+     `HandlerPool` had two (`engine_adapter.zig`, `edge_server.zig`), and `SystemRuntime`
+     had one (`runtime_workflow.zig`). All four public aliases are deleted; the three real
+     users import the owning module directly. `SystemRuntime` stays as a private import
+     because `Runtime.system_registry_ref` is typed on it.
+   - What still forces `zruntime.zig` to import `runtime_pool.zig` is **tests**: 15 test
+     blocks, 711 lines, every one named for `HandlerPool` behavior, live in `zruntime.zig`
+     instead of in `runtime_pool.zig`. The import is now private, so no production code can
+     reach the pool through this module.
+
+   Moving those tests is the head of the remaining work, and it is not a block-level cut:
+   non-test declarations are interleaved between the test blocks (`writeCachedTeardownFixture`
+   at line 5975 sits inside the run, and is shared with two non-pool tests), so the move has
+   to be per-block with a compile between each, promoting three helpers to `pub`.
+
+   The rest of the slice: extract `Runtime` from `zruntime.zig` into its own file as
    `HandlerInstance`, owning the Context, installed builtins, loaded handler, invocation
-   state, and reset lifecycle, with `runtime_pool.zig` owning it directly. Delete the
-   `HandlerPool` alias bridge and the back-import. The 96 test blocks move with it.
+   state, and reset lifecycle, with `runtime_pool.zig` owning it directly. The 96 test
+   blocks move with it.
    -> verify: the dependency graph is acyclic (no file imports both directions), full
    `verify.sh`, byte-identical contract and receipt fixtures.
 

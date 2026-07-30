@@ -9,28 +9,49 @@ but it does not define the advanced profile.
 
 ## 1. Decision
 
-ZTS should be a compact application language with a rich type and library
-surface, not a small language that forces applications to escape into native
-code.
+ZTS should be an AI-minimal, agent-first application language whose canonical
+source remains readable and maintainable by humans.
 
 The target is:
 
-> A TypeScript-shaped application surface where every admitted construct has
-> one canonical meaning and a local lowering into a much smaller, closed,
-> independently checkable execution kernel.
+> An agent can discover the complete language profile, generate one canonical
+> TypeScript-lexical source form, receive deterministic machine-actionable
+> repairs, and independently check the result. A human can read and maintain
+> that same source without decoding an agent-only notation.
 
-The optimal balance is not the fewest source tokens at any cost. It is the
-fewest semantic concepts and competing spellings that still let ordinary
-applications express their domain directly.
+AI-minimal does not mean code-golfed source or the fewest characters. It means
+the least choice entropy, hidden context, and repair ambiguity consistent with
+general application programming:
 
-This profile therefore makes four decisions:
+- one meaning and one preferred spelling for each admitted operation,
+- a bounded grammar and type system discoverable from the compiler,
+- explicit data, control flow, effects, failure, and capability use,
+- deterministic normalization and exact repairs where a mechanical repair is
+  safe,
+- and structured refusal where the compiler lacks enough semantic information.
 
-1. Add no new control-flow statements and no new control-flow operators.
+The design priority is:
+
+1. reliable agent discovery, generation, repair, and verification,
+2. closed semantics and explicit authority,
+3. human readability as a hard constraint,
+4. application expressiveness justified by a versioned corpus.
+
+ZTS is not a TypeScript compatibility profile. It is a distinct constrained
+language that reuses familiar TypeScript lexical and layout conventions when
+they preserve one clear meaning. A `.ts` or `.tsx` transport does not imply
+that arbitrary TypeScript is accepted.
+
+This profile therefore makes five decisions:
+
+1. Add no new control-flow statements or control-flow operators.
 2. Complete the existing type system instead of importing TypeScript's
    type-level programming language.
 3. Put common application power in pure, typed data abstractions and explicit
    capability modules.
-4. Separate language acceptance from proof claims. An accepted program may
+4. Make the versioned compiler-in-the-loop protocol part of the language
+   contract rather than optional tooling.
+5. Separate language acceptance from proof claims. An accepted program may
    run even when termination or a cost bound is unproved. A proof certificate
    may never hide that gap.
 
@@ -46,12 +67,31 @@ This profile therefore makes four decisions:
 | Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes`, `HtmlNode` |
 | Added concurrency model | None; retain explicit `parallel` and `race` |
 | Added error channel | None; errors remain ordinary tagged values |
+| Agent-only source notation | None; machine metadata remains separate JSON |
+| Agent protocol | Versioned discovery, diagnostics, repair simulation, normalization, and verification |
+| Canonical formatting | One deterministic, idempotent human-readable layout |
 
 The executable kernel grows only for `null`, `Dict`, and `Bytes`. Generic
 constraints, recursive aliases, and `Result` are erased or elaborate to
 existing records, unions, calls, and branches.
 
 ## 2. Application envelope
+
+The primary product envelope is one complete agent loop. Given a user goal and
+no hidden profile knowledge, an agent can:
+
+1. discover the language, policy, modules, effects, restrictions, and tool
+   schemas,
+2. generate canonical source,
+3. check it through a stable JSON interface,
+4. trace each failure to a rule and source span,
+5. simulate any exact compiler-proposed repair,
+6. normalize to a deterministic fixed point,
+7. recheck and verify the requested properties,
+8. or return a structured unsupported result without guessing.
+
+Application breadth is the evidence used to expand or reject language
+features. It is not allowed to outrank the integrity of this loop.
 
 `zts-advanced-1` is intended to support these application classes without
 checker bypasses or routine native extensions:
@@ -81,12 +121,15 @@ An application profile is ready only when representative programs from every
 target class compile, run, and verify without:
 
 - `unknown` used to launder a known type
+- undocumented syntax or behavior that an agent must infer from examples
 - parser-specific source rewrites such as reversing an ordinary comparison in
   TSX
 - native modules introduced only to compensate for a language gap
 - unchecked dynamic property access
 - trapping operations on attacker-controlled input
 - an unexplained or mislabeled proof gap
+- manual human correction of profile syntax within the declared agent repair
+  budget
 
 ## 3. Current baseline and the gap
 
@@ -139,6 +182,14 @@ The important gaps are not more loop or class syntax:
     a runtime implementation, so its declared effects cannot support a proof.
 13. Several current UI and upgrade summaries use proof-certificate language
     for structural or textual evidence that has no independent verifier.
+14. The live CLI already exposes JSON metadata, feature and module discovery,
+    diagnostics, repair simulation, canonicalization, and normalization, but
+    the language profile does not yet bind them into one versioned agent
+    protocol.
+15. Diagnostic suggestions, exact repair intents, rule descriptions, and
+    normalization traces exist across separate surfaces. Their identifiers,
+    compatibility rules, and convergence guarantees are not yet one stable
+    agent-facing contract.
 
 The advanced profile treats those facts as its starting point.
 
@@ -146,7 +197,25 @@ The advanced profile treats those facts as its starting point.
 
 Every feature admitted to the profile must satisfy all applicable laws.
 
-### 4.1 One canonical source form
+### 4.1 AI-minimality
+
+A feature is minimal when an agent needs the fewest independent decisions to
+use, diagnose, transform, and verify it correctly. Token count alone is not a
+minimality measure.
+
+For each proposed feature, the profile must account for:
+
+- how an agent discovers it,
+- how many canonical choices it introduces,
+- what new inference or proof state it adds,
+- how failure is identified and repaired,
+- and whether the same application need is already expressible by composition.
+
+A familiar TypeScript form SHOULD win when it is equally precise,
+deterministic, and verifiable. A ZTS-specific form is justified only when it
+materially reduces ambiguity, authority, proof burden, or repair risk.
+
+### 4.2 One canonical source form
 
 If two constructs express the same operation with no meaningful semantic
 difference, keep one.
@@ -162,13 +231,17 @@ Examples:
 - annotations and narrowing, not `as` or `satisfies`
 - `Dict`, not computed keys on shape records
 
-### 4.2 Local elaboration
+The canonical formatter MUST produce one deterministic, idempotent source
+layout. Normalizing canonical source a second time MUST produce identical
+bytes.
+
+### 4.3 Local elaboration
 
 A surface feature should lower locally to a small number of kernel forms. The
 lowering must not depend on runtime reflection, prototype lookup, hidden
 receiver binding, or ambient scheduling.
 
-### 4.3 Visible control and effects
+### 4.4 Visible control and effects
 
 Every branch, failure path, state write, and external effect must remain
 visible in typed IR.
@@ -180,7 +253,7 @@ visible in typed IR.
 - concurrency is an explicit structured operation
 - reusable state lives behind a capability, not in a mutable module global
 
-### 4.4 Closed executable semantics
+### 4.5 Closed executable semantics
 
 Every source construct admitted to a certified build must map to:
 
@@ -191,7 +264,7 @@ Every source construct admitted to a certified build must map to:
 An unknown node, opcode, value kind, callback path, or module call makes the
 certified build fail closed.
 
-### 4.5 Proof claims are property-specific
+### 4.6 Proof claims are property-specific
 
 Translation correctness, partial correctness, determinism, totality, cost
 bounds, and application policies are different claims.
@@ -204,9 +277,100 @@ The compiler must never infer:
 - proof from a solver invocation that returned `unknown`,
 - end-to-end correctness from a proof over one IR slice.
 
+### 4.7 Human readability is a hard floor
+
+The agent and the human use the same canonical source. ZTS MUST NOT add a
+machine-only source encoding, compressed token dialect, positional shorthand,
+opaque generated identifiers, or semantics carried only in external metadata.
+
+Canonical source SHOULD preserve:
+
+- domain names rather than synthetic aliases,
+- named reusable functions rather than anonymous indirection,
+- explicit parameter and return types at public boundaries,
+- ordinary block structure and stable indentation,
+- intermediate `const` bindings when they make data or effect flow clearer,
+- and source-order control flow that can be reviewed without expanding a
+  hidden lowering.
+
+Machine detail belongs in versioned JSON. Source remains the durable shared
+artifact for agents and humans.
+
+### 4.8 Normative agent protocol
+
+The compiler-in-the-loop interface is part of the advanced language contract.
+It is not an optional editor convenience.
+
+The canonical CLI entry points are:
+
+- `zts meta --json` for protocol, compiler, policy, and registry identity,
+- `zts features --json`, `zts restrictions --json`, `zts modules --json`, and
+  `zts describe-rule --json` for discovery,
+- `zts check --json` for source, type, effect, policy, and proof diagnostics,
+- `zts canonicalize --json --simulate` for compiler-authored local repairs,
+- `zts edit-simulate --stdin-json` and `zts review-patch --json` for edit
+  validation,
+- `zts normalize --check --json` for canonical fixed-point validation,
+- and property-specific verification commands for proof claims.
+
+An implementation MAY provide transports other than the CLI, but they MUST
+preserve the same schemas and semantics.
+
+Every JSON result MUST include a schema version, profile identifier, compiler
+version, and policy identity. Results that depend on modules or canonical
+rules MUST also include the module-registry and policy hashes. An agent that
+does not support the returned schema or profile MUST stop rather than infer a
+fallback.
+
+Every diagnostic MUST contain:
+
+- a stable diagnostic code and governing rule identifier,
+- severity and success impact,
+- source digest plus exact byte span and human line and column,
+- a concise message and, when useful, a human explanation,
+- effect and proof impact when applicable,
+- whether an exact repair is available,
+- and either a stable repair identifier or a structured statement of the
+  semantic decision still required.
+
+Prose is never an executable repair. A mechanical repair MUST bind the source
+digest, original span content, replacement text, rule identifier, policy hash,
+and repair identifier. It may be applied only when the source still matches
+and edit simulation accepts it.
+
+Canonicalization and normalization MUST be deterministic, terminating,
+semantics-preserving, and idempotent. If a proposed rewrite cannot establish
+those properties, the compiler MUST reject it as non-mechanical instead of
+guessing.
+
+The canonical repair loop is bounded:
+
+1. discover the active profile,
+2. generate or edit canonical source,
+3. check and classify every diagnostic,
+4. simulate exact repairs,
+5. apply repairs whose source bindings still match,
+6. normalize to a fixed point,
+7. recheck and run the requested verifier,
+8. stop successfully, or return a structured unsupported result.
+
+The profile registry declares the maximum repair iterations and tool calls for
+each conformance task class. Repeated diagnostics, stale edits, a non-convergent
+normalizer, or an unavailable semantic choice end the loop explicitly.
+
 ## 5. Normative source profile
 
 The words MUST, MUST NOT, SHOULD, and MAY are normative in this document.
+
+ZTS source is a distinct constrained language with familiar TypeScript lexical
+and layout conventions. TypeScript documentation is not an implicit source of
+ZTS semantics.
+
+A front end MAY recognize a common noncanonical TypeScript form solely to
+produce a targeted diagnostic and the exact canonical alternative. It MUST
+NOT silently choose among semantically different lowerings. If there is no
+safe alternative, the result names the unsupported construct and the missing
+semantic decision.
 
 ### 5.1 Modules
 
@@ -547,6 +711,17 @@ Admitted types are:
 - `Spec`, `Proof`, and `Effects` capsules
 - contractive recursive aliases
 
+`Proof<T, P>` and `Effects<T, R>` are checker-only transparent capsules. They
+do not allocate or wrap a runtime value. In ordinary value use, an expression
+with either capsule has value type `T`; proof properties and inferred effects
+are tracked separately by the checker.
+
+On a function return, `Effects<T, R>` declares an effect ceiling. The checker
+requires the inferred row of the body to be a subset of `R`, while callers
+receive a value of type `T` and the inferred effect row. Thus `parallel`
+returns its tuple value directly, even when a containing function declares an
+`Effects<tuple, row>` return contract.
+
 A recursive alias is contractive when every cycle passes through a record,
 tuple, array, or `Dict` constructor:
 
@@ -594,8 +769,8 @@ core programs without erased annotations being used as runtime evidence.
 
 ### 5.8 JSX and TSX
 
-TSX is an optional surface elaboration into specified `h` and `Fragment`
-operations.
+TSX is an optional surface elaboration into specified `jsxElement` and
+`jsxFragment` operations.
 
 - `HtmlNode` is an opaque immutable virtual-node type.
 - `HtmlChild` is `HtmlNode | string | number | boolean | null | undefined |
@@ -1175,7 +1350,7 @@ The advanced surface is intentionally richer than the executable kernel.
 | array higher-order function | typed finite fold with explicit callback call |
 | `Result` | tagged record union |
 | `Dict` | immutable intrinsic with specified ordering and equality |
-| TSX | calls to specified `h` and `Fragment` intrinsics |
+| TSX | calls to specified `jsxElement` and `jsxFragment` intrinsics |
 | `parallel` / `race` | explicit structured-effect operation |
 
 Each elaboration is validated independently. A surface form does not need its
@@ -1454,6 +1629,28 @@ A native module is either:
 A self-asserted manifest is not proof. Unknown modules and implementation-to-
 manifest mismatches fail closed.
 
+### 13.6 Agent explanation graph
+
+Every failed or unavailable property in a build report, checked report, or
+certificate attempt MUST expose a machine-readable explanation graph:
+
+```text
+requested property
+  -> failed obligation
+  -> source span and semantic member
+  -> governing rule
+  -> evidence or failure outcome
+  -> admissible repairs or required semantic decision
+```
+
+Nodes and edges use stable identifiers from versioned registries. A source
+repair is included only when it is mechanically valid and simulation-safe.
+Otherwise the graph states exactly what decision or evidence is missing. A
+human-readable rendering MUST be derivable from the same graph.
+
+The explanation graph makes a result diagnosable and repairable. It is not
+itself proof and cannot strengthen the grade of its enclosing artifact.
+
 ## 14. Readiness gates
 
 The advanced profile is ready to ship only when all gates are true.
@@ -1471,7 +1668,55 @@ The advanced profile is ready to ship only when all gates are true.
 - `Result`, `Dict`, recursive aliases, `null`, `Bytes`, higher-order arrays,
   and structured-I/O tuples are fully typed.
 
-### 14.2 Application corpus gate
+### 14.2 Agent gate
+
+A versioned conformance corpus MUST exercise at least two independently
+implemented coding-agent clients in fixed, reproducible environments. The
+tasks cover:
+
+- greenfield generation from user intent,
+- migration from common TypeScript forms,
+- diagnosis of type, effect, policy, and proof failures,
+- exact mechanical repair and rejection of unsafe repair,
+- behavior-preserving refactoring,
+- and explicit recognition of unsupported requirements.
+
+Each client begins with the user task and `zts meta --json`, not hidden syntax
+instructions. It must discover every other language fact through the
+normative agent protocol.
+
+For every corpus task declared supported:
+
+- the final source is canonical, type-correct, and semantically correct,
+- every requested available property verifies,
+- the loop converges within the profile's declared repair budget,
+- no human corrects profile syntax or interprets an unstructured diagnostic,
+- no exact repair is invalid, stale, or changes application semantics,
+- and a second normalization produces identical bytes.
+
+For every corpus task declared unsupported, every client must return a
+structured unsupported result with no false success or guessed behavior.
+
+The release report publishes first-pass validity, repair iterations, tool
+calls, invalid-repair count, semantic-drift count, unsupported-task precision,
+and human-intervention count per client. Release requires zero invalid exact
+repairs, zero semantic drift, zero false success, and zero human syntax
+intervention across the corpus.
+
+### 14.3 Human-readability gate
+
+- Agents and humans consume the same canonical source.
+- No source construct exists only to transport machine metadata.
+- Canonical formatting uses stable indentation and ordinary TypeScript lexical
+  conventions.
+- Public contracts use explicit types, reusable behavior uses named functions,
+  and effectful calls remain visible in source order.
+- Compiler-authored repairs preserve existing domain names and do not introduce
+  opaque aliases, compressed layout, or needless nesting.
+- The representative corpus passes a documented maintainability review by
+  readers who did not author the programs.
+
+### 14.4 Application corpus gate
 
 At least one end-to-end application for each target class in Section 2:
 
@@ -1492,7 +1737,7 @@ The corpus MUST include:
 - accepted structural recursion and a rejected or unproved non-decreasing
   recursion case.
 
-### 14.3 Semantics gate
+### 14.5 Semantics gate
 
 - Every profile member has an explicit semantic disposition.
 - Every reachable core operation and bytecode opcode is specified.
@@ -1501,7 +1746,7 @@ The corpus MUST include:
 - Front-end elaboration, optimization, code generation, VM execution, heap
   behavior, and module boundaries are represented in the theorem chain.
 
-### 14.4 Certificate gate
+### 14.6 Certificate gate
 
 - A real independent consumer exists before certificate production is called
   shipped.
@@ -1526,6 +1771,7 @@ The corpus MUST include:
   types, guards, utility types, and proof/effect capsules
 - TSX as pure elaboration
 - explicit capability modules and structured I/O
+- familiar TypeScript lexical conventions and human-readable block structure
 
 ### Add or complete
 
@@ -1543,6 +1789,10 @@ The corpus MUST include:
 - precise minimum HTTP, WebSocket, queue, and durable-workflow ABIs
 - snapshot semantics for every finite traversal
 - property-specific proof grades and an independent certificate verifier
+- a versioned agent discovery, diagnostics, repair, and verification protocol
+- stable rule, diagnostic, repair, and explanation-graph identifiers
+- deterministic fixed-point normalization and edit simulation
+- an agent conformance corpus with bounded convergence
 
 ### Tighten
 
@@ -1551,6 +1801,10 @@ The corpus MUST include:
 - reject ambient time, random, logging, and I/O
 - reject unchecked trapping operations at untrusted boundaries
 - make a closed profile registry the source of truth
+- identify ZTS as a distinct constrained language rather than imply TypeScript
+  source compatibility
+- give common rejected TypeScript forms targeted diagnostics and exact
+  alternatives when safe
 - distinguish accepted recursion from proved termination
 - classify the existing 10-node and 7-opcode semantics as a partial slice
 - treat the removed signed receipt as historical, not shipped
@@ -1724,21 +1978,42 @@ function loadDashboard(): Effects<
 The tuple remains typed. The effect ceiling remains visible. No Promise or
 ambient scheduler enters the program.
 
+### 16.5 Agent repair sequence
+
+An agent starts from the compiler, not from remembered TypeScript behavior:
+
+```sh
+zts meta --json
+zts features --json
+zts modules --json
+zts check dashboard.ts --json
+zts canonicalize dashboard.ts --json --simulate
+zts normalize dashboard.ts --check --json
+zts check dashboard.ts --json
+```
+
+The exact repair payload from `canonicalize` is applied only after its source
+digest and span still match and edit simulation accepts it. The final check
+must reference the same profile, policy, and module-registry identities
+discovered at the start. If a diagnostic requires a domain decision, the agent
+returns that structured decision point instead of synthesizing behavior.
+
 ## 17. Final northstar
 
 The strongest defensible destination is:
 
-> Every accepted ZTS application is checked against one small, versioned
-> source profile. Every admitted surface construct elaborates into a closed
-> semantic kernel. Every certified property names its assumptions and covers
-> every reachable kernel and module operation. A separate verifier rebuilds
-> and checks the proof against the exact deployment artifact. Missing coverage
-> and inconclusive automation fail closed.
+> An agent can enter with user intent and no hidden ZTS knowledge, discover one
+> small versioned profile, produce canonical source, repair it through bounded
+> deterministic feedback, and verify the exact result. A human can read,
+> review, and maintain that same source. Every admitted construct elaborates
+> into a closed semantic kernel, and every certified property is independently
+> checked against the exact deployment artifact.
 
-This is more useful than minimizing syntax until applications become awkward,
-and more honest than calling a partial or inconclusive check complete.
+Missing coverage, stale repairs, unsupported semantics, and inconclusive
+automation fail closed. They never become guessed source or inflated proof
+claims.
 
-The language stays small where smallness compounds:
+The language stays AI-minimal where choice entropy compounds:
 
 - one data-contract form,
 - one recoverable-error form,
@@ -1747,7 +2022,9 @@ The language stays small where smallness compounds:
 - one absence convention,
 - one dynamic keyed collection,
 - one structured-concurrency model,
-- one explicit path for effects.
+- one explicit path for effects,
+- one canonical formatting fixed point,
+- and one machine-discoverable repair protocol.
 
 It grows only where application evidence demands real expressive power:
 
@@ -1759,7 +2036,13 @@ It grows only where application evidence demands real expressive power:
 - JSON fidelity,
 - and compositional effects.
 
-That is the balance `zts-advanced-1` should preserve.
+Human readability is not a competing language mode. It is the floor beneath
+the agent-first design: familiar lexical forms, explicit names, visible
+control, and no machine-only source dialect.
+
+That is the balance `zts-advanced-1` should preserve: minimal uncertainty for
+agents, sufficient power for general applications, and durable source for
+humans.
 
 ## Sources inspected
 
@@ -1782,12 +2065,20 @@ That is the balance `zts-advanced-1` should preserve.
 - `packages/zts/src/handler_verifier.zig`
 - `packages/zts/src/function_specs.zig`
 - `packages/zts/src/path_generator.zig`
+- `packages/zts/src/repair_intent.zig`
+- `packages/zts/src/repair_plan.zig`
 - `packages/zts/src/module_manifest.zig`
 - `packages/zts/src/contract_builder.zig`
 - `packages/zts/src/semantics.zig`
 - `packages/zts/src/semantics_check.zig`
 - `packages/zts/src/builtins/root.zig`
 - `packages/zts/src/builtins/result.zig`
+- `packages/tools/src/expert_meta.zig`
+- `packages/tools/src/json_diagnostics.zig`
+- `packages/tools/src/canonicalize.zig`
+- `packages/tools/src/edit_simulate.zig`
+- `packages/tools/src/zts_cli.zig`
+- `packages/tools/src/skills/zts-expert/SKILL.md`
 - `packages/tools/src/precompile.zig`
 - the live `zts meta`, `features`, `restrictions`, `modules`, and `spec-check`
   JSON surfaces

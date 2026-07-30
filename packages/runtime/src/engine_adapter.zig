@@ -9,7 +9,7 @@ const zruntime = @import("zruntime.zig");
 const http_types = @import("http_types.zig");
 
 pub const Runtime = zruntime.Runtime;
-pub const HandlerPool = zruntime.HandlerPool;
+pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 pub const RuntimeConfig = zruntime.RuntimeConfig;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
