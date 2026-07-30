@@ -283,6 +283,18 @@ pub const Runtime = struct {
         events: []const zq.trace.DurableEvent,
     };
 
+    /// Recover the runtime that owns `ctx`. This is the sanctioned way for a
+    /// native callback to reach its host runtime: the engine hands callbacks a
+    /// `*Context`, and the host pointer makes the runtime an explicit argument
+    /// rather than something read out of thread-local state.
+    ///
+    /// Returns null for a Context no runtime claimed (an engine-only Context in
+    /// a compiler test, for example).
+    pub fn fromContext(ctx: *zq.Context) ?*Self {
+        const host = ctx.host orelse return null;
+        return @ptrCast(@alignCast(host));
+    }
+
     pub fn init(allocator: std.mem.Allocator, config: RuntimeConfig) !*Self {
         const self = try allocator.create(Self);
         errdefer allocator.destroy(self);
@@ -375,6 +387,11 @@ pub const Runtime = struct {
         self.strings = &self.owned_strings.?;
         errdefer self.owned_strings.?.deinit();
 
+        // The Context carries the host pointer so a native callback can reach
+        // this runtime by an explicit cast. `self` is heap-allocated and stable
+        // for the runtime's whole life; `deinit` clears the slot.
+        self.ctx.host = self;
+
         // Open trace file if configured
         if (config.trace_file_path) |trace_path| {
             self.trace_file = openTraceFile(allocator, trace_path) catch |err| {
@@ -443,6 +460,11 @@ pub const Runtime = struct {
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
         applyEmbeddedCapabilityPolicy(pool_rt.ctx, config);
 
+        // Pooled Contexts outlive this wrapper and are handed to the next
+        // wrapper on recycle, so the slot is re-pointed here on every init and
+        // cleared in `deinit`. A stale host pointer would be a use-after-free.
+        pool_rt.ctx.host = self;
+
         // Install core JS builtins if the pooled runtime hasn't already done so.
         if (pool_rt.ctx.builtin_objects.items.len == 0) {
             try zq.builtins.initBuiltins(pool_rt.ctx);
@@ -453,6 +475,10 @@ pub const Runtime = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // Drop the host pointer before anything is torn down. On the pooled
+        // path the Context survives this wrapper, so leaving it set would hand
+        // the next callback a freed pointer.
+        if (self.ctx.host == @as(?*anyopaque, @ptrCast(self))) self.ctx.host = null;
         if (self.owns_resources) {
             // Context teardown walks builtin objects and bytecode constants that may
             // still reference interned unique strings from this runtime.
@@ -2836,6 +2862,67 @@ test "Runtime creation" {
     defer rt.deinit();
 
     try std.testing.expect(rt.ctx.sp == 0);
+}
+
+test "fromContext recovers the owning runtime, and a native callback sees it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    try std.testing.expectEqual(@as(?*Runtime, rt), Runtime.fromContext(rt.ctx));
+
+    // A native function receives the type-erased Context, which is exactly the
+    // position every module callback is in. It must be able to recover the
+    // runtime without reading thread-local state.
+    const probe = struct {
+        var seen: ?*Runtime = null;
+        fn call(ctx_ptr: *anyopaque, _: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
+            const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
+            seen = Runtime.fromContext(ctx);
+            return zq.JSValue.undefined_val;
+        }
+    };
+    probe.seen = null;
+    _ = try probe.call(rt.ctx, zq.JSValue.undefined_val, &.{});
+    try std.testing.expectEqual(@as(?*Runtime, rt), probe.seen);
+}
+
+test "a pooled wrapper re-points the host slot and clears it on deinit" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var pool = try zq.LockFreePool.init(allocator, .{ .max_size = 1 });
+    defer pool.deinit();
+    const base_rt = try pool.acquire();
+
+    // The pooled Context outlives each wrapper, so the slot must follow the
+    // current wrapper and must be empty in between.
+    const first = try Runtime.initFromPool(base_rt, .{});
+    try std.testing.expectEqual(@as(?*Runtime, first), Runtime.fromContext(base_rt.ctx));
+    first.deinit();
+    try std.testing.expectEqual(@as(?*anyopaque, null), base_rt.ctx.host);
+
+    const second = try Runtime.initFromPool(base_rt, .{});
+    defer second.deinit();
+    try std.testing.expectEqual(@as(?*Runtime, second), Runtime.fromContext(base_rt.ctx));
+}
+
+test "fromContext returns null for a Context no runtime claimed" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const gc_state = try allocator.create(zq.GC);
+    gc_state.* = try zq.GC.init(allocator, .{});
+    defer gc_state.deinit();
+
+    const ctx = try zq.Context.init(allocator, gc_state, .{});
+    defer ctx.deinit();
+
+    try std.testing.expectEqual(@as(?*Runtime, null), Runtime.fromContext(ctx));
 }
 
 test "virtual module import alias resolves to callable binding" {

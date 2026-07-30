@@ -279,6 +279,14 @@ pub const Context = struct {
     interrupt_requested: std.atomic.Value(bool),
     /// Monotonic deadline in ns for the current request. 0 = no deadline.
     deadline_ns: u64,
+    /// Opaque pointer to whatever host object owns this Context, set by whoever
+    /// created it. The engine never dereferences it and never frees it.
+    ///
+    /// It exists so a native callback, which the engine hands a `*Context`, can
+    /// reach its own host runtime by an explicit cast instead of a threadlocal.
+    /// The host is responsible for the cast being sound: set it to exactly one
+    /// type per Context, and clear it before the pointee dies.
+    host: ?*anyopaque = null,
 
     pub fn init(allocator: std.mem.Allocator, gc_state: *gc.GC, config: ContextConfig) !*Context {
         const ctx = try allocator.create(Context);
@@ -345,6 +353,7 @@ pub const Context = struct {
             .sdk_sqlite_allowlist = .{},
             .interrupt_requested = std.atomic.Value(bool).init(false),
             .deadline_ns = 0,
+            .host = null,
         };
         errdefer {
             ctx.literal_shapes.deinit(allocator);
