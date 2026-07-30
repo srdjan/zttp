@@ -11,6 +11,7 @@
 //! drift from the binary's actual semantics.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const rule_registry = zts.rule_registry;
 const witness_corpus = zts.witness_corpus;
@@ -548,10 +549,9 @@ pub fn buildSystemPromptFull(
     witness_corpus_dir: ?[]const u8,
     project_root: ?[]const u8,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll(prologue);
     try w.writeAll(skill.skill_md);
@@ -604,7 +604,7 @@ pub fn buildSystemPromptFull(
     // cap, which is why it is the first to shrink when the witness section
     // uses its full budget.
     if (witness_corpus_dir) |dir| {
-        const persona_len_before_witnesses = aw.writer.end;
+        const persona_len_before_witnesses = buf.written().len;
         const room_after_witnesses_reserve =
             if (PROMPT_CAP_BYTES > persona_len_before_witnesses + CTX_TRUNCATION_RESERVED)
                 PROMPT_CAP_BYTES - persona_len_before_witnesses - CTX_TRUNCATION_RESERVED
@@ -646,13 +646,13 @@ pub fn buildSystemPromptFull(
     //                - len(project_context or 0) (so CONTEXT keeps room)
     //   memory_budget = min(remaining, MEMORY_SECTION_SOFT_CAP)
     if (project_root) |root| {
-        try writeMemorySection(allocator, w, aw.writer.end, root, project_context);
+        try writeMemorySection(allocator, w, buf.written().len, root, project_context);
     }
 
     // Project context is appended after persona+snapshots but before the
     // epilogue, so the veto reminder still has the last word. The cap guard
     // truncates *only* this section, never persona content above it.
-    const persona_len_before_ctx = aw.writer.end;
+    const persona_len_before_ctx = buf.written().len;
     if (project_context) |ctx| {
         if (ctx.len > 0) {
             try writeBanner(w, "PROJECT CONTEXT (read-only, from AGENTS.md / CLAUDE.md)");
@@ -680,8 +680,7 @@ pub fn buildSystemPromptFull(
 
     try w.writeAll(epilogue);
 
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    return try buf.toOwnedSlice();
 }
 
 fn writeSection(writer: anytype, title: []const u8, body: []const u8) !void {

@@ -15,6 +15,7 @@
 //! through `writeWitnessJsonl` here and hand the bytes to `replay`.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const ui_payload = @import("ui_payload.zig");
 const json_writer = @import("providers/anthropic/json_writer.zig");
 
@@ -85,13 +86,11 @@ pub fn replay(
 ) !Verdict {
     const f = replay_fn orelse return error.WitnessReplayNotConfigured;
 
-    var jsonl: std.ArrayList(u8) = .empty;
-    defer jsonl.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &jsonl);
-    try writeWitnessJsonl(&aw.writer, witness);
-    jsonl = aw.toArrayList();
+    var jsonl = TextBuffer.init(allocator);
+    defer jsonl.deinit();
+    try writeWitnessJsonl(jsonl.writer(), witness);
 
-    return f(allocator, handler_path, jsonl.items);
+    return f(allocator, handler_path, jsonl.written());
 }
 
 /// Emit a witness body as trace-compatible JSONL: one `request` record
@@ -155,17 +154,15 @@ test "writeWitnessJsonl emits a parseable trace pair" {
         .io_stubs = @constCast(&stubs),
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try writeWitnessJsonl(&aw.writer, body);
-    buf = aw.toArrayList();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try writeWitnessJsonl(buf.writer(), body);
 
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"type\":\"request\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"method\":\"GET\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"type\":\"io\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"fn\":\"env\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"result\":\"sentinel\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"type\":\"request\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"method\":\"GET\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"type\":\"io\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"fn\":\"env\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"result\":\"sentinel\"") != null);
 }
 
 test "Verdict.reproducedViolation matches sentinel substring" {

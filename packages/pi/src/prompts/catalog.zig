@@ -9,6 +9,7 @@
 //! template requires dropping a `.md` file, listing it below, and rebuilding.
 
 const std = @import("std");
+const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const frontmatter = @import("../frontmatter.zig");
 
 pub const Template = struct {
@@ -152,10 +153,9 @@ test "coding templates point at compiler-native Pi workflows" {
 /// `args` are the trailing tokens after the template name.
 /// Returns an allocated string the caller must free.
 pub fn expand(allocator: std.mem.Allocator, template_body: []const u8, args: []const []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     var pos: usize = 0;
     while (pos < template_body.len) {
@@ -188,6 +188,5 @@ pub fn expand(allocator: std.mem.Allocator, template_body: []const u8, args: []c
         pos = close + 2;
     }
 
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    return try buf.toOwnedSlice();
 }

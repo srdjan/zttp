@@ -10,6 +10,7 @@
 //! Anthropic's "watch tool calls assemble in real time" experience.
 
 const std = @import("std");
+const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const builtin = @import("builtin");
 const loop = @import("../../loop.zig");
 const turn = @import("../../turn.zig");
@@ -94,9 +95,9 @@ pub fn buildRequestBody(
     transcript: *const transcript_mod.Transcript,
     extra_user_text: ?[]const u8,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(arena);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeByte('{');
     try w.writeAll("\"model\":");
@@ -124,8 +125,7 @@ pub fn buildRequestBody(
     }
 
     try w.writeByte('}');
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(arena);
+    return try buf.toOwnedSlice();
 }
 
 fn writeUserMessage(w: anytype, body: []const u8) !void {
@@ -501,13 +501,11 @@ test "writeToolsArray: wraps registry entries in flat Responses-API tool shape" 
     defer registry.deinit(testing.allocator);
     try registry.register(testing.allocator, echo_tool);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
-    try writeToolsArray(&aw.writer, &registry);
-    buf = aw.toArrayList();
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try writeToolsArray(buf.writer(), &registry);
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
     const items = parsed.value.array.items;
     try testing.expectEqual(@as(usize, 2), items.len);
@@ -533,13 +531,11 @@ test "writeToolsArray: omits registry workspace writers" {
     defer registry.deinit(testing.allocator);
     try registry.register(testing.allocator, writer_tool);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
-    try writeToolsArray(&aw.writer, &registry);
-    buf = aw.toArrayList();
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try writeToolsArray(buf.writer(), &registry);
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.items, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
     try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
     try testing.expectEqualStrings(apply_edit.tool_name, parsed.value.array.items[0].object.get("name").?.string);

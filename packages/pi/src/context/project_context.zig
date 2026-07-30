@@ -17,6 +17,7 @@
 //! still enforces the final envelope.
 
 const std = @import("std");
+const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const file_io = zts.file_io;
 
@@ -93,9 +94,9 @@ pub fn loadFromDir(
 
     if (levels.items.len == 0) return null;
 
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    errdefer aw.deinit();
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     // Emit outer-first (parents before cwd).
     var i: usize = levels.items.len;
@@ -107,12 +108,11 @@ pub fn loadFromDir(
             try w.writeAll(file.body);
             if (file.body.len == 0 or file.body[file.body.len - 1] != '\n') try w.writeByte('\n');
             try w.writeByte('\n');
-            if (aw.writer.end > options.total_cap) return error.ProjectContextTooLarge;
+            if (buf.written().len > options.total_cap) return error.ProjectContextTooLarge;
         }
     }
 
-    var out = aw.toArrayList();
-    return try out.toOwnedSlice(allocator);
+    return try buf.toOwnedSlice();
 }
 
 const FileBuf = struct {

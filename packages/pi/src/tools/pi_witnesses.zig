@@ -92,10 +92,9 @@ fn execute(
     };
     defer witness_corpus.freeEntries(allocator, entries);
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
-    const w = &aw.writer;
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    defer out.deinit();
+    const w = out.writer();
 
     try w.writeAll("{\"ok\":true,\"handler_path\":");
     try json_utils.writeJsonString(w, handler_path);
@@ -124,9 +123,8 @@ fn execute(
         );
     }
     try w.writeAll("]}\n");
-    out = aw.toArrayList();
 
-    const text = try out.toOwnedSlice(allocator);
+    const text = try out.toOwnedSlice();
     defer allocator.free(text);
     return try registry_mod.ToolResult.withPlainText(allocator, true, text);
 }
@@ -135,17 +133,15 @@ fn emitEmpty(
     allocator: std.mem.Allocator,
     handler_path: []const u8,
 ) anyerror!registry_mod.ToolResult {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
-    const w = &aw.writer;
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    defer out.deinit();
+    const w = out.writer();
 
     try w.writeAll("{\"ok\":true,\"handler_path\":");
     try json_utils.writeJsonString(w, handler_path);
     try w.writeAll(",\"total\":0,\"by_property\":{},\"entries\":[]}\n");
-    out = aw.toArrayList();
 
-    const text = try out.toOwnedSlice(allocator);
+    const text = try out.toOwnedSlice();
     defer allocator.free(text);
     return try registry_mod.ToolResult.withPlainText(allocator, true, text);
 }

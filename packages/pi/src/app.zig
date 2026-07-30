@@ -1,6 +1,7 @@
 //! Top-level entrypoint for `zttp expert` (developer CLI).
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const registry_mod = @import("registry/registry.zig");
 const repl = @import("repl.zig");
 const loop = @import("loop.zig");
@@ -313,10 +314,9 @@ fn printAutoloopOutcome(
 ) !void {
     const props = session_state.currentProperties(transcript, file);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.print("autoloop verdict: {s}\n", .{@tagName(outcome.verdict)});
     try w.print("iterations: {d}\n", .{outcome.iterations});
@@ -336,8 +336,8 @@ fn printAutoloopOutcome(
         try w.writeByte('\n');
     }
 
-    buf = aw.toArrayList();
-    _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    const bytes = buf.written();
+    _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
 }
 
 fn splitCsv(allocator: std.mem.Allocator, csv: []const u8) ![][]u8 {

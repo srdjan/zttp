@@ -4,6 +4,7 @@
 //! model-facing JSON invocation alongside direct argv-style invocation.
 
 const std = @import("std");
+const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const tool_mod = @import("tool.zig");
 
 pub const ToolDef = tool_mod.ToolDef;
@@ -96,15 +97,13 @@ pub const Registry = struct {
 const testing = std.testing;
 
 fn echoExecute(allocator: std.mem.Allocator, args: []const []const u8) anyerror!ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
     for (args, 0..) |a, i| {
-        if (i > 0) try aw.writer.writeByte(' ');
-        try aw.writer.writeAll(a);
+        if (i > 0) try buf.writer().writeByte(' ');
+        try buf.writer().writeAll(a);
     }
-    buf = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try buf.toOwnedSlice() };
 }
 
 const echo_tool: ToolDef = .{

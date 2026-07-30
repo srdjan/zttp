@@ -22,6 +22,7 @@
 //! format `cassette_client.zig` consumes.
 
 const std = @import("std");
+const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const file_io = zts.file_io;
 const cassette_client = @import("cassette_client.zig");
@@ -169,10 +170,9 @@ pub fn serializeCassette(
     body: []const u8,
     options: WriteOptions,
 ) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try writeHeaderLine(w, options);
     try w.writeByte('\n');
@@ -190,8 +190,7 @@ pub fn serializeCassette(
         try w.writeAll("}\n");
     }
 
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    return try buf.toOwnedSlice();
 }
 
 /// Write a captured body to disk as a cassette. Intermediate directories

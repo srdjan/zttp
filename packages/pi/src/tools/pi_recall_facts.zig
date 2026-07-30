@@ -129,10 +129,9 @@ fn execute(
         try kept.append(allocator, e);
     }
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
-    const w = &aw.writer;
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    defer out.deinit();
+    const w = out.writer();
 
     try w.print(
         "{{\"ok\":true,\"returned\":{d},\"corpus_total\":{d},\"entries\":[",
@@ -158,9 +157,8 @@ fn execute(
         );
     }
     try w.writeAll("]}\n");
-    out = aw.toArrayList();
 
-    const text = try out.toOwnedSlice(allocator);
+    const text = try out.toOwnedSlice();
     defer allocator.free(text);
     return try registry_mod.ToolResult.withPlainText(allocator, true, text);
 }

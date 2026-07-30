@@ -87,10 +87,9 @@ fn execute(
     var buf: [HandlerProperties.max_proven_specs]?[]const u8 = undefined;
     const count = props.provenSpecNames(&buf);
 
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
-    const w = &aw.writer;
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    defer out.deinit();
+    const w = out.writer();
 
     try w.writeAll("{\"path\":\"");
     try w.writeAll(args[0]);
@@ -107,8 +106,7 @@ fn execute(
     }
     try w.writeAll("]}");
 
-    out = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try out.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try out.toOwnedSlice() };
 }
 
 // ---------------------------------------------------------------------------

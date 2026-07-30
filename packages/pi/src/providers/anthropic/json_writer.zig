@@ -3,6 +3,7 @@
 //! zts to avoid widening the named-module surface for one function.
 
 const std = @import("std");
+const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 
 pub fn writeString(writer: anytype, s: []const u8) !void {
     try writer.writeByte('"');
@@ -53,12 +54,10 @@ pub fn writeString(writer: anytype, s: []const u8) !void {
 const testing = std.testing;
 
 fn roundtrip(input: []const u8) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
-    try writeString(&aw.writer, input);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(testing.allocator);
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try writeString(buf.writer(), input);
+    return try buf.toOwnedSlice();
 }
 
 test "writeString: ascii passthrough is wrapped in quotes" {

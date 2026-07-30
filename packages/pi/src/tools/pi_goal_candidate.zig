@@ -252,15 +252,13 @@ fn parsePlans(allocator: std.mem.Allocator, json_text: []const u8) !ParsedPlans 
         const id_val = plan_val.object.get("id") orelse return error.InvalidToolOutput;
         if (id_val != .string) return error.InvalidToolOutput;
 
-        var raw_buf: std.ArrayList(u8) = .empty;
-        defer raw_buf.deinit(allocator);
-        var raw_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &raw_buf);
-        try std.json.Stringify.value(plan_val, .{}, &raw_aw.writer);
-        raw_buf = raw_aw.toArrayList();
+        var raw_buf = registry_mod.helpers.TextBuffer.init(allocator);
+        defer raw_buf.deinit();
+        try std.json.Stringify.value(plan_val, .{}, raw_buf.writer());
 
         const id_copy = try allocator.dupe(u8, id_val.string);
         errdefer allocator.free(id_copy);
-        const raw_json = try raw_buf.toOwnedSlice(allocator);
+        const raw_json = try raw_buf.toOwnedSlice();
         errdefer allocator.free(raw_json);
 
         items[next] = .{

@@ -1,4 +1,5 @@
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const json_writer = @import("providers/anthropic/json_writer.zig");
 const payload_memory = @import("payload_memory.zig");
 
@@ -1970,13 +1971,11 @@ fn getOptionalUnsignedValue(value_opt: ?std.json.Value) !?u32 {
 const testing = std.testing;
 
 fn roundTrip(allocator: std.mem.Allocator, payload: UiPayload) !UiPayload {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try writeJson(&aw.writer, payload);
-    buf = aw.toArrayList();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try writeJson(buf.writer(), payload);
 
-    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, buf.items, .{});
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, buf.written(), .{});
     defer parsed.deinit();
     return try parse(allocator, parsed.value);
 }

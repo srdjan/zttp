@@ -91,10 +91,9 @@ fn execute(
     };
     defer parsed.deinit();
 
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &out);
-    var w = &aw.writer;
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    defer out.deinit();
+    var w = out.writer();
 
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (outcome.exit_code == 0) "true" else "false");
@@ -129,9 +128,8 @@ fn execute(
     }
 
     try w.writeAll("}\n");
-    out = aw.toArrayList();
 
-    const text = try out.toOwnedSlice(allocator);
+    const text = try out.toOwnedSlice();
     defer allocator.free(text);
     return try registry_mod.ToolResult.withPlainText(allocator, outcome.exit_code == 0, text);
 }

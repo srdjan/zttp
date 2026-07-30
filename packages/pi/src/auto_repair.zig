@@ -11,6 +11,7 @@
 //! writes files, calls the model, or applies an edit.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 /// Maximum repair templates to surface in a retry block. Past a handful the
 /// signal-to-token ratio drops and the model is better served re-reading the
@@ -45,15 +46,9 @@ pub fn buildRetryBlock(allocator: std.mem.Allocator, plan_json: []const u8) !?[]
     };
     if (plans == null or plans.?.len == 0) return null;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    // fromArrayList empties `buf` and moves the buffer into `aw`, so the only
-    // cleanup that reclaims written bytes on an early `return null` (or a write
-    // error) is aw.deinit(). On the success path toArrayList() empties aw before
-    // this defer runs, so it is a no-op there.
-    defer aw.deinit();
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll(
         "COMPILER-AUTHORED FIX. The analyzer already derived these exact repairs " ++
@@ -80,8 +75,7 @@ pub fn buildRetryBlock(allocator: std.mem.Allocator, plan_json: []const u8) !?[]
         try writeWitness(w, wit);
     }
 
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    return try buf.toOwnedSlice();
 }
 
 fn objField(obj: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {

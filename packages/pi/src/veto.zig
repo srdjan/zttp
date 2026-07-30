@@ -9,6 +9,7 @@
 //! in docs/zts-expert-contract.md.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const edit_simulate = zts_cli.edit_simulate;
@@ -212,13 +213,11 @@ pub fn runVetoWithSchema(
     // hard error the normalizer could not clear.
     const is_canonical = if (result.properties) |p| p.canonical else false;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try edit_simulate.writeResultJson(&aw.writer, &result);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try edit_simulate.writeResultJson(buf.writer(), &result);
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
 
     var payload = if (result.new_count == 0)

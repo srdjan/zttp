@@ -3,6 +3,7 @@
 //! feedback.
 
 const std = @import("std");
+const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const json_writer = @import("json_writer.zig");
 const transcript_mod = @import("../../transcript.zig");
 
@@ -178,12 +179,10 @@ fn serialize(
     allocator: std.mem.Allocator,
     params: RequestParams,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try writeRequestBody(&aw.writer, allocator, params);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try writeRequestBody(buf.writer(), allocator, params);
+    return try buf.toOwnedSlice();
 }
 
 test "writeRequestBody: first turn emits one user message array" {

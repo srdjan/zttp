@@ -1,6 +1,7 @@
 //! HTTPS wire layer for the Anthropic Messages API.
 
 const std = @import("std");
+const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const builtin = @import("builtin");
 const loop = @import("../../loop.zig");
 const turn = @import("../../turn.zig");
@@ -93,9 +94,9 @@ pub fn buildRequestBody(
     transcript: *const transcript_mod.Transcript,
     extra_user_text: ?[]const u8,
 ) ![]u8 {
-    var buf: std.ArrayListUnmanaged(u8) = .empty;
-    var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
-    try request_mod.writeRequestBody(&aw.writer, arena, .{
+    var buf = TextBuffer.init(arena);
+    defer buf.deinit();
+    try request_mod.writeRequestBody(buf.writer(), arena, .{
         .model = config.model,
         .max_tokens = config.max_tokens,
         .system_prompt = config.system_prompt,
@@ -104,8 +105,7 @@ pub fn buildRequestBody(
         .tools_json = config.tools_json,
         .stream = true,
     });
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(arena);
+    return try buf.toOwnedSlice();
 }
 
 /// Tee one roundtrip's SSE body to `<dir>/<scenario>/step_<step>.jsonl`. The

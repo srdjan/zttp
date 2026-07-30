@@ -12,6 +12,7 @@
 //! returns an owned hex-string slice - what the ledger payload stores.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const counterexample = zts.counterexample;
 
@@ -21,12 +22,10 @@ pub fn forWitness(
     allocator: std.mem.Allocator,
     witness: counterexample.CounterexampleWitness,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try witness.stableKey(&aw.writer);
-    buf = aw.toArrayList();
-    return buf.toOwnedSlice(allocator);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try witness.stableKey(buf.writer());
+    return buf.toOwnedSlice();
 }
 
 test "forWitness produces a 64-char hex digest" {

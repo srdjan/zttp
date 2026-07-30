@@ -47,15 +47,13 @@ fn execute(
             var result = try module_audit.verifyBuiltins(allocator, .{ .strict = strict });
             defer result.deinit(allocator);
 
-            var buf: std.ArrayList(u8) = .empty;
-            defer buf.deinit(allocator);
-            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            var buf = registry_mod.helpers.TextBuffer.init(allocator);
+            defer buf.deinit();
 
             const hash = rule_registry.policyHash();
-            try module_audit.writeJsonEnvelope(&aw.writer, &result, hash);
+            try module_audit.writeJsonEnvelope(buf.writer(), &result, hash);
 
-            buf = aw.toArrayList();
-            const llm_text = try buf.toOwnedSlice(allocator);
+            const llm_text = try buf.toOwnedSlice();
             errdefer allocator.free(llm_text);
             return .{
                 .ok = !result.hasErrors(),
@@ -86,15 +84,13 @@ fn execute(
     var result = try module_audit.verifyPaths(allocator, paths, .{ .strict = strict });
     defer result.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer buf.deinit();
 
     const hash = rule_registry.policyHash();
-    try module_audit.writeJsonEnvelope(&aw.writer, &result, hash);
+    try module_audit.writeJsonEnvelope(buf.writer(), &result, hash);
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
     return .{
         .ok = !result.hasErrors(),

@@ -4,6 +4,7 @@
 //! registry.
 
 const std = @import("std");
+const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const registry_mod = @import("../../registry/registry.zig");
 const json_writer = @import("json_writer.zig");
 const apply_edit = @import("apply_edit.zig");
@@ -75,12 +76,10 @@ fn unusedExecute(
 }
 
 fn serialize(registry: *const registry_mod.Registry) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
-    try writeToolsArray(&aw.writer, registry);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(testing.allocator);
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try writeToolsArray(buf.writer(), registry);
+    return try buf.toOwnedSlice();
 }
 
 /// Test-only: find a tool entry in a parsed JSON array by its name field.
