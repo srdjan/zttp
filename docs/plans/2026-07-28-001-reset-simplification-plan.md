@@ -1266,7 +1266,19 @@ passing.
 3. Table-drive the nine host-tool and pi test roots and the five `embedded_handler` stub
    attachments in `build.zig`. About 150 to 180 lines of 972.
 4. Delete the three unused package-local `test` steps.
-5. Add tests for `runtime_http.zig` and link `witnesses_cli.zig` into a test root.
+5. DONE. Both files had zero test blocks. `witnesses_cli.zig` was genuinely unreachable for
+   test collection, not merely untested: Zig's lazy analysis never reached it because `run` is
+   referenced only from a `dev_cli` dispatch branch no test calls, so a test there moved the
+   collected count by zero until `cli_main.zig` anchored the import explicitly. Same hazard
+   `cli_main.zig` already documented for proof-review. `runtime_http.zig` now covers the
+   outbound-timeout sentinel, header splitting including its 64-slot cap, hostless-URI
+   rejection, and the egress allowlist. test-cli 755 to 766, test-zruntime 494 to 500.
+
+   Two measurement notes for whoever picks up the rest of this wave. First, the aggregate
+   `(N total)` sum does NOT include `test-cli`, which prints its own format; any collected-test
+   figure taken that way omits ~760 tests. Second, `zig build test-zruntime` is intermittently
+   flaky on a loaded machine via a WebSocket callback timeout, and it failed twice in a row
+   before passing three times with no change in between. Re-run before attributing a failure.
 6. Turn `scripts/check-docs-drift.sh`'s accumulated one-off regexes into a data table and
    retire the bans whose docs no longer exist.
 
