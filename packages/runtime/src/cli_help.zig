@@ -6,6 +6,54 @@
 const std = @import("std");
 const zts_cli = @import("zts_cli");
 
+/// One `zttp`-owned command, as both the dispatcher and the `help --all`
+/// listing see it. The analyzer commands are not here: they live in
+/// `zts_cli.commands`, which both binaries already share.
+///
+/// `run` is what makes this a dispatch table rather than a second copy of the
+/// help text. Each entry's wrapper owns that command's argument handling, its
+/// error-to-exit-code mapping, and its own `--help`, because measured, no two
+/// of them agree on any of the three.
+pub const Command = struct {
+    name: []const u8,
+    /// A second spelling that dispatches to the same wrapper (`--version`).
+    alias: ?[]const u8 = null,
+    run: *const fn (Ctx) anyerror!void,
+    section: Section,
+    /// Argument hint in the listing. Empty for a bare verb.
+    args: []const u8 = "",
+    /// One-line description in the listing.
+    blurb: []const u8 = "",
+    /// Stored provider keys are injected into the environment before this
+    /// command runs. The expert agent is the only consumer; handler execution
+    /// paths must see the caller's explicit environment.
+    injects_stored_providers: bool = false,
+};
+
+/// What a command wrapper is handed. A struct rather than three parameters so
+/// adding a fourth does not churn every entry.
+pub const Ctx = struct {
+    allocator: std.mem.Allocator,
+    /// Arguments after the command name.
+    args: []const []const u8,
+    environ: std.process.Environ,
+    /// The name as typed, for diagnostics that quote it back.
+    command: []const u8,
+    /// argv[0], which `dev`, `studio`, and `demo` re-exec.
+    argv0: []const u8,
+};
+
+pub const Section = enum {
+    core,
+    run_and_inspect,
+    package,
+    proof_ledger,
+    credentials,
+    advanced,
+    /// Dispatchable, never listed.
+    unlisted,
+};
+
 pub fn hasAllFlag(argv: []const []const u8) bool {
     for (argv) |arg| {
         if (std.mem.eql(u8, arg, "--all") or std.mem.eql(u8, arg, "all")) return true;
@@ -101,20 +149,50 @@ const help_all_tail =
     \\
 ;
 
+/// Upper bound on the rendered `help --all` text: the three static spans plus
+/// the widest line each registry entry can produce. A comptime bound rather
+/// than a round number, because a round number is what silently truncated the
+/// Advanced section: the buffer was 4 KB, the text had grown past it, and every
+/// write went through `catch {}`.
+const help_all_capacity = blk: {
+    var total = help_all_head.len + help_all_mid.len + help_all_tail.len;
+    for (zts_cli.commands) |c| {
+        // "  zttp " + name + " " + args, padded to the description column,
+        // then the blurb and a newline.
+        total += 8 + c.name.len + c.args.len + 41 + c.blurb.len + 1;
+    }
+    break :blk total;
+};
+
 /// Render the full `help --all` text into `buf` (static spans plus the two
-/// registry-generated sections). 4 KB is comfortably above the rendered size.
+/// registry-generated sections). A short write is a bug, not a formatting
+/// detail, so it is not swallowed.
 fn renderHelpAll(buf: []u8) []const u8 {
     var w = std.Io.Writer.fixed(buf);
-    w.writeAll(help_all_head) catch {};
-    zts_cli.writeCommandLines(&w, .analyze) catch {};
-    w.writeAll(help_all_mid) catch {};
-    zts_cli.writeCommandLines(&w, .machine) catch {};
-    w.writeAll(help_all_tail) catch {};
+    renderHelpAllInner(&w) catch unreachable; // buf is help_all_capacity
     return w.buffered();
 }
 
+fn renderHelpAllInner(w: *std.Io.Writer) std.Io.Writer.Error!void {
+    try w.writeAll(help_all_head);
+    try zts_cli.writeCommandLines(w, .analyze);
+    try w.writeAll(help_all_mid);
+    try zts_cli.writeCommandLines(w, .machine);
+    try w.writeAll(help_all_tail);
+}
+
+/// The rendered `help --all` text, for the drift gate in dev_cli.zig. Exposed
+/// rather than duplicated so the gate reads the bytes users see.
+pub fn renderHelpAllForTest(buf: []u8) []const u8 {
+    std.debug.assert(buf.len >= help_all_capacity);
+    return renderHelpAll(buf);
+}
+
+/// The buffer size a caller must provide to `renderHelpAllForTest`.
+pub const help_all_buffer_size = help_all_capacity;
+
 pub fn printHelpAll() void {
-    var buf: [4096]u8 = undefined;
+    var buf: [help_all_capacity]u8 = undefined;
     const out = renderHelpAll(&buf);
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
@@ -197,7 +275,7 @@ test "default help advertises only the five core commands" {
 }
 
 test "help --all surfaces the advanced commands" {
-    var buf: [4096]u8 = undefined;
+    var buf: [help_all_capacity]u8 = undefined;
     const help_all = renderHelpAll(&buf);
     inline for (.{
         "zttp serve",        "zttp build",          "zttp compile",
@@ -215,7 +293,7 @@ test "help --all surfaces the advanced commands" {
 test "help --all advertises every shared analyzer command" {
     // Anti-drift guard: the developer CLI must list the full surface `zts`
     // dispatches. New entries in `zts_cli.commands` fail here until added.
-    var buf: [4096]u8 = undefined;
+    var buf: [help_all_capacity]u8 = undefined;
     const help_all = renderHelpAll(&buf);
     for (zts_cli.commands) |c| {
         var needle_buf: [64]u8 = undefined;
@@ -225,7 +303,7 @@ test "help --all advertises every shared analyzer command" {
 }
 
 test "help --all surfaces the optional browser studio workbench" {
-    var buf: [4096]u8 = undefined;
+    var buf: [help_all_capacity]u8 = undefined;
     try std.testing.expect(has(renderHelpAll(&buf), "zttp studio"));
 }
 
@@ -253,7 +331,7 @@ test "help --all no longer advertises hosted cloud deploy" {
     // Trailing space avoids spurious substring matches with longer
     // command names (e.g. `zttp review` would otherwise match
     // `zttp review-patch`).
-    var buf: [4096]u8 = undefined;
+    var buf: [help_all_capacity]u8 = undefined;
     const help_all = renderHelpAll(&buf);
     inline for (.{
         "zttp login ",  "zttp logout ",       "zttp review ",
