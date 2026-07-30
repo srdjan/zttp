@@ -3,6 +3,9 @@
 **Status:** proposed language and assurance profile  
 **Profile name:** `zts-advanced-1`  
 **Grounded against:** ZTS 0.18.0, policy 2026.04.2, 2026-07-30  
+**Revision:** 2, 2026-07-30. Applies the multi-lens design review: stronger
+`match`, effect-aware `Result` combinators, a completed pure standard surface,
+decidable canonical-choice rules, and a closed agent-protocol contract.  
 **Relationship to the earlier northstar:** this document replaces its design
 claims, not its historical record. The earlier artifact remains useful context,
 but it does not define the advanced profile.
@@ -65,18 +68,20 @@ This profile therefore makes five decisions:
 | Removed redundant forms | Pipe composition and fallback `assert` |
 | Restored data literals | `null`, only as an explicit value |
 | Added declaration syntax | Trailing parameters with closed compile-time scalar defaults |
+| Added pattern syntax | Binding fields and type-test patterns in `match` |
 | Added type syntax | Bounded generic parameters with `extends` |
 | Added type capability | Sound function generics and contractive recursive aliases |
 | Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes`, `HtmlNode` |
 | Added concurrency model | None; retain explicit `parallel` and `race` |
-| Added error channel | None; errors remain ordinary tagged values |
+| Added error channel | None; errors remain ordinary tagged values. `Result` combinators are effect-row polymorphic, not a new channel |
 | Agent-only source notation | None; machine metadata remains separate JSON |
 | Agent protocol | Versioned discovery, diagnostics, repair simulation and application, normalization, and verification |
 | Canonical formatting | One deterministic, idempotent human-readable layout |
 
-The executable kernel grows only for `null`, `Dict`, and `Bytes`. Generic
-constraints, recursive aliases, and `Result` are erased or elaborate to
-existing records, unions, calls, and branches.
+The executable kernel grows only for `null`, `Dict`, `Bytes`, and array
+append. Generic constraints, recursive aliases, `Result`, and the new match
+patterns are erased or elaborate to existing records, unions, calls, and
+branches.
 
 ## 2. Application envelope
 
@@ -230,7 +235,8 @@ Examples:
 
 - `match`, not `switch`
 - explicit assignment, not compound assignment or increment/decrement
-- one pure `?:` value selection, not effectful expression branches
+- one pure `?:` two-way value selection; effectful selection uses `if` or
+  `match`
 - direct named calls, not a custom pipe operator
 - `assert` for invariants and `if` plus `return` for expected guards
 - named reusable functions, not exported or reusable function-valued
@@ -367,14 +373,38 @@ The closed operation set is:
 - `check` for source, type, effect, policy, and proof diagnostics,
 - `canonicalize` for compiler-authored rewrite candidates,
 - `simulate_edit` for diagnostic and policy non-regression,
-- `apply_repair` for atomic application of an exact validated repair,
+- `apply_repair` for atomic application of exact validated repairs,
 - `normalize` for canonical fixed-point validation,
-- and `verify` for one discovered property identifier and assurance grade.
+- and `verify` for a set of discovered property identifiers and their
+  assurance grades.
 
 `meta.payload.operations` MUST provide the request and response schema for
 every operation. `meta.payload.verifiers` MUST enumerate each property
 identifier, required inputs, prerequisites, possible assurance grades, and
 result schema. An agent never chooses among undocumented verification commands.
+
+The `meta` payload MUST also publish:
+
+- `grammar`: the machine-readable productions of Section 8, member for
+  member, registry-generated and drift-gated,
+- `examples`: one canonical minimal example per admitted surface form,
+  registry-generated, so an agent can learn ZTS-specific syntax (`match`,
+  `distinct type`, `assert`, `comptime()`, `parallel`) without hidden
+  instructions,
+- `ambient_names`: the closed table of ambient type and value names from
+  Section 6,
+- `validators`: the registered equivalence validators, each with an
+  identifier, the rewrite classes it covers, and its validation method,
+- `type_serialization`: the versioned canonical type serialization artifact
+  that defines stable type-graph identities (Section 5.4),
+- `limits`: resource limits plus the default repair-iteration and tool-call
+  budget for the canonical loop,
+- and `decisions`: the versioned registry of next-action and
+  semantic-decision kinds referenced by unsupported results and explanation
+  graphs, each with an identifier and a parameter schema.
+
+A resolved semantic decision re-enters the loop as edited canonical source at
+step 2; no separate decision-submission operation exists.
 
 The project root is explicit and canonicalized before any file access. Request
 file paths resolve within that root. A relative source-module specifier
@@ -397,6 +427,23 @@ version selected explicitly by the client. An agent that does not support the
 response schema, profile, or identity hashes MUST stop rather than infer a
 fallback.
 
+A request with an unsupported `schema_version` receives a minimal response
+listing the supported versions. That response shape is frozen: it is identical
+across all present and future schema versions, so version negotiation is one
+deterministic round trip and the MUST-stop rule always has a recovery path.
+
+Protocol-level failures are not diagnostics. An unknown operation, an
+unresolvable or out-of-boundary path, a malformed request, or an internal
+fault returns a top-level `error` object with a stable error code, a message,
+and the offending request field. The mandatory diagnostic shape below applies
+only to source-bound diagnostics.
+
+The `expected` block obeys one rule for every operation: a supplied field that
+does not match the recomputed identity fails the request with a stable
+staleness error naming the mismatched field and both values. Omitting
+`expected` skips the guard. `apply_repair` additionally guarantees that a
+mismatch writes nothing.
+
 The agent transport emits only the response JSON on standard output. Logs go
 to standard error. Array order, diagnostic order, rewrite order, and serialized
 canonical source are deterministic for identical authenticated inputs.
@@ -409,13 +456,17 @@ Every diagnostic MUST contain:
 - a concise message and, when useful, a human explanation,
 - effect and proof impact when applicable,
 - whether an exact repair is available,
-- and either a stable repair identifier or a structured statement of the
-  semantic decision still required.
+- and either the complete bound mechanical-repair object with its safety
+  grade embedded inline, or a structured statement of the semantic decision
+  still required. `canonicalize` remains the channel for rewrite candidates
+  not attached to a diagnostic.
 
 Prose is never an executable repair. A mechanical repair MUST bind the source
 digest, half-open byte span, original span digest or bytes, replacement text,
-diagnostic code, rule identifier, repair identifier, profile identity, policy
-hash, and module-graph hash.
+diagnostic code, rule identifier, repair identifier, equivalence-validator
+identity and result, profile identity, policy hash, and module-graph hash. A
+diagnostic advertises an exact repair only when a registered equivalence
+validator exists for that repair identifier.
 
 Edit simulation establishes diagnostic and policy non-regression. It does not
 establish behavioral equivalence. Until a rewrite has a registered equivalence
@@ -427,11 +478,23 @@ Each `canonicalize` candidate carries a safety grade. An
 authenticated inputs, and its result. Lower grades are never eligible for
 automatic application.
 
-`apply_repair` accepts only a repair with successful edit simulation and a
-named equivalence-validation result. It rechecks every bound identity and span,
-applies all replacements atomically, and returns the new source digest and
-recomputed complete module-graph hash. A mismatch or failed validation writes
-nothing.
+The launch validator registry MUST cover at least: layout-only rewrites,
+missing-semicolon insertion where the parser admits exactly one insertion
+point (the validator is the parser's unique-parse check), and
+identifier-preserving canonical respellings with a specified local
+elaboration. Pre-parse lexical errors carry a dedicated lexical-repair grade
+so a file that does not yet parse still has a mechanical exit; no agent or
+human hand-fixes profile syntax.
+
+`apply_repair` is stateless and self-contained: it re-runs edit simulation and
+equivalence validation internally on the submitted repairs before writing, so
+the standalone `simulate_edit` operation is an optional preview, never a
+trusted client assertion. One request accepts an ordered set of validated
+repairs bound to the same source digest with pairwise non-overlapping spans.
+It rechecks every bound identity and span, applies the whole set atomically as
+one edit, and returns the new source digest and recomputed complete
+module-graph hash. Overlapping spans, cross-digest sets, a mismatch, or a
+failed validation reject the whole request and write nothing.
 
 Advanced-profile mechanical normalization MUST be deterministic, terminating,
 semantics-preserving, and idempotent. If a rewrite cannot establish those
@@ -447,19 +510,23 @@ The canonical repair loop is bounded:
 1. discover the active profile,
 2. generate or edit canonical source,
 3. resolve and bind the complete module graph,
-4. check and classify every diagnostic,
-5. simulate and equivalence-validate exact repairs,
-6. apply repairs whose source and identity bindings still match,
+4. check and classify every diagnostic, collecting the inline bound repairs,
+5. optionally preview non-obvious repairs with `simulate_edit`,
+6. apply the non-overlapping repair set atomically; `apply_repair`
+   revalidates internally,
 7. accept the returned post-edit source and module-graph identities,
 8. normalize to a fixed point, routing any required rewrite back through
-   simulation and atomic application,
-9. recheck against the latest identities and invoke `verify` with a discovered
-   property identifier,
+   atomic application,
+9. recheck against the latest identities and invoke `verify` with the
+   requested property identifiers,
 10. stop successfully, or return a structured unsupported result.
 
-The profile registry declares the maximum repair iterations and tool calls for
-each conformance task class. Repeated diagnostics, stale edits, a non-convergent
-normalizer, or an unavailable semantic choice end the loop explicitly.
+`meta.payload.limits` publishes the default maximum repair iterations and
+tool calls for the loop; conformance task classes may override the default
+inside the 14.2 harness only. Repeated diagnostics, stale edits, a
+non-convergent normalizer, or an unavailable semantic choice end the loop
+explicitly, and each of those four conditions is a machine-detectable response
+field, not an inference from response history.
 
 ## 5. Normative source profile
 
@@ -482,7 +549,7 @@ The profile permits:
 ```ts
 import { name, other as local } from "./module.ts";
 import { fetch } from "zttp:fetch";
-import type { Effects, Proof, Spec } from "zttp:types";
+import type { Order } from "./order.ts";
 
 export type User = { readonly id: UserId; name: string };
 export distinct type UserId = string;
@@ -543,7 +610,8 @@ function pageSize(limit: number = 50): number {
 
 The default expression MUST be accepted by `comptime()`, be assignable to the
 declared parameter type, and produce only `null`, a boolean, a finite number, a
-string, or a `distinct type` over one of those scalar values. Arrays, records,
+string, or a `distinct type` over `number` or `string` (the only declarable
+distinct bases). Arrays, records,
 `Bytes`, `Dict`, closures, capabilities, and other identity-bearing or
 resource-owning values are excluded. Once a parameter has a default, every
 following parameter MUST also have a default.
@@ -596,18 +664,27 @@ Rules:
 - Record shapes are fixed after allocation. Existing writable fields may be
   updated. Fields cannot be added or deleted dynamically.
 - A fixed record key that is a valid identifier MUST use the identifier in a
-  literal or type and dot access at a read site. Any other fixed key MUST use a
-  string literal and the same string literal in bracket form. Numeric record
-  keys are excluded; use a string key or a number-keyed `Dict`.
-- Arrays may be locally mutable. Aliased or captured mutation is visible as a
+  literal or type and dot access at read and write sites. Any other fixed key
+  MUST use a string literal and the same string literal in bracket form at
+  read and write sites. Numeric record keys are excluded; use a string key or
+  a number-keyed `Dict`.
+- Arrays may be locally mutable. `items.push(value)` is the one growth
+  operation; it appends in amortized constant time through the kernel append
+  operation. Index writes are in-bounds only; writing past the current length
+  is a bounds fault, not growth. Aliased or captured mutation is visible as a
   state effect and may prevent purity, determinism, or isolation proofs.
 - `Dict` is immutable and has deterministic insertion-order iteration.
 - Function and object equality is identity equality. `Dict` keys are
   `string`, `number`, or a `distinct type` over either.
 
 `null` and `undefined` remain distinct. Optional chaining and `??` follow
-TypeScript nullish behavior and therefore test both. Code that needs to
-preserve JSON `null` MUST use an explicit comparison or `match`.
+TypeScript nullish behavior and therefore test both. Because that behavior
+silently erases the distinction, the rule is compiler-enforced, not
+remembered: `??` and `?.` are rejected with a targeted diagnostic and an
+exact repair when the static type of the operand includes `null`. Such a site
+uses an explicit `=== null` or `=== undefined` comparison or `match`, so
+JSON `null` can never be swallowed by an absence operator. On types without
+`null`, `??` and `?.` keep exactly one meaning: `undefined`-absence handling.
 
 ### 5.4 Operators and expressions
 
@@ -649,21 +726,51 @@ The profile excludes:
 
 Conditions in `if`, `assert`, and `?:`, operands of boolean operators, and
 predicate callback results MUST have type `boolean`. There is no general
-truthiness conversion. Optional values narrow through explicit comparisons
-with `undefined` or `null`.
+truthiness conversion.
+
+Narrowing is a closed, normative list. The narrowing tests are: explicit
+`===` and `!==` comparison with `undefined`, `null`, or a literal; `typeof`
+comparison with a type-name literal; the ambient intrinsic value-kind guards
+`Array.isArray`, `isDict`, and `isBytes`; a literal test of a record
+discriminant field; a bare read of a boolean record discriminant field; the
+negation `!` of any admitted test, which narrows the opposite branches; and a
+validated type predicate (Section 5.7). The narrowing positions are: the
+branches of `if`/`else`, the branches of `?:`, the arms of `match`, the code
+after `assert`, the code after an early `return`/`break`/`continue` guard,
+and the right operand of `&&` and `||` over an admitted test. No other
+construct narrows. A checked extraction after a discriminant guard (for
+example `result.value` after `result.ok === true`, or after
+`if (!result.ok) { return ...; }`) is therefore predictable without running
+the checker.
 
 `condition ? whenTrue : whenFalse` is the canonical two-way pure value
 selection. Exactly one branch is evaluated. Both branches MUST be pure and
-their result type MUST use the join below. Use `if` when a branch contains
-statements or effects, and `match` for exhaustive multi-way selection.
+their result type MUST use the join below. A conditional expression MUST NOT
+appear as an arm of another conditional expression, parenthesized or not.
+The diagnostic carries an exact repair when a single-scrutinee `match` or a
+value-producing `if`/`else` rewrite exists; otherwise it carries a proposed
+refactor per Section 4.8, never a guessed rewrite.
+
+Branch selection is a decidable rule, not a style judgment:
+
+- boolean condition, both branches pure values: `?:`
+- boolean condition, either value branch effectful: `match` over the
+  condition
+- any branch contains statements and no value is selected: `if`
+- multi-way value selection over one scrutinee: `match`
+- heterogeneous predicate ladder: `if`/`else if`
+
+A `match` over a bare `boolean` scrutinee with pure arms is non-canonical;
+the repair is `?:`. With an effectful arm it is canonical, because `?:` arms
+MUST be pure and a statement `if` cannot initialize a binding.
 
 The result type is the deterministic join `join(A, B)`:
 
 1. Remove `never`; if both sides were `never`, return `never`, and if one side
    remains, use it.
 2. If the types are identical, use that type.
-3. If both are mutually assignable, use the one with the lower stable
-   type-graph identity.
+3. If both are mutually assignable, use the type of the `whenTrue` branch, a
+   syntactic rule a reader can apply without a type-identity oracle.
 4. If exactly one type is assignable to the other, use the receiving type.
 5. Otherwise form and canonically normalize `A | B`.
 
@@ -678,17 +785,24 @@ expected type does not change the join; assignability to it is checked
 afterward.
 
 The stable type-graph identity is derived from the profile's canonical type
-serialization, never from allocation or encounter order.
+serialization, never from allocation or encounter order. The canonical type
+serialization is a versioned registry artifact published through
+`meta.payload.type_serialization`, so an independent implementation can
+reproduce every ordering decision.
 
 The pure intrinsic `String(value)` is the explicit conversion from a number or
 boolean to text. Number formatting uses the ECMAScript base-10
 shortest-round-trip representation; negative zero renders as `0`. This is the
 only scalar-to-text spelling; instance `.toString()` conversion is excluded.
 
-Template interpolation MAY contain any pure expression of type `string`.
-Numbers and booleans use explicit `String(...)` inside the interpolation.
-An effectful expression MUST be evaluated into a named `const` before the
-template so effect order remains visible.
+Template interpolation MAY contain any pure expression of type `string` or
+`number`. A `number` interpolation elaborates through the same implicit
+`String` intrinsic as a JSX numeric child; the formatting is fully
+deterministic, so the implicit form loses nothing. A `boolean` MUST use
+explicit `String(...)`: the JSX child rule renders booleans as no text, so an
+implicit boolean conversion would give one value two context-dependent
+meanings. An effectful expression MUST be evaluated into a named `const`
+before the template so effect order remains visible.
 
 ### 5.5 Control flow
 
@@ -714,11 +828,19 @@ There is no `switch`, `while`, `do...while`, C-style `for`, `for...in`,
 
 Every declaration and statement shown with a trailing semicolon in the grammar
 MUST include it. The advanced profile has no automatic semicolon insertion. A
-newline never creates a token.
+newline never creates a token. A missing semicolon always carries an exact
+mechanical repair through the lexical-repair grade of Section 4.8, whose
+validator is the parser's unique-parse insertion check, so the strictness
+never costs a human or agent a hand edit.
+
+An assignment statement evaluates its target subexpressions left to right and
+then the right-hand side. Subexpressions of an assignment target MUST be
+pure; an effectful receiver or index is evaluated into a named `const` before
+the assignment, the same hoisting rule templates use.
 
 #### `match`
 
-`match` is the only multi-way branch:
+`match` is the only multi-way selection over one scrutinee:
 
 ```ts
 type Command =
@@ -727,8 +849,8 @@ type Command =
 
 function run(command: Command): string {
   return match (command) {
-    when { kind: "echo" }:
-      command.text
+    when { kind: "echo", text }:
+      text
     when { kind: "ping" }:
       "pong"
   };
@@ -737,14 +859,32 @@ function run(command: Command): string {
 
 Rules:
 
-- Arms are checked in source order.
-- Patterns are literals or fixed record-discriminant patterns.
+- The scrutinee MUST be an identifier or a member path, so every arm has a
+  named referent to narrow. A call or other complex expression is bound to a
+  `const` first; the diagnostic carries that exact repair.
+- Arms are checked in source order. Exactly one arm's expression is
+  evaluated.
+- Arm expressions MAY be effectful. `match` with effectful named calls in its
+  arms is the canonical effectful selection form, including for initializing
+  a `const` from a two-way effectful choice.
+- Patterns are literals, type-test patterns, or fixed record patterns.
+- A type-test pattern is one of `boolean`, `number`, `string`, `array`,
+  `Dict`, or `Bytes`, covering the closed core value kinds; `null` and
+  `undefined` are matched by their literal patterns. Each test lowers to the
+  corresponding narrowing test from the Section 5.4 closed list (`typeof`
+  for the scalars, `Array.isArray`, `isDict`, or `isBytes`), so
+  heterogeneous unions such as `JsonValue` dispatch through `match`.
+- A record pattern field is either a discriminant test
+  (`kind: "echo"`), a binding of the field under its own name (`text`), or a
+  binding under a new name (`value: v`). A binding introduces an arm-scoped
+  `const` of the narrowed field type; no double read of the scrutinee is
+  needed.
 - A closed literal or discriminated union MUST be covered exactly and MUST NOT
   include `default`.
 - An open domain such as `string`, `number`, or `unknown` MUST include
   `default`.
 - Duplicate, unreachable, and non-exhaustive arms are errors.
-- Each arm narrows the scrutinee for its expression.
+- Each arm narrows the scrutinee binding for its expression.
 
 #### `assert`
 
@@ -761,7 +901,11 @@ if (!predicate) {
 ```
 
 Use `Result` when the caller can recover. Use `assert` only for a programmer
-invariant whose violation is a typed runtime assertion fault.
+invariant whose violation is a typed runtime assertion fault. One direction of
+that boundary is decidable and enforced: `assert` on a value whose flow label
+is `user_input` or ingress-derived is rejected, and the diagnostic's exact
+repair is the `if (!predicate) { return err(...); }` form. Trapping on
+attacker-controlled input is never an invariant.
 
 #### `for...of`
 
@@ -769,8 +913,12 @@ invariant whose violation is a typed runtime assertion fault.
 
 ```ts
 for (const item of items) {
-  if (skip(item)) continue;
-  if (done(item)) break;
+  if (skip(item)) {
+    continue;
+  }
+  if (done(item)) {
+    break;
+  }
   consume(item);
 }
 ```
@@ -785,7 +933,8 @@ Its semantics are snapshot-finite:
 
 Admitted iterables are arrays, tuples, strings, `range(n)`, `Dict` entries,
 and other standard-library values whose contract supplies a finite snapshot.
-There is no user-defined iterator protocol.
+`range` is an ambient pure intrinsic (Section 6). There is no user-defined
+iterator protocol.
 
 `range(n)` requires a finite non-negative integer. A certified cost claim also
 requires a proven upper bound for `n`.
@@ -793,7 +942,12 @@ requires a proven upper bound for `n`.
 ### 5.6 Functions and recursion
 
 Every named function MUST declare all parameter and return types. A direct
-arrow callback MAY infer them from a fully typed callback position.
+arrow callback MAY infer them from a fully typed callback position, and MAY
+declare any leading prefix of the callback type's parameter list (for
+example a two-parameter arrow in a three-parameter `reduce` position). This
+prefix rule is the only arity flexibility in the profile; named function
+declarations and ordinary calls remain fixed-arity except for trailing
+defaults.
 
 Generic functions are sound and erased:
 
@@ -811,8 +965,12 @@ Rules:
 
 - Type arguments are inferred from value arguments.
 - Explicit type arguments are permitted when inference is ambiguous.
-- A generic declaration has at most eight parameters.
+- A generic declaration has at most eight type parameters; the limit is
+  published in the profile registry limits.
 - Constraints are structural bounds composed from admitted types.
+- Generic parameters exist only on `function` and `type` declarations. A
+  function type is always monomorphic, so rank-2 and higher polymorphism is
+  inexpressible and inference stays decidable.
 - Generic defaults, overload sets, variance annotations, higher-kinded types,
   and runtime type reflection are excluded.
 - Every instantiation is checked. An unresolved type never degrades silently
@@ -870,19 +1028,26 @@ Admitted types are:
 - generic applications and constrained generic parameters
 - template literal types
 - `Readonly`, `Pick`, `Omit`, `Partial`, and `Required`
-- `Spec`, `Proof`, and `Effects` capsules
+- `Proof` and `Effects` capsules
 - contractive recursive aliases
 
-`Proof<T, P>` and `Effects<T, R>` are checker-only transparent capsules. They
-do not allocate or wrap a runtime value. In ordinary value use, an expression
-with either capsule has value type `T`; proof properties and inferred effects
-are tracked separately by the checker.
+`Proof<T, P>` and `Effects<T, R>` are checker-only transparent capsules and
+ambient type names; they are never imported. They do not allocate or wrap a
+runtime value. In ordinary value use, an expression with either capsule has
+value type `T`; proof properties and inferred effects are tracked separately
+by the checker.
 
 On a function return, `Effects<T, R>` declares an effect ceiling. The checker
 requires the inferred row of the body to be a subset of `R`, while callers
 receive a value of type `T` and the inferred effect row. Thus `parallel`
 returns its tuple value directly, even when a containing function declares an
 `Effects<tuple, row>` return contract.
+
+When to declare the ceiling is a decidable rule, not a style choice: an
+exported function with a nonempty inferred effect row MUST declare an
+`Effects` return ceiling, and a module-internal function MUST NOT. The
+diagnostic for a missing or extra ceiling carries an exact repair computed
+from the inferred row.
 
 A recursive alias is contractive when every cycle passes through a record,
 tuple, array, or `Dict` constructor:
@@ -910,13 +1075,15 @@ function isUser(value: unknown): value is User { ... }
 ```
 
 The checker validates the predicate body before using it for narrowing.
-`Array.isArray` is a specified intrinsic type guard that narrows a union to its
-array members. No annotation alone can install a false guard.
+`Array.isArray`, `isDict`, and `isBytes` are specified intrinsic type guards
+that narrow a union to the corresponding value-kind members. No annotation
+alone can install a false guard.
 
 Excluded type features are:
 
 - `any`
 - `as`, angle-bracket assertions, and `satisfies`
+- generic parameters on function types (higher-rank polymorphism)
 - `keyof`, indexed-access types, and index signatures
 - type-position `typeof`
 - conditional, distributive, mapped, and inferred types
@@ -980,9 +1147,36 @@ renderToString(node: HtmlNode): string
 The intrinsic names describe the semantics and are not additional source
 syntax. `null`, `undefined`, and boolean children render no text. Nested child
 arrays flatten in source order. A numeric child elaborates through the same
-explicit `String(number)` intrinsic. Text and attribute values are escaped.
+implicit `String` elaboration as template interpolation (Section 5.4). Text
+and attribute values are escaped.
 
-## 6. Pure application data abstractions
+## 6. Application data abstractions
+
+The data values in this section are pure and immutable. An operation itself
+is pure unless its callback carries effects, in which case the inferred
+effect row carries them (Section 6.1).
+
+One rule separates ambient names from imports, so the split is derivable, not
+memorized:
+
+- Ambient type names: the closed profile-level type names — the primitives,
+  `Result`, `Dict`, `Bytes`, `HtmlNode`, `Request`, `Response`, `Proof`, and
+  `Effects`. These are never imported. A module-defined type (for example
+  `FetchError` from `zttp:fetch`) is named through an ordinary `import type`
+  from its module.
+- Ambient value names: the members of the familiar TypeScript sequence types
+  (array and string methods), plus the closed intrinsic set `String`,
+  `range`, `Array.isArray`, `isDict`, and `isBytes`. These keep their
+  familiar TS spellings under law 4.1; dispatch is static, never prototype
+  lookup.
+- Everything else is a statically named import. New abstractions with no
+  TypeScript-familiar member form (`Result`, `Dict`, `Bytes`, JSON)
+  export free functions from their zero-capability modules, and
+  capability-bearing operations import from their capability modules where
+  the import line carries authority information.
+
+The complete ambient table (types and values) is published through
+`meta.payload.ambient_names` and is registry-generated.
 
 ### 6.1 `Result<T, E>`
 
@@ -994,7 +1188,7 @@ type Result<T, E> =
   | { readonly ok: false; readonly error: E };
 ```
 
-The canonical pure operations are:
+The canonical operations are:
 
 ```ts
 ok<T>(value: T): Result<T, never>
@@ -1005,18 +1199,45 @@ andThen<T, U, E, F>(
   result: Result<T, E>,
   f: (value: T) => Result<U, F>,
 ): Result<U, E | F>
+orElse<T, E, F>(
+  result: Result<T, E>,
+  f: (error: E) => Result<T, F>,
+): Result<T, F>
+unwrapOr<T, E>(result: Result<T, E>, fallback: T): T
+collectAll<T, E>(
+  results: readonly Result<T, E>[],
+): Result<readonly T[], E>
 ```
 
 The type is predeclared. Constructors and combinators are statically named
-imports from the zero-capability `zttp:result` module.
+imports from the zero-capability `zttp:result` module. `collectAll` is
+first-error: it returns the first `err` in order, matching `andThen`
+short-circuit semantics.
 
-Callbacks to `mapResult`, `mapError`, and `andThen` MUST be pure, including
-every reachable helper. An effectful continuation uses explicit `match` and a
-named call so its sequencing and effect row stay visible.
+The combinator callbacks are effect-row polymorphic. The callback of
+`mapResult`, `mapError`, `andThen`, and `orElse` MAY be effectful; the
+operation's inferred effect row is the join of the callback's row and its
+operands' rows, and each step is exactly one ordered call, so sequencing
+stays deterministic and visible in the trace. This differs deliberately from
+the array operations of Section 6.5, whose callbacks run once per element:
+a per-element effect sequence belongs in `for...of`, while a `Result` chain
+is a linear once-per-step sequence the row and the source order both make
+manifest.
 
-Use `match` or narrowing to consume it. Trapping `unwrap` and `unwrapErr` are
-not canonical. A checked extraction after an `ok` guard MAY lower directly to
-the value field.
+Consumption has one canonical form per shape:
+
+- `match` is the canonical consumption, including every effectful
+  continuation with statements.
+- The `ok`-guard early return (`if (!result.ok) { return ...; }` followed by
+  direct use of `result.value`) is canonical exactly for guard-shaped code
+  that exits the enclosing function on the error arm.
+- A combinator chain is canonical exactly for a single-expression
+  transformation of the value or error.
+
+Trapping `unwrap` and `unwrapErr` are not canonical; a pure default uses
+`unwrapOr`. A checked extraction after an `ok` guard MAY lower directly to
+the value field, and the narrowing rules of Section 5.4 make that extraction
+predictable.
 
 Every recoverable failure MUST use a typed `Result`. This includes fallible
 ingress APIs, decoders, capability calls, text codecs, and partial collection
@@ -1042,7 +1263,29 @@ dictSet<K extends DictKey, V>(dict: Dict<K, V>, key: K, value: V): Dict<K, V>
 dictRemove<K extends DictKey, V>(dict: Dict<K, V>, key: K): Dict<K, V>
 dictHas<K extends DictKey, V>(dict: Dict<K, V>, key: K): boolean
 dictEntries<K extends DictKey, V>(dict: Dict<K, V>): readonly (readonly [K, V])[]
+dictMapValues<K extends DictKey, V, W>(
+  dict: Dict<K, V>,
+  f: (value: V, key: K) => W,
+): Dict<K, W>
+dictFilter<K extends DictKey, V>(
+  dict: Dict<K, V>,
+  f: (value: V, key: K) => boolean,
+): Dict<K, V>
+dictFold<K extends DictKey, V, U>(
+  dict: Dict<K, V>,
+  f: (acc: U, value: V, key: K) => U,
+  init: U,
+): U
 ```
+
+The bulk operations iterate in insertion order with pure callbacks, preserve
+key uniqueness by construction, and return `Dict`, not `Result`, so a
+transformation of an existing dictionary never handles an impossible
+duplicate-key error and never leaves the type.
+
+A static table uses `comptime(dictFromEntries([...]))` over a literal entry
+list: the duplicate-key check is discharged at compile time, the expression
+fails the build on a duplicate, and its type is the plain `Dict<K, V>`.
 
 `DictKey` is a checker-recognized generic bound, not a source alias. It accepts
 `string`, `number`, or a `distinct type` over one of those bases. Nominal keys
@@ -1155,22 +1398,39 @@ reduce<T, U>(items: readonly T[], f: (acc: U, value: T, index: number) => U, ini
 find<T>(items: readonly T[], f: (value: T, index: number) => boolean): T | undefined
 some<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 every<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
+flatMap<T, U>(items: readonly T[], f: (value: T, index: number) => readonly U[]): U[]
+toSorted<T>(items: readonly T[], compare: (a: T, b: T) => number): T[]
+slice<T>(items: readonly T[], start: number, end: number): T[]
+concat<T>(items: readonly T[], other: readonly T[]): T[]
+indexOf<T>(items: readonly T[], value: T): number
+includes<T>(items: readonly T[], value: T): boolean
+join(items: readonly string[], separator: string): string
 ```
+
+`toSorted` is non-mutating, its comparator MUST be pure and total over the
+element type, and the sort is stable. `indexOf` and `includes` use strict
+equality. This closed set is a superset of the array members the live runtime
+already ships, so completing their types (Section 3, gap 6) does not narrow
+the baseline.
 
 Each operation uses snapshot-finite iteration. Its callback MUST be pure. The
 checker verifies the callback body and every reachable helper rather than
 assuming that an arrow expression is pure. An effectful traversal uses
-`for...of`, which keeps sequencing and failure visible without adding
-effect-polymorphic callback types.
+`for...of` with `push` accumulation, which keeps per-element sequencing and
+failure visible; the once-per-step effect polymorphism of the `Result`
+combinators (Section 6.1) does not extend to per-element callbacks.
 
 The canonical source spelling is an intrinsic array method such as
 `items.map(f)`. Dispatch is resolved statically from the receiver type and
 lowers to an explicit intrinsic such as `arrayMap(items, f)`. It never performs
 prototype lookup.
 
-Use a higher-order operation for a direct transformation or fold. Use
-`for...of` when the algorithm needs `break`, `continue`, explicit effect
-sequencing, or more than one evolving accumulator.
+The choice between the two iteration forms is decidable, not judgment: a
+`for...of` loop whose body is pure, carries one evolving accumulator, and has
+no `break` or `continue` is non-canonical, and `canonicalize` emits the
+rewrite to the equivalent higher-order operation. `for...of` is canonical
+when the algorithm needs `break`, `continue`, per-element effects, or more
+than one evolving accumulator.
 
 ## 7. Effects and structured concurrency
 
@@ -1204,11 +1464,23 @@ visible.
 `parallel` and `race` are explicit effect operations, not Promise emulation.
 
 ```ts
+import { parallel } from "zttp:io";
+import type { FetchError } from "zttp:fetch";
+
 function loadUser(): Result<User, FetchError> { ... }
 function loadOrders(): Result<readonly Order[], FetchError> { ... }
 
-const [user, orders] = parallel([loadUser, loadOrders]);
+function loadBoth(): readonly [
+  Result<User, FetchError>,
+  Result<readonly Order[], FetchError>,
+] {
+  const [user, orders] = parallel([loadUser, loadOrders]);
+  return [user, orders];
+}
 ```
+
+The call sits inside a function body: module initialization MUST be pure
+(Section 5.1), so an effect operation never runs at module top level.
 
 Rules:
 
@@ -1228,6 +1500,12 @@ Rules:
   the trace before `race` returns.
 - There is no user-visible Promise, microtask queue, detached task, or
   implicit scheduler.
+- `parallel` and `race` are checker-intrinsic special forms. Their result
+  types are synthesized per call site from the task tuple and are not
+  expressible in the admitted type grammar, which has no variadic or mapped
+  types. The module registry represents each with a declared special-form
+  role whose contract schema `meta` publishes; they are not ordinary typed
+  exports.
 
 ### 7.2 Minimum application ABI
 
@@ -1258,6 +1536,7 @@ type FetchOptions = {
 requestBody(request: Request): Bytes
 requestText(request: Request): Result<string, BodyError>
 requestJson(request: Request): Result<JsonValue, JsonError | BodyError>
+responseText(value: string, status: number): Response
 responseJson<T>(value: T, status: number): Result<Response, JsonError>
 fetch(
   url: string,
@@ -1265,7 +1544,11 @@ fetch(
 ): Result<Response, FetchError>
 ```
 
-`responseJson<T>` uses the JSON-encodability rule from Section 6.4. Request
+`responseText` is total: a handler always has an infallible constructor for
+the error arm of a fallible one. `responseJson<T>` uses the JSON-encodability
+rule from Section 6.4; its residual runtime failures are non-finite numbers
+and cycles, and when the checker proves `T` excludes both, the call MAY be
+typed total. Request
 headers, method, URL, route parameters, status, and response headers have
 precise fixed or opaque types. Attacker-controlled data enters as `string`,
 `Bytes`, `JsonValue`, or a schema-decoded application type, never as silently
@@ -1350,9 +1633,15 @@ to one of the specified roles.
 
 ## 8. Compact grammar
 
-This grammar describes admitted structure. Unexpanded leaves such as `Ident`,
-`String`, `Number`, `Literal`, `Template`, `TemplateLiteralType`, and `JSXExpr`
-are lexical or separately specified syntactic classes.
+This grammar describes admitted structure as a structural over-approximation:
+several productions admit forms the normative prose of Section 5 excludes
+(for example arrow expressions outside callback argument positions, and
+non-scalar parameter defaults). Legality is defined by the prose rules and
+the machine-readable registry together; the registry records, per rule,
+whether enforcement happens at parse time or at check time. Unexpanded
+leaves such as `Ident`, `String`, `Number`, `Literal`, `Template`,
+`TemplateLiteralType`, and `JSXExpr` are lexical or separately specified
+syntactic classes.
 
 ```ebnf
 Module       ::= Import* TopDecl*
@@ -1410,7 +1699,7 @@ AssignableSuffix ::= "." Ident
                    | TypeArgs? "(" [Args] ")"
 
 Expr         ::= ArrowExpr | ConditionalExpr
-ConditionalExpr ::= BinaryExpr ["?" Expr ":" ConditionalExpr]
+ConditionalExpr ::= BinaryExpr ["?" BinaryExpr ":" BinaryExpr]
 BinaryExpr   ::= UnaryExpr (BinaryOp UnaryExpr)*
 UnaryExpr    ::= UnaryOp UnaryExpr | PostfixExpr
 PostfixExpr  ::= PrimaryExpr PostfixSuffix*
@@ -1448,13 +1737,18 @@ TypeArgs     ::= "<" Type ("," Type)* ">"
 ArrowExpr    ::= "(" [ArrowParams] ")" "=>" (Expr | Block)
 ArrowParams  ::= ArrowParam ("," ArrowParam)* [","]
 ArrowParam   ::= Ident [":" Type]
-MatchExpr    ::= "match" "(" Expr ")" "{"
+MatchExpr    ::= "match" "(" Scrutinee ")" "{"
                   MatchArm+ [DefaultArm] "}"
+Scrutinee    ::= Ident ("." Ident)*
 MatchArm     ::= "when" Pattern ":" Expr
 DefaultArm   ::= "default" ":" Expr
-Pattern      ::= Literal | "{" PatternFields "}"
+Pattern      ::= Literal | TypeTestPattern | "{" PatternFields "}"
+TypeTestPattern ::= "boolean" | "number" | "string"
+                  | "array" | "Dict" | "Bytes"
 PatternFields ::= PatternField ("," PatternField)* [","]
 PatternField ::= PropertyName ":" Literal
+               | PropertyName ":" Ident
+               | Ident
 
 Type         ::= UnionType
 UnionType    ::= IntersectionType ("|" IntersectionType)*
@@ -1477,17 +1771,19 @@ LiteralType  ::= String | Number | "true" | "false"
 TupleType    ::= ["readonly"] "[" [Type ("," Type)* [","]] "]"
 RecordType   ::= "{" [RecordTypeField (";" RecordTypeField)* [";"]] "}"
 RecordTypeField ::= ["readonly"] PropertyName ["?"] ":" Type
-FunctionType ::= TypeParams? "(" [ValueParams] ")" "=>" ReturnType
+FunctionType ::= "(" [ValueParams] ")" "=>" ReturnType
 ScalarType   ::= "number" | "string"
 ```
 
 Postfix operations bind most tightly. Binary precedence, from tightest to
 loosest, is exponentiation; multiplication; addition; shifts; comparisons;
 strict equality; bitwise AND, XOR, and OR; boolean AND and OR; nullish
-coalescing; then the conditional expression. Exponentiation and the
-conditional expression are right-associative. Every other binary operator is
-left-associative. Parentheses override precedence. An `LValue` cannot contain
-an optional-chain suffix.
+coalescing; then the conditional expression. Exponentiation is
+right-associative. Every other binary operator is left-associative. The
+conditional expression does not nest: neither arm may be a conditional
+expression, parenthesized or not, so no associativity question arises.
+Parentheses override precedence. An `LValue` cannot contain an
+optional-chain suffix.
 
 The complete parser specification must also define numeric literals, string
 escapes, Unicode identifiers, templates, patterns, and TSX without relying on
@@ -1511,11 +1807,15 @@ The advanced surface is intentionally richer than the executable kernel.
 | record spread | allocate fixed target shape, copy one base, write explicit fields |
 | array spread | finite snapshot concatenation |
 | destructuring | temporary binding plus fixed reads |
-| `match` | one scrutinee temporary plus ordered tested branches |
+| `match` | ordered tested branches over the named scrutinee |
+| `match` binding field | arm-scoped `const` bound from the narrowed scrutinee field |
+| `match` type-test pattern | the corresponding value-kind narrowing test from the Section 5.4 closed list |
 | `assert` | branch to continuation or typed invariant halt |
 | `for...of` | finite snapshot plus index-controlled core loop |
 | array higher-order function | typed finite fold with explicit callback call |
+| array `push` | kernel append operation |
 | `Result` | tagged record union |
+| `Result` combinator | one ordered call plus a branch on the tag |
 | `Dict` | immutable intrinsic with specified ordering and equality |
 | TSX | calls to specified `jsxElement` and `jsxFragment` intrinsics |
 | `parallel` / `race` | explicit structured-effect operation |
@@ -1538,7 +1838,7 @@ The kernel needs only:
 - fixed-arity call and return
 - primitive unary and binary operations
 - fixed-shape record allocation, field read, and field write
-- array allocation, index read, index write, and length
+- array allocation, index read, index write, append, and length
 - immutable `Dict` operations
 - immutable `Bytes` operations
 - conditional branch and jump
@@ -1672,7 +1972,10 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | regex literal or ambient `RegExp` | predictable resource use and analyzable validation | use string operations or schema validation |
 | `any`, type assertions (`as` and angle-bracket forms), `satisfies` | type evidence integrity | essential to the selected checker model |
 | loose equality and implicit coercion | visible type-directed branches | essential to sound narrowing |
-| effectful `?:`, compound assignment, rest parameters | visible evaluation and one mutation spelling | language-simplicity choice |
+| effectful `?:`, compound assignment, rest parameters | visible evaluation and one mutation spelling | language-simplicity choice, provisional pending the 14.2 paired-task measurement |
+| chained conditional arms | one form per branch shape | exact repair when constructible, else proposed refactor |
+| numeric record keys | one keyed-collection model | canonical simplicity; use a string key or a number-keyed `Dict` |
+| multiple record spreads | fixed-shape elaboration without field-presence tests | canonical simplicity; write explicit fields over one base |
 | fallback `assert` | one explicit early-return spelling | use `if` plus `return` |
 | interface, enum, namespace, decorator | one closed data and module model | language-simplicity choice |
 | object methods, getters, setters | explicit functions and effects | language-simplicity choice |
@@ -1838,6 +2141,10 @@ The advanced profile is ready to ship only when all gates are true.
   and structured-I/O tuples are fully typed.
 - The version-2 agent envelope, complete module-graph identity, atomic repair
   application, and unified property verification operation are implemented.
+- The `meta` payload publishes the grammar productions, canonical per-form
+  examples, ambient-name table, validator registry, canonical type
+  serialization, default repair budget, and decision-kind registry, each
+  registry-generated and drift-gated.
 - Version-1 JSON surfaces remain explicitly distinguishable and cannot be
   mistaken for advanced-profile results.
 
@@ -1856,7 +2163,9 @@ tasks cover:
 
 Each client begins with the user task and the version-2 `meta` operation
 through `zts agent --stdin-json`, not hidden syntax instructions. It must
-discover every other language fact through the normative agent protocol.
+discover every other language fact through the normative agent protocol; the
+`grammar` and `examples` payloads of `meta` are part of that permitted
+discovery surface.
 
 For every corpus task declared supported:
 
@@ -1872,9 +2181,13 @@ structured unsupported result with no false success or guessed behavior.
 
 The release report publishes first-pass validity, repair iterations, tool
 calls, invalid-repair count, semantic-drift count, unsupported-task precision,
-and human-intervention count per client. Release requires zero invalid exact
-repairs, zero semantic drift, zero false success, and zero human syntax
-intervention across the corpus.
+and human-intervention count per client. It also publishes a measured
+terseness criterion: canonical-source token count and total generation-token
+overhead per corpus task against an idiomatic TypeScript baseline, with a
+declared acceptable ratio, so mandatory ceremony is a measured cost rather
+than an asserted one. Release requires zero invalid exact repairs, zero
+semantic drift, zero false success, and zero human syntax intervention across
+the corpus.
 
 The corpus also contains paired tasks for every admitted ZTS-specific form and
 every excluded high-frequency TypeScript alternative. A custom form or
@@ -1957,11 +2270,19 @@ The corpus MUST include:
 - sound generic-function inference and instantiation
 - limited `extends` constraints
 - pure boolean conditional expressions
+- binding fields and type-test patterns in `match`
+- the closed narrowing rule list
+- decidable branch-choice and iteration-choice rules
 - trailing parameters with closed compile-time scalar defaults
 - contractive recursive aliases
-- precise `Result<T, E>`
-- immutable deterministic `Dict<K, V>`
+- precise `Result<T, E>` with effect-row polymorphic combinators,
+  `unwrapOr`, `orElse`, and `collectAll`
+- immutable deterministic `Dict<K, V>` with bulk operations and
+  `comptime()` static tables
 - immutable `Bytes`
+- the completed array operation set and `push`
+- a total `responseText` constructor in the HTTP ABI
+- the ambient-name criterion and registry table
 - opaque typed `HtmlNode` and finite `HtmlChild`
 - explicit JSON `null`
 - a typed, resource-bounded JSON codec
@@ -2031,17 +2352,16 @@ function divide(
 function describeRatio(numerator: number, denominator: number): string {
   const result = divide(numerator, denominator);
   return match (result) {
-    when { ok: true }:
-      formatRatio(result.value)
+    when { ok: true, value }:
+      `ratio ${value}`
     when { ok: false }:
       "undefined ratio"
   };
 }
-
-function formatRatio(value: number): string {
-  return `ratio ${String(value)}`;
-}
 ```
+
+The binding field `value` removes the scrutinee double-read, and the numeric
+interpolation elaborates through the implicit `String` intrinsic.
 
 ### 16.2 Keyed aggregation
 
@@ -2053,21 +2373,21 @@ import {
 } from "zttp:collections";
 
 function frequencies(words: readonly string[]): Dict<string, number> {
-  let counts = dictEmpty<string, number>();
-
-  for (const word of words) {
-    const previous = dictGet(counts, word) ?? 0;
-    counts = dictSet(counts, word, previous + 1);
-  }
-
-  return counts;
+  return words.reduce(
+    (counts, word) => dictSet(counts, word, (dictGet(counts, word) ?? 0) + 1),
+    dictEmpty<string, number>(),
+  );
 }
 ```
+
+A pure single-accumulator fold is a `reduce` by the decidable rule of
+Section 6.5; the `let` plus `for...of` spelling of the same fold is
+non-canonical and receives the rewrite.
 
 ### 16.3 Recursive application data
 
 ```ts
-import { dictEntries } from "zttp:collections";
+import { dictFold } from "zttp:collections";
 
 type JsonValue =
   | null
@@ -2078,41 +2398,35 @@ type JsonValue =
   | Dict<string, JsonValue>;
 
 function depth(value: JsonValue): number {
-  if (value === null) {
-    return 1;
-  }
-  if (typeof value === "boolean") {
-    return 1;
-  }
-  if (typeof value === "number") {
-    return 1;
-  }
-  if (typeof value === "string") {
-    return 1;
-  }
-
-  if (Array.isArray(value)) {
-    let maximum = 0;
-    for (const child of value) {
-      const childDepth = depth(child);
-      if (childDepth > maximum) {
-        maximum = childDepth;
-      }
-    }
-    return maximum + 1;
-  }
-
-  let maximum = 0;
-  for (const entry of dictEntries(value)) {
-    const childDepth = depth(entry[1]);
-    if (childDepth > maximum) {
-      maximum = childDepth;
-    }
-  }
-  return maximum + 1;
+  return match (value) {
+    when null: 1
+    when boolean: 1
+    when number: 1
+    when string: 1
+    when array:
+      value.reduce(
+        (maximum, child) => {
+          const childDepth = depth(child);
+          return childDepth > maximum ? childDepth : maximum;
+        },
+        0,
+      ) + 1
+    when Dict:
+      dictFold(
+        value,
+        (maximum, child) => {
+          const childDepth = depth(child);
+          return childDepth > maximum ? childDepth : maximum;
+        },
+        0,
+      ) + 1
+  };
 }
 ```
 
+The `null` literal pattern and the five type-test patterns cover the six
+value kinds of `JsonValue` exactly, so the `match` is exhaustive without
+`default` and each arm narrows `value`.
 This function is accepted. Its totality certificate depends on the checker
 proving that recursive calls receive strict subvalues of a finite input.
 
@@ -2124,7 +2438,6 @@ import { fetch } from "zttp:fetch";
 import { parallel } from "zttp:io";
 import { err } from "zttp:result";
 import type { FetchError } from "zttp:fetch";
-import type { Effects } from "zttp:types";
 
 type LoadError =
   | FetchError
@@ -2146,7 +2459,7 @@ function loadOrders(): Result<Response, LoadError> {
   return fetch(url, {});
 }
 
-function loadDashboard(): Effects<
+export function loadDashboard(): Effects<
   readonly [
     Result<Response, LoadError>,
     Result<Response, LoadError>,
@@ -2157,8 +2470,11 @@ function loadDashboard(): Effects<
 }
 ```
 
-The tuple remains typed. The effect ceiling remains visible. No Promise or
-ambient scheduler enters the program.
+The tuple remains typed. The effect ceiling remains visible, and its
+placement follows the decidable rule of Section 5.7: `loadDashboard` is
+exported with a nonempty effect row, so it declares the ceiling; `loadUser`
+and `loadOrders` are module-internal, so they do not. `Effects` is ambient
+and needs no import. No Promise or ambient scheduler enters the program.
 
 ### 16.5 Familiar pure shorthand
 
@@ -2189,10 +2505,13 @@ zts agent --stdin-json < request-recheck.json
 zts agent --stdin-json < request-verify.json
 ```
 
-Each request uses the version-2 envelope and explicit project root.
-`canonicalize` emits the complete source-bound candidate; the agent passes it
-unchanged through simulation and atomic application. `apply_repair` rejects
-anything without a successful named equivalence validator.
+Each request uses the version-2 envelope and explicit project root. `check`
+embeds the complete bound repair object inline for every repairable
+diagnostic; `canonicalize` emits the rewrite candidates not attached to a
+diagnostic; `simulate_edit` is an optional preview. The agent submits the
+non-overlapping repair set unchanged, and `apply_repair` re-runs simulation
+and equivalence validation internally before writing, rejecting anything
+without a registered validator.
 
 The final check and verification bind the same profile and policy, plus the
 latest complete module-graph identity returned after all applied source
@@ -2218,7 +2537,7 @@ The language stays AI-minimal where choice entropy compounds:
 
 - one data-contract form,
 - one recoverable-error form,
-- one multi-way branch,
+- one branch form per branch shape, chosen by a decidable rule,
 - one source loop,
 - one absence convention,
 - one dynamic keyed collection,
