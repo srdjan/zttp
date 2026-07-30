@@ -260,7 +260,7 @@ pub const CodeGen = struct {
     /// Pre-reserve capacity based on IR size to reduce reallocations.
     ///
     /// Heuristics calibrated against the Phase 8 compile-bench fixtures
-    /// (see packages/runtime/src/compile_benchmark.zig). Measured top-level
+    /// (see packages/runtime/bench/compile_benchmark.zig). Measured top-level
     /// bytecode length is 0.3-0.5 bytes per IR node; an inflated node_count*4
     /// reserve was over-allocating 10-25x and costing an extra up-front alloc.
     fn reserveCapacity(self: *CodeGen) !void {

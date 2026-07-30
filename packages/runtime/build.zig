@@ -119,17 +119,36 @@ pub fn build(b: *std.Build) void {
     server_tests.addImport("zts", zts_mod);
     server_tests.addOptions("runtime_feature_options", runtime_features);
 
+    // The benchmark harness lives in bench/, outside the product source tree,
+    // so it reaches the runtime through a module rather than by relative path
+    // (a `../src/...` import is outside the harness module's own path). One
+    // module, rooted at the file that owns `HandlerInstance`, so the harness
+    // and the runtime agree on the `RuntimeConfig` type.
+    const runtime_instance = b.addModule("runtime_instance", .{
+        .root_source_file = b.path("src/handler_instance.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    runtime_instance.addImport("zts", zts_mod);
+    runtime_instance.addOptions("runtime_feature_options", runtime_features);
+    runtime_instance.addAnonymousImport("embedded_handler", .{
+        .root_source_file = b.path("src/embedded_handler_stub.zig"),
+        .imports = &.{.{ .name = "zts", .module = zts_mod }},
+    });
+
     const benchmark = b.addModule("benchmark", .{
-        .root_source_file = b.path("src/benchmark.zig"),
+        .root_source_file = b.path("bench/benchmark.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
     });
     benchmark.addImport("zts", zts_mod);
+    benchmark.addImport("runtime_instance", runtime_instance);
     benchmark.addOptions("runtime_feature_options", runtime_features);
 
     const compile_benchmark = b.addModule("compile_benchmark", .{
-        .root_source_file = b.path("src/compile_benchmark.zig"),
+        .root_source_file = b.path("bench/compile_benchmark.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,

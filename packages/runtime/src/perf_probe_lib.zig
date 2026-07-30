@@ -4,7 +4,7 @@
 //! The PI agent host registers `recordPerfReceipt` via a function pointer at
 //! startup (see `dev_cli.zig`, next to the witness-replay injection). PI
 //! cannot import this directly: the probe needs the JS engine
-//! (`benchmark.runHandlerCorpusFromSource`) and the ledger pulls in the
+//! (`handler_corpus.runHandlerCorpusFromSource`) and the ledger pulls in the
 //! deploy stack, and the runtime binaries consume PI, so a direct dependency
 //! would invert the build graph.
 //!
@@ -22,7 +22,7 @@
 
 const std = @import("std");
 const zq = @import("zts");
-const benchmark = @import("benchmark.zig");
+const handler_corpus = @import("handler_corpus.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const identity = @import("attest/identity.zig");
 const review = @import("zttp_proof_review").review;
@@ -68,12 +68,12 @@ pub fn recordPerfReceiptWithKey(
 ) anyerror!void {
     // 1. Latency probe. A load/exec failure surfaces as zeroed stats
     // (sample_count == 0), which we still record as a skipped-probe row.
-    const stats = benchmark.runHandlerCorpusFromSource(
+    const stats = handler_corpus.runHandlerCorpusFromSource(
         after_bytes,
         handler_path,
         probe_budget_ns,
         allocator,
-    ) catch benchmark.HandlerCorpusStats{};
+    ) catch handler_corpus.HandlerCorpusStats{};
 
     // 2. Bind the receipt to the exact handler bytes.
     var digest: [Sha256.digest_length]u8 = undefined;

@@ -65,7 +65,12 @@ const HttpResponse = http_types.HttpResponse;
 const runtime_config_mod = @import("runtime_config.zig");
 const cost_meter = zq.context.cost_meter;
 
-const RuntimeConfig = runtime_config_mod.RuntimeConfig;
+/// Public because `HandlerInstance.init` takes one, and the benchmark harness
+/// in `packages/runtime/bench/` reaches this file as a module rather than by
+/// relative path. Re-exporting here keeps the config type and the type that
+/// consumes it in one module, so no consumer analyzes `runtime_config.zig`
+/// a second time and ends up with an incompatible `RuntimeConfig`.
+pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 
 /// In-process registry of co-located sub-handlers, used by zttp:workflow to
 /// dispatch from an orchestrator handler without HTTP.

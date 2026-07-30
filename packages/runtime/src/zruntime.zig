@@ -629,7 +629,7 @@ test {
     _ = @import("ws_frame_loop.zig");
     _ = @import("durable_fetch.zig");
     _ = @import("retry_backoff.zig");
-    _ = @import("benchmark.zig");
+    _ = @import("handler_corpus.zig");
     _ = @import("durable_dead_runs.zig");
     _ = @import("durable_dead_runs_cli.zig");
     _ = @import("fault_explain.zig");

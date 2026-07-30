@@ -133,7 +133,7 @@ zig build test-cli                 # Developer CLI tests only
 zig build test -- --test-filter "name"  # Single test
 bash scripts/test-examples.sh      # All example handler tests
 
-zig build bench                    # Zig-native benchmarks (packages/runtime/src/benchmark.zig)
+zig build bench                    # Zig-native benchmarks (packages/runtime/bench/benchmark.zig)
 zttp prove old.json new.json  # Compare contracts (0=safe, 1=breaking)
 zttp mock tests.jsonl --port 3001  # Mock server from test cases
 zttp link system.json         # Cross-handler contract linking

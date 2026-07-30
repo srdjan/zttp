@@ -485,7 +485,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     g_args = init.args;
     const options = parseOptions();
     // libc malloc/free for proper per-compile freeing without GPA tracking
-    // overhead. Matches packages/runtime/src/benchmark.zig.
+    // overhead. Matches packages/runtime/bench/benchmark.zig.
     const allocator = std.heap.c_allocator;
 
     var results: [fixtures.len]Result = undefined;
