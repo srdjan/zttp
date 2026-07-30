@@ -63,6 +63,7 @@ tools flow_checker
 tools handler_contract
 tools handler_policy
 tools handler_verifier
+tools idiom_registry
 tools json_utils
 tools manifest_registry
 tools module_binding

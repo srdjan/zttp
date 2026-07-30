@@ -6,11 +6,13 @@
 const std = @import("std");
 const zts = @import("zts");
 const rule_registry = zts.rule_registry;
+const idiom_registry = zts.idiom_registry;
 const writeJsonString = zts.handler_contract.writeJsonString;
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
     var hash_mode = false;
+    var idiom_mode = false;
     var rule_name: ?[]const u8 = null;
 
     for (argv) |arg| {
@@ -18,6 +20,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
             json_mode = true;
         } else if (std.mem.eql(u8, arg, "--hash")) {
             hash_mode = true;
+        } else if (std.mem.eql(u8, arg, "--idioms")) {
+            idiom_mode = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             printHelp();
             return;
@@ -39,6 +43,24 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+
+    // The idiom table (spec 4.2.1) is a separate surface from the diagnostic
+    // rules: an idiom is never an error, so it has no code, category, or
+    // severity. It gets its own flag rather than a key inside the rule list,
+    // which ships as a bare JSON array that machine consumers already parse.
+    if (idiom_mode) {
+        if (json_mode) {
+            try writeIdiomListJson(&aw.writer);
+            try aw.writer.writeAll("\n");
+        } else {
+            try writeIdiomListText(&aw.writer);
+        }
+        buf = aw.toArrayList();
+        if (buf.items.len > 0) {
+            _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        }
+        return;
+    }
 
     if (rule_name) |name| {
         const entry = rule_registry.findByName(name) orelse
@@ -133,6 +155,45 @@ pub fn writeRuleJson(writer: anytype, entry: *const rule_registry.RuleEntry) !vo
     try writer.writeAll("}");
 }
 
+pub fn writeIdiomJson(writer: anytype, entry: *const idiom_registry.IdiomEntry) !void {
+    try writer.writeAll("{\"id\":");
+    try writeJsonString(writer, entry.id);
+    try writer.writeAll(",\"operation\":");
+    try writeJsonString(writer, entry.operation);
+    try writer.writeAll(",\"idiomatic\":");
+    try writeJsonString(writer, entry.idiomatic);
+    try writer.writeAll(",\"superseded\":");
+    try writeJsonString(writer, entry.superseded);
+    try writer.writeAll(",\"precondition\":");
+    try writeJsonString(writer, entry.precondition);
+    try writer.writeAll(",\"rewrite_rule\":");
+    if (entry.rewrite_rule) |rule| {
+        try writeJsonString(writer, rule);
+    } else {
+        // Emitted as an explicit null, not omitted: absence is the signal that
+        // the row is advisory-only, so a consumer must be able to see it.
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("}");
+}
+
+pub fn writeIdiomListJson(writer: anytype) !void {
+    try writer.writeAll("{\"idioms\":[");
+    for (&idiom_registry.entries, 0..) |*entry, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writeIdiomJson(writer, entry);
+    }
+    try writer.writeAll("]}");
+}
+
+fn writeIdiomListText(writer: anytype) !void {
+    try writer.print("{s:<28} {s:<24} {s}\n", .{ "ID", "OPERATION", "IDIOMATIC" });
+    try writer.writeAll("---\n");
+    for (&idiom_registry.entries) |*entry| {
+        try writer.print("{s:<28} {s:<24} {s}\n", .{ entry.id, entry.operation, entry.idiomatic });
+    }
+}
+
 fn writeRuleText(writer: anytype, entry: *const rule_registry.RuleEntry) !void {
     try writer.print("Rule: {s}\n", .{entry.name});
     try writer.print("Code: {s}\n", .{entry.code});
@@ -208,11 +269,12 @@ fn printHelp() void {
         \\zts describe-rule - describe diagnostic rules
         \\
         \\Usage:
-        \\  zts describe-rule [rule-name|code] [--json] [--hash]
+        \\  zts describe-rule [rule-name|code] [--json] [--hash] [--idioms]
         \\
         \\Options:
         \\  --json    Output as JSON
         \\  --hash    Output policy hash (SHA-256 of all rule metadata)
+        \\  --idioms  List the idiom table instead of the diagnostic rules
         \\
         \\With no arguments, lists all rules.
         \\
@@ -246,6 +308,29 @@ test "writeUnknownRuleJson emits a JSON error object for an unknown rule" {
     defer parsed.deinit();
     try testing.expectEqualStrings("unknown_rule", parsed.value.object.get("error").?.string);
     try testing.expectEqualStrings("BOGUS", parsed.value.object.get("query").?.string);
+}
+
+test "writeIdiomListJson emits every seeded row with a stable id" {
+    var aw = std.Io.Writer.Allocating.init(testing.allocator);
+    defer aw.deinit();
+    try writeIdiomListJson(&aw.writer);
+    const out = aw.writer.buffered();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
+    defer parsed.deinit();
+
+    const idioms = parsed.value.object.get("idioms").?.array;
+    try testing.expectEqual(idiom_registry.entries.len, idioms.items.len);
+    for (idioms.items) |item| {
+        const obj = item.object;
+        try testing.expect(std.mem.startsWith(u8, obj.get("id").?.string, "idiom."));
+        try testing.expect(obj.get("operation").?.string.len > 0);
+        try testing.expect(obj.get("idiomatic").?.string.len > 0);
+        try testing.expect(obj.get("superseded").?.string.len > 0);
+        try testing.expect(obj.get("precondition").?.string.len > 0);
+        // Phase 0 wires no rewrites; task 5 fills these in.
+        try testing.expect(obj.get("rewrite_rule").? == .null);
+    }
 }
 
 test "writeTypeCheckerJson emits the rule-json shape with a real description" {

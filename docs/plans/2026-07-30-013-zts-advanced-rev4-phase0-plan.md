@@ -29,7 +29,7 @@
 - Consumes: nothing new.
 - Produces: `Severity = enum { err, warning, advisory }` with `label()` returning `"advisory"`; every existing exit-code / success decision keyed on `.err` only. Task 5 and Task 6 emit `.advisory` diagnostics; Task 2 exposes the severity set.
 
-- [ ] **Step 1: Write the failing test** in `strict_checker.zig` next to the Severity enum:
+- [x] **Step 1: Write the failing test** in `strict_checker.zig` next to the Severity enum:
 
 ```zig
 test "advisory severity label" {
@@ -37,12 +37,12 @@ test "advisory severity label" {
 }
 ```
 
-- [ ] **Step 2: Run it, expect compile failure** (`advisory` not a member):
+- [x] **Step 2: Run it, expect compile failure** (`advisory` not a member):
 
 Run: `zig build test-zts -- --test-filter "advisory severity label"`
 Expected: compile error `enum 'Severity' has no member named 'advisory'`
 
-- [ ] **Step 3: Extend the enum**
+- [x] **Step 3: Extend the enum**
 
 ```zig
 pub const Severity = enum {
@@ -60,9 +60,9 @@ pub const Severity = enum {
 };
 ```
 
-- [ ] **Step 4: Audit every switch and comparison on `Severity`.** Run `grep -n "Severity\|severity ==\|\.err" packages/zts/src/strict_checker.zig packages/tools/src/json_diagnostics.zig packages/tools/src/zts_cli.zig` and confirm: (a) exhaustive switches now handle `.advisory` (the compiler forces this — fix each site so advisory routes like warning for display and like nothing for failure); (b) any "has errors" / exit-code decision tests `== .err` specifically, not "not warning". Fix any site that would let advisory flip an exit code.
+- [x] **Step 4: Audit every switch and comparison on `Severity`.** Run `grep -n "Severity\|severity ==\|\.err" packages/zts/src/strict_checker.zig packages/tools/src/json_diagnostics.zig packages/tools/src/zts_cli.zig` and confirm: (a) exhaustive switches now handle `.advisory` (the compiler forces this — fix each site so advisory routes like warning for display and like nothing for failure); (b) any "has errors" / exit-code decision tests `== .err` specifically, not "not warning". Fix any site that would let advisory flip an exit code.
 
-- [ ] **Step 5: Add the success-isolation test** in `strict_checker.zig`:
+- [x] **Step 5: Add the success-isolation test** in `strict_checker.zig`:
 
 ```zig
 test "advisory diagnostics do not count as errors" {
@@ -87,12 +87,12 @@ test "advisory diagnostics do not count as errors" {
 
 (Adjust the `addDiagnostic` payload to the struct's actual fields — read the `Diagnostic` struct at the top of `strict_checker.zig` first; the test's assertion is the deliverable.)
 
-- [ ] **Step 6: Run the two tests, expect PASS**
+- [x] **Step 6: Run the two tests, expect PASS**
 
 Run: `zig build test-zts -- --test-filter "advisory"`
 Expected: PASS (2 tests)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 zig fmt packages/zts/src/strict_checker.zig packages/tools/src/json_diagnostics.zig
@@ -110,7 +110,7 @@ git add -A && git commit -m "feat(checker): add advisory severity that never aff
 - Consumes: nothing.
 - Produces: `pub const IdiomEntry = struct { id: []const u8, operation: []const u8, idiomatic: []const u8, superseded: []const u8, precondition: []const u8, rewrite_rule: ?[]const u8 };` and `pub const entries: []const IdiomEntry`. Task 5 references entries by `id`. IDs are stable strings `idiom.<operation-slug>` (for example `idiom.absence-default`).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```zig
 const std = @import("std");
@@ -126,18 +126,36 @@ test "idiom registry has unique stable ids" {
 }
 ```
 
-- [ ] **Step 2: Run, expect failure** (file missing / entries undefined). Add the new file to the test root the same way sibling registries are included — check how `rule_registry.zig` is imported in `packages/zts/src/root.zig` and mirror it.
+- [x] **Step 2: Run, expect failure** (file missing / entries undefined). Add the new file to the test root the same way sibling registries are included — check how `rule_registry.zig` is imported in `packages/zts/src/root.zig` and mirror it.
 
-- [ ] **Step 3: Implement the seed table** — the ~10 rows from spec 4.2.1 that need no new language, transcribed verbatim from the table (idiomatic and superseded columns as the spec spells them): `idiom.absence-default`, `idiom.absent-member-read`, `idiom.number-in-text`, `idiom.scalar-to-text`, `idiom.redundant-template`, `idiom.string-concatenation`, `idiom.array-concatenation`, `idiom.membership-test`, `idiom.existence-test`, `idiom.field-read`, `idiom.multi-field-read`, `idiom.element-iteration`. `rewrite_rule` is null except where Task 5 wires an existing canonicalize rewrite.
+- [x] **Step 3: Implement the seed table** — the ~10 rows from spec 4.2.1 that need no new language, transcribed verbatim from the table (idiomatic and superseded columns as the spec spells them): `idiom.absence-default`, `idiom.absent-member-read`, `idiom.number-in-text`, `idiom.scalar-to-text`, `idiom.redundant-template`, `idiom.string-concatenation`, `idiom.array-concatenation`, `idiom.membership-test`, `idiom.existence-test`, `idiom.field-read`, `idiom.multi-field-read`, `idiom.element-iteration`. `rewrite_rule` is null except where Task 5 wires an existing canonicalize rewrite.
 
-- [ ] **Step 4: Run test, expect PASS.** `zig build test-zts -- --test-filter "idiom registry"`
+- [x] **Step 4: Run test, expect PASS.** `zig build test-zts -- --test-filter "idiom registry"`
 
-- [ ] **Step 5: Expose in JSON.** In `zts_cli.zig`, find where `describe-rule --json` serializes the rule list and add a sibling `"idioms": [...]` array (id, operation, idiomatic, superseded, precondition, rewrite_rule). Add a CLI test if the file has a harness for JSON output; otherwise verify by hand:
+- [x] **Step 5: Expose in JSON.** In `zts_cli.zig`, find where `describe-rule --json` serializes the rule list and add a sibling `"idioms": [...]` array (id, operation, idiomatic, superseded, precondition, rewrite_rule). Add a CLI test if the file has a harness for JSON output; otherwise verify by hand:
 
 Run: `zig build && ./zig-out/bin/zts describe-rule --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert any(k.startswith('idiom.') for k in [e['id'] for e in d['idioms']]); print('ok')"`
 Expected: `ok`
 
-- [ ] **Step 6: Commit**
+**Deviation, 2026-07-31.** The idioms went behind a new `--idioms` flag, not into
+the no-arg `describe-rule --json` output. That output is a bare JSON array of
+rules (`describe_rule.zig:85-90`), duplicated byte-for-byte by
+`packages/pi/src/tools/zts_expert_describe_rule.zig` and published in
+`docs/internals/zts-expert-contract.md`, so adding a sibling key meant turning
+the array into an object and breaking both. An idiom also has no code,
+category, or severity, so it does not fit the rule shape. Spec 5 names the
+`meta` payload as the idiom table's home; moving it there is Phase 1 protocol
+work, and `--idioms` is the additive surface until then. The verification
+command becomes:
+
+`./zig-out/bin/zts describe-rule --idioms --json | python3 -c "import json,sys; d=json.load(sys.stdin); assert all(e['id'].startswith('idiom.') for e in d['idioms']); print('ok', len(d['idioms']))"`
+Expected: `ok 12`
+
+Also touched, beyond the file list above: `scripts/module-boundary.allow` needs
+a `tools idiom_registry` row for `describe_rule.zig` to name the new internal
+module, and `docs/cli.md` documents the flag.
+
+- [x] **Step 6: Commit**
 
 ```bash
 zig fmt packages/zts/src/idiom_registry.zig packages/tools/src/zts_cli.zig

@@ -118,6 +118,7 @@ pub const perf_receipt = @import("perf_receipt.zig");
 pub const equivalence_receipt = @import("equivalence_receipt.zig");
 pub const rule_error = @import("rule_error.zig");
 pub const rule_registry = @import("rule_registry.zig");
+pub const idiom_registry = @import("idiom_registry.zig");
 pub const repair_intent = @import("repair_intent.zig");
 pub const ws_consistency = @import("ws_consistency.zig");
 pub const spec_discharge = @import("spec_discharge.zig");

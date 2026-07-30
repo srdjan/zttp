@@ -287,7 +287,7 @@ zttp features [--json]
 zttp modules [--json]
 zttp restrictions [--json] [--by proof|class]
 zttp meta [--json]
-zttp describe-rule [name|code] [--json] [--hash]
+zttp describe-rule [name|code] [--json] [--hash] [--idioms]
 zttp search <keyword> [--json]
 zttp spec-check [--json]
 zttp spec-hash [--json]
@@ -310,6 +310,14 @@ The canonical profile gives common operations one spelling. `zttp check` and
 `zttp verify-paths` enforce these rules as ZTS6xx diagnostics. `zttp normalize
 <file> --write` rewrites the rules that can be rewritten safely, and `zttp
 describe-rule <code>` prints the live rule record.
+
+`zttp describe-rule --idioms` prints the idiom table, which is a separate
+surface from the diagnostic rules. An idiom names one operation, its preferred
+spelling, the spellings it supersedes, and the precondition under which a
+mechanical rewrite preserves meaning. A non-idiomatic spelling is never an
+error and never fails a build: it is reported at `advisory` severity, rewritten
+where the rewrite is provable, and otherwise left in place. Rows whose
+`rewrite_rule` is null are advisory-only.
 
 | Code | Rule | Canonical form |
 |---|---|---|
