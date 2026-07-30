@@ -15,7 +15,7 @@ const api_schema = @import("api_schema.zig");
 const json_utils = @import("json_utils.zig");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
-const context = @import("context.zig");
+const atom_table = @import("atom_table.zig");
 const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
@@ -83,7 +83,7 @@ fn currentPolicyHashRaw() [32]u8 {
 pub const ContractBuilder = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
-    atoms: ?*context.AtomTable,
+    atoms: ?*atom_table.AtomTable,
     type_env: ?*const TypeEnv,
     type_checker: ?*const TypeChecker,
     /// Partner virtual-module manifests registered for this compile session.
@@ -188,7 +188,7 @@ pub const ContractBuilder = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         ir_view: IrView,
-        atoms: ?*context.AtomTable,
+        atoms: ?*atom_table.AtomTable,
         type_env: ?*const TypeEnv,
         type_checker: ?*const TypeChecker,
     ) ContractBuilder {
@@ -4247,7 +4247,7 @@ fn expectBuiltinExportEffect(
 
 fn buildTestContract(source: []const u8) !HandlerContract {
     const allocator = std.testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
 
     var parser = try JsParser.init(allocator, source);
@@ -4263,7 +4263,7 @@ fn buildTestContract(source: []const u8) !HandlerContract {
     return try builder.build("handler.ts", null, handler_fn, root, null, false, null);
 }
 
-fn findTestFunctionNode(view: IrView, atoms: *context.AtomTable, name: []const u8) ?NodeIndex {
+fn findTestFunctionNode(view: IrView, atoms: *atom_table.AtomTable, name: []const u8) ?NodeIndex {
     const node_count = view.nodeCount();
     for (0..node_count) |idx_usize| {
         const idx: NodeIndex = @intCast(idx_usize);
@@ -4284,7 +4284,7 @@ fn findTestFunctionNode(view: IrView, atoms: *context.AtomTable, name: []const u
     return null;
 }
 
-fn resolveTestAtomName(atoms: *context.AtomTable, atom_idx: u16) ?[]const u8 {
+fn resolveTestAtomName(atoms: *atom_table.AtomTable, atom_idx: u16) ?[]const u8 {
     const atom: object.Atom = @enumFromInt(atom_idx);
     if (atom.isPredefined()) return atom.toPredefinedName();
     return atoms.getName(atom);
@@ -4852,7 +4852,7 @@ test "registered partner manifest contributes effect class to handler properties
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();
@@ -4912,7 +4912,7 @@ test "partner manifest contractExtractions populate extensions section" {
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();
@@ -4953,7 +4953,7 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();
@@ -5004,7 +5004,7 @@ test "resource() affordances are extracted strict-literal with method default an
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();
@@ -5046,7 +5046,7 @@ test "resource() with a computed affordances argument fails closed as affordance
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();
@@ -5077,7 +5077,7 @@ test "resource() affordance with a non-literal href is recorded dynamic, not res
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();
@@ -5263,7 +5263,7 @@ test "missing manifest registry skips partner imports" {
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();

@@ -13,7 +13,7 @@
 const std = @import("std");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
-const context = @import("context.zig");
+const atom_table = @import("atom_table.zig");
 const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
@@ -118,7 +118,7 @@ const max_iterations: u8 = 16;
 pub const Analyzer = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
-    atoms: ?*context.AtomTable,
+    atoms: ?*atom_table.AtomTable,
     manifest_registry: ?*const manifest_registry_mod.Registry,
     functions: std.ArrayListUnmanaged(FunctionEffect),
     /// Imported callee metadata keyed by local binding slot.
@@ -144,14 +144,14 @@ pub const Analyzer = struct {
     /// `Spec<...>`/`Effects<...>` capsule.
     nested_workflow_calls: std.ArrayListUnmanaged(NestedWorkflowCall),
 
-    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) Analyzer {
+    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*atom_table.AtomTable) Analyzer {
         return initWithManifestRegistry(allocator, ir_view, atoms, null);
     }
 
     pub fn initWithManifestRegistry(
         allocator: std.mem.Allocator,
         ir_view: IrView,
-        atoms: ?*context.AtomTable,
+        atoms: ?*atom_table.AtomTable,
         manifest_registry: ?*const manifest_registry_mod.Registry,
     ) Analyzer {
         return .{
@@ -658,7 +658,7 @@ const module_manifest = @import("module_manifest.zig");
 
 test "leaf pure function has empty effect row" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try JsParser.init(allocator, "function clean(s) { return s; }");
     parser.setAtomTable(&atoms);
@@ -678,7 +678,7 @@ test "leaf pure function has empty effect row" {
 
 test "Date.now marks the enclosing function non-deterministic" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try JsParser.init(allocator, "function nowSeconds() { return Date.now(); }");
     parser.setAtomTable(&atoms);
@@ -696,7 +696,7 @@ test "Date.now marks the enclosing function non-deterministic" {
 
 test "Date.now inside durable step callback preserves determinism" {
     const allocator = std.testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try JsParser.init(allocator,
         \\import { step } from "zttp:durable";
@@ -716,7 +716,7 @@ test "Date.now inside durable step callback preserves determinism" {
 
 test "Date.now as eager durable step argument is non-deterministic" {
     const allocator = std.testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try JsParser.init(allocator,
         \\import { step } from "zttp:durable";
@@ -736,7 +736,7 @@ test "Date.now as eager durable step argument is non-deterministic" {
 
 test "transitive non-determinism flows through callers" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     const source =
         \\function inner() { return Date.now(); }
@@ -758,7 +758,7 @@ test "transitive non-determinism flows through callers" {
 
 test "self-recursive function is flagged" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try JsParser.init(allocator, "function loop(n) { return loop(n); }");
     parser.setAtomTable(&atoms);
@@ -775,7 +775,7 @@ test "self-recursive function is flagged" {
 
 test "mutual recursion is flagged for both participants" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     const source =
         \\function a(n) { return b(n); }
@@ -798,7 +798,7 @@ test "mutual recursion is flagged for both participants" {
 
 test "Math.random marks function non-deterministic" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try JsParser.init(allocator, "function pick() { return Math.random(); }");
     parser.setAtomTable(&atoms);
@@ -815,7 +815,7 @@ test "Math.random marks function non-deterministic" {
 
 test "pure helper next to non-deterministic helper stays pure" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     const source =
         \\function clean(s) { return s; }
@@ -839,7 +839,7 @@ test "pure helper next to non-deterministic helper stays pure" {
 
 test "calling a write-classified import marks the function as writing" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     const source =
         \\import { cacheSet } from "zttp:cache";
@@ -865,7 +865,7 @@ test "calling a write-classified import marks the function as writing" {
 
 test "write effect propagates transitively to callers" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     const source =
         \\import { cacheSet } from "zttp:cache";
@@ -906,7 +906,7 @@ test "partner write-classified import marks function and callers as writing" {
         return err;
     };
 
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     const source =
         \\import { chargeCard } from "zttp-ext:stripe";
@@ -937,7 +937,7 @@ test "partner write-classified import marks function and callers as writing" {
 
 test "empty program is a no-op" {
     const allocator = testing.allocator;
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try JsParser.init(allocator, "");
     parser.setAtomTable(&atoms);
@@ -980,7 +980,7 @@ test "the import scan records every specifier across the shared corpus" {
 
         var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
         defer parser.deinit();
-        var atoms = context.AtomTable.init(allocator);
+        var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
         parser.setAtomTable(&atoms);
         _ = try parser.parse();
@@ -1009,7 +1009,7 @@ test "this analyzer records imports from unresolved modules" {
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
     defer parser.deinit();
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();

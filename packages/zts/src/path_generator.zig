@@ -15,7 +15,7 @@
 const std = @import("std");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
-const context = @import("context.zig");
+const atom_table = @import("atom_table.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const module_facts_mod = @import("module_facts.zig");
 const mb = @import("module_binding.zig");
@@ -135,7 +135,7 @@ fn dupePathIoCall(
 pub const PathGenerator = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
-    atoms: ?*context.AtomTable,
+    atoms: ?*atom_table.AtomTable,
 
     /// Binding tracking: local slot -> module function metadata.
     module_fn_bindings: std.AutoHashMapUnmanaged(u16, FnMeta),
@@ -232,7 +232,7 @@ pub const PathGenerator = struct {
         bound: contract_types.Bound,
     };
 
-    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) PathGenerator {
+    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*atom_table.AtomTable) PathGenerator {
         return .{
             .allocator = allocator,
             .ir_view = ir_view,
@@ -1709,7 +1709,7 @@ test "scanImports tracks virtual module functions with binding names" {
     ;
 
     var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     defer parser.deinit();
@@ -1744,7 +1744,7 @@ const handler_verifier = @import("handler_verifier.zig");
 
 const PathGeneratorFixture = struct {
     parser: parser_mod.Parser,
-    atoms: context.AtomTable,
+    atoms: atom_table.AtomTable,
     generator: PathGenerator,
 
     fn deinit(self: *PathGeneratorFixture) void {
@@ -1830,7 +1830,7 @@ fn expectGenerationFailsOnFirstAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
     var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
 
@@ -1868,7 +1868,7 @@ fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
     var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -1920,7 +1920,7 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
     ;
     var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -1953,7 +1953,7 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
 fn generateWithAllocator(
     allocator: std.mem.Allocator,
     ir_view: IrView,
-    atoms: *context.AtomTable,
+    atoms: *atom_table.AtomTable,
     handler_fn: NodeIndex,
 ) !void {
     var generator = PathGenerator.init(allocator, ir_view, atoms);
@@ -1975,7 +1975,7 @@ test "generate cleans every fatal allocation failure" {
     ;
     var parser = try parser_mod.Parser.init(allocator, source);
     defer parser.deinit();
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2052,7 +2052,7 @@ fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGenera
     var parser = try parser_mod.Parser.init(allocator, source);
     errdefer parser.deinit();
 
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     errdefer atoms.deinit();
     parser.setAtomTable(&atoms);
 
@@ -2354,7 +2354,7 @@ test "the import scan maps builtin slots to function metadata in both atom modes
             \\import { thing } from "zttp-ext:unknown";
         );
         defer parser.deinit();
-        var atoms = context.AtomTable.init(allocator);
+        var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
         if (use_atoms) parser.setAtomTable(&atoms);
         _ = try parser.parse();
@@ -2383,7 +2383,7 @@ test "this generator skips imports from unresolved modules" {
         \\import { thing } from "zttp-ext:unknown";
     );
     defer parser.deinit();
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();

@@ -13,7 +13,7 @@ const value = @import("../value.zig");
 const heap = @import("../heap.zig");
 const string = @import("../string.zig");
 const js_object = @import("../object.zig");
-const context = @import("../context.zig");
+const atom_table = @import("../atom_table.zig");
 const handler_analyzer = @import("../handler_analyzer.zig");
 const bool_checker = @import("../bool_checker.zig");
 const module_manifest = @import("../module_manifest.zig");
@@ -74,7 +74,7 @@ pub const CodeGen = struct {
     ir: IrView,
     scopes: *ScopeAnalyzer,
     strings: ?*string.StringTable,
-    atoms: ?*context.AtomTable,
+    atoms: ?*atom_table.AtomTable,
 
     // Output
     code: std.ArrayList(u8),
@@ -132,7 +132,7 @@ pub const CodeGen = struct {
         ir_constants: *const ConstantPool,
         scopes: *ScopeAnalyzer,
         strings_table: ?*string.StringTable,
-        atoms_table: ?*context.AtomTable,
+        atoms_table: ?*atom_table.AtomTable,
     ) CodeGen {
         return .{
             .allocator = allocator,
@@ -164,7 +164,7 @@ pub const CodeGen = struct {
         ir_constants: *const ConstantPool,
         scopes: *ScopeAnalyzer,
         strings_table: ?*string.StringTable,
-        atoms_table: ?*context.AtomTable,
+        atoms_table: ?*atom_table.AtomTable,
     ) CodeGen {
         return .{
             .allocator = allocator,

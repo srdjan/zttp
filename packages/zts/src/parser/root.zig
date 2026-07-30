@@ -26,7 +26,7 @@ const std = @import("std");
 const bytecode = @import("../bytecode.zig");
 const value = @import("../value.zig");
 const string = @import("../string.zig");
-const context = @import("../context.zig");
+const atom_table_mod = @import("../atom_table.zig");
 const object = @import("../object.zig");
 
 // Re-export all parser components
@@ -154,7 +154,7 @@ pub const Parser = struct {
 
     // Strings/atoms kept for API compatibility (not used by new parser)
     strings: *string.StringTable,
-    atoms: ?*context.AtomTable,
+    atoms: ?*atom_table_mod.AtomTable,
 
     /// Wrapper for constants to provide .items interface
     pub const ConstantsList = struct {
@@ -165,7 +165,7 @@ pub const Parser = struct {
         allocator: std.mem.Allocator,
         source: []const u8,
         strings: *string.StringTable,
-        atoms: ?*context.AtomTable,
+        atoms: ?*atom_table_mod.AtomTable,
     ) !Parser {
         var p = Parser{
             .allocator = allocator,
@@ -304,7 +304,7 @@ pub const Parser = struct {
     }
 
     /// Resolve an atom index back to a string name
-    fn resolveAtomName(atom: object.Atom, atoms: ?*context.AtomTable) ?[]const u8 {
+    fn resolveAtomName(atom: object.Atom, atoms: ?*atom_table_mod.AtomTable) ?[]const u8 {
         // Check predefined atoms first
         if (atom.isPredefined()) {
             return atom.toPredefinedName();
@@ -358,7 +358,7 @@ test "legacy Parser API getImports returns imported names" {
     const allocator = std.testing.allocator;
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
-    var atoms = context.AtomTable.init(allocator);
+    var atoms = atom_table_mod.AtomTable.init(allocator);
     defer atoms.deinit();
 
     var p = try Parser.init(

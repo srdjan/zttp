@@ -12,7 +12,7 @@ const scope_mod = @import("scope.zig");
 const error_mod = @import("error.zig");
 const token_mod = @import("token.zig");
 const object = @import("../object.zig");
-const context = @import("../context.zig");
+const atom_table = @import("../atom_table.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerState = tokenizer_mod.TokenizerState;
@@ -88,7 +88,7 @@ pub const Parser = struct {
     previous: Token,
 
     // Optional atom table for interning identifiers/properties
-    atoms: ?*context.AtomTable,
+    atoms: ?*atom_table.AtomTable,
 
     // Context flags
     in_loop: bool,
@@ -158,7 +158,7 @@ pub const Parser = struct {
         self.errors.deinit();
     }
 
-    pub fn setAtomTable(self: *Parser, atoms: *context.AtomTable) void {
+    pub fn setAtomTable(self: *Parser, atoms: *atom_table.AtomTable) void {
         self.atoms = atoms;
     }
 
