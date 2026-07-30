@@ -44,7 +44,8 @@ that arbitrary TypeScript is accepted.
 
 This profile therefore makes five decisions:
 
-1. Add no new control-flow statements or control-flow operators.
+1. Add one constrained pure conditional operator, add no new control-flow
+   statements, and remove redundant control-flow shorthand.
 2. Complete the existing type system instead of importing TypeScript's
    type-level programming language.
 3. Put common application power in pure, typed data abstractions and explicit
@@ -60,15 +61,17 @@ This profile therefore makes five decisions:
 | Area | Advanced-profile decision |
 |---|---|
 | New statement keywords | None |
-| New control-flow operators | None |
+| New control-flow operators | Pure boolean `condition ? value : value` |
+| Removed redundant forms | Pipe composition and fallback `assert` |
 | Restored data literals | `null`, only as an explicit value |
+| Added declaration syntax | Trailing parameters with closed compile-time scalar defaults |
 | Added type syntax | Bounded generic parameters with `extends` |
 | Added type capability | Sound function generics and contractive recursive aliases |
 | Added pure abstractions | `Result<T, E>`, `Dict<K, V>`, immutable `Bytes`, `HtmlNode` |
 | Added concurrency model | None; retain explicit `parallel` and `race` |
 | Added error channel | None; errors remain ordinary tagged values |
 | Agent-only source notation | None; machine metadata remains separate JSON |
-| Agent protocol | Versioned discovery, diagnostics, repair simulation, normalization, and verification |
+| Agent protocol | Versioned discovery, diagnostics, repair simulation and application, normalization, and verification |
 | Canonical formatting | One deterministic, idempotent human-readable layout |
 
 The executable kernel grows only for `null`, `Dict`, and `Bytes`. Generic
@@ -83,12 +86,13 @@ no hidden profile knowledge, an agent can:
 1. discover the language, policy, modules, effects, restrictions, and tool
    schemas,
 2. generate canonical source,
-3. check it through a stable JSON interface,
-4. trace each failure to a rule and source span,
-5. simulate any exact compiler-proposed repair,
-6. normalize to a deterministic fixed point,
-7. recheck and verify the requested properties,
-8. or return a structured unsupported result without guessing.
+3. resolve and bind its complete module graph,
+4. check it through a stable JSON interface,
+5. trace each failure to a rule and source span,
+6. simulate, validate, and atomically apply any exact mechanical repair,
+7. normalize to a deterministic fixed point,
+8. recheck and verify the requested properties,
+9. or return a structured unsupported result without guessing.
 
 Application breadth is the evidence used to expand or reject language
 features. It is not allowed to outrank the integrity of this loop.
@@ -149,9 +153,11 @@ The live compiler already has most of the right shape:
 - explicit `zttp:*` capability modules and structured I/O
 
 The canonical checker is narrower than the parser and the feature catalog. It
-also rejects redundant forms such as ternaries, compound assignment, call
-spread, default parameters, nested destructuring, non-leading object spread,
-and reusable function-valued constants.
+currently rejects forms including ternaries, compound assignment, call spread,
+default parameters, nested destructuring, non-leading object spread, and
+reusable function-valued constants. The advanced profile reassesses each form
+under the agent-first decision rule rather than treating every current
+restriction as permanent.
 
 The important gaps are not more loop or class syntax:
 
@@ -224,7 +230,9 @@ Examples:
 
 - `match`, not `switch`
 - explicit assignment, not compound assignment or increment/decrement
-- explicit `T | undefined` resolution in the body, not default parameters
+- one pure `?:` value selection, not effectful expression branches
+- direct named calls, not a custom pipe operator
+- `assert` for invariants and `if` plus `return` for expected guards
 - named reusable functions, not exported or reusable function-valued
   constants
 - `type`, not both `type` and `interface`, for application data contracts
@@ -301,26 +309,97 @@ artifact for agents and humans.
 The compiler-in-the-loop interface is part of the advanced language contract.
 It is not an optional editor convenience.
 
-The canonical CLI entry points are:
+The current JSON commands are useful seeds, but their version-1 shapes are not
+the advanced protocol. `zts-advanced-1` introduces an explicit version-2
+cutover through one canonical CLI transport:
 
-- `zts meta --json` for protocol, compiler, policy, and registry identity,
-- `zts features --json`, `zts restrictions --json`, `zts modules --json`, and
-  `zts describe-rule --json` for discovery,
-- `zts check --json` for source, type, effect, policy, and proof diagnostics,
-- `zts canonicalize --json --simulate` for compiler-authored local repairs,
-- `zts edit-simulate --stdin-json` and `zts review-patch --json` for edit
-  validation,
-- `zts normalize --check --json` for canonical fixed-point validation,
-- and property-specific verification commands for proof claims.
+```sh
+zts agent --stdin-json
+```
 
-An implementation MAY provide transports other than the CLI, but they MUST
-preserve the same schemas and semantics.
+The command reads one request object and writes one response object. Existing
+commands such as `zts meta --json`, `zts check <file> --json`, and
+`zts canonicalize <file> --json --simulate` MAY remain available as explicitly
+selected legacy or human-facing interfaces. Their bare arrays and version-1
+objects MUST NOT be interpreted as advanced-profile responses.
 
-Every JSON result MUST include a schema version, profile identifier, compiler
-version, and policy identity. Results that depend on modules or canonical
-rules MUST also include the module-registry and policy hashes. An agent that
-does not support the returned schema or profile MUST stop rather than infer a
+The request envelope is:
+
+```json
+{
+  "schema_version": 2,
+  "operation": "check",
+  "project_root": "/absolute/project/root",
+  "input": {
+    "file": "dashboard.ts"
+  },
+  "expected": {
+    "profile_id": "zts-advanced-1",
+    "policy_hash": "...",
+    "module_graph_hash": "..."
+  }
+}
+```
+
+The response envelope is:
+
+```json
+{
+  "schema_version": 2,
+  "operation": "check",
+  "profile_id": "zts-advanced-1",
+  "compiler_version": "...",
+  "policy_version": "...",
+  "policy_hash": "...",
+  "module_graph_hash": "...",
+  "success": false,
+  "payload": {},
+  "diagnostics": []
+}
+```
+
+The closed operation set is:
+
+- `meta` for compiler, profile, policy, registry, limits, operation schemas,
+  built-in module catalog, and verifier discovery,
+- `features`, `restrictions`, and `describe_rule` for language discovery,
+- `modules` for resolution of one entry file,
+- `check` for source, type, effect, policy, and proof diagnostics,
+- `canonicalize` for compiler-authored rewrite candidates,
+- `simulate_edit` for diagnostic and policy non-regression,
+- `apply_repair` for atomic application of an exact validated repair,
+- `normalize` for canonical fixed-point validation,
+- and `verify` for one discovered property identifier and assurance grade.
+
+`meta.payload.operations` MUST provide the request and response schema for
+every operation. `meta.payload.verifiers` MUST enumerate each property
+identifier, required inputs, prerequisites, possible assurance grades, and
+result schema. An agent never chooses among undocumented verification commands.
+
+The project root is explicit and canonicalized before any file access. Request
+file paths resolve within that root. A relative source-module specifier
+resolves against the importing module's canonical directory and MUST remain
+within the permitted project boundary. The `modules` operation receives an
+entry file and returns:
+
+- the resolved relative module graph and source digests,
+- the built-in module registry,
+- authenticated `zttp-ext:*` manifests and implementation identities,
+- every resolution decision and rejected candidate,
+- and one digest of the complete resolved module environment.
+
+Checking, edit simulation, normalization, and verification MUST bind that
+complete `module_graph_hash`, not only the context-free built-in catalog.
+
+Within schema version 2, a field cannot be removed, renamed, or given a new
+meaning. Optional fields may be added. A breaking change requires a new schema
+version selected explicitly by the client. An agent that does not support the
+response schema, profile, or identity hashes MUST stop rather than infer a
 fallback.
+
+The agent transport emits only the response JSON on standard output. Logs go
+to standard error. Array order, diagnostic order, rewrite order, and serialized
+canonical source are deterministic for identical authenticated inputs.
 
 Every diagnostic MUST contain:
 
@@ -334,25 +413,49 @@ Every diagnostic MUST contain:
   semantic decision still required.
 
 Prose is never an executable repair. A mechanical repair MUST bind the source
-digest, original span content, replacement text, rule identifier, policy hash,
-and repair identifier. It may be applied only when the source still matches
-and edit simulation accepts it.
+digest, half-open byte span, original span digest or bytes, replacement text,
+diagnostic code, rule identifier, repair identifier, profile identity, policy
+hash, and module-graph hash.
 
-Canonicalization and normalization MUST be deterministic, terminating,
-semantics-preserving, and idempotent. If a proposed rewrite cannot establish
-those properties, the compiler MUST reject it as non-mechanical instead of
-guessing.
+Edit simulation establishes diagnostic and policy non-regression. It does not
+establish behavioral equivalence. Until a rewrite has a registered equivalence
+validator, `canonicalize` and `normalize` MUST report it as a proposed
+refactor, not a mechanical repair.
+
+Each `canonicalize` candidate carries a safety grade. An
+`equivalence_validated` candidate also carries the named validator, its
+authenticated inputs, and its result. Lower grades are never eligible for
+automatic application.
+
+`apply_repair` accepts only a repair with successful edit simulation and a
+named equivalence-validation result. It rechecks every bound identity and span,
+applies all replacements atomically, and returns the new source digest and
+recomputed complete module-graph hash. A mismatch or failed validation writes
+nothing.
+
+Advanced-profile mechanical normalization MUST be deterministic, terminating,
+semantics-preserving, and idempotent. If a rewrite cannot establish those
+properties, the compiler rejects it as non-mechanical instead of guessing.
+
+A structured unsupported result is distinct from an invalid program. It names
+the unsupported requirement or construct, governing rule when applicable,
+source span when available, missing semantic decision or evidence, and allowed
+next actions. It never includes a guessed replacement.
 
 The canonical repair loop is bounded:
 
 1. discover the active profile,
 2. generate or edit canonical source,
-3. check and classify every diagnostic,
-4. simulate exact repairs,
-5. apply repairs whose source bindings still match,
-6. normalize to a fixed point,
-7. recheck and run the requested verifier,
-8. stop successfully, or return a structured unsupported result.
+3. resolve and bind the complete module graph,
+4. check and classify every diagnostic,
+5. simulate and equivalence-validate exact repairs,
+6. apply repairs whose source and identity bindings still match,
+7. accept the returned post-edit source and module-graph identities,
+8. normalize to a fixed point, routing any required rewrite back through
+   simulation and atomic application,
+9. recheck against the latest identities and invoke `verify` with a discovered
+   property identifier,
+10. stop successfully, or return a structured unsupported result.
 
 The profile registry declares the maximum repair iterations and tool calls for
 each conformance task class. Repeated diagnostics, stale edits, a non-convergent
@@ -412,6 +515,7 @@ The profile permits:
 - `const` for every binding that is assigned once
 - `let` only when the binding is reassigned
 - named function declarations for reusable behavior
+- trailing parameters with closed compile-time scalar defaults
 - direct arrow expressions only as arguments to typed, finite callback APIs
 - one-level object or array destructuring
 - one leading object spread followed by explicit fields
@@ -420,7 +524,7 @@ It excludes:
 
 - `var`
 - nested or rest destructuring
-- rest and default parameters
+- rest parameters, non-trailing defaults, and runtime-evaluated defaults
 - function expressions
 - reusable or exported arrow helpers
 - object methods, getters, and setters
@@ -428,6 +532,31 @@ It excludes:
 
 Object literals contain data fields only. Reusable behavior is a named
 function with explicit inputs and outputs.
+
+A default parameter has the form:
+
+```ts
+function pageSize(limit: number = 50): number {
+  return limit;
+}
+```
+
+The default expression MUST be accepted by `comptime()`, be assignable to the
+declared parameter type, and produce only `null`, a boolean, a finite number, a
+string, or a `distinct type` over one of those scalar values. Arrays, records,
+`Bytes`, `Dict`, closures, capabilities, and other identity-bearing or
+resource-owning values are excluded. Once a parameter has a default, every
+following parameter MUST also have a default.
+
+The form elaborates locally to a `T | undefined` ingress value and one
+embedded constant selected before body entry. Omission and an explicit
+`undefined` select the precomputed default; the function body sees the declared
+non-optional type. There is no runtime default evaluation, allocation, effect,
+halt, or resource-order question.
+The checked declaration and module registry record its minimum and maximum
+arity. A call may omit only trailing defaulted positions. When the function is
+viewed through a fixed-arity function type, omission is not inferred from that
+type alone.
 
 ### 5.3 Values
 
@@ -490,12 +619,14 @@ The profile permits:
 - direct and optional static member access
 - numeric array and tuple indexing
 - literal bracket access to a quoted fixed record field
-- calls with fixed positional arguments
+- calls with fixed positional arguments, with omission only for trailing
+  defaulted parameters
 - array and record literals
 - finite array spread
 - one leading record spread
-- simple template interpolation
-- `??`, `?.`, and the pipe operator
+- pure template interpolation
+- `??` and `?.`
+- pure boolean conditional expressions
 - `comptime()` over closed, pure expressions
 - `match` expressions
 - TSX expressions
@@ -508,7 +639,6 @@ The profile excludes:
 - compound and logical assignment
 - increment and decrement
 - comma and sequence expressions
-- ternaries
 - call spread
 - dynamic record property access
 - regex literals and the ambient `RegExp` constructor
@@ -517,19 +647,48 @@ The profile excludes:
 - `this` and `super`
 - `yield`, generators, `async`, `await`, and `Promise`
 
-Conditions in `if` and `assert`, operands of boolean operators, and predicate
-callback results MUST have type `boolean`. There is no general truthiness
-conversion. Optional values narrow through explicit comparisons with
-`undefined` or `null`.
+Conditions in `if`, `assert`, and `?:`, operands of boolean operators, and
+predicate callback results MUST have type `boolean`. There is no general
+truthiness conversion. Optional values narrow through explicit comparisons
+with `undefined` or `null`.
+
+`condition ? whenTrue : whenFalse` is the canonical two-way pure value
+selection. Exactly one branch is evaluated. Both branches MUST be pure and
+their result type MUST use the join below. Use `if` when a branch contains
+statements or effects, and `match` for exhaustive multi-way selection.
+
+The result type is the deterministic join `join(A, B)`:
+
+1. Remove `never`; if both sides were `never`, return `never`, and if one side
+   remains, use it.
+2. If the types are identical, use that type.
+3. If both are mutually assignable, use the one with the lower stable
+   type-graph identity.
+4. If exactly one type is assignable to the other, use the receiving type.
+5. Otherwise form and canonically normalize `A | B`.
+
+Union normalization flattens nested unions, removes `never` and duplicate
+canonical type identities, coalesces mutually assignable members to the lowest
+stable identity, removes a member strictly assignable to another member, and
+sorts remaining members by stable type-graph identity.
+Literals do not widen unless a branch already supplies a receiving wider type.
+`null`, `undefined`, distinct types, and generic variables retain their own
+identities unless the ordinary assignability rules remove them. A contextual
+expected type does not change the join; assignability to it is checked
+afterward.
+
+The stable type-graph identity is derived from the profile's canonical type
+serialization, never from allocation or encounter order.
 
 The pure intrinsic `String(value)` is the explicit conversion from a number or
 boolean to text. Number formatting uses the ECMAScript base-10
 shortest-round-trip representation; negative zero renders as `0`. This is the
 only scalar-to-text spelling; instance `.toString()` conversion is excluded.
 
-Template interpolation MUST contain a local, literal, or static property
-read whose type is `string`. Every other expression, pure or effectful, MUST
-be converted if necessary and hoisted to a named `const`.
+Template interpolation MAY contain any pure expression of type `string`.
+Numbers and booleans use explicit `String(...)` inside the interpolation.
+An effectful expression MUST be evaluated into a named `const` before the
+template so effect order remains visible.
 
 ### 5.5 Control flow
 
@@ -592,14 +751,17 @@ Rules:
 `assert predicate;` declares an invariant. It installs forward narrowing or
 halts with a typed runtime assertion fault.
 
-`assert predicate, fallback;` returns `fallback` from the enclosing function
-when the predicate is false. The fallback type MUST be assignable to the
-enclosing return type. This form is an expected early-return guard, not an
-invariant fault and not a caller-recoverable result.
+`assert` has no fallback form. Expected early return uses explicit ordinary
+control flow:
 
-Use `Result` when the caller can recover. Use a fallback assertion when the
-current function must return immediately. Use a bare assertion only for a
-violated programmer invariant.
+```ts
+if (!predicate) {
+  return fallback;
+}
+```
+
+Use `Result` when the caller can recover. Use `assert` only for a programmer
+invariant whose violation is a typed runtime assertion fault.
 
 #### `for...of`
 
@@ -1210,9 +1372,11 @@ TypeParams   ::= "<" TypeParam ("," TypeParam)* ">"
 TypeParam    ::= Ident ["extends" Type]
 
 FunctionDecl ::= "function" Ident TypeParams?
-                 "(" Params? ")" ":" ReturnType Block
-Params       ::= Param ("," Param)* [","]
-Param        ::= Ident ":" Type
+                 "(" DeclParams? ")" ":" ReturnType Block
+DeclParams   ::= DeclParam ("," DeclParam)* [","]
+DeclParam    ::= Ident ":" Type ["=" Expr]
+ValueParams  ::= ValueParam ("," ValueParam)* [","]
+ValueParam   ::= Ident ":" Type
 ReturnType   ::= Type | TypePredicate
 TypePredicate ::= Ident "is" Type
 
@@ -1231,7 +1395,7 @@ Stmt         ::= BindingDecl
                | Expr ";"
                | IfStmt
                | "for" "(" ("const" | "let") Bind "of" Expr ")" Block
-               | "assert" Expr ["," Expr] ";"
+               | "assert" Expr ";"
                | "return" [Expr] ";"
                | "break" ";"
                | "continue" ";"
@@ -1245,7 +1409,8 @@ AssignableSuffix ::= "." Ident
                    | "[" Expr "]"
                    | TypeArgs? "(" [Args] ")"
 
-Expr         ::= ArrowExpr | BinaryExpr
+Expr         ::= ArrowExpr | ConditionalExpr
+ConditionalExpr ::= BinaryExpr ["?" Expr ":" ConditionalExpr]
 BinaryExpr   ::= UnaryExpr (BinaryOp UnaryExpr)*
 UnaryExpr    ::= UnaryOp UnaryExpr | PostfixExpr
 PostfixExpr  ::= PrimaryExpr PostfixSuffix*
@@ -1268,7 +1433,7 @@ BinaryOp     ::= "**" | "*" | "/" | "%"
                | "<" | "<=" | ">" | ">="
                | "===" | "!=="
                | "&" | "^" | "|"
-               | "&&" | "||" | "??" | "|>"
+               | "&&" | "||" | "??"
 
 ArrayExpr    ::= "[" [ArrayItem ("," ArrayItem)* [","]] "]"
 ArrayItem    ::= Expr | "..." Expr
@@ -1312,16 +1477,17 @@ LiteralType  ::= String | Number | "true" | "false"
 TupleType    ::= ["readonly"] "[" [Type ("," Type)* [","]] "]"
 RecordType   ::= "{" [RecordTypeField (";" RecordTypeField)* [";"]] "}"
 RecordTypeField ::= ["readonly"] PropertyName ["?"] ":" Type
-FunctionType ::= TypeParams? "(" [Params] ")" "=>" ReturnType
+FunctionType ::= TypeParams? "(" [ValueParams] ")" "=>" ReturnType
 ScalarType   ::= "number" | "string"
 ```
 
 Postfix operations bind most tightly. Binary precedence, from tightest to
 loosest, is exponentiation; multiplication; addition; shifts; comparisons;
 strict equality; bitwise AND, XOR, and OR; boolean AND and OR; nullish
-coalescing; then pipe. Exponentiation is right-associative. Every other binary
-operator is left-associative. Parentheses override precedence. An `LValue`
-cannot contain an optional-chain suffix.
+coalescing; then the conditional expression. Exponentiation and the
+conditional expression are right-associative. Every other binary operator is
+left-associative. Parentheses override precedence. An `LValue` cannot contain
+an optional-chain suffix.
 
 The complete parser specification must also define numeric literals, string
 escapes, Unicode identifiers, templates, patterns, and TSX without relying on
@@ -1338,14 +1504,15 @@ The advanced surface is intentionally richer than the executable kernel.
 | constrained generics | checker instantiation, then erasure |
 | contractive recursive aliases | finite named type graph, then erasure |
 | `distinct type` | nominal checker identity plus specified base-value constructor |
+| closed compile-time scalar default | optional ingress plus embedded constant selection |
 | optional member access | evaluate receiver once, branch on `null` or `undefined` |
 | nullish coalescing | evaluate left once, branch on `null` or `undefined` |
-| pipe | direct call with the prior value as the first argument |
+| pure conditional expression | evaluate the boolean condition and exactly one branch |
 | record spread | allocate fixed target shape, copy one base, write explicit fields |
 | array spread | finite snapshot concatenation |
 | destructuring | temporary binding plus fixed reads |
 | `match` | one scrutinee temporary plus ordered tested branches |
-| `assert` | branch to continuation or typed halt/return |
+| `assert` | branch to continuation or typed invariant halt |
 | `for...of` | finite snapshot plus index-controlled core loop |
 | array higher-order function | typed finite fold with explicit callback call |
 | `Result` | tagged record union |
@@ -1379,9 +1546,9 @@ The kernel needs only:
 - capability call
 - structured parallel and race operation
 
-`match`, `for...of`, optional access, pipe, spread, destructuring, JSX,
-`Result`, and higher-order array methods are surface or library constructs,
-not distinct semantic foundations.
+`match`, `for...of`, conditional expressions, optional access, default
+parameters, spread, destructuring, JSX, `Result`, and higher-order array
+methods are surface or library constructs, not distinct semantic foundations.
 
 ### 10.2 Machine state
 
@@ -1505,7 +1672,8 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | regex literal or ambient `RegExp` | predictable resource use and analyzable validation | use string operations or schema validation |
 | `any`, type assertions (`as` and angle-bracket forms), `satisfies` | type evidence integrity | essential to the selected checker model |
 | loose equality and implicit coercion | visible type-directed branches | essential to sound narrowing |
-| ternary, compound assignment, default/rest parameters | one canonical spelling | language-simplicity choice |
+| effectful `?:`, compound assignment, rest parameters | visible evaluation and one mutation spelling | language-simplicity choice |
+| fallback `assert` | one explicit early-return spelling | use `if` plus `return` |
 | interface, enum, namespace, decorator | one closed data and module model | language-simplicity choice |
 | object methods, getters, setters | explicit functions and effects | language-simplicity choice |
 
@@ -1644,9 +1812,10 @@ requested property
 ```
 
 Nodes and edges use stable identifiers from versioned registries. A source
-repair is included only when it is mechanically valid and simulation-safe.
-Otherwise the graph states exactly what decision or evidence is missing. A
-human-readable rendering MUST be derivable from the same graph.
+repair is included only when it is mechanically valid, simulation-safe, and
+equivalence-validated. Otherwise the graph states exactly what decision or
+evidence is missing. A human-readable rendering MUST be derivable from the
+same graph.
 
 The explanation graph makes a result diagnosable and repairable. It is not
 itself proof and cannot strengthen the grade of its enclosing artifact.
@@ -1667,6 +1836,10 @@ The advanced profile is ready to ship only when all gates are true.
 - Generic functions instantiate soundly and never fall back to `unknown`.
 - `Result`, `Dict`, recursive aliases, `null`, `Bytes`, higher-order arrays,
   and structured-I/O tuples are fully typed.
+- The version-2 agent envelope, complete module-graph identity, atomic repair
+  application, and unified property verification operation are implemented.
+- Version-1 JSON surfaces remain explicitly distinguishable and cannot be
+  mistaken for advanced-profile results.
 
 ### 14.2 Agent gate
 
@@ -1681,9 +1854,9 @@ tasks cover:
 - behavior-preserving refactoring,
 - and explicit recognition of unsupported requirements.
 
-Each client begins with the user task and `zts meta --json`, not hidden syntax
-instructions. It must discover every other language fact through the
-normative agent protocol.
+Each client begins with the user task and the version-2 `meta` operation
+through `zts agent --stdin-json`, not hidden syntax instructions. It must
+discover every other language fact through the normative agent protocol.
 
 For every corpus task declared supported:
 
@@ -1702,6 +1875,12 @@ calls, invalid-repair count, semantic-drift count, unsupported-task precision,
 and human-intervention count per client. Release requires zero invalid exact
 repairs, zero semantic drift, zero false success, and zero human syntax
 intervention across the corpus.
+
+The corpus also contains paired tasks for every admitted ZTS-specific form and
+every excluded high-frequency TypeScript alternative. A custom form or
+restriction remains only when it measurably reduces invalid generation or
+repair work, or when it is necessary for a named semantic, authority, or proof
+property that the familiar alternative cannot preserve.
 
 ### 14.3 Human-readability gate
 
@@ -1764,7 +1943,7 @@ The corpus MUST include:
 - named functions and direct typed callbacks
 - lexical closures
 - fixed records, arrays, tuples, and limited spread/destructuring
-- strict operators, optional chaining, nullish coalescing, and pipe
+- strict operators, optional chaining, and nullish coalescing
 - `if`, `match`, `assert`, snapshot-finite `for...of`
 - static named modules
 - aliases, unions, intersections, literals, readonly, optionals, nominal
@@ -1777,6 +1956,8 @@ The corpus MUST include:
 
 - sound generic-function inference and instantiation
 - limited `extends` constraints
+- pure boolean conditional expressions
+- trailing parameters with closed compile-time scalar defaults
 - contractive recursive aliases
 - precise `Result<T, E>`
 - immutable deterministic `Dict<K, V>`
@@ -1798,6 +1979,8 @@ The corpus MUST include:
 
 - reject object methods, getters, and setters at the parser boundary
 - treat reusable arrows as named functions
+- reserve `assert` for programmer invariants
+- use direct named calls instead of custom pipe syntax
 - reject ambient time, random, logging, and I/O
 - reject unchecked trapping operations at untrusted boundaries
 - make a closed profile registry the source of truth
@@ -1856,8 +2039,7 @@ function describeRatio(numerator: number, denominator: number): string {
 }
 
 function formatRatio(value: number): string {
-  const text = String(value);
-  return `ratio ${text}`;
+  return `ratio ${String(value)}`;
 }
 ```
 
@@ -1978,25 +2160,44 @@ function loadDashboard(): Effects<
 The tuple remains typed. The effect ceiling remains visible. No Promise or
 ambient scheduler enters the program.
 
-### 16.5 Agent repair sequence
+### 16.5 Familiar pure shorthand
+
+```ts
+function greeting(name: string, excited: boolean = false): string {
+  const punctuation = excited ? "!" : ".";
+  return `Hello, ${name}${punctuation}`;
+}
+```
+
+The default is a closed compile-time scalar, the conditional selects pure
+values, and the template preserves direct source order. None introduces a new
+kernel operation.
+
+### 16.6 Agent repair sequence
 
 An agent starts from the compiler, not from remembered TypeScript behavior:
 
 ```sh
-zts meta --json
-zts features --json
-zts modules --json
-zts check dashboard.ts --json
-zts canonicalize dashboard.ts --json --simulate
-zts normalize dashboard.ts --check --json
-zts check dashboard.ts --json
+zts agent --stdin-json < request-meta.json
+zts agent --stdin-json < request-modules.json
+zts agent --stdin-json < request-check.json
+zts agent --stdin-json < request-canonicalize.json
+zts agent --stdin-json < request-simulate-edit.json
+zts agent --stdin-json < request-apply-repair.json
+zts agent --stdin-json < request-normalize.json
+zts agent --stdin-json < request-recheck.json
+zts agent --stdin-json < request-verify.json
 ```
 
-The exact repair payload from `canonicalize` is applied only after its source
-digest and span still match and edit simulation accepts it. The final check
-must reference the same profile, policy, and module-registry identities
-discovered at the start. If a diagnostic requires a domain decision, the agent
-returns that structured decision point instead of synthesizing behavior.
+Each request uses the version-2 envelope and explicit project root.
+`canonicalize` emits the complete source-bound candidate; the agent passes it
+unchanged through simulation and atomic application. `apply_repair` rejects
+anything without a successful named equivalence validator.
+
+The final check and verification bind the same profile and policy, plus the
+latest complete module-graph identity returned after all applied source
+changes. If a diagnostic requires a domain decision, the agent returns that
+structured decision point instead of synthesizing behavior.
 
 ## 17. Final northstar
 

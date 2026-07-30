@@ -190,113 +190,14 @@ pub fn build(b: *std.Build) void {
     const proof_review_pkg_test_step = b.step("test-proof-review", "Run zttp proof-review package tests");
     proof_review_pkg_test_step.dependOn(&run_proof_review_pkg_tests.step);
 
-    const precompile_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/precompile.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    precompile_tests.root_module.addImport("zts", zts_host_mod);
-    const run_precompile_tests = b.addRunArtifact(precompile_tests);
-    const precompile_test_step = b.step("test-precompile", "Run precompile tool tests");
-    precompile_test_step.dependOn(&run_precompile_tests.step);
-
-    // Canonicalize/normalize tool tests. The tools `canonicalize.zig` is only
-    // reached through the `zts_cli` named module, so its `test {}` blocks are
-    // not collected by any other test root; this step roots at it directly.
-    const canonicalize_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/canonicalize.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    canonicalize_tests.root_module.addImport("zts", zts_host_mod);
-    // edit_simulate.zig (reached from canonicalize.zig's test graph) resolves
-    // the project SQL schema through the shared project_config module.
-    canonicalize_tests.root_module.addImport("project_config", project_config_mod);
-    const run_canonicalize_tests = b.addRunArtifact(canonicalize_tests);
-    const canonicalize_test_step = b.step("test-canonicalize", "Run canonicalize/normalize tool tests");
-    canonicalize_test_step.dependOn(&run_canonicalize_tests.step);
-
-    const prop_expect_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/property_expectations.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    prop_expect_tests.root_module.addImport("zts", zts_host_mod);
-    const run_prop_expect_tests = b.addRunArtifact(prop_expect_tests);
-    const prop_expect_test_step = b.step("test-property-expectations", "Run property expectations tool tests");
-    prop_expect_test_step.dependOn(&run_prop_expect_tests.step);
-
-    const rollout_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/system_rollout.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    rollout_tests.root_module.addImport("zts", zts_host_mod);
-    const run_rollout_tests = b.addRunArtifact(rollout_tests);
-    const rollout_test_step = b.step("test-rollout", "Run rollout planner tests");
-    rollout_test_step.dependOn(&run_rollout_tests.step);
-
-    const expert_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/expert.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    expert_tests.root_module.addImport("zts", zts_host_mod);
-    const run_expert_tests = b.addRunArtifact(expert_tests);
-    const expert_test_step = b.step("test-expert", "Run zts expert v1 contract tripwires");
-    expert_test_step.dependOn(&run_expert_tests.step);
-
-    // Analyzer dispatch + machine-command modules. zts_cli.zig and the
-    // command files it imports (describe_rule.zig, search_rules.zig, ...) are
-    // only reached through the `zts_cli` named module, which is never an
-    // addTest root, so their `test {}` blocks were collected by no suite. This
-    // step roots at the dispatcher directly. Same rationale as canonicalize_tests.
-    const zts_cli_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/zts_cli.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    zts_cli_tests.root_module.addImport("zts", zts_host_mod);
-    zts_cli_tests.root_module.addImport("project_config", project_config_mod);
-    const run_zts_cli_tests = b.addRunArtifact(zts_cli_tests);
-    const zts_cli_test_step = b.step("test-zts-cli", "Run analyzer dispatch + machine-command module tests");
-    zts_cli_test_step.dependOn(&run_zts_cli_tests.step);
-
-    const deploy_manifest_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = tools_dep.path("src/deploy_manifest.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    deploy_manifest_tests.root_module.addImport("zts", zts_host_mod);
-    const run_deploy_manifest_tests = b.addRunArtifact(deploy_manifest_tests);
-    const deploy_manifest_test_step = b.step("test-deploy-manifest", "Run deploy manifest renderer tests");
-    deploy_manifest_test_step.dependOn(&run_deploy_manifest_tests.step);
-
-    // Pi in-process tool registry tests. The pi package owns its own module
-    // graph; shared tool cores (expert_meta, verify_paths_core, etc.) are
-    // consumed through the `zts_cli` named module rather than relatively
-    // imported, so the file graphs stay disjoint.
+    // Host-side test roots for the tools and pi packages. Nine roots that
+    // differ only in source file, step name, description, and which extra
+    // modules they import, so they are declared as data and built in one loop.
+    //
+    // Several exist because their file is only reached through a *named module*
+    // (`zts_cli`), which is never an addTest root, so no other suite collects
+    // their `test {}` blocks. Rooting at the file directly is the only way they
+    // run at all; see the `collected_via_named_module` note on each entry.
     const pi_host_tools_dep = b.dependency("zttp_tools", .{
         .target = b.graph.host,
         .optimize = optimize,
@@ -304,40 +205,64 @@ pub fn build(b: *std.Build) void {
     });
     const pi_zts_cli_host_mod = pi_host_tools_dep.module("zts_cli");
     const pi_zts_expert_skill_host_mod = pi_host_tools_dep.module("zts_expert_skill");
-    const pi_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = pi_dep.path("src/tests.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    pi_tests.root_module.addImport("zts", zts_host_mod);
-    pi_tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
-    pi_tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
-    pi_tests.root_module.addImport("project_config", project_config_mod);
-    const run_pi_tests = b.addRunArtifact(pi_tests);
-    const expert_app_test_step = b.step("test-expert-app", "Run zts expert in-process app tests");
-    expert_app_test_step.dependOn(&run_pi_tests.step);
 
-    // Cassette harness tests. Focused subset that only covers the
-    // record/replay layer; runs offline, never needs an API key, and
-    // does not transitively pull in tools/skills tests so it stays fast.
-    const cassette_tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = pi_dep.path("src/cassette_tests.zig"),
-            .target = b.graph.host,
-            .optimize = optimize,
-            .link_libc = true,
-        }),
-    });
-    cassette_tests.root_module.addImport("zts", zts_host_mod);
-    cassette_tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
-    cassette_tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
-    cassette_tests.root_module.addImport("project_config", project_config_mod);
-    const run_cassette_tests = b.addRunArtifact(cassette_tests);
-    const cassette_test_step = b.step("test-cassette", "Run pi provider cassette harness tests (offline)");
-    cassette_test_step.dependOn(&run_cassette_tests.step);
+    const HostTestRoot = struct {
+        /// Which package owns the root source file.
+        owner: enum { tools, pi },
+        src: []const u8,
+        step: []const u8,
+        desc: []const u8,
+        /// `edit_simulate.zig` and the machine commands resolve the project SQL
+        /// schema through the shared project_config module.
+        project_config: bool = false,
+        /// The pi roots consume the shared tool cores through named modules
+        /// rather than relative imports, so their file graphs stay disjoint.
+        pi_modules: bool = false,
+    };
+
+    const host_test_roots = [_]HostTestRoot{
+        .{ .owner = .tools, .src = "src/precompile.zig", .step = "test-precompile", .desc = "Run precompile tool tests" },
+        // collected_via_named_module: canonicalize.zig is reached only through
+        // the `zts_cli` module, so this root is what runs its tests.
+        .{ .owner = .tools, .src = "src/canonicalize.zig", .step = "test-canonicalize", .desc = "Run canonicalize/normalize tool tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/property_expectations.zig", .step = "test-property-expectations", .desc = "Run property expectations tool tests" },
+        .{ .owner = .tools, .src = "src/system_rollout.zig", .step = "test-rollout", .desc = "Run rollout planner tests" },
+        .{ .owner = .tools, .src = "src/expert.zig", .step = "test-expert", .desc = "Run zts expert v1 contract tripwires" },
+        // collected_via_named_module: zts_cli.zig and the command files it
+        // imports (describe_rule.zig, search_rules.zig, ...) are reached only
+        // through the `zts_cli` module. Same rationale as canonicalize.
+        .{ .owner = .tools, .src = "src/zts_cli.zig", .step = "test-zts-cli", .desc = "Run analyzer dispatch + machine-command module tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/deploy_manifest.zig", .step = "test-deploy-manifest", .desc = "Run deploy manifest renderer tests" },
+        .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true },
+        // Focused subset covering only the record/replay layer: runs offline,
+        // never needs an API key, and does not transitively pull in the
+        // tools/skills tests, so it stays fast.
+        .{ .owner = .pi, .src = "src/cassette_tests.zig", .step = "test-cassette", .desc = "Run pi provider cassette harness tests (offline)", .project_config = true, .pi_modules = true },
+    };
+
+    var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
+    for (host_test_roots, 0..) |root, i| {
+        const owner_dep = switch (root.owner) {
+            .tools => tools_dep,
+            .pi => pi_dep,
+        };
+        const tests = b.addTest(.{
+            .root_module = b.createModule(.{
+                .root_source_file = owner_dep.path(root.src),
+                .target = b.graph.host,
+                .optimize = optimize,
+                .link_libc = true,
+            }),
+        });
+        tests.root_module.addImport("zts", zts_host_mod);
+        if (root.project_config) tests.root_module.addImport("project_config", project_config_mod);
+        if (root.pi_modules) {
+            tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
+            tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
+        }
+        host_test_runs[i] = b.addRunArtifact(tests);
+        b.step(root.step, root.desc).dependOn(&host_test_runs[i].step);
+    }
 
     const capability_audit = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" });
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
@@ -712,12 +637,7 @@ pub fn build(b: *std.Build) void {
     // import from main.zig collects none of its tests. Measured at 521 tests
     // with and without that import. `zig build test-zruntime` is the only step
     // that runs that root, and `scripts/verify.sh` runs it separately.
-    unit_tests.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
-        .imports = &.{
-            .{ .name = "zts", .module = zts_mod },
-        },
-    });
+    attachEmbeddedHandlerStub(unit_tests, runtime_dep, zts_mod);
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
     // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
@@ -729,12 +649,7 @@ pub fn build(b: *std.Build) void {
             .mode = .simple,
         },
     });
-    cli_tests.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
-        .imports = &.{
-            .{ .name = "zts", .module = zts_mod },
-        },
-    });
+    attachEmbeddedHandlerStub(cli_tests, runtime_dep, zts_mod);
     const run_cli_tests = b.addRunArtifact(cli_tests);
     const cli_test_step = b.step("test-cli", "Run developer CLI unit tests");
     cli_test_step.dependOn(&run_cli_tests.step);
@@ -742,15 +657,8 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_cli_tests.step);
-    test_step.dependOn(&run_precompile_tests.step);
-    test_step.dependOn(&run_canonicalize_tests.step);
-    test_step.dependOn(&run_prop_expect_tests.step);
-    test_step.dependOn(&run_rollout_tests.step);
-    test_step.dependOn(&run_expert_tests.step);
-    test_step.dependOn(&run_zts_cli_tests.step);
-    test_step.dependOn(&run_pi_tests.step);
-    test_step.dependOn(&run_cassette_tests.step);
-    test_step.dependOn(&run_deploy_manifest_tests.step);
+    // Every host test root from the table above; the aggregate runs all nine.
+    for (host_test_runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
     // The docs drift and link gates run here, and only here: neither Run step is
     // cached, so `zig build test` always executes both scripts. CI and
@@ -771,12 +679,7 @@ pub fn build(b: *std.Build) void {
     const zruntime_tests = b.addTest(.{
         .root_module = runtime_dep.module("zruntime"),
     });
-    zruntime_tests.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
-        .imports = &.{
-            .{ .name = "zts", .module = zts_mod },
-        },
-    });
+    attachEmbeddedHandlerStub(zruntime_tests, runtime_dep, zts_mod);
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
@@ -791,12 +694,7 @@ pub fn build(b: *std.Build) void {
     const server_tests = b.addTest(.{
         .root_module = runtime_dep.module("server_tests"),
     });
-    server_tests.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_dep.path("src/embedded_handler_stub.zig"),
-        .imports = &.{
-            .{ .name = "zts", .module = zts_mod },
-        },
-    });
+    attachEmbeddedHandlerStub(server_tests, runtime_dep, zts_mod);
     const run_server_tests = b.addRunArtifact(server_tests);
     const server_test_step = b.step("test-server", "Run server/runtime facade integration tests");
     server_test_step.dependOn(&run_server_tests.step);
@@ -807,12 +705,7 @@ pub fn build(b: *std.Build) void {
         .name = "zttp-bench",
         .root_module = runtime_bench_dep.module("benchmark"),
     });
-    bench_exe.root_module.addAnonymousImport("embedded_handler", .{
-        .root_source_file = runtime_bench_dep.path("src/embedded_handler_stub.zig"),
-        .imports = &.{
-            .{ .name = "zts", .module = zts_bench_mod },
-        },
-    });
+    attachEmbeddedHandlerStub(bench_exe, runtime_bench_dep, zts_bench_mod);
     // Bench is not installed by default. `zig build bench` still builds and
     // runs it; the artifact is available via the cache or an explicit install.
 
@@ -925,6 +818,24 @@ pub fn build(b: *std.Build) void {
 /// Returns null on any failure (missing git, detached worktree, snapshot
 /// tarball with no .git directory). The caller treats null as "fall back to
 /// the precompile sentinel" rather than failing the build.
+/// Attach the `embedded_handler` stub that every runtime-rooted test and bench
+/// target needs. A production build replaces this import with the precompiled
+/// handler bytecode (`-Dhandler`); a test build has no handler, so it resolves
+/// to the stub. The `zts` module must be the one matching the target's optimize
+/// mode, or the module graph collides (see the zts_bench_dep comment).
+fn attachEmbeddedHandlerStub(
+    compile: *std.Build.Step.Compile,
+    owner_dep: *std.Build.Dependency,
+    zts_module: *std.Build.Module,
+) void {
+    compile.root_module.addAnonymousImport("embedded_handler", .{
+        .root_source_file = owner_dep.path("src/embedded_handler_stub.zig"),
+        .imports = &.{
+            .{ .name = "zts", .module = zts_module },
+        },
+    });
+}
+
 fn detectGitCommit(b: *std.Build) ?[]const u8 {
     const result = std.process.run(b.allocator, b.graph.io, .{
         .argv = &.{ "git", "rev-parse", "--short=12", "HEAD" },

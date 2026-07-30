@@ -1271,9 +1271,26 @@ passing.
    invariant in `build.zig` and in the `verify.sh` header so it does not come back. Cost:
    a drift failure now surfaces inside the aggregate test job rather than under its own CI
    step label.
-3. Table-drive the nine host-tool and pi test roots and the five `embedded_handler` stub
-   attachments in `build.zig`. About 150 to 180 lines of 972.
-4. Delete the three unused package-local `test` steps.
+3. DONE. The nine host-tool and pi roots are a `HostTestRoot` table plus one loop, and the
+   five stub attachments are one `attachEmbeddedHandlerStub` helper. build.zig 1,025 to 936
+   lines; the 148-line root block became 73. The aggregate `test` step now depends on the
+   collected run steps rather than nine named ones. Each of the nine steps was invoked
+   individually after the change, since a table that silently drops a step would still
+   build. The per-root comments that carry real information were kept as table-entry
+   comments: four of these roots exist only because their file is reached through a named
+   module, which is never an addTest root, so nothing else collects their tests.
+
+   Measurement note for whoever runs `zig build bench-check`: it fails on `intArithmetic`
+   with a ~13% regression against `benchmarks/perf-baseline.json`, and that is neither new
+   nor caused by this wave. Measured on one machine, three runs each: HEAD gives 19.17,
+   19.31, and 19.86 M ops/sec, and the session-start commit `f216123a` gives 19.23, 20.33,
+   and 19.87 - the same range. The committed baseline of 22.40 M (promoted by `b768385e`,
+   the JIT removal) is simply not reproducible here. Do not re-promote a baseline from a
+   loaded laptop; attribute it on the bench machine first.
+4. DONE, earlier and unrecorded. Commit `21cd9522` removed the package-local `test` steps
+   in modules, proof-review, and zttp-sdk, along with the scaffolding they orphaned (two
+   dead addTest blocks, their run artifacts, and a duplicate test-shim module). No package
+   `build.zig` declares a test step today, and all three still configure standalone.
 5. DONE. Both files had zero test blocks. `witnesses_cli.zig` was genuinely unreachable for
    test collection, not merely untested: Zig's lazy analysis never reached it because `run` is
    referenced only from a `dev_cli` dispatch branch no test calls, so a test there moved the
