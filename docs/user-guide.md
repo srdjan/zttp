@@ -365,7 +365,8 @@ the analyzer. It checks:
   where enough structure is visible.
 
 The proof card shows the current verdict and the property chips. See
-[Proof Card](proof-card.md), [Verification](verification.md), and
+[Proofs and Receipts](proofs-and-receipts.md#reading-the-proof-card),
+[Verification](verification.md), and
 [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md).
 
 ## Tests And Replay
@@ -388,7 +389,7 @@ zig build -Dhandler=src/handler.ts -Dreplay=traces.jsonl
 ```
 
 Persisted counterexamples live in the witness corpus and can be inspected with
-`zttp witnesses`. See [Witnesses](witnesses.md).
+`zttp witnesses`. See [Witness Corpus](proofs-and-receipts.md#witness-corpus).
 
 ## Deploy And Verify
 

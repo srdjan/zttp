@@ -265,7 +265,8 @@ also accounts for every helper it transitively calls. `zts check
 Counterexample-rich specs additionally feed a persistent on-disk
 corpus. Each falsifying input the analyzer materialises is written
 under `.zttp/witnesses/<short_hash>/` so the same logical leak does
-not need to be rediscovered next session. See [witnesses.md](witnesses.md)
+not need to be rediscovered next session. See
+[Witness Corpus](proofs-and-receipts.md#witness-corpus)
 for layout, CLI (`zttp witnesses`), and agent tool (`pi_witnesses`).
 
 ### 10. Capability Capsules

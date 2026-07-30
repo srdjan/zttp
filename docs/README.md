@@ -36,9 +36,9 @@ path.
   comparison diagnostics.
 - [Canonical Profile](canonical-profile.md) - canonical ZigTS rules and
   `zttp normalize`.
-- [Proof Card](proof-card.md), [Proof Gate](proof-gate.md),
-  [Counterexamples](counterexamples.md), and [Witnesses](witnesses.md) -
-  proof UI, pull-request gates, failing inputs, and persisted witness corpus.
+- [Proofs and Receipts](proofs-and-receipts.md) - the proof card, the
+  counterexample block, the persisted witness corpus, and the pull-request
+  proof gate.
 - [Edge Runtime](edge.md) - optional in-process multi-handler router.
 - [Performance](performance.md) - current benchmark claims and tuning notes.
 - [Reliability](reliability.md) - limits, failure behavior, and exit codes.

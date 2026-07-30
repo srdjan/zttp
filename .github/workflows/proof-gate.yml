@@ -4,7 +4,7 @@ name: Proof Gate
 # comment and fails the check when a change is `breaking` or the proof gate
 # itself errors. The verdict (equivalent / additive / breaking) is the
 # compiler's answer to "is this safe to merge?", computed by
-# `zttp proofs gate`. See docs/proof-gate.md.
+# `zttp proofs gate`. See docs/proofs-and-receipts.md.
 
 on:
   pull_request:

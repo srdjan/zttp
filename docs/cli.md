@@ -264,7 +264,7 @@ every corpus directory found. Flow-rich specs populate the corpus automatically
 through the analyzer; `synthesize` seeds a structural witness for a cause-only
 spec (`deterministic`, `read_only`, `retry_safe`, `idempotent`,
 `state_isolated`, `fault_covered`) from the per-property suggestion in
-spec discharge. See [Witnesses](witnesses.md).
+spec discharge. See [Witness Corpus](proofs-and-receipts.md#witness-corpus).
 
 ## Analyzer Commands
 

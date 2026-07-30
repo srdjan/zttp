@@ -265,7 +265,7 @@ prose_docs="docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md"
 prose_bans=(
   "fixed	src/generated/embedded_handler.zig	$prose_docs	-	docs reference obsolete src/generated/embedded_handler.zig"
   "fixed	docs/capabilities.md	$prose_docs	-	docs reference obsolete docs/capabilities.md"
-  "fixed	zttp mock --replay	$prose_docs	^docs/witnesses.md:	docs advertise unsupported zttp mock --replay"
+  "fixed	zttp mock --replay	$prose_docs	^docs/proofs-and-receipts.md:	docs advertise unsupported zttp mock --replay"
   "fixed	std.net	docs/internals/architecture.md	-	architecture docs still describe the HTTP server as std.net"
   "fixed	zero external dependencies	docs/internals/architecture.md	-	architecture docs still claim zero external dependencies"
   "fixed	threaded and evented I/O paths	docs/performance.md	-	performance docs still claim evented request path support"
