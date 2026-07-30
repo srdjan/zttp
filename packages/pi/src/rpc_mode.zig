@@ -33,6 +33,7 @@ const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
 const json_writer = @import("providers/anthropic/json_writer.zig");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 const Registry = registry_mod.Registry;
 const ExpertFlags = app.ExpertFlags;
@@ -284,10 +285,9 @@ fn handleSessionInfo(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll("{\"session_id\":");
     if (session.session_id) |sid| try json_writer.writeString(w, sid) else try w.writeAll("null");
@@ -305,8 +305,7 @@ fn handleSessionInfo(
     try w.print("{d}", .{session.token_totals.cache_creation_input_tokens});
     try w.writeAll("}}");
 
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    try emitResultRaw(allocator, out, id, buf.written());
 }
 
 fn handleModelList(
@@ -315,10 +314,9 @@ fn handleModelList(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeByte('[');
     if (session.activeProvider()) |provider| {
@@ -339,8 +337,7 @@ fn handleModelList(
     }
     try w.writeByte(']');
 
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    try emitResultRaw(allocator, out, id, buf.written());
 }
 
 fn handleModelSet(
@@ -376,10 +373,9 @@ fn handleSkillsList(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeByte('[');
     inline for (skills_catalog.catalog, 0..) |s, i| {
@@ -392,8 +388,7 @@ fn handleSkillsList(
     }
     try w.writeByte(']');
 
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    try emitResultRaw(allocator, out, id, buf.written());
 }
 
 fn handleTemplatesList(
@@ -401,10 +396,9 @@ fn handleTemplatesList(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeByte('[');
     inline for (prompts_catalog.catalog, 0..) |t, i| {
@@ -417,8 +411,7 @@ fn handleTemplatesList(
     }
     try w.writeByte(']');
 
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    try emitResultRaw(allocator, out, id, buf.written());
 }
 
 fn handleTemplatesExpand(
@@ -461,10 +454,9 @@ fn handleToolsList(
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeByte('[');
     var emitted: usize = 0;
@@ -484,8 +476,7 @@ fn handleToolsList(
     }
     try w.writeByte(']');
 
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    try emitResultRaw(allocator, out, id, buf.written());
 }
 
 fn handleToolsInvoke(
@@ -528,10 +519,9 @@ fn handleToolsInvoke(
     };
     defer result.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (result.ok) "true" else "false");
     try w.writeAll(",\"llm_text\":");
@@ -544,8 +534,7 @@ fn handleToolsInvoke(
     }
     try w.writeByte('}');
 
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    try emitResultRaw(allocator, out, id, buf.written());
 }
 
 fn handleCompact(
@@ -586,18 +575,16 @@ fn handleTurn(
         try emitEntryNotification(allocator, out, tr.at(idx));
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     try w.writeAll("{\"appended\":");
     try w.print("{d}", .{tr.len() - start_len});
     try w.writeAll(",\"rendered\":");
     try json_writer.writeString(w, rendered);
     try w.writeByte('}');
 
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    try emitResultRaw(allocator, out, id, buf.written());
 
     // Auto-compact after the turn, mirroring the interactive REPL (repl.zig), so
     // a long-lived IDE session on the RPC surface never dead-ends on a
@@ -637,10 +624,9 @@ fn emitResultRaw(
     id: std.json.Value,
     result_json: []const u8,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
     try writeId(w, id);
@@ -648,8 +634,7 @@ fn emitResultRaw(
     try w.writeAll(result_json);
     try w.writeAll("}\n");
 
-    buf = aw.toArrayList();
-    try writeOut(out, buf.items);
+    try writeOut(out, buf.written());
 }
 
 fn emitResultString(
@@ -658,12 +643,10 @@ fn emitResultString(
     id: std.json.Value,
     s: []const u8,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try json_writer.writeString(&aw.writer, s);
-    buf = aw.toArrayList();
-    try emitResultRaw(allocator, out, id, buf.items);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try json_writer.writeString(buf.writer(), s);
+    try emitResultRaw(allocator, out, id, buf.written());
 }
 
 fn emitError(
@@ -673,10 +656,9 @@ fn emitError(
     code: i32,
     message: []const u8,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":");
     try writeId(w, id);
@@ -684,8 +666,7 @@ fn emitError(
     try json_writer.writeString(w, message);
     try w.writeAll("}}\n");
 
-    buf = aw.toArrayList();
-    try writeOut(out, buf.items);
+    try writeOut(out, buf.written());
 }
 
 fn emitErrorFmt(
@@ -752,23 +733,20 @@ fn emitNotification(
     out: ?*std.Io.Writer,
     record: session_events.EventRecord,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":");
     try session_events.writeEventLine(w, record);
-    // writeEventLine appends '\n'; strip it by overwriting and adding the
-    // closing brace + newline ourselves.
-    buf = aw.toArrayList();
     // Drop the trailing '\n' written by writeEventLine so the wrapping
-    // notification object stays on one line.
-    if (buf.items.len > 0 and buf.items[buf.items.len - 1] == '\n') {
-        _ = buf.pop();
+    // notification object stays on one line, then close it ourselves.
+    const written = buf.written();
+    if (written.len > 0 and written[written.len - 1] == '\n') {
+        buf.shrinkRetainingCapacity(written.len - 1);
     }
-    try buf.appendSlice(allocator, "}\n");
-    try writeOut(out, buf.items);
+    try w.writeAll("}\n");
+    try writeOut(out, buf.written());
 }
 
 // ---------------------------------------------------------------------------
@@ -842,7 +820,7 @@ fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
 fn driveWith(
     allocator: std.mem.Allocator,
     input: []const u8,
-    out: *std.Io.Writer.Allocating,
+    out: *TextBuffer,
 ) !void {
     var session = agent.AgentSession.initStub();
     defer session.deinit(allocator);
@@ -853,74 +831,68 @@ fn driveWithSession(
     allocator: std.mem.Allocator,
     session: *agent.AgentSession,
     input: []const u8,
-    out: *std.Io.Writer.Allocating,
+    out: *TextBuffer,
 ) !void {
     var reg = try buildMiniRegistry(allocator);
     defer reg.deinit(allocator);
 
     var reader: std.Io.Reader = .fixed(input);
-    try runWithSession(allocator, session, &reg, .auto_reject, &reader, &out.writer);
+    try runWithSession(allocator, session, &reg, .auto_reject, &reader, out.writer());
 }
 
 test "rpc: shutdown returns ok and stops the loop" {
     const allocator = testing.allocator;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"shutdown\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session.info\"}\n",
-        &aw,
+        &buf,
     );
 
-    buf = aw.toArrayList();
     // First response must be for id=1 shutdown; the second request must be
     // ignored because the loop exits.
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":1") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"result\":\"ok\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":2") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"id\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"result\":\"ok\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"id\":2") == null);
 }
 
 test "rpc: parse error yields id null and code -32700" {
     const allocator = testing.allocator;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{not json\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":-32700") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":null") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"result\":\"ok\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"code\":-32700") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"id\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"result\":\"ok\"") != null);
 }
 
 test "rpc: unknown method returns -32601" {
     const allocator = testing.allocator;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"no.such.thing\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":-32601") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":\"x\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"code\":-32601") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"id\":\"x\"") != null);
 }
 
 test "rpc: model.list filters models to the active provider" {
@@ -932,46 +904,40 @@ test "rpc: model.list filters models to the active provider" {
     {
         var session = try agent.AgentSession.initAnthropic(allocator, "k", "p", null);
         defer session.deinit(allocator);
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-        try driveWithSession(allocator, &session, input, &aw);
-        buf = aw.toArrayList();
-        try testing.expect(std.mem.indexOf(u8, buf.items, "claude-sonnet-4-6") != null);
-        try testing.expect(std.mem.indexOf(u8, buf.items, "gpt-4o-mini") == null);
+        var buf = TextBuffer.init(allocator);
+        defer buf.deinit();
+        try driveWithSession(allocator, &session, input, &buf);
+        try testing.expect(std.mem.indexOf(u8, buf.written(), "claude-sonnet-4-6") != null);
+        try testing.expect(std.mem.indexOf(u8, buf.written(), "gpt-4o-mini") == null);
     }
 
     {
         var session = try agent.AgentSession.initOpenAI(allocator, "k", "p", null);
         defer session.deinit(allocator);
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-        try driveWithSession(allocator, &session, input, &aw);
-        buf = aw.toArrayList();
-        try testing.expect(std.mem.indexOf(u8, buf.items, "gpt-4o-mini") != null);
-        try testing.expect(std.mem.indexOf(u8, buf.items, "claude-") == null);
-        try testing.expect(std.mem.indexOf(u8, buf.items, "\"max_output_tokens\":8192") != null);
+        var buf = TextBuffer.init(allocator);
+        defer buf.deinit();
+        try driveWithSession(allocator, &session, input, &buf);
+        try testing.expect(std.mem.indexOf(u8, buf.written(), "gpt-4o-mini") != null);
+        try testing.expect(std.mem.indexOf(u8, buf.written(), "claude-") == null);
+        try testing.expect(std.mem.indexOf(u8, buf.written(), "\"max_output_tokens\":8192") != null);
     }
 }
 
 test "rpc: model methods expose no models without an active provider" {
     const allocator = testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.list\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"model.set\",\"params\":{\"id\":\"gpt-4o-mini\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":1,\"result\":[]") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"id\":2,\"error\":{\"code\":-32602") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "no active model provider") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"id\":1,\"result\":[]") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"id\":2,\"error\":{\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "no active model provider") != null);
 }
 
 test "rpc: model.set preserves invalid-params and session state on provider mismatch" {
@@ -981,18 +947,16 @@ test "rpc: model.set preserves invalid-params and session state on provider mism
     const previous_model = session.backend.anthropic.config.model;
     const previous_budget = session.backend.anthropic.config.max_tokens;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
     try driveWithSession(
         allocator,
         &session,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.set\",\"params\":{\"id\":\"gpt-4o-mini\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"code\":-32602") != null);
     try testing.expectEqualStrings(previous_model, session.backend.anthropic.config.model);
     try testing.expectEqual(previous_budget, session.backend.anthropic.config.max_tokens);
 }
@@ -1002,18 +966,16 @@ test "rpc: model.set accepts an active-provider model and updates its request po
     var session = try agent.AgentSession.initAnthropic(allocator, "k", "p", null);
     defer session.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
     try driveWithSession(
         allocator,
         &session,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"model.set\",\"params\":{\"id\":\"claude-haiku-4-5-20251001\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"result\":\"claude-haiku-4-5-20251001\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"result\":\"claude-haiku-4-5-20251001\"") != null);
     try testing.expectEqualStrings("claude-haiku-4-5-20251001", session.backend.anthropic.config.model);
     try testing.expectEqual(@as(u32, 8_192), session.backend.anthropic.config.max_tokens);
 }
@@ -1021,130 +983,122 @@ test "rpc: model.set accepts an active-provider model and updates its request po
 test "rpc: skills.list and templates.list return catalog metadata" {
     const allocator = testing.allocator;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"skills.list\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"templates.list\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "handler-scaffold") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"name\":\"explain\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "handler-scaffold") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"name\":\"explain\"") != null);
 }
 
 test "rpc: templates.expand substitutes positional args" {
     const allocator = testing.allocator;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"templates.expand\",\"params\":{\"name\":\"review\",\"args\":[\"handler.ts\"]}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "handler.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "{{1}}") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "handler.ts") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "{{1}}") == null);
 }
 
 test "rpc: tools.list returns registered tool names" {
     const allocator = testing.allocator;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.list\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "zts_expert_meta") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"effect\":\"analyze\"") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "test_workspace_writer") == null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "test_process_runner") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "zts_expert_meta") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"effect\":\"analyze\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "test_workspace_writer") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "test_process_runner") == null);
 }
 
 test "rpc: session.info reports stub session fields" {
     const allocator = testing.allocator;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.info\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    buf = aw.toArrayList();
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"session_id\":null") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"transcript_len\":0") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.items, "\"input\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"session_id\":null") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"transcript_len\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"input\":0") != null);
 }
 
 test "rpc: turn missing params returns INVALID_PARAMS" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"turn\"}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"message\":\"missing params\"") != null);
 }
 
 test "rpc: turn missing text field returns INVALID_PARAMS" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"turn\",\"params\":{}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
     try testing.expect(std.mem.indexOf(u8, out, "missing text") != null);
 }
 
 test "rpc: turn with stub session emits event notifications and a final result" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"turn\",\"params\":{\"text\":\"hello\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     // user_text event notification for the prompt.
     try testing.expect(std.mem.indexOf(u8, out, "\"method\":\"event\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"k\":\"user_text\"") != null);
@@ -1156,85 +1110,85 @@ test "rpc: turn with stub session emits event notifications and a final result" 
 
 test "rpc: tools.invoke missing name returns INVALID_PARAMS" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
     try testing.expect(std.mem.indexOf(u8, out, "missing name") != null);
 }
 
 test "rpc: tools.invoke with unknown tool name surfaces as INVALID_PARAMS" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"no_such_tool\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
     try testing.expect(std.mem.indexOf(u8, out, "unknown tool: no_such_tool") != null);
 }
 
 test "rpc: tools.invoke rejects workspace writers before execution" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"test_workspace_writer\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
     try testing.expect(std.mem.indexOf(u8, out, "tool not available over rpc: test_workspace_writer") != null);
 }
 
 test "rpc: tools.invoke rejects process runners before execution" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"test_process_runner\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"code\":-32602") != null);
     try testing.expect(std.mem.indexOf(u8, out, "tool not available over rpc: test_process_runner") != null);
 }
 
 test "rpc: tools.invoke with known tool returns {ok, body}" {
     const allocator = testing.allocator;
-    var aw: std.Io.Writer.Allocating = .init(allocator);
-    defer aw.deinit();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     try driveWith(
         allocator,
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"zts_expert_meta\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
-        &aw,
+        &buf,
     );
 
-    const out = aw.writer.buffered();
+    const out = buf.written();
     try testing.expect(std.mem.indexOf(u8, out, "\"id\":1,\"result\":{\"ok\":true") != null);
     try testing.expect(std.mem.indexOf(u8, out, "compiler_version") != null);
 }
