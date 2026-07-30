@@ -188,44 +188,54 @@ done < <(git ls-files -z 'packages/modules/module-specs/*.json')
 [[ "$spec_count" == "$module_count" ]] ||
   fail "module specs have $spec_count modules, registry has $module_count"
 
-if grep -R "packages/runtime/src/generated/embedded_handler.zig" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md >/dev/null; then
-  fail "docs reference obsolete packages/runtime/src/generated/embedded_handler.zig"
-fi
+# ---------------------------------------------------------------------------
+# Prose bans.
+#
+# Each row is one accumulated one-off, as data rather than as another hand-
+# written if/grep block. Fields are tab-separated:
+#
+#   kind     fixed = literal substring (grep -F), regex = extended (grep -E)
+#   pattern  what must not appear
+#   paths    space-separated files/directories to search
+#   exclude  grep -E pattern for hits to ignore, or "-" for none
+#   message  what the author should do instead
+#
+# Retired when this became a table: a ban on the full path
+# "packages/runtime/src/generated/embedded_handler.zig", which the shorter
+# "src/generated/embedded_handler.zig" row already covers as a substring. Every
+# other row still has a live target - checked when the table was written; the
+# only absent file is docs/capabilities.md, which is exactly what its row
+# enforces.
+# ---------------------------------------------------------------------------
 
-if grep -R "src/generated/embedded_handler.zig" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md >/dev/null; then
-  fail "docs reference obsolete src/generated/embedded_handler.zig"
-fi
+prose_docs="docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md"
 
-if grep -R "docs/capabilities.md" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md >/dev/null; then
-  fail "docs reference obsolete docs/capabilities.md"
-fi
+prose_bans=(
+  "fixed	src/generated/embedded_handler.zig	$prose_docs	-	docs reference obsolete src/generated/embedded_handler.zig"
+  "fixed	docs/capabilities.md	$prose_docs	-	docs reference obsolete docs/capabilities.md"
+  "fixed	zttp mock --replay	$prose_docs	^docs/witnesses.md:	docs advertise unsupported zttp mock --replay"
+  "fixed	std.net	docs/internals/architecture.md	-	architecture docs still describe the HTTP server as std.net"
+  "fixed	zero external dependencies	docs/internals/architecture.md	-	architecture docs still claim zero external dependencies"
+  "fixed	threaded and evented I/O paths	docs/performance.md	-	performance docs still claim evented request path support"
+  # Front-door docs must link to the module catalog rather than restate its size,
+  # which is how the count drifted before the catalog became generated.
+  "regex	[0-9]+[^[:cntrl:]]*\`zttp:\\*\`[^[:cntrl:]]*modules|[0-9]+[^[:cntrl:]]*(native|built-in)[^[:cntrl:]]*modules[^[:cntrl:]]*\`zttp:\\*\`	README.md docs/README.md docs/user-guide.md docs/roadmap.md	-	front-door docs hardcode zttp:* module counts; link to docs/virtual-modules/README.md instead"
+)
 
-if grep -n "std.net" docs/internals/architecture.md >/dev/null; then
-  fail "architecture docs still describe the HTTP server as std.net"
-fi
-
-if grep -n "zero external dependencies" docs/internals/architecture.md >/dev/null; then
-  fail "architecture docs still claim zero external dependencies"
-fi
-
-if grep -n "threaded and evented I/O paths" docs/performance.md >/dev/null; then
-  fail "performance docs still claim evented request path support"
-fi
-
-module_count_refs="$(
-  grep -E -n '[0-9]+[^[:cntrl:]]*`zttp:\*`[^[:cntrl:]]*modules|[0-9]+[^[:cntrl:]]*(native|built-in)[^[:cntrl:]]*modules[^[:cntrl:]]*`zttp:\*`' \
-    README.md docs/README.md docs/user-guide.md docs/roadmap.md 2>/dev/null || true
-)"
-if [[ -n "$module_count_refs" ]]; then
-  fail "front-door docs hardcode zttp:* module counts; link to docs/virtual-modules/README.md instead"
-fi
-
-mock_replay_refs="$(
-  grep -R "zttp mock --replay" docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md 2>/dev/null |
-    grep -v '^docs/witnesses.md:' || true
-)"
-if [[ -n "$mock_replay_refs" ]]; then
-  fail "docs advertise unsupported zttp mock --replay"
-fi
+for row in "${prose_bans[@]}"; do
+  IFS=$'\t' read -r kind pattern paths exclude message <<<"$(printf '%b' "$row")"
+  case "$kind" in
+    fixed) hits="$(grep -R -n -F -- "$pattern" $paths 2>/dev/null || true)" ;;
+    regex) hits="$(grep -R -n -E -- "$pattern" $paths 2>/dev/null || true)" ;;
+    *) fail "unknown prose ban kind '$kind'" ;;
+  esac
+  if [[ "$exclude" != "-" ]]; then
+    hits="$(printf '%s\n' "$hits" | grep -v -E "$exclude" || true)"
+  fi
+  # An all-whitespace result means no hits survived the exclusion.
+  if [[ -n "${hits//[[:space:]]/}" ]]; then
+    fail "$message"
+  fi
+done
 
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

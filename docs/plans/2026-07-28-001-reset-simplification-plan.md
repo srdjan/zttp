@@ -1304,8 +1304,21 @@ passing.
    figure taken that way omits ~760 tests. Second, `zig build test-zruntime` is intermittently
    flaky on a loaded machine via a WebSocket callback timeout, and it failed twice in a row
    before passing three times with no change in between. Re-run before attributing a failure.
-6. Turn `scripts/check-docs-drift.sh`'s accumulated one-off regexes into a data table and
-   retire the bans whose docs no longer exist.
+6. DONE. The eight one-off if/grep blocks are one `prose_bans` table of seven rows
+   (kind, pattern, paths, exclude, message) driven by a single loop; the exclusion that
+   `zttp mock --replay` needs for `docs/witnesses.md` is a table field rather than a piped
+   `grep -v`. Only one ban was retired, and not for the stated reason: the full-path ban on
+   `packages/runtime/src/generated/embedded_handler.zig` was already covered as a substring
+   by the shorter `src/generated/embedded_handler.zig` row. Every other row still has a live
+   target - the only absent file is `docs/capabilities.md`, which is precisely what its row
+   enforces.
+
+   The gate that mattered here is that a data table can silently match nothing. Each of the
+   seven rows was verified to fire by appending a violating line to the real doc and
+   checking the script exits non-zero, plus the witnesses.md exclusion still passing and a
+   clean control. Two notes for whoever repeats that: `cp` is interactive in this shell, so
+   use `git checkout --` to restore, and check `git status` afterwards - a failed restore
+   silently poisons every later case.
 
 Gate: standard, plus identical collected-test counts before and after item 1.
 
