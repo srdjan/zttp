@@ -3,13 +3,16 @@
 **Status:** proposed language and assurance profile  
 **Profile name:** `zts-advanced-1`  
 **Grounded against:** ZTS 0.18.0, policy 2026.04.2, 2026-07-30  
-**Revision:** 3, 2026-07-30. Revision 2 applied the multi-lens design review:
+**Revision:** 4, 2026-07-30. Revision 2 applied the multi-lens design review:
 stronger `match`, effect-aware `Result` combinators, a completed pure
 standard surface, decidable canonical-choice rules, and a closed
-agent-protocol contract. Revision 3 raises the canonical-form law from
-"one spelling per operation" to "each thing exactly one way" by adding
-compositional uniqueness and its mechanical derivation table (Section
-4.2.1).  
+agent-protocol contract. Revision 3 pushed the canonical-form law to "each
+thing exactly one way" and added the rewrite table that would have been
+needed to enforce it. Revision 4 refines that law to Zig's "there is an
+idiomatic way to do it": the table becomes an idiom table, non-idiomatic
+spellings stay legal and advisory, and idiom becomes machine-discoverable
+because an agent-first language cannot inherit idiom from a community
+(Section 4.2).  
 **Relationship to the earlier northstar:** this document replaces its design
 claims, not its historical record. The earlier artifact remains useful context,
 but it does not define the advanced profile.
@@ -221,7 +224,7 @@ minimality measure.
 For each proposed feature, the profile must account for:
 
 - how an agent discovers it,
-- how many canonical choices it introduces,
+- how many spelling choices it leaves the author,
 - what new inference or proof state it adds,
 - how failure is identified and repaired,
 - and whether the same application need is already expressible by composition.
@@ -230,29 +233,52 @@ A familiar TypeScript form SHOULD win when it is equally precise,
 deterministic, and verifiable. A ZTS-specific form is justified only when it
 materially reduces ambiguity, authority, proof burden, or repair risk.
 
-### 4.2 One canonical source form
+### 4.2 There is an idiomatic way to do it
 
-Each thing that can be done can be done exactly one way. If two constructs
-express the same operation with no meaningful semantic difference, keep one.
+For every operation the profile admits, there is one idiomatic way to write
+it, and that way is discoverable from the compiler.
 
-The rule binds at two levels, and both are normative:
+This is an existence claim, not a uniqueness claim, and the difference is
+deliberate. An earlier formulation of this law demanded that each thing be
+expressible exactly one way. That target is unreachable in any language rich
+enough to be worth using: a standard library with `map`, `reduce`, and a loop
+can express one traversal several ways no matter how the surface is
+restricted, and eliminating the redundancy costs more expressiveness than the
+uniqueness is worth. Zig's own ethos made the same move, from "only one
+obvious way to do things" to "there is an idiomatic way to do it." ZTS
+follows it.
 
-1. **Syntactic uniqueness.** No two token-level forms denote the same
-   operation. This is enforced by exclusion: the rejected form is not in the
-   language.
-2. **Compositional uniqueness.** When one operation is reachable through more
-   than one composition of admitted forms, exactly one composition is
-   canonical and every other is mechanically rewritten to it. This is
-   enforced by canonicalization, not by exclusion, because removing the
-   general form would cost expressiveness the profile needs.
+The law binds at three levels:
 
-Level 2 is what keeps the rule true as the standard library grows: a richer
-operation set always adds derivation paths, so uniqueness is preserved by the
-normalizer rather than by restraint in the operation set. Section 4.2.1 is
-the normative table. An author's choice among derivable spellings never
-survives normalization, so it never becomes a decision an agent has to make.
+1. **Exclusion.** Where two token-level forms denote the same operation with
+   no semantic difference, the profile admits one and rejects the other. A
+   rejected form is an error with an exact repair. This is where `switch`,
+   compound assignment, `as`, and loose equality live.
+2. **Idiom.** Where one operation is reachable through more than one
+   composition of admitted forms, one composition is idiomatic. The others
+   remain legal: they check, they run, and they mean what they say. They are
+   reported as non-idiomatic with the idiomatic form named, at advisory
+   severity that never fails a build.
+3. **Normalization.** Where the rewrite from a non-idiomatic form to its
+   idiom is provably meaning-preserving, `canonicalize` and `normalize`
+   perform it, so the author's choice does not survive into the stored
+   source. Where it is not provable, the non-idiomatic form stands and the
+   advisory remains.
 
-Examples of level-1 uniqueness:
+Level 3 is a service, not an obligation. The profile does not require that
+every non-idiomatic spelling be mechanically rewritable, because a rewrite
+whose precondition cannot be discharged would either change behavior or
+block a legal program. What the profile does require is level 2: no
+operation lacks a published idiom.
+
+Two words are used precisely throughout this document and are not
+interchangeable. **Canonical** describes the output of the formatter and
+normalizer, which is unique to the byte and is what identity hashes bind.
+**Idiomatic** describes the preferred spelling among admitted alternatives,
+which is unique by declaration rather than by exclusion. Canonical source may
+still contain a non-idiomatic spelling that no registered rewrite covers.
+
+Examples of level-1 exclusion:
 
 - `match`, not `switch`
 - explicit assignment, not compound assignment or increment/decrement
@@ -270,25 +296,46 @@ The canonical formatter MUST produce one deterministic, idempotent source
 layout. Normalizing canonical source a second time MUST produce identical
 bytes.
 
-#### 4.2.1 Derived forms and mechanical canonicalization
+One adaptation separates this law from its Zig ancestor. A human-facing
+language can let idiom live in community convention, style guides, and
+reading other people's code. An agent-first language cannot: an agent has no
+community and does not read the ecosystem. Idiom that is not machine-readable
+is, for the profile's primary consumer, idiom that does not exist. Every
+idiom this profile declares MUST therefore be published in the registry and
+reachable through `meta`, with a stable identifier, the operation it covers,
+its idiomatic spelling, and the non-idiomatic spellings it supersedes. An
+agent asks the compiler what the idiomatic form is rather than inferring it
+from examples.
 
-Every entry below names one operation, its canonical spelling, the derivable
-spellings that `canonicalize` rewrites to it, and the precondition under
-which the rewrite preserves meaning. A rewrite whose precondition does not
-hold is not emitted, because a canonicalization that changes behavior would
-be worse than a second spelling. Each entry carries a registered equivalence
-validator and is eligible for automatic application under Section 4.8. The
-table is registry-generated and drift-gated; this document is its readable
-view.
+#### 4.2.1 The idiom table
 
-| Operation | Canonical spelling | Rewritten from | Precondition |
+Every entry below names one operation, its idiomatic spelling, the
+non-idiomatic spellings it supersedes, and the precondition under which a
+mechanical rewrite between them preserves meaning.
+
+The precondition governs level 3 only. Where it holds, `canonicalize` and
+`normalize` rewrite the non-idiomatic spelling and the author's choice
+disappears. Where it does not hold, the idiom still stands and is still
+reported, but the source is left alone, because a rewrite that changed
+behavior would be worse than a second spelling. `items.indexOf(v) !== -1` is
+non-idiomatic on every element type, and is rewritten to `includes` only when
+`NaN` cannot distinguish the two equalities.
+
+Rewrites that are emitted carry a registered equivalence validator and are
+eligible for automatic application under Section 4.8. The table is
+registry-generated and drift-gated; this document is its readable view.
+
+| Operation | Idiomatic spelling | Non-idiomatic | Rewrite precondition |
 |---|---|---|---|
 | absence default | `x ?? d` | `x === undefined ? d : x`, `x !== undefined ? x : d`, `match (x) { when undefined: d default: x }` | operand type excludes `null` and is neither a generic parameter nor `unknown` |
 | absent member read | `x?.f` | `x === undefined ? undefined : x.f` | same as above |
+| two-way pure selection | `c ? a : b` | a two-arm `match` over a `boolean` scrutinee whose arms are both pure | none |
+| record update | an explicit literal | a leading spread that overrides every field | the spread operand is pure |
 | number in text | `` `${n}` `` | `` `${String(n)}` `` | interpolation of a `number` |
 | scalar to text | `String(n)` | a template whose entire content is one `number` interpolation | value position outside a template |
 | redundant template | the interpolated expression itself | a template whose entire content is one `string` interpolation | value position outside a template, and the interpolation's static type is exactly `string` |
 | string concatenation | left-associated `a + b + c` | a template with no literal text and two or more interpolations, all `string` | value position outside a template |
+| array concatenation | `[...a, ...b]` | `a.concat(b)` | none |
 | membership test | `items.includes(v)` | `items.indexOf(v) !== -1`, `items.indexOf(v) >= 0` | element type excludes `number` (`NaN` distinguishes the two equalities) |
 | existence test | `items.some(p)` | `items.find(p) !== undefined` | element type excludes `undefined` |
 | dictionary membership test | `dictHas(d, k)` | `dictGet(d, k) !== undefined` | `V` excludes `undefined` |
@@ -297,51 +344,57 @@ view.
 | dictionary map | `dictMapValues(d, f)` | an entry round trip through `dictEntries` and `dictFromEntries` that changes only values | the rewrite spans the whole consumption site, including its `Result` handling |
 | dictionary filter | `dictFilter(d, p)` | an entry round trip that only drops entries | same as above |
 | dictionary fold | `dictFold(d, f, init)` | `dictEntries(d).reduce(...)` | the fold has one accumulator |
-| pure single-accumulator fold | `map`, then `filter`, then `some`, then `every`, then `find`, then `findIndex`, then `reduce`: the first that fits | `let` plus `for...of` with no `break`, `continue`, or effect | the body is pure and the loop head is already canonical under the element-iteration row |
-| pure search loop | `find`, `findIndex`, `some`, or `every`, by what the loop yields and whether its flag starts `false` or `true` | `let` plus `for...of` whose only early exit is `break` | the body is pure, carries one accumulator, uses no `continue`, and the loop head is already canonical under the element-iteration row |
+| pure single-accumulator fold | `map`, then `filter`, then `some`, then `every`, then `find`, then `findIndex`, then `reduce`: the first that fits | `let` plus `for...of` with no `break`, `continue`, or effect | the body is pure and the loop head is already idiomatic under the element-iteration row |
+| pure search loop | `find`, `findIndex`, `some`, or `every`, by what the loop yields and whether its flag starts `false` or `true` | `let` plus `for...of` whose only early exit is `break` | the body is pure, carries one accumulator, uses no `continue`, and the loop head is already idiomatic under the element-iteration row |
 | field read | `const id = user.id;`, or `const first = pair[0];` for a tuple | a one-field or one-element destructuring pattern | none |
 | multi-field read | `const { id, name } = user;`, or `const [first, second] = pair;` for a tuple | two or more member or fixed-tuple index reads of the same binding in one block | the binding's type is a single record type or a fixed tuple, and no narrowing guard separates the reads |
 | matched field read | a binding pattern field | a `match` arm that reads the field off the scrutinee | none |
 | binding field name | shorthand `{ value }` | `{ value: value }` | none |
 | element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items` | none |
 
-Three canonical choices in that table are decisions rather than derivations,
-recorded here so no reader has to infer them:
+Three entries are declared preferences rather than derivations, recorded here
+so no reader has to infer them:
 
-- `??` and `?.` are canonical for `undefined`-absence. The explicit
-  comparison is canonical wherever they are unavailable: when the operand
+- `??` and `?.` are idiomatic for `undefined`-absence. The explicit
+  comparison is idiomatic wherever they are unavailable: when the operand
   type includes `null` (Section 5.3), when the operand is generic or
   `unknown` and a later instantiation could admit `null`, and in
   `if`-position guards, where the comparison is a narrowing test rather than
   a value selection.
-- Array spread is canonical for concatenation, so the profile ships no
-  `concat` even though the live runtime has one. Spread is the familiar
-  TypeScript form under law 4.1 and it generalizes to element-and-array
-  mixtures that a two-argument helper cannot express.
-- A record spread is canonical whenever at least one field is inherited
+- Array spread is idiomatic for concatenation. `concat` stays in the
+  operation set because the live runtime ships it and removing it would
+  narrow the baseline, but spread is the familiar TypeScript form under law
+  4.1 and generalizes to element-and-array mixtures a two-argument helper
+  cannot express, so every `concat` call normalizes to a spread.
+- A record spread is idiomatic whenever at least one field is inherited
   unchanged, including when the result type widens the base's type with new
   fields. A spread that overrides every field inherits nothing and is
   rewritten to an explicit literal.
 
-Where a derivation row matches a site, it takes precedence over the
-branch-selection rule of Section 5.4, the iteration rule of Section 6.5, and
-the consumption procedure of Section 6.1. Those rules choose among forms of
-equal standing; this table resolves forms that are not.
+Where a row matches a site, it takes precedence over the branch-selection
+rule of Section 5.4, the iteration rule of Section 6.5, and the consumption
+procedure of Section 6.1. Those rules choose among forms of equal standing;
+this table resolves forms that are not.
 
 Rows compose, so normalization is a fixed-point computation rather than a
 single pass: a `let` loop over `dictEntries` becomes a `reduce` by one row
 and then `dictFold` by another. Rewrites apply innermost first, so a row that
 matches an interpolation fires before a row that matches the enclosing
 template, and a row that matches a loop head fires before a row that matches
-the loop. That order makes the table confluent: any two rows that can match
-one program reach the same fixed point. The profile registry publishes the
+the loop. The rewrite relation MUST be confluent under that order, including
+rows that only become applicable after an earlier rewrite fires: two rewrites
+that can match one program reach the same result. Confluence is required of
+the relation, not totality of the table, since a row whose precondition fails
+emits nothing and leaves a legal non-idiomatic form in place. The profile registry publishes the
 maximum pass count, and a second `normalize` of canonical source MUST produce
 identical bytes.
 
-A derivable spelling is never an error. It checks, runs, and means what it
-says; it simply is not the fixed point, so `normalize` replaces it. This is
-deliberate: a rewrite costs an agent nothing, while an exclusion would cost a
-diagnostic, a repair iteration, and a lost expressive path.
+A non-idiomatic spelling is never an error and never fails a build. It
+checks, runs, and means what it says. The profile reports it at advisory
+severity with its idiom named, rewrites it when the rewrite is provable, and
+otherwise leaves it in place. This is the cheaper trade in both directions: a
+rewrite costs an agent nothing, an advisory costs it one lookup, while an
+exclusion would cost a diagnostic, a repair iteration, and a legal program.
 
 ### 4.3 Local elaboration
 
@@ -461,7 +514,7 @@ The response envelope is:
 The closed operation set is:
 
 - `meta` for compiler, profile, policy, registry, limits, operation schemas,
-  built-in module catalog, derivation table, and verifier discovery,
+  built-in module catalog, idiom table, and verifier discovery,
 - `features`, `restrictions`, and `describe_rule` for language discovery,
 - `modules` for resolution of one entry file,
 - `check` for source, type, effect, policy, and proof diagnostics,
@@ -487,8 +540,12 @@ The `meta` payload MUST also publish:
   instructions,
 - `ambient_names`: the closed table of ambient type and value names from
   Section 6,
-- `derivations`: the Section 4.2.1 table of derivable spellings, each with
-  its canonical form, its rewrite identifier, and its equivalence validator,
+- `severities`: the closed diagnostic severity set and the rule that decides
+  `success`,
+- `idioms`: the Section 4.2.1 table, each entry with a stable identifier, the
+  operation it covers, its idiomatic spelling, the non-idiomatic spellings it
+  supersedes, and, where a mechanical rewrite exists, that rewrite's
+  identifier and equivalence validator,
 - `validators`: the registered equivalence validators, each with an
   identifier, the rewrite classes it covers, and its validation method,
 - `type_serialization`: the versioned canonical type serialization artifact
@@ -547,7 +604,14 @@ canonical source are deterministic for identical authenticated inputs.
 Every diagnostic MUST contain:
 
 - a stable diagnostic code and governing rule identifier,
-- severity and success impact,
+- severity and success impact. The severity set is closed and
+  registry-published: `error` rejects the program, `warning` reports a
+  hazard the profile still admits, and `advisory` carries a non-idiomatic
+  spelling with its idiom identifier. A response reports `"success": true`
+  exactly when it produced no `error` diagnostic, so warnings and advisories
+  never fail a build, a check, or the repair loop. Every rule in the registry
+  declares the severity it emits, so no severity is admitted by the protocol
+  without a rule that uses it,
 - source digest plus exact byte span and human line and column,
 - a concise message and, when useful, a human explanation,
 - effect and proof impact when applicable,
@@ -567,7 +631,9 @@ validator exists for that repair identifier.
 Edit simulation establishes diagnostic and policy non-regression. It does not
 establish behavioral equivalence. Until a rewrite has a registered equivalence
 validator, `canonicalize` and `normalize` MUST report it as a proposed
-refactor, not a mechanical repair.
+refactor, not a mechanical repair. A proposed refactor and an unrewritable
+advisory are the same state seen from two operations: the source stands, the
+preferred form is named, and nothing is applied automatically.
 
 Each `canonicalize` candidate carries a safety grade. An
 `equivalence_validated` candidate also carries the named validator, its
@@ -578,7 +644,8 @@ The launch validator registry MUST cover at least: layout-only rewrites,
 missing-semicolon insertion where the parser admits exactly one insertion
 point (the validator is the parser's unique-parse check),
 identifier-preserving canonical respellings with a specified local
-elaboration, and every entry in the Section 4.2.1 derivation table. Pre-parse lexical errors carry a dedicated lexical-repair grade
+elaboration, and every rewrite the Section 4.2.1 idiom table emits.
+Pre-parse lexical errors carry a dedicated lexical-repair grade
 so a file that does not yet parse still has a mechanical exit; no agent or
 human hand-fixes profile syntax.
 
@@ -619,9 +686,9 @@ The canonical repair loop is bounded:
 
 `meta.payload.limits` publishes the default maximum repair iterations and
 tool calls for the loop; conformance task classes may override the default
-inside the 14.2 harness only. Repeated diagnostics, stale edits, a
-non-convergent normalizer, or an unavailable semantic choice end the loop
-explicitly, and each of those four conditions is a machine-detectable response
+inside the 14.2 harness only. Repeated non-advisory diagnostics, stale
+edits, a non-convergent normalizer, or an unavailable semantic choice end the
+loop explicitly, and each of those four conditions is a machine-detectable response
 field, not an inference from response history.
 
 ## 5. Normative source profile
@@ -680,12 +747,12 @@ The profile permits:
 - named function declarations for reusable behavior
 - trailing parameters with closed compile-time scalar defaults
 - direct arrow expressions only as arguments to typed, finite callback APIs
-- one-level object or array destructuring, canonical when two or more fields
+- one-level object or array destructuring, idiomatic when two or more fields
   of a single record type are read in one block with no narrowing guard
-  between them, and canonical for two or more elements of a fixed tuple; a
+  between them, and idiomatic for two or more elements of a fixed tuple; a
   single field, a union-typed binding, and any read after a guard use member
   access
-- one leading object spread followed by explicit fields, canonical when at
+- one leading object spread followed by explicit fields, idiomatic when at
   least one field is inherited unchanged from the base
 
 It excludes:
@@ -789,10 +856,10 @@ explicit `=== null` or `=== undefined` comparison or `match`, so JSON `null`
 can never be swallowed by an absence operator.
 
 On concrete types without `null`, `??` and `?.` keep exactly one meaning,
-`undefined`-absence handling, and they are the canonical spelling of it. An
+`undefined`-absence handling, and they are the idiomatic spelling of it. An
 `undefined` comparison written in value position to select a default or a
 member is rewritten to them (Section 4.2.1). The explicit comparison stays
-canonical in `if`-position guards, where it is a narrowing test rather than a
+idiomatic in `if`-position guards, where it is a narrowing test rather than a
 value selection.
 
 ### 5.4 Operators and expressions
@@ -800,7 +867,7 @@ value selection.
 The profile permits:
 
 - arithmetic, comparison, bitwise, and boolean operators
-- `+` over two `string` operands, yielding `string`, the canonical
+- `+` over two `string` operands, yielding `string`, the idiomatic
   concatenation
 - strict equality `===` and `!==`
 - `typeof` in value position
@@ -854,7 +921,7 @@ example `result.value` after `result.ok === true`, or after
 `if (!result.ok) { return ...; }`) is therefore predictable without running
 the checker.
 
-`condition ? whenTrue : whenFalse` is the canonical two-way pure value
+`condition ? whenTrue : whenFalse` is the idiomatic two-way pure value
 selection. Exactly one branch is evaluated. Both branches MUST be pure and
 their result type MUST use the join below. A conditional expression MUST NOT
 appear as an arm of another conditional expression, parenthesized or not.
@@ -862,7 +929,8 @@ The diagnostic carries an exact repair when a single-scrutinee `match` or a
 value-producing `if`/`else` rewrite exists; otherwise it carries a proposed
 refactor per Section 4.8, never a guessed rewrite.
 
-Branch selection is a decidable rule, not a style judgment:
+Branch selection is a decidable rule rather than a style judgment, so the
+idiom for a given shape is looked up, not weighed:
 
 - boolean condition, both branches pure values: `?:`
 - boolean condition, either value branch effectful: `match` over the
@@ -871,9 +939,9 @@ Branch selection is a decidable rule, not a style judgment:
 - multi-way value selection over one scrutinee: `match`
 - heterogeneous predicate ladder: `if`/`else if`
 
-A `match` over a bare `boolean` scrutinee with pure arms is non-canonical;
-the repair is `?:`. With an effectful arm it is canonical, because `?:` arms
-MUST be pure and a statement `if` cannot initialize a binding.
+A `match` over a bare `boolean` scrutinee with pure arms is non-idiomatic and
+is rewritten to `?:`. With an effectful arm it is idiomatic, because `?:`
+arms MUST be pure and a statement `if` cannot initialize a binding.
 
 The result type is the deterministic join `join(A, B)`:
 
@@ -991,7 +1059,7 @@ Rules:
 - Arms are checked in source order. Exactly one arm's expression is
   evaluated.
 - Arm expressions MAY be effectful. `match` with effectful named calls in its
-  arms is the canonical effectful selection form, including for initializing
+  arms is the idiomatic effectful selection form, including for initializing
   a `const` from a two-way effectful choice.
 - Patterns are literals, type-test patterns, or fixed record patterns.
 - A type-test pattern is one of `boolean`, `number`, `string`, `array`,
@@ -1005,7 +1073,7 @@ Rules:
   binding under a new name (`value: v`). A binding introduces an arm-scoped
   `const` of the narrowed field type; no double read of the scrutinee is
   needed.
-- The binding pattern is the canonical way for an arm to read a field of the
+- The binding pattern is the idiomatic way for an arm to read a field of the
   scrutinee: an arm that reads the field off the scrutinee instead is
   rewritten to a binding, and a rename whose new name equals the field name
   is rewritten to the shorthand (Section 4.2.1).
@@ -1318,7 +1386,7 @@ type Result<T, E> =
   | { readonly ok: false; readonly error: E };
 ```
 
-The canonical operations are:
+The admitted operations are:
 
 ```ts
 ok<T>(value: T): Result<T, never>
@@ -1355,7 +1423,7 @@ is a linear once-per-step sequence the row and the source order both make
 manifest.
 
 Consumption is one ordered decision procedure, first match wins, so exactly
-one form is canonical for any given site:
+one form is idiomatic for any given site:
 
 1. The site's result type is `T` and the error arm supplies a constant of
    type `T`: `unwrapOr`.
@@ -1373,11 +1441,12 @@ construction: rules 1 and 2 are separated by the site's result type and by
 the defaulting test, so a nested `Result<Result<A, B>, E>` cannot satisfy
 both. `match` is the residual form, and a site whose result type is neither
 `T` nor a `Result` reaches it directly rather than through a `unwrapOr` of a
-combinator chain. Every consumption site therefore has exactly one canonical
-spelling. A `match` whose shape matches an earlier rule is rewritten to that
-rule's form.
+combinator chain. Every consumption site therefore has exactly one idiomatic
+spelling. A `match` whose shape matches an earlier rule is reported
+non-idiomatic, and is rewritten to that rule's form where a Section 4.2.1
+row's precondition holds.
 
-Trapping `unwrap` and `unwrapErr` are not canonical. A checked extraction
+Trapping `unwrap` and `unwrapErr` are not admitted at all. A checked extraction
 after an `ok` guard MAY lower directly to the value field, and the narrowing
 rules of Section 5.4 make that extraction predictable.
 
@@ -1423,12 +1492,13 @@ dictFold<K extends DictKey, V, U>(
 The bulk operations iterate in insertion order with pure callbacks, preserve
 key uniqueness by construction, and return `Dict`, not `Result`, so a
 transformation of an existing dictionary never handles an impossible
-duplicate-key error and never leaves the type. They are also the canonical
+duplicate-key error and never leaves the type. They are also the idiomatic
 spellings of their operations: an entry round trip through `dictEntries` and
 `dictFromEntries` is rewritten to `dictMapValues` or `dictFilter`, and a
-`reduce` over `dictEntries` is rewritten to `dictFold` (Section 4.2.1).
+`reduce` over `dictEntries` is rewritten to `dictFold`, in each case where the
+Section 4.2.1 row's precondition holds.
 
-Construction has one canonical form per input shape, separated by duplicate
+Construction has one idiomatic form per input shape, separated by duplicate
 handling rather than by the shape of the source data:
 
 - `comptime(dictFromEntries([...]))` from a literal entry list, where a
@@ -1497,7 +1567,7 @@ encodeBase64(value: Bytes): string
 JSON uses the recursive `JsonValue` type from Section 5.7. Object nodes are
 `Dict<string, JsonValue>`, not dynamic-shape records.
 
-The canonical boundary is:
+The JSON boundary is:
 
 ```ts
 type JsonError =
@@ -1549,7 +1619,7 @@ precise application type rather than `unknown`.
 
 ### 6.5 Arrays and higher-order functions
 
-The canonical finite operations have these abstract semantic signatures. This
+The admitted finite operations have these abstract semantic signatures. This
 block specifies types and is not additional source declaration syntax:
 
 ```ts
@@ -1563,6 +1633,7 @@ every<T>(items: readonly T[], f: (value: T, index: number) => boolean): boolean
 flatMap<T, U>(items: readonly T[], f: (value: T, index: number) => readonly U[]): U[]
 toSorted<T>(items: readonly T[], compare: (a: T, b: T) => number): T[]
 slice<T>(items: readonly T[], start: number, end: number): T[]
+concat<T>(items: readonly T[], other: readonly T[]): T[]
 indexOf<T>(items: readonly T[], value: T): number
 includes<T>(items: readonly T[], value: T): boolean
 join(items: readonly string[], separator: string): string
@@ -1572,13 +1643,12 @@ join(items: readonly string[], separator: string): string
 element type, and the sort is stable. `indexOf` uses strict equality and
 `includes` uses SameValueZero, matching both the live runtime and the `Dict`
 key rule of Section 6.2, so they disagree on `NaN` and the rewrite between
-them is conditioned accordingly. `includes` is canonical for the boolean
+them is conditioned accordingly. `includes` is idiomatic for the boolean
 question and `indexOf` for the position, so neither is written through the
-other (Section 4.2.1). Concatenation has no operation because array spread
-already spells it: the set is otherwise a superset of the array members the
-live runtime ships, and `concat` is the one deliberate removal, so
-completing their types (Section 3, gap 6) does not otherwise narrow the
-baseline.
+other (Section 4.2.1). `concat` is admitted but non-idiomatic: array spread
+spells the same operation and generalizes further. This closed set is a
+superset of the array members the live runtime already ships, so completing
+their types (Section 3, gap 6) does not narrow the baseline.
 
 Each operation uses snapshot-finite iteration. Its callback MUST be pure. The
 checker verifies the callback body and every reachable helper rather than
@@ -1587,20 +1657,20 @@ assuming that an arrow expression is pure. An effectful traversal uses
 failure visible; the once-per-step effect polymorphism of the `Result`
 combinators (Section 6.1) does not extend to per-element callbacks.
 
-The canonical source spelling is an intrinsic array method such as
+The idiomatic source spelling is an intrinsic array method such as
 `items.map(f)`. Dispatch is resolved statically from the receiver type and
 lowers to an explicit intrinsic such as `arrayMap(items, f)`. It never performs
 prototype lookup.
 
 The choice between the two iteration forms is decidable, not judgment: a
 `for...of` loop whose body is pure, carries one evolving accumulator, and has
-no `break` or `continue` is non-canonical, and `canonicalize` emits the
+no `break` or `continue` is non-idiomatic, and `canonicalize` emits the
 rewrite to the equivalent higher-order operation. A loop whose `break` is its
 only early exit, which uses no `continue`, and whose body is a pure search is
 likewise rewritten: to `find` when it yields the element, `findIndex` when it
 yields a position, `some` when it yields a boolean flag starting `false`, and
 `every` when it yields one starting `true`.
-`for...of` is canonical when the algorithm needs `continue`, a `break` that
+`for...of` is idiomatic when the algorithm needs `continue`, a `break` that
 carries other work, per-element effects, or more than one evolving
 accumulator.
 
@@ -2158,15 +2228,16 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | interface, enum, namespace, decorator | one closed data and module model | language-simplicity choice |
 | object methods, getters, setters | explicit functions and effects | language-simplicity choice |
 
-Derivable spellings are absent from this matrix by design. They are not
-restrictions and eliminate no failure class: they are rewritten to their
-canonical form by Section 4.2.1 rather than rejected, so they belong to the
-canonicalization table, not to the exclusion set. A machine-readable profile
-publishes both.
+Non-idiomatic spellings are absent from this matrix by design. They are not
+restrictions and eliminate no failure class: Section 4.2.1 supersedes them
+with an idiom and, where provable, rewrites them, but never rejects them. The
+matrix is the exclusion set and the idiom table is the preference set. A
+machine-readable profile publishes both, and an agent must not read a
+non-idiomatic form as a forbidden one.
 
 This matrix MUST be generated from the versioned profile registry once that
-registry exists. A restriction list that omits the strict canonical rules is
-not a complete machine-readable profile.
+registry exists. A restriction list that omits the Section 4.2 level-1
+exclusion rules is not a complete machine-readable profile.
 
 ## 13. Assurance architecture
 
@@ -2314,7 +2385,11 @@ The advanced profile is ready to ship only when all gates are true.
 ### 14.1 Language gate
 
 - One machine-readable registry enumerates grammar features, canonical rules,
-  types, intrinsics, value kinds, opcodes, and module forms.
+  types, intrinsics, value kinds, opcodes, module forms, and language
+  operations. A language operation is a registry member naming one thing a
+  program can do, such as absence defaulting or element iteration; it is the
+  unit the idiom table is keyed by, and it is unrelated to the protocol
+  operations of Section 4.8.
 - The parser, checker, documentation, diagnostics, and formal coverage consume
   or validate against that registry.
 - Every accepted form is registry-backed and code-generated. Object methods,
@@ -2326,14 +2401,18 @@ The advanced profile is ready to ship only when all gates are true.
 - The version-2 agent envelope, complete module-graph identity, atomic repair
   application, and unified property verification operation are implemented.
 - The `meta` payload publishes the grammar productions, canonical per-form
-  examples, ambient-name table, derivation table, validator registry,
+  examples, ambient-name table, idiom table, validator registry,
   canonical type serialization, default repair budget, and decision-kind
   registry, each registry-generated and drift-gated.
-- Every entry in the Section 4.2.1 derivation table has a registered
-  equivalence validator and a checked precondition, and normalizing a program
-  containing every derivable spelling reaches the canonical fixed point
-  within the published pass bound, after which a second normalization
-  produces identical bytes.
+- Every language operation in that registry has a published idiom, and every
+  idiom is reachable through `meta`. A language operation with no declared
+  idiomatic spelling fails this gate.
+- Every rewrite the idiom table emits has a registered equivalence validator
+  and a checked precondition, the rewrite relation is confluent, and
+  normalization reaches its fixed point within the published pass bound,
+  after which a second normalization produces identical bytes. A
+  non-idiomatic spelling with no provable rewrite is reported at advisory
+  severity and does not fail the gate.
 - Version-1 JSON surfaces remain explicitly distinguishable and cannot be
   mistaken for advanced-profile results.
 
@@ -2358,7 +2437,8 @@ discovery surface.
 
 For every corpus task declared supported:
 
-- the final source is canonical, type-correct, and semantically correct,
+- the final source is canonical, free of `error` and `warning` diagnostics,
+  type-correct, and semantically correct,
 - every requested available property verifies,
 - the loop converges within the profile's declared repair budget,
 - no human corrects profile syntax or interprets an unstructured diagnostic,
@@ -2472,7 +2552,8 @@ The corpus MUST include:
 - the completed array operation set and `push`
 - a total `responseText` constructor in the HTTP ABI
 - the ambient-name criterion and registry table
-- the derivation table that makes compositional uniqueness mechanical
+- the machine-readable idiom table, so idiom is discoverable rather than
+  conventional
 - an ordered `Result` consumption procedure with disjoint clauses
 - one `responseJson` result type at every call site
 - opaque typed `HtmlNode` and finite `HtmlChild`
@@ -2574,7 +2655,7 @@ function frequencies(words: readonly string[]): Dict<string, number> {
 
 A pure single-accumulator fold is a `reduce` by the decidable rule of
 Section 6.5; the `let` plus `for...of` spelling of the same fold is
-non-canonical and receives the rewrite. The `dictSet` fold is canonical here
+non-idiomatic and receives the rewrite. The `dictSet` fold is idiomatic here
 for the reason Section 6.2 gives: a repeated word must merge into the running
 count rather than fail as a duplicate key, and that is the one behavior
 `dictFromEntries` cannot express.
@@ -2733,8 +2814,8 @@ The language stays AI-minimal where choice entropy compounds:
 - one data-contract form,
 - one recoverable-error form,
 - one branch form per branch shape, chosen by a decidable rule,
-- one canonical spelling for every derivable operation, reached by
-  normalization rather than by exclusion,
+- one published idiom for every admitted operation, reached by normalization
+  where a rewrite is provable and by an advisory where it is not,
 - one source loop,
 - one absence convention,
 - one dynamic keyed collection,
