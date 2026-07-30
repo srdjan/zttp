@@ -274,12 +274,13 @@ prose_bans=(
   "regex	[0-9]+[^[:cntrl:]]*\`zttp:\\*\`[^[:cntrl:]]*modules|[0-9]+[^[:cntrl:]]*(native|built-in)[^[:cntrl:]]*modules[^[:cntrl:]]*\`zttp:\\*\`	README.md docs/README.md docs/user-guide.md docs/roadmap.md	-	front-door docs hardcode zttp:* module counts; link to docs/virtual-modules/README.md instead"
 )
 
-# Dated plan and decision records under docs/plans/ are excluded from every row.
-# These bans exist to keep the docs a reader is pointed at accurate; a plan that
-# records retiring a path has to be able to name the path it retired. The gate
-# proved this the hard way: two rows fired on the paragraph in
-# 2026-07-28-001-reset-simplification-plan.md that documents this very table.
-plans_exclude='^docs/plans/'
+# Dated plan and decision records under docs/plans/, and everything under
+# docs/archive/, are excluded from every row. These bans exist to keep the docs
+# a reader is pointed at accurate; a plan that records retiring a path has to be
+# able to name the path it retired. The gate proved this the hard way: two rows
+# fired on the paragraph in 2026-07-28-001-reset-simplification-plan.md that
+# documents this very table.
+plans_exclude='^docs/plans/|^docs/archive/'
 
 for row in "${prose_bans[@]}"; do
   IFS=$'\t' read -r kind pattern paths exclude message <<<"$(printf '%b' "$row")"

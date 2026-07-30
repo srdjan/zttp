@@ -28,7 +28,7 @@
 //! carries 148 such references, so the orchestration cannot move without
 //! drawing a boundary that does not exist today. Revisit only with a concrete
 //! consumer for a fourth phase, such as a build cache or an incremental
-//! compile. See `docs/plans/2026-07-30-007-lowered-module-plan.md`.
+//! compile. See `docs/archive/plans/2026-07-30-007-lowered-module-plan.md`.
 //!
 //! See: /Users/srdjans/.claude/plans/study-following-doc-document-luminous-fog.md
 

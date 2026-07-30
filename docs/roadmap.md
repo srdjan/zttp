@@ -60,4 +60,4 @@ behavior lives in [User Guide](user-guide.md).
   and user-facing commands are present in default docs.
 - Defer VM-loop dedupe until the FaaS hardening, engine facade, and measurement
   gates are stable. The standalone plan lives in
-  [Deferred VM Loop Dedupe Plan](../DEFERRED_VM_LOOP_DEDUPE_PLAN.md).
+  [Deferred VM Loop Dedupe Plan](archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md).

@@ -115,4 +115,4 @@ property proof remain separate decisions.
 ## Related
 
 - [ZTS advanced formal-spec northstar](../../zts-formal-spec-northstar-advanced.md)
-- [Earlier formal-spec northstar](../../zts-formal-spec-northstar.html)
+- [Earlier formal-spec northstar](../../archive/spec-explainers/zts-formal-spec-northstar.html)

@@ -59,3 +59,8 @@ path.
   excludes, and why the zruntime suite is standalone.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.
+
+## Archive
+
+[docs/archive/](archive/README.md) holds dated records of finished work. It is
+unmaintained by design and describes the system as it was, not as it is.

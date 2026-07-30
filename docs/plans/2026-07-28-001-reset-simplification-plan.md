@@ -1644,8 +1644,41 @@ Run this last, so the docs describe the simplified system rather than the curren
    `counterexamples.md` plus `witnesses.md` plus `proof-card.md` plus `proof-gate.md` into
    one proofs and receipts reference, and `canonical-profile.md` into the `canonicalize`
    section of `docs/cli.md`.
-4. DEFERRED by the owner on 2026-07-30, because wave 4 and wave 5 are not finished and this
-   directory still holds their live plans. Archive the dated planning residue: `docs/plans/`, `docs/ideation/`, `docs/vision/`, the
+4. DONE, with the live plans held back. Deferred first on 2026-07-30, then reversed by the
+   owner the same day. `docs/archive/` holds 52 archived files totalling 12,728 lines, plus
+   a README: 23 dated plans, the 20-file advisory pass from the root `plans/` directory,
+   three ideation write-ups, one vision document, the two HTML formal-spec explainers,
+   `IMPROVEMENT_PLAN.md`, `DEFERRED_VM_LOOP_DEDUPE_PLAN.md`, and the single file that was
+   `packages/zts/src/docs/`. That is more than the 8,187 lines this item estimated, because
+   the estimate predates the plans written during waves 3 to 5.
+   `docs/archive/README.md` states that nothing in it is maintained and lists what was
+   held back.
+
+   Six plans stay in `docs/plans/` because they still drive open work: this document,
+   which by its own instruction joins the archive only once the plan is executed, and the
+   five files of the `zts-advanced-1` revision 4 program.
+
+   Two deviations from the wording below. `docs/hypermedia-explainer.html` was NOT moved:
+   `docs/user-guide.md` tells a reader to open it, so it is a live user-facing document
+   rather than planning residue. Only the two formal-spec HTML explainers moved.
+
+   Three things had to move with the files, and each would have been a silent break.
+   `check-docs-drift.sh` excluded `^docs/plans/` from every prose ban, so the archive
+   needed the same exclusion or the bans would fire on records that legitimately name
+   retired paths. Two Zig doc comments cited archived plans by path
+   (`packages/zts/src/pipeline.zig`, `packages/zttp-sdk/src/args.zig`). And
+   `tooling/release_check.zig` fails the `docs_scope` passport row when `README.md`,
+   `docs/README.md`, or `docs/roadmap.md` contains any of five stale markers, one of which
+   is the literal string "old plans", so the archive pointer added to the docs index had to
+   avoid that phrasing.
+
+   Noticed while editing `packages/zts/src/pipeline.zig` and left alone as out of scope: its
+   doc comment ends with an absolute path into a personal directory,
+   `/Users/srdjans/.claude/plans/study-following-doc-document-luminous-fog.md`.
+
+   The original wording follows.
+
+   Archive the dated planning residue: `docs/plans/`, `docs/ideation/`, `docs/vision/`, the
    root `plans/` directory, `IMPROVEMENT_PLAN.md`, `DEFERRED_VM_LOOP_DEDUPE_PLAN.md`, and
    `packages/zts/src/docs/v0.1-v0.2-gap-analysis.md`. That is 8,187 lines, about 39 percent
    of all prose, referenced by no gate. Keep `docs/solutions/`, which agents are pointed at.

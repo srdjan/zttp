@@ -2,7 +2,7 @@
 
 Archived on 2026-07-02. This file is no longer the current backlog.
 
-Use [`plans/README.md`](plans/README.md) as the current plan index. The material
+Use [`plans-advisory/README.md`](plans-advisory/README.md) as the current plan index. The material
 below is retained as historical audit context only; several phase entries were
 later completed, rejected, or superseded.
 

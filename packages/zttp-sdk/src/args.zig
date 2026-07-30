@@ -5,7 +5,7 @@
 //! run of `extractString(args[i]) orelse return ...`, so the declared signature
 //! and the executed one could drift (and did: three entries read an argument
 //! position they did not declare - see
-//! docs/plans/2026-07-30-008-wave4-item6-arg-decode-plan.md).
+//! docs/archive/plans/2026-07-30-008-wave4-item6-arg-decode-plan.md).
 //!
 //! Decoding here makes the declared list the one that runs. The caller keeps
 //! its own failure value, because the failure vocabulary is per function
