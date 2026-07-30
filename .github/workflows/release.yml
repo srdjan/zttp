@@ -126,8 +126,8 @@ jobs:
           echo "$META" | jq -e '.rule_count >= 25'
           echo "$META" | jq -e '.policy_hash | length == 64'
 
-      - name: Run release doctor
-        run: ./zig-out/bin/zttp doctor --release --json
+      - name: Run release check
+        run: zig build release-check -- --json
 
   build:
     needs: test

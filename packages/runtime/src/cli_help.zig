@@ -109,7 +109,6 @@ const help_all_mid =
     \\Run and inspect:
     \\  zttp serve [handler.ts]              Run a handler without watch or proof
     \\  zttp doctor [path]                   Check project readiness
-    \\  zttp doctor --release                Print the release proof passport
     \\  zttp studio [handler.ts]             Optional browser proof workbench
     \\  zttp demo                            Guided local proof theater
     \\  zttp edge [--config FILE]            Optional in-process edge runtime (-Dedge)

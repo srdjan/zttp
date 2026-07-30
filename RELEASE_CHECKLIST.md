@@ -25,7 +25,7 @@ gates, and keep release notes user-facing.
 - [ ] `zig build -Doptimize=ReleaseFast`
 - [ ] `bash scripts/check-semantics-spec.sh`
 - [ ] `zig build bench-check` (advisory; if a single benchmark misses once, rerun immediately and block only if it fails twice)
-- [ ] `./zig-out/bin/zttp doctor --release --json`
+- [ ] `zig build release-check -- --json`
 
 ## Cross-Compile
 

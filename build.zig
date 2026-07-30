@@ -277,6 +277,32 @@ pub fn build(b: *std.Build) void {
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
 
+    // Release-readiness passport: repository tooling, deliberately not part of
+    // any installed binary. It reads this repository's own files, so it means
+    // nothing inside a user project; it shipped as `zttp doctor --release`
+    // until it moved to tooling/.
+    const release_check_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/release_check.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    release_check_mod.addImport("zts", zts_host_mod);
+    const release_check_exe = b.addExecutable(.{
+        .name = "release-check",
+        .root_module = release_check_mod,
+    });
+    const release_check_cmd = b.addRunArtifact(release_check_exe);
+    release_check_cmd.has_side_effects = true;
+    if (b.args) |args| release_check_cmd.addArgs(args);
+    const release_check_step = b.step("release-check", "Print this repository's release-readiness passport");
+    release_check_step.dependOn(&release_check_cmd.step);
+
+    const release_check_tests = b.addTest(.{ .root_module = release_check_mod });
+    const run_release_check_tests = b.addRunArtifact(release_check_tests);
+    const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
+    release_check_test_step.dependOn(&run_release_check_tests.step);
+
     const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-module-boundary.sh" });
     const module_boundary_step = b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
     module_boundary_step.dependOn(&module_boundary.step);
@@ -675,6 +701,7 @@ pub fn build(b: *std.Build) void {
     for (host_test_runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&module_boundary.step);
+    test_step.dependOn(&run_release_check_tests.step);
     // The docs drift and link gates run here, and only here: neither Run step is
     // cached, so `zig build test` always executes both scripts. CI and
     // scripts/verify.sh deliberately do not invoke test-docs-drift or

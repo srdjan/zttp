@@ -2,9 +2,12 @@
 //!
 //! Validates the project discovered from the current directory (or an
 //! explicit path / handler file) and prints a checklist for the files and
-//! runtime options that affect local development. The `--release` branch
-//! delegates to cli_release_check.releaseDoctorCommand; otherwise this
-//! module owns the entire flow.
+//! runtime options that affect local development.
+//!
+//! The `--release` passport moved to tooling/release_check.zig
+//! (`zig build release-check`): every check it runs reads a file that exists
+//! in this repository and in no user project, so it was repository tooling
+//! shipped inside the user-facing binary.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -12,14 +15,18 @@ const project_config_mod = @import("project_config");
 const zts_cli = @import("zts_cli");
 const precompile = zts_cli.precompile;
 const self_extract = @import("self_extract.zig");
-const cli_release_check = @import("cli_release_check.zig");
 const cli_paths = @import("cli_paths.zig");
 const cli_auth = @import("cli_auth.zig");
 
 pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
+    // Rejected by name rather than left to fall through to path handling,
+    // where it would read as "cannot read --release: FileNotFound".
     if (argv.len > 0 and std.mem.eql(u8, argv[0], "--release")) {
-        try cli_release_check.releaseDoctorCommand(allocator, argv[1..], printDoctorHelp);
-        return;
+        std.debug.print(
+            "zttp doctor --release moved to repository tooling: run `zig build release-check -- --json` from a zttp checkout.\n",
+            .{},
+        );
+        return error.InvalidArgument;
     }
 
     if (argv.len > 1) {
@@ -151,15 +158,10 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
 pub fn printDoctorHelp() void {
     const help =
         \\zttp doctor [path]
-        \\zttp doctor --release [--json] [--out FILE]
         \\
         \\Validate the project discovered from the current directory, a handler
         \\path, or a zttp.json path. Prints a checklist for the files and
         \\runtime options that affect local development.
-        \\
-        \\With --release, validates the current beta release evidence and prints
-        \\a release proof passport. The release check reads existing files only;
-        \\it does not run the benchmark or test suite.
         \\
         \\Checks:
         \\  manifest, entry, static directory, system file, tests fixture,
@@ -168,7 +170,6 @@ pub fn printDoctorHelp() void {
         \\Examples:
         \\  zttp doctor
         \\  zttp doctor src/handler.ts
-        \\  zttp doctor --release --json
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

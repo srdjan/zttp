@@ -1,15 +1,17 @@
-//! `zttp doctor --release` implementation extracted from dev_cli.zig.
+//! Release-readiness passport: repository tooling, not product.
 //!
-//! Self-contained release-passport pipeline: parses CLI options, collects
-//! a set of release-readiness checks, renders the result as text or JSON,
-//! and returns a verdict (ready / ready_with_known_issues / blocked).
-//! Each check reads existing files only — no benchmark or test suite
-//! invocation — so the command is safe to run repeatedly.
+//! Self-contained pipeline: parses options, collects a set of
+//! release-readiness checks, renders the result as text or JSON, and returns
+//! a verdict (ready / ready_with_known_issues / blocked). Each check reads
+//! existing files in this repository only - no benchmark or test suite
+//! invocation - so it is safe to run repeatedly.
 //!
-//! The dev_cli `doctorCommand` dispatches into `releaseDoctorCommand`
-//! here when `--release` is the first argument; it passes the basic
-//! `printDoctorHelp` function in so this module stays free of dev_cli
-//! dependencies.
+//! This shipped as `zttp doctor --release` until it moved here. Every check
+//! reads paths that exist in this repository and nowhere else (README.md,
+//! docs/performance.md, scripts/verify.sh, .github/workflows/*.yml), so it
+//! was 581 lines of repository tooling inside the user-facing binary.
+//!
+//! Run it with `zig build release-check -- [--json] [--out FILE]`.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -18,7 +20,6 @@ const release_verify_commands = [_][]const u8{
     "zig fmt --check build.zig packages/",
     "zig build test",
     "zig build test-zruntime",
-    "zig build test-docs-drift test-doc-links",
     "zig build -Doptimize=ReleaseFast",
     "zig build smoke-v1",
     "zig build test-panic-isolation",
@@ -29,7 +30,7 @@ const release_verify_commands = [_][]const u8{
     "bash scripts/test-install-archive-safety.sh",
     "bash scripts/check-semantics-spec.sh",
     "zig build bench-check",
-    "./zig-out/bin/zttp doctor --release --json",
+    "zig build release-check",
 };
 
 const build_gate_markers = [_][]const u8{
@@ -43,11 +44,13 @@ const build_gate_markers = [_][]const u8{
     "test-docs-drift",
 };
 
+// `test-docs-drift` and `test-doc-links` are deliberately absent here and in
+// the verify list below: both are dependencies of the `test` step, and
+// scripts/verify.sh says in its header not to re-add them as separate steps.
 const ci_gate_markers = [_][]const u8{
     "zig fmt --check build.zig packages/",
     "zig build test",
     "zig build test-zruntime",
-    "zig build test-docs-drift test-doc-links",
     "zig build -Doptimize=ReleaseFast",
     "zig build smoke-v1",
     "zig build test-panic-isolation",
@@ -59,7 +62,6 @@ const ci_gate_markers = [_][]const u8{
 const verify_script_markers = [_][]const u8{
     "zig build test",
     "zig build test-zruntime",
-    "zig build test-docs-drift test-doc-links",
     "zig build -Doptimize=ReleaseFast",
     "zig build smoke-v1",
     "zig build test-panic-isolation",
@@ -73,7 +75,7 @@ const release_only_gate_markers = [_][]const u8{
     "zig build smoke-getting-started",
     "zig build smoke-demo",
     "zig build smoke-studio",
-    "./zig-out/bin/zttp doctor --release --json",
+    "zig build release-check",
     "contents: write",
 };
 
@@ -216,14 +218,53 @@ pub const ReleasePassport = struct {
     }
 };
 
-pub fn releaseDoctorCommand(
+const usage =
+    \\Usage: zig build release-check -- [--json] [--out FILE]
+    \\
+    \\Validates this repository's release evidence and prints a release proof
+    \\passport. Reads existing files only: it runs neither the benchmark nor
+    \\the test suite. Exits non-zero when the verdict is `blocked`.
+    \\
+    \\  --json          Emit the passport as JSON instead of text
+    \\  --out FILE      Also write the JSON passport to FILE
+    \\
+;
+
+pub fn main(init: std.process.Init.Minimal) !void {
+    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_alloc.deinit();
+    const allocator = debug_alloc.allocator();
+
+    const args = try collectArgs(allocator, init.args);
+    defer {
+        for (args) |arg| allocator.free(arg);
+        allocator.free(args);
+    }
+
+    try releaseCheckCommand(allocator, args[1..]);
+}
+
+fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {
+    var args_iter = std.process.Args.Iterator.init(args_vector);
+    defer args_iter.deinit();
+
+    var list: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (list.items) |arg| allocator.free(arg);
+        list.deinit(allocator);
+    }
+    while (args_iter.next()) |arg| {
+        try list.append(allocator, try allocator.dupe(u8, arg));
+    }
+    return list.toOwnedSlice(allocator);
+}
+
+pub fn releaseCheckCommand(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
-    print_help: *const fn () void,
 ) !void {
     const opts = parseReleaseDoctorOptions(argv) catch |err| {
-        std.debug.print("Invalid release doctor arguments.\n\n", .{});
-        print_help();
+        std.debug.print("Invalid release-check arguments.\n\n{s}", .{usage});
         return err;
     };
     var passport = try collectReleasePassport(allocator);
@@ -338,9 +379,9 @@ fn addReleaseGateCheck(allocator: std.mem.Allocator, passport: *ReleasePassport)
         false;
 
     if (smoke_ok and examples_ok and installer_ok and semantics_ok and workflow_ok) {
-        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && ./zig-out/bin/zttp doctor --release --json");
+        try passport.add(allocator, "release_gates", "Release gates", .ok, "CI, release workflow, local verifier, installer, semantics, docs, smoke, and doctor gates are wired", "bash scripts/verify.sh && zig build release-check");
     } else {
-        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring, scripts, or workflows", "bash scripts/verify.sh && ./zig-out/bin/zttp doctor --release --json");
+        try passport.add(allocator, "release_gates", "Release gates", .fail, "one or more release gates are missing from build wiring, scripts, or workflows", "bash scripts/verify.sh && zig build release-check");
     }
 }
 
@@ -428,20 +469,28 @@ fn addReliabilityKnownIssuesCheck(allocator: std.mem.Allocator, passport: *Relea
 }
 
 fn addProofSurfaceCheck(allocator: std.mem.Allocator, passport: *ReleasePassport) !void {
-    const dev_cli = readOptionalFile(allocator, "packages/runtime/src/dev_cli.zig", 2 * 1024 * 1024);
-    defer if (dev_cli) |bytes| allocator.free(bytes);
+    // The advertised surface lives in the help listing (`cli_help.zig`) and the
+    // signing opt-out in the build command, not in `dev_cli.zig`. This check
+    // read dev_cli.zig until the release tooling moved out of the product CLI,
+    // and passed only because dev_cli.zig carried these three strings inside a
+    // *test fixture* for this very check. Read the files that actually own the
+    // surface instead.
+    const help_source = readOptionalFile(allocator, "packages/runtime/src/cli_help.zig", 2 * 1024 * 1024);
+    defer if (help_source) |bytes| allocator.free(bytes);
+    const build_source = readOptionalFile(allocator, "packages/runtime/src/build_command.zig", 2 * 1024 * 1024);
+    defer if (build_source) |bytes| allocator.free(bytes);
     const proofs_cli_source = readOptionalFile(allocator, "packages/runtime/src/proofs_cli.zig", 2 * 1024 * 1024);
     defer if (proofs_cli_source) |bytes| allocator.free(bytes);
 
-    if (dev_cli == null or proofs_cli_source == null) {
+    if (help_source == null or build_source == null or proofs_cli_source == null) {
         try passport.add(allocator, "proof_surface", "Proof surface", .fail, "developer CLI or proof ledger CLI source is missing", "zig build test-cli");
         return;
     }
 
     const dev_ok =
-        std.mem.indexOf(u8, dev_cli.?, "zttp verify <url>") != null and
-        std.mem.indexOf(u8, dev_cli.?, "proofs") != null and
-        std.mem.indexOf(u8, dev_cli.?, "--no-attest") != null;
+        std.mem.indexOf(u8, help_source.?, "zttp verify <url>") != null and
+        std.mem.indexOf(u8, help_source.?, "proofs") != null and
+        std.mem.indexOf(u8, build_source.?, "--no-attest") != null;
     const proofs_ok =
         std.mem.indexOf(u8, proofs_cli_source.?, "badge") != null and
         std.mem.indexOf(u8, proofs_cli_source.?, "bundle") != null and
@@ -476,7 +525,7 @@ fn renderReleasePassportText(allocator: std.mem.Allocator, passport: *const Rele
         try aw.writer.print("Wrote JSON passport: {s}\n", .{path});
     }
     if (verdict == .blocked) {
-        try aw.writer.writeAll("Next: resolve the failed release rows, then run `zttp doctor --release` again.\n");
+        try aw.writer.writeAll("Next: resolve the failed release rows, then run `zig build release-check` again.\n");
     }
     return try allocator.dupe(u8, aw.writer.buffered());
 }
@@ -541,11 +590,10 @@ fn hasReleaseVerifyCommand(command: []const u8) bool {
 test "release verify commands cover release gates" {
     try std.testing.expect(hasReleaseVerifyCommand("zig fmt --check build.zig packages/"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build test-zruntime"));
-    try std.testing.expect(hasReleaseVerifyCommand("zig build test-docs-drift test-doc-links"));
     try std.testing.expect(hasReleaseVerifyCommand("bash scripts/test-install-archive-safety.sh"));
     try std.testing.expect(hasReleaseVerifyCommand("bash scripts/check-semantics-spec.sh"));
     try std.testing.expect(hasReleaseVerifyCommand("zig build bench-check"));
-    try std.testing.expect(hasReleaseVerifyCommand("./zig-out/bin/zttp doctor --release --json"));
+    try std.testing.expect(hasReleaseVerifyCommand("zig build release-check"));
 }
 
 test "pending receipt-backed measurement note tolerates markdown wrapping" {
@@ -567,7 +615,7 @@ test "release gate requirements require semantics and doctor wiring" {
     const release_yml =
         ci_yml ++
         "zig build smoke-getting-started\nzig build smoke-demo\nzig build smoke-studio\n" ++
-        "./zig-out/bin/zttp doctor --release --json\ncontents: write\n";
+        "zig build release-check\ncontents: write\n";
     const verify_sh =
         "zig build test\nzig build test-zruntime\nzig build test-docs-drift test-doc-links\n" ++
         "zig build -Doptimize=ReleaseFast\nzig build smoke-v1\nzig build test-panic-isolation\n" ++
@@ -578,4 +626,253 @@ test "release gate requirements require semantics and doctor wiring" {
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, "zig build test\n", verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, "zig build test\n", release_yml, verify_sh));
     try std.testing.expect(!releaseGateRequirementsPresent(build_zig, ci_yml, release_yml, "zig build test\n"));
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+//
+// The passport reads the repository it runs in, so every test stages a fixture
+// tree in a tmp dir and runs from there. `chdirTmpForTest` is local rather than
+// borrowed from the runtime package: this tool depends on std and zts only.
+// ---------------------------------------------------------------------------
+
+fn chdirTmpForTest(tmp: *std.testing.TmpDir) ![:0]u8 {
+    const old_cwd = try std.process.currentPathAlloc(std.testing.io, std.testing.allocator);
+    errdefer std.testing.allocator.free(old_cwd);
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const len = try tmp.dir.realPath(std.testing.io, &buf);
+    try std.Io.Threaded.chdir(buf[0..len]);
+    return old_cwd;
+}
+
+test "release doctor options parse json and out path" {
+    const opts = try parseReleaseDoctorOptions(&.{ "--json", "--out", ".zttp/release-passport.json" });
+    try std.testing.expect(opts.json);
+    try std.testing.expectEqualStrings(".zttp/release-passport.json", opts.out_path.?);
+    try std.testing.expectError(error.InvalidArgument, parseReleaseDoctorOptions(&.{"--out"}));
+    try std.testing.expectError(error.InvalidArgument, parseReleaseDoctorOptions(&.{"--bad"}));
+}
+
+test "release passport reports known issue for pending public measurement receipts" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeReleaseDoctorFixture(io, &tmp, .{});
+
+    var passport = try collectReleasePassport(testing.allocator);
+    defer passport.deinit(testing.allocator);
+    try testing.expectEqual(ReleaseVerdict.ready_with_known_issues, passport.verdict());
+
+    const json = try renderReleasePassportJson(testing.allocator, &passport);
+    defer testing.allocator.free(json);
+    try testing.expect(std.mem.indexOf(u8, json, "\"verdict\":\"ready_with_known_issues\"") != null);
+    try testing.expect(std.mem.indexOf(u8, json, "\"release\":\"0.18.0\"") != null);
+}
+
+test "release passport blocks stale public claims" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeReleaseDoctorFixture(io, &tmp, .{ .stale_readme = true });
+
+    var passport = try collectReleasePassport(testing.allocator);
+    defer passport.deinit(testing.allocator);
+    try testing.expectEqual(ReleaseVerdict.blocked, passport.verdict());
+}
+
+test "release passport warns for documented reliability gap" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeReleaseDoctorFixture(io, &tmp, .{ .document_413_gap = true });
+
+    var passport = try collectReleasePassport(testing.allocator);
+    defer passport.deinit(testing.allocator);
+    try testing.expectEqual(ReleaseVerdict.ready_with_known_issues, passport.verdict());
+}
+
+const ReleaseDoctorFixtureOptions = struct {
+    stale_readme: bool = false,
+    document_413_gap: bool = false,
+};
+
+fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: ReleaseDoctorFixtureOptions) !void {
+    try tmp.dir.createDirPath(io, "packages/zts/src");
+    try tmp.dir.createDirPath(io, "packages/runtime/src");
+    try tmp.dir.createDirPath(io, "docs/virtual-modules");
+    try tmp.dir.createDirPath(io, "docs");
+    try tmp.dir.createDirPath(io, "scripts");
+    try tmp.dir.createDirPath(io, ".github/workflows");
+
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "build.zig.zon",
+        .data =
+        \\.{
+        \\    .name = .zttp,
+        \\    .version = "0.18.0",
+        \\}
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/zts/src/root.zig",
+        .data =
+        \\pub const version = struct {
+        \\    pub const string = "0.18.0";
+        \\};
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "build.zig",
+        .data =
+        \\// smoke-v1
+        \\// test-panic-isolation
+        \\// smoke-getting-started
+        \\// smoke-demo
+        \\// smoke-studio
+        \\// test-module-governance
+        \\// test-capability-audit
+        \\// test-docs-drift
+        ,
+    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scripts/smoke-v1.sh", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scripts/test-examples.sh", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scripts/test-install-archive-safety.sh", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "scripts/check-semantics-spec.sh", .data = "#!/bin/sh\n" });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "scripts/verify.sh",
+        .data =
+        \\zig build test
+        \\zig build test-zruntime
+        \\zig build test-docs-drift test-doc-links
+        \\zig build -Doptimize=ReleaseFast
+        \\zig build smoke-v1
+        \\zig build test-panic-isolation
+        \\bash scripts/test-examples.sh
+        \\bash scripts/test-install-archive-safety.sh
+        \\bash scripts/check-semantics-spec.sh
+        \\zts meta --json
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".github/workflows/ci.yml",
+        .data =
+        \\zig fmt --check build.zig packages/
+        \\zig build test
+        \\zig build test-zruntime
+        \\zig build test-docs-drift test-doc-links
+        \\zig build -Doptimize=ReleaseFast
+        \\zig build smoke-v1
+        \\zig build test-panic-isolation
+        \\bash scripts/test-examples.sh
+        \\bash scripts/test-install-archive-safety.sh
+        \\bash scripts/check-semantics-spec.sh
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = ".github/workflows/release.yml",
+        .data =
+        \\zig fmt --check build.zig packages/
+        \\zig build test
+        \\zig build test-zruntime
+        \\zig build test-docs-drift test-doc-links
+        \\zig build -Doptimize=ReleaseFast
+        \\zig build smoke-v1
+        \\zig build test-panic-isolation
+        \\zig build smoke-getting-started
+        \\zig build smoke-demo
+        \\zig build smoke-studio
+        \\bash scripts/test-examples.sh
+        \\bash scripts/test-install-archive-safety.sh
+        \\bash scripts/check-semantics-spec.sh
+        \\zig build release-check
+        \\contents: write
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/README.md",
+        .data =
+        \\# Documentation
+        \\Current docs use one user guide and one roadmap.
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/user-guide.md",
+        .data =
+        \\# User Guide
+        \\Current user flow.
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/roadmap.md",
+        .data =
+        \\# Roadmap
+        \\Current support boundary.
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/virtual-modules/README.md",
+        .data =
+        \\# Virtual Modules
+        \\| Module | Exports | Capabilities |
+        \\|---|---|---|
+        \\| `zttp:env` | `env` | `env`, `policy_check` |
+        ,
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "README.md",
+        .data = if (opts.stale_readme)
+            "Numbers: 3ms runtime init. 1.2MB binary. 4MB memory baseline.\n"
+        else
+            "Numbers: cold-start floor 3.5 ms, typical 7-15 ms, RSS 13 MB, throughput 112k req/s. These numbers are pending receipt-backed measurement.\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/performance.md",
+        .data = "Performance: 3.5 ms floor, 7-15 ms typical, 13 MB RSS, 112k req/s. These numbers are pending receipt-backed measurement.\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "docs/reliability.md",
+        .data = if (opts.document_413_gap)
+            "Request bodies over the cap closes the connection without a response; 413 is tracked.\n"
+        else
+            "No release-blocking reliability gaps are documented.\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/runtime/src/cli_help.zig",
+        .data = "zttp verify <url>\nproofs\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/runtime/src/build_command.zig",
+        .data = "--no-attest\n",
+    });
+    try tmp.dir.writeFile(io, .{
+        .sub_path = "packages/runtime/src/proofs_cli.zig",
+        .data = "badge\nbundle\nverify\n",
+    });
 }

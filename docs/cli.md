@@ -110,12 +110,7 @@ settings, and outbound HTTP configuration:
 ```bash
 zttp doctor
 zttp doctor src/handler.ts
-zttp doctor --release [--json] [--out FILE]
 ```
-
-`--release` validates the current beta release evidence and prints a release
-proof passport. It reads existing files only: it runs neither the benchmark nor
-the test suite.
 
 `zttp version` (alias `--version`) prints the version and exits.
 
