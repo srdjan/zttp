@@ -314,10 +314,6 @@ fn dispatchOnMessage(
 
     try lease.runtime.installWebSocketModuleState(ws_pool);
 
-    const prev_connection = engine.activeWebSocketConnection();
-    engine.setActiveWebSocketConnection(id);
-    defer engine.setActiveWebSocketConnection(prev_connection);
-
     // Connection ids larger than i32 max would truncate; W2 widens the
     // proxy to a full object so the id range stops mattering. For W1 we
     // accept the limit (~2 billion live connections per process, which
@@ -354,10 +350,6 @@ fn dispatchOnOpen(
 
     try lease.runtime.installWebSocketModuleState(ws_pool);
 
-    const prev_connection = engine.activeWebSocketConnection();
-    engine.setActiveWebSocketConnection(id);
-    defer engine.setActiveWebSocketConnection(prev_connection);
-
     const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
     const ws_val = engine.jsInt(id_i32);
     const url_val = try lease.runtime.ctx.createString(url);
@@ -386,10 +378,6 @@ fn dispatchOnClose(
     defer lease.deinit();
 
     try lease.runtime.installWebSocketModuleState(ws_pool);
-
-    const prev_connection = engine.activeWebSocketConnection();
-    engine.setActiveWebSocketConnection(id);
-    defer engine.setActiveWebSocketConnection(prev_connection);
 
     const id_i32: i32 = std.math.cast(i32, id) orelse return error.ConnectionIdOverflow;
     const ws_val = engine.jsInt(id_i32);

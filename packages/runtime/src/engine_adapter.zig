@@ -63,24 +63,6 @@ pub fn contractRuntimePolicy(contract: *const HandlerContract) RuntimePolicy {
     return zq.handler_policy.contractToRuntimePolicy(contract);
 }
 
-pub fn activeWebSocketConnection() ?u64 {
-    return zruntime.active_ws_connection;
-}
-
-pub fn setActiveWebSocketConnection(id: ?u64) void {
-    zruntime.active_ws_connection = id;
-}
-
-/// Read-and-clear the source line of the most recent handler type fault on this
-/// worker thread (set by the runtime at the fault catch). The server's 500 site
-/// uses it to include `line:column` in the response body after the runtime is
-/// released.
-pub fn takeFaultLocation() ?zq.bytecode.LineEntry {
-    const loc = zruntime.last_fault_location;
-    zruntime.last_fault_location = null;
-    return loc;
-}
-
 pub fn initHandlerPool(
     allocator: std.mem.Allocator,
     config: RuntimeConfig,
@@ -107,6 +89,22 @@ pub fn executeHandlerBorrowed(pool: *HandlerPool, request: http_types.HttpReques
     return pool.executeHandlerBorrowed(request);
 }
 
+/// Resolved source location of a handler fault. Re-exported so `server.zig`
+/// can name it without importing the engine directly - it reaches the engine
+/// only through this adapter, and the purity script enforces that.
+pub const FaultLocation = zq.bytecode.LineEntry;
+
+/// Execute, and on a type fault write the runtime's resolved source line into
+/// `fault_out`. The server's 500 site needs `line:column` after the runtime is
+/// released, so the pool copies it out while the runtime is still in hand.
+pub fn executeHandlerBorrowedCapturingFault(
+    pool: *HandlerPool,
+    request: http_types.HttpRequestView,
+    fault_out: *?FaultLocation,
+) !ResponseHandle {
+    return pool.executeHandlerBorrowedCapturingFault(request, fault_out);
+}
+
 pub fn poolInUse(pool: *const HandlerPool) usize {
     return pool.getInUse();
 }
@@ -115,12 +113,35 @@ pub fn poolCapacity(pool: *const HandlerPool) usize {
     return pool.max_size;
 }
 
-test "takeFaultLocation reads and clears the thread-local fault location" {
-    zruntime.last_fault_location = .{ .offset = 5, .line = 12, .column = 3 };
-    const taken = takeFaultLocation();
-    try std.testing.expect(taken != null);
-    try std.testing.expectEqual(@as(u32, 12), taken.?.line);
-    try std.testing.expectEqual(@as(u32, 3), taken.?.column);
-    // A second take returns null: the location was cleared.
-    try std.testing.expect(takeFaultLocation() == null);
+test "a type fault leaves its source line on the runtime for the pool to copy out" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try zruntime.Runtime.init(allocator, .{});
+    defer rt.deinit();
+
+    // Fresh runtime: nothing to report.
+    try std.testing.expect(rt.last_fault_location == null);
+
+    // A handler that calls a non-function faults with HandlerTypeFault, and the
+    // runtime resolves the source line from the bytecode line table.
+    try rt.loadHandler(
+        \\function handler(req) {
+        \\  const missing = undefined;
+        \\  return missing();
+        \\}
+    , "<type-fault>");
+
+    var request = http_types.HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
+    const loc = rt.last_fault_location orelse return error.ExpectedFaultLocation;
+    try std.testing.expect(loc.line > 0);
 }

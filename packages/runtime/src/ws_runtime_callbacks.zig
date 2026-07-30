@@ -5,9 +5,8 @@
 //! Extracted from zruntime.zig to keep the request-lifecycle struct focused.
 //! These are registered by `Runtime.installWebSocketModuleState`; each callback
 //! receives the owning Runtime as an opaque pointer and dispatches against its
-//! WebSocket pool (`Runtime.ws_pool_ref`). The `active_ws_connection`
-//! thread-local stays in zruntime.zig because the frame loop owns it and these
-//! callbacks take the connection id from their first JS argument instead.
+//! WebSocket pool (`Runtime.ws_pool_ref`), and takes the connection id from its
+//! first JS argument.
 
 const std = @import("std");
 const zq = @import("zts");

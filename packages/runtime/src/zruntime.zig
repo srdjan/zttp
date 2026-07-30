@@ -128,12 +128,6 @@ const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapability
 const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
 const parseHeadersFromJson = @import("trace_helpers.zig").parseHeadersFromJson;
 
-/// Source location of the most recent handler type fault on this worker thread,
-/// resolved from the bytecode line table (feature A). Set at the fault catch and
-/// read-and-cleared by the server's 500 site, which builds the response after the
-/// runtime is released. Same-thread handoff only.
-pub threadlocal var last_fault_location: ?zq.bytecode.LineEntry = null;
-
 /// Clear thread-local interpreter state after a handler panic.
 /// Called from the setjmp recovery branch before returning error.HandlerPanicked.
 /// Must only touch thread-locals - the runtime heap may be mid-mutation. The
@@ -179,6 +173,11 @@ pub const Runtime = struct {
     owns_resources: bool,
     active_request_id: std.atomic.Value(u64),
     last_request_body_len: usize,
+    /// Source location of the most recent handler type fault, resolved from the
+    /// bytecode line table (feature A). Set at the fault catch; the pool copies
+    /// it out on the error path, because the server builds the 500 body after
+    /// this runtime is already released.
+    last_fault_location: ?zq.bytecode.LineEntry = null,
     request_prototype: ?*zq.JSObject,
     response_prototype: ?*zq.JSObject,
     headers_prototype: ?*zq.JSObject,
@@ -360,6 +359,7 @@ pub const Runtime = struct {
             .owns_resources = true,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
+            .last_fault_location = null,
             .request_prototype = null,
             .response_prototype = null,
             .headers_prototype = null,
@@ -431,6 +431,7 @@ pub const Runtime = struct {
             .owns_resources = false,
             .active_request_id = std.atomic.Value(u64).init(0),
             .last_request_body_len = 0,
+            .last_fault_location = null,
             .request_prototype = null,
             .response_prototype = null,
             .headers_prototype = null,
@@ -1680,7 +1681,7 @@ pub const Runtime = struct {
                     // Hand the resolved source line to the server's 500 site, which
                     // builds the body after this runtime is released (same worker
                     // thread, so the threadlocal is a safe read-and-cleared channel).
-                    last_fault_location = self.interpreter.last_error_location;
+                    self.last_fault_location = self.interpreter.last_error_location;
                     return error.HandlerTypeFault;
                 },
                 else => return error.HandlerError,
@@ -2267,16 +2268,6 @@ pub const Runtime = struct {
 // ===========================================================================
 // WebSocket runtime callbacks (W1-d.4-b)
 // ===========================================================================
-
-/// Connection id for the WS frame currently being dispatched to JS.
-/// Frame loop sets this before invoking onOpen/onMessage/onClose and
-/// clears it afterwards. Callbacks like `send(ws, data)` read from this
-/// when the first JS argument is omitted or when we need to double-check
-/// the dispatched connection matches the one JS claims.
-///
-/// Thread-local: each ws frame-loop thread runs independent dispatches,
-/// so per-thread storage keeps connections cleanly separated.
-pub threadlocal var active_ws_connection: ?u64 = null;
 
 // ============================================================================
 // Percentile Tracker for Latency Metrics

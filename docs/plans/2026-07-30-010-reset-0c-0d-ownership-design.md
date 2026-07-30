@@ -156,6 +156,25 @@ depend on earlier ones; earlier slices are useful on their own.
    between the runtime and `engine_adapter.zig`; they become fields on the invocation state.
    -> verify: `test-zruntime`, the WebSocket examples, the panic-isolation smoke.
 
+   DONE 2026-07-30, and one of the two was not a channel at all. `active_ws_connection`
+   had no reader: `ws_frame_loop.zig` saved, set, and restored it around three dispatch
+   sites, and nothing in between read the value. The docstring claimed the WebSocket
+   `send`/`close` callbacks fell back to it, while `ws_runtime_callbacks.zig`'s own header
+   said those callbacks take the connection id from their first JS argument. The
+   threadlocal, its two adapter accessors, and the nine frame-loop lines are deleted.
+
+   `last_fault_location` is a genuine handoff and became a `Runtime` field. The server
+   builds the 500 body after the runtime is released, so the value has to leave the
+   runtime at the pool boundary: `executeHandlerBorrowedCapturingFault` copies it into an
+   out-parameter on the error path, and `executeHandlerBorrowed` delegates with null so
+   the other 29 call sites are untouched. `server.zig` names the type as
+   `engine.FaultLocation` rather than importing the engine, which the purity script
+   requires. The adapter's test now drives a real type fault through a runtime instead of
+   poking a threadlocal.
+
+   All five ambient-dispatch threadlocals from the 6.1 census are now gone except
+   `aot_override`, which is file-local test-only state and needs no context.
+
 6. **`HandlerInstance`** (0c). Extract `Runtime` from `zruntime.zig` into its own file as
    `HandlerInstance`, owning the Context, installed builtins, loaded handler, invocation
    state, and reset lifecycle, with `runtime_pool.zig` owning it directly. Delete the

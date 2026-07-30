@@ -724,14 +724,18 @@ const ConnectionPool = struct {
 
         // Invoke handler
         if (self.server.pool) |*pool| {
-            var handle = engine.executeHandlerBorrowed(pool, HttpRequestView{
+            // The runtime resolves the faulting source line, but is released
+            // before the 500 body below is built, so the pool copies the value
+            // out here while it still holds the runtime.
+            var fault_location: ?engine.FaultLocation = null;
+            var handle = engine.executeHandlerBorrowedCapturingFault(pool, HttpRequestView{
                 .url = request.url,
                 .method = request.method,
                 .path = request.path,
                 .query_params = request.query_params,
                 .headers = request.headers,
                 .body = request.body,
-            }) catch |err| {
+            }, &fault_location) catch |err| {
                 const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else 500;
                 var fault_buf: [256]u8 = undefined;
                 var fault_loc_buf: [320]u8 = undefined;
@@ -751,7 +755,7 @@ const ConnectionPool = struct {
                         // faulting source line the runtime resolved (feature A).
                         const diag = fault_explain.diagnose(proof, .type_fault);
                         const base = fault_explain.formatMessage(&fault_buf, diag);
-                        if (engine.takeFaultLocation()) |loc| {
+                        if (fault_location) |loc| {
                             break :blk std.fmt.bufPrint(
                                 &fault_loc_buf,
                                 "{s} at {d}:{d}",

@@ -382,6 +382,18 @@ pub const HandlerPool = struct {
     /// Execute handler and return a response handle that borrows JS strings.
     /// Caller must call handle.deinit() after sending the response.
     pub fn executeHandlerBorrowed(self: *Self, request: HttpRequestView) !ResponseHandle {
+        return self.executeHandlerBorrowedCapturingFault(request, null);
+    }
+
+    /// Same as `executeHandlerBorrowed`, but on a type-fault error it copies the
+    /// runtime's resolved fault location into `fault_out` before the runtime is
+    /// released. The server's 500 site builds its body after release, so the
+    /// value has to leave the runtime here or not at all.
+    pub fn executeHandlerBorrowedCapturingFault(
+        self: *Self,
+        request: HttpRequestView,
+        fault_out: ?*?zq.bytecode.LineEntry,
+    ) !ResponseHandle {
         const request_id = self.nextRequestId();
         const base_rt = try self.acquireForRequest();
         var slot_disposed = false;
@@ -399,6 +411,7 @@ pub const HandlerPool = struct {
         while (attempt < 2) : (attempt += 1) {
             const rt = try self.ensureRuntime(base_rt);
             const response = self.callHandlerGuarded(rt, request, request_id, true) catch |err| {
+                if (fault_out) |out| out.* = rt.last_fault_location;
                 if (err == error.HandlerPanicked) {
                     slot_disposed = true;
                     self.quarantineSlot(base_rt);
