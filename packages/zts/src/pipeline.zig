@@ -382,6 +382,17 @@ pub const ExtractContractOptions = struct {
     /// `ResolveOptions.module_facts`: it must outlive the returned contract's
     /// construction, not the contract itself, since the contract gets copies.
     module_facts: ?*const ModuleFacts = null,
+    /// The type session this compile already ran. When it carries a
+    /// `TypeChecker`, the contract is built on that checker rather than on a
+    /// second pool, env, and checker constructed identically and re-checked
+    /// over the same root.
+    ///
+    /// It does not replace `type_map`: a resolve with no type env (an untyped
+    /// source) leaves `type_checker` null, and extraction then builds its own
+    /// session from `type_map` as before. It also does not apply when
+    /// `type_check` is overridden, because a caller that replaced the check
+    /// wants it to run.
+    resolved: ?*const ResolvedModule = null,
 };
 
 fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
@@ -397,6 +408,26 @@ pub fn extractContractFromParsed(
 ) !HandlerContract {
     const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
     const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
+
+    if (opts.type_check == runContractTypeCheck) {
+        if (opts.resolved) |resolved| {
+            if (resolved.type_checker) |*tc| {
+                var contract = try buildContractOn(
+                    allocator,
+                    parsed,
+                    filename,
+                    opts,
+                    tc.env,
+                    tc,
+                    handler_fn,
+                    handler_loc,
+                );
+                errdefer contract.deinit(allocator);
+                try tc.ensureHealthy();
+                return contract;
+            }
+        }
+    }
 
     var type_pool = TypePool.init(allocator);
     defer type_pool.deinit(allocator);
@@ -418,18 +449,45 @@ pub fn extractContractFromParsed(
     defer type_checker.deinit();
     _ = try opts.type_check(&type_checker, parsed.root);
 
+    var contract = try buildContractOn(
+        allocator,
+        parsed,
+        filename,
+        opts,
+        &type_env,
+        &type_checker,
+        handler_fn,
+        handler_loc,
+    );
+    errdefer contract.deinit(allocator);
+    try type_checker.ensureHealthy();
+    return contract;
+}
+
+/// The half of contract extraction that does not care where the type session
+/// came from: a freshly built one, or the one `resolve` already ran.
+fn buildContractOn(
+    allocator: std.mem.Allocator,
+    parsed: ParsedModule,
+    filename: []const u8,
+    opts: ExtractContractOptions,
+    type_env: *const TypeEnv,
+    type_checker: *const TypeChecker,
+    handler_fn: ?NodeIndex,
+    handler_loc: ?ir_mod.SourceLocation,
+) !HandlerContract {
     var builder = ContractBuilder.init(
         allocator,
         parsed.ir_view,
         parsed.atoms,
-        &type_env,
-        &type_checker,
+        type_env,
+        type_checker,
     );
     builder.manifest_registry = opts.manifest_registry;
     builder.injected_facts = opts.module_facts;
     defer builder.deinit();
 
-    var contract = try builder.build(
+    return builder.build(
         filename,
         handler_loc,
         handler_fn,
@@ -438,9 +496,6 @@ pub fn extractContractFromParsed(
         opts.has_default_response,
         opts.verification,
     );
-    errdefer contract.deinit(allocator);
-    try type_checker.ensureHealthy();
-    return contract;
 }
 
 /// Strip TypeScript/TSX when needed, parse and resolve the source, then return

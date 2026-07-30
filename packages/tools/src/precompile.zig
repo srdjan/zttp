@@ -372,6 +372,7 @@ fn buildContractForServiceContext(
         null,
         null,
         null,
+        null,
     );
 }
 
@@ -1327,6 +1328,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         stc_ptr,
         flow_in,
         null,
+        &resolved,
     );
 
     if (result.contract) |*c| {
@@ -1914,6 +1916,7 @@ pub fn compileHandler(
                     stc_ptr,
                     null,
                     manifest_registry,
+                    &resolved,
                 )
             else
                 null;
@@ -1964,6 +1967,7 @@ pub fn compileHandler(
             stc_ptr,
             null,
             manifest_registry,
+            &resolved,
         );
 
         // Inject verification-derived properties (Checks 2, 6, 7)
@@ -2399,6 +2403,10 @@ fn buildContractWithPolicy(
     /// injection and stderr output.
     precomputed_flow: ?*const zts.FlowChecker,
     manifest_registry: ?*const zts.manifest_registry.Registry,
+    /// The resolved type session for this compile, when the caller ran one.
+    /// Contract extraction then builds on the checker that already ran instead
+    /// of constructing a second identical one and re-checking the same root.
+    resolved: ?*const zts.pipeline.ResolvedModule,
 ) !HandlerContract {
     const contract_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(contract_view, root, atoms);
@@ -2420,6 +2428,7 @@ fn buildContractWithPolicy(
             .type_map = type_map,
             .service_type_context = service_type_context,
             .manifest_registry = manifest_registry,
+            .resolved = resolved,
         },
     );
     errdefer contract.deinit(allocator);
@@ -3310,6 +3319,7 @@ fn buildTestContractForSource(
         null,
         null,
         sql_schema_path,
+        null,
         null,
         null,
         null,
