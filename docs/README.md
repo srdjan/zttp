@@ -55,5 +55,7 @@ path.
 - [Semantics Verification](internals/semantics-verification.md) - the five
   `spec-check` mechanisms, the SMT layer, the exclusion audit, and the
   generated spec artifacts.
+- [Test Steps](internals/testing.md) - what `zig build test` includes and
+  excludes, and why the zruntime suite is standalone.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.

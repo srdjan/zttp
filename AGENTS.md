@@ -50,6 +50,7 @@
 
 ## Testing Guidelines
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
+- `docs/internals/testing.md` maps the build steps: what `zig build test` runs, what it leaves to `scripts/verify.sh`, and why `test-zruntime` is standalone.
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
 - Add tests near the feature you touched in `packages/runtime/` or `packages/zts/` and run the relevant `zig build test*` step.
 - Reaching a new `zts` internal module (anything in the internal tier of `packages/zts/src/root.zig`) from `runtime`, `tools`, `pi`, or `proof-review` needs a row in `scripts/module-boundary.allow`, and a row that nothing uses fails the same gate. Prefer the curated surface at the bottom of `root.zig`; widen the allowlist only deliberately, and say why in the commit. Run `zig build test-module-boundary`.
