@@ -1,8 +1,19 @@
 # CLI Reference
 
-`zttp` is the developer CLI. `zts` is installed for tools that want the
-analyzer directly; analyzer commands exposed by `zts` are also reachable as
-`zttp <command>`.
+The build produces three binaries:
+
+- `zttp` is the developer CLI and the local runtime entry point.
+- `zttp-runtime` is the internal runtime template that self-contained outputs
+  wrap. `zttp` invokes it; users never type its name.
+- `zts` is the pi-free engine and compiler CLI, installed for IDE and CI
+  integrations that call the analyzer directly.
+
+Every analyzer command exposed by `zts` is also reachable as `zttp <command>`
+with identical surface and output. The interactive `expert` agent and the
+session `ledger` commands are the exception: they live only in `zttp`, so the
+agent, its provider HTTP clients, and its API-key handling are compiled exactly
+once and never linked into `zts` or the deployed `zttp-runtime`. `zts expert`
+and `zts ledger` print a one-line pointer to `zttp` and exit non-zero.
 
 Run command-specific help for exact flags:
 
@@ -145,6 +156,14 @@ zttp verify http://127.0.0.1:8080
 `kind=deploy` row to `.zttp/proofs.jsonl`, and signs an attestation by
 default. `--no-attest` disables signing for that build.
 
+`deploy` takes no arguments: it auto-detects the handler file and the project
+name in the current directory and writes `.zttp/deploy/<project-name>`. No
+credentials, Docker, or network are involved. `--local` and `--target local`
+are explicit aliases for the default. Hosted cloud deploy is deferred from this
+beta: `--cloud` still parses and rejects with a "not in this beta" message, and
+the related account verbs (`login`, `logout`, `review`, `grants`,
+`revoke-grant`) are not dispatched and read as unknown commands.
+
 Proof ledger commands:
 
 ```bash
@@ -283,7 +302,7 @@ zttp extension-status --module-manifest <path>... [--json]
 
 Use JSON mode for IDEs, CI, and review-bot integrations.
 
-Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale.
+Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the five mechanisms, the SMT layer, the exclusion audit, and the generated artifacts these commands own.
 
 ## Expert Mode
 
@@ -347,5 +366,10 @@ values.
   edge router when built with `-Dedge`.
 - `zttp demo --scripted --out proof-demo --export proof-demo/passport`
   creates an offline Proof Passport demo.
+
+`studio` and `edge` are compiled out of the default build. Compiled out, each
+prints a one-line "rebuild with -Dstudio" or "rebuild with -Dedge" message and
+exits non-zero. `studio` stays listed in `zttp help --all` so its opt-in is
+discoverable.
 
 See [User Guide](user-guide.md) for the normal project flow.

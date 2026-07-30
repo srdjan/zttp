@@ -52,5 +52,8 @@ path.
   native function extension notes.
 - [Module Capabilities](internals/capabilities.md) - built-in module
   capability governance.
+- [Semantics Verification](internals/semantics-verification.md) - the five
+  `spec-check` mechanisms, the SMT layer, the exclusion audit, and the
+  generated spec artifacts.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.

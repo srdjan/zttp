@@ -92,19 +92,14 @@ Strong success criteria let you loop independently. Weak criteria such as "make
 it work" require clarification.
 
 
+
 ## What This Repo Is
 
 Serverless JavaScript runtime for FaaS, powered by zts (pure Zig JS engine). Targets AWS Lambda, Azure Functions, Cloudflare Workers, edge. Design goals: instant cold starts, small binary, request isolation, zero dependencies.
 
 ## Build & Run
 
-Validated on Zig 0.16.0 stable.
-
-The build produces three binaries:
-
-- `zttp` — the primary developer CLI and local runtime entrypoint. `zttp --help` advertises only the five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is advanced and listed under `zttp help --all`: the analyzer commands `check`, `prove`, `prove-behavior`, `mock`, `link`, `gen-tests`, `rollout`, `canonicalize`, `normalize`, `edit-simulate`, `review-patch`, plus `serve`, `compile`, `build`, `verify`, `doctor`, `demo`, `edge`, `proofs` (with `list | show | diff | watch | export | badge | bundle | verify | gate | replay` subcommands; `replay <capsule>` replays a recorded Proof Flight Recorder capsule against the current handler, and the old top-level spelling `zttp proof replay` remains a deprecated, unlisted alias for one release), `ratchet` (with `show | check` subcommands), `witnesses`, `workflow-queue` (dead-letter inspection: `list | show | replay | discard`), `durable dead-runs` (same subcommands), and `ledger` (`export | replay`, `zttp`-only). A "Machine tools" section in `help --all` lists the JSON-output commands `features`, `modules`, `restrictions`, `meta`, `describe-rule`, `search`, `spec-check`, `spec-hash`, `spec-render`, `module-spec-render`, `verify-paths`, `verify-modules`, `verify-module-manifest`, and `extension-status` — all reachable as `zttp <command>` via thin delegations into the same code path the `zts` binary uses. `spec-check` validates the semantics registry (the meaning of each IR node and bytecode opcode) against the IR/bytecode tables via five mechanisms — the comptime drift gate, stack-effect arity, the symbolic lowering proof, the differential corpus that runs the registry's denotations against the real compiler's output (`semantics_corpus.zig`), and the SMT equivalence check (mechanism 5) that asks `z3` whether each obligation holds on all inputs — every value node's `denote == exec(lower)` (so mechanism 5 is a superset of the structural lowering proof for value rules), the fused-opcode refinements, and the registry's algebraic laws (currently none asserted: every tempting equivalence, `neg` involution included, sits in `excluded_laws` instead so the receipt never over-claims a law the faithful model refutes) — (pure encoder `semantics_smt.zig` over an unbounded-integer abstraction of the engine's i32→f64 numbers, so the law table must only assert laws that hold under the engine's value model, not merely over ℤ — associativity of `+` (f64 rounding), commutativity of `+` (string concatenation), and `!` involution (truthiness coercion) are deliberately excluded; the solver is injected from `smt_solver.zig` so `std.process.Child` never enters the wasm analyzer; only a genuine counterexample (`ZTS755`) or an ill-typed obligation (`ZTS756`) fails the build, while an absent/broken/undecided solver is non-fatal "unproven" so CI without `z3` stays green; opt out with `ZTTP_Z3=off`, pin the binary with `ZTTP_Z3=<path>`). A companion exclusion audit (`semantics_audit.zig`, the dual of mechanism 5) machine-REFUTES the declared `excluded_laws` (associativity/commutativity of `+`, `!` and unary-`-` involution) over a FAITHFUL tagged number|bool|string value model with JS coercion: each must yield a counterexample (`sat`); if an excluded law actually holds (`unsat`) the build fails with `ZTS757`, if z3 cannot evaluate the model it fails with `ZTS758`, and a timeout is inconclusive/non-fatal at the command level (so a genuinely un-refutable future law cannot wedge plain `spec-check --audit`). The audit is opt-in (`spec-check --audit`, run by `scripts/verify.sh`) because its f64-associativity refutation is slow; interactive `spec-check` stays fast. The `scripts/verify.sh` gate is stricter than the command: it re-reads the `--json` summary and REQUIRES a complete audit (z3 present, every excluded law refuted, zero inconclusive), so a silent z3-absent skip or a timeout cannot pass it with false confidence; an explicit `ZTTP_Z3` opt-out (off/none/0/disable) is honored as an intentional skip. `spec-hash` prints that registry's hash for CI assertions, and `spec-render` renders the registry as a readable TypeScript spec (`docs/spec/semantics.spec.ts`; `--check` is the CI drift gate). `module-spec-render` is the same pattern for the virtual-module specs: the typed Zig bindings in `packages/zts/src/module_binding.zig` are authoritative and `packages/modules/module-specs/*.json` is generated from them (24 files, output paths from `builtin_governance_entries`); It also owns the Module Catalog table in `docs/virtual-modules/README.md`, a marked region between `<!-- BEGIN GENERATED: module catalog ... -->` and `<!-- END GENERATED: module catalog -->` (the rest of that file is hand-written prose). `--check` gates all 25 artifacts in `scripts/verify.sh` and reports every stale path; a missing region marker is exit 2 rather than a skip. Do not hand-edit the JSON files or that table - edit the binding and regenerate. The edit-aware analyzers `edit-simulate`, `review-patch`, and `prove-behavior` are listed under the "Analyze" category in `help --all`, not under "Machine tools". The top-level `zttp verify <url>` is the proof-receipt verifier and is distinct from `zttp proofs verify <bundle-dir>` (bundle integrity). The browser proof workbench (`zttp studio`) and the in-process edge runtime (`zttp edge`) are compiled out of the default build (opt in with `zig build -Dstudio` / `-Dedge`); compiled out, each command prints a one-line "rebuild with -D..." message and exits non-zero. `studio` stays listed under `help --all` (so its `-Dstudio` opt-in is discoverable) even though it is compiled out by default. Hosted cloud deploy is deferred too: `deploy --cloud` still parses and rejects with a "not in this beta" message; the related account verbs (`login`, `logout`, `review`, `grants`, `revoke-grant`) are not dispatched and treated as unknown commands. Hosted control-plane, provider, registry, and OCI image orchestration code is intentionally out of core.
-- `zttp-runtime` — the internal runtime template used for self-contained outputs and direct runtime tests. Invoked automatically by `zttp`; users never type its name.
-- `zts` — the pi-free engine/compiler CLI installed alongside `zttp` for IDE and CI integrations that prefer calling the analyzer directly. Every `zts <command>` is also reachable as `zttp <command>` with identical surface and output. The interactive `expert` agent and session `ledger` commands are the exception: they live only in `zttp`, so the ~37 KLOC agent (and its provider HTTP clients and API-key handling) is compiled exactly once and never linked into `zts` or the deployed `zttp-runtime`. `zts expert`/`zts ledger` print a one-line pointer to `zttp` and exit non-zero.
+Validated on Zig 0.16.0 stable. The build produces three binaries: `zttp` (developer CLI and local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
 
 ```bash
 zig build                                      # Debug build (all three binaries)
@@ -126,38 +121,43 @@ zig build wasm                     # Build zts analyzer as a wasm module (web pl
 bash scripts/build-wasm-playground.sh  # Build wasm + publish to zttp-website/static
 
 zig build test                     # Bulk unit suite (excludes zruntime root, smoke, panic-isolation, examples)
-bash scripts/verify.sh             # Full local gate mirroring CI (run zig fmt --check separately)
-zig build test-zts               # Engine tests only
+bash scripts/verify.sh             # Full local gate mirroring CI, including zig fmt --check
+zig build test-zts                 # Engine tests only
 zig build test-zruntime            # Runtime tests only
 zig build test-cli                 # Developer CLI tests only
 zig build test -- --test-filter "name"  # Single test
 bash scripts/test-examples.sh      # All example handler tests
 
 zig build bench                    # Zig-native benchmarks (packages/runtime/bench/benchmark.zig)
-zttp prove old.json new.json  # Compare contracts (0=safe, 1=breaking)
-zttp mock tests.jsonl --port 3001  # Mock server from test cases
-zttp link system.json         # Cross-handler contract linking
 ```
+
+## CLI Surface
+
+`zttp --help` advertises five core commands: `init`, `dev`, `test`, `expert`, `deploy`. Everything else is advanced and listed by `zttp help --all`, in six categories: Analyze, Run and inspect, Package, Proof ledger, Credentials, and Machine tools. Every analyzer command is reachable both as `zts <command>` and as `zttp <command>` with identical output; `expert` and `ledger` live only in `zttp`.
+
+`zttp verify <url>` is the proof-receipt verifier and is distinct from `zttp proofs verify <bundle-dir>`, which checks bundle integrity. `studio` and `edge` are compiled out by default. Hosted cloud deploy and the account verbs are deferred from this beta; hosted control-plane, provider, registry, and OCI image orchestration are intentionally out of core.
+
+Full reference: [docs/cli.md](docs/cli.md). Semantics registry checking (`spec-check`, `spec-hash`, `spec-render`, `module-spec-render`, the SMT layer and exclusion audit): [docs/internals/semantics-verification.md](docs/internals/semantics-verification.md). Generated artifacts under `packages/modules/module-specs/` and the Module Catalog table in `docs/virtual-modules/README.md` are rendered from the Zig bindings; edit the binding and regenerate, never the output.
 
 ## Architecture
 
-Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Two entry points after the split:
+Monorepo with packages under `packages/`. Runtime (`packages/runtime/`): HTTP, CLI, request routing, static files, live reload. Two entry points:
 
-- `main.zig` → `runtime_cli.zig` — the `zttp-runtime` runtime template binary (serve, attest, self-extract startup, version, help).
-- `cli_main.zig` → `dev_cli.zig` — the `zttp` developer binary (init, dev, test, expert, deploy, and the advanced commands).
-- `cli_shared.zig` — arg parsing, watch sets, size parsing shared by both.
+- `main.zig` -> `runtime_cli.zig` - the `zttp-runtime` binary (serve, attest, self-extract startup, version, help).
+- `cli_main.zig` -> `dev_cli.zig` - the `zttp` developer binary (init, dev, test, expert, deploy, and the advanced commands).
+- `cli_shared.zig` - arg parsing, watch sets, size parsing shared by both.
 
-HTTP: `server.zig`, runtime management: `handler_instance.zig` (`zruntime_tests.zig` is its end-to-end test root), live reload: `live_reload.zig`. Engine (`packages/zts/`): JS engine with two-pass compilation (parse to IR, then bytecode). Parser in `packages/zts/src/parser/`, VM dispatch loop in `interpreter.zig` (Zig switch the compiler lowers to computed-goto on x86_64 and aarch64). The interpreter is the single execution path: the tiered JIT was removed after measurement showed it never compiled on the server request path and could not compile handler-shaped code (see docs/plans/2026-07-28-001-reset-simplification-plan.md, section 8.1; recoverable from the tag `jit-baseline-tier-intact`). The interpreter keeps its polymorphic inline cache and capability-sandbox dispatch. Values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
+HTTP in `server.zig`, runtime management in `handler_instance.zig` (`zruntime_tests.zig` is its end-to-end test root), live reload in `live_reload.zig`. Engine (`packages/zts/`): two-pass compilation (parse to IR, then bytecode), parser in `packages/zts/src/parser/`, VM dispatch loop in `interpreter.zig`. The interpreter is the single execution path; the tiered JIT was removed after measurement. Values use NaN-boxing (`value.zig`, `object.zig`), memory management in `gc.zig`/`heap.zig`/`arena.zig`/`pool.zig`, TypeScript stripping in `stripper.zig`. Tools (`packages/tools/`): build-time precompilation, CLI, analysis.
 
-Request flow: accept connection, check proven route table (contract-aware pre-filter), check proof cache for deterministic+read_only handlers (`proof_adapter.zig`), acquire isolated runtime from HandlerPool (LockFreePool-backed), convert to JS Request, invoke handler, extract Response, release runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
+Request flow: accept connection, check proven route table, check proof cache for deterministic and read-only handlers (`proof_adapter.zig`), acquire an isolated runtime from HandlerPool, convert to a JS Request, invoke the handler, extract the Response, release the runtime. Self-extracting binaries parse the embedded contract at startup for env var validation, route pre-filtering, proof cache activation, and property logging (`contract_runtime.zig`).
 
-Key patterns: native Zig error unions (`!T`) for error handling throughout the implementation (the `Result<T>` seen in handlers is a user-facing JS/verification construct, not a Zig engine pattern), hidden classes for inline caching, request-scoped arena allocation, guard composition via pipe operator (`packages/modules/src/workflow/compose.zig`).
+Key patterns: native Zig error unions (`!T`) throughout the implementation (the `Result<T>` seen in handlers is a user-facing JS and verification construct, not a Zig engine pattern), hidden classes for inline caching, request-scoped arena allocation, guard composition via the pipe operator (`packages/modules/src/workflow/compose.zig`).
 
-For detailed architecture: [docs/internals/architecture.md](docs/internals/architecture.md). For performance internals: [docs/performance.md](docs/performance.md).
+Detail: [docs/internals/architecture.md](docs/internals/architecture.md) and [docs/performance.md](docs/performance.md).
 
 ## Virtual Modules
 
-Import via `import { fn } from "zttp:module"`. Most implementations live in `packages/modules/src/` (peer package) under `data/`, `http/`, `net/`, `platform/`, `security/`, and `workflow/` (the last holding `zttp:compose`); the workflow modules `zttp:io`, `zttp:scope`, `zttp:durable`, `zttp:workflow`, and `zttp:queue` live under `packages/zts/src/modules/workflow/`. The authoritative module-to-path registry is `packages/zts/src/builtin_modules.zig`. Each module owns its `pub const binding = sdk.ModuleBinding{...}` declaration next to its implementation file. The `ModuleBinding` type and the shared capability-enforcement helpers live in `packages/zts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, etc.) enforced at call time by those helpers; modules with no capabilities skip the enforcement wrapper at compile time.
+Import via `import { fn } from "zttp:module"`. Most implementations live in `packages/modules/src/` under `data/`, `http/`, `net/`, `platform/`, `security/`, and `workflow/`; the workflow modules `zttp:io`, `zttp:scope`, `zttp:durable`, `zttp:workflow`, and `zttp:queue` live under `packages/zts/src/modules/workflow/`. The authoritative module-to-path registry is `packages/zts/src/builtin_modules.zig`. Each module owns its `pub const binding = sdk.ModuleBinding{...}` next to its implementation file; the type and the shared capability-enforcement helpers live in `packages/zts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, and so on) enforced at call time.
 
 | Module | Key Exports |
 |--------|-------------|
@@ -194,86 +194,19 @@ Not supported (detected at parse time with suggestions): classes, async/await, P
 
 Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Response.redirect()`.
 
+TS and TSX files work directly through the native type stripper. JSX is parsed by the zts parser and rendered via `h()` and `renderToString()` in `packages/zts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md).
+
 ## Compile-Time Systems
 
-All documented in detail in their source files and in `docs/`:
-
-- **Verification** (`-Dverify`): Proves Response returns, Result checking, state isolation. See [docs/verification.md](docs/verification.md).
-- **Contracts** (`-Dcontract`): Extracts imports, env vars, routes, egress hosts, handler properties, and author-declared intent assertions. See `packages/zts/src/handler_contract.zig`. Intent extraction is strict-literal: a top-level `export const intent = { assertions: [...] }` populates `contract.intent.assertions[]`; any non-literal form sets `intent.dynamic = true`. See `packages/zts/src/intent_extractor.zig`.
-- **Sound mode**: Type-directed analysis across operators. See [docs/sound-mode.md](docs/sound-mode.md).
-- **Type checking**: Full TS annotation checking. See `packages/zts/src/type_checker.zig`, `packages/zts/src/type_map.zig`.
-- **Flow analysis**: Data label tracking (secret, credential, user_input). See `packages/zts/src/flow_checker.zig`.
-- **Fault coverage**: Path enumeration, failure severity. See `packages/zts/src/fault_coverage.zig`.
-- **Replay/durable**: Deterministic trace recording and crash recovery. See `packages/zts/src/trace.zig`, `packages/runtime/src/durable_recovery.zig`.
-- **Deploy manifests**: Platform-specific configs from contracts. See `packages/tools/src/deploy_manifest.zig`.
-- **System linking**: Cross-handler verification. See `packages/zts/src/system_linker.zig`.
-
-## TypeScript/JSX
-
-TS/TSX files work directly (native type stripper). JSX parsed by zts parser, rendered via `h()`/`renderToString()` in `packages/zts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md) and the JSX/TSX section of [docs/user-guide.md](docs/user-guide.md).
-
-## CLI Options
-
-### zttp (server)
-
-`-p PORT`, `-h HOST`, `-e CODE`, `-m SIZE` (per-runtime memory limit; unset means unlimited, and it applies to each pooled runtime rather than the process, so the process ceiling is the value times the pool size), `--max-body-size SIZE` (request body limit, default 1m), `--max-websocket-connections N` (live WebSocket limit, default 1024; `0` disables upgrades), `-n N` (pool size), `--static DIR`, `--watch` (live reload), `--prove` (contract-diff before swap), `--force-swap` (apply breaking changes), `--trace FILE`, `--replay FILE`, `--test FILE`, `--durable DIR`, `--sqlite FILE` (SQLite path for zttp:sql), `--system FILE` (system registry for zttp:service), `--outbound-http` (enable the native outbound HTTP bridge), `--outbound-host HOST` (restrict the bridge to an exact egress host), `--no-env-check`. `zttp dev --record-proof` desugars to `--trace` aimed inside a capsule (`.zttp/capsules/default/`) and writes the capsule manifest up front (the manifest pins the handler/contract/policy hashes; it is written before the session so Ctrl+C, which signals the whole process group, cannot skip it). Replay the capsule against a later edit with `zttp proofs replay default` (exit 0 reproduced, 1 regression; fails closed on schema/policy-hash drift, `--allow-version-mismatch` overrides).
-
-### zttp auth
-
-`zttp auth claude` prompts (with hidden input) for an Anthropic API key
-and stores it at `~/.zttp/providers.json` with mode 0600. `zttp auth
-openai` does the same for OpenAI. `zttp auth status` prints which keys
-are configured (shell vs file, masked). `zttp auth revoke <provider>`
-removes a stored key. The runtime calls `cli_auth.injectStoredProvidersIntoEnv`
-before dispatching `expert` (only that command), so stored values populate
-`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` automatically for the agent. Shell-set variables
-always win; the file only fills gaps. Listed under `zttp help --all`
-(Credentials section), not in the core five.
-
-### zttp deploy
-
-`zttp deploy` takes no arguments. It auto-detects the handler file and project name in the current directory, verifies the handler, and emits a self-contained binary at `.zttp/deploy/<project-name>` with a `kind=deploy` row appended to `.zttp/proofs.jsonl`. No credentials, Docker, or network. `zttp deploy --local` and `--target local` are explicit aliases. Hosted cloud deploy (`--cloud`) is deferred from this beta. See [docs/user-guide.md](docs/user-guide.md).
-
-Proof receipts ship default-on: every fresh `compile`, `build`, or `deploy --local` signs the contract, bytecode, and rule-registry hashes with the persistent Ed25519 identity at `~/.zttp/attest/keypair.bin` (generated on first use, mode 0600) and embeds the JWS in the self-extracting binary. The running server emits `Zttp-Proofs` and `Zttp-Attest` response headers on every request and serves `GET /.well-known/zttp-attest` with the full attestation envelope plus the JWK public key (ETag, `Cache-Control: max-age=3600`, 304 on `If-None-Match`). `zttp verify <url>` validates the signature from any third-party machine. Opt out for a specific build with `--no-attest`.
-
-### Machine tools (analyzer surface)
-
-Every analyzer command is reachable as `zttp <command>`. The standalone `zts` binary is also installed for IDE and CI integrations; surface and output formats are identical.
-
-```bash
-zttp check [handler.ts] [--json] [--contract] [--types] [--sql-schema path] [--system path] [--require-export-capsules]
-zttp compile [flags] <handler.ts> <output.zig>
-zttp prove <old.json> <new.json> [output-dir/]
-zttp mock <tests.jsonl> [--port PORT]
-zttp link <system.json> [--output-dir <dir>]
-zttp features [--json]
-zttp modules [--json]
-zttp restrictions [--json] [--by proof|class]
-zttp meta [--json]
-zttp verify-paths <file>... [--json]
-zttp verify-modules <file>... [--strict] [--json]
-zttp verify-modules --builtins [--strict] [--json]
-zttp verify-module-manifest <manifest.json> [--json]
-zttp extension-status --module-manifest <path>... [--json]
-zttp edit-simulate [handler.ts] [--before old.ts] [--stdin-json]
-zttp describe-rule [rule-name|code] [--json] [--hash]
-zttp search <keyword> [--json]
-zttp spec-check [--json]
-zttp spec-hash [--json]
-zttp spec-render [--out path] [--check path]
-zttp module-spec-render [--check] [--json]
-zttp review-patch <file> [--before <old>] [--diff-only] [--json] [--stdin-json]
-zttp prove-behavior <before.ts> <after.ts> [--json] [--sql-schema path]
-zttp canonicalize <file> --json [--simulate]
-zttp normalize <file> [--write] [--check] [--json]
-zttp expert
-```
-
-`--json` emits structured diagnostics to stdout with error codes (ZTS0xx-ZTS3xx), source locations, and suggestion fields. `zttp features` and `zttp modules` list language rules and virtual module exports. `zttp restrictions` projects every blocked feature into the failure class it eliminates and the proof it unlocks (see [docs/restrictions-to-proofs.md](docs/restrictions-to-proofs.md) for the table). `zttp expert` is the canonical interactive compiler-in-the-loop workflow.
-
-`zttp edit-simulate` runs the analysis pipeline on a handler file and reports violations as JSON. With `--before`, it marks violations introduced by the edit vs pre-existing. `zttp describe-rule` lists all diagnostic rules; `--hash` outputs the policy hash for CI assertions. `zttp search` finds rules by keyword. `zttp review-patch` combines edit-simulate with `--diff-only` filtering to show only new violations. `zttp prove-behavior <before.ts> <after.ts> [--sql-schema path]` compiles both handler versions and reports the behavioral-equivalence verdict (equivalent / equivalent_modulo_laws / additive / breaking) with the per-path behavior delta; a changed or removed response path reads as breaking even when the route surface is unchanged. Exit 0 = safe, 1 = breaking, 2 = error. It differs from `zttp prove`, which diffs two pre-extracted contract.json files. The expert loop emits the same verdict as a signed `kind=equivalence` proof receipt after each applied edit (opt out with `--no-equivalence-receipt`).
-
-`zttp meta`, `zttp verify-paths`, and `zttp verify-modules` are the machine-facing verification surface. `zttp expert` is the interactive agent that uses the same underlying analyzers in-process.
+- **Verification** (`-Dverify`): Response returns, Result checking, state isolation. [docs/verification.md](docs/verification.md).
+- **Contracts** (`-Dcontract`): imports, env vars, routes, egress hosts, handler properties, author-declared intent assertions. `packages/zts/src/handler_contract.zig`, `packages/zts/src/intent_extractor.zig`.
+- **Sound mode**: type-directed analysis across operators. [docs/sound-mode.md](docs/sound-mode.md).
+- **Type checking**: `packages/zts/src/type_checker.zig`, `packages/zts/src/type_map.zig`.
+- **Flow analysis**: data label tracking (secret, credential, user_input). `packages/zts/src/flow_checker.zig`.
+- **Fault coverage**: path enumeration, failure severity. `packages/zts/src/fault_coverage.zig`.
+- **Replay and durable**: `packages/zts/src/trace.zig`, `packages/runtime/src/durable_recovery.zig`.
+- **Deploy manifests**: `packages/tools/src/deploy_manifest.zig`.
+- **System linking**: `packages/zts/src/system_linker.zig`.
 
 ## Conventions
 
@@ -281,8 +214,6 @@ zttp expert
 - Tests live alongside code in `test "..."` blocks. Run relevant `zig build test*` after changes.
 - `errdefer` on all allocations. `orelse` instead of `?` unwrap.
 - Benchmark before optimizing. If targets already met, stop.
-- Benchmarks live in `../zttp-bench`. Do not create benchmark scripts here.
+- `zig build bench` is the in-repo benchmark suite. Do not add ad-hoc benchmark scripts.
 - Draft structure first before deep codebase exploration.
-- Always close any processes and browser instances you start (dev servers,
-  `preview`, headless Chrome, long-running watchers) once the task is done.
-  Leave no orphaned processes or open ports behind.
+- Always close any processes and browser instances you start (dev servers, `preview`, headless Chrome, long-running watchers) once the task is done. Leave no orphaned processes or open ports behind.
