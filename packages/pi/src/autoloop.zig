@@ -30,6 +30,7 @@ const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
 const tools_common = @import("tools/common.zig");
 const json_writer = @import("providers/anthropic/json_writer.zig");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 pub const AutoloopVerdict = session_events.AutoloopVerdict;
 
@@ -311,10 +312,9 @@ fn buildPathGoalsJson(
     file: []const u8,
     goals: []const []const u8,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll("{\"path\":");
     try json_writer.writeString(w, file);
@@ -325,8 +325,7 @@ fn buildPathGoalsJson(
     }
     try w.writeAll("]}");
 
-    buf = aw.toArrayList();
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 /// Single-pass parse of `pi_goal_check` output: extracts both the `ok`
@@ -431,17 +430,15 @@ fn parseSingleGoalCheckWitness(
         if (stub_func_value != .string) return error.InvalidToolOutput;
         const stub_result_value = stub_obj.get("result") orelse return error.InvalidToolOutput;
 
-        var result_buf: std.ArrayList(u8) = .empty;
-        defer result_buf.deinit(allocator);
-        var result_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &result_buf);
-        try std.json.Stringify.value(stub_result_value, .{}, &result_aw.writer);
-        result_buf = result_aw.toArrayList();
+        var result_buf = TextBuffer.init(allocator);
+        defer result_buf.deinit();
+        try std.json.Stringify.value(stub_result_value, .{}, result_buf.writer());
 
         const module_copy = try allocator.dupe(u8, stub_module);
         errdefer allocator.free(module_copy);
         const func_copy = try allocator.dupe(u8, stub_func_value.string);
         errdefer allocator.free(func_copy);
-        const result_copy = try result_buf.toOwnedSlice(allocator);
+        const result_copy = try result_buf.toOwnedSlice();
 
         stubs[si] = .{
             .seq = stub_seq,
@@ -555,15 +552,13 @@ fn parseRepairPlans(allocator: std.mem.Allocator, json_text: []const u8) !Repair
         const id_copy = try allocator.dupe(u8, id_val.string);
         errdefer allocator.free(id_copy);
 
-        var raw_buf: std.ArrayList(u8) = .empty;
-        defer raw_buf.deinit(allocator);
-        var raw_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &raw_buf);
-        try std.json.Stringify.value(plan_val, .{}, &raw_aw.writer);
-        raw_buf = raw_aw.toArrayList();
+        var raw_buf = TextBuffer.init(allocator);
+        defer raw_buf.deinit();
+        try std.json.Stringify.value(plan_val, .{}, raw_buf.writer());
 
         items[next] = .{
             .id = id_copy,
-            .raw_json = try raw_buf.toOwnedSlice(allocator),
+            .raw_json = try raw_buf.toOwnedSlice(),
             .line_target = extractEditIntentLine(plan_val),
         };
         next += 1;
@@ -635,10 +630,9 @@ fn buildApplyArgsJson(
     file: []const u8,
     plan_raw_json: []const u8,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.writeAll("{\"path\":");
     try json_writer.writeString(w, file);
@@ -646,8 +640,7 @@ fn buildApplyArgsJson(
     try w.writeAll(plan_raw_json);
     try w.writeByte('}');
 
-    buf = aw.toArrayList();
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 const ApplyOutcome = struct {

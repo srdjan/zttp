@@ -3,6 +3,7 @@ const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const transcript_mod = @import("transcript.zig");
 const ui_payload = @import("ui_payload.zig");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const tools_common = @import("tools/common.zig");
 const perf_probe = @import("perf_probe.zig");
 const equivalence_probe = @import("equivalence_probe.zig");
@@ -350,10 +351,9 @@ pub fn formatProveSummary(
     if (summary == null) return allocator.dupe(u8, "prove: unavailable\n");
 
     const value = summary.?;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.print(
         "classification: {s}\nproof_level: {s}\nrecommendation: {s}\n",
@@ -369,8 +369,7 @@ pub fn formatProveSummary(
         }
     }
 
-    buf = aw.toArrayList();
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 pub fn formatSystemSummary(
@@ -380,10 +379,9 @@ pub fn formatSystemSummary(
     if (summary == null) return allocator.dupe(u8, "system proof: unavailable\n");
 
     const value = summary.?;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.print(
         "system: {s}\nproof_level: {s}\nall_links_resolved: {s}\nall_responses_covered: {s}\npayload_compatible: {s}\ninjection_safe: {s}\nno_secret_leakage: {s}\nno_credential_leakage: {s}\nretry_safe: {s}\nfault_covered: {s}\nstate_isolated: {s}\n",
@@ -412,8 +410,7 @@ pub fn formatSystemSummary(
         }
     }
 
-    buf = aw.toArrayList();
-    return buf.toOwnedSlice(allocator);
+    return buf.toOwnedSlice();
 }
 
 // Property drift gate. pi's PropertiesSnapshot must mirror every boolean handler
@@ -801,10 +798,9 @@ fn buildUnifiedDiff(
 
     const before_line_count = lineCount(before_text);
     const after_line_count = lineCount(after);
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try w.print(
         "@@ -{d},{d} +{d},{d} @@\n",
@@ -818,8 +814,8 @@ fn buildUnifiedDiff(
     try appendPrefixedLines(w, '-', before_text);
     try appendPrefixedLines(w, '+', after);
 
-    buf = aw.toArrayList();
     const hunks = try allocator.alloc(ui_payload.DiffHunk, 1);
+    errdefer allocator.free(hunks);
     hunks[0] = .{
         .old_start = if (before_line_count == 0) 0 else 1,
         .old_count = before_line_count,
@@ -827,7 +823,7 @@ fn buildUnifiedDiff(
         .new_count = after_line_count,
     };
     return .{
-        .text = try buf.toOwnedSlice(allocator),
+        .text = try buf.toOwnedSlice(),
         .hunks = hunks,
     };
 }

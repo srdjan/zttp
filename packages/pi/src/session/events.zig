@@ -8,6 +8,7 @@ const std = @import("std");
 const zts = @import("zts");
 const ui_payload = @import("../ui_payload.zig");
 const json_writer = @import("../providers/anthropic/json_writer.zig");
+const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 
 pub const schema_version: u32 = 2;
 
@@ -162,14 +163,12 @@ pub fn appendEvent(
     events_path: []const u8,
     record: EventRecord,
 ) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
-    try writeEventLine(&aw.writer, record);
+    try writeEventLine(buf.writer(), record);
 
-    buf = aw.toArrayList();
-    const bytes = buf.items;
+    const bytes = buf.written();
 
     const fd = try zts.file_io.openAppend(allocator, events_path);
     defer std.Io.Threaded.closeFd(fd);
@@ -382,12 +381,11 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
 }
 
 pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta) !void {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
 
     var stream: std.json.Stringify = .{
-        .writer = &aw.writer,
+        .writer = buf.writer(),
         .options = .{ .whitespace = .indent_2 },
     };
     try stream.beginObject();
@@ -412,12 +410,11 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
         try stream.write(ap);
     }
     try stream.endObject();
-    try aw.writer.writeByte('\n');
+    try buf.writer().writeByte('\n');
 
-    buf = aw.toArrayList();
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{meta_path});
     defer allocator.free(tmp_path);
-    try zts.file_io.writeFile(allocator, tmp_path, buf.items);
+    try zts.file_io.writeFile(allocator, tmp_path, buf.written());
 
     const old_z = try allocator.dupeZ(u8, tmp_path);
     defer allocator.free(old_z);
@@ -480,13 +477,11 @@ test "model_text event matches the documented v2 envelope" {
     // Guards docs/internals/zts-expert-contract.md: the documented example is
     // { "v": 2, "k": "model_text", "d": "..." } with a bare-string payload.
     const allocator = testing.allocator;
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try writeEventLine(&aw.writer, .{ .model_text = "hello" });
-    buf = aw.toArrayList();
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try writeEventLine(buf.writer(), .{ .model_text = "hello" });
 
-    const line = std.mem.trim(u8, buf.items, "\n");
+    const line = std.mem.trim(u8, buf.written(), "\n");
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
