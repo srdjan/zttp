@@ -2,6 +2,7 @@
 //! tool-use, tool results, and visible verification output.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const turn = @import("turn.zig");
 const ui_payload = @import("ui_payload.zig");
 
@@ -272,12 +273,10 @@ pub fn renderRichEntryToOwned(
     allocator: std.mem.Allocator,
     entry: *const OwnedEntry,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try renderRich(&aw.writer, entry);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try renderRich(buf.writer(), entry);
+    return try buf.toOwnedSlice();
 }
 
 /// Byte cap applied to a `tool_result` body when it is rendered live to the
@@ -326,12 +325,10 @@ fn renderToString(
     allocator: std.mem.Allocator,
     transcript: *const Transcript,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try renderAll(&aw.writer, transcript);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try renderAll(buf.writer(), transcript);
+    return try buf.toOwnedSlice();
 }
 
 test "append dupes textual message bodies" {

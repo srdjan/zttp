@@ -1,4 +1,5 @@
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const proof_enrichment = @import("proof_enrichment.zig");
 const transcript_mod = @import("transcript.zig");
@@ -97,10 +98,9 @@ pub fn exportSessionLedger(
     var bundle = try collectSessionLedger(allocator, session_id);
     defer bundle.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
 
     try writeMetaLine(w, bundle.meta);
     try w.writeByte('\n');
@@ -109,8 +109,7 @@ pub fn exportSessionLedger(
         try w.writeByte('\n');
     }
 
-    buf = aw.toArrayList();
-    try zts.file_io.writeFile(allocator, out_path, buf.items);
+    try zts.file_io.writeFile(allocator, out_path, buf.written());
 }
 
 pub fn collectSessionLedger(
@@ -516,10 +515,9 @@ fn runStats(allocator: std.mem.Allocator) !void {
         }
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     if (total == 0) {
         try w.writeAll("ledger stats: no sessions with a summary yet for this workspace.\n");
     } else {
@@ -534,8 +532,8 @@ fn runStats(allocator: std.mem.Allocator) !void {
             try w.print("  proven-path ratio:           median {d:.3}  (over {d} proof session{s})\n", .{ medianF32(ratios.items), proof_reached, if (proof_reached == 1) "" else "s" });
         }
     }
-    buf = aw.toArrayList();
-    _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    const bytes = buf.written();
+    _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
 }
 
 fn writeMetaLine(writer: *std.Io.Writer, meta: ExportMeta) !void {
@@ -854,15 +852,13 @@ test "readLedgerFile round-trips exported verified patch payload" {
         owned.deinit(testing.allocator);
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(testing.allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(testing.allocator, &buf);
-    try writeMetaLine(&aw.writer, meta);
-    try aw.writer.writeByte('\n');
-    try writePatchLine(&aw.writer, patch);
-    try aw.writer.writeByte('\n');
-    buf = aw.toArrayList();
-    try zts.file_io.writeFile(testing.allocator, path, buf.items);
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try writeMetaLine(buf.writer(), meta);
+    try buf.writer().writeByte('\n');
+    try writePatchLine(buf.writer(), patch);
+    try buf.writer().writeByte('\n');
+    try zts.file_io.writeFile(testing.allocator, path, buf.written());
 
     var bundle = try readLedgerFile(testing.allocator, path);
     defer bundle.deinit(testing.allocator);

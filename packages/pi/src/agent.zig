@@ -12,6 +12,7 @@
 //! history on every submission.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const loop = @import("loop.zig");
 const turn = @import("turn.zig");
@@ -681,21 +682,17 @@ fn nowUnixMs() i64 {
 }
 
 fn buildToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try tools_schema.writeToolsArray(&aw.writer, registry);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try tools_schema.writeToolsArray(buf.writer(), registry);
+    return try buf.toOwnedSlice();
 }
 
 fn buildOpenAIToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try openai_client.writeToolsArray(&aw.writer, registry);
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try openai_client.writeToolsArray(buf.writer(), registry);
+    return try buf.toOwnedSlice();
 }
 
 /// Runs one turn through the loop driver and returns an owned slice holding
@@ -773,15 +770,13 @@ pub fn compact(
         return allocator.dupe(u8, "Nothing to compact.\n");
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try aw.writer.writeAll("[COMPACTED CONVERSATION HISTORY]\n");
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try buf.writer().writeAll("[COMPACTED CONVERSATION HISTORY]\n");
     for (tr.entries.items) |*entry| {
-        try transcript_mod.renderPlain(&aw.writer, entry);
+        try transcript_mod.renderPlain(buf.writer(), entry);
     }
-    buf = aw.toArrayList();
-    const note = try buf.toOwnedSlice(allocator);
+    const note = try buf.toOwnedSlice();
     errdefer allocator.free(note);
 
     const entry_count = tr.len();

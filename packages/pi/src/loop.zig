@@ -2,6 +2,7 @@
 //! veto results, and structured tool batches through `turn.TurnMachine`.
 
 const std = @import("std");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const turn = @import("turn.zig");
 const veto = @import("veto.zig");
 const transcript_mod = @import("transcript.zig");
@@ -277,10 +278,9 @@ fn callModel(
 /// must fix reference bytes it can actually see, and the context survives a
 /// mid-repair tool call instead of evaporating with a transient prompt.
 fn buildApplyEditArgs(allocator: std.mem.Allocator, edit: turn.Edit) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    errdefer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
     try w.writeAll("{\"file\":");
     try json_writer.writeString(w, edit.file);
     try w.writeAll(",\"content\":");
@@ -290,8 +290,7 @@ fn buildApplyEditArgs(allocator: std.mem.Allocator, edit: turn.Edit) ![]u8 {
         try json_writer.writeString(w, before);
     }
     try w.writeByte('}');
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    return try buf.toOwnedSlice();
 }
 
 /// Append the `tool_result` that closes a draft's synthetic `apply_edit` tool
@@ -1067,14 +1066,12 @@ fn postApplyCheck(
     // char would otherwise produce malformed JSON and silently disable this
     // post-apply regression gate.
     const verify_paths_args = blk: {
-        var buf: std.ArrayList(u8) = .empty;
-        var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
-        const w = &aw.writer;
+        var buf = TextBuffer.init(arena);
+        const w = buf.writer();
         try w.writeAll("{\"paths\":[");
         try json_writer.writeString(w, prepared.edit.file);
         try w.writeAll("]}");
-        buf = aw.toArrayList();
-        break :blk buf.items;
+        break :blk buf.written();
     };
     runPostApplyTool(allocator, arena, registry, transcript, &report, .{
         .tool_name = "zts_expert_verify_paths",
@@ -1086,9 +1083,8 @@ fn postApplyCheck(
 
     if (prepared.edit.before != null) {
         const review_args = blk: {
-            var buf: std.ArrayList(u8) = .empty;
-            var aw: std.Io.Writer.Allocating = .fromArrayList(arena, &buf);
-            const w = &aw.writer;
+            var buf = TextBuffer.init(arena);
+            const w = buf.writer();
             // review_patch requires "file" and "content" (the applied bytes) and
             // takes "before" so diff_only can mark genuinely new violations.
             // Omitting content silently disabled this gate ("missing content").
@@ -1099,8 +1095,7 @@ fn postApplyCheck(
             try w.writeAll(",\"before\":");
             try json_writer.writeString(w, prepared.edit.before.?);
             try w.writeAll(",\"diff_only\":true}");
-            buf = aw.toArrayList();
-            break :blk buf.items;
+            break :blk buf.written();
         };
         runPostApplyTool(allocator, arena, registry, transcript, &report, .{
             .tool_name = "zts_expert_review_patch",
