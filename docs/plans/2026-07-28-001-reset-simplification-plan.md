@@ -1260,7 +1260,7 @@ passing.
    `zruntime.zig` is the root of its own module, so importing it from `main.zig`'s test block
    collected none of its 96 test blocks. Deleting it moved the collected count by zero, against
    a positive control where adding one test moved it by one. See
-   `docs/plans/2026-07-30-002-wave3-item1-test-duplication.md`.
+   `docs/archive/plans/2026-07-30-002-wave3-item1-test-duplication.md`.
 2. DONE, and half the premise was already true. `test-doc-links` was already a dependency of
    the `test` step, next to `test-docs-drift`. What remained was the redundancy: both are
    uncached Run steps, so `zig build test` executes both scripts every time, and the separate
@@ -1346,7 +1346,7 @@ follow them, and they should be sequenced first.
    endless recovery loop. The `CompileRequest` to `CompiledModule` type is not built, because
    owning bytecode as well as the contract means spanning the IO boundary that the declined
    orchestration move (`2026-07-30-007`) declined to span. See
-   `docs/plans/2026-07-30-011-reset-0a-compile-session-findings.md`. The original wording
+   `docs/archive/plans/2026-07-30-011-reset-0a-compile-session-findings.md`. The original wording
    follows.
 
    Introduce the fallible `CompileRequest` to `CompiledModule` API from section 4.5, with
@@ -1391,7 +1391,7 @@ follow them, and they should be sequenced first.
    private so no production code can reach the pool through this module. Remaining: move
    those tests (per-block, because non-test declarations are interleaved), then extract
    `Runtime` into `HandlerInstance` owned directly by the pool. See
-   `docs/plans/2026-07-30-010-reset-0c-0d-ownership-design.md`.
+   `docs/archive/plans/2026-07-30-010-reset-0c-0d-ownership-design.md`.
 
 0d. DONE, with one deviation: there is no `InvocationContext` type. The ambient state did
    not need a new carrier, it needed the callbacks to have a context at all. `Context` grew
@@ -1404,7 +1404,7 @@ follow them, and they should be sequenced first.
    removed the 12 save/restore pairs in `runtime_workflow.zig`. `ExecutionSpec` shipped as
    two fields of `ServerConfig`'s 27, mapped at the composition edge by
    `ServerConfig.executionSpec()`. See
-   `docs/plans/2026-07-30-010-reset-0c-0d-ownership-design.md`.
+   `docs/archive/plans/2026-07-30-010-reset-0c-0d-ownership-design.md`.
 
 1. DONE, and the count was five, not four. Measured, the change-verdict family held
    `contract_diff.Classification`, `upgrade_verifier.UpgradeVerdict`,
@@ -1417,7 +1417,7 @@ follow them, and they should be sequenced first.
    from it plus property regressions and coverage gaps. One enum would force every diff
    switch to handle `needs_review`, which `diffContracts` cannot emit. Added
    `UpgradeVerdict.slug` for the lowercase surfaces so no rendered byte moved. See
-   `docs/plans/2026-07-30-009-wave4-item1-verdict-vocabularies-plan.md`.
+   `docs/archive/plans/2026-07-30-009-wave4-item1-verdict-vocabularies-plan.md`.
 2. DONE. `replay` is now a `proofs` subcommand that delegates to `proof_cli.runReplay`; the
    old top-level `zttp proof` still dispatches, prints a one-line migration note, and is
    absent from `help --all`. The delegation had one thing worth getting right: error
@@ -1447,7 +1447,7 @@ follow them, and they should be sequenced first.
 4. PARTLY DONE, and the last clause's premise is false. The shared import and binding index
    exists and is shared: `packages/zts/src/module_facts.zig`, adopted by all six analyzers
    (C1) and injected once per compile through `resolve`/`check` (C2). The shared IR shape
-   helper library is deliberately deferred; see `docs/plans/2026-07-30-003-item4-design.md`.
+   helper library is deliberately deferred; see `docs/archive/plans/2026-07-30-003-item4-design.md`.
    The claim that `PathGenerator` and `FlowChecker` run more than once per compile does not
    hold: measured, both construct exactly once, the two `PathGenerator` sites in
    `compileHandler` are the mutually exclusive failure and success branches, and
@@ -1459,8 +1459,8 @@ follow them, and they should be sequenced first.
    fourth `LoweredModule` phase, such as a build cache or an incremental compile. The one
    piece of that plan with standalone value was done: a golden over the serialized bytecode a
    compile emits, which nothing had pinned. See
-   `docs/plans/2026-07-30-006-item4-c3-findings.md` and
-   `docs/plans/2026-07-30-007-lowered-module-plan.md`.
+   `docs/archive/plans/2026-07-30-006-item4-c3-findings.md` and
+   `docs/archive/plans/2026-07-30-007-lowered-module-plan.md`.
 5. DONE for the duplication, and the estimate was about twice the real figure. Measured, the
    file held 18 clone and 18 deinit methods totaling 633 lines (clone 346, deinit 287), not
    1,500 to 2,000; the rest of the 3,014 is `writeJson`, `parse`, `writeLegible`, and the
@@ -1495,7 +1495,7 @@ follow them, and they should be sequenced first.
    comptime `sdk.decodeArgs` driven by the declared list, the 23 conversions, the three
    declarations fixed, and a `param_types.len == arg_count` compile-time gate that makes the
    declared signature executable rather than decorative. See
-   `docs/plans/2026-07-30-008-wave4-item6-arg-decode-plan.md`.
+   `docs/archive/plans/2026-07-30-008-wave4-item6-arg-decode-plan.md`.
 7. DONE, as a helper rather than a generator, and the saving is a third of the estimate.
    Section 7.1 put the repeated allocating-writer pattern at 600 to 900 lines. Measured, it
    is a six-line block appearing 38 times under `packages/pi/src/tools/` (102 times across
