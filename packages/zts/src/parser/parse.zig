@@ -171,6 +171,13 @@ pub const Parser = struct {
             if (self.parseStatement()) |stmt| {
                 try stmts.append(self.allocator, stmt);
             } else |err| {
+                // An error the list could not record is an out-of-memory, not a
+                // syntax error. Report it as one: `hasErrors` counts it, so the
+                // loop stops, but `err` would name the wrong cause. Without this
+                // the whole loop used to spin forever, because a truncated error
+                // left `hasErrors` false and `synchronize` returns without
+                // advancing when the current token starts a statement.
+                if (self.errors.outOfMemory()) return error.OutOfMemory;
                 // If there are recorded errors, fail immediately
                 if (self.errors.hasErrors()) {
                     return err;

@@ -1062,3 +1062,67 @@ test "with no injected index each analyzer still builds its own" {
     try std.testing.expect(resolved.bool_checker.facts == null);
     try std.testing.expect(resolved.bool_checker.owned_facts != null);
 }
+
+/// Parse, resolve, check, and extract a contract, releasing everything it
+/// allocated. Used by the failure sweep below: the acceptance criterion for
+/// reset item 0a is that every compile path, including every failure stage,
+/// leaks nothing, and a sweep can only assert that against one function that
+/// owns the whole sequence.
+fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8, type_map: *const TypeMap) !void {
+    var js_parser = try JsParser.init(allocator, source);
+    defer js_parser.deinit();
+    const root = try js_parser.parse();
+
+    const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, root, null);
+
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    try storage.init(allocator, type_map);
+
+    var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = false });
+    defer resolved.deinit();
+
+    const handler_func = handler_verifier_mod.findHandlerFunction(view, root) orelse
+        return error.HandlerNotFound;
+
+    var checked = try check(allocator, &resolved, handler_func, .{});
+    defer checked.deinit();
+
+    var contract = try extractContractFromParsed(allocator, parsed, "sweep.ts", .{
+        .strict = false,
+        .resolved = &resolved,
+    });
+    contract.deinit(allocator);
+}
+
+test "every compile stage releases what it allocated at any failure index" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) {
+        \\  const make = () => sha256("x");
+        \\  if (req.url === "/a") return Response.json({ hash: make() });
+        \\  return Response.text("ok");
+        \\}
+        \\
+    ;
+    var type_map = TypeMap.init("");
+    defer type_map.deinit(allocator);
+
+    // The successful run first, both as a control and to learn how many
+    // allocations the sweep has to cover.
+    var counting = std.testing.FailingAllocator.init(allocator, .{ .fail_index = std.math.maxInt(usize) });
+    try runCompilePhasesForTest(counting.allocator(), source, &type_map);
+    const total = counting.alloc_index;
+    try testing.expect(total > 0);
+
+    // Each iteration fails one allocation. A leak on any unwind path is
+    // reported by std.testing.allocator when the test ends, which is the
+    // assertion; the error value itself is not interesting.
+    var i: usize = 0;
+    while (i < total) : (i += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = i });
+        runCompilePhasesForTest(failing.allocator(), source, &type_map) catch {};
+    }
+}

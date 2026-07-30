@@ -244,7 +244,14 @@ pub const ErrorList = struct {
 
     /// Check if any errors have been recorded
     pub fn hasErrors(self: *const ErrorList) bool {
-        return self.errors.items.len > 0;
+        return self.errors.items.len > 0 or self.errors_truncated;
+    }
+
+    /// True when an error could not be recorded because the append failed.
+    /// The parser reads this to turn an out-of-memory inside error reporting
+    /// back into `error.OutOfMemory` rather than a generic parse failure.
+    pub fn outOfMemory(self: *const ErrorList) bool {
+        return self.errors_truncated;
     }
 
     /// Get error count

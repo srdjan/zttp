@@ -442,19 +442,42 @@ pub const ContractBuilder = struct {
             };
         }
 
+        // The three fallible values the contract literal needs are built
+        // before it, each with its own unwind. Inside a struct literal there is
+        // no unwind: a later field that fails drops every earlier field's
+        // allocation, which the failure sweep reported as a leak.
+        var handler_path_copy: []const u8 = try self.allocator.dupe(u8, handler_path);
+        errdefer if (handler_path_copy.len != 0) self.allocator.free(handler_path_copy);
+
+        // Copies, not the index's own lists. Moving them would empty the
+        // index, and every reader after this point (detectRateLimiting,
+        // computeGlobalEffectSummary, and the six analyzers that adopt the
+        // index) would see a handler with no imports.
+        var modules_copy = try self.factsRef().cloneModules(self.allocator);
+        errdefer {
+            for (modules_copy.items) |m| self.allocator.free(m);
+            modules_copy.deinit(self.allocator);
+        }
+
+        var functions_copy = try self.factsRef().cloneFunctions(self.allocator);
+        errdefer {
+            for (functions_copy.items) |*entry| {
+                self.allocator.free(entry.module);
+                for (entry.names.items) |n| self.allocator.free(n);
+                entry.names.deinit(self.allocator);
+            }
+            functions_copy.deinit(self.allocator);
+        }
+
         var contract = HandlerContract{
             .handler = .{
-                .path = try self.allocator.dupe(u8, handler_path),
+                .path = handler_path_copy,
                 .line = if (handler_loc) |loc| loc.line else 0,
                 .column = if (handler_loc) |loc| loc.column else 0,
             },
             .routes = routes,
-            // Copies, not the index's own lists. Moving them would empty the
-            // index, and every reader after this point (detectRateLimiting,
-            // computeGlobalEffectSummary, and the six analyzers that will
-            // adopt the index) would see a handler with no imports.
-            .modules = try self.factsRef().cloneModules(self.allocator),
-            .functions = try self.factsRef().cloneFunctions(self.allocator),
+            .modules = modules_copy,
+            .functions = functions_copy,
             .env = .{
                 .literal = self.env_literals,
                 .dynamic = self.env_dynamic,
@@ -528,6 +551,41 @@ pub const ContractBuilder = struct {
             .extensions = self.extensions,
         };
 
+        // Ownership of the moved lists transfers here, at the literal, not at
+        // the end of the function. Clearing them now is what lets the contract
+        // own its unwind: `deinit()` below frees each list exactly once, and
+        // the builder's own `deinit`, plus the two local errdefers above, find
+        // them empty. Emptying the locals is not cosmetic - an errdefer cannot
+        // be disarmed, so `routes` and `saga_calls` would otherwise be freed
+        // twice on the failure path, once by the contract and once by their own
+        // unwind.
+        routes = .empty;
+        saga_calls = .empty;
+        handler_path_copy = &.{};
+        modules_copy = .empty;
+        functions_copy = .empty;
+        self.env_literals = .empty;
+        self.egress_hosts = .empty;
+        self.egress_urls = .empty;
+        self.service_calls = .empty;
+        self.workflow_calls = .empty;
+        self.affordances = .empty;
+        self.cache_namespaces = .empty;
+        self.sql_queries = .empty;
+        self.scope_names = .empty;
+        self.durable_key_literals = .empty;
+        self.durable_step_names = .empty;
+        self.durable_signal_names = .empty;
+        self.durable_producer_key_literals = .empty;
+        self.durable_workflow = .{};
+        self.api_schemas = .empty;
+        self.api_request_schema_refs = .empty;
+        self.api_routes = .empty;
+        self.extensions = .empty;
+        // Every phase below can fail, and each one adds to the contract. Before
+        // this the partially built contract was simply dropped.
+        errdefer contract.deinit(self.allocator);
+
         contract.capabilities = computeCapabilityMatrix(contract.modules.items);
         contract.policy_hash = currentPolicyHashRaw();
 
@@ -561,28 +619,6 @@ pub const ContractBuilder = struct {
         // affordance-link proofs in system_linker.zig - it needs no
         // cross-handler resolution and belongs here, not there.
         try self.emitSagaCompensationDiagnostics(&contract);
-
-        // Clear moved lists so deinit() won't double-free. `facts.modules` and
-        // `facts.functions` are absent here on purpose: the contract got
-        // copies, so the index still owns and still frees its own.
-        self.env_literals = .empty;
-        self.egress_hosts = .empty;
-        self.egress_urls = .empty;
-        self.service_calls = .empty;
-        self.workflow_calls = .empty;
-        self.affordances = .empty;
-        self.cache_namespaces = .empty;
-        self.sql_queries = .empty;
-        self.scope_names = .empty;
-        self.durable_key_literals = .empty;
-        self.durable_step_names = .empty;
-        self.durable_signal_names = .empty;
-        self.durable_producer_key_literals = .empty;
-        self.durable_workflow = .{};
-        self.api_schemas = .empty;
-        self.api_request_schema_refs = .empty;
-        self.api_routes = .empty;
-        self.extensions = .empty;
 
         return contract;
     }
@@ -646,6 +682,10 @@ pub const ContractBuilder = struct {
 
         contract.declared_specs = owned;
         contract.declared_specs_implicit = declared_specs_implicit;
+        // The contract owns the list from here. Emptying the local disarms the
+        // errdefer above, which would otherwise free it a second time when the
+        // discharge below fails and `build`'s own unwind deinits the contract.
+        owned = .empty;
 
         // Discharge: produce ZTS500 / ZTS501 / ZTS502 diagnostics into
         // contract.spec_diagnostics. Downstream consumers (zts check,
