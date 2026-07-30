@@ -30,13 +30,4 @@ pub fn build(b: *std.Build) void {
     zts_cli_mod.addImport("zts", zts_mod);
     zts_cli_mod.addImport("project_config", project_config_mod);
 
-    // Embedded zts-expert catalog (skill prose + vendored canonical
-    // handler examples), consumed by the pi package's `expert_persona`
-    // bundle builder. Rooted inside the skill directory so @embedFile
-    // reaches the sibling markdown and example subtrees directly.
-    _ = b.addModule("zts_expert_skill", .{
-        .root_source_file = b.path("src/skills/zts-expert/skill_data.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
 }

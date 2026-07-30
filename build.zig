@@ -204,7 +204,16 @@ pub fn build(b: *std.Build) void {
         .perf_histogram = perf_histogram_enabled,
     });
     const pi_zts_cli_host_mod = pi_host_tools_dep.module("zts_cli");
-    const pi_zts_expert_skill_host_mod = pi_host_tools_dep.module("zts_expert_skill");
+    // The skill catalog is pi's own data, so it comes from a host-target pi
+    // dependency rather than from tools. The host target has to match the test
+    // modules built below, which is why this is a second dependency on the
+    // same package as `pi_dep`.
+    const pi_host_dep = b.dependency("zttp_pi", .{
+        .target = b.graph.host,
+        .optimize = optimize,
+        .perf_histogram = perf_histogram_enabled,
+    });
+    const pi_zts_expert_skill_host_mod = pi_host_dep.module("zts_expert_skill");
 
     const HostTestRoot = struct {
         /// Which package owns the root source file.
