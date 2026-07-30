@@ -10,7 +10,7 @@
 //!
 //! This module is the pure core: fault class -> guarding chips -> diagnosis ->
 //! message. Threading the fault class and the proof facts to each 500 site lives
-//! in `zruntime.zig`/`server.zig`.
+//! in `handler_instance.zig`/`server.zig`.
 
 const std = @import("std");
 

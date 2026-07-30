@@ -13,7 +13,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zq = @import("zts");
 const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
-const Runtime = @import("zruntime.zig").Runtime;
+const HandlerInstance = @import("handler_instance.zig").HandlerInstance;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const ExecutionSpec = @import("execution_spec.zig").ExecutionSpec;
@@ -272,13 +272,13 @@ pub fn recoverIncompleteOplogsTracked(
         };
 
         // A run suspended on a timer whose recorded deadline is still in the
-        // future would provably re-suspend; skip the Runtime spin-up and
+        // future would provably re-suspend; skip the HandlerInstance spin-up and
         // handler replay until the deadline passes.
         if (parsed.events.len > 0) {
             switch (parsed.events[parsed.events.len - 1]) {
                 .wait_timer => |w| if (w.until_ms > trace.unixMillis()) continue,
                 // A run blocked on waitSignal would provably re-suspend until a
-                // matching signal arrives. Skip the Runtime spin-up + full oplog
+                // matching signal arrives. Skip the HandlerInstance spin-up + full oplog
                 // replay (which otherwise repeats every poll with no backoff,
                 // since .pending is neutral to the retry tracker) when no
                 // matching signal is present yet.
@@ -435,7 +435,7 @@ fn recoverOne(
 
     const recovery_config = spec.runtime_config;
 
-    const rt = try Runtime.init(allocator, recovery_config);
+    const rt = try HandlerInstance.init(allocator, recovery_config);
     defer rt.deinit();
 
     const loaded = handler_loader.load(allocator, spec.handler) catch |err| {

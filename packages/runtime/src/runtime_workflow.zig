@@ -5,21 +5,21 @@
 //! follow). They orchestrate co-located sub-handlers through the in-process
 //! `SystemRuntime` registry and copy borrowed sub-handler responses into
 //! orchestrator-owned JS values. They reach their runtime through the Context
-//! (`Runtime.fromContext`) and use the response/request helpers that remain in
+//! (`HandlerInstance.fromContext`) and use the response/request helpers that remain in
 //! zruntime.zig, reached here by back-import. zruntime depends on this module only for the
-//! four callbacks registered in `Runtime.installWorkflowModuleState`.
+//! four callbacks registered in `HandlerInstance.installWorkflowModuleState`.
 
 const std = @import("std");
 const ascii = std.ascii;
 const zq = @import("zts");
-const zruntime = @import("zruntime.zig");
+const handler_instance = @import("handler_instance.zig");
 const natives = @import("runtime_natives.zig");
 const http_parser = @import("http_parser.zig");
 const durable_executor = @import("durable_executor.zig");
 const http = @import("runtime_http.zig");
 const workflow_queue = @import("workflow_queue.zig");
 
-const Runtime = zruntime.Runtime;
+const HandlerInstance = handler_instance.HandlerInstance;
 const http_types = @import("http_types.zig");
 const HttpResponse = http_types.HttpResponse;
 const HttpRequestView = http_types.HttpRequestView;
@@ -53,7 +53,7 @@ const WORKFLOW_QUEUE_RETRY_DELAY_MS: i64 = 1_000;
 /// not delay them meaningfully.
 const WORKFLOW_QUEUE_RETRY_JITTER_CAP_MS: i64 = 1_000;
 
-/// Runtime side of `zttp:workflow.call(name, init)`. Builds an
+/// HandlerInstance side of `zttp:workflow.call(name, init)`. Builds an
 /// `HttpRequestView` from the `init` object, dispatches it to a co-located
 /// sub-handler in-process via the `SystemRuntime` registry (a separate pooled
 /// runtime, own GC/arena, setjmp panic isolation), then copies the borrowed
@@ -69,7 +69,7 @@ pub fn workflowCallCallback(
     name: []const u8,
     init_val: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const registry = rt.system_registry_ref orelse {
         return createFetchErrorResponse(rt, "WorkflowUnavailable", "workflow.call requires a --system handler bundle");
     };
@@ -148,7 +148,7 @@ pub fn workflowCallCallback(
 /// {status,headers,body} is reconstructed into an identical Response. Live and
 /// replay both reconstruct through `responseFromPartsObject`, so the bytes match.
 fn workflowCallDurable(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     registry: *SystemRuntime,
     name: []const u8,
@@ -178,7 +178,7 @@ fn workflowCallDurable(
 }
 
 fn workflowDirectDispatchParts(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     registry: *SystemRuntime,
     name: []const u8,
@@ -198,7 +198,7 @@ fn workflowDirectDispatchParts(
 }
 
 fn workflowDirectTargetDispatchParts(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     target: *Target,
     view: HttpRequestView,
@@ -215,7 +215,7 @@ fn workflowDirectTargetDispatchParts(
 }
 
 fn workflowQueuedDispatchParts(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     registry: *SystemRuntime,
     item_step_name: []const u8,
@@ -282,7 +282,7 @@ fn workflowQueuedDispatchParts(
 }
 
 fn completeQueuedDispatch(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     registry: *SystemRuntime,
     durable_dir: []const u8,
     item_id: []const u8,
@@ -341,7 +341,7 @@ test "jitteredRetryAtMs spreads distinct item ids apart" {
     try std.testing.expect(retry_a != retry_b);
 }
 
-fn suspendQueuedWorkflowDispatch(rt: *Runtime, retry_at_ms: i64) !void {
+fn suspendQueuedWorkflowDispatch(rt: *HandlerInstance, retry_at_ms: i64) !void {
     if (rt.active_durable_run == null) return error.NoActiveDurableRun;
     const active = &rt.active_durable_run.?;
     try active.state.persistWaitTimer(retry_at_ms, null);
@@ -434,7 +434,7 @@ fn parseFollowHref(arena: std.mem.Allocator, href: []const u8) !FollowHref {
     };
 }
 
-/// Runtime side of `zttp:workflow.follow(resource, rel, init?)`. Resolves the
+/// HandlerInstance side of `zttp:workflow.follow(resource, rel, init?)`. Resolves the
 /// affordance `rel` on a structured `resource()` to `{href, method}`, routes the
 /// href to a co-located handler by the "/<name>" mount convention, and
 /// dispatches in-process - HATEOAS link-following without the orchestrator
@@ -449,7 +449,7 @@ pub fn workflowFollowCallback(
     rel: []const u8,
     init_val: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const registry = rt.system_registry_ref orelse {
         return createFetchErrorResponse(rt, "WorkflowUnavailable", "workflow.follow requires a --system handler bundle");
     };
@@ -544,7 +544,7 @@ pub fn workflowFollowCallback(
 /// durable step ("workflow.follow#<seq>"), sharing the run's call sequence so a
 /// completed follow replays from the oplog and is never re-dispatched.
 fn workflowFollowDurable(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     registry: *SystemRuntime,
     target: *Target,
@@ -591,7 +591,7 @@ fn workflowResponseParts(ctx: *zq.Context, resp: *const HttpResponse) !zq.JSValu
 
 /// Build a `{status, headers, body}` step result for a dispatch error (599),
 /// mirroring the error JSON the non-durable path returns.
-fn workflowErrorParts(rt: *Runtime, ctx: *zq.Context, code: []const u8, detail: []const u8) !zq.JSValue {
+fn workflowErrorParts(rt: *HandlerInstance, ctx: *zq.Context, code: []const u8, detail: []const u8) !zq.JSValue {
     const body = try httpRequestErrorJsonAlloc(rt.allocator, code, detail);
     defer rt.allocator.free(body);
     const parts = try ctx.createObject(null);
@@ -606,7 +606,7 @@ fn workflowErrorParts(rt: *Runtime, ctx: *zq.Context, code: []const u8, detail: 
 /// Reconstruct a real Response (with .json()/.text(), proper prototype) from a
 /// `{status, headers, body}` object. Used on both the live and cached durable
 /// paths so a replay is byte-identical to the first run.
-fn responseFromPartsObject(rt: *Runtime, parts: zq.JSValue) !zq.JSValue {
+fn responseFromPartsObject(rt: *HandlerInstance, parts: zq.JSValue) !zq.JSValue {
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     if (!parts.isObject()) {
         const fallback = try createFetchResponse(rt, 502, statusTextFor(502), "", null);
@@ -665,7 +665,7 @@ fn responseFromPartsObject(rt: *Runtime, parts: zq.JSValue) !zq.JSValue {
     return created.value;
 }
 
-/// Runtime side of zttp:workflow.saga(steps). Each step's `run` runs as a
+/// HandlerInstance side of zttp:workflow.saga(steps). Each step's `run` runs as a
 /// durable step "do:<name>"; on a step failure (its Response status >= 400) the
 /// completed steps are compensated in REVERSE via "undo:<name>" durable steps.
 /// The compensation order is an emergent property of deterministic replay: on
@@ -674,7 +674,7 @@ fn responseFromPartsObject(rt: *Runtime, parts: zq.JSValue) !zq.JSValue {
 /// D1 - no oplog schema change). A compensation that itself fails yields a
 /// terminal 500 "manual intervention", with the oplog as the audit trail.
 pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val: zq.JSValue) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     if (rt.config.workflow_queue_enabled) {
         return zq.modules.util.throwError(ctx, "Error", "saga() is not supported with --workflow-queue; use top-level durable call/follow/fanout");
     }
@@ -784,7 +784,7 @@ pub fn workflowSagaCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, steps_val
 /// missing/invalid status (e.g. a dispatch error's 599, or a non-Response) is a
 /// failure that triggers compensation. Works on both the live Response and the
 /// replay-reconstructed plain object (both expose an integer `status`).
-fn sagaStepSucceeded(rt: *Runtime, result: zq.JSValue) bool {
+fn sagaStepSucceeded(rt: *HandlerInstance, result: zq.JSValue) bool {
     const status = extractResponseStatus(rt, result);
     return status >= 100 and status < 400;
 }
@@ -799,7 +799,7 @@ const SagaCompensation = struct {
     skipped: bool = false,
 };
 
-fn buildSagaResponse(rt: *Runtime, status: u16, ok: bool, failed: ?[]const u8, comp_failed: ?[]const u8, compensation: SagaCompensation) !zq.JSValue {
+fn buildSagaResponse(rt: *HandlerInstance, status: u16, ok: bool, failed: ?[]const u8, comp_failed: ?[]const u8, compensation: SagaCompensation) !zq.JSValue {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(rt.allocator);
     try body.appendSlice(rt.allocator, "{\"ok\":");
@@ -829,7 +829,7 @@ fn runSagaForTest(allocator: std.mem.Allocator, durable_dir: []const u8, key: []
     var system = SystemRuntime.init(allocator);
     defer system.deinit();
 
-    const rt = try Runtime.init(allocator, .{
+    const rt = try HandlerInstance.init(allocator, .{
         .durable_oplog_dir = durable_dir,
         .system_registry = @ptrCast(&system),
     });
@@ -989,7 +989,7 @@ test "workflow.saga still reports successful compensation when compensator runs"
 /// fetches for `parallel()`/`race()`.
 const MAX_PARALLEL_CALLS: u32 = 16;
 
-/// Runtime side of zttp:workflow.fanout(calls). Dispatches N co-located
+/// HandlerInstance side of zttp:workflow.fanout(calls). Dispatches N co-located
 /// sub-handlers and returns their Responses as an array in DECLARATION ORDER.
 /// Inside a durable.run the whole fan-out is recorded as ONE durable step, so on
 /// recovery the aggregate replays from a single oplog entry - concurrency (if
@@ -997,7 +997,7 @@ const MAX_PARALLEL_CALLS: u32 = 16;
 /// the single source of truth. Each `calls[i]` is
 /// `{ name, method?, path?, body?, headers? }`.
 pub fn workflowFanoutCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, calls_val: zq.JSValue) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const registry = rt.system_registry_ref orelse {
         return createFetchErrorResponse(rt, "WorkflowUnavailable", "workflow.fanout requires a --system handler bundle");
     };
@@ -1052,7 +1052,7 @@ pub fn workflowFanoutCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, calls_v
 /// Boundaries) for why: each nested dispatch swaps shared runtime/
 /// interpreter globals (see below), which is not safe to do across
 /// concurrently-running calls without a larger runtime change.
-fn dispatchAllToPartsArray(rt: *Runtime, ctx: *zq.Context, registry: *SystemRuntime, arr: *zq.JSObject, count: u32) !zq.JSValue {
+fn dispatchAllToPartsArray(rt: *HandlerInstance, ctx: *zq.Context, registry: *SystemRuntime, arr: *zq.JSObject, count: u32) !zq.JSValue {
     var view_arena = std.heap.ArenaAllocator.init(rt.allocator);
     defer view_arena.deinit();
     const arena = view_arena.allocator();
@@ -1105,7 +1105,7 @@ fn dispatchAllToPartsArray(rt: *Runtime, ctx: *zq.Context, registry: *SystemRunt
 }
 
 fn dispatchAllQueuedToPartsArray(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     registry: *SystemRuntime,
     arr: *zq.JSObject,
@@ -1148,7 +1148,7 @@ fn dispatchAllQueuedToPartsArray(
 
 /// Reconstruct an array of real Responses from a `{status,headers,body}` parts
 /// array - used on both the live and cached durable paths so a replay matches.
-fn responsesFromPartsArray(rt: *Runtime, ctx: *zq.Context, parts_arr_val: zq.JSValue) !zq.JSValue {
+fn responsesFromPartsArray(rt: *HandlerInstance, ctx: *zq.Context, parts_arr_val: zq.JSValue) !zq.JSValue {
     const result = try ctx.createArray();
     if (!parts_arr_val.isObject()) return result.toValue();
     const parts_arr = parts_arr_val.toPtr(zq.JSObject);

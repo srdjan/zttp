@@ -1,4 +1,4 @@
-//! Native JS-callable runtime builtins extracted from zruntime.zig.
+//! Native JS-callable runtime builtins extracted from the handler instance.
 //!
 //! Each `*Native` function matches the engine's native-fn signature
 //! (ctx_ptr, this, args) -> anyerror!zq.JSValue and is registered as a

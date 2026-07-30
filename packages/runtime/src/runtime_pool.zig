@@ -1,6 +1,6 @@
 //! Lock-free pool of per-request JS runtimes plus the lifecycle/audit
 //! machinery that decides when to reuse, recycle, or evict a runtime.
-//! `Runtime` itself lives in zruntime.zig and is reached via back-import.
+//! `HandlerInstance` itself lives in zruntime.zig and is reached via back-import.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -24,8 +24,8 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 const HttpRequestOwned = http_types.HttpRequestOwned;
 
-const zruntime = @import("zruntime.zig");
-const Runtime = zruntime.Runtime;
+const handler_instance = @import("handler_instance.zig");
+const HandlerInstance = handler_instance.HandlerInstance;
 const panic_recovery = @import("panic_recovery.zig");
 
 pub const HandlerPool = struct {
@@ -72,7 +72,7 @@ pub const HandlerPool = struct {
     reload_generation: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
     /// Pre-compiled bytecode embedded at build time (from -Dhandler option)
     embedded_bytecode: ?[]const u8,
-    /// Runtime-provided dependency bytecodes (from self-extracting binary)
+    /// HandlerInstance-provided dependency bytecodes (from self-extracting binary)
     runtime_dep_bytecodes: ?[]const []const u8,
     /// Shared trace file handle (owned by pool, shared across runtimes)
     trace_file: ?std.c.fd_t,
@@ -88,7 +88,7 @@ pub const HandlerPool = struct {
 
     pub const ResponseHandle = struct {
         response: HttpResponse,
-        runtime: *Runtime,
+        runtime: *HandlerInstance,
         base_rt: *zq.LockFreePool.Runtime,
         pool: *HandlerPool,
         released: bool = false,
@@ -114,7 +114,7 @@ pub const HandlerPool = struct {
     };
 
     pub const WorkerRuntimeLease = struct {
-        runtime: *Runtime,
+        runtime: *HandlerInstance,
         base_rt: *zq.LockFreePool.Runtime,
         pool: *HandlerPool,
         active: bool = true,
@@ -703,7 +703,7 @@ pub const HandlerPool = struct {
 
     fn releaseForRequest(self: *Self, rt: *zq.LockFreePool.Runtime) void {
         if (rt.user_data) |ptr| {
-            const runtime: *Runtime = @ptrCast(@alignCast(ptr));
+            const runtime: *HandlerInstance = @ptrCast(@alignCast(ptr));
             runtime.prepareForPoolRelease();
         }
 
@@ -852,7 +852,7 @@ pub const HandlerPool = struct {
     /// not be touched on the panic path.
     noinline fn callHandlerGuarded(
         self: *Self,
-        rt: *Runtime,
+        rt: *HandlerInstance,
         request: HttpRequestView,
         request_id: u64,
         comptime borrowed: bool,
@@ -860,7 +860,7 @@ pub const HandlerPool = struct {
         var frame: panic_recovery.Frame = undefined;
         if (panic_recovery.setjmpFn(&frame.jb) != 0) {
             // Handler panicked. Defers in the skipped zruntime frames did NOT run.
-            zruntime.clearThreadStateAfterPanic();
+            handler_instance.clearThreadStateAfterPanic();
             std.log.err("handler panicked (isolated): {s}", .{frame.message()});
             return error.HandlerPanicked;
         }
@@ -895,10 +895,10 @@ pub const HandlerPool = struct {
         }
     }
 
-    fn ensureRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) !*Runtime {
+    fn ensureRuntime(self: *Self, base_rt: *zq.LockFreePool.Runtime) !*HandlerInstance {
         const cur_gen = self.reload_generation.load(.acquire);
         if (base_rt.user_data) |ptr| {
-            const rt: *Runtime = @ptrCast(@alignCast(ptr));
+            const rt: *HandlerInstance = @ptrCast(@alignCast(ptr));
             // Fresh runtime: fast path. A stale one (a reload/egress swap bumped
             // the generation while it was idle) falls through to rebuild below.
             if (rt.pool_generation == cur_gen) return rt;
@@ -911,14 +911,14 @@ pub const HandlerPool = struct {
         // for this base_rt, so the stale teardown cannot race an in-flight request.
         const gen = self.reload_generation.load(.acquire);
         if (base_rt.user_data) |ptr| {
-            const rt: *Runtime = @ptrCast(@alignCast(ptr));
+            const rt: *HandlerInstance = @ptrCast(@alignCast(ptr));
             if (rt.pool_generation == gen) return rt;
             // Stale: tear down the old generation's runtime before rebuilding so
             // it picks up the new handler code / egress policy.
             runtimeUserDeinit(base_rt, self.allocator);
         }
 
-        const rt = try Runtime.initFromPool(base_rt, self.config);
+        const rt = try HandlerInstance.initFromPool(base_rt, self.config);
         rt.pool_generation = gen;
         errdefer rt.deinit();
 
@@ -941,7 +941,7 @@ pub const HandlerPool = struct {
         return rt;
     }
 
-    fn loadHandlerCached(self: *Self, rt: *Runtime) !void {
+    fn loadHandlerCached(self: *Self, rt: *HandlerInstance) !void {
         // Temporarily disable hybrid mode during handler loading.
         // Handler function objects must use persistent allocation so they survive
         // arena resets between requests. Without this, closures or function objects
@@ -959,7 +959,7 @@ pub const HandlerPool = struct {
         if (self.embedded_bytecode) |entry_bytecode| {
             // Load dependency modules first
             if (self.runtime_dep_bytecodes) |deps| {
-                // Runtime-provided deps (self-extracting binary)
+                // HandlerInstance-provided deps (self-extracting binary)
                 for (deps) |dep_data| {
                     try rt.loadFromCachedBytecodeNoHandler(dep_data);
                 }
@@ -1036,7 +1036,7 @@ pub const HandlerPool = struct {
     fn runtimeUserDeinit(base_rt: *zq.LockFreePool.Runtime, allocator: std.mem.Allocator) void {
         _ = allocator;
         if (base_rt.user_data) |ptr| {
-            const rt: *Runtime = @ptrCast(@alignCast(ptr));
+            const rt: *HandlerInstance = @ptrCast(@alignCast(ptr));
             rt.deinit();
             base_rt.user_data = null;
             base_rt.user_deinit = null;

@@ -10,8 +10,8 @@ const http_types = @import("http_types.zig");
 const QueryParam = http_types.QueryParam;
 const http_parser = @import("http_parser.zig");
 
-const zruntime = @import("zruntime.zig");
-const Runtime = zruntime.Runtime;
+const handler_instance = @import("handler_instance.zig");
+const HandlerInstance = handler_instance.HandlerInstance;
 
 pub fn getStringData(val: zq.JSValue) ?[]const u8 {
     if (val.isString()) {
@@ -58,7 +58,7 @@ pub fn getHeaderAtom(ctx: *zq.Context, name: []const u8) !zq.Atom {
     if (ascii.eqlIgnoreCase(name, "content-type")) {
         return try ctx.atoms.intern("Content-Type");
     }
-    return Runtime.headerKeyToAtom(name) orelse try ctx.atoms.intern(name);
+    return HandlerInstance.headerKeyToAtom(name) orelse try ctx.atoms.intern(name);
 }
 
 pub const HeaderAssignMode = enum {
@@ -134,7 +134,7 @@ pub fn findHeaderPropertyAtom(
     pool: *const zq.HiddenClassPool,
     wanted: []const u8,
 ) ?zq.Atom {
-    if (Runtime.headerKeyToAtom(wanted)) |known_atom| {
+    if (HandlerInstance.headerKeyToAtom(wanted)) |known_atom| {
         if (headers_obj.getOwnProperty(pool, known_atom) != null) return known_atom;
     }
     if (ascii.eqlIgnoreCase(wanted, "content-type")) {
@@ -271,7 +271,7 @@ pub fn buildQueryObject(ctx: *zq.Context, query_params: []const QueryParam) !*zq
     const query_obj = try ctx.createObject(null);
     for (query_params) |param| {
         const key_atom = try ctx.atoms.intern(param.key);
-        const param_val = if (Runtime.parseQueryInt(param.value)) |int_val|
+        const param_val = if (HandlerInstance.parseQueryInt(param.value)) |int_val|
             zq.JSValue.fromInt(int_val)
         else
             try ctx.createString(param.value);

@@ -1,14 +1,14 @@
-//! Runtime-owned adapter for the zts engine surface used by the HTTP server.
+//! HandlerInstance-owned adapter for the zts engine surface used by the HTTP server.
 //!
-//! Keep direct `zts` and `zruntime` imports here so server code depends on
+//! Keep direct `zts` and `handler_instance` imports here so server code depends on
 //! handler execution capabilities instead of engine internals.
 
 const std = @import("std");
 const zq = @import("zts");
-const zruntime = @import("zruntime.zig");
+const handler_instance = @import("handler_instance.zig");
 const http_types = @import("http_types.zig");
 
-pub const Runtime = zruntime.Runtime;
+pub const HandlerInstance = handler_instance.HandlerInstance;
 pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 pub const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 pub const ResponseHandle = HandlerPool.ResponseHandle;
@@ -118,7 +118,7 @@ test "a type fault leaves its source line on the runtime for the pool to copy ou
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try zruntime.Runtime.init(allocator, .{});
+    const rt = try handler_instance.HandlerInstance.init(allocator, .{});
     defer rt.deinit();
 
     // Fresh runtime: nothing to report.

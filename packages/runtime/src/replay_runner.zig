@@ -12,7 +12,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zq = @import("zts");
 const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
-const Runtime = @import("zruntime.zig").Runtime;
+const HandlerInstance = @import("handler_instance.zig").HandlerInstance;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
@@ -44,7 +44,7 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
     };
     defer allocator.free(handler_source.code);
 
-    // Build replay runtime config: keep replay_file_path set so Runtime
+    // Build replay runtime config: keep replay_file_path set so HandlerInstance
     // installs replay stubs instead of real virtual module functions.
     var replay_config = spec.runtime_config;
     replay_config.trace_file_path = null;
@@ -89,7 +89,7 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
 /// Replay a single parsed trace group against an in-memory handler.
 ///
 /// `config.replay_file_path` MUST be non-null - it is the sentinel that
-/// makes `Runtime.init` install replay stubs for virtual modules instead
+/// makes `HandlerInstance.init` install replay stubs for virtual modules instead
 /// of real implementations. Any non-null string works (the path is not
 /// re-read; `replayOne` operates on the supplied `handler_code` directly).
 ///
@@ -107,9 +107,9 @@ pub fn replayOne(
     group: *const trace.RequestTraceGroup,
 ) !ReplayResult {
     // Create a fresh runtime for each replay.
-    // Config has replay_file_path set, so Runtime.init registers replay stubs
+    // Config has replay_file_path set, so HandlerInstance.init registers replay stubs
     // for virtual modules and fetchSync instead of real implementations.
-    const rt = try Runtime.init(allocator, config);
+    const rt = try HandlerInstance.init(allocator, config);
     defer rt.deinit();
 
     // Set up per-request replay state in module_state.
@@ -454,7 +454,7 @@ test "witness round-trip: solved witness replays into an executable leak" {
 
     // 4. Create a runtime in replay mode so the virtual-module calls get
     // redirected to the replay stubs that consume ReplayState.
-    const rt = try Runtime.init(allocator, .{ .replay_file_path = "witness-roundtrip-test" });
+    const rt = try HandlerInstance.init(allocator, .{ .replay_file_path = "witness-roundtrip-test" });
     defer rt.deinit();
 
     var replay_state = zq.trace.ReplayState{
@@ -505,7 +505,7 @@ fn replaySha256ArgDivergences(allocator: std.mem.Allocator, comptime live_arg: [
         "  return Response.json({ h: sha256(\"" ++ live_arg ++ "\") });\n" ++
         "}\n";
 
-    const rt = try Runtime.init(allocator, .{ .replay_file_path = "argcheck-test" });
+    const rt = try HandlerInstance.init(allocator, .{ .replay_file_path = "argcheck-test" });
     defer rt.deinit();
 
     // Recording captured the call with the argument "AAA".

@@ -1,18 +1,18 @@
 //! Durable workflow executor: native implementations behind the
 //! `zttp:durable` module exports (run / step / stepWithTimeout / sleepUntil /
 //! waitSignal / signal / signalAt) plus the oplog persistence and recovery
-//! helpers. Extracted from zruntime.zig to keep the request-lifecycle struct
-//! focused.
+//! helpers. Extracted from the handler instance to keep the request-lifecycle
+//! struct focused.
 //!
-//! These operate on the owning Runtime, passed explicitly as `rt`. The
+//! These operate on the owning HandlerInstance, passed explicitly as `rt`. The
 //! `active_durable_run` / `pending_durable_recovery` state fields and the
 //! `ActiveDurableRun` / `PendingDurableRecovery` / `PendingDurableWait` types
-//! stay on Runtime in zruntime.zig (pub there, aliased below). The seven
-//! `*Callback` wrappers are registered by `Runtime.installDurableModuleState`.
+//! stay on HandlerInstance in handler_instance.zig (pub there, aliased below).
+//! The seven
+//! `*Callback` wrappers are registered by `HandlerInstance.installDurableModuleState`.
 //!
-//! Cross-module helpers are re-declared from their source modules (the same
-//! ones zruntime aliases); only callFunction / extractResponseInternal /
-//! createFetchResponse / splitHeaderKV reach back into zruntime (pub there).
+//! Cross-module helpers are re-declared from their source modules; only
+//! callFunction and extractResponseInternal reach back into the instance.
 
 const std = @import("std");
 const ascii = std.ascii;
@@ -21,19 +21,19 @@ const durable_store_mod = @import("durable_store.zig");
 const runtime_config_mod = @import("runtime_config.zig");
 const natives = @import("runtime_natives.zig");
 const trace_helpers = @import("trace_helpers.zig");
-const zruntime = @import("zruntime.zig");
+const handler_instance = @import("handler_instance.zig");
 const runtime_http = @import("runtime_http.zig");
 
-const Runtime = zruntime.Runtime;
+const HandlerInstance = handler_instance.HandlerInstance;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const compat = zq.compat;
-const ActiveDurableRun = Runtime.ActiveDurableRun;
-const PendingDurableRecovery = Runtime.PendingDurableRecovery;
-const PendingDurableWait = Runtime.PendingDurableWait;
+const ActiveDurableRun = HandlerInstance.ActiveDurableRun;
+const PendingDurableRecovery = HandlerInstance.PendingDurableRecovery;
+const PendingDurableWait = HandlerInstance.PendingDurableWait;
 const DurableStore = durable_store_mod.DurableStore;
 
-// Helpers re-declared from the same source modules zruntime aliases.
+// Helpers re-declared from their source modules.
 const upgradeResponseValue = natives.upgradeResponseValue;
 const getHeaderAtom = natives.getHeaderAtom;
 const getStringData = natives.getStringData;
@@ -45,7 +45,7 @@ const openOplogAppendFile = runtime_config_mod.openOplogAppendFile;
 const tryLockOplogFd = runtime_config_mod.tryLockOplogFd;
 const parseHeadersFromJson = trace_helpers.parseHeadersFromJson;
 
-// The few helpers that genuinely live in zruntime (pub there).
+// HTTP helpers shared with the instance.
 const createFetchResponse = runtime_http.createFetchResponse;
 const splitHeaderKV = runtime_http.splitHeaderKV;
 
@@ -53,7 +53,7 @@ const StepDeadlineGuard = struct {
     deadline_ns: u64,
     interrupt_requested: bool,
 
-    fn arm(rt: *Runtime, timeout_ms: i64) StepDeadlineGuard {
+    fn arm(rt: *HandlerInstance, timeout_ms: i64) StepDeadlineGuard {
         const guard: StepDeadlineGuard = .{
             .deadline_ns = rt.ctx.deadline_ns,
             .interrupt_requested = rt.ctx.interrupt_requested.load(.monotonic),
@@ -69,13 +69,13 @@ const StepDeadlineGuard = struct {
         return guard;
     }
 
-    fn restore(self: StepDeadlineGuard, rt: *Runtime) void {
+    fn restore(self: StepDeadlineGuard, rt: *HandlerInstance) void {
         rt.ctx.deadline_ns = self.deadline_ns;
         rt.ctx.interrupt_requested.store(self.interrupt_requested, .monotonic);
     }
 };
 
-fn timeoutResult(rt: *Runtime, ctx: *zq.Context, name: []const u8) !zq.JSValue {
+fn timeoutResult(rt: *HandlerInstance, ctx: *zq.Context, name: []const u8) !zq.JSValue {
     const result = try zq.modules.util.createPlainResultErr(ctx, "timeout");
     try rt.active_durable_run.?.state.persistStepResult(name, ctx, result);
     return result;
@@ -85,7 +85,7 @@ fn timeoutExpired(deadline_ms: i64, now_ms: i64) bool {
     return now_ms >= deadline_ms;
 }
 
-fn requestIdempotencyKeyForRun(rt: *Runtime, durable_key: []const u8) ?[]const u8 {
+fn requestIdempotencyKeyForRun(rt: *HandlerInstance, durable_key: []const u8) ?[]const u8 {
     const request = rt.active_request orelse return null;
     for (request.headers.items) |header| {
         if (ascii.eqlIgnoreCase(header.key, "idempotency-key") and
@@ -97,14 +97,14 @@ fn requestIdempotencyKeyForRun(rt: *Runtime, durable_key: []const u8) ?[]const u
     return null;
 }
 
-fn durableCompletedResponseAllowed(rt: *Runtime, idempotency_key: ?[]const u8) bool {
+fn durableCompletedResponseAllowed(rt: *HandlerInstance, idempotency_key: ?[]const u8) bool {
     const props = rt.config.durable_workflow_properties;
     if (!props.enforced) return true;
     if (props.idempotent) return true;
     return idempotency_key != null;
 }
 
-fn durableRetryAllowed(rt: *Runtime, durable_key: []const u8, idempotency_key: ?[]const u8) !bool {
+fn durableRetryAllowed(rt: *HandlerInstance, durable_key: []const u8, idempotency_key: ?[]const u8) !bool {
     const props = rt.config.durable_workflow_properties;
     if (!props.enforced) return true;
     if (props.retry_safe) return true;
@@ -115,7 +115,7 @@ fn durableRetryAllowed(rt: *Runtime, durable_key: []const u8, idempotency_key: ?
     return store.hasIdempotencyLedger(ledger_key, durable_key);
 }
 
-fn durableRetryWouldResume(rt: *Runtime, durable_key: []const u8) !bool {
+fn durableRetryWouldResume(rt: *HandlerInstance, durable_key: []const u8) !bool {
     if (rt.pending_durable_recovery != null) return true;
 
     const path = try buildDurableOplogPath(rt, durable_key);
@@ -133,7 +133,7 @@ fn durableRetryWouldResume(rt: *Runtime, durable_key: []const u8) !bool {
 }
 
 fn recordIdempotencyLedger(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     idempotency_key: []const u8,
     durable_key: []const u8,
     state: durable_store_mod.IdempotencyLedgerState,
@@ -142,7 +142,7 @@ fn recordIdempotencyLedger(
     try store.writeIdempotencyLedger(idempotency_key, durable_key, state);
 }
 
-fn durableSoftErrorResponse(rt: *Runtime, code: []const u8, detail: []const u8) !zq.JSValue {
+fn durableSoftErrorResponse(rt: *HandlerInstance, code: []const u8, detail: []const u8) !zq.JSValue {
     var body: std.ArrayList(u8) = .empty;
     defer body.deinit(rt.allocator);
 
@@ -157,7 +157,7 @@ fn durableSoftErrorResponse(rt: *Runtime, code: []const u8, detail: []const u8) 
 }
 
 pub fn setPendingDurableRecovery(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     key: []const u8,
     oplog_path: []const u8,
     events: []const zq.trace.DurableEvent,
@@ -169,7 +169,7 @@ pub fn setPendingDurableRecovery(
     };
 }
 
-pub fn durableRun(rt: *Runtime, ctx: *zq.Context, key: []const u8, run_val: zq.JSValue) anyerror!zq.JSValue {
+pub fn durableRun(rt: *HandlerInstance, ctx: *zq.Context, key: []const u8, run_val: zq.JSValue) anyerror!zq.JSValue {
     if (rt.active_durable_run != null) {
         return zq.modules.util.throwError(ctx, "Error", "nested run() is not supported");
     }
@@ -247,7 +247,7 @@ pub fn durableRun(rt: *Runtime, ctx: *zq.Context, key: []const u8, run_val: zq.J
     return upgraded;
 }
 
-pub fn durableStep(rt: *Runtime, ctx: *zq.Context, name: []const u8, step_val: zq.JSValue) anyerror!zq.JSValue {
+pub fn durableStep(rt: *HandlerInstance, ctx: *zq.Context, name: []const u8, step_val: zq.JSValue) anyerror!zq.JSValue {
     const active = rt.active_durable_run orelse {
         return zq.modules.util.throwError(ctx, "Error", "step() must be called inside run()");
     };
@@ -277,7 +277,7 @@ pub fn durableStep(rt: *Runtime, ctx: *zq.Context, name: []const u8, step_val: z
     return result;
 }
 
-pub fn durableStepWithTimeout(rt: *Runtime, ctx: *zq.Context, name: []const u8, timeout_ms: i64, step_val: zq.JSValue) anyerror!zq.JSValue {
+pub fn durableStepWithTimeout(rt: *HandlerInstance, ctx: *zq.Context, name: []const u8, timeout_ms: i64, step_val: zq.JSValue) anyerror!zq.JSValue {
     const active = rt.active_durable_run orelse {
         return zq.modules.util.throwError(ctx, "Error", "stepWithTimeout() must be called inside run()");
     };
@@ -336,7 +336,7 @@ pub fn durableStepWithTimeout(rt: *Runtime, ctx: *zq.Context, name: []const u8, 
     return ok_result;
 }
 
-pub fn durableSleepUntil(rt: *Runtime, ctx: *zq.Context, until_ms: i64) anyerror!zq.JSValue {
+pub fn durableSleepUntil(rt: *HandlerInstance, ctx: *zq.Context, until_ms: i64) anyerror!zq.JSValue {
     if (rt.active_durable_run == null) {
         return zq.modules.util.throwError(ctx, "Error", "sleepUntil() must be called inside run()");
     }
@@ -384,7 +384,7 @@ pub fn durableSleepUntil(rt: *Runtime, ctx: *zq.Context, until_ms: i64) anyerror
     }
 }
 
-pub fn durableWaitSignal(rt: *Runtime, ctx: *zq.Context, name: []const u8) anyerror!zq.JSValue {
+pub fn durableWaitSignal(rt: *HandlerInstance, ctx: *zq.Context, name: []const u8) anyerror!zq.JSValue {
     if (rt.active_durable_run == null) {
         return zq.modules.util.throwError(ctx, "Error", "waitSignal() must be called inside run()");
     }
@@ -434,7 +434,7 @@ pub fn durableWaitSignal(rt: *Runtime, ctx: *zq.Context, name: []const u8) anyer
     return error.DurableSuspended;
 }
 
-pub fn durableSignal(rt: *Runtime, ctx: *zq.Context, key: []const u8, name: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
+pub fn durableSignal(rt: *HandlerInstance, ctx: *zq.Context, key: []const u8, name: []const u8, payload: zq.JSValue) anyerror!zq.JSValue {
     const exists = durableSignalTargetExists(rt, key) catch |err| switch (err) {
         error.DurableKeyCollision => return zq.modules.util.throwError(ctx, "Error", "durable key collision detected for oplog path"),
         else => return err,
@@ -453,7 +453,7 @@ pub fn durableSignal(rt: *Runtime, ctx: *zq.Context, key: []const u8, name: []co
 }
 
 pub fn durableSignalAt(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     key: []const u8,
     name: []const u8,
@@ -477,12 +477,12 @@ pub fn durableSignalAt(
     return zq.JSValue.true_val;
 }
 
-pub fn initDurableStore(rt: *Runtime) !durable_store_mod.DurableStore {
+pub fn initDurableStore(rt: *HandlerInstance) !durable_store_mod.DurableStore {
     const dir = rt.config.durable_oplog_dir orelse return error.DurableDisabled;
     return durable_store_mod.DurableStore.initFs(rt.allocator, dir);
 }
 
-pub fn durableSignalTargetExists(rt: *Runtime, key: []const u8) !bool {
+pub fn durableSignalTargetExists(rt: *HandlerInstance, key: []const u8) !bool {
     const path = try buildDurableOplogPath(rt, key);
     defer rt.allocator.free(path);
 
@@ -499,7 +499,7 @@ pub fn durableSignalTargetExists(rt: *Runtime, key: []const u8) !bool {
     return !parsed.complete;
 }
 
-pub fn serializeDurablePayload(rt: *Runtime, ctx: *zq.Context, payload: zq.JSValue) ![]u8 {
+pub fn serializeDurablePayload(rt: *HandlerInstance, ctx: *zq.Context, payload: zq.JSValue) ![]u8 {
     if (payload.isUndefined()) {
         return rt.allocator.dupe(u8, "null");
     }
@@ -514,7 +514,7 @@ pub fn serializeDurablePayload(rt: *Runtime, ctx: *zq.Context, payload: zq.JSVal
     return rt.allocator.dupe(u8, json);
 }
 
-pub fn buildPendingDurableResponseValue(rt: *Runtime) !zq.JSValue {
+pub fn buildPendingDurableResponseValue(rt: *HandlerInstance) !zq.JSValue {
     const active = rt.active_durable_run orelse return error.NoActiveDurableRun;
     const wait = active.pending_wait orelse return error.MissingDurableWait;
     var body: std.ArrayList(u8) = .empty;
@@ -543,7 +543,7 @@ pub fn buildPendingDurableResponseValue(rt: *Runtime) !zq.JSValue {
     return created.value;
 }
 
-pub fn tryLoadCompletedDurableResponse(rt: *Runtime, key: []const u8) !?zq.JSValue {
+pub fn tryLoadCompletedDurableResponse(rt: *HandlerInstance, key: []const u8) !?zq.JSValue {
     if (rt.pending_durable_recovery != null) return null;
 
     const path = try buildDurableOplogPath(rt, key);
@@ -564,7 +564,7 @@ pub fn tryLoadCompletedDurableResponse(rt: *Runtime, key: []const u8) !?zq.JSVal
     return try buildStoredResponseValue(rt, response);
 }
 
-pub fn openActiveDurableRun(rt: *Runtime, key: []const u8) !ActiveDurableRun {
+pub fn openActiveDurableRun(rt: *HandlerInstance, key: []const u8) !ActiveDurableRun {
     if (rt.pending_durable_recovery) |pending| {
         if (!std.mem.eql(u8, pending.key, key)) return error.DurableRecoveryKeyMismatch;
 
@@ -649,7 +649,7 @@ pub fn openActiveDurableRun(rt: *Runtime, key: []const u8) !ActiveDurableRun {
     };
 }
 
-pub fn buildDurableOplogPath(rt: *Runtime, key: []const u8) ![]u8 {
+pub fn buildDurableOplogPath(rt: *HandlerInstance, key: []const u8) ![]u8 {
     const dir = rt.config.durable_oplog_dir orelse return error.DurableDisabled;
     return std.fmt.allocPrint(
         rt.allocator,
@@ -658,14 +658,14 @@ pub fn buildDurableOplogPath(rt: *Runtime, key: []const u8) ![]u8 {
     );
 }
 
-pub fn readDurableLogIfExists(rt: *Runtime, path: []const u8) !?[]u8 {
+pub fn readDurableLogIfExists(rt: *HandlerInstance, path: []const u8) !?[]u8 {
     return zq.file_io.readFile(rt.allocator, path, 100 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => null,
         else => err,
     };
 }
 
-pub fn buildStoredResponseValue(rt: *Runtime, response: zq.trace.ResponseTrace) !zq.JSValue {
+pub fn buildStoredResponseValue(rt: *HandlerInstance, response: zq.trace.ResponseTrace) !zq.JSValue {
     var headers: std.ArrayListUnmanaged(HttpHeader) = .empty;
     defer headers.deinit(rt.allocator);
     try parseHeadersFromJson(rt.allocator, response.headers_json, &headers);
@@ -697,7 +697,7 @@ pub fn buildStoredResponseValue(rt: *Runtime, response: zq.trace.ResponseTrace) 
     return created.value;
 }
 
-pub fn isResponseLike(rt: *Runtime, value: zq.JSValue) bool {
+pub fn isResponseLike(rt: *HandlerInstance, value: zq.JSValue) bool {
     if (!value.isObject()) return false;
     const pool = rt.ctx.hidden_class_pool orelse return false;
     const obj = value.toPtr(zq.JSObject);
@@ -706,7 +706,7 @@ pub fn isResponseLike(rt: *Runtime, value: zq.JSValue) bool {
         obj.getProperty(pool, zq.Atom.headers) != null;
 }
 
-pub fn persistActiveDurableResponse(rt: *Runtime, response: *const HttpResponse) !void {
+pub fn persistActiveDurableResponse(rt: *HandlerInstance, response: *const HttpResponse) !void {
     if (rt.active_durable_run) |*active| {
         var h_names: [64][]const u8 = undefined;
         var h_values: [64][]const u8 = undefined;
@@ -727,7 +727,7 @@ pub fn durableRunCallback(
     key: []const u8,
     run_val: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return durableRun(rt, ctx, key, run_val);
 }
 
@@ -737,7 +737,7 @@ pub fn durableStepCallback(
     name: []const u8,
     step_val: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return durableStep(rt, ctx, name, step_val);
 }
 
@@ -748,7 +748,7 @@ pub fn durableStepWithTimeoutCallback(
     timeout_ms: i64,
     step_val: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return durableStepWithTimeout(rt, ctx, name, timeout_ms, step_val);
 }
 
@@ -757,7 +757,7 @@ pub fn durableSleepUntilCallback(
     ctx: *zq.Context,
     until_ms: i64,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return durableSleepUntil(rt, ctx, until_ms);
 }
 
@@ -766,7 +766,7 @@ pub fn durableWaitSignalCallback(
     ctx: *zq.Context,
     name: []const u8,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return durableWaitSignal(rt, ctx, name);
 }
 
@@ -777,7 +777,7 @@ pub fn durableSignalCallback(
     name: []const u8,
     payload: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return durableSignal(rt, ctx, key, name, payload);
 }
 
@@ -789,6 +789,6 @@ pub fn durableSignalAtCallback(
     at_ms: i64,
     payload: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return durableSignalAt(rt, ctx, key, name, at_ms, payload);
 }

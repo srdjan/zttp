@@ -5,22 +5,22 @@
 //! synchronous `fetch` bridge, durable-fetch caching, the `zttp:service`
 //! call path, the parallel-I/O fetch workers, and the low-level
 //! `zttp:http.request` native. These are plain free functions taking an
-//! explicit `*Runtime`, or recovering it from the `*Context` the engine hands
-//! every native callback (`Runtime.fromContext`), so they live here and
-//! back-import `Runtime` from zruntime.
+//! explicit `*HandlerInstance`, or recovering it from the `*Context` the engine hands
+//! every native callback (`HandlerInstance.fromContext`), so they live here and
+//! back-import `HandlerInstance` from zruntime.
 //! zruntime registers the exported native callbacks during binding setup, and
 //! runtime_workflow reaches the response builders here by alias.
 
 const std = @import("std");
 const ascii = std.ascii;
 const zq = @import("zts");
-const zruntime = @import("zruntime.zig");
+const handler_instance = @import("handler_instance.zig");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
 const http_parser = @import("http_parser.zig");
 const retry_backoff = @import("retry_backoff.zig");
 
-const Runtime = zruntime.Runtime;
+const HandlerInstance = handler_instance.HandlerInstance;
 const http_types = @import("http_types.zig");
 const HttpResponse = http_types.HttpResponse;
 const HttpRequestView = http_types.HttpRequestView;
@@ -40,7 +40,7 @@ const appendEscapedJson = durable_store_mod.appendEscaped;
 
 const unixMillis = zq.trace.unixMillis;
 
-fn effectiveOutboundTimeoutMs(rt: *Runtime) u32 {
+fn effectiveOutboundTimeoutMs(rt: *HandlerInstance) u32 {
     var timeout_ms = rt.config.outbound_timeout_ms;
     if (rt.active_durable_run) |active| {
         if (active.step_timeout_deadline_ms) |deadline_ms| {
@@ -55,7 +55,7 @@ fn effectiveOutboundTimeoutMs(rt: *Runtime) u32 {
     return timeout_ms;
 }
 
-fn stepDeadlinePassed(rt: *Runtime) bool {
+fn stepDeadlinePassed(rt: *HandlerInstance) bool {
     const active = rt.active_durable_run orelse return false;
     const deadline_ms = active.step_timeout_deadline_ms orelse return false;
     return unixMillis() >= deadline_ms;
@@ -88,7 +88,7 @@ pub fn beginBodyRead(ctx: *zq.Context, this: zq.JSValue) zq.JSValue {
         return throwTypeError(ctx, "Body reader target must be an object");
     }
     const obj = this.toPtr(zq.JSObject);
-    if (Runtime.fromContext(ctx)) |rt| {
+    if (HandlerInstance.fromContext(ctx)) |rt| {
         if (rt.consumed_body_objects.contains(obj)) {
             return throwTypeError(ctx, "Body has already been consumed");
         }
@@ -157,14 +157,14 @@ fn snapshotResponseHead(allocator: std.mem.Allocator, head: anytype) !OwnedRespo
     return owned;
 }
 
-fn createResponseHeadersObject(rt: *Runtime) !*zq.JSObject {
+fn createResponseHeadersObject(rt: *HandlerInstance) !*zq.JSObject {
     if (rt.ctx.http_shapes) |shapes| {
         return rt.ctx.createObjectWithClass(shapes.response_headers.class_idx, rt.headers_prototype);
     }
     return rt.ctx.createObject(rt.headers_prototype);
 }
 
-pub fn createFetchResponse(rt: *Runtime, status: u16, status_text: []const u8, body: []const u8, content_type: ?[]const u8) !FetchResponseObjects {
+pub fn createFetchResponse(rt: *HandlerInstance, status: u16, status_text: []const u8, body: []const u8, content_type: ?[]const u8) !FetchResponseObjects {
     const body_val = try rt.ctx.createString(body);
     const body_str = body_val.toPtr(zq.JSString);
     const response_val = try zq.http.createResponseFromString(
@@ -201,7 +201,7 @@ pub fn createFetchResponse(rt: *Runtime, status: u16, status_text: []const u8, b
     };
 }
 
-pub fn createFetchErrorResponse(rt: *Runtime, err_code: []const u8, details: []const u8) !zq.JSValue {
+pub fn createFetchErrorResponse(rt: *HandlerInstance, err_code: []const u8, details: []const u8) !zq.JSValue {
     const error_body = try httpRequestErrorJsonAlloc(rt.allocator, err_code, details);
     defer rt.allocator.free(error_body);
 
@@ -430,7 +430,7 @@ pub fn splitHeaderKV(headers: anytype, names: *[64][]const u8, values: *[64][]co
     return count;
 }
 
-fn outboundHostViolation(rt: *Runtime, host: []const u8) ?[]const u8 {
+fn outboundHostViolation(rt: *HandlerInstance, host: []const u8) ?[]const u8 {
     if (rt.config.outbound_allow_host) |allowed_host| {
         if (!ascii.eqlIgnoreCase(host, allowed_host)) {
             zq.policy.emitDenied(.{
@@ -452,7 +452,7 @@ fn outboundHostViolation(rt: *Runtime, host: []const u8) ?[]const u8 {
 
 pub fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx_for_host: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const rt = Runtime.fromContext(ctx_for_host) orelse return error.RuntimeUnavailable;
+    const rt = HandlerInstance.fromContext(ctx_for_host) orelse return error.RuntimeUnavailable;
     const result = fetchSyncResult(rt, args) catch |err| {
         return createFetchErrorResponse(rt, "InternalError", @errorName(err));
     };
@@ -496,7 +496,7 @@ const FetchInitResult = union(enum) {
 };
 
 fn fetchInitError(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     allocator: std.mem.Allocator,
     options: *FetchInitOptions,
     code: []const u8,
@@ -526,7 +526,7 @@ fn resolveHostSafe(uri: std.Uri, buf: *[std.Io.net.HostName.max_len]u8) std.Uri.
 
 /// Parse and validate the (url, init?) arguments common to all fetch call sites.
 /// Returns a JS error response (status 599) on validation failure.
-pub fn parseFetchArgs(rt: *Runtime, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !FetchArgsResult {
+pub fn parseFetchArgs(rt: *HandlerInstance, pool: *const zq.HiddenClassPool, args: []const zq.JSValue) !FetchArgsResult {
     if (args.len == 0) {
         return .{ .err = try createFetchErrorResponse(rt, "InvalidArgs", "expected url string or init object") };
     }
@@ -599,7 +599,7 @@ const FetchUrlResult = union(enum) {
 /// no query, for uniform caller ownership), or a JS error response if `query`
 /// is present but not an object / holds an unencodable value.
 pub fn buildFetchUrl(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     pool: *const zq.HiddenClassPool,
     base_url: []const u8,
     init_obj: ?*zq.JSObject,
@@ -648,7 +648,7 @@ pub fn buildFetchUrl(
 }
 
 fn parseFetchInitOptions(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     allocator: std.mem.Allocator,
     pool: *const zq.HiddenClassPool,
     init_obj: ?*zq.JSObject,
@@ -825,7 +825,7 @@ const FetchDeadline = struct {
     }
 };
 
-fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
+fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
     if (!rt.config.outbound_http_enabled) {
         return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
@@ -960,7 +960,7 @@ fn fetchSyncResult(rt: *Runtime, args: []const zq.JSValue) !zq.JSValue {
 /// Intercept a fetchSync call during parallel collection mode.
 /// Records the URL/method/body/headers as a FetchDescriptor instead of
 /// performing the actual HTTP request.
-fn collectFetchForParallel(rt: *Runtime, collector: *zq.modules.io.ParallelCollector, args: []const zq.JSValue) !zq.JSValue {
+fn collectFetchForParallel(rt: *HandlerInstance, collector: *zq.modules.io.ParallelCollector, args: []const zq.JSValue) !zq.JSValue {
     if (collector.count >= collector.capacity) {
         return createFetchErrorResponse(rt, "ParallelOverflow", "too many fetchSync calls in parallel thunk");
     }
@@ -1012,7 +1012,7 @@ pub fn ioCallThunk(runtime_ptr: *anyopaque, thunk_val: zq.JSValue) anyerror!zq.J
 }
 
 fn callJsThunk(runtime_ptr: *anyopaque, func_val: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     if (!func_val.isObject()) return error.NotCallable;
     const func_obj = func_val.toPtr(zq.JSObject);
     return rt.callFunction(func_obj, args);
@@ -1047,7 +1047,7 @@ pub fn fetchModuleCallback(
     args: []const zq.JSValue,
 ) anyerror!zq.JSValue {
     _ = ctx;
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     if (rt.config.replay_file_path != null) {
@@ -1070,7 +1070,7 @@ pub fn fetchModuleCallback(
     return fetchSyncNative(@ptrCast(rt.ctx), zq.JSValue.undefined_val, args);
 }
 
-fn fetchModuleReplay(rt: *Runtime) !zq.JSValue {
+fn fetchModuleReplay(rt: *HandlerInstance) !zq.JSValue {
     const state = rt.ctx.getModuleState(zq.trace.ReplayState, zq.trace.REPLAY_STATE_SLOT) orelse {
         return createFetchErrorResponse(rt, "ReplayNotConfigured", "fetch replay state is not installed");
     };
@@ -1128,7 +1128,7 @@ fn replayNextIs(state: *const zq.trace.ReplayState, module_name: []const u8, fn_
     return std.mem.eql(u8, entry.module, module_name) and std.mem.eql(u8, entry.func, fn_name);
 }
 
-fn copyRecordedFetchHeaders(rt: *Runtime, headers_obj: *zq.JSObject, headers_json: []const u8) !void {
+fn copyRecordedFetchHeaders(rt: *HandlerInstance, headers_obj: *zq.JSObject, headers_json: []const u8) !void {
     var pos = skipJsonWhitespace(headers_json, 0);
     if (pos >= headers_json.len or headers_json[pos] != '{') return;
     pos += 1;
@@ -1211,7 +1211,7 @@ const ParsedDurableOpts = union(enum) {
 /// but malformed — authors who opt in to durable semantics deserve a
 /// loud failure, not a silent fallback.
 fn parseDurableFetchOpts(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     init: *zq.JSObject,
     pool: *const zq.HiddenClassPool,
 ) !ParsedDurableOpts {
@@ -1274,7 +1274,7 @@ fn parseDurableFetchOpts(
 }
 
 fn runDurableFetch(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     args: []const zq.JSValue,
     opts: DurableFetchOpts,
 ) !zq.JSValue {
@@ -1346,7 +1346,7 @@ const RequestSummary = struct {
     body: []const u8,
 };
 
-fn summarizeFetchRequest(rt: *Runtime, args: []const zq.JSValue) !RequestSummary {
+fn summarizeFetchRequest(rt: *HandlerInstance, args: []const zq.JSValue) !RequestSummary {
     const pool = rt.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
 
     var url: []const u8 = "";
@@ -1395,7 +1395,7 @@ fn summarizeFetchRequest(rt: *Runtime, args: []const zq.JSValue) !RequestSummary
     return .{ .method = method, .url = effective_url, .body = body };
 }
 
-pub fn extractResponseStatus(rt: *Runtime, response: zq.JSValue) u16 {
+pub fn extractResponseStatus(rt: *HandlerInstance, response: zq.JSValue) u16 {
     if (!response.isObject()) return 0;
     const pool = rt.ctx.hidden_class_pool orelse return 0;
     const obj = response.toPtr(zq.JSObject);
@@ -1406,7 +1406,7 @@ pub fn extractResponseStatus(rt: *Runtime, response: zq.JSValue) u16 {
     return @intCast(raw);
 }
 
-fn rebuildResponseFromCache(rt: *Runtime, entry: durable_fetch.Entry) !zq.JSValue {
+fn rebuildResponseFromCache(rt: *HandlerInstance, entry: durable_fetch.Entry) !zq.JSValue {
     const created = try createFetchResponse(
         rt,
         entry.status,
@@ -1418,7 +1418,7 @@ fn rebuildResponseFromCache(rt: *Runtime, entry: durable_fetch.Entry) !zq.JSValu
 }
 
 fn persistResponseToCache(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     fetch_dir: []const u8,
     hash_hex: []const u8,
     response: zq.JSValue,
@@ -1540,7 +1540,7 @@ pub fn serviceCallCallback(
     route_pattern: []const u8,
     init_val: zq.JSValue,
 ) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const route = parseServiceRoutePattern(route_pattern) catch {
         return createFetchErrorResponse(rt, "InvalidServiceRoute", "route pattern must be 'METHOD /path'");
     };
@@ -1614,7 +1614,7 @@ fn parseServiceRoutePattern(route_pattern: []const u8) !ServiceRoute {
 }
 
 pub fn buildServiceUrl(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     base_url: []const u8,
     path_pattern: []const u8,
@@ -1641,7 +1641,7 @@ pub fn buildServiceUrl(
 }
 
 fn appendServicePath(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     buf: *std.ArrayList(u8),
     path_pattern: []const u8,
@@ -1678,7 +1678,7 @@ fn appendServicePath(
 }
 
 fn appendServiceQuery(
-    rt: *Runtime,
+    rt: *HandlerInstance,
     ctx: *zq.Context,
     buf: *std.ArrayList(u8),
     init_obj: ?*zq.JSObject,
@@ -1709,7 +1709,7 @@ fn appendServiceQuery(
     }
 }
 
-fn appendEncodedJsValue(rt: *Runtime, buf: *std.ArrayList(u8), val: zq.JSValue) !bool {
+fn appendEncodedJsValue(rt: *HandlerInstance, buf: *std.ArrayList(u8), val: zq.JSValue) !bool {
     if (getStringData(val)) |text| {
         try appendPercentEncoded(rt, buf, text);
         return true;
@@ -1733,7 +1733,7 @@ fn appendEncodedJsValue(rt: *Runtime, buf: *std.ArrayList(u8), val: zq.JSValue) 
     return false;
 }
 
-fn appendPercentEncoded(rt: *Runtime, buf: *std.ArrayList(u8), input: []const u8) !void {
+fn appendPercentEncoded(rt: *HandlerInstance, buf: *std.ArrayList(u8), input: []const u8) !void {
     return appendPercentEncodedInto(rt.allocator, buf, input);
 }
 
@@ -1766,7 +1766,7 @@ pub fn ioExecuteFetches(
     descriptors: []const zq.modules.io.FetchDescriptor,
     results: []zq.modules.io.FetchResult,
 ) void {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     const count = descriptors.len;
     if (count == 0) return;
 
@@ -2034,7 +2034,7 @@ fn doFetchWorkerInner(
 
 /// IoCallbacks.build_response_fn - create a JS Response object from a FetchResult.
 pub fn ioBuildResponse(runtime_ptr: *anyopaque, result: *const zq.modules.io.FetchResult) anyerror!zq.JSValue {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
 
     if (!result.ok) {
         // Build error response
@@ -2064,7 +2064,7 @@ pub fn ioBuildResponse(runtime_ptr: *anyopaque, result: *const zq.modules.io.Fet
 
 pub fn httpRequestNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
     const ctx: *zq.Context = @ptrCast(@alignCast(ctx_ptr));
-    const rt = Runtime.fromContext(ctx) orelse return error.RuntimeUnavailable;
+    const rt = HandlerInstance.fromContext(ctx) orelse return error.RuntimeUnavailable;
     const out = httpRequestResultJsonAlloc(rt, args) catch |err| {
         const fallback = try httpRequestErrorJsonAlloc(rt.allocator, "InternalError", @errorName(err));
         defer rt.allocator.free(fallback);
@@ -2074,7 +2074,7 @@ pub fn httpRequestNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JS
     return rt.createString(out);
 }
 
-fn httpRequestResultJsonAlloc(rt: *Runtime, args: []const zq.JSValue) ![]u8 {
+fn httpRequestResultJsonAlloc(rt: *HandlerInstance, args: []const zq.JSValue) ![]u8 {
     const a = rt.allocator;
     if (!rt.config.outbound_http_enabled) {
         return try httpRequestErrorJsonAlloc(a, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
@@ -2313,9 +2313,9 @@ pub fn httpRequestErrorJsonAlloc(a: std.mem.Allocator, err_code: []const u8, det
 //
 // This file had zero test blocks across 2,305 lines, which the reset plan named
 // as the repository's highest-risk untested file. Most of its surface takes a
-// live `Runtime` or a `Context`; these cover the parts whose behavior can be
+// live `HandlerInstance` or a `Context`; these cover the parts whose behavior can be
 // pinned without standing up a request, plus the egress-host check, which is a
-// security boundary and worth a Runtime.
+// security boundary and worth a HandlerInstance.
 //
 // Collection was confirmed with a positive control before any of these were
 // written: a trivial test here moves `test-zruntime` from 494 to 495.
@@ -2384,13 +2384,13 @@ test "host resolution accepts a plain host and rejects a missing one" {
 }
 
 test "the egress allowlist rejects a host it does not name" {
-    // A security boundary, so it gets a real Runtime. `outbound_allow_host`
+    // A security boundary, so it gets a real HandlerInstance. `outbound_allow_host`
     // restricts the bridge to one exact host; a mismatch must be reported.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try Runtime.init(allocator, .{ .outbound_allow_host = "api.example.com" });
+    const rt = try HandlerInstance.init(allocator, .{ .outbound_allow_host = "api.example.com" });
     defer rt.deinit();
 
     // Exact match passes the allowlist check. Whether the capability policy also
@@ -2408,7 +2408,7 @@ test "the egress allowlist is case-insensitive on the host" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const rt = try Runtime.init(allocator, .{ .outbound_allow_host = "api.example.com" });
+    const rt = try HandlerInstance.init(allocator, .{ .outbound_allow_host = "api.example.com" });
     defer rt.deinit();
 
     // Not the allowlist's complaint: any violation here comes from the

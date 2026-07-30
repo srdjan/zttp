@@ -18,7 +18,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zq = @import("zts");
 const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
-const Runtime = @import("zruntime.zig").Runtime;
+const HandlerInstance = @import("handler_instance.zig").HandlerInstance;
 const HttpRequestView = @import("http_types.zig").HttpRequestView;
 const HttpHeader = @import("http_types.zig").HttpHeader;
 const HttpResponse = @import("http_types.zig").HttpResponse;
@@ -80,7 +80,7 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
     const handler_filename = loaded.filename;
     defer allocator.free(handler_code);
 
-    // Set replay_file_path sentinel so Runtime installs replay stubs
+    // Set replay_file_path sentinel so HandlerInstance installs replay stubs
     // instead of real virtual module functions.
     var test_config = spec.runtime_config;
     test_config.trace_file_path = null;
@@ -151,7 +151,7 @@ fn runOneTest(
     };
 
     // Each test case gets its own zttp:queue ActorQueue, matching the
-    // fresh Runtime and ReplayState below: sharing one queue across test
+    // fresh HandlerInstance and ReplayState below: sharing one queue across test
     // cases in the same file would leak mailbox/lease/dead-letter state
     // (e.g. a message left un-received by one test would be visible to
     // the next, unlike every other virtual module which replays isolated
@@ -164,7 +164,7 @@ fn runOneTest(
         test_config.queue_system = @ptrCast(&test_queue.?);
     }
 
-    const rt = Runtime.init(allocator, test_config) catch |err| {
+    const rt = HandlerInstance.init(allocator, test_config) catch |err| {
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
     };
     defer rt.deinit();

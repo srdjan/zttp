@@ -633,10 +633,11 @@ pub fn build(b: *std.Build) void {
 
     // Runtime-side tests (main.zig root) — covers runtime_cli, cli_shared,
     // server, edge_server, studio, and proof_adapter via the test block in
-    // main.zig. NOT zruntime: it is the root of its own module, so a file
-    // import from main.zig collects none of its tests. Measured at 521 tests
-    // with and without that import. `zig build test-zruntime` is the only step
-    // that runs that root, and `scripts/verify.sh` runs it separately.
+    // main.zig. NOT zruntime, the handler-instance test root: it is the root of
+    // its own module, so a file import from main.zig collects none of its
+    // tests. Measured at 521 tests with and without that import.
+    // `zig build test-zruntime` is the only step that runs that root, and
+    // `scripts/verify.sh` runs it separately.
     attachEmbeddedHandlerStub(unit_tests, runtime_dep, zts_mod);
     const run_unit_tests = b.addRunArtifact(unit_tests);
 
@@ -683,10 +684,10 @@ pub fn build(b: *std.Build) void {
     const run_zruntime_tests = b.addRunArtifact(zruntime_tests);
     const zruntime_test_step = b.step("test-zruntime", "Run ZRuntime unit tests");
     zruntime_test_step.dependOn(&run_zruntime_tests.step);
-    // main.zig already imports zruntime.zig in the aggregate runtime test root.
-    // Keep test-zruntime as a focused standalone target, but do not run the same
-    // pool-heavy tests twice inside zig build test; parallel duplicate roots
-    // have produced intermittent libc/JIT/arena teardown TRAPs on macOS.
+    // Deliberately not a dependency of `zig build test`: this root holds the
+    // pool-heavy handler-instance tests, and running the same root twice in
+    // parallel has produced intermittent libc/JIT/arena teardown TRAPs on
+    // macOS. `scripts/verify.sh` runs it as its own step.
 
     // test-server: server/runtime facade integration suite (Phase 0b gate).
     // Tests through public entry points (Server.init/deinit, HandlerPool

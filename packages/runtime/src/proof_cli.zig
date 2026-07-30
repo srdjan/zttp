@@ -226,7 +226,7 @@ pub fn replayTraceFiles(
 ) !ReplayReport {
     var report: ReplayReport = .{};
 
-    // `replay_file_path` non-null is the sentinel that makes Runtime install
+    // `replay_file_path` non-null is the sentinel that makes HandlerInstance install
     // replay stubs for virtual modules instead of real implementations.
     const config = RuntimeConfig{
         .replay_file_path = "proof-capsule",

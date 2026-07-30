@@ -3,18 +3,18 @@
 //! deserializeAttachment / getWebSockets / setAutoResponse).
 //!
 //! Extracted from zruntime.zig to keep the request-lifecycle struct focused.
-//! These are registered by `Runtime.installWebSocketModuleState`; each callback
-//! receives the owning Runtime as an opaque pointer and dispatches against its
-//! WebSocket pool (`Runtime.ws_pool_ref`), and takes the connection id from its
+//! These are registered by `HandlerInstance.installWebSocketModuleState`; each callback
+//! receives the owning HandlerInstance as an opaque pointer and dispatches against its
+//! WebSocket pool (`HandlerInstance.ws_pool_ref`), and takes the connection id from its
 //! first JS argument.
 
 const std = @import("std");
 const zq = @import("zts");
 const websocket_codec = @import("websocket_codec.zig");
 const websocket_pool = @import("websocket_pool.zig");
-const zruntime = @import("zruntime.zig");
+const handler_instance = @import("handler_instance.zig");
 
-const Runtime = zruntime.Runtime;
+const HandlerInstance = handler_instance.HandlerInstance;
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 
 pub fn wsConnectionIdFromArg(arg: zq.JSValue) ?u64 {
@@ -27,7 +27,7 @@ pub fn wsConnectionIdFromArg(arg: zq.JSValue) ?u64 {
 }
 
 pub fn wsPoolFromRuntime(runtime_ptr: *anyopaque) ?*websocket_pool.Pool {
-    const rt: *Runtime = @ptrCast(@alignCast(runtime_ptr));
+    const rt: *HandlerInstance = @ptrCast(@alignCast(runtime_ptr));
     return rt.ws_pool_ref;
 }
 
@@ -221,7 +221,7 @@ pub fn wsSetAutoResponseCallback(
 
 test "setAutoResponse callback registers a three-argument codec reply" {
     const allocator = std.testing.allocator;
-    const rt = try Runtime.init(allocator, .{});
+    const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
     var pool = websocket_pool.Pool.init(allocator);
     defer pool.deinit();
@@ -242,7 +242,7 @@ test "setAutoResponse callback registers a three-argument codec reply" {
 
 test "close callback writes one valid boundary-truncated close frame and shuts down" {
     const allocator = std.testing.allocator;
-    const rt = try Runtime.init(allocator, .{});
+    const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
     const fds = try @import("server_io.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);
@@ -279,7 +279,7 @@ test "close callback writes one valid boundary-truncated close frame and shuts d
 
 test "close callback rejects reserved codes and non-string reasons without writing" {
     const allocator = std.testing.allocator;
-    const rt = try Runtime.init(allocator, .{});
+    const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
     const fds = try @import("server_io.zig").createUnixSocketPair();
     defer std.Io.Threaded.closeFd(fds[0]);

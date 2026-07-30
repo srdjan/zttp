@@ -1,7 +1,7 @@
 //! Oplog-step helper for `zttp:fetch` with `durable: { key, retries,
 //! backoff, ttl_s }`. Pure functions here: hashing, JSON
 //! serialization, filesystem round-trip. The driver that decides when
-//! to call these lives in `zruntime.zig` next to the HTTP path.
+//! to call these lives in `handler_instance.zig` next to the HTTP path.
 //!
 //! Storage layout: `<durable>/fetch/<hash>.step` — one JSON file per
 //! idempotency key. The hash folds the key with the method + URL +

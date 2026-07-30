@@ -6,9 +6,9 @@
 
 const std = @import("std");
 const compat = @import("zts").compat;
-const zruntime = @import("zruntime.zig");
+const handler_instance = @import("handler_instance.zig");
 const zq = @import("zts");
-const Runtime = zruntime.Runtime;
+const HandlerInstance = handler_instance.HandlerInstance;
 const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 const PerfStats = zq.interpreter.PerfStats;
 const OptStats = zq.OptStats;
@@ -88,7 +88,7 @@ pub fn runHandlerCorpusFromSource(
     defer runtime_arena.deinit();
     const runtime_allocator = runtime_arena.allocator();
 
-    const runtime = try Runtime.init(runtime_allocator, config);
+    const runtime = try HandlerInstance.init(runtime_allocator, config);
 
     runtime.loadCode(source, handler_path) catch return HandlerCorpusStats{};
 
@@ -590,7 +590,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
         defer allocator.free(code);
 
-        const runtime = try Runtime.init(allocator, config);
+        const runtime = try HandlerInstance.init(allocator, config);
         // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
         // All memory is released when the process exits
 
@@ -680,7 +680,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     for (benchmarks, 0..) |bench, i| {
         // Create fresh runtime for each benchmark
-        const runtime = try Runtime.init(allocator, config);
+        const runtime = try HandlerInstance.init(allocator, config);
         // Note: Skip runtime.deinit() - page_allocator doesn't support individual frees
 
         const start = compat.Instant.now() catch {

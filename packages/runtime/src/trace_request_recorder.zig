@@ -2,7 +2,7 @@
 //! records the request, and on completion records timing meta + flushes.
 //! Extracted from zruntime.zig's executeHandlerInternal hot path to keep that
 //! function focused; the trace_file / trace_mutex / trace_recorder state stays
-//! on Runtime (these operate on it through `rt`).
+//! on HandlerInstance (these operate on it through `rt`).
 //!
 //! Usage in the hot path mirrors the original inline block:
 //!     var timer = trace_request_recorder.setupRequestRecorder(self, request);
@@ -12,10 +12,10 @@
 const std = @import("std");
 const zq = @import("zts");
 const compat = @import("zts").compat;
-const zruntime = @import("zruntime.zig");
+const handler_instance = @import("handler_instance.zig");
 const http_types = @import("http_types.zig");
 
-const Runtime = zruntime.Runtime;
+const HandlerInstance = handler_instance.HandlerInstance;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const HttpRequestView = http_types.HttpRequestView;
 const splitHeaderKV = @import("runtime_http.zig").splitHeaderKV;
@@ -23,7 +23,7 @@ const splitHeaderKV = @import("runtime_http.zig").splitHeaderKV;
 /// Set up the per-request recorder (lazily creating it on first request) and
 /// record the inbound request. Returns the timer to hand to
 /// `finishRequestRecorder`, or null when tracing is not configured.
-pub fn setupRequestRecorder(rt: *Runtime, request: HttpRequestView) ?compat.Timer {
+pub fn setupRequestRecorder(rt: *HandlerInstance, request: HttpRequestView) ?compat.Timer {
     var trace_timer: ?compat.Timer = null;
     if (rt.trace_file != null and rt.trace_mutex != null) {
         if (rt.trace_recorder == null) {
@@ -62,7 +62,7 @@ pub fn setupRequestRecorder(rt: *Runtime, request: HttpRequestView) ?compat.Time
 
 /// Record timing meta and flush after the handler completes, then detach the
 /// recorder from module_state so the next request starts fresh.
-pub fn finishRequestRecorder(rt: *Runtime, trace_timer: ?compat.Timer) void {
+pub fn finishRequestRecorder(rt: *HandlerInstance, trace_timer: ?compat.Timer) void {
     if (rt.trace_recorder) |rec| {
         var timer = trace_timer;
         const duration_us: u64 = if (timer) |*t| t.read() / 1000 else 0;
@@ -73,7 +73,7 @@ pub fn finishRequestRecorder(rt: *Runtime, trace_timer: ?compat.Timer) void {
 }
 
 /// Record a response into the active recorder (no-op when tracing is inactive).
-pub fn recordResponse(rt: *Runtime, response: *const HttpResponse) void {
+pub fn recordResponse(rt: *HandlerInstance, response: *const HttpResponse) void {
     const rec = rt.trace_recorder orelse return;
     if (!rec.active) return;
 
