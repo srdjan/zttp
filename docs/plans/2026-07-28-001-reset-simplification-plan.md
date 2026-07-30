@@ -1520,17 +1520,40 @@ follow them, and they should be sequenced first.
    left out here to keep the diff reviewable. Two scripted attempts at a repo-wide regex
    sweep produced broken code and were reverted - the shapes vary too much for pattern
    surgery, so the conversion was done by exact-block replacement per file.
-8. Define typed `CommandDescriptor` records carrying name, help, options, capability
+8. DONE, and the drift the item predicts was found the moment a gate existed. `zttp`
+   dispatches from a `cli_help.Command` table of 23 entries instead of a 380-line `if`
+   chain; each entry keeps its own error-to-exit-code mapping, because measured, no two of
+   the 23 agree on which errors exit 1, which print a remediation line, and which reprint
+   their own help. The listing is NOT generated from the table: listing rows and commands
+   are not one to one (`auth` owns four rows, `doctor` and `proofs` two each), so a
+   generator would have to re-encode the same bytes. A two-way test does the work instead,
+   and it immediately caught `zttp help --all` silently truncating: 4,313 bytes of text
+   into a 4 KB buffer through writes that all ended in `catch {}`, losing the whole
+   Advanced section. `zttp-runtime` got the same gate and turned out to dispatch `durable`
+   without listing it. `zts` already dispatched and rendered from `zts_cli.commands`.
+   Not done: "capability requirements" and "output contract" fields, which no binary has a
+   consumer for.
+
+   The original wording follows.
+
+   Define typed `CommandDescriptor` records carrying name, help, options, capability
    requirements, handler, and output contract, and derive dispatch and help for all three
    binaries from them. Each binary keeps its own command set and its exact current output.
    The command registry already proves the principle: the generated parts of the help
    surface never drift while the hand-written parts do.
-9. Extract artifact construction into an explicit `BuildRequest` plus `BuildCapabilities`
-   to `BuildReceipt` service with declared dependencies, so building an artifact stops
-   being a set of ambient effects.
-10. Convert pi's flat tool catalog into typed capability bundles. Classify every tool
-   first; remove a wrapper or a provider only after prompt, cassette, schema, and
-   live-reference analysis proves it redundant.
+9. DONE. `runBuild(allocator, BuildRequest, BuildCapabilities) !BuildReceipt`. The six
+   ambient effects - read the source, compile, locate the runtime binary, write the tail,
+   codesign, append the ledger row - are named capability functions with production
+   defaults, the same shape `ArtifactTailCapabilities` already used one level in. The
+   receipt reports what the build produced instead of the build returning void and logging.
+   Five tests now drive the whole path with no compiler, no filesystem, and no code signer.
+10. DONE, and nothing was removed because the classification showed nothing redundant.
+   Six bundles (workspace, analysis, build, repair, memory, authoring) replace 36 hand-
+   ordered `register` calls and the duplicated three-name minimal preset. Classifying first
+   found two defects: seventeen tools declared `.effect = .analyze` while taking a workspace
+   path and reading it, which understates the strongest effect the enum exists to record,
+   and `workspace_gen_tests` was registered but absent from the expert persona the model
+   reads. Both are now gated by tests.
 
 Gate: standard, plus every compile path and every failure stage leak-free under
 `std.testing.allocator`, plus byte-identical contract, artifact, and receipt fixtures, plus
