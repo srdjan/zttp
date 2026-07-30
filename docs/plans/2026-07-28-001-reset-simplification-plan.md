@@ -1466,7 +1466,30 @@ follow them, and they should be sequenced first.
    declarations fixed, and a `param_types.len == arg_count` compile-time gate that makes the
    declared signature executable rather than decorative. See
    `docs/plans/2026-07-30-008-wave4-item6-arg-decode-plan.md`.
-7. Add the comptime JSON-tool generator for the 20 thin pi wrappers.
+7. DONE, as a helper rather than a generator, and the saving is a third of the estimate.
+   Section 7.1 put the repeated allocating-writer pattern at 600 to 900 lines. Measured, it
+   is a six-line block appearing 38 times under `packages/pi/src/tools/` (102 times across
+   all of `packages/pi/src`), and collapsing it in tools/ removed 73 net lines across 25
+   files: 193 deleted, 120 added.
+
+   A comptime *generator* for whole tools was the wrong shape once measured. Only 3 of the
+   38 tools are "no arguments, one writer call"; the rest carry their own argument
+   validation, workspace resolution, and multi-statement rendering. So the shared piece is
+   the buffer, not the tool: `helpers.TextBuffer` (init / writer / deinit / toOwnedSlice)
+   for the multi-statement sites, and `helpers.renderAlloc(allocator, write, args)` for the
+   single-call ones.
+
+   The pattern also leaked, in all 38 places. `Io.Writer.Allocating.fromArrayList` takes
+   ownership and replaces the source list with empty, so the caller's
+   `defer buf.deinit(allocator)` freed an empty list while the writer still held the grown
+   buffer; a failed write leaked it. `TextBuffer.deinit` is the whole cleanup, and a
+   FailingAllocator sweep pins that.
+
+   Not swept: the 89 remaining sites elsewhere in `packages/pi/src` (transcript, loop,
+   providers). Same helper applies and the same leak is there; it is a mechanical follow-up,
+   left out here to keep the diff reviewable. Two scripted attempts at a repo-wide regex
+   sweep produced broken code and were reverted - the shapes vary too much for pattern
+   surgery, so the conversion was done by exact-block replacement per file.
 8. Define typed `CommandDescriptor` records carrying name, help, options, capability
    requirements, handler, and output contract, and derive dispatch and help for all three
    binaries from them. Each binary keeps its own command set and its exact current output.

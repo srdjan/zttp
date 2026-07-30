@@ -123,10 +123,9 @@ fn execute(
 
     const semantic_ok = output.ok;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
 
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (semantic_ok) "true" else "false");
@@ -164,8 +163,7 @@ fn execute(
     try json_writer.writeString(w, output.stderr);
     try w.writeAll("}\n");
 
-    buf = aw.toArrayList();
-    return .{ .ok = semantic_ok, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = semantic_ok, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 /// Match lines in `rg -n --no-heading` format (`path:line:text`). Both the

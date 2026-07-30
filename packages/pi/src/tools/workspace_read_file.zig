@@ -79,10 +79,9 @@ fn execute(
         wrote_any = true;
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try w.writeAll("{\"ok\":true,\"path\":");
     try json_writer.writeString(w, relative);
     try w.writeAll(",\"start_line\":");
@@ -97,8 +96,7 @@ fn execute(
     try json_writer.writeString(w, selected.items);
     try w.writeAll("}\n");
 
-    buf = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 // ---------------------------------------------------------------------------

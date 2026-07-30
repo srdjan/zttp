@@ -218,10 +218,9 @@ fn buildResult(
     ) };
     errdefer payload.deinit(allocator);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (success) "true" else "false");
     try w.writeAll(",\"run_id\":");
@@ -235,11 +234,10 @@ fn buildResult(
     try w.writeAll(",\"verification_summary\":");
     try json_utils.writeJsonString(w, verification_summary);
     try w.writeAll("}\n");
-    buf = aw.toArrayList();
 
     return .{
         .ok = success,
-        .llm_text = try buf.toOwnedSlice(allocator),
+        .llm_text = try text_buf.toOwnedSlice(),
         .ui_payload = payload,
     };
 }

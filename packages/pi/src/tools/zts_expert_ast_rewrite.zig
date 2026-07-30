@@ -242,10 +242,9 @@ fn buildResult(
     allocator: std.mem.Allocator,
     args: BuildArgs,
 ) !registry_mod.ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
 
     const ok = args.verdict.new_count == 0;
     try w.writeAll("{\"ok\":");
@@ -262,8 +261,7 @@ fn buildResult(
     try edit_simulate.writeResultJson(w, args.verdict);
     try w.writeAll("}\n");
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
 
     const summary = try std.fmt.allocPrint(
@@ -367,10 +365,9 @@ fn failureJson(
     reason: []const u8,
     message: []const u8,
 ) !registry_mod.ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try w.writeAll("{\"ok\":false,\"applied\":false,\"plan_id\":");
     try json_utils.writeJsonString(w, plan_id);
     try w.writeAll(",\"intent\":");
@@ -381,8 +378,7 @@ fn failureJson(
     try json_utils.writeJsonString(w, message);
     try w.writeAll("}\n");
 
-    buf = aw.toArrayList();
-    return .{ .ok = false, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 // ---------------------------------------------------------------------------

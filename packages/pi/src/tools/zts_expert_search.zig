@@ -34,10 +34,9 @@ fn execute(
         return registry_mod.ToolResult.err(allocator, "zts_expert_search requires a keyword argument\n");
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
 
     const results = rule_registry.search(args[0]);
 
@@ -48,8 +47,7 @@ fn execute(
     }
     try w.writeAll("]\n");
 
-    buf = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 // ---------------------------------------------------------------------------

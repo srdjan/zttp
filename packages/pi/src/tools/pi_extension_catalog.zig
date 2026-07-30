@@ -110,10 +110,9 @@ fn execute(
         break :blk registry.findExport(specifier, exp_name) != null;
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
 
     const ok = parse_errors.items.len == 0;
     try w.print("{{\"ok\":{s}", .{if (ok) "true" else "false"});
@@ -145,8 +144,7 @@ fn execute(
     }
     try w.writeAll("]}");
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try text_buf.toOwnedSlice();
     return .{ .ok = ok and specifier_known, .llm_text = llm_text };
 }
 

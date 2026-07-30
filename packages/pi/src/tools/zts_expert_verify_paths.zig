@@ -33,14 +33,12 @@ fn execute(
         return registry_mod.ToolResult.err(allocator, "zts_expert_verify_paths requires at least one path\n");
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
 
-    const outcome = try verify_paths_core.writeJsonEnvelope(allocator, &aw.writer, args);
+    const outcome = try verify_paths_core.writeJsonEnvelope(allocator, text_buf.writer(), args);
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
 
     return .{

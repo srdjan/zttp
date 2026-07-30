@@ -151,10 +151,9 @@ pub fn planFromSource(
     defer checker.deinit();
     _ = try checker.check(handler_fn);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
 
     const policy_hash = zts.rule_registry.policyHash();
     try w.writeAll("{\"ok\":");
@@ -259,8 +258,7 @@ pub fn planFromSource(
     }
     try w.writeAll("]}\n");
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
     return .{ .ok = !has_failures, .llm_text = llm_text };
 }

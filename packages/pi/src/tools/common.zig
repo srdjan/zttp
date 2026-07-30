@@ -223,10 +223,9 @@ pub fn commandOutcomeToToolResult(
     argv: []const []const u8,
     outcome: *const CommandOutcome,
 ) !registry_mod.ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
 
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (outcome.ok) "true" else "false");
@@ -249,8 +248,7 @@ pub fn commandOutcomeToToolResult(
     try json_writer.writeString(w, outcome.stderr);
     try w.writeAll("}\n");
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
 
     const command = try std.mem.join(allocator, " ", argv);

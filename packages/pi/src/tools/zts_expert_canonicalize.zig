@@ -54,15 +54,15 @@ fn execute(
     else
         null;
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try canonicalize.writeJsonWithSimulation(&aw.writer, &result, simulation);
-    buf = aw.toArrayList();
+    const llm_text = try registry_mod.helpers.renderAlloc(
+        allocator,
+        canonicalize.writeJsonWithSimulation,
+        .{ &result, simulation },
+    );
 
     return .{
         .ok = true,
-        .llm_text = try buf.toOwnedSlice(allocator),
+        .llm_text = llm_text,
     };
 }
 

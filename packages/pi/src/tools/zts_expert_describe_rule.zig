@@ -30,10 +30,9 @@ fn execute(
     allocator: std.mem.Allocator,
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
 
     if (args.len == 0) {
         try w.writeAll("[");
@@ -43,8 +42,7 @@ fn execute(
         }
         try w.writeAll("]\n");
 
-        buf = aw.toArrayList();
-        return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+        return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
     }
 
     const query = args[0];
@@ -52,15 +50,13 @@ fn execute(
         rule_registry.findByCode(query) orelse
         {
             try w.print("Unknown rule: {s}\n", .{query});
-            buf = aw.toArrayList();
-            return .{ .ok = false, .llm_text = try buf.toOwnedSlice(allocator) };
+            return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
         };
 
     try describe_rule.writeRuleJson(w, entry);
     try w.writeAll("\n");
 
-    buf = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 // ---------------------------------------------------------------------------

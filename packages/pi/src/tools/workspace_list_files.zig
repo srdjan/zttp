@@ -84,10 +84,9 @@ fn execute(
         }
     }.lessThan);
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (ok) "true" else "false");
     try w.writeAll(",\"path\":");
@@ -103,8 +102,7 @@ fn execute(
     try json_writer.writeString(w, err_name);
     try w.writeAll("}\n");
 
-    buf = aw.toArrayList();
-    return .{ .ok = ok, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = ok, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 const excluded_names = [_][]const u8{ ".git", "zig-out", ".zig-cache", "node_modules" };

@@ -115,15 +115,13 @@ fn execute(
     try type_pool.ensureHealthy();
 
     const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try writeEnvelope(&aw.writer, ctx, args[0], analyzer.all());
-    buf = aw.toArrayList();
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    try writeEnvelope(text_buf.writer(), ctx, args[0], analyzer.all());
 
     return .{
         .ok = true,
-        .llm_text = try buf.toOwnedSlice(allocator),
+        .llm_text = try text_buf.toOwnedSlice(),
     };
 }
 

@@ -293,10 +293,9 @@ fn buildApplyArgsJson(
     source: []const u8,
     plan_raw_json: []const u8,
 ) ![]u8 {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try w.writeAll("{\"path\":");
     try json_writer.writeString(w, path);
     try w.writeAll(",\"source\":");
@@ -304,8 +303,7 @@ fn buildApplyArgsJson(
     try w.writeAll(",\"plan\":");
     try w.writeAll(plan_raw_json);
     try w.writeByte('}');
-    buf = aw.toArrayList();
-    return try buf.toOwnedSlice(allocator);
+    return try text_buf.toOwnedSlice();
 }
 
 fn parseApplyJson(allocator: std.mem.Allocator, json_text: []const u8) !ApplyJson {
@@ -335,16 +333,14 @@ fn alreadySatisfied(
     input: ParsedInput,
     repair_json: []const u8,
 ) !registry_mod.ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try writePrefix(w, input, true, "already_satisfied");
     try w.writeAll(",\"repairs_applied\":0,\"plan_ids\":[],\"proposed_content\":null,\"repair_plan\":");
     try w.writeAll(std.mem.trim(u8, repair_json, " \t\r\n"));
     try w.writeAll("}\n");
-    buf = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 fn noCandidate(
@@ -353,16 +349,14 @@ fn noCandidate(
     reason: []const u8,
     message: []const u8,
 ) !registry_mod.ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try writePrefix(w, input, false, reason);
     try w.writeAll(",\"message\":");
     try json_utils.writeJsonString(w, message);
     try w.writeAll(",\"repairs_applied\":0,\"plan_ids\":[],\"proposed_content\":null}\n");
-    buf = aw.toArrayList();
-    return .{ .ok = false, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 fn candidateResult(
@@ -373,10 +367,9 @@ fn candidateResult(
     repairs_applied: usize,
     last_apply_json: []const u8,
 ) !registry_mod.ToolResult {
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    const w = &aw.writer;
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
     try writePrefix(w, input, true, "candidate_verified");
     try w.print(",\"repairs_applied\":{d},\"plan_ids\":[", .{repairs_applied});
     for (plan_ids, 0..) |id, i| {
@@ -388,8 +381,7 @@ fn candidateResult(
     try w.writeAll(",\"last_apply_result\":");
     try w.writeAll(last_apply_json);
     try w.writeAll("}\n");
-    buf = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
 }
 
 fn writePrefix(writer: *std.Io.Writer, input: ParsedInput, ok: bool, reason: []const u8) !void {

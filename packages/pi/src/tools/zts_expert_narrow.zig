@@ -113,15 +113,13 @@ fn execute(
         );
     };
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-    try writeEnvelope(&aw.writer, args[0], checker.getDiagnostics());
-    buf = aw.toArrayList();
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    try writeEnvelope(text_buf.writer(), args[0], checker.getDiagnostics());
 
     return .{
         .ok = true,
-        .llm_text = try buf.toOwnedSlice(allocator),
+        .llm_text = try text_buf.toOwnedSlice(),
     };
 }
 

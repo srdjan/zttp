@@ -181,6 +181,54 @@ pub fn singleArg(allocator: std.mem.Allocator, value: []const u8) ![]const []con
     return out;
 }
 
+/// Collect writer output into an owned slice.
+///
+/// Every tool that renders JSON or text used to spell this out: an empty
+/// ArrayList, a `defer buf.deinit(allocator)`, an Allocating writer built with
+/// `fromArrayList`, then `toArrayList` + `toOwnedSlice` to get the bytes back.
+/// That shape leaks when a write fails: `fromArrayList` takes ownership and
+/// replaces the source list with empty, so the deferred `buf.deinit` frees an
+/// empty list while the Allocating writer still holds the grown buffer.
+///
+/// `deinit` here is the whole cleanup, so `defer out.deinit()` covers both the
+/// success and the failure path.
+pub const TextBuffer = struct {
+    aw: std.Io.Writer.Allocating,
+
+    pub fn init(allocator: std.mem.Allocator) TextBuffer {
+        return .{ .aw = .init(allocator) };
+    }
+
+    pub fn writer(self: *TextBuffer) *std.Io.Writer {
+        return &self.aw.writer;
+    }
+
+    pub fn deinit(self: *TextBuffer) void {
+        self.aw.deinit();
+    }
+
+    /// Transfer the bytes to the caller. The buffer is empty afterwards, so a
+    /// trailing `defer deinit()` stays correct.
+    pub fn toOwnedSlice(self: *TextBuffer) std.mem.Allocator.Error![]u8 {
+        return self.aw.toOwnedSlice();
+    }
+};
+
+/// One-call form of `TextBuffer`: render through `write`, return the bytes.
+/// `args` is a tuple of the arguments after the writer, so
+/// `renderAlloc(a, writeFeaturesJson, .{})` and
+/// `renderAlloc(a, writeRuleJson, .{entry})` both work.
+pub fn renderAlloc(
+    allocator: std.mem.Allocator,
+    comptime write: anytype,
+    args: anytype,
+) anyerror![]u8 {
+    var out = TextBuffer.init(allocator);
+    errdefer out.deinit();
+    try @call(.auto, write, .{out.writer()} ++ args);
+    return out.toOwnedSlice();
+}
+
 pub fn decodeNoArgs(
     allocator: std.mem.Allocator,
     args_json: []const u8,
@@ -315,6 +363,35 @@ test "decodeSingleStringField returns a heap-owned slice" {
     const args = try decodeSingleStringField(arena.allocator(), "{\"file\":\"src/handler.ts\"}", "file");
     try testing.expectEqual(@as(usize, 1), args.len);
     try testing.expectEqualStrings("src/handler.ts", args[0]);
+}
+
+test "TextBuffer frees the buffer when a write fails" {
+    // The shape this replaced leaked here: `fromArrayList` takes ownership and
+    // replaces the source list with empty, so the caller's
+    // `defer buf.deinit(allocator)` freed an empty list while the Allocating
+    // writer still held the grown buffer. Fail every allocation index in turn;
+    // the testing allocator asserts at teardown that nothing survived.
+    var fail_index: usize = 0;
+    while (fail_index < 8) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(testing.allocator, .{ .fail_index = fail_index });
+        var buf = TextBuffer.init(failing.allocator());
+        defer buf.deinit();
+        buf.writer().writeAll("some output that needs a heap buffer") catch continue;
+        const owned = buf.toOwnedSlice() catch continue;
+        failing.allocator().free(owned);
+    }
+}
+
+test "renderAlloc passes trailing arguments through to the writer" {
+    const render = struct {
+        fn write(w: *std.Io.Writer, prefix: []const u8, n: u32) !void {
+            try w.print("{s}{d}", .{ prefix, n });
+        }
+    }.write;
+
+    const text = try renderAlloc(testing.allocator, render, .{ "count=", @as(u32, 7) });
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings("count=7", text);
 }
 
 test "singleArg allocates a one-element argv on the allocator" {

@@ -87,14 +87,12 @@ fn execute(
         result.preexisting_count = 0;
     }
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
 
-    try edit_simulate.writeResultJson(&aw.writer, &result);
+    try edit_simulate.writeResultJson(text_buf.writer(), &result);
 
-    buf = aw.toArrayList();
-    const llm_text = try buf.toOwnedSlice(allocator);
+    const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
     return .{
         .ok = result.new_count == 0,

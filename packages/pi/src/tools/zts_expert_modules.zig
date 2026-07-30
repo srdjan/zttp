@@ -24,14 +24,8 @@ fn execute(
 ) anyerror!registry_mod.ToolResult {
     if (args.len != 0) return registry_mod.ToolResult.err(allocator, name ++ ": takes no arguments\n");
 
-    var buf: std.ArrayList(u8) = .empty;
-    defer buf.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-
-    try json_diagnostics.writeModulesJson(&aw.writer);
-
-    buf = aw.toArrayList();
-    return .{ .ok = true, .llm_text = try buf.toOwnedSlice(allocator) };
+    const llm_text = try registry_mod.helpers.renderAlloc(allocator, json_diagnostics.writeModulesJson, .{});
+    return .{ .ok = true, .llm_text = llm_text };
 }
 
 // ---------------------------------------------------------------------------
