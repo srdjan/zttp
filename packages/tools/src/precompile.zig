@@ -2402,11 +2402,18 @@ fn buildContractWithPolicy(
 ) !HandlerContract {
     const contract_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(contract_view, root, atoms);
+
+    // One index for this contract build, shared by the contract builder and the
+    // flow checker below. Both walked the imports independently before.
+    var module_facts = try zts.pipeline.buildModuleFacts(allocator, parsed, manifest_registry);
+    defer module_facts.deinit();
+
     var contract = try zts.pipeline.extractContractFromParsed(
         allocator,
         parsed,
         filename,
         .{
+            .module_facts = &module_facts,
             .dispatch = if (aot) |analysis| analysis.dispatch else null,
             .has_default_response = if (aot) |analysis| analysis.default_response != null else false,
             .verification = verify_info,
@@ -2433,6 +2440,7 @@ fn buildContractWithPolicy(
 
             const flow_errors: u32 = if (precomputed_flow) |_| 0 else blk: {
                 owned_flow = zts.FlowChecker.init(allocator, ir_view, atoms);
+                owned_flow.?.facts = &module_facts;
                 break :blk try owned_flow.?.check(hf);
             };
 

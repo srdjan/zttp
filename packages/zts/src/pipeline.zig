@@ -367,6 +367,11 @@ pub const ExtractContractOptions = struct {
     git_commit: []const u8 = "unknown",
     version: ?[]const u8 = null,
     read_file: ?modules_mod.module_graph.ReadFileFn = null,
+    /// Shared import index for this compile. When set, `ContractBuilder` reads
+    /// it instead of building an identical private one. Same lifetime rule as
+    /// `ResolveOptions.module_facts`: it must outlive the returned contract's
+    /// construction, not the contract itself, since the contract gets copies.
+    module_facts: ?*const ModuleFacts = null,
 };
 
 fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
@@ -411,6 +416,7 @@ pub fn extractContractFromParsed(
         &type_checker,
     );
     builder.manifest_registry = opts.manifest_registry;
+    builder.injected_facts = opts.module_facts;
     defer builder.deinit();
 
     var contract = try builder.build(
