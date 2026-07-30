@@ -77,57 +77,112 @@ pub const demo_passport = @import("demo_passport.zig");
 pub const envHasModelBackend = agent.envHasModelBackend;
 
 const Registry = registry_mod.Registry;
+const ToolDef = registry_mod.ToolDef;
+
+/// The tool catalog, grouped by what a bundle lets the agent do rather than by
+/// which file each tool lives in. The `minimal` preset is the workspace bundle,
+/// so "read-only workspace access" is a named set instead of three names
+/// repeated in a second function that could fall out of step with the first.
+///
+/// A bundle is not an authorization boundary. That is `ToolDef.effect`, which
+/// every tool still declares for itself and which `ToolDef.allowedOn` reads.
+pub const Bundle = enum {
+    /// Read the workspace: list, read, search.
+    workspace,
+    /// Compiler analysis over handler sources and the rule registry.
+    analysis,
+    /// Run a process: the compiler, the build, the tests.
+    build,
+    /// Propose and dry-run source repairs. Nothing here writes a file.
+    repair,
+    /// Agent-owned memory: facts, witnesses, extension catalog.
+    memory,
+    /// Produce new project artifacts.
+    authoring,
+};
+
+const workspace_bundle = [_]ToolDef{
+    workspace_read_file_tool.tool,
+    workspace_list_files_tool.tool,
+    workspace_search_text_tool.tool,
+};
+
+const analysis_bundle = [_]ToolDef{
+    meta_tool.tool,
+    verify_paths_tool.tool,
+    canonicalize_tool.tool,
+    normalize_tool.tool,
+    describe_rule_tool.tool,
+    search_tool.tool,
+    edit_simulate_tool.tool,
+    review_patch_tool.tool,
+    prove_patch_tool.tool,
+    system_proof_tool.tool,
+    features_tool.tool,
+    modules_tool.tool,
+    verify_modules_tool.tool,
+    effects_tool.tool,
+    narrow_tool.tool,
+    ratchet_tool.tool,
+};
+
+const build_bundle = [_]ToolDef{
+    zts_check_tool.tool,
+    zig_build_step_tool.tool,
+    zig_test_step_tool.tool,
+    pi_specs_status_tool.tool,
+};
+
+const repair_bundle = [_]ToolDef{
+    pi_goal_check_tool.tool,
+    pi_goal_candidate_tool.tool,
+    pi_repair_plan_tool.tool,
+    pi_apply_repair_plan_tool.tool,
+    ast_rewrite_tool.tool,
+    pi_feature_plan_tool.tool,
+    pi_forge_route_tool.tool,
+    pi_forge_spec_tool.tool,
+};
+
+const memory_bundle = [_]ToolDef{
+    pi_witnesses_tool.tool,
+    pi_remember_fact_tool.tool,
+    pi_recall_facts_tool.tool,
+    pi_extension_catalog_tool.tool,
+};
+
+const authoring_bundle = [_]ToolDef{
+    gen_tests_tool.tool,
+};
+
+pub fn bundleTools(bundle: Bundle) []const ToolDef {
+    return switch (bundle) {
+        .workspace => &workspace_bundle,
+        .analysis => &analysis_bundle,
+        .build => &build_bundle,
+        .repair => &repair_bundle,
+        .memory => &memory_bundle,
+        .authoring => &authoring_bundle,
+    };
+}
+
+fn registerBundle(reg: *Registry, allocator: std.mem.Allocator, bundle: Bundle) !void {
+    for (bundleTools(bundle)) |tool| try reg.register(allocator, tool);
+}
 
 pub fn buildMinimalRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
-    try reg.register(allocator, workspace_read_file_tool.tool);
-    try reg.register(allocator, workspace_list_files_tool.tool);
-    try reg.register(allocator, workspace_search_text_tool.tool);
+    try registerBundle(&reg, allocator, .workspace);
     return reg;
 }
 
 pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
-
-    try reg.register(allocator, meta_tool.tool);
-    try reg.register(allocator, verify_paths_tool.tool);
-    try reg.register(allocator, canonicalize_tool.tool);
-    try reg.register(allocator, normalize_tool.tool);
-    try reg.register(allocator, describe_rule_tool.tool);
-    try reg.register(allocator, search_tool.tool);
-    try reg.register(allocator, edit_simulate_tool.tool);
-    try reg.register(allocator, review_patch_tool.tool);
-    try reg.register(allocator, prove_patch_tool.tool);
-    try reg.register(allocator, system_proof_tool.tool);
-    try reg.register(allocator, features_tool.tool);
-    try reg.register(allocator, modules_tool.tool);
-    try reg.register(allocator, verify_modules_tool.tool);
-    try reg.register(allocator, workspace_list_files_tool.tool);
-    try reg.register(allocator, workspace_read_file_tool.tool);
-    try reg.register(allocator, workspace_search_text_tool.tool);
-    try reg.register(allocator, zts_check_tool.tool);
-    try reg.register(allocator, zig_build_step_tool.tool);
-    try reg.register(allocator, zig_test_step_tool.tool);
-    try reg.register(allocator, gen_tests_tool.tool);
-    try reg.register(allocator, pi_goal_check_tool.tool);
-    try reg.register(allocator, pi_goal_candidate_tool.tool);
-    try reg.register(allocator, pi_repair_plan_tool.tool);
-    try reg.register(allocator, pi_apply_repair_plan_tool.tool);
-    try reg.register(allocator, ast_rewrite_tool.tool);
-    try reg.register(allocator, pi_feature_plan_tool.tool);
-    try reg.register(allocator, pi_forge_route_tool.tool);
-    try reg.register(allocator, pi_forge_spec_tool.tool);
-    try reg.register(allocator, pi_specs_status_tool.tool);
-    try reg.register(allocator, pi_witnesses_tool.tool);
-    try reg.register(allocator, pi_remember_fact_tool.tool);
-    try reg.register(allocator, pi_recall_facts_tool.tool);
-    try reg.register(allocator, pi_extension_catalog_tool.tool);
-    try reg.register(allocator, effects_tool.tool);
-    try reg.register(allocator, narrow_tool.tool);
-    try reg.register(allocator, ratchet_tool.tool);
-
+    inline for (comptime std.enums.values(Bundle)) |bundle| {
+        try registerBundle(&reg, allocator, bundle);
+    }
     return reg;
 }
 
@@ -1003,4 +1058,55 @@ test "splitCsv trims whitespace and drops empty entries" {
     try testing.expectEqualStrings("a", parts[0]);
     try testing.expectEqualStrings("b", parts[1]);
     try testing.expectEqualStrings("c", parts[2]);
+}
+
+test "every registered tool is documented in the expert persona" {
+    // The persona is the model's map of the catalog. A tool absent from it is
+    // one the model has to guess at. `workspace_gen_tests` was absent until
+    // this gate existed.
+    const persona_text = @import("expert_persona.zig").prologue_text_for_test;
+    inline for (comptime std.enums.values(Bundle)) |bundle| {
+        for (bundleTools(bundle)) |tool| {
+            std.testing.expect(std.mem.indexOf(u8, persona_text, tool.name) != null) catch |err| {
+                std.debug.print("expert persona does not document `{s}`\n", .{tool.name});
+                return err;
+            };
+        }
+    }
+}
+
+test "the bundles partition the catalog with no tool in two of them" {
+    var seen: usize = 0;
+    inline for (comptime std.enums.values(Bundle)) |bundle| {
+        seen += bundleTools(bundle).len;
+    }
+    var reg = try buildRegistry(std.testing.allocator);
+    defer reg.deinit(std.testing.allocator);
+    // `register` rejects a duplicate name, so an equal count proves each tool
+    // appears in exactly one bundle.
+    try std.testing.expectEqual(seen, reg.count());
+}
+
+test "an analyze tool may not take a workspace path" {
+    // `ToolEffect` is documented as the STRONGEST observable effect, so a tool
+    // that reads a path the caller names is `read_workspace`, not `analyze`.
+    // Seventeen of them claimed `analyze`; today that is only a labelling
+    // error, because both are allowed on all three surfaces, but the enum
+    // exists so a future surface can deny workspace reads, and those
+    // seventeen would have slipped through.
+    const path_keys = [_][]const u8{ "\"path\"", "\"paths\"", "\"file\"", "\"before\"", "\"after\"", "\"handler_path\"" };
+    inline for (comptime std.enums.values(Bundle)) |bundle| {
+        for (bundleTools(bundle)) |tool| {
+            if (tool.effect != .analyze) continue;
+            for (path_keys) |key| {
+                if (std.mem.indexOf(u8, tool.input_schema, key) != null) {
+                    std.debug.print(
+                        "tool `{s}` declares effect .analyze but takes {s} in its input schema\n",
+                        .{ tool.name, key },
+                    );
+                    return error.EffectUnderstated;
+                }
+            }
+        }
+    }
 }

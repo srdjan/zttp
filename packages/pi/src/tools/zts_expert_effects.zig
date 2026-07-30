@@ -19,7 +19,7 @@ const name = "zts_expert_effects";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "effect rows",
-    .effect = .analyze,
+    .effect = .read_workspace,
     .description =
     \\Report the inferred effect row for every named function in a source
     \\file. Each row records the union of capabilities required by direct

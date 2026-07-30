@@ -63,6 +63,11 @@ const MEMORY_SECTION_SOFT_CAP: usize = 8 * 1024;
 // the Anthropic tool-use API still exposes any registered tool, but the
 // agent won't be told about a new one in its system prompt and may not
 // reach for it proactively until a later turn surfaces it.
+//
+// A test in `app.zig` now asserts every registered tool name appears here,
+// which is how `workspace_gen_tests` was found missing.
+pub const prologue_text_for_test = prologue;
+
 const prologue =
     \\You are the native zts coding agent running inside zttp's pi loop.
     \\Your job is to inspect the workspace, reason about compiler semantics,
@@ -190,6 +195,12 @@ const prologue =
     \\                                idempotent, injection_safe,
     \\                                state_isolated, fault_covered,
     \\                                result_safe
+    \\  workspace_gen_tests         - generate a JSONL suite from the handler's
+    \\                                proven behavioral paths and write it
+    \\                                beside the handler. The only tool here
+    \\                                that writes a file, so the model surface
+    \\                                refuses it: it is for the human and the
+    \\                                autoloop
     \\  pi_goal_check               - check a handler against property goals
     \\                                and surface *executable counterexample
     \\                                witnesses* (a concrete Request + virtual

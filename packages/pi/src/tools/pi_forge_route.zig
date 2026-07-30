@@ -25,7 +25,7 @@ const name = "pi_forge_route";
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "forge-route",
-    .effect = .analyze,
+    .effect = .read_workspace,
     .description =
     \\Run a compiler-native route forge loop. Input matches /feature route:
     \\file, method, path, optional body_schema, response_schema, and status.
