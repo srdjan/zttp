@@ -16,6 +16,7 @@ const durable_fetch = @import("durable_fetch.zig");
 const durable_executor = @import("durable_executor.zig");
 const workflow_queue = @import("workflow_queue.zig");
 const actor_queue = @import("actor_queue.zig");
+const queue_callbacks = @import("queue_runtime_callbacks.zig");
 const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const workflow = @import("runtime_workflow.zig");
@@ -49,6 +50,7 @@ test {
     // Force collection of in_process_dispatch.zig tests under test-zruntime.
     _ = @import("in_process_dispatch.zig");
     _ = @import("actor_queue.zig");
+    _ = @import("queue_runtime_callbacks.zig");
 }
 
 const openOplogFile = runtime_config_mod.openOplogFile;
@@ -541,7 +543,7 @@ test "zttp:queue sends receives and acks JSON payloads" {
     defer rt.deinit();
 
     const direct_payload = try rt.ctx.createString("direct");
-    _ = try rt.queueSendInternal(rt.ctx, "direct", direct_payload, false);
+    _ = try queue_callbacks.queueSendInternal(rt, rt.ctx, "direct", direct_payload, false);
     try std.testing.expect(!rt.ctx.hasException());
     const direct_msg = (try queue.receive("direct")).?;
     try std.testing.expect(queue.ack(direct_msg.id));
