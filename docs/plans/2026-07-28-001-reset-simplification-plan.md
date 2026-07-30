@@ -1321,9 +1321,15 @@ follow them, and they should be sequenced first.
    hold: measured, both construct exactly once, the two `PathGenerator` sites in
    `compileHandler` are the mutually exclusive failure and success branches, and
    `buildContractWithPolicy` already reuses a precomputed `FlowChecker`. The orchestration
-   move therefore has no performance or correctness justification left, only the
-   architectural one `pipeline.zig`'s header states, and needs its own plan. See
-   `docs/plans/2026-07-30-006-item4-c3-findings.md`.
+   move is CLOSED as declined: it had no performance or correctness justification left, only
+   an architectural one, and it required splitting orchestration along an IO boundary that
+   does not exist today (`pipeline.zig` production code does zero file, process, or libc IO;
+   `precompile.zig` carries 148 such references). Revisit only with a concrete consumer for a
+   fourth `LoweredModule` phase, such as a build cache or an incremental compile. The one
+   piece of that plan with standalone value was done: a golden over the serialized bytecode a
+   compile emits, which nothing had pinned. See
+   `docs/plans/2026-07-30-006-item4-c3-findings.md` and
+   `docs/plans/2026-07-30-007-lowered-module-plan.md`.
 5. Replace `ui_payload.zig`'s 44 hand-written clone and deinit functions with arena-owned
    payloads. About 1,500 to 2,000 lines of 3,013.
 6. Add the comptime argument-decode wrapper for module impl functions, generated from the

@@ -1,6 +1,11 @@
 # Plan: one orchestrator, and the `LoweredModule` phase it unblocks
 
-**Status:** Task 1 done at commit `8c27464c`. Tasks 2-5 need the go/no-go in section 8.
+**Status:** DECLINED, option 3 of section 8, decided 2026-07-30. Task 1 landed anyway at commit
+`8c27464c` and stands on its own; Tasks 2-5 will not be done.
+
+This document is kept rather than deleted because the decision needs its reasoning attached.
+The clause is not open work, and the next reader should not reopen it without the new
+justification section 8 asks for.
 
 **Source:** the orchestration clause of wave 4 item 4. Its original justification, that
 `PathGenerator` and `FlowChecker` run more than once per compile, was measured and refuted

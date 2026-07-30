@@ -16,9 +16,19 @@
 //! check") are encoded in the function signatures: `check` only accepts a
 //! `ResolvedModule`, never a `ParsedModule`. Construction of `ParsedModule` is
 //! still permissive in this phase (`fromExisting`) — gating that constructor is
-//! WS5 work. A fourth `LoweredModule` phase is intentionally not added until
-//! `precompile.zig`'s codegen-bearing orchestrator migrates; introducing the
-//! type before it has a real producer would ship dead API.
+//! WS5 work. A fourth `LoweredModule` phase is intentionally not added: it would
+//! need `precompile.zig`'s codegen-bearing orchestrator to migrate here first,
+//! and introducing the type before it has a real producer would ship dead API.
+//!
+//! That migration was planned and then DECLINED, so this is a settled decision
+//! rather than pending work. It had no performance or correctness justification
+//! — `PathGenerator` and `FlowChecker` were measured constructing once per
+//! compile, not twice — and the split it required is real: production code in
+//! this file performs zero file, process, or libc IO, while `precompile.zig`
+//! carries 148 such references, so the orchestration cannot move without
+//! drawing a boundary that does not exist today. Revisit only with a concrete
+//! consumer for a fourth phase, such as a build cache or an incremental
+//! compile. See `docs/plans/2026-07-30-007-lowered-module-plan.md`.
 //!
 //! See: /Users/srdjans/.claude/plans/study-following-doc-document-luminous-fog.md
 
