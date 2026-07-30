@@ -211,7 +211,7 @@ TS and TSX files work directly through the native type stripper. JSX is parsed b
 ## Conventions
 
 - All Zig. New code in Zig unless editing existing JS/TS handler examples.
-- Tests live alongside code in `test "..."` blocks. Run relevant `zig build test*` after changes.
+- Tests live alongside code in `test "..."` blocks. Run relevant `zig build test*` after changes. [docs/internals/testing.md](docs/internals/testing.md) maps which step runs what.
 - `errdefer` on all allocations. `orelse` instead of `?` unwrap.
 - Benchmark before optimizing. If targets already met, stop.
 - `zig build bench` is the in-repo benchmark suite. Do not add ad-hoc benchmark scripts.

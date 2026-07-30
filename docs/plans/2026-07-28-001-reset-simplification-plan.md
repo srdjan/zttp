@@ -1651,8 +1651,15 @@ Run this last, so the docs describe the simplified system rather than the curren
    of all prose, referenced by no gate. Keep `docs/solutions/`, which agents are pointed at.
    Move the three top-level HTML explainers into the archive or the website repository.
    This document joins the archive once the plan is executed.
-5. Write the missing contributor document: which steps `zig build test` includes and
-   excludes, and why the zruntime suite is standalone.
+5. DONE. `docs/internals/testing.md`. One correction to the assumption behind this item:
+   the excluded set is smaller than the CLAUDE.md line that prompted it claimed. Only two
+   build steps sit outside `zig build test`, `test-zruntime` and `test-panic-isolation`;
+   `test-compile-bench` and `test-server` are both in the aggregate. Everything else the
+   old line called "excluded" is shell-driven and therefore never was a build step. Two
+   findings worth keeping: the docs drift and link gates run inside `zig build test` and
+   nowhere else, by design, because neither Run step is cached; and both benchmark binaries
+   are compiled but not run by the aggregate, which is the check that would have caught
+   `zttp-bench` breaking when the JIT was removed.
 
 Gate: `zig build test-docs-drift test-doc-links` green, and the new CLI-coverage assertion
 passing.
