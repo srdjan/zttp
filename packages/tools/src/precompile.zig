@@ -1143,6 +1143,12 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
 
+    // One import index for this compile, owned here because the phase structs
+    // are returned by value and cannot hold a stable address for it. Passed to
+    // resolve and check, which forward it to all four analyzers they construct.
+    var module_facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
+    defer module_facts.deinit();
+
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
     if (strip_result) |sr| {
@@ -1155,6 +1161,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         .{
             .type_env = type_env_storage.envPtr(),
             .service_type_context = stc_ptr,
+            .module_facts = &module_facts,
         },
     );
     defer resolved.deinit();
@@ -1239,7 +1246,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     var checked_opt: ?zts.pipeline.CheckedModule = null;
     defer if (checked_opt) |*c| c.deinit();
     if (zts.handler_verifier.findHandlerFunction(ir_view, root)) |hf| {
-        var checked = try zts.pipeline.check(allocator, &resolved, hf);
+        var checked = try zts.pipeline.check(allocator, &resolved, hf, .{ .module_facts = &module_facts });
         result.verify_ran = true;
         result.verify_errors = @intCast(checked.verifier_error_count);
         const verifier_diags = checked.verifierDiagnostics();

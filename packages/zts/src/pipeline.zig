@@ -30,6 +30,7 @@ const type_checker_mod = @import("type_checker.zig");
 const strict_checker_mod = @import("strict_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
 const flow_checker_mod = @import("flow_checker.zig");
+const module_facts_mod = @import("module_facts.zig");
 const context_mod = @import("context.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
@@ -60,6 +61,7 @@ const HandlerContract = handler_contract_mod.HandlerContract;
 const VerificationInfo = handler_contract_mod.VerificationInfo;
 const ContractBuilder = handler_contract_mod.ContractBuilder;
 const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
+const ModuleFacts = module_facts_mod.ModuleFacts;
 
 // ---------------------------------------------------------------------------
 // Phase 1: Parsed
@@ -76,6 +78,22 @@ pub const ParsedModule = struct {
     }
 };
 
+/// Build the shared import index for a parsed module. Caller owns the result
+/// and must keep it alive for as long as any analyzer that received it, exactly
+/// like `ResolveOptions.type_env`.
+///
+/// The index cannot live inside `ResolvedModule` or `CheckedModule`: both are
+/// returned by value, so a pointer into either dangles once the phase function
+/// returns. Caller storage is the only stable home, which is the same reason
+/// `CheckedModule` borrows `*const ResolvedModule`.
+pub fn buildModuleFacts(
+    allocator: std.mem.Allocator,
+    parsed: ParsedModule,
+    registry: ?*const @import("manifest_registry.zig").Registry,
+) !ModuleFacts {
+    return ModuleFacts.build(allocator, parsed.ir_view, parsed.atoms, registry);
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2: Resolved (boolean + optional type checks)
 // ---------------------------------------------------------------------------
@@ -88,6 +106,10 @@ pub const ResolveOptions = struct {
     /// Default-on strict ZigTS profile (ZTS6xx). Type-directed rules run when
     /// type context exists; syntax/profile rules still run for untyped sources.
     strict: bool = true,
+    /// Shared import index for this compile, built once by the caller. The
+    /// pointed-to index must outlive the returned ResolvedModule. When null each
+    /// analyzer builds a private one, which is what an un-migrated caller does.
+    module_facts: ?*const ModuleFacts = null,
 };
 
 pub const ResolvedModule = struct {
@@ -150,6 +172,7 @@ pub fn resolve(
     opts: ResolveOptions,
 ) !ResolvedModule {
     var bool_checker = BoolChecker.init(allocator, parsed.ir_view, parsed.atoms);
+    bool_checker.facts = opts.module_facts;
     errdefer bool_checker.deinit();
     const bool_errors = try bool_checker.check(parsed.root);
 
@@ -180,6 +203,7 @@ pub fn resolve(
             env_ptr,
             tc_ptr,
         );
+        sc.facts = opts.module_facts;
         errdefer sc.deinit();
         strict_errors = try sc.check(parsed.root);
         if (type_checker_opt) |*tc| try tc.ensureHealthy();
@@ -231,10 +255,18 @@ pub const CheckedModule = struct {
     }
 };
 
+pub const CheckOptions = struct {
+    /// Shared import index for this compile. Same lifetime rule as
+    /// `ResolveOptions.module_facts`. An options struct rather than a fourth
+    /// positional parameter so the next addition does not churn every call site.
+    module_facts: ?*const ModuleFacts = null,
+};
+
 pub fn check(
     allocator: std.mem.Allocator,
     resolved: *const ResolvedModule,
     handler_func: NodeIndex,
+    opts: CheckOptions,
 ) !CheckedModule {
     const tc_ptr: ?*const TypeChecker = if (resolved.type_checker) |*tc| tc else null;
     const env_ptr: ?*const TypeEnv = if (resolved.type_checker) |*tc| tc.env else null;
@@ -246,6 +278,7 @@ pub fn check(
         env_ptr,
         tc_ptr,
     );
+    verifier.facts = opts.module_facts;
     errdefer verifier.deinit();
     const verifier_errors = try verifier.verify(handler_func);
     if (tc_ptr) |tc| try tc.ensureHealthy();
@@ -255,6 +288,7 @@ pub fn check(
         resolved.parsed.ir_view,
         resolved.parsed.atoms,
     );
+    flow.facts = opts.module_facts;
     errdefer flow.deinit();
     const flow_errors = try flow.check(handler_func);
 
@@ -468,10 +502,16 @@ pub fn extractContract(
         try type_env_storage.init(allocator, type_map);
     }
 
+    // One index for this module, owned here for the same reason precompile owns
+    // its own: the phase structs cannot hold a stable address for it.
+    var module_facts = try buildModuleFacts(allocator, parsed, null);
+    defer module_facts.deinit();
+
     var resolved = try resolve(allocator, parsed, .{
         .type_env = type_env_storage.envPtr(),
         .service_type_context = opts.service_type_context,
         .strict = opts.strict,
+        .module_facts = &module_facts,
     });
     defer resolved.deinit();
 
@@ -547,10 +587,16 @@ fn extractMultiModuleContract(
         if (module_opts.type_map) |type_map| {
             try type_env_storage.init(allocator, type_map);
         }
+        // Per module, not per compile: each module in the graph has its own IR,
+        // so an index built over one says nothing about another.
+        var module_facts = try buildModuleFacts(allocator, parsed, null);
+        defer module_facts.deinit();
+
         var resolved = try resolve(allocator, parsed, .{
             .type_env = type_env_storage.envPtr(),
             .service_type_context = module_opts.service_type_context,
             .strict = module_opts.strict,
+            .module_facts = &module_facts,
         });
         defer resolved.deinit();
         if (resolved.bool_error_count > 0 or
@@ -681,7 +727,7 @@ test "pipeline.check does not emit a module after verifier allocation failure" {
         return error.HandlerNotFound;
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    try testing.expectError(error.OutOfMemory, check(failing.allocator(), &resolved, handler_func));
+    try testing.expectError(error.OutOfMemory, check(failing.allocator(), &resolved, handler_func, .{}));
 }
 
 test "pipeline.check rejects a TypePool poisoned after resolve" {
@@ -712,7 +758,7 @@ test "pipeline.check rejects a TypePool poisoned after resolve" {
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     _ = storage.pool.makeReadonly(failing.allocator(), record);
 
-    try testing.expectError(error.OutOfMemory, check(allocator, &resolved, handler_func));
+    try testing.expectError(error.OutOfMemory, check(allocator, &resolved, handler_func, .{}));
 }
 
 test "pipeline.resolve runs BoolChecker on clean source" {
@@ -883,4 +929,65 @@ test "extractContract merges capabilities from relative imports" {
             .read_file = file_io.readFileForModuleGraph,
         }),
     );
+}
+
+test "an injected index is used by all four analyzers instead of private ones" {
+    // The half of C2's gate that cannot pass vacuously. C1 made injection
+    // behavior-neutral by construction - an analyzer with no index builds an
+    // identical private one - so identical output proves nothing about whether
+    // the work is shared. `owned_facts == null` proves it directly.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { jwtVerify } from "zttp:auth";
+        \\function handler(req) { return Response.json({ok: true}); }
+    ;
+
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var facts = try buildModuleFacts(allocator, parsed, null);
+    defer facts.deinit();
+    // The index must be non-trivial, or the assertions below would hold for an
+    // empty one and say nothing.
+    try std.testing.expect(facts.imports.items.len >= 2);
+
+    var resolved = try resolve(allocator, parsed, .{ .module_facts = &facts });
+    defer resolved.deinit();
+
+    try std.testing.expectEqual(&facts, resolved.bool_checker.facts.?);
+    try std.testing.expect(resolved.bool_checker.owned_facts == null);
+    try std.testing.expect(resolved.strict_checker != null);
+    try std.testing.expectEqual(&facts, resolved.strict_checker.?.facts.?);
+    try std.testing.expect(resolved.strict_checker.?.owned_facts == null);
+
+    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root).?;
+    var checked = try check(allocator, &resolved, handler_func, .{ .module_facts = &facts });
+    defer checked.deinit();
+
+    try std.testing.expectEqual(&facts, checked.verifier.facts.?);
+    try std.testing.expect(checked.verifier.owned_facts == null);
+    try std.testing.expectEqual(&facts, checked.flow_checker.facts.?);
+    try std.testing.expect(checked.flow_checker.owned_facts == null);
+}
+
+test "with no injected index each analyzer still builds its own" {
+    // The fallback C1 relies on and C3 still needs, since precompile has sites
+    // C3 has not reached. Asserted so a future change cannot quietly make
+    // injection mandatory.
+    const allocator = std.testing.allocator;
+    const source = "import { env } from \"zttp:env\";\n";
+
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var resolved = try resolve(allocator, parsed, .{});
+    defer resolved.deinit();
+
+    try std.testing.expect(resolved.bool_checker.facts == null);
+    try std.testing.expect(resolved.bool_checker.owned_facts != null);
 }
