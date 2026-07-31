@@ -241,6 +241,50 @@ done < <(listed_commands)
   fail "only $command_count commands parsed from the dispatch registries; the table format changed"
 
 # ---------------------------------------------------------------------------
+# Restriction matrix coverage.
+#
+# docs/restrictions-to-proofs.md renders packages/zts/src/restriction_registry.zig.
+# Nothing regenerated it, so it drifted by 14 rows in both directions: it listed
+# canonical-profile rules that were never restrictions, and missed every row
+# added after the version-1 freeze. Two counts and a per-row lookup catch that.
+# ---------------------------------------------------------------------------
+
+restrictions_doc="docs/restrictions-to-proofs.md"
+restrictions_registry="packages/zts/src/restriction_registry.zig"
+
+[[ -f "$restrictions_doc" ]] || fail "missing $restrictions_doc"
+[[ -f "$restrictions_registry" ]] || fail "missing $restrictions_registry"
+
+doc_table_rows() {
+  awk -v heading="$1" '
+    $0 == heading { in_section = 1; next }
+    /^## / && in_section { exit }
+    in_section && /^\| / && $0 !~ /^\| *Restriction *\|/ && $0 !~ /^\|---/ { count += 1 }
+    END { print count + 0 }
+  ' "$restrictions_doc"
+}
+
+registry_total=$(grep -c '\.id = "restriction\.' "$restrictions_registry")
+registry_v1=$(grep -c '\.v1_feature_name = ' "$restrictions_registry")
+
+[[ "$registry_total" -ge 20 ]] ||
+  fail "only $registry_total rows parsed from $restrictions_registry; the table format changed"
+
+doc_v1_rows=$(doc_table_rows '## Restrictions With A Named Proof')
+doc_rest_rows=$(doc_table_rows '## Further Refused Forms')
+
+[[ "$doc_v1_rows" == "$registry_v1" ]] ||
+  fail "$restrictions_doc lists $doc_v1_rows version-1 restrictions, registry has $registry_v1"
+
+[[ $((doc_v1_rows + doc_rest_rows)) == "$registry_total" ]] ||
+  fail "$restrictions_doc lists $((doc_v1_rows + doc_rest_rows)) restrictions, registry has $registry_total"
+
+while IFS= read -r feature; do
+  grep -qF -- "$feature" "$restrictions_doc" ||
+    fail "$restrictions_doc is missing the restriction '$feature'"
+done < <(sed -n 's/^ *\.v1_feature_name = "\(.*\)",$/\1/p' "$restrictions_registry")
+
+# ---------------------------------------------------------------------------
 # Prose bans.
 #
 # Each row is one accumulated one-off, as data rather than as another hand-

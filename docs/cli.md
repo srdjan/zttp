@@ -332,13 +332,14 @@ where the rewrite is provable, and otherwise left in place. Rows whose
 
 | Code | Rule | Canonical form |
 |---|---|---|
+| ZTS602 | Dynamic capability access | Use literal env keys, cache namespaces, SQL query names, egress URLs, route paths, and service names. |
 | ZTS604 | Avoidable `let` | Use `const` unless the binding is reassigned. |
-| ZTS605 | Dynamic computed property access | Use literal property names or explicit maps. |
-| ZTS608 | Reused arrow helper | Give reusable helpers named function declarations. |
+| ZTS605 | Dynamic computed property access | Use a typed field, a literal key, or narrow the object before indexing. |
+| ZTS608 | Reused arrow helper | Give reusable helpers named function declarations; keep arrows for callbacks. |
 | ZTS609 | Exported function-valued `const` | Export a function declaration. |
-| ZTS610 | Public helper effects | Declare helper proof/effect capsules when required. |
-| ZTS611 | Proof capsules | Keep proof-carrying helper annotations explicit. |
-| ZTS612 | Ternary expression | Use `if`/`else` or `match`. |
+| ZTS610 | Public helper effects | Annotate the helper return type with `Effects<T, "...">`. |
+| ZTS611 | Public helper proof capsule | Annotate the helper return type with `Proof<T, "...">`. |
+| ZTS612 | Effectful `?:` arm | A `?:` arm must be a pure value. Bind the effectful call first, or use `match`. |
 | ZTS613 | Compound assignment | Write the full assignment. |
 | ZTS614 | Non-leading object spread | Put spread first or write explicit fields. |
 | ZTS615 | Complex template interpolation | Bind the value first, then interpolate the binding. |
@@ -347,6 +348,10 @@ where the rewrite is provable, and otherwise left in place. Rows whose
 | ZTS618 | Nested destructuring | Destructure one level at a time. |
 | ZTS619 | Unused index alias in `for...of` | Iterate the array directly. |
 | ZTS620 | Boolean compared to boolean literal | Use the boolean expression or negation directly. |
+| ZTS621 | Chained conditional arms | Use `match` over one scrutinee, or an if/else chain. |
+
+A pure `?:` is canonical. Only an effectful arm (ZTS612) or a conditional
+nested inside another conditional (ZTS621) is diagnosed.
 
 ```bash
 zttp check --json examples/handler/handler.ts

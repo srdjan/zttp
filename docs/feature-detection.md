@@ -4,10 +4,11 @@ This document catalogs all unsupported JavaScript and TypeScript features detect
 
 ## Detection Architecture
 
-zttp uses a two-layer validation system:
+zttp validates in three layers:
 
 1. **TypeScript Stripper** (`packages/zts/src/stripper.zig`): Runs first for .ts/.tsx files, catches TypeScript-specific syntax that only exists in type positions
 2. **Parser** (`packages/zts/src/parser/parse.zig`): Runs for all files (after stripping for TS), catches unsupported JavaScript and TypeScript features
+3. **Strict checker** (`packages/zts/src/strict_checker.zig`): Runs after parsing on `zttp check` and `zttp verify-paths`, and enforces the [canonical profile](#canonical-profile-strict-checker)
 
 **Principle**: Each feature should be detected at exactly one layer to avoid duplicate error reporting and ensure consistent error messages regardless of file type.
 
@@ -218,11 +219,12 @@ Logical compound assignments require short-circuit semantics and are not support
 
 ## Canonical Profile (Strict Checker)
 
-A third layer of detection runs alongside the parser: the strict checker enforces the **canonical ZigTS profile** on every `zttp check` and `zttp verify-paths` run. These rules tighten the language further, removing redundant idioms that compete with an already-canonical form. The goal is one canonical spelling per operation.
+The strict checker enforces the **canonical ZigTS profile** on every `zttp check` and `zttp verify-paths` run. These rules tighten the language further, removing redundant idioms that compete with an already-canonical form. The goal is one canonical spelling per operation.
 
 | Code | Rule | Canonical replacement |
 |------|------|----------------------|
-| `ZTS612` | ternary `a ? b : c` | `if`/`else` block or `match` expression |
+| `ZTS612` | effectful arm in `a ? b : c` | bind the effectful call first, or use `match` over the condition |
+| `ZTS621` | conditional nested in a conditional arm | `match` over one scrutinee, or an if/else chain |
 | `ZTS613` | compound assignment (`+=`, `-=`, ...) | `x = x + e` |
 | `ZTS614` | non-leading object spread `{x: 1, ...base}` | leading spread: `{...base, x: 1}` |
 | `ZTS615` | complex template interpolation `${getX()}` | hoist into a `const` above the template |

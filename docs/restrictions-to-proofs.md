@@ -1,19 +1,27 @@
 # Restrictions to Proofs
 
-This document is generated from `packages/tools/src/json_diagnostics.zig`.
-It maps each zts language restriction to the failure class it eliminates
-and the proof it unlocks. Run `zts restrictions` for the live table.
+Generated from `packages/zts/src/restriction_registry.zig`, the machine-readable
+form of the spec's restriction matrix. Each row pairs a refused construct with
+the boundary the refusal protects. `zttp restrictions` prints the frozen
+version-1 rows; the version-2 `restrictions` operation returns all 34.
 
-Every entry is a deliberate cut from JavaScript or TypeScript that buys
-a specific soundness guarantee. The author-declared intent assertions
-(extracted with `-Dcontract`) and the contract diff (`zttp proofs show`)
-live above these cuts; the cuts themselves are what make those
-higher-level claims possible.
+Every entry is a deliberate cut from JavaScript or TypeScript. The rows that
+predate the version-1 freeze name the failure class the cut removes and the
+proof it buys. Later rows carry the boundary and the nature of the decision
+instead: `essential` when nothing known keeps both the proof and the construct,
+`replaced` when another construct does the job with the proof intact, and
+`canonical_simplicity`, `language_simplicity`, and `provisional` for choices
+that are not theorems.
 
-The proof card's `Trade` lens in `zttp dev` (press `Tab` to rotate)
-and the matching tab in Studio render a per-property view of this table
-against the current handler, so you can see exactly which restrictions
-earned each `[+]` chip.
+The author-declared intent assertions (extracted with `-Dcontract`) and the
+contract diff (`zttp proofs show`) sit above these cuts; the cuts are what make
+those higher-level claims possible.
+
+The proof card's `Trade` lens in `zttp dev` (press `Tab` to rotate) and the
+matching tab in Studio render a per-property view of this table against the
+current handler, so you can see which restrictions earned each `[+]` chip.
+
+## Restrictions With A Named Proof
 
 | Restriction | Failure class prevented | Proof unlocked | Alternative |
 |-------------|-------------------------|----------------|-------------|
@@ -37,56 +45,73 @@ earned each `[+]` chip.
 | `enum` | dual numeric/string lookup and non-exhaustive cases | exhaustive match coverage on discriminated unions | use object literals or discriminated unions |
 | `decorator (@)` | implicit metaprogramming and target rewriting | static call-graph and visible effect composition | use function composition |
 | `namespace` | module-graph blind spots | AST-driven contract extraction | use ES6 modules |
-| implicit unknown call result | untyped helper boundaries | typed call graph for expert repair | annotate local helpers or use modeled virtual modules |
-| missing named-function annotations | inferred public contracts | stable handler and helper signatures | add parameter and return types |
-| dynamic capability key | hidden env/cache/sql/egress authority | literal capability manifests | use string literals or const literal aliases |
-| avoidable `let` | needless mutable slots | simpler state-isolation proof | use `const` unless reassigned |
-| dynamic computed property access | shape-erasing indexed reads | shape-stable property access | use fields, literal keys, or const literal aliases |
-| ternary `a ? b : c` | duplicate branching idiom and inline-nesting drift | one canonical branching form per control-flow shape | use `if`/`else` or `match` |
-| compound assignment (`+=`, `-=`, ...) | hidden mutation in expression position | explicit write effects and diff-visible updates | write `x = x + e` |
-| non-leading object spread | precedence ambiguity around "which keys win" | unambiguous override semantics | put spread first: `{...base, x: 1}` |
-| complex template interpolation | inline expressions hide call/effect sites in strings | named intermediates and visible call sites | hoist into a `const` above the template |
-| call-site spread `f(...args)` | dynamic arity invisible to the contract extractor | static call-arity and stable helper contracts | pass positional args or widen the helper signature |
-| default parameter value | hidden default invisible at call sites and in contracts | diff-visible defaults in the function body | accept `T \| undefined` and resolve in the body |
-| nested destructuring | deep patterns inflate review cost and drift in agent output | one-level destructure with intermediate names | drill in with follow-up `const` bindings |
-| unused index alias in `for...of` | alias-tracking pass on a binding that is never read | iterator-scope confinement with one fewer binding to track | iterate over the array directly; drop `.entries()` and the destructure |
-| boolean compared to a boolean literal (`x === true`) | redundant spelling of the boolean test, with a non-boolean identity-comparison footgun | one canonical boolean-test shape; flow/narrowing passes skip literal-comparison nodes | use the boolean directly: `x` (or `!x` for `=== false`) |
+
+## Further Refused Forms
+
+These rows entered the matrix after the version-1 output froze, so they reach
+clients through the version-2 `restrictions` operation rather than through
+`zttp restrictions`.
+
+| Restriction | Boundary protected | Nature | Enforced by |
+|-------------|--------------------|--------|-------------|
+| eval, dynamic import, reflection, Proxy | closed program and semantics coverage | `essential` | `ZTS001`, `ZTS002` |
+| mutable live iteration | loop finiteness and stable cost | `replaced` | `ZTS622` |
+| unchecked recursive cycle | totality and bounded cost | `essential` | no diagnostic |
+| native module with unbound contract | effect and authority integrity | `essential` | no diagnostic |
+| `any`, type assertions (`as` and angle-bracket forms), `satisfies` | type evidence integrity | `essential` | `ZTS041`, `ZTS042`, `ZTS043` |
+| effectful `?:` | visible evaluation and one mutation spelling | `provisional` | `ZTS612` |
+| compound assignment | visible evaluation and one mutation spelling | `provisional` | `ZTS613` |
+| rest parameters | visible evaluation and one mutation spelling | `provisional` | `ZTS001` |
+| chained conditional arms | one form per branch shape | `canonical_simplicity` | `ZTS621` |
+| numeric record keys | one keyed-collection model | `canonical_simplicity` | `ZTS001` |
+| multiple record spreads | fixed-shape elaboration without field-presence tests | `canonical_simplicity` | `ZTS614` |
+| fallback `assert` | one explicit early-return spelling | `canonical_simplicity` | `ZTS002` |
+| interface | one closed data and module model | `language_simplicity` | no diagnostic |
+| object methods, getters, setters | explicit functions and effects | `language_simplicity` | `ZTS001` |
+
+## Rows No Diagnostic Rejects
+
+Three rows sit in the matrix with no rule code behind them. Each says why:
+
+- **unchecked recursive cycle** - not a rejection by design: recursion runs, and phase 0 downgrades the totality and cost claims instead (spec_discharge refuses the capsule, path_generator reports the coverage cause).
+- **native module with unbound contract** - enforced outside the rule registry, by module manifest authentication and `zts verify-modules`, which emit no registry rule code.
+- **interface** - still admitted: `interface` parses and type-checks today, and its removal is blocked on the migration policy the D workstream owes.
 
 ## Why
 
-Per-restriction rationale. Each line answers "why is this cut worth
-making?" in one sentence.
+Per-restriction rationale, one sentence each.
 
-- **`switch/case`** - fallthrough makes coverage ambiguous and lets cases share state through implicit fallthrough.
-- **`var`** - hoisting and function-scoping create temporal dead zones the verifier cannot reason about.
-- **`class`** - implicit mutable receivers hide data flow from the contract extractor.
-- **`while`** - unbounded back-edges defeat finite path enumeration.
-- **`do...while`** - unbounded back-edges defeat finite path enumeration.
-- **`for(;;)`** - C-style loops carry no bound; gen-tests cannot enumerate every iteration.
-- **`for...in`** - for...in walks the prototype chain; iteration order is implementation-defined.
-- **`try/catch`** - exceptions are an invisible second return channel that bypasses the type system.
-- **`throw`** - throw is the producer side of the hidden exception channel.
-- **`async/await`** - ambient scheduling produces interleavings the replay log cannot reproduce.
-- **`new`** - constructor dispatch combined with prototypes hides effects from the IR.
-- **`this`** - the binding of `this` is dynamic and unreadable from the IR.
-- **`null`** - two absent-value sentinels split optional narrowing into two incompatible lattices.
-- **`== / !=`** - loose equality coerces operands, creating control-flow paths the type checker cannot see.
-- **`++ / --`** - in-place mutation hides write effects in expression positions.
-- **`regex`** - regex literals describe an opaque accept set the validator cannot reason about.
-- **`delete`** - delete mutates hidden-class shape, defeating shape-stable property access.
-- **`enum`** - TS enums emit dual numeric/string lookups that bypass exhaustive match checking.
-- **`decorator (@)`** - decorators rewrite their target at runtime in ways the contract extractor cannot trace.
-- **`namespace`** - TS namespaces compile to closures with mutable internals invisible to the module graph.
-- **implicit unknown call result** - unknown return types hide control-flow and data-flow facts from the checker.
-- **missing named-function annotations** - public helper boundaries need stable signatures for repeatable repair.
-- **dynamic capability key** - non-literal authority cannot be represented in a precise deployment contract.
-- **avoidable `let`** - unnecessary mutable slots widen the state the verifier must track.
-- **dynamic computed property access** - arbitrary indexes erase object shape and defeat field-level narrowing.
-- **ternary `a ? b : c`** - duplicate branching idiom that competes with `if`/`else` and `match`; nested ternaries are a primary source of agent style drift.
-- **compound assignment (`+=`, `-=`, ...)** - in-place arithmetic update hides write effects in expression position, the same footgun the `++`/`--` ban already addressed.
-- **non-leading object spread** - mixed spread-and-literal order makes the "which keys win" reading ambiguous; the leading-spread form has only one valid reading.
-- **complex template interpolation** - function calls and arithmetic inside `${...}` hide call sites in strings; named intermediates surface them.
-- **call-site spread `f(...args)`** - dynamic arity defeats the contract extractor's ability to pin a helper's parameter shape.
-- **default parameter value** - signature-site defaults are invisible to the contract extractor and to callers reading the diff.
-- **nested destructuring** - patterns nested inside another binding pattern inflate review cost without buying any proof.
-- **unused index alias in `for...of`** - an index binding the loop body never reads still forces the analyzer to track it before proving it dead; dropping `.entries()` lets iterator-scope confinement land directly.
+- **switch/case** - fallthrough makes coverage ambiguous and lets cases share state through implicit fallthrough.
+- **var** - hoisting and function-scoping create temporal dead zones the verifier cannot reason about.
+- **class** - implicit mutable receivers hide data flow from the contract extractor.
+- **while** - unbounded back-edges defeat finite path enumeration.
+- **do...while** - unbounded back-edges defeat finite path enumeration.
+- **for(;;)** - C-style loops carry no bound; gen-tests cannot enumerate every iteration.
+- **for...in** - for...in walks the prototype chain; iteration order is implementation-defined.
+- **try/catch** - exceptions are an invisible second return channel that bypasses the type system.
+- **throw** - throw is the producer side of the hidden exception channel.
+- **async/await** - ambient scheduling produces interleavings the replay log cannot reproduce.
+- **new** - constructor dispatch combined with prototypes hides effects from the IR.
+- **this** - the binding of `this` is dynamic and unreadable from the IR.
+- **null** - two absent-value sentinels split optional narrowing into two incompatible lattices.
+- **loose equality and implicit coercion** - loose equality coerces operands, creating control-flow paths the type checker cannot see.
+- **++ / --** - in-place mutation hides write effects in expression positions.
+- **regex literal or ambient RegExp** - regex literals describe an opaque accept set the validator cannot reason about.
+- **delete** - delete mutates hidden-class shape, defeating shape-stable property access.
+- **enum** - TS enums emit dual numeric/string lookups that bypass exhaustive match checking.
+- **decorator** - decorators rewrite their target at runtime in ways the contract extractor cannot trace.
+- **namespace** - TS namespaces compile to closures with mutable internals invisible to the module graph.
+- **eval, dynamic import, reflection, Proxy** - essential until a closed dynamic-code model exists
+- **mutable live iteration** - replaced by snapshot iteration
+- **unchecked recursive cycle** - recursion runs, but these claims require evidence
+- **native module with unbound contract** - essential
+- **`any`, type assertions (`as` and angle-bracket forms), `satisfies`** - essential to the selected checker model
+- **effectful `?:`** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
+- **compound assignment** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
+- **rest parameters** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
+- **chained conditional arms** - exact repair when constructible, else proposed refactor
+- **numeric record keys** - canonical simplicity; use a string key or a number-keyed `Dict`
+- **multiple record spreads** - canonical simplicity; write explicit fields over one base
+- **fallback `assert`** - use `if` plus `return`
+- **interface** - language-simplicity choice
+- **object methods, getters, setters** - language-simplicity choice
