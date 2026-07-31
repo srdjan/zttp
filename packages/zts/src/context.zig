@@ -20,7 +20,6 @@ const modules = @import("modules/root.zig");
 
 pub const cost_meter = @import("cost_meter.zig");
 
-/// Enhanced JIT metrics for monitoring and tuning compilation behavior
 /// Context configuration
 pub const ContextConfig = struct {
     stack_size: usize = 1024 * 1024, // 1MB value stack
@@ -30,7 +29,6 @@ pub const ContextConfig = struct {
     use_http_string_cache: bool = true, // Cache common HTTP strings
 };
 
-/// Cached strings for small integers (0-999) to avoid repeated allocations
 /// Re-exports: the HTTP/JSX caches live in http_cache.zig, which the runtime
 /// and http.zig import directly. `Context.http` holds the one instance.
 pub const HttpRequestShape = http_cache_mod.HttpRequestShape;
@@ -181,10 +179,6 @@ pub const Context = struct {
     json_writer: std.Io.Writer.Allocating,
     /// Reusable buffer for JSX renderToString to reduce allocations
     render_writer: std.Io.Writer.Allocating,
-    /// JIT compilation metrics (compiled out in ReleaseFast)
-    /// Interpreter pointer for JIT IC fast path access
-    /// Set before JIT code execution, null otherwise
-    /// Allows JIT-compiled code to access the interpreter's PIC cache directly
     /// Builtin objects registered during initialization (Math, JSON, etc.)
     /// Tracked for proper cleanup in deinit
     builtin_objects: std.ArrayList(*object.JSObject),
