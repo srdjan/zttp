@@ -1,8 +1,8 @@
 # Documentation
 
 These docs describe the current codebase. Release history lives in
-`CHANGELOG.md`; plans and release snapshots stay out of the maintained docs
-path.
+`CHANGELOG.md`, and [Roadmap](roadmap.md) is the only forward-looking document
+here. Finished plans live under [archive](archive/README.md).
 
 ## Start Here
 
@@ -15,8 +15,9 @@ path.
   module list, exports, capabilities, effects, and runtime requirements.
 - [Durable Workflows](durable-workflows.md) - durable run/step/signal,
   workflow queue, dead-letter handling, proof receipts, and replay boundaries.
-- [Roadmap](roadmap.md) - one forward-looking document for supported platforms,
-  current limitations, and planned work.
+- [Roadmap](roadmap.md) - supported platforms, current limitations, planned
+  runtime work, the `zts-advanced-1` language program, and what remains of the
+  reset.
 
 ## Reference
 

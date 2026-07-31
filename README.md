@@ -42,7 +42,7 @@ Or build from source with Zig `0.16.0`:
 
 ```bash
 git clone https://github.com/srdjan/zigttp.git
-cd zttp
+cd zigttp
 zig build -Doptimize=ReleaseFast
 ```
 

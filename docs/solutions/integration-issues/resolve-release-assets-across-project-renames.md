@@ -33,7 +33,7 @@ tags:
 The default installer selected release v0.18.0 but assumed every selected tag
 used the current `zttp-<version>-<os>-<arch>.tar.gz` asset convention. Releases
 through v0.18.0 use the historical `zigttp` archive and executable names
-instead, as the current unreleased note records (`docs/releases/unreleased.md:18`).
+instead, as the unreleased breaking-change note records (`CHANGELOG.md`, `[Unreleased]`).
 The resulting download URL did not exist, so an end user running `./install.sh`
 received HTTP 404 before checksum or archive validation could begin.
 
@@ -70,8 +70,8 @@ companion exists.
 A prior repository-wide mechanical rename affected both the installer and
 archived release prose (session history). A historical release record describes
 what that release shipped, not the repository's current vocabulary. The rename
-belongs in current release documentation, where the old and new interfaces can
-be stated together (`docs/releases/unreleased.md:18`).
+belongs in the unreleased notes, where the old and new interfaces can be
+stated together (`CHANGELOG.md`, `[Unreleased]`).
 
 ## Solution
 
@@ -116,8 +116,7 @@ destination names, and a second run that exits as already installed without
 network access (`scripts/test-install-archive-safety.sh:140`).
 
 The historical changelog keeps the identifiers shipped by released versions.
-The rename boundary is documented under the current unreleased release notes
-(`docs/releases/unreleased.md:18`).
+The rename boundary is documented under `[Unreleased]` in `CHANGELOG.md`.
 
 ## Why This Works
 

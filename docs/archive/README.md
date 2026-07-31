@@ -25,9 +25,16 @@ and `v0.1-v0.2-gap-analysis.md`, which was the only file under
 
 Still live, and deliberately not archived:
 
-- `docs/plans/2026-07-28-001-reset-simplification-plan.md`, because waves 4 and
-  5 are unfinished. It archives itself once the plan is executed.
-- The `zts-advanced-1` revision 4 program: the master plan, the phase 0 plan,
-  and the three companion design documents.
+- `docs/plans/2026-07-28-001-reset-simplification-plan.md`, because three items
+  across waves 4 and 5 are unfinished. It archives itself once they close;
+  `docs/roadmap.md` names what is left.
+- The three `zts-advanced-1` companion design documents, D1 to D3. They are
+  reference specifications that later phases consume, not plans to execute.
+  Their master plan and the executed phase 0 and phase 1 plans are here in
+  `plans/`; `docs/roadmap.md` carries the remaining phase map.
 - `docs/solutions/`, which agents are pointed at and which is not planning
   residue.
+
+`docs/roadmap.md` is the only forward-looking document in the maintained docs.
+When a plan here contradicts it, the roadmap is current and the plan is
+history.

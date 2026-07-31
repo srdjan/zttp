@@ -1,10 +1,26 @@
 # Changelog
 
-Changes to zigttp. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). SemVer kicks in at 1.0; until then, minor bumps may include breaking changes (called out in the release notes).
+Changes to zttp. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). SemVer kicks in at 1.0; until then, minor bumps may include breaking changes (called out in the release notes).
+
+Entries for released versions keep the identifiers that version shipped. A
+release record describes what it shipped, not the repository's current
+vocabulary, so the pre-rename names below stay as written.
 
 For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHECKLIST.md).
 
 ## [Unreleased]
+
+### Breaking changes
+
+- **Project rename:** current builds use the `zttp`, `zttp-runtime`, and `zts`
+  executables; `zttp:*` virtual modules; `ZTTP_*` environment and installer
+  variables; the `Zttp-Attest` header; the `~/.zttp` install directory; and
+  `zttp-...` release archives. Releases through v0.18.0 retain the historical
+  `zigttp`, `zigttp-runtime`, `zigts`, `zigttp:*`, `ZIGTTP_*`,
+  `Zigttp-Attest`, `~/.zigttp`, and `zigttp-...` names. The current installer
+  recognizes those archives and exposes their executables under the current
+  command names; their runtime interfaces and reported identities remain
+  historical.
 
 ## [0.18.0] - 2026-07-16
 
