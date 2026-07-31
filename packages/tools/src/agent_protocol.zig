@@ -131,12 +131,13 @@ pub fn specFor(op: Operation) *const OperationSpec {
 // Request and response plumbing
 // ---------------------------------------------------------------------------
 
+/// A protocol-level failure. Not a diagnostic: it names a request field, never
+/// a source span. Any allocated `message` or `field` lives in the per-request
+/// arena, which outlives the write.
 const ProtocolError = struct {
     code: ErrorCode,
     message: []const u8,
     field: ?[]const u8,
-    /// Set when `message` is heap-allocated for this response.
-    owned_message: bool = false,
 };
 
 const Identity = struct {
@@ -161,6 +162,11 @@ pub fn handleRequest(
     writer: *std.Io.Writer,
 ) !void {
     var json: std.json.Stringify = .{ .writer = writer };
+
+    // Transient strings for staleness messages, freed once the response is
+    // written. Nothing in the response borrows request memory past this scope.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, request_json, .{}) catch {
         return writeErrorEnvelope(&json, null, contextFreeIdentity(), .{
@@ -256,6 +262,13 @@ pub fn handleRequest(
     // empty.
     const identity = contextFreeIdentity();
 
+    // Spec 4.8: one guard rule for every operation, run before any work. When
+    // `apply_repair` lands in phase 6, this ordering is what makes a stale
+    // request write nothing.
+    if (try checkExpected(arena.allocator(), root.get("expected"), identity)) |stale| {
+        return writeErrorEnvelope(&json, op_name, identity, stale);
+    }
+
     var payload: std.Io.Writer.Allocating = .init(allocator);
     defer payload.deinit();
     var payload_json: std.json.Stringify = .{ .writer = &payload.writer };
@@ -266,6 +279,70 @@ pub fn handleRequest(
     };
 
     try writeEnvelope(&json, op_name, identity, success, payload.writer.buffered(), "[]", null);
+}
+
+/// Spec 4.8: a supplied `expected` field that does not match the recomputed
+/// identity fails the request, naming the mismatched field and both values.
+/// An absent block skips the guard entirely.
+///
+/// An unrecognized key inside `expected` is malformed rather than ignored:
+/// silently skipping a misspelled guard field would report success for a
+/// request the client believed was guarded, which is the exact failure the
+/// guard exists to prevent.
+fn checkExpected(
+    arena: std.mem.Allocator,
+    expected: ?std.json.Value,
+    identity: Identity,
+) !?ProtocolError {
+    const obj = switch (expected orelse return null) {
+        .object => |o| o,
+        else => return ProtocolError{
+            .code = .malformed_request,
+            .message = "expected must be an object",
+            .field = "expected",
+        },
+    };
+
+    // ObjectMap preserves insertion order, so two mismatched fields report the
+    // first in request order - deterministic for a given request.
+    var it = obj.iterator();
+    while (it.next()) |kv| {
+        const key = kv.key_ptr.*;
+        const actual: []const u8 = if (std.mem.eql(u8, key, "profile_id"))
+            agent_identity.profile_id
+        else if (std.mem.eql(u8, key, "policy_hash"))
+            &identity.policy_hash
+        else if (std.mem.eql(u8, key, "module_graph_hash"))
+            &identity.module_graph_hash
+        else
+            return ProtocolError{
+                .code = .malformed_request,
+                .message = "expected carries a field this protocol does not bind",
+                .field = try std.fmt.allocPrint(arena, "expected.{s}", .{key}),
+            };
+
+        if (kv.value_ptr.* != .string) {
+            return ProtocolError{
+                .code = .malformed_request,
+                .message = "expected fields must be strings",
+                .field = try std.fmt.allocPrint(arena, "expected.{s}", .{key}),
+            };
+        }
+
+        const supplied = kv.value_ptr.string;
+        if (!std.mem.eql(u8, supplied, actual)) {
+            return ProtocolError{
+                .code = .identity_mismatch,
+                .message = try std.fmt.allocPrint(
+                    arena,
+                    "expected.{s} is stale: request said {s}, this compiler reports {s}",
+                    .{ key, supplied, actual },
+                ),
+                .field = try std.fmt.allocPrint(arena, "expected.{s}", .{key}),
+            };
+        }
+    }
+    return null;
 }
 
 /// Frozen across all present and future schema versions (spec 4.8). Three keys,
@@ -688,6 +765,137 @@ test "an error response still carries the identity block" {
     const obj = parsed.value.object;
     try testing.expectEqualStrings(&rule_registry.policyHash(), obj.get("policy_hash").?.string);
     try testing.expectEqualStrings("zts-advanced-1", obj.get("profile_id").?.string);
+}
+
+test "a matching expected block passes the guard" {
+    const a = testing.allocator;
+    const policy = rule_registry.policyHash();
+    const graph = module_graph_record.contextFreeHash();
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"meta","project_root":".","input":{{}},
+        \\ "expected":{{"profile_id":"zts-advanced-1","policy_hash":"{s}","module_graph_hash":"{s}"}}}}
+    , .{ policy, graph });
+    defer a.free(req);
+
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("success").?.bool);
+    try testing.expect(parsed.value.object.get("error") == null);
+}
+
+test "a stale policy_hash fails with both values named" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{},
+        \\ "expected":{"policy_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    try testing.expect(!obj.get("success").?.bool);
+    const err = obj.get("error").?.object;
+    try testing.expectEqualStrings("identity_mismatch", err.get("code").?.string);
+    try testing.expectEqualStrings("expected.policy_hash", err.get("field").?.string);
+    // Both values, so a client re-binds without a second round trip.
+    const message = err.get("message").?.string;
+    try testing.expect(std.mem.indexOf(u8, message, "0000000000") != null);
+    try testing.expect(std.mem.indexOf(u8, message, &rule_registry.policyHash()) != null);
+}
+
+test "a stale profile_id fails the same way" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{},
+        \\ "expected":{"profile_id":"zts-1"}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("identity_mismatch", err.get("code").?.string);
+    try testing.expectEqualStrings("expected.profile_id", err.get("field").?.string);
+}
+
+test "a stale module_graph_hash fails the same way" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{},
+        \\ "expected":{"module_graph_hash":"deadbeef"}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("identity_mismatch", err.get("code").?.string);
+    try testing.expectEqualStrings("expected.module_graph_hash", err.get("field").?.string);
+}
+
+test "an omitted or empty expected block skips the guard" {
+    const a = testing.allocator;
+    for ([_][]const u8{
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{}}
+        ,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{},"expected":{}}
+        ,
+    }) |body| {
+        const out = try respond(a, body);
+        defer a.free(out);
+        var parsed = try parse(a, out);
+        defer parsed.deinit();
+        try testing.expect(parsed.value.object.get("success").?.bool);
+    }
+}
+
+test "an unknown key inside expected is malformed, not ignored" {
+    // Silently skipping a misspelled guard field would report success for a
+    // request the client believed was guarded.
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{},
+        \\ "expected":{"policy_hashh":"x"}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("malformed_request", err.get("code").?.string);
+    try testing.expectEqualStrings("expected.policy_hashh", err.get("field").?.string);
+}
+
+test "a non-string expected value is malformed" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{},
+        \\ "expected":{"policy_hash":2}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("malformed_request", err.get("code").?.string);
+    try testing.expectEqualStrings("expected.policy_hash", err.get("field").?.string);
+}
+
+test "the guard runs before the operation does any work" {
+    // A deferred operation reports operation_not_implemented before the guard,
+    // and an implemented one reports staleness before dispatching - so a stale
+    // request never reaches the code that would act on it.
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"apply_repair","project_root":".","input":{},
+        \\ "expected":{"policy_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expectEqualStrings(
+        "operation_not_implemented",
+        parsed.value.object.get("error").?.object.get("code").?.string,
+    );
 }
 
 test "identical requests produce byte-identical responses" {
