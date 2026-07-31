@@ -268,8 +268,6 @@ When the compiler can prove both operands of a binary operation are numbers (or 
 | `gte` | `gte_num` | skips general comparison path |
 | `add` (string) | `concat_2` | direct string concatenation |
 
-Specialized opcodes also skip type feedback recording (the JIT does not need profiling data for statically-proven types). The JIT baseline compiler maps specialized opcodes directly to their optimized machine code paths.
-
 Type-directed codegen is active only in precompiled handlers (`-Dhandler=...`). Dev mode (`zig build run`) uses generic opcodes because the BoolChecker's type annotations are not wired to the dev-mode CodeGen path.
 
 ## Runtime Enforcement
@@ -281,4 +279,4 @@ The VM applies TDT at four opcode sites:
 
 If an object or function reaches these opcodes at runtime, an exception is set: `condition rejected: <type> has no falsy state`.
 
-The boolean fast path remains first in the check sequence. The JIT includes an additional integer fast path for conditionals and NOT, avoiding deoptimization for the two most common types (boolean and integer).
+`toConditionBool()` checks boolean first and integer second, the two most common condition types, before it reaches floats, nullish values, and strings.

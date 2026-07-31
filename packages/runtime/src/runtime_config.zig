@@ -1,5 +1,5 @@
 //! Runtime configuration knobs plus the small helpers that translate
-//! `RuntimeConfig` into GC/heap/JIT/capability-policy mutations and open
+//! `RuntimeConfig` into GC/heap/capability-policy mutations and open
 //! the trace / durable-oplog file descriptors.
 
 const std = @import("std");
@@ -37,8 +37,6 @@ pub const RuntimeConfig = struct {
     use_hybrid_allocation: bool = true,
     arena_size: usize = 1024 * 1024,
     enforce_arena_escape: bool = true,
-    /// Soft cap for native JIT code bytes per runtime context. 0 disables
-    /// native-code eviction.
     outbound_http_enabled: bool = false,
     outbound_allow_host: ?[]const u8 = null,
     outbound_max_response_bytes: usize = 1024 * 1024,

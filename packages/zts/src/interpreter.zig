@@ -62,10 +62,11 @@ pub const Interpreter = struct {
     /// Set to 4 for .push_const_call (opcode + u16 + argc) and .get_field_call.
     call_opcode_offset: usize = 2,
 
-    // JIT profiling counters (Phase 11)
-    backedge_count: u32 = 0, // Back-edge counter for hot loop detection
-    pic_hits: u32 = 0, // PIC cache hits (type feedback)
-    pic_misses: u32 = 0, // PIC cache misses (type feedback)
+    // Perf counters, read by `zig build bench`. These profiled the JIT before it
+    // was removed; `backedge_count` now also amortizes the deadline check.
+    backedge_count: u32 = 0, // Back-edge counter
+    pic_hits: u32 = 0, // PIC cache hits
+    pic_misses: u32 = 0, // PIC cache misses
     mega_recoveries: u32 = 0, // PIC sites that recovered from megamorphic to monomorphic
     opcode_histogram: [256]u32 = [_]u32{0} ** 256,
     last_op: bytecode.Opcode = .nop,
@@ -395,7 +396,6 @@ pub const Interpreter = struct {
                 const sp = self.ctx.sp;
                 const b = self.ctx.stack[sp - 1];
                 const a = self.ctx.stack[sp - 2];
-                // Record type feedback for JIT optimization
                 // Inline integer fast path
                 if (a.isInt() and b.isInt()) {
                     @branchHint(.likely);

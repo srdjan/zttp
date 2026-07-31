@@ -78,7 +78,7 @@ Possible soundness incident: the handler faulted on a path proven optional_safe/
 
 An unmapped fault returns the plain `Internal Server Error` body. The trailing
 `line:column` is appended only when the interpreter resolved a source location;
-JIT-tier faults and JS-thrown exceptions often carry none.
+JS-thrown exceptions often carry none.
 
 `--incident-log <file>` is an opt-in JSONL sink for confirmed soundness
 incidents. Each is appended as one line through a shared `O_APPEND` fd:
