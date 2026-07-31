@@ -17,6 +17,7 @@ const module_graph_record = @import("module_graph_record.zig");
 const expert_meta = @import("expert_meta.zig");
 const edit_simulate = @import("edit_simulate.zig");
 const json_diagnostics = @import("json_diagnostics.zig");
+const precompile = @import("precompile.zig");
 
 const rule_registry = zts.rule_registry;
 const restriction_registry = zts.restriction_registry;
@@ -85,9 +86,9 @@ pub const operations = [_]OperationSpec{
     .{ .op = .modules, .status = .implemented, .input_fields = &.{"file"}, .payload_fields = &.{
         "graph", "builtins", "extensions", "rejected", "module_graph_hash",
     } },
-    .{ .op = .check, .status = .deferred, .input_fields = &.{"file"}, .payload_fields = &.{
+    .{ .op = .check, .status = .implemented, .input_fields = &.{"file"}, .payload_fields = &.{
         "file", "source_digest", "counts", "properties", "paths", "contract_available",
-    }, .deferred_note = "phase 1 task 9" },
+    } },
     .{ .op = .canonicalize, .status = .deferred, .input_fields = &.{ "file", "simulate" }, .payload_fields = &.{
         "file", "source_digest", "candidates", "simulation",
     }, .deferred_note = "phase 1 task 10" },
@@ -119,6 +120,8 @@ pub const deferred_sections = [_]DeferredSection{
     .{ .name = "type_serialization", .note = "phase 2: the canonical type serialization is D1's artifact" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "verifiers", .note = "phase 6: property discovery arrives with the verify operation" },
+    .{ .name = "diagnostic_span", .note = "phase 6: JsonDiagnostic carries line and column and no byte range, so a diagnostic publishes an exact byte_offset and no half-open span. Threading offsets through every producer lands with the repair vocabulary" },
+    .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
     .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
     .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
     .{ .name = "repair_budget", .note = "phase 6: the repair-iteration and tool-call budget is a loop policy no code implements" },
@@ -277,6 +280,8 @@ pub fn handleRequest(
     // compare for every operation and the envelope field is never empty.
     var graph: ?module_graph_record.GraphRecord = null;
     defer if (graph) |*g| g.deinit(allocator);
+    var file_rel: ?[]const u8 = null;
+    defer if (file_rel) |r| allocator.free(r);
 
     if (takesFile(spec)) {
         const file_value = switch (input) {
@@ -294,6 +299,7 @@ pub fn handleRequest(
                 .field = "input.file",
             });
         }
+        file_rel = agent_identity.canonicalRelPath(allocator, io, canonical_root, file_value.string) catch null;
         graph = module_graph_record.build(allocator, io, canonical_root, file_value.string) catch |err| {
             return writeErrorEnvelope(&json, op_name, contextFreeIdentity(), switch (err) {
                 error.PathOutsideProjectRoot => .{
@@ -337,16 +343,33 @@ pub fn handleRequest(
     defer payload.deinit();
     var payload_json: std.json.Stringify = .{ .writer = &payload.writer };
 
+    // Operations that produce source-bound diagnostics write them here; the
+    // rest leave the array empty.
+    var diagnostics: std.Io.Writer.Allocating = .init(allocator);
+    defer diagnostics.deinit();
+
     const success = switch (op) {
         .meta => try writeMetaPayload(&payload_json),
         .features => try writeFeaturesPayload(&payload_json),
         .restrictions => try writeRestrictionsPayload(&payload_json),
         .describe_rule => try writeDescribeRulePayload(&payload_json, input),
         .modules => try writeModulesPayload(&payload_json, &graph.?),
+        .check => try runCheck(
+            allocator,
+            io,
+            &payload_json,
+            &diagnostics,
+            canonical_root,
+            file_rel.?,
+        ),
         else => unreachable, // every other row is `.deferred` and returned above
     };
 
-    try writeEnvelope(&json, op_name, identity, success, payload.writer.buffered(), "[]", null);
+    const diagnostics_json = if (diagnostics.writer.buffered().len > 0)
+        diagnostics.writer.buffered()
+    else
+        "[]";
+    try writeEnvelope(&json, op_name, identity, success, payload.writer.buffered(), diagnostics_json, null);
 }
 
 /// Spec 4.8: a supplied `expected` field that does not match the recomputed
@@ -775,6 +798,201 @@ fn writeModulesPayload(
 
     try json.endObject();
     return graph.rejected.len == 0;
+}
+
+// ---------------------------------------------------------------------------
+// check
+// ---------------------------------------------------------------------------
+
+/// Run the analyzer once and write both the payload and the diagnostics array.
+///
+/// `success` is exactly "produced no error diagnostic" (spec 4.8): warnings and
+/// advisories never fail a check.
+fn runCheck(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    json: *std.json.Stringify,
+    diagnostics: *std.Io.Writer.Allocating,
+    canonical_root: []const u8,
+    file_rel: []const u8,
+) !bool {
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
+    defer allocator.free(abs);
+
+    // The same bytes the digest covers, so a byte offset published beside a
+    // digest indexes into what that digest names.
+    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
+    defer allocator.free(source);
+    const digest = agent_identity.sourceDigest(source);
+
+    var diag_json: std.json.Stringify = .{ .writer = &diagnostics.writer };
+
+    var result = precompile.runCheckOnlyWithOptions(allocator, abs, .{
+        .json_mode = true,
+        .sql_schema_path = null,
+        .system_path = null,
+    }) catch |err| switch (err) {
+        // The v1 path reports this as a ZTS700 diagnostic rather than a crash;
+        // the v2 wire keeps it a diagnostic too, so the two surfaces agree on
+        // what a missing schema is.
+        error.MissingSqlSchema => {
+            try diag_json.beginArray();
+            try writeDiagnostic(&diag_json, allocator, io, canonical_root, .{
+                .code = "ZTS700",
+                .severity = "error",
+                .message = "zttp:sql queries require a SQL schema, which this operation cannot supply",
+                .file = file_rel,
+                .line = 1,
+                .column = 1,
+                .suggestion = "configure sqlite in zttp.json, or check this handler through `zts check --sql-schema`",
+            }, digest, source);
+            try diag_json.endArray();
+            try writeCheckPayload(json, null, file_rel, digest, 1, 0);
+            return false;
+        },
+        else => return err,
+    };
+    defer result.deinit(allocator);
+
+    try diag_json.beginArray();
+    for (result.json_diagnostics.items) |diag| {
+        try writeDiagnostic(&diag_json, allocator, io, canonical_root, diag, digest, source);
+    }
+    try diag_json.endArray();
+
+    try writeCheckPayload(json, &result, file_rel, digest, result.totalErrors(), result.totalWarnings());
+    return result.totalErrors() == 0;
+}
+
+fn writeCheckPayload(
+    json: *std.json.Stringify,
+    result: ?*const precompile.CheckResult,
+    file_rel: []const u8,
+    digest: [64]u8,
+    errors: u32,
+    warnings: u32,
+) !void {
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("source_digest");
+    try json.write(&digest);
+
+    try json.objectField("counts");
+    try json.beginObject();
+    try json.objectField("errors");
+    try json.write(errors);
+    try json.objectField("warnings");
+    try json.write(warnings);
+    try json.endObject();
+
+    try json.objectField("properties");
+    if (result) |r| {
+        if (r.properties) |props| {
+            // Generated from the struct, so a property added to the contract
+            // reaches the wire without an edit here and cannot be silently
+            // dropped.
+            try json.beginObject();
+            inline for (@typeInfo(zts.handler_contract.HandlerProperties).@"struct".fields) |field| {
+                try json.objectField(field.name);
+                switch (field.type) {
+                    bool => try json.write(@field(props, field.name)),
+                    ?u32 => if (@field(props, field.name)) |v| try json.write(v) else try json.write(null),
+                    else => @compileError("unhandled HandlerProperties field type: " ++ @typeName(field.type)),
+                }
+            }
+            try json.endObject();
+        } else try json.write(null);
+    } else try json.write(null);
+
+    try json.objectField("paths");
+    if (result) |r| {
+        try json.beginObject();
+        try json.objectField("enumerated");
+        try json.write(r.paths_enumerated);
+        try json.objectField("exhaustive");
+        try json.write(r.paths_exhaustive);
+        // Phase 0 replaced a bare bool with a cause; the wire carries the cause.
+        try json.objectField("coverage_note");
+        try json.write(r.paths_coverage_note);
+        try json.endObject();
+    } else try json.write(null);
+
+    try json.objectField("contract_available");
+    try json.write(if (result) |r| r.contract != null else false);
+
+    try json.endObject();
+}
+
+/// One source-bound diagnostic.
+///
+/// Two deliberate absences, both published in `meta.deferred_sections`:
+/// no `span`, because no producer computes a half-open byte range and inventing
+/// an end would be a lie of precision; and `repair_available` is uniformly
+/// false, because spec 4.8 permits advertising an exact repair only when a
+/// registered equivalence validator exists, and that registry is phase 6.
+fn writeDiagnostic(
+    json: *std.json.Stringify,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    canonical_root: []const u8,
+    diag: json_diagnostics.JsonDiagnostic,
+    digest: [64]u8,
+    source: []const u8,
+) !void {
+    try json.beginObject();
+    try json.objectField("code");
+    try json.write(diag.code);
+    try json.objectField("rule_id");
+    if (rule_registry.findByCode(diag.code)) |rule| {
+        try json.write(rule.name);
+    } else {
+        // The ZTS0xx parser band and the ZTS2xx type-checker band are real
+        // codes outside the policy-hashed registry, so they have no rule name.
+        try json.write(null);
+    }
+    try json.objectField("severity");
+    try json.write(diag.severity);
+    try json.objectField("message");
+    try json.write(diag.message);
+    try json.objectField("file");
+    // Project-relative on the wire. The checker reports the absolute path it
+    // was handed, and spec 4.8 resolves every request path inside the project
+    // root, so publishing the absolute form would both leak the host layout and
+    // hand back a path the client cannot use in a follow-up request. A path
+    // that will not relativize is outside the root and is published as-is
+    // rather than hidden.
+    if (agent_identity.canonicalRelPath(allocator, io, canonical_root, diag.file)) |rel| {
+        defer allocator.free(rel);
+        try json.write(rel);
+    } else |_| {
+        try json.write(diag.file);
+    }
+    try json.objectField("source_digest");
+    try json.write(&digest);
+    try json.objectField("line");
+    try json.write(diag.line);
+    try json.objectField("column");
+    try json.write(diag.column);
+    try json.objectField("byte_offset");
+    try json.write(byteOffsetOf(source, diag.line, diag.column));
+    try json.objectField("suggestion");
+    if (diag.suggestion) |sug| try json.write(sug) else try json.write(null);
+    try json.objectField("repair_available");
+    try json.write(false);
+    try json.endObject();
+}
+
+/// Byte offset of a 1-based line and column. Exact for the reported position;
+/// the end of the range is not published because no producer computes one.
+fn byteOffsetOf(source: []const u8, line: u32, column: u32) usize {
+    var current_line: u32 = 1;
+    var idx: usize = 0;
+    while (idx < source.len and current_line < line) : (idx += 1) {
+        if (source[idx] == '\n') current_line += 1;
+    }
+    const offset = idx + @as(usize, if (column > 0) column - 1 else 0);
+    return @min(offset, source.len);
 }
 
 // ---------------------------------------------------------------------------
@@ -1504,6 +1722,183 @@ test "a stale module_graph_hash is caught against the real graph" {
     const err = parsed.value.object.get("error").?.object;
     try testing.expectEqualStrings("identity_mismatch", err.get("code").?.string);
     try testing.expectEqualStrings("expected.module_graph_hash", err.get("field").?.string);
+}
+
+test "check on a clean handler succeeds with no diagnostics" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\type Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\
+        \\export function handler(req: Request): Response & Guardrails {
+        \\    return Response.json({ ok: true });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expect(obj.get("success").?.bool);
+    try testing.expectEqual(@as(usize, 0), obj.get("diagnostics").?.array.items.len);
+
+    const payload = obj.get("payload").?.object;
+    try testing.expectEqualStrings("h.ts", payload.get("file").?.string);
+    try testing.expectEqual(@as(usize, 64), payload.get("source_digest").?.string.len);
+    try testing.expectEqual(@as(i64, 0), payload.get("counts").?.object.get("errors").?.integer);
+}
+
+test "check on a rejected handler binds every diagnostic to the digest" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A chained ternary: ZTS621, an error-severity canonical-profile rule.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\export function handler(req: Request): Response {
+        \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
+        \\  return Response.json({ n });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expect(!obj.get("success").?.bool);
+    try testing.expect(obj.get("error") == null);
+
+    const digest = obj.get("payload").?.object.get("source_digest").?.string;
+    const diags = obj.get("diagnostics").?.array;
+    try testing.expect(diags.items.len >= 1);
+
+    var found_chain = false;
+    for (diags.items) |item| {
+        const d = item.object;
+        // Every diagnostic binds the same digest and a project-relative path,
+        // so a client can re-validate without knowing the host layout.
+        try testing.expectEqualStrings(digest, d.get("source_digest").?.string);
+        try testing.expectEqualStrings("h.ts", d.get("file").?.string);
+        try testing.expect(!d.get("repair_available").?.bool);
+        try testing.expect(d.get("span") == null);
+        if (std.mem.eql(u8, d.get("code").?.string, "ZTS621")) {
+            found_chain = true;
+            try testing.expectEqualStrings("canonical_ternary_chain", d.get("rule_id").?.string);
+            try testing.expectEqualStrings("error", d.get("severity").?.string);
+            try testing.expect(d.get("byte_offset").?.integer > 0);
+        }
+    }
+    try testing.expect(found_chain);
+}
+
+test "byte_offset indexes into the bytes the digest covers" {
+    const source = "export const a = 1;\nexport const b = 2;\n";
+    try testing.expectEqual(@as(usize, 0), byteOffsetOf(source, 1, 1));
+    try testing.expectEqual(@as(usize, 7), byteOffsetOf(source, 1, 8));
+    try testing.expectEqual(@as(usize, 20), byteOffsetOf(source, 2, 1));
+    // A column past the end clamps rather than pointing outside the buffer.
+    try testing.expectEqual(source.len, byteOffsetOf(source, 9, 400));
+}
+
+test "success is exactly no error diagnostic, not no diagnostic" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // ZTS305 unused_variable is emitted at warning severity (measured), so this
+    // handler carries a diagnostic and still succeeds - spec 4.8's success rule.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\type Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\
+        \\export function handler(req: Request): Response & Guardrails {
+        \\    const unused = 1;
+        \\    return Response.json({ ok: true });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    const diags = obj.get("diagnostics").?.array;
+
+    var warnings: usize = 0;
+    var errors: usize = 0;
+    for (diags.items) |item| {
+        const sev = item.object.get("severity").?.string;
+        if (std.mem.eql(u8, sev, "warning")) warnings += 1;
+        if (std.mem.eql(u8, sev, "error")) errors += 1;
+    }
+    try testing.expect(warnings >= 1);
+    try testing.expectEqual(@as(usize, 0), errors);
+    try testing.expect(obj.get("success").?.bool);
+    try testing.expectEqual(
+        @as(i64, @intCast(warnings)),
+        obj.get("payload").?.object.get("counts").?.object.get("warnings").?.integer,
+    );
+}
+
+test "check publishes the path-coverage cause, not only a bool" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\type Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\
+        \\export function handler(req: Request): Response & Guardrails {
+        \\    return Response.json({ ok: true });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const paths = parsed.value.object.get("payload").?.object.get("paths").?.object;
+    try testing.expect(paths.get("enumerated").?.integer >= 1);
+    try testing.expect(paths.get("exhaustive").? == .bool);
+    // Phase 0 replaced a bare bool with a cause; the wire carries the cause.
+    try testing.expect(paths.get("coverage_note").?.string.len > 0);
 }
 
 test "identical requests produce byte-identical responses" {
