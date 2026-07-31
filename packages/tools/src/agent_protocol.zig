@@ -82,9 +82,9 @@ pub const operations = [_]OperationSpec{
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
     .{ .op = .describe_rule, .status = .implemented, .input_fields = &.{"rule"}, .payload_fields = &.{"rules"} },
-    .{ .op = .modules, .status = .deferred, .input_fields = &.{"file"}, .payload_fields = &.{
+    .{ .op = .modules, .status = .implemented, .input_fields = &.{"file"}, .payload_fields = &.{
         "graph", "builtins", "extensions", "rejected", "module_graph_hash",
-    }, .deferred_note = "phase 1 task 8" },
+    } },
     .{ .op = .check, .status = .deferred, .input_fields = &.{"file"}, .payload_fields = &.{
         "file", "source_digest", "counts", "properties", "paths", "contract_available",
     }, .deferred_note = "phase 1 task 9" },
@@ -119,9 +119,19 @@ pub const deferred_sections = [_]DeferredSection{
     .{ .name = "type_serialization", .note = "phase 2: the canonical type serialization is D1's artifact" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "verifiers", .note = "phase 6: property discovery arrives with the verify operation" },
+    .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
     .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
     .{ .name = "repair_budget", .note = "phase 6: the repair-iteration and tool-call budget is a loop policy no code implements" },
 };
+
+/// True when the operation reads a source file, and therefore binds the digest
+/// of a real module environment rather than the context-free one.
+fn takesFile(spec: *const OperationSpec) bool {
+    for (spec.input_fields) |field| {
+        if (std.mem.eql(u8, field, "file")) return true;
+    }
+    return false;
+}
 
 pub fn specFor(op: Operation) *const OperationSpec {
     for (&operations) |*spec| {
@@ -259,11 +269,62 @@ pub fn handleRequest(
         });
     defer allocator.free(canonical_root);
 
-    // Operations that take no `file` bind the context-free environment digest:
-    // the built-in registry with an empty module set. `expected` therefore has
-    // something to compare for every operation, and the envelope field is never
-    // empty.
-    const identity = contextFreeIdentity();
+    const input = root.get("input") orelse std.json.Value{ .null = {} };
+
+    // A file-bound operation binds the digest of the environment it actually
+    // read. Everything else binds the context-free digest - the built-in
+    // registry with an empty module set - so `expected` has something to
+    // compare for every operation and the envelope field is never empty.
+    var graph: ?module_graph_record.GraphRecord = null;
+    defer if (graph) |*g| g.deinit(allocator);
+
+    if (takesFile(spec)) {
+        const file_value = switch (input) {
+            .object => |o| o.get("file"),
+            else => null,
+        } orelse return writeErrorEnvelope(&json, op_name, contextFreeIdentity(), .{
+            .code = .malformed_request,
+            .message = "input.file is required for this operation",
+            .field = "input.file",
+        });
+        if (file_value != .string) {
+            return writeErrorEnvelope(&json, op_name, contextFreeIdentity(), .{
+                .code = .malformed_request,
+                .message = "input.file must be a string",
+                .field = "input.file",
+            });
+        }
+        graph = module_graph_record.build(allocator, io, canonical_root, file_value.string) catch |err| {
+            return writeErrorEnvelope(&json, op_name, contextFreeIdentity(), switch (err) {
+                error.PathOutsideProjectRoot => .{
+                    .code = .path_outside_project_root,
+                    .message = "input.file resolves outside the project root",
+                    .field = "input.file",
+                },
+                error.EntryUnreadable => .{
+                    .code = .file_unreadable,
+                    .message = "input.file could not be read",
+                    .field = "input.file",
+                },
+                error.GraphTooLarge => .{
+                    .code = .internal_error,
+                    .message = "the module graph exceeds this compiler's module cap",
+                    .field = "input.file",
+                },
+                error.ProjectRootUnresolvable => .{
+                    .code = .project_root_unresolvable,
+                    .message = "project_root stopped resolving while the graph was read",
+                    .field = "project_root",
+                },
+                error.OutOfMemory => return err,
+            });
+        };
+    }
+
+    const identity = Identity{
+        .policy_hash = rule_registry.policyHash(),
+        .module_graph_hash = if (graph) |g| g.hash else module_graph_record.contextFreeHash(),
+    };
 
     // Spec 4.8: one guard rule for every operation, run before any work. When
     // `apply_repair` lands in phase 6, this ordering is what makes a stale
@@ -276,13 +337,12 @@ pub fn handleRequest(
     defer payload.deinit();
     var payload_json: std.json.Stringify = .{ .writer = &payload.writer };
 
-    const input = root.get("input") orelse std.json.Value{ .null = {} };
-
     const success = switch (op) {
         .meta => try writeMetaPayload(&payload_json),
         .features => try writeFeaturesPayload(&payload_json),
         .restrictions => try writeRestrictionsPayload(&payload_json),
         .describe_rule => try writeDescribeRulePayload(&payload_json, input),
+        .modules => try writeModulesPayload(&payload_json, &graph.?),
         else => unreachable, // every other row is `.deferred` and returned above
     };
 
@@ -622,6 +682,102 @@ fn writeDescribeRulePayload(json: *std.json.Stringify, input: std.json.Value) !b
 }
 
 // ---------------------------------------------------------------------------
+// modules
+// ---------------------------------------------------------------------------
+
+/// The resolved module environment for one entry file (spec 4.8): the relative
+/// graph with source digests, the built-in registry, authenticated extensions,
+/// every rejected candidate, and one digest over the whole environment.
+///
+/// The payload's `module_graph_hash` and the envelope's are the same value,
+/// computed once - a client that binds one has bound the other.
+fn writeModulesPayload(
+    json: *std.json.Stringify,
+    graph: *const module_graph_record.GraphRecord,
+) !bool {
+    try json.beginObject();
+
+    try json.objectField("graph");
+    try json.beginArray();
+    for (graph.modules) |module| {
+        try json.beginObject();
+        try json.objectField("path");
+        try json.write(module.path);
+        try json.objectField("source_digest");
+        try json.write(&module.source_digest);
+        try json.objectField("imports");
+        try json.beginArray();
+        for (module.imports) |import| {
+            try json.beginObject();
+            try json.objectField("specifier");
+            try json.write(import.specifier);
+            try json.objectField("kind");
+            try json.write(@tagName(import.kind));
+            try json.objectField("target");
+            try json.write(import.target);
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.endObject();
+    }
+    try json.endArray();
+
+    try json.objectField("builtins");
+    try json.beginArray();
+    for (zts.builtin_modules.all) |binding| {
+        try json.beginObject();
+        try json.objectField("specifier");
+        try json.write(binding.specifier);
+        try json.objectField("name");
+        try json.write(binding.name);
+        try json.objectField("required_capabilities");
+        try json.beginArray();
+        for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
+        try json.endArray();
+        try json.objectField("exports");
+        try json.beginArray();
+        for (binding.exports) |exp| {
+            try json.beginObject();
+            try json.objectField("name");
+            try json.write(exp.name);
+            try json.objectField("effect");
+            try json.write(@tagName(exp.effect));
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.endObject();
+    }
+    try json.endArray();
+
+    // Empty until a manifest is authenticated; see the extension_manifests
+    // deferred section. An extension specifier in source shows up under
+    // `rejected`, never silently resolved.
+    try json.objectField("extensions");
+    try json.beginArray();
+    try json.endArray();
+
+    try json.objectField("rejected");
+    try json.beginArray();
+    for (graph.rejected) |rejection| {
+        try json.beginObject();
+        try json.objectField("specifier");
+        try json.write(rejection.specifier);
+        try json.objectField("importer");
+        try json.write(rejection.importer);
+        try json.objectField("reason");
+        try json.write(rejection.reason);
+        try json.endObject();
+    }
+    try json.endArray();
+
+    try json.objectField("module_graph_hash");
+    try json.write(&graph.hash);
+
+    try json.endObject();
+    return graph.rejected.len == 0;
+}
+
+// ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
 
@@ -761,9 +917,16 @@ test "every implemented operation emits exactly its declared payload_fields" {
     const a = testing.allocator;
     for (&operations) |*spec| {
         if (spec.status != .implemented) continue;
+        // A file-bound operation gets a real fixture: an empty input would
+        // answer with a protocol error and an empty payload, and the gate would
+        // pass while proving nothing.
+        const input = if (takesFile(spec))
+            "{\"file\":\"packages/tools/tests/fixtures/contract/plain_ts.ts\"}"
+        else
+            "{}";
         const req = try std.fmt.allocPrint(a,
-            \\{{"schema_version":2,"operation":"{s}","project_root":".","input":{{}}}}
-        , .{@tagName(spec.op)});
+            \\{{"schema_version":2,"operation":"{s}","project_root":".","input":{s}}}
+        , .{ @tagName(spec.op), input });
         defer a.free(req);
         const out = try respond(a, req);
         defer a.free(out);
@@ -1172,6 +1335,175 @@ test "meta names rule_severity as a section no registry can answer" {
         if (std.mem.eql(u8, sec.object.get("name").?.string, "rule_severity")) found = true;
     }
     try testing.expect(found);
+}
+
+test "modules returns the resolved graph and binds one hash in two places" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "util.ts", .data = "export const two = 2;\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data =
+        \\import { env } from "zttp:env";
+        \\import { two } from "./util.ts";
+        \\export function handler(req) { return Response.json({ two, e: env("X") }); }
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expect(obj.get("success").?.bool);
+
+    const payload = obj.get("payload").?.object;
+    // One digest, bound in the envelope and in the payload.
+    try testing.expectEqualStrings(
+        obj.get("module_graph_hash").?.string,
+        payload.get("module_graph_hash").?.string,
+    );
+    try testing.expectEqual(@as(usize, 2), payload.get("graph").?.array.items.len);
+    try testing.expect(payload.get("builtins").?.array.items.len > 0);
+    try testing.expectEqual(@as(usize, 0), payload.get("rejected").?.array.items.len);
+
+    const imports = payload.get("graph").?.array.items[0].object.get("imports").?.array;
+    try testing.expectEqualStrings("zttp:env", imports.items[0].object.get("specifier").?.string);
+    try testing.expectEqualStrings("builtin", imports.items[0].object.get("kind").?.string);
+    try testing.expectEqualStrings("util.ts", imports.items[1].object.get("target").?.string);
+}
+
+test "a file-bound operation binds the graph digest, not the context-free one" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "handler.ts",
+        .data = "export function handler(req) { return Response.json({ ok: true }); }\n",
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const bound = parsed.value.object.get("module_graph_hash").?.string;
+    try testing.expect(!std.mem.eql(u8, bound, &module_graph_record.contextFreeHash()));
+}
+
+test "modules reports a rejected import and stops claiming success" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "handler.ts",
+        .data = "import { gone } from \"./gone.ts\";\nexport const x = gone;\n",
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const obj = parsed.value.object;
+    // The environment resolved, so this is not a protocol error - but it did
+    // not resolve completely, so it is not a success either.
+    try testing.expect(!obj.get("success").?.bool);
+    try testing.expect(obj.get("error") == null);
+    const rejected = obj.get("payload").?.object.get("rejected").?.array;
+    try testing.expectEqual(@as(usize, 1), rejected.items.len);
+    try testing.expectEqualStrings("file_unreadable", rejected.items[0].object.get("reason").?.string);
+}
+
+test "modules without input.file is malformed, not an empty graph" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"modules","project_root":".","input":{}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("malformed_request", err.get("code").?.string);
+    try testing.expectEqualStrings("input.file", err.get("field").?.string);
+}
+
+test "modules on a path outside the project root is refused" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "app");
+    const base = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, "app", a);
+    defer a.free(base);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"../escape.ts"}}}}
+    , .{base});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("path_outside_project_root", err.get("code").?.string);
+    try testing.expectEqualStrings("input.file", err.get("field").?.string);
+}
+
+test "modules on a missing entry file reports file_unreadable" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"modules","project_root":".","input":{"file":"no/such/handler.ts"}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("file_unreadable", err.get("code").?.string);
+}
+
+test "a stale module_graph_hash is caught against the real graph" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "handler.ts",
+        .data = "export function handler(req) { return Response.json({ ok: true }); }\n",
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    // The context-free digest is a real hash, and the wrong one for a file
+    // request: the guard must compare against what the operation read.
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}},
+        \\ "expected":{{"module_graph_hash":"{s}"}}}}
+    , .{ root, module_graph_record.contextFreeHash() });
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("identity_mismatch", err.get("code").?.string);
+    try testing.expectEqualStrings("expected.module_graph_hash", err.get("field").?.string);
 }
 
 test "identical requests produce byte-identical responses" {
