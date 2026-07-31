@@ -673,15 +673,6 @@ pub const BytecodeCache = struct {
         return self.cache.contains(key);
     }
 
-    /// Get cache hit rate
-    pub fn hitRate(self: *const BytecodeCache) f64 {
-        const hits = self.hits.load(.monotonic);
-        const misses = self.misses.load(.monotonic);
-        const total = hits + misses;
-        if (total == 0) return 0.0;
-        return @as(f64, @floatFromInt(hits)) / @as(f64, @floatFromInt(total));
-    }
-
     /// Drop a single cache entry. Used to evict bytecode that round-trips
     /// through the serializer but fails to deserialize, so a later request
     /// can recompile from source instead of looping on the bad bytes.

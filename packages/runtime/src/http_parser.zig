@@ -289,45 +289,6 @@ pub const TransferEncoding = enum {
     chunked,
 };
 
-/// Process a single header line: normalize key to lowercase, copy into storage,
-/// append to header list, and update fast slots.
-fn processHeaderLine(
-    line: []const u8,
-    storage: []u8,
-    offset: *usize,
-    headers: *std.ArrayListUnmanaged(HttpHeader),
-    allocator: std.mem.Allocator,
-    fast_slots: *FastHeaderSlots,
-) !void {
-    const header = splitHeaderLine(line) orelse return;
-    const key = header.key;
-    const value = header.value;
-
-    // Normalize key to lowercase using comptime lookup table
-    var key_lower_buf: [256]u8 = undefined;
-    if (key.len > key_lower_buf.len) return error.HeaderKeyTooLong;
-    const key_lower = lowerStringFast(key_lower_buf[0..key.len], key);
-    const key_dup = try copyToStorage(storage, offset, key_lower);
-    const value_dup = try copyToStorage(storage, offset, value);
-    try headers.append(allocator, .{ .key = key_dup, .value = value_dup });
-
-    // Populate fast header slots during parsing
-    if (std.mem.eql(u8, key_lower, "content-length")) {
-        const parsed = try parseContentLengthValue(value);
-        if (fast_slots.content_length) |existing| {
-            if (existing != parsed) return error.DuplicateContentLength;
-        } else {
-            fast_slots.content_length = parsed;
-        }
-    } else if (std.mem.eql(u8, key_lower, "connection")) {
-        fast_slots.connection = value_dup;
-    } else if (std.mem.eql(u8, key_lower, "content-type")) {
-        fast_slots.content_type = value_dup;
-    } else if (std.mem.eql(u8, key_lower, "transfer-encoding")) {
-        try updateTransferEncodingSlot(fast_slots, value);
-    }
-}
-
 /// Process a single header line without copying key/value slices.
 fn processHeaderLineBorrowed(
     line: []const u8,

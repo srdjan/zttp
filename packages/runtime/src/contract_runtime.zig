@@ -295,34 +295,6 @@ pub fn parseContractJson(allocator: std.mem.Allocator, source: []const u8) !RawR
     return fromHandlerContract(allocator, &hc);
 }
 
-pub fn deriveCostCeilings(envelope_opt: ?CostEnvelope, body_limit_bytes: u64) ?CostCeilings {
-    const envelope = envelope_opt orelse return null;
-    var ceilings = CostCeilings{
-        .total = envelope.total.worstCaseAt(body_limit_bytes),
-        .total_is_constant = envelope.total == .constant,
-    };
-    var seen = [_]bool{false} ** cost_meter.class_count;
-
-    for (envelope.entries.items) |entry| {
-        const class = cost_meter.classForName(entry.module);
-        const idx = @intFromEnum(class);
-        seen[idx] = true;
-        const value = entry.bound.worstCaseAt(body_limit_bytes) orelse {
-            ceilings.per_class[idx] = null;
-            continue;
-        };
-        if (ceilings.per_class[idx]) |current| {
-            ceilings.per_class[idx] = std.math.add(u64, current, value) catch std.math.maxInt(u64);
-        } else if (!seen[idx]) {
-            ceilings.per_class[idx] = value;
-        } else {
-            ceilings.per_class[idx] = value;
-        }
-    }
-
-    return ceilings;
-}
-
 /// Match a route pattern (e.g. "/users/:id") against a request path (e.g. "/users/42").
 /// Supports :param segments as wildcards.
 fn matchPath(pattern: []const u8, path: []const u8) bool {
