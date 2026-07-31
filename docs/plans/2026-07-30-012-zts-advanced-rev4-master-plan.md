@@ -223,3 +223,62 @@ missing `Bytes` hex and equality signatures; assign the `warning` severity to
 at least one rule or drop it from the gates; state that spec 5.8's TSX
 comparison requirement is already satisfied by prefix-position
 disambiguation; add the migration policy for `|>` and `interface`.
+
+**2026-07-31 — Phase 0 complete.** `scripts/verify.sh`, `zig build test`,
+`bash scripts/test-examples.sh` (43/43), and `zts spec-check --json` all green.
+Detail and per-task deviations:
+`2026-07-30-013-zts-advanced-rev4-phase0-plan.md`.
+
+Interim markers adopted, both to be retired when their design doc lands:
+
+- **D1-interim** at `type_checker.zig joinTypes`. Spec 5.4's join steps 1-5,
+  with step 2's "syntactically identical" as `TypeIndex` equality and steps 3-4
+  as `type_pool.isAssignableTo` in both directions. The pool does not intern, so
+  index equality is strictly narrower than the canonical type identity D1
+  specifies; step 3 covers the gap, since two structurally identical types are
+  mutually assignable and resolve to the `whenTrue` branch either way. Retire
+  when D1's canonical serialization lands. The join's shape does not change.
+- **D2-interim** at `strict_checker.zig isPureExpr`. A syntactic purity class:
+  call, method call, and assignment are impure, and so is any composite
+  containing one. Retire when D2's inferred effect row replaces it.
+
+Four decisions made in code during Phase 0 that the phase plan did not
+anticipate:
+
+1. **The idiom table is published on its own flag, not inside the rule list.**
+   `describe-rule --json` is a bare JSON array of rules, duplicated by the pi
+   expert tool and published in the expert contract; an `idioms` sibling key
+   would have meant turning that array into an object. An idiom also carries no
+   code, category, or severity. `describe-rule --idioms [--json]` is additive.
+   Spec 5 puts `idioms` in the `meta` payload, which is Phase 1's job.
+2. **The idiom back-reference runs registry-to-intent.** Mapping the rewrite
+   catalog against the table found exactly one pair: every other rewrite repairs
+   a *restriction*, while the idiom table picks among admitted spellings. So
+   `rewrite_rule` holds the `RepairIntent` tag name that `normalize --json`
+   already prints, rather than adding an `idiom_id` field to two rewrite
+   descriptors and two JSON surfaces for one wired row.
+3. **`cost_bounded` is no longer conjoined with path exhaustiveness.** Task 6
+   would otherwise have stripped it from every loop-bearing handler. The
+   conjunct was already redundant - truncation forces the total to unbounded -
+   and a summarized loop still carries a symbolic linear bound.
+4. **Path coverage reports its cause, not a bool.** `PathGenerator.Coverage` has
+   four cases, each carrying its own note. Three separate reworks of one
+   parenthetical proved a bool cannot say why coverage is incomplete.
+
+Two findings recorded for later phases, neither fixed here:
+
+- **The path generator does not walk into user functions at all**, so every
+  helper's module calls are missing from the cost envelope, recursive or not.
+  Measured: one `sqlOne` moved from a handler body into a non-recursive
+  one-line helper drops `Max I/O depth` from 1 to 0. Whole-program cost
+  analysis, not Phase 0.
+- **`advisory` is assigned to zero rules**, so it is not yet observable in any
+  CLI output - the same shape as the `warning` debt already listed above. The
+  severity exists, is isolated from success and exit codes, and is tested; the
+  idiom channel that will carry it is Phase 6.
+
+**Spec edits owed, added by Phase 0:** the `idiom.element-iteration` row's
+non-idiomatic column should also list the `items.entries()`-with-unread-index
+spelling. Spec 4.2.1 gives only the `range(items.length)` form, but ZTS619 has
+rewritten the other since before this program, targeting the same idiomatic
+spelling for the same operation.

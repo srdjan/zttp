@@ -609,7 +609,7 @@ git add -A && git commit -m "fix(verify): recursion never yields totality or con
 **Files:**
 - Modify: `docs/plans/2026-07-30-012-zts-advanced-rev4-master-plan.md` (Decision log)
 
-- [ ] **Step 1: Full local gate.** Run in order; all green:
+- [x] **Step 1: Full local gate.** Run in order; all green:
 
 ```bash
 zig build test
@@ -617,13 +617,39 @@ bash scripts/test-examples.sh
 bash scripts/verify.sh
 ```
 
-- [ ] **Step 2: Spec drift.** `./zig-out/bin/zts spec-check --json` — green (ternary node rule pre-existed; confirm no drift from Task 4).
+- [x] **Step 2: Spec drift.** `./zig-out/bin/zts spec-check --json` — green (ternary node rule pre-existed; confirm no drift from Task 4).
 
-- [ ] **Step 3: Manual smoke.** `./zig-out/bin/zts check` on a handler using a pure ternary — no diagnostics; on a chained ternary — ZTS chain code with repair; `describe-rule --json` lists `advisory` severity and `idiom.` IDs.
+- [x] **Step 3: Manual smoke.** `./zig-out/bin/zts check` on a handler using a pure ternary — no diagnostics; on a chained ternary — ZTS chain code with repair; `describe-rule --json` lists `advisory` severity and `idiom.` IDs.
 
-- [ ] **Step 4: Record decisions.** Append to the master plan's Decision log: D1-interim assignability adopted at `type_checker.zig joinTypes`; D2-interim purity adopted at `strict_checker.zig isPureExpr`; both cite retirement conditions (D1/D2 landing).
+**Results, 2026-07-31.** All met except the severity half of the last clause.
 
-- [ ] **Step 5: Commit**
+| Check | Result |
+|---|---|
+| pure `?:` | `Strict ZigTS ........... OK` |
+| chained `?:` | `ZTS621 error` at 4:20, help names `match` / if-else |
+| impure `?:` | `ZTS612 error` at 4:21, help names binding the call first |
+| `describe-rule ZTS612`/`ZTS621` | both `repair_intent: replace_ternary_with_if` |
+| `describe-rule --idioms --json` | 12 rows, all `idiom.`-prefixed, 1 wired |
+| `normalize` on a chain | unchains the outer, keeps the freed inner `?:` |
+| `spec-check --json` | `ok: true`, no drift from Task 4 |
+
+Two clarifications on what the smoke did *not* show:
+
+1. **`check --json` carries no repair intent for any rule.** Its diagnostic
+   shape is `{code, severity, message, file, line, column, suggestion}`.
+   Confirmed against the pre-existing ZTS613, which has the same keys, so ZTS621
+   behaves exactly like every other rule. Repair intents are published through
+   `describe-rule --json` and the canonicalize surfaces, not here.
+2. **`advisory` is not observable in `describe-rule` output**, because rule
+   entries carry no severity field and no rule is assigned `advisory` yet. The
+   severity exists, is isolated from exit codes and success, and is tested; the
+   idiom channel that will emit it is Phase 6, and the `severities` list the
+   spec requires is part of Phase 1's `meta` payload. This is the same shape as
+   the `warning`-assigned-to-zero-rules debt the master plan already tracks.
+
+- [x] **Step 4: Record decisions.** Append to the master plan's Decision log: D1-interim assignability adopted at `type_checker.zig joinTypes`; D2-interim purity adopted at `strict_checker.zig isPureExpr`; both cite retirement conditions (D1/D2 landing).
+
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "docs(plans): record phase 0 completion and interim decisions"
