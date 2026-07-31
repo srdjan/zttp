@@ -37,7 +37,6 @@ const ScopeKind = scope_mod.ScopeKind;
 const Binding = scope_mod.Binding;
 
 const ErrorList = error_mod.ErrorList;
-const ErrorBuilder = error_mod.ErrorBuilder;
 
 /// Parser errors
 pub const ParseErr = error{

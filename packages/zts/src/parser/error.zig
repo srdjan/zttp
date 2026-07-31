@@ -297,97 +297,6 @@ pub const ErrorList = struct {
     }
 };
 
-/// Error builder for common error patterns
-pub const ErrorBuilder = struct {
-    errors: *ErrorList,
-
-    pub fn init(errors: *ErrorList) ErrorBuilder {
-        return .{ .errors = errors };
-    }
-
-    pub fn unexpectedToken(self: ErrorBuilder, tok: Token) void {
-        self.errors.addErrorAt(.unexpected_token, tok, "unexpected token");
-    }
-
-    pub fn expectedExpression(self: ErrorBuilder, tok: Token) void {
-        self.errors.addExpectedError(tok, "expression");
-    }
-
-    pub fn expectedIdentifier(self: ErrorBuilder, tok: Token) void {
-        self.errors.addExpectedError(tok, "identifier");
-    }
-
-    pub fn expectedSemicolon(self: ErrorBuilder, tok: Token) void {
-        self.errors.addExpectedError(tok, "';'");
-    }
-
-    pub fn expectedColon(self: ErrorBuilder, tok: Token) void {
-        self.errors.addExpectedError(tok, "':'");
-    }
-
-    pub fn expectedCloseParen(self: ErrorBuilder, tok: Token) void {
-        self.errors.addExpectedError(tok, "')'");
-    }
-
-    pub fn expectedCloseBrace(self: ErrorBuilder, tok: Token) void {
-        self.errors.addExpectedError(tok, "'}'");
-    }
-
-    pub fn expectedCloseBracket(self: ErrorBuilder, tok: Token) void {
-        self.errors.addExpectedError(tok, "']'");
-    }
-
-    pub fn invalidAssignmentTarget(self: ErrorBuilder, loc: SourceLocation) void {
-        self.errors.addError(.invalid_assignment_target, loc, "invalid assignment target");
-    }
-
-    pub fn duplicateBinding(self: ErrorBuilder, tok: Token, name: []const u8) void {
-        _ = name;
-        self.errors.addErrorAt(.duplicate_binding, tok, "identifier already declared in this scope");
-    }
-
-    pub fn constWithoutInit(self: ErrorBuilder, tok: Token) void {
-        self.errors.addErrorAt(.const_without_initializer, tok, "const declaration must have an initializer");
-    }
-
-    pub fn invalidBreak(self: ErrorBuilder, tok: Token) void {
-        self.errors.addErrorAt(.invalid_break, tok, "'break' outside of loop or switch");
-    }
-
-    pub fn invalidContinue(self: ErrorBuilder, tok: Token) void {
-        self.errors.addErrorAt(.invalid_continue, tok, "'continue' outside of loop");
-    }
-
-    pub fn invalidReturn(self: ErrorBuilder, tok: Token) void {
-        self.errors.addErrorAt(.invalid_return, tok, "'return' outside of function");
-    }
-
-    pub fn tooManyLocals(self: ErrorBuilder, loc: SourceLocation) void {
-        self.errors.addError(.too_many_locals, loc, "too many local variables (max 255)");
-    }
-
-    pub fn tooManyUpvalues(self: ErrorBuilder, loc: SourceLocation) void {
-        self.errors.addError(.too_many_upvalues, loc, "too many upvalues (max 255)");
-    }
-
-    pub fn unterminatedString(self: ErrorBuilder, loc: SourceLocation) void {
-        self.errors.addError(.unterminated_string, loc, "unterminated string literal");
-    }
-
-    pub fn unterminatedTemplate(self: ErrorBuilder, loc: SourceLocation) void {
-        self.errors.addError(.unterminated_template, loc, "unterminated template literal");
-    }
-
-    pub fn mismatchedJsxTag(self: ErrorBuilder, tok: Token, expected_tag: []const u8) void {
-        _ = expected_tag;
-        self.errors.addErrorAt(.mismatched_jsx_tag, tok, "JSX closing tag does not match opening tag");
-    }
-
-    pub fn unclosedJsxElement(self: ErrorBuilder, loc: SourceLocation) void {
-        self.errors.addError(.unclosed_jsx_element, loc, "unclosed JSX element");
-    }
-};
-
 // --- Tests ---
 
 test "error formatting" {
@@ -404,29 +313,6 @@ test "error formatting" {
     var buf: [1024]u8 = undefined;
     const output = list.formatFirstError(&buf);
     try std.testing.expect(output.len > 0);
-}
-
-test "error builder patterns" {
-    const source = "let 123 = x;";
-    var list = ErrorList.init(std.testing.allocator, source);
-    defer list.deinit();
-
-    var builder = ErrorBuilder.init(&list);
-
-    const tok = Token{
-        .type = .number,
-        .start = 4,
-        .len = 3,
-        .line = 1,
-        .column = 5,
-    };
-
-    builder.expectedIdentifier(tok);
-
-    try std.testing.expect(list.hasErrors());
-    const err = list.getErrors()[0];
-    try std.testing.expectEqual(ErrorKind.expected_token, err.kind);
-    try std.testing.expectEqualStrings("identifier", err.expected.?);
 }
 
 test "panic mode suppresses errors" {

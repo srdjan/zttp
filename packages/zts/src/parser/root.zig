@@ -57,7 +57,6 @@ pub const Binding = @import("scope.zig").Binding;
 pub const Upvalue = @import("scope.zig").Upvalue;
 
 pub const ErrorList = @import("error.zig").ErrorList;
-pub const ErrorBuilder = @import("error.zig").ErrorBuilder;
 pub const ParseError = @import("error.zig").ParseError;
 pub const ErrorKind = @import("error.zig").ErrorKind;
 
