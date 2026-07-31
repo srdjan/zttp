@@ -387,19 +387,6 @@ pub const Context = struct {
         return self.http.method(method);
     }
 
-    pub fn clearCompiledCodePointers(self: *Context) usize {
-        var evicted: usize = 0;
-        for (self.bytecode_roots.items) |func| {
-            evicted += self.clearCompiledCodeRecursive(func);
-        }
-        for (self.bytecode_functions.items) |obj| {
-            if (obj.getBytecodeFunctionData()) |data| {
-                evicted += self.clearCompiledCodeRecursive(@constCast(data.bytecode));
-            }
-        }
-        return evicted;
-    }
-
     pub fn takeBytecodeRoot(self: *Context, func: *bytecode.FunctionBytecode) !void {
         if (self.cached_bytecode.contains(func)) return;
 
