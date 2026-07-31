@@ -242,6 +242,11 @@ pub fn build(b: *std.Build) void {
         // through the `zts_cli` module. Same rationale as canonicalize.
         .{ .owner = .tools, .src = "src/zts_cli.zig", .step = "test-zts-cli", .desc = "Run analyzer dispatch + machine-command module tests", .project_config = true },
         .{ .owner = .tools, .src = "src/deploy_manifest.zig", .step = "test-deploy-manifest", .desc = "Run deploy manifest renderer tests" },
+        // collected_via_named_module: agent_identity.zig is re-exported by
+        // zts_cli.zig but not yet referenced by any analyzed code, and Zig only
+        // collects tests from files it analyzes - so the `zts_cli` root runs
+        // none of them. Its own root does. Same rationale as canonicalize.
+        .{ .owner = .tools, .src = "src/agent_identity.zig", .step = "test-agent-identity", .desc = "Run v2 agent protocol identity primitive tests" },
         .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true },
         // Focused subset covering only the record/replay layer: runs offline,
         // never needs an API key, and does not transitively pull in the
