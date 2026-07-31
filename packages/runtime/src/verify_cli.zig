@@ -138,13 +138,6 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     return exit_ok;
 }
 
-const FetchError = error{
-    UnsupportedScheme,
-    NotAttested,
-    HttpStatus,
-    OutOfMemory,
-};
-
 /// Fetch the URL, extract the Zttp-Attest header value, return an owned
 /// copy. The response body is discarded; only headers matter for slice 1.
 fn fetchAttestHeader(

@@ -14,19 +14,6 @@ const zts = @import("zts");
 const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
-/// Named tags this module surfaces. Callers can pattern-match these for
-/// operator-facing diagnostics; everything else (raw POSIX errors from open,
-/// read, write, mkdirat) flows through the inferred return type unchanged.
-pub const KeyError = error{
-    HomeDirUnavailable,
-    KeyFileMalformed,
-    KeyFilePermissionsTooOpen,
-    UrandomOpenFailed,
-    UrandomReadFailed,
-    WriteFailed,
-    OutOfMemory,
-};
-
 pub const KeySource = enum { generated, loaded };
 
 pub const SignerIdentity = struct {

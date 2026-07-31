@@ -38,13 +38,6 @@ const Binding = scope_mod.Binding;
 
 const ErrorList = error_mod.ErrorList;
 
-/// Parser errors
-pub const ParseErr = error{
-    UnexpectedToken,
-    TooManyLocals,
-    OutOfMemory,
-};
-
 /// Operator precedence levels (higher = binds tighter)
 const Precedence = enum(u8) {
     none = 0,

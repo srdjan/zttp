@@ -92,12 +92,6 @@ pub const Outcome = struct {
     goals_unmet_count: u32 = 0,
 };
 
-pub const DriveError = error{
-    ToolFailed,
-    InvalidToolOutput,
-    FileWriteFailed,
-} || std.mem.Allocator.Error;
-
 pub fn drive(
     allocator: std.mem.Allocator,
     registry: *const registry_mod.Registry,
