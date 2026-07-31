@@ -1326,7 +1326,18 @@ pub const Parser = struct {
             if (self.parseStatement()) |stmt| {
                 try stmts.append(stmts_alloc, stmt);
             } else |_| {
+                const before = self.current.location().offset;
                 self.synchronize();
+                // `synchronize` returns without consuming anything when
+                // `previous` is a semicolon or `current` starts a statement, so
+                // an error raised at such a token would leave this loop
+                // re-parsing it forever. Two error sites already call
+                // `advance()` by hand to dodge that; guarantee the progress
+                // here instead, so a site that forgets produces a diagnostic
+                // rather than a hang.
+                if (!self.check(.eof) and self.current.location().offset == before) {
+                    self.advance();
+                }
             }
         }
 
@@ -4805,6 +4816,37 @@ test "unsupported: delete operator" {
     };
 
     try std.testing.expect(false);
+}
+
+test "a statement error after a semicolon inside a block terminates" {
+    // Regression. `parseBlock`'s recovery loop assumed `synchronize()` always
+    // consumes a token. It returns immediately when `previous` is a semicolon,
+    // so an error raised at the token directly after one left the loop
+    // re-parsing that token forever - a hang, not a diagnostic.
+    //
+    // `delete`, `yield`, and `++x` all reach that path. `class` and `var` only
+    // escaped because their error sites call `advance()` by hand, each with a
+    // comment naming this same failure; the loop now guarantees progress
+    // instead of depending on every error site to remember.
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        "function f() { const o = {a: 1}; delete o.a; return 1; }",
+        "function f() { const o = 1; yield o; }",
+        "function f() { const o = 1; ++o; }",
+        // The same shape one block deeper.
+        "function f() { if (x) { const o = 1; delete o.a; } return 1; }",
+    };
+
+    for (cases) |source| {
+        var parser = try Parser.init(allocator, source);
+        defer parser.deinit();
+        _ = parser.parse() catch {
+            try std.testing.expect(parser.hasErrors());
+            continue;
+        };
+        // Reaching here means the parser accepted an unsupported construct.
+        try std.testing.expect(false);
+    }
 }
 
 test "parse import declaration" {
