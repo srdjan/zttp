@@ -251,6 +251,20 @@ pub fn build(b: *std.Build) void {
         // references it yet, so only its own root runs its tests.
         .{ .owner = .tools, .src = "src/module_graph_record.zig", .step = "test-module-graph-record", .desc = "Run v2 resolved module graph and digest tests" },
         .{ .owner = .tools, .src = "src/agent_protocol.zig", .step = "test-agent-protocol", .desc = "Run v2 agent protocol envelope tests", .project_config = true },
+        // Audited 2026-07-31: these eight files carry tests that no root
+        // collected, so none had ever run. Zig collects tests only from files a
+        // root analyzes, and a file reached solely through a named module - or
+        // through an unreferenced re-export - is not analyzed. Verified by
+        // planting a failing test in every tools file and recording which ones
+        // the aggregate suite reported.
+        .{ .owner = .tools, .src = "src/module_audit.zig", .step = "test-module-audit", .desc = "Run module-contract audit tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/manifest_alignment.zig", .step = "test-manifest-alignment", .desc = "Run manifest alignment tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/smt_solver.zig", .step = "test-smt-solver", .desc = "Run SMT solver harness tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/verify_paths_core.zig", .step = "test-verify-paths-core", .desc = "Run behavior-path verification core tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/report.zig", .step = "test-report", .desc = "Run analyzer report renderer tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/project_config.zig", .step = "test-project-config", .desc = "Run project config discovery tests" },
+        .{ .owner = .tools, .src = "src/proof_quest_fixture.zig", .step = "test-proof-quest-fixture", .desc = "Run proof quest fixture tests", .project_config = true },
+        .{ .owner = .tools, .src = "src/openapi_manifest.zig", .step = "test-openapi-manifest", .desc = "Run OpenAPI manifest tests", .project_config = true },
         .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true },
         // Focused subset covering only the record/replay layer: runs offline,
         // never needs an API key, and does not transitively pull in the

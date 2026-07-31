@@ -280,7 +280,13 @@ test "project config parses and defaults public directory" {
         ,
     });
 
-    const manifest_path = try std.fs.path.resolve(std.testing.allocator, &.{ tmp.sub_path, "zttp.json" });
+    // `tmp.sub_path` names a directory under `.zig-cache/tmp`, not one relative
+    // to the current directory, so resolving against it pointed at a path that
+    // does not exist. Ask the handle where it actually is.
+    const tmp_root = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(tmp_root);
+
+    const manifest_path = try std.fs.path.resolve(std.testing.allocator, &.{ tmp_root, "zttp.json" });
     defer std.testing.allocator.free(manifest_path);
 
     var config = try loadAbsolute(std.testing.allocator, io, manifest_path);
@@ -321,16 +327,19 @@ test "discover finds manifest from relative handler path" {
     const cwd = try dupCurrentDir(std.testing.allocator, io);
     defer std.testing.allocator.free(cwd);
 
-    const handler_abs = try std.fs.path.resolve(std.testing.allocator, &.{ tmp.sub_path, "src", "handler.ts" });
+    const tmp_root = try std.Io.Dir.realPathFileAlloc(tmp.dir, io, ".", std.testing.allocator);
+    defer std.testing.allocator.free(tmp_root);
+
+    const handler_abs = try std.fs.path.resolve(std.testing.allocator, &.{ tmp_root, "src", "handler.ts" });
     defer std.testing.allocator.free(handler_abs);
 
-    const relative_handler = try std.fs.path.relative(std.testing.allocator, cwd, handler_abs);
+    const relative_handler = try std.fs.path.relative(std.testing.allocator, cwd, null, cwd, handler_abs);
     defer std.testing.allocator.free(relative_handler);
 
     var config = (try discover(std.testing.allocator, io, relative_handler)).?;
     defer config.deinit(std.testing.allocator);
 
-    const expected_root = try std.fs.path.resolve(std.testing.allocator, &.{tmp.sub_path});
+    const expected_root = try std.fs.path.resolve(std.testing.allocator, &.{tmp_root});
     defer std.testing.allocator.free(expected_root);
 
     try std.testing.expectEqualStrings(expected_root, config.root_dir);

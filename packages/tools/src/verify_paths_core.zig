@@ -156,9 +156,12 @@ test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
     var tmp_dir = std.testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
+    // Annotated: the strict checker now rejects an unannotated handler with
+    // ZTS601 before flow analysis runs, so the unannotated form this test used
+    // to carry never reached the flow diagnostic it exists to check.
     const fixture =
         \\import { env } from "zttp:env";
-        \\function handler(req) {
+        \\function handler(req: Request): Response {
         \\  const secret = env("SECRET_KEY");
         \\  if (secret) {
         \\    return Response.json({ leaked: secret });
@@ -166,10 +169,11 @@ test "writeJsonEnvelope surfaces ZTS400 for a flow violation" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    try tmp_dir.dir.writeFile(.{ .sub_path = "leak.ts", .data = fixture });
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "leak.ts", .data = fixture });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs_path = try tmp_dir.dir.realpath("leak.ts", &path_buf);
+    const abs_len = try tmp_dir.dir.realPathFile(std.testing.io, "leak.ts", &path_buf);
+    const abs_path = path_buf[0..abs_len];
     const paths = [_][]const u8{abs_path};
 
     var buf: std.ArrayList(u8) = .empty;
@@ -198,10 +202,11 @@ test "writeJsonEnvelope canonical diagnostics make ok false" {
         \\  return Response.json({ a, b });
         \\}
     ;
-    try tmp_dir.dir.writeFile(.{ .sub_path = "canonical.ts", .data = fixture });
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "canonical.ts", .data = fixture });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs_path = try tmp_dir.dir.realpath("canonical.ts", &path_buf);
+    const abs_len = try tmp_dir.dir.realPathFile(std.testing.io, "canonical.ts", &path_buf);
+    const abs_path = path_buf[0..abs_len];
     const paths = [_][]const u8{abs_path};
 
     var buf: std.ArrayList(u8) = .empty;
@@ -230,10 +235,11 @@ test "writeJsonEnvelope canonical clean file keeps ok true" {
         \\  return Response.json({ a, b });
         \\}
     ;
-    try tmp_dir.dir.writeFile(.{ .sub_path = "canonical.ts", .data = fixture });
+    try tmp_dir.dir.writeFile(std.testing.io, .{ .sub_path = "canonical.ts", .data = fixture });
 
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const abs_path = try tmp_dir.dir.realpath("canonical.ts", &path_buf);
+    const abs_len = try tmp_dir.dir.realPathFile(std.testing.io, "canonical.ts", &path_buf);
+    const abs_path = path_buf[0..abs_len];
     const paths = [_][]const u8{abs_path};
 
     var buf: std.ArrayList(u8) = .empty;
