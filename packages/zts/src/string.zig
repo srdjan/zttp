@@ -165,8 +165,7 @@ pub const RopeNode = extern struct {
 
     pub const RopeFlags = packed struct(u8) {
         is_ascii: bool = false,
-        is_flattened: bool = false, // Has been flattened to a JSString
-        _reserved: u6 = 0,
+        _reserved: u7 = 0,
     };
 
     pub const RopeKind = enum(u8) {

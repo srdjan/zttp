@@ -888,11 +888,11 @@ pub const ClosureData = struct {
 
 /// Property descriptor flags
 pub const PropertyFlags = packed struct(u8) {
-    writable: bool = true,
     enumerable: bool = true,
     configurable: bool = true,
-    is_accessor: bool = false,
-    _reserved: u4 = 0,
+    // No writable or is_accessor bit: the subset has no defineProperty to make
+    // a property non-writable, and accessors are rejected at parse time.
+    _reserved: u6 = 0,
 };
 
 // ============================================================================
@@ -1343,11 +1343,12 @@ pub const JSObject = extern struct {
         extensible: bool = true,
         is_exotic: bool = false, // Array, TypedArray, etc.
         is_callable: bool = false,
-        is_constructor: bool = false,
         has_small_array: bool = false, // Dense array optimization
         is_generator: bool = false, // Generator function (function*)
         is_async: bool = false, // Async function (async function)
         is_arena: bool = false, // Allocated from request arena (ephemeral)
+        // `new` is rejected at parse time, so there is no is_constructor bit.
+        _reserved: u1 = 0,
     };
 
     /// Create a new object
