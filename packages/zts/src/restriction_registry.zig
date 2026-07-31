@@ -368,7 +368,11 @@ pub const entries = [_]RestrictionEntry{
         .boundary = "type evidence integrity",
         .nature = .essential,
         .note = "essential to the selected checker model",
-        .enforced_by = &.{ "ZTS041", "ZTS042" },
+        // Stripper codes, measured: ZTS041 `any`, ZTS042 `as`, ZTS043
+        // `satisfies` (json_diagnostics.stripErrorCode). ZTS041 is also the
+        // parser's `nesting_too_deep` code - a collision recorded for a later
+        // phase, not introduced here.
+        .enforced_by = &.{ "ZTS041", "ZTS042", "ZTS043" },
     },
     .{
         .id = "restriction.effectful-ternary",

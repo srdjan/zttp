@@ -15,6 +15,7 @@ const type_checker = zts.type_checker;
 const strict_checker = zts.strict_checker;
 const handler_verifier = zts.handler_verifier;
 const flow_checker = zts.flow_checker;
+const restriction_registry = zts.restriction_registry;
 const handler_contract = zts.handler_contract;
 const writeJsonString = handler_contract.writeJsonString;
 
@@ -675,8 +676,9 @@ const Feature = struct {
     proof_unlocked: ?[]const u8 = null,
 };
 
-const features = [_]Feature{
-    // Allowed
+/// Admitted surface forms. Not restrictions, so spec 12 does not cover them and
+/// they stay a local table.
+const allowed_features = [_]Feature{
     .{ .name = "const", .status = .allowed, .alternative = null },
     .{ .name = "let", .status = .allowed, .alternative = null },
     .{ .name = "function", .status = .allowed, .alternative = null },
@@ -699,168 +701,31 @@ const features = [_]Feature{
     .{ .name = "type guards (x is T)", .status = .allowed, .alternative = null },
     .{ .name = "template literal types", .status = .allowed, .alternative = null },
     .{ .name = "comptime()", .status = .allowed, .alternative = null },
-    // Blocked
-    .{
-        .name = "switch/case",
-        .status = .blocked,
-        .alternative = "use 'match' expression",
-        .blocked_reason = "fallthrough makes coverage ambiguous and lets cases share state through implicit fallthrough.",
-        .failure_class = "non-exhaustive control flow and implicit fallthrough",
-        .proof_unlocked = "match coverage and exhaustive return analysis",
-    },
-    .{
-        .name = "var",
-        .status = .blocked,
-        .alternative = "use 'let' or 'const'",
-        .blocked_reason = "hoisting and function-scoping create temporal dead zones the verifier cannot reason about.",
-        .failure_class = "scope hoisting and temporal dead zones",
-        .proof_unlocked = "block-scoped data flow and reachability analysis",
-    },
-    .{
-        .name = "class",
-        .status = .blocked,
-        .alternative = "use plain objects and functions",
-        .blocked_reason = "implicit mutable receivers hide data flow from the contract extractor.",
-        .failure_class = "implicit mutable receivers and hidden state",
-        .proof_unlocked = "explicit data flow and effect analysis",
-    },
-    .{
-        .name = "while",
-        .status = .blocked,
-        .alternative = "use 'for...of' with a finite collection",
-        .blocked_reason = "unbounded back-edges defeat finite path enumeration.",
-        .failure_class = "unbounded back-edges and non-termination",
-        .proof_unlocked = "finite path enumeration and termination",
-    },
-    .{
-        .name = "do...while",
-        .status = .blocked,
-        .alternative = "use 'for...of' with a finite collection",
-        .blocked_reason = "unbounded back-edges defeat finite path enumeration.",
-        .failure_class = "unbounded back-edges and non-termination",
-        .proof_unlocked = "finite path enumeration and termination",
-    },
-    .{
-        .name = "for(;;)",
-        .status = .blocked,
-        .alternative = "use 'for (const i of range(n))'",
-        .blocked_reason = "C-style loops carry no bound; gen-tests cannot enumerate every iteration.",
-        .failure_class = "unbounded back-edges and non-termination",
-        .proof_unlocked = "finite path enumeration and termination",
-    },
-    .{
-        .name = "for...in",
-        .status = .blocked,
-        .alternative = "use 'for (const k of Object.keys(obj))'",
-        .blocked_reason = "for...in walks the prototype chain; iteration order is implementation-defined.",
-        .failure_class = "prototype-chain iteration and non-deterministic order",
-        .proof_unlocked = "deterministic iteration and shape-stable access",
-    },
-    .{
-        .name = "try/catch",
-        .status = .blocked,
-        .alternative = "use Result types and check .ok",
-        .blocked_reason = "exceptions are an invisible second return channel that bypasses the type system.",
-        .failure_class = "hidden exceptional control flow",
-        .proof_unlocked = "Result narrowing and exhaustive path enumeration",
-    },
-    .{
-        .name = "throw",
-        .status = .blocked,
-        .alternative = "return an error Response",
-        .blocked_reason = "throw is the producer side of the hidden exception channel.",
-        .failure_class = "hidden exceptional control flow",
-        .proof_unlocked = "Result narrowing and exhaustive return analysis",
-    },
-    .{
-        .name = "async/await",
-        .status = .blocked,
-        .alternative = "use fetchSync(), parallel(), race()",
-        .blocked_reason = "ambient scheduling produces interleavings the replay log cannot reproduce.",
-        .failure_class = "ambient scheduling and non-deterministic interleavings",
-        .proof_unlocked = "deterministic effect boundary and replayable I/O",
-    },
-    .{
-        .name = "new",
-        .status = .blocked,
-        .alternative = "use factory functions or object literals",
-        .blocked_reason = "constructor dispatch combined with prototypes hides effects from the IR.",
-        .failure_class = "constructor dispatch and hidden initialization effects",
-        .proof_unlocked = "explicit factory call sites and visible effects",
-    },
-    .{
-        .name = "this",
-        .status = .blocked,
-        .alternative = "use explicit parameter passing",
-        .blocked_reason = "the binding of `this` is dynamic and unreadable from the IR.",
-        .failure_class = "dynamic receiver binding",
-        .proof_unlocked = "static call-graph and visible data flow",
-    },
-    .{
-        .name = "null",
-        .status = .blocked,
-        .alternative = "use undefined",
-        .blocked_reason = "two absent-value sentinels split optional narrowing into two incompatible lattices.",
-        .failure_class = "dual absent-value sentinels",
-        .proof_unlocked = "optional-narrowing proof totality",
-    },
-    .{
-        .name = "== / !=",
-        .status = .blocked,
-        .alternative = "use === / !==",
-        .blocked_reason = "loose equality coerces operands, creating control-flow paths the type checker cannot see.",
-        .failure_class = "implicit coercion paths",
-        .proof_unlocked = "sound type-directed comparison",
-    },
-    .{
-        .name = "++ / --",
-        .status = .blocked,
-        .alternative = "use x = x + 1",
-        .blocked_reason = "in-place mutation hides write effects in expression positions.",
-        .failure_class = "hidden in-place mutation in expressions",
-        .proof_unlocked = "explicit assignment effects and state isolation",
-    },
-    .{
-        .name = "regex",
-        .status = .blocked,
-        .alternative = "use string methods (includes, startsWith, etc.)",
-        .blocked_reason = "regex literals describe an opaque accept set the validator cannot reason about.",
-        .failure_class = "opaque accept set and catastrophic backtracking",
-        .proof_unlocked = "shape-checkable validation via zttp:validate schemas",
-    },
-    .{
-        .name = "delete",
-        .status = .blocked,
-        .alternative = "build a new object literal with only the keys you keep",
-        .blocked_reason = "delete mutates hidden-class shape, defeating shape-stable property access.",
-        .failure_class = "hidden-class shape mutation",
-        .proof_unlocked = "shape-stable property access",
-    },
-    .{
-        .name = "enum",
-        .status = .blocked,
-        .alternative = "use object literals or discriminated unions",
-        .blocked_reason = "TS enums emit dual numeric/string lookups that bypass exhaustive match checking.",
-        .failure_class = "dual numeric/string lookup and non-exhaustive cases",
-        .proof_unlocked = "exhaustive match coverage on discriminated unions",
-    },
-    .{
-        .name = "decorator (@)",
-        .status = .blocked,
-        .alternative = "use function composition",
-        .blocked_reason = "decorators rewrite their target at runtime in ways the contract extractor cannot trace.",
-        .failure_class = "implicit metaprogramming and target rewriting",
-        .proof_unlocked = "static call-graph and visible effect composition",
-    },
-    .{
-        .name = "namespace",
-        .status = .blocked,
-        .alternative = "use ES6 modules",
-        .blocked_reason = "TS namespaces compile to closures with mutable internals invisible to the module graph.",
-        .failure_class = "module-graph blind spots",
-        .proof_unlocked = "AST-driven contract extraction",
-    },
 };
+
+/// Refused surface forms, projected from the section-12 restriction matrix.
+/// Spec 12 owns the rows; this file owns only the frozen v1 wire shape, so the
+/// projection emits exactly the rows the v1 table published, in registry order,
+/// with the registry's strings.
+const blocked_features = blk: {
+    var out: [restriction_registry.v1_count]Feature = undefined;
+    var n: usize = 0;
+    for (restriction_registry.entries) |entry| {
+        const name = entry.v1_feature_name orelse continue;
+        out[n] = .{
+            .name = name,
+            .status = .blocked,
+            .alternative = entry.alternative,
+            .blocked_reason = entry.note,
+            .failure_class = entry.failure_class,
+            .proof_unlocked = entry.proof_unlocked,
+        };
+        n += 1;
+    }
+    break :blk out;
+};
+
+const features = allowed_features ++ blocked_features;
 
 // Comptime assertion: every blocked feature must populate `alternative`,
 // `blocked_reason`, `failure_class`, and `proof_unlocked`. Allowed features
@@ -1184,6 +1049,31 @@ test "fromParseError: expected token uses expected field" {
     const diag = fromParseError(err, "handler.ts");
     try std.testing.expectEqualStrings("ZTS003", diag.code);
     try std.testing.expectEqualStrings("';'", diag.suggestion.?);
+}
+
+test "blocked features project from the restriction registry" {
+    var blocked: usize = 0;
+    for (features) |f| {
+        if (f.status != .blocked) continue;
+        blocked += 1;
+        const entry = blk: {
+            for (&restriction_registry.entries) |*e| {
+                const name = e.v1_feature_name orelse continue;
+                if (std.mem.eql(u8, name, f.name)) break :blk e;
+            }
+            std.debug.print("blocked feature {s} has no registry row\n", .{f.name});
+            return error.TestUnexpectedResult;
+        };
+        try std.testing.expectEqualStrings(entry.note, f.blocked_reason.?);
+        try std.testing.expectEqualStrings(entry.alternative.?, f.alternative.?);
+        try std.testing.expectEqualStrings(entry.failure_class.?, f.failure_class.?);
+        try std.testing.expectEqualStrings(entry.proof_unlocked.?, f.proof_unlocked.?);
+    }
+    try std.testing.expectEqual(@as(usize, 20), blocked);
+    // Order is part of the frozen v1 wire shape: the registry's v1 rows come
+    // out in registry order, after every allowed row.
+    try std.testing.expectEqualStrings("switch/case", features[allowed_features.len].name);
+    try std.testing.expectEqualStrings("namespace", features[features.len - 1].name);
 }
 
 test "writeRestrictionsJson includes canonical entries" {
