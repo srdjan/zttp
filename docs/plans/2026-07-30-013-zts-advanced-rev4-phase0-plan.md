@@ -300,13 +300,20 @@ git add -A && git commit -m "feat(checker): admit pure ternary, reject impure an
 - Consumes: `type_pool.zig:1058` `isAssignableTo` as the D1-interim assignability.
 - Produces: ternary expressions get type `join(then, else)` per spec 5.4 steps 1-5; step 3 = when mutually assignable use the `whenTrue` type; step 5 = the pool's existing union constructor. Later phases replace the relation, not the join shape.
 
-- [ ] **Step 1: Write failing tests** (mirror the harness used by the distinct-type tests — read them first, reuse their setup helper):
+- [x] **Step 1: Write failing tests** (mirror the harness used by the distinct-type tests — read them first, reuse their setup helper):
 
 ```zig
 test "ternary join: identical types" {
     // const x = cond ? 1 : 2;  -> number
     // assert inferred type of x is number
 }
+
+// CORRECTION, 2026-07-31: `cond ? 1 : 2` is `1 | 2`, not `number`. The checker
+// gives an integer literal its own literal type, so `1` and `2` are distinct
+// and neither is assignable to the other: step 5 applies, not step 2, and
+// widening to `number` would discard information the checker holds. Both
+// outcomes are now pinned - step 2 by a test over two `string` bindings, step 5
+// by this literal case.
 
 test "ternary join: literal widens into receiving branch type" {
     // const s = cond ? "a" : someString;  -> string (step 4: literal assignable to string)
@@ -319,9 +326,9 @@ test "ternary join: disjoint types form a union" {
 
 Write these as real tests against the checker harness: each parses a snippet, runs the type checker, and asserts the pool type of the binding. Copy the exact setup from the nearest existing inference test; the three snippets and three expected types above are the deliverable.
 
-- [ ] **Step 2: Run, expect FAIL** (current behavior: whatever the checker does today for ternary — likely `unknown` or the then-branch type).
+- [x] **Step 2: Run, expect FAIL** (current behavior: whatever the checker does today for ternary — likely `unknown` or the then-branch type).
 
-- [ ] **Step 3: Implement `joinTypes`** in `type_checker.zig`:
+- [x] **Step 3: Implement `joinTypes`** in `type_checker.zig`:
 
 ```zig
 // Spec 5.4 join, steps 1-5. D1-interim: mutual assignability uses
@@ -347,11 +354,11 @@ fn joinTypes(self: *TypeChecker, when_true: TypeIndex, when_false: TypeIndex) Ty
 
 Adjust names to the pool's real API (`isNever`, `makeUnion` — grep `type_pool.zig` for the union constructor and never checks; if `isNever` does not exist, compare against the pool's never index constant the way `null_type_idx` is used). Wire it into the expression-typing `.ternary` arm: type the condition (assert boolean where the checker enforces operand types), type both branches, return `joinTypes`.
 
-- [ ] **Step 4: Run tests, expect PASS.** `zig build test-zts -- --test-filter "ternary join"`
+- [x] **Step 4: Run tests, expect PASS.** `zig build test-zts -- --test-filter "ternary join"`
 
-- [ ] **Step 5: Full suite.** `zig build test-zts` — fix regressions (most likely: code paths that assumed ternary was rejected upstream).
+- [x] **Step 5: Full suite.** `zig build test-zts` — fix regressions (most likely: code paths that assumed ternary was rejected upstream).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 zig fmt packages/zts/src/type_checker.zig

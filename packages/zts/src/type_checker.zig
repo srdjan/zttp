@@ -1163,6 +1163,47 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     /// Infer the TypeIndex of an expression. Returns null_type_idx for unknown.
+    /// The deterministic join of spec 5.4, steps 1-5. It types `?:`, and
+    /// anything else that has to pick one type for two branches.
+    ///
+    /// D1-interim: step 2's "syntactically identical" is index equality and
+    /// steps 3-4 use `type_pool.isAssignableTo` in both directions. The type
+    /// pool does not intern, so index equality is narrower than the canonical
+    /// type identity D1 specifies - two structurally identical types can hold
+    /// different indices. Step 3 covers that gap for now, since such a pair is
+    /// mutually assignable and resolves to the `whenTrue` branch either way.
+    /// Replace the relation when D1 lands; the join's shape does not change.
+    pub fn joinTypes(self: *const TypeChecker, when_true: TypeIndex, when_false: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+
+        // Outside the spec's join, which assumes both branches type: an
+        // un-inferred branch contributes nothing, so defer to the other side
+        // rather than widening the result to a union with a hole in it.
+        if (when_true == null_type_idx) return when_false;
+        if (when_false == null_type_idx) return when_true;
+
+        // 1. Remove `never`.
+        if (when_true == pool.idx_never) return when_false;
+        if (when_false == pool.idx_never) return when_true;
+
+        // 2. Syntactically identical.
+        if (when_true == when_false) return when_true;
+
+        const true_to_false = pool.isAssignableTo(when_true, when_false);
+        const false_to_true = pool.isAssignableTo(when_false, when_true);
+
+        // 3. Mutually assignable: the whenTrue branch wins. A syntactic rule, so
+        //    a reader reaches it without a type-identity oracle.
+        if (true_to_false and false_to_true) return when_true;
+
+        // 4. Assignable one way only: the receiving type wins.
+        if (true_to_false) return when_false;
+        if (false_to_true) return when_true;
+
+        // 5. Otherwise the normalized union.
+        return pool.addUnion(self.allocator, &.{ when_true, when_false });
+    }
+
     pub fn inferType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         self.env.pool.ensureHealthy() catch return null_type_idx;
         if (node == null_node) return null_type_idx;
@@ -1197,13 +1238,10 @@ pub const TypeChecker = struct {
 
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return null_type_idx;
-                const then_type = self.inferType(t.then_branch);
-                const else_type = self.inferType(t.else_branch);
-                if (then_type == else_type) return then_type;
-                if (then_type == null_type_idx) return else_type;
-                if (else_type == null_type_idx) return then_type;
-                // If both are known but different, create a union
-                return pool.addUnion(self.allocator, &.{ then_type, else_type });
+                return self.joinTypes(
+                    self.inferType(t.then_branch),
+                    self.inferType(t.else_branch),
+                );
             },
 
             .identifier => {
@@ -2264,6 +2302,109 @@ test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
 
 fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     try checkTypedSourceWithServiceContext(source, null, expect_errors, expect_warnings);
+}
+
+/// Type the first ternary in `source` and render the result into `buf`. The
+/// rendering is returned rather than the `TypeIndex` because the pool dies with
+/// this function, so an index would dangle.
+fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
+    const allocator = std.testing.allocator;
+
+    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer checker.deinit();
+    _ = try checker.check(root);
+
+    var node: NodeIndex = 0;
+    while (node < ir_view.nodeCount()) : (node += 1) {
+        const tag = ir_view.getTag(node) orelse continue;
+        if (tag != .ternary) continue;
+        return pool.formatType(checker.inferType(node), buf);
+    }
+    return error.NoTernaryInSource;
+}
+
+test "ternary join: identical branch types collapse to that type" {
+    var buf: [128]u8 = undefined;
+    const rendered = try formatFirstTernaryType(
+        "function handler(req: Request): Response { const a: string = req.url; const b: string = req.method; const v = req.method === \"GET\" ? a : b; return Response.text(v); }",
+        &buf,
+    );
+    // Step 2: both branches are `string`, so the join is `string` and no union
+    // is formed.
+    try std.testing.expectEqualStrings("string", rendered);
+}
+
+test "ternary join: distinct literal branches form a literal union" {
+    var buf: [128]u8 = undefined;
+    const rendered = try formatFirstTernaryType(
+        "function handler(req: Request): Response { const x = req.method === \"GET\" ? 1 : 2; return Response.json({ x }); }",
+        &buf,
+    );
+    // Step 5, not step 2: `1` and `2` are distinct literal types and neither is
+    // assignable to the other, so the join is their union rather than `number`.
+    // Widening to `number` would discard information the checker holds.
+    try std.testing.expectEqualStrings("1 | 2", rendered);
+}
+
+test "ternary join: a literal widens into the receiving branch type" {
+    var buf: [128]u8 = undefined;
+    const rendered = try formatFirstTernaryType(
+        "function handler(req: Request): Response { const s: string = req.url; const v = req.method === \"GET\" ? \"a\" : s; return Response.text(v); }",
+        &buf,
+    );
+    // Step 4: the string literal is assignable to string but not the reverse,
+    // so the receiving type wins.
+    try std.testing.expectEqualStrings("string", rendered);
+}
+
+test "ternary join: disjoint branch types form a union" {
+    var buf: [128]u8 = undefined;
+    const rendered = try formatFirstTernaryType(
+        "function handler(req: Request): Response { const u = req.method === \"GET\" ? 1 : \"a\"; return Response.json({ u }); }",
+        &buf,
+    );
+    // Step 5: nothing relates number and string, so the join is their union.
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "|") != null);
+}
+
+test "ternary join: never on one side is removed" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    var node_list = ir.NodeList.init(allocator);
+    defer node_list.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+    const view = ir.IrView.fromNodeList(&node_list, &constants);
+
+    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    defer checker.deinit();
+
+    // Step 1, both directions, plus the both-never case.
+    try std.testing.expectEqual(pool.idx_number, checker.joinTypes(pool.idx_never, pool.idx_number));
+    try std.testing.expectEqual(pool.idx_number, checker.joinTypes(pool.idx_number, pool.idx_never));
+    try std.testing.expectEqual(pool.idx_never, checker.joinTypes(pool.idx_never, pool.idx_never));
 }
 
 fn checkTypedSourceWithServiceContext(
