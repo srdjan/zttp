@@ -92,7 +92,6 @@ pub const AutoloopVerdict = enum {
     exhausted_time,
     stalled,
     regression_blocked,
-    tool_failed,
     /// User requested cancellation (Ctrl-C) and the autoloop returned
     /// at the next phase boundary. Distinct from achieved and stalled
     /// because the property may be in any state - the run was cut

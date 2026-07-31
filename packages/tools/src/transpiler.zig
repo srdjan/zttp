@@ -27,7 +27,6 @@ pub const ZigType = enum {
     string_type,
     optional_string_type,
     jsvalue_type,
-    void_type,
 };
 
 /// Information about a local variable
