@@ -1247,13 +1247,6 @@ pub const HandlerInstance = struct {
         }
     }
 
-    /// Serialize bytecode for caching (Phase 1b: cache miss path)
-    pub fn serializeBytecode(self: *Self, func: *const zq.FunctionBytecode, buffer: []u8) ![]const u8 {
-        var writer = bytecode_cache.SliceWriter{ .buffer = buffer };
-        try bytecode_cache.serializeFunctionBytecode(func, &writer, self.allocator);
-        return writer.getWritten();
-    }
-
     /// Arm the per-request execution deadline on this runtime's context.
     /// No-op when request_timeout_ms == 0.
     pub fn armRequestDeadline(self: *Self) void {

@@ -150,24 +150,6 @@ pub fn parseRequestLineBorrowed(request_line: []const u8, max_url_length: usize)
     };
 }
 
-pub fn parseHeadersFromLines(
-    allocator: std.mem.Allocator,
-    max_headers: usize,
-    storage: []u8,
-    offset: *usize,
-    headers: *std.ArrayListUnmanaged(HttpHeader),
-    fast_slots: *FastHeaderSlots,
-    line_source: anytype,
-) !void {
-    var header_count: usize = 0;
-    while (try line_source.next()) |line| {
-        if (line.len == 0) break;
-        if (header_count >= max_headers) return error.TooManyHeaders;
-        try processHeaderLine(line, storage, offset, headers, allocator, fast_slots);
-        header_count += 1;
-    }
-}
-
 pub fn parseHeadersFromLinesBorrowed(
     allocator: std.mem.Allocator,
     max_headers: usize,

@@ -234,10 +234,6 @@ pub const ValidatedRuntimeContract = struct {
         return self.inner.durable_workflow_properties;
     }
 
-    pub fn costCeilings(self: *const ValidatedRuntimeContract, body_limit_bytes: usize) ?CostCeilings {
-        return deriveCostCeilings(self.inner.cost_envelope, @intCast(body_limit_bytes));
-    }
-
     pub fn websocket(self: *const ValidatedRuntimeContract) WebSocketInfo {
         return self.inner.websocket;
     }

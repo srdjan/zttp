@@ -105,14 +105,6 @@ pub fn executeHandlerBorrowedCapturingFault(
     return pool.executeHandlerBorrowedCapturingFault(request, fault_out);
 }
 
-pub fn poolInUse(pool: *const HandlerPool) usize {
-    return pool.getInUse();
-}
-
-pub fn poolCapacity(pool: *const HandlerPool) usize {
-    return pool.max_size;
-}
-
 test "a type fault leaves its source line on the runtime for the pool to copy out" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

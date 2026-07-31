@@ -106,24 +106,6 @@ fn advanceIovecCursor(remaining: []std.posix.iovec_const, first_offset: usize, w
     return .{ .remaining = rem, .first_offset = off };
 }
 
-/// Returns true for network errors that are expected during normal operation.
-/// These include client disconnects, timeouts, and connection resets which
-/// occur naturally under load and should not be logged at error level.
-pub fn isExpectedNetworkError(err: anyerror) bool {
-    return switch (err) {
-        error.Canceled,
-        error.RequestTimedOut,
-        error.EndOfStream,
-        error.ConnectionResetByPeer,
-        error.BrokenPipe,
-        error.ConnectionRefused,
-        error.ReadFailed,
-        error.WriteFailed,
-        => true,
-        else => false,
-    };
-}
-
 pub fn defaultPoolSize() usize {
     const cpu_count = std.Thread.getCpuCount() catch 1;
     const min_pool: usize = 8;

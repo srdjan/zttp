@@ -230,13 +230,6 @@ pub const HandlerPool = struct {
         return self;
     }
 
-    /// Set embedded bytecode (precompiled at build time)
-    /// When set, this bytecode is used directly without parsing.
-    /// Note: For proper prewarm, use initWithEmbedded instead.
-    pub fn setEmbeddedBytecode(self: *Self, bytecode: []const u8) void {
-        self.embedded_bytecode = bytecode;
-    }
-
     pub fn deinit(self: *Self) void {
         self.pool.deinit();
         self.cache.deinit();
@@ -443,59 +436,8 @@ pub const HandlerPool = struct {
         return last_err orelse error.HandlerNotCallable;
     }
 
-    /// Execute handler on a worker-pinned runtime lease.
-    /// The caller must keep the lease alive until any borrowed response data
-    /// has been sent, then release it with lease.deinit().
-    pub fn executeHandlerBorrowedLeased(self: *Self, lease: *WorkerRuntimeLease, request: HttpRequestView) !HttpResponse {
-        const request_id = self.nextRequestId();
-        var exec_timer: ?compat.Timer = null;
-        if (collect_pool_metrics) {
-            exec_timer = compat.Timer.start() catch null;
-        }
-        defer if (collect_pool_metrics) {
-            if (exec_timer) |*t| self.recordExec(t.read());
-        };
-
-        var attempt: u8 = 0;
-        var last_err: ?anyerror = null;
-        while (attempt < 2) : (attempt += 1) {
-            const response = self.callHandlerGuarded(lease.runtime, request, request_id, true) catch |err| {
-                if (err == error.HandlerPanicked) {
-                    // Lease path: panic during WebSocket frame - close the connection.
-                    self.quarantineLeasedRuntime(lease);
-                    return err;
-                }
-                if (err == error.RequestTimeout) {
-                    _ = self.timeouts.fetchAdd(1, .monotonic);
-                    std.log.warn("Leased handler timed out after {d}ms, invalidating runtime", .{self.config.request_timeout_ms});
-                    self.recycleLeasedRuntime(lease);
-                    return err;
-                }
-                if (isHandlerInvalid(err)) {
-                    std.log.warn("Leased runtime invalid, rebuilding (err={})", .{err});
-                    self.invalidateRuntime(lease.base_rt);
-                    lease.runtime = try self.ensureRuntime(lease.base_rt);
-                    last_err = err;
-                    continue;
-                }
-                return err;
-            };
-            return response;
-        }
-        return last_err orelse error.HandlerNotCallable;
-    }
-
     pub fn getInUse(self: *const Self) usize {
         return self.in_use.load(.acquire);
-    }
-
-    /// Get cache statistics
-    pub fn getCacheStats(self: *const Self) struct { hits: u64, misses: u64, hit_rate: f64 } {
-        return .{
-            .hits = self.cache.hits.load(.monotonic),
-            .misses = self.cache.misses.load(.monotonic),
-            .hit_rate = self.cache.hitRate(),
-        };
     }
 
     /// Context for parallel prewarm workers
