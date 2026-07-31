@@ -364,6 +364,14 @@ const strict_meta = [_]struct {
         .help = "Drop the literal comparison and use the boolean directly: `if (ready) { ... }` (or `if (!ready)` for `=== false`).",
         .repair = .drop_redundant_bool_compare,
     },
+    .{
+        .kind = .mutable_live_iteration,
+        .code = "ZTS622",
+        .description = "A for-of body mutates the collection the loop is iterating.",
+        .example = "for (const x of xs) { xs.push(x); }",
+        .help = "Iterate a snapshot: read from one collection and build the mutated one separately.",
+        .repair = null,
+    },
 };
 
 // ---------------------------------------------------------------------------

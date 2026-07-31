@@ -2277,6 +2277,22 @@ pub const Parser = struct {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'RegExp' is not supported; use string methods instead");
                 return error.ParseError;
             }
+            // Dynamic code and reflection: the program must be closed for the
+            // analyzers to see every call. `new Proxy(...)` was already
+            // rejected as `new`, and `import(...)` as an unexpected token, but
+            // these three names were admitted.
+            if (std.mem.eql(u8, name, "eval")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'eval' is not supported; call a named function instead");
+                return error.ParseError;
+            }
+            if (std.mem.eql(u8, name, "Proxy")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'Proxy' is not supported; use plain objects and explicit functions instead");
+                return error.ParseError;
+            }
+            if (std.mem.eql(u8, name, "Reflect")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "'Reflect' is not supported; access properties directly instead");
+                return error.ParseError;
+            }
         }
 
         self.advance();
@@ -2468,14 +2484,17 @@ pub const Parser = struct {
 
                         const key_idx = try self.addString(key.text(self.source));
                         key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
-                    } else if (self.check(.string_literal) or self.check(.number)) {
+                    } else if (self.check(.number)) {
+                        // One keyed-collection model: a record has string keys.
+                        // A numeric key parses to the same string key, so the
+                        // two spellings would be indistinguishable downstream.
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "numeric record keys are not supported; use a string key or a number-keyed Dict instead");
+                        return error.ParseError;
+                    } else if (self.check(.string_literal)) {
                         const key = self.current;
                         self.advance();
                         const text = key.text(self.source);
-                        const content = if (key.type == .string_literal and text.len >= 2)
-                            text[1 .. text.len - 1]
-                        else
-                            text;
+                        const content = if (text.len >= 2) text[1 .. text.len - 1] else text;
                         const key_idx = try self.addString(content);
                         key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
                     } else if (self.isKeyword(self.current.type)) {
@@ -2490,49 +2509,34 @@ pub const Parser = struct {
                         break;
                     }
 
-                    // Method shorthand or getter/setter
+                    // Method shorthand or getter/setter. All three are
+                    // rejected: codegen emits only `.object_property` and
+                    // `.object_spread`, so a parsed method was silently
+                    // dropped from the object it appeared in.
                     if (self.check(.lparen)) {
-                        const method_flags = FunctionFlags{
-                            .is_method = true,
-                            .is_getter = prop_kind == .object_getter,
-                            .is_setter = prop_kind == .object_setter,
+                        const message = switch (prop_kind) {
+                            .object_getter => "object getters are not supported; use an explicit function call instead",
+                            .object_setter => "object setters are not supported; use an explicit function call instead",
+                            else => "object methods are not supported; use a property holding an arrow function instead",
                         };
-                        const method_body = try self.parseFunctionBody(0, method_flags);
-
-                        const tag: NodeTag = switch (prop_kind) {
-                            .object_getter => .object_getter,
-                            .object_setter => .object_setter,
-                            else => .object_method,
-                        };
-
-                        const prop_node = try self.nodes.add(.{
-                            .tag = tag,
-                            .loc = prop_loc,
-                            .data = .{ .property = .{
-                                .key = key_node,
-                                .value = method_body,
-                                .is_computed = is_computed,
-                                .is_shorthand = false,
-                            } },
-                        });
-                        try properties.append(properties_alloc, prop_node);
-                    } else {
-                        // Regular property
-                        try self.expect(.colon, "':'");
-                        const value = try self.parseExpression(.assignment);
-
-                        const prop_node = try self.nodes.add(.{
-                            .tag = .object_property,
-                            .loc = prop_loc,
-                            .data = .{ .property = .{
-                                .key = key_node,
-                                .value = value,
-                                .is_computed = is_computed,
-                                .is_shorthand = is_shorthand,
-                            } },
-                        });
-                        try properties.append(properties_alloc, prop_node);
+                        self.errors.addErrorAt(.unsupported_feature, self.current, message);
+                        return error.ParseError;
                     }
+
+                    try self.expect(.colon, "':'");
+                    const value = try self.parseExpression(.assignment);
+
+                    const prop_node = try self.nodes.add(.{
+                        .tag = .object_property,
+                        .loc = prop_loc,
+                        .data = .{ .property = .{
+                            .key = key_node,
+                            .value = value,
+                            .is_computed = is_computed,
+                            .is_shorthand = is_shorthand,
+                        } },
+                    });
+                    try properties.append(properties_alloc, prop_node);
                 }
 
                 if (!self.match(.comma)) break;

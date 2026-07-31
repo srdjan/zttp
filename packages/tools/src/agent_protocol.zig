@@ -1752,7 +1752,12 @@ test "restrictions publishes the rows nothing enforces as unenforced" {
             try testing.expect(note == .null);
         }
     }
-    try testing.expect(unenforced >= 6);
+    // Three rows remain: `restriction.unchecked-recursion` (not a rejection by
+    // design), `restriction.unbound-native-module` (enforced outside the rule
+    // registry), and `restriction.interface` (blocked on the migration policy
+    // the D workstream owes). An exact count, so closing or opening a gap has
+    // to come here and say which.
+    try testing.expectEqual(@as(usize, 3), unenforced);
 }
 
 test "features publishes both halves and links refused forms to the matrix" {

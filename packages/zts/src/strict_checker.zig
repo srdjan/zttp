@@ -84,6 +84,7 @@ pub const DiagnosticKind = enum {
     non_exhaustive_profile_match,
     avoidable_let,
     computed_property_access,
+    mutable_live_iteration,
     canonical_arrow_helper,
     canonical_export_function_const,
     canonical_public_helper_effects,
@@ -346,6 +347,7 @@ pub const StrictChecker = struct {
                     });
                 }
                 self.checkUnusedIndexAlias(node, for_iter);
+                self.checkLiveMutation(node, for_iter);
                 self.walkExpr(for_iter.iterable);
                 self.walkStmt(for_iter.body);
             },
@@ -854,6 +856,137 @@ pub const StrictChecker = struct {
     fn boolLiteralValue(self: *const StrictChecker, node: NodeIndex) ?bool {
         if (self.ir_view.getTag(node) != .lit_bool) return null;
         return self.ir_view.getBoolValue(node);
+    }
+
+    /// Spec 12: mutable live iteration is replaced by snapshot iteration. A
+    /// `for-of` body that mutates the collection it iterates changes the
+    /// loop's own trip count, so neither finiteness nor cost is a property of
+    /// the loop head. Only a directly named collection is checked: the
+    /// iterable has to be an identifier for the body reference to be the same
+    /// collection rather than a fresh one.
+    fn checkLiveMutation(self: *StrictChecker, node: NodeIndex, for_iter: ir.Node.ForIterStmt) void {
+        if (self.ir_view.getTag(for_iter.iterable) != .identifier) return;
+        const target = self.ir_view.getBinding(for_iter.iterable) orelse return;
+        if (!self.scanLiveMutation(for_iter.body, target)) return;
+
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .mutable_live_iteration,
+            .node = node,
+            .message = "the collection being iterated is mutated inside the loop",
+            .help = "iterate a snapshot instead: bind the collection you are reading, and build the mutated one separately",
+        });
+    }
+
+    /// Depth-first search for an in-place mutation of `target`. Mirrors
+    /// `scanBindingRead`'s descent; the two differ only in what they look for
+    /// at each node.
+    fn scanLiveMutation(self: *const StrictChecker, node: NodeIndex, target: ir.BindingRef) bool {
+        if (node == null_node) return false;
+        if (self.isLiveMutationOf(node, target)) return true;
+        const tag = self.ir_view.getTag(node) orelse return false;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return false;
+                for (0..block.stmts_count) |i| {
+                    if (self.scanLiveMutation(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), target)) return true;
+                }
+                return false;
+            },
+            .var_decl, .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return false;
+                return self.scanLiveMutation(decl.init, target);
+            },
+            .function_expr, .arrow_function => {
+                const func = self.ir_view.getFunction(node) orelse return false;
+                return self.scanLiveMutation(func.body, target);
+            },
+            .if_stmt => {
+                const if_stmt = self.ir_view.getIfStmt(node) orelse return false;
+                return self.scanLiveMutation(if_stmt.condition, target) or
+                    self.scanLiveMutation(if_stmt.then_branch, target) or
+                    self.scanLiveMutation(if_stmt.else_branch, target);
+            },
+            .for_of_stmt => {
+                const inner = self.ir_view.getForIter(node) orelse return false;
+                return self.scanLiveMutation(inner.iterable, target) or
+                    self.scanLiveMutation(inner.body, target);
+            },
+            .return_stmt, .expr_stmt => {
+                const value = self.ir_view.getOptValue(node) orelse return false;
+                return self.scanLiveMutation(value, target);
+            },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return false;
+                return self.scanLiveMutation(bin.left, target) or self.scanLiveMutation(bin.right, target);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return false;
+                return self.scanLiveMutation(un.operand, target);
+            },
+            .ternary => {
+                const tern = self.ir_view.getTernary(node) orelse return false;
+                return self.scanLiveMutation(tern.condition, target) or
+                    self.scanLiveMutation(tern.then_branch, target) or
+                    self.scanLiveMutation(tern.else_branch, target);
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return false;
+                return self.scanLiveMutation(assign.value, target);
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return false;
+                if (self.scanLiveMutation(call.callee, target)) return true;
+                for (0..call.args_count) |i| {
+                    if (self.scanLiveMutation(self.ir_view.getListIndex(call.args_start, @intCast(i)), target)) return true;
+                }
+                return false;
+            },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(node) orelse return false;
+                if (self.scanLiveMutation(match.discriminant, target)) return true;
+                for (0..match.arms_count) |i| {
+                    const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    if (self.scanLiveMutation(arm.body, target)) return true;
+                }
+                return false;
+            },
+            else => return false,
+        }
+    }
+
+    /// True when `node` mutates `target` in place: a mutating array method
+    /// called on it, or an assignment through one of its members
+    /// (`xs[i] = v`, `xs.length = 0`).
+    fn isLiveMutationOf(self: *const StrictChecker, node: NodeIndex, target: ir.BindingRef) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        switch (tag) {
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return false;
+                if (self.ir_view.getTag(call.callee) != .member_access) return false;
+                const member = self.ir_view.getMember(call.callee) orelse return false;
+                if (!self.isBindingReference(member.object, target)) return false;
+                const name = self.resolveAtomName(member.property) orelse return false;
+                return isArrayMutator(name);
+            },
+            .assignment => {
+                const assign = self.ir_view.getAssignment(node) orelse return false;
+                const target_tag = self.ir_view.getTag(assign.target) orelse return false;
+                // `xs[i] = v` is `.computed_access`, `xs.length = 0` is
+                // `.member_access`. Both write through the binding.
+                if (target_tag != .member_access and target_tag != .computed_access) return false;
+                const member = self.ir_view.getMember(assign.target) orelse return false;
+                return self.isBindingReference(member.object, target);
+            },
+            else => return false,
+        }
+    }
+
+    fn isBindingReference(self: *const StrictChecker, node: NodeIndex, target: ir.BindingRef) bool {
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        return binding.scope_id == target.scope_id and binding.slot == target.slot;
     }
 
     /// True when `node` is `<expr>.entries()` with no arguments.
@@ -1436,6 +1569,24 @@ fn isKnownGlobalFunction(name: []const u8) bool {
     return false;
 }
 
+fn isArrayMutator(name: []const u8) bool {
+    const names = [_][]const u8{
+        "copyWithin",
+        "fill",
+        "pop",
+        "push",
+        "reverse",
+        "shift",
+        "sort",
+        "splice",
+        "unshift",
+    };
+    for (names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
 fn bindingKey(binding: ir.BindingRef) u32 {
     return bool_checker.packBindingKey(binding.scope_id, binding.slot);
 }
@@ -1461,6 +1612,36 @@ test "missing_public_annotation fires once for an exported function" {
     var checker = try checkSource("export function handler(req) { return Response.json({ok: true}); }");
     defer checker.deinit();
     try testing.expectEqual(@as(usize, 1), countKind(&checker, .missing_public_annotation));
+}
+
+test "mutable_live_iteration fires when the loop pushes to the collection it reads" {
+    var checker = try checkSource("function handler(req) { const xs = [1,2]; for (const x of xs) { xs.push(x); } return Response.json({}); }");
+    defer checker.deinit();
+    try testing.expectEqual(@as(usize, 1), countKind(&checker, .mutable_live_iteration));
+}
+
+test "mutable_live_iteration fires on an indexed write to the iterated collection" {
+    var checker = try checkSource("function handler(req) { const xs = [1,2]; for (const x of xs) { xs[0] = x; } return Response.json({}); }");
+    defer checker.deinit();
+    try testing.expectEqual(@as(usize, 1), countKind(&checker, .mutable_live_iteration));
+}
+
+test "mutable_live_iteration fires from a nested statement in the loop body" {
+    var checker = try checkSource("function handler(req) { const xs = [1,2]; for (const x of xs) { if (x > 1) { xs.pop(); } } return Response.json({}); }");
+    defer checker.deinit();
+    try testing.expectEqual(@as(usize, 1), countKind(&checker, .mutable_live_iteration));
+}
+
+test "mutable_live_iteration does not fire when a different collection is built" {
+    var checker = try checkSource("function handler(req) { const xs = [1,2]; const ys = []; for (const x of xs) { ys.push(x); } return Response.json({}); }");
+    defer checker.deinit();
+    try testing.expectEqual(@as(usize, 0), countKind(&checker, .mutable_live_iteration));
+}
+
+test "mutable_live_iteration does not fire on a read of the iterated collection" {
+    var checker = try checkSource("function handler(req) { const xs = [1,2]; for (const x of xs) { const n = xs.length; } return Response.json({}); }");
+    defer checker.deinit();
+    try testing.expectEqual(@as(usize, 0), countKind(&checker, .mutable_live_iteration));
 }
 
 test "missing_public_annotation count is the same exported and not" {

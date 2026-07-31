@@ -336,7 +336,12 @@ pub const entries = [_]RestrictionEntry{
         .boundary = "closed program and semantics coverage",
         .nature = .essential,
         .note = "essential until a closed dynamic-code model exists",
-        .unenforced_note = "partial: `new Proxy({}, {})` is rejected as `new` (ZTS001), but eval is admitted - measured 2026-07-31, `eval(\"1\")` yields only ZTS600 implicit-unknown and no rejection.",
+        // `eval`, `Proxy`, and `Reflect` join the removed-global list the
+        // parser already applied to `Promise` and `RegExp`; a user-declared
+        // binding of the same name is still admitted. `import(...)` is
+        // rejected as an unexpected token (ZTS002), and `new Proxy(...)` as
+        // `new`, both before this row's names are reached.
+        .enforced_by = &.{ "ZTS001", "ZTS002" },
     },
     .{
         .id = "restriction.mutable-live-iteration",
@@ -344,7 +349,9 @@ pub const entries = [_]RestrictionEntry{
         .boundary = "loop finiteness and stable cost",
         .nature = .replaced,
         .note = "replaced by snapshot iteration",
-        .unenforced_note = "measured 2026-07-31: `xs.push(x)` inside `for (const x of xs)` produces no diagnostic.",
+        // Reaches a directly named collection only: the iterable has to be an
+        // identifier for a body reference to name the same collection.
+        .enforced_by = &.{"ZTS622"},
     },
     .{
         .id = "restriction.unchecked-recursion",
@@ -412,7 +419,10 @@ pub const entries = [_]RestrictionEntry{
         .boundary = "one keyed-collection model",
         .nature = .canonical_simplicity,
         .note = "canonical simplicity; use a string key or a number-keyed `Dict`",
-        .unenforced_note = "measured 2026-07-31: `{1: \"a\"}` produces no diagnostic.",
+        // Rejected at the key, not by a canonical ZTS6xx rule: a numeric key
+        // parsed to the same string key as `{"1": ...}`, so no later pass
+        // could tell the two spellings apart.
+        .enforced_by = &.{"ZTS001"},
     },
     .{
         .id = "restriction.multiple-record-spreads",
@@ -444,7 +454,10 @@ pub const entries = [_]RestrictionEntry{
         .boundary = "explicit functions and effects",
         .nature = .language_simplicity,
         .note = "language-simplicity choice",
-        .unenforced_note = "measured 2026-07-31: `{ go() { return 1; } }` and `{ get x() { return 1; } }` both produce no diagnostic.",
+        // All three parsed and were then dropped by codegen, which emits only
+        // `.object_property` and `.object_spread`: the method disappeared from
+        // the object it was written into. Rejecting at the parse site.
+        .enforced_by = &.{"ZTS001"},
     },
 };
 

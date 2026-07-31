@@ -195,6 +195,18 @@ Logical compound assignments require short-circuit semantics and are not support
 |---------|----------------------|
 | `Promise` (as unbound global) | Use Result types or callbacks |
 | `RegExp` (as unbound global) | Use string methods |
+| `eval` (as unbound global) | Call a named function |
+| `Proxy` (as unbound global) | Use plain objects and explicit functions |
+| `Reflect` (as unbound global) | Access properties directly |
+
+### Object Literal Forms
+
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| Object method `{ go() { ... } }` | Hold an arrow function in the property: `{ go: () => ... }` |
+| Getter `{ get x() { ... } }` | Call an explicit function |
+| Setter `{ set x(v) { ... } }` | Call an explicit function |
+| Numeric key `{ 1: "a" }` | Use a string key, or a number-keyed `Dict` |
 
 ### Object Built-in Methods
 
@@ -219,6 +231,7 @@ A third layer of detection runs alongside the parser: the strict checker enforce
 | `ZTS618` | nested destructuring `{a: {b}}` | drill in with follow-up `const` bindings |
 | `ZTS619` | unused index alias in `for...of` | iterate the array directly; drop `.entries()` and the destructure |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |
+| `ZTS622` | the iterated collection is mutated in the loop body (`for (const x of xs) { xs.push(x); }`) | iterate a snapshot: read one collection, build the mutated one separately |
 
 The full reference lives at [Canonicalize And Normalize](cli.md#canonicalize-and-normalize).
 
