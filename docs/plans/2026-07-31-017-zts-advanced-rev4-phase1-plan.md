@@ -262,6 +262,33 @@ git add -A && git commit -m "feat(agent): add v2 identity primitives - profile i
 
 ---
 
+
+**Deviations and findings, 2026-07-31.**
+
+1. **Every `enforced_by` entry was measured, and six rows have no enforcement.**
+   Running a minimal handler per construct through `zts check --json` found that
+   `eval`, numeric record keys, object methods, getters, and mutable live
+   iteration produce no diagnostic at all, and that `interface` is still admitted
+   by decision. Each carries an `unenforced_note` naming the measurement rather
+   than an invented code. Two enforcement details also came out different from
+   the obvious guess: `async/await` is rejected by the parser's expected-token
+   path (ZTS002), not the unsupported-feature path, and multiple record spreads
+   are caught by ZTS614.
+2. **ZTS041 is two different diagnostics.** `parserErrorCode` maps
+   `nesting_too_deep` to ZTS041 and `stripErrorCode` maps the `any`-type
+   rejection to the same code (`json_diagnostics.zig:96` and `:234`). The
+   type-evidence row lists the measured stripper codes (ZTS041 `any`, ZTS042
+   `as`, ZTS043 `satisfies`) and records the collision inline. Not fixed here.
+3. **The allowlist row landed with Task 3, not Task 2**, because the gate rejects
+   a row nothing uses: `tools restriction_registry` is only reached once
+   `json_diagnostics` projects from it.
+4. **`zts check` does not terminate on `delete` inside a function body.**
+   Found while measuring the `delete` row:
+   `export function handler(req) { const o = {a: 1}; delete o.a; return Response.json({}); }`
+   runs past 40 seconds with no output. The same statement at module scope
+   reports ZTS001 in milliseconds. Unrelated to this phase, not fixed, recorded
+   here so it is not rediscovered.
+
 ### Task 2: the restriction registry
 
 **Files:**
@@ -315,7 +342,7 @@ at Task 12:**
    v1 emitter filters on that field. New rows reach clients through the v2
    `restrictions` operation and `meta` only.
 
-- [ ] **Step 1: Capture the v1 baseline before touching anything**
+- [x] **Step 1: Capture the v1 baseline before touching anything**
 
 ```bash
 zig build
@@ -331,7 +358,7 @@ These four files are the acceptance criterion for Task 3. `features --json`,
 build gate covers the JSON pair; the text pair is covered by hand comparison in
 Task 3 Step 5.
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 ```zig
 const std = @import("std");
@@ -390,7 +417,7 @@ test "matrixHash is stable and changes with the matrix" {
 }
 ```
 
-- [ ] **Step 3: Run, expect failure** (file missing).
+- [x] **Step 3: Run, expect failure** (file missing).
 
 Run: `zig build test-zts -- --test-filter "restriction"`
 
@@ -398,7 +425,7 @@ Add `pub const restriction_registry = @import("restriction_registry.zig");` to t
 internal-tier block of `packages/zts/src/root.zig` - copy the line style of the
 neighbouring `pub const rule_registry` / `pub const idiom_registry` entries.
 
-- [ ] **Step 4: Transcribe the matrix**
+- [x] **Step 4: Transcribe the matrix**
 
 Read `docs/zts-formal-spec-northstar-advanced.md` lines 2209-2229 (the table) and
 `packages/tools/src/json_diagnostics.zig` lines 678-880 (the v1 `features` array).
@@ -526,7 +553,7 @@ shows which constructs raise ZTS001. A row you cannot tie to a code gets
 `.enforced_by = &.{}` plus a one-line `.unenforced_note` - the second test above
 forces the choice to be explicit either way.
 
-- [ ] **Step 5: Implement lookup and the hash**
+- [x] **Step 5: Implement lookup and the hash**
 
 ```zig
 pub fn findById(id: []const u8) ?*const RestrictionEntry {
@@ -568,12 +595,12 @@ pub fn matrixHash() [64]u8 {
 }
 ```
 
-- [ ] **Step 6: Run, expect PASS**
+- [x] **Step 6: Run, expect PASS**
 
 Run: `zig build test-zts -- --test-filter "restriction"`
 Expected: PASS (5 tests).
 
-- [ ] **Step 7: Boundary row.** Add `tools restriction_registry` to
+- [x] **Step 7: Boundary row.** Add `tools restriction_registry` to
 `scripts/module-boundary.allow` in the `# tools` block, keeping alphabetical order
 (it sits between `repair_intent` and `route_match`). Task 3 is the reach that
 justifies it; the gate fails a row nothing uses, so this must land with Task 3 or
@@ -582,7 +609,7 @@ in the same commit.
 Run: `zig build test-module-boundary`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 zig fmt packages/zts/src/restriction_registry.zig packages/zts/src/root.zig
@@ -606,7 +633,7 @@ git add -A && git commit -m "feat(registry): generate the section-12 restriction
   rows now come from the registry; the allowed rows stay a local table (they are
   not restrictions and spec 12 does not cover them).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```zig
 test "blocked features project from the restriction registry" {
@@ -631,12 +658,12 @@ test "blocked features project from the restriction registry" {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** - today the two tables are unrelated, so a
+- [x] **Step 2: Run, expect FAIL** - today the two tables are unrelated, so a
 string mismatch or a missing row fires.
 
 Run: `zig build test-zts-cli -- --test-filter "restriction registry"`
 
-- [ ] **Step 3: Implement the projection.** Replace the 20 blocked literals in the
+- [x] **Step 3: Implement the projection.** Replace the 20 blocked literals in the
 `features` array with a comptime concatenation:
 
 ```zig
@@ -670,14 +697,14 @@ note and its v1 `blocked_reason` differ, keep the v1 string in `note` and put th
 spec wording in `boundary`; the v1 bytes are the constraint, and the spec column
 that has no v1 counterpart is `boundary`, which v1 never emitted.
 
-- [ ] **Step 4: Run, expect PASS**, then the goldens:
+- [x] **Step 4: Run, expect PASS**, then the goldens:
 
 Run: `zig build test-zts-cli` then `zig build test-contract-golden`
 Expected: PASS. `features.golden.json` and `restrictions.golden.json` must not
 move. If either moves, the transcription changed a string - fix the registry, not
 the golden.
 
-- [ ] **Step 5: Compare the text surfaces against the Task 2 baseline**
+- [x] **Step 5: Compare the text surfaces against the Task 2 baseline**
 
 ```bash
 zig build
@@ -690,7 +717,7 @@ diff <(./zig-out/bin/zts restrictions --by proof) <(true) >/dev/null; \
 Expected: both diffs empty. The third command is a smoke check that grouping still
 renders (it has no baseline file; eyeball that it prints grouped rows).
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 zig fmt packages/tools/src/json_diagnostics.zig
