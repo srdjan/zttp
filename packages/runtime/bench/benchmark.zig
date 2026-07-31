@@ -31,7 +31,6 @@ const BenchmarkResult = struct {
 const Options = struct {
     json: bool = false,
     quiet: bool = false,
-    compare: bool = true,
     script_path: ?[]const u8 = null,
     bench: bool = false,
     bench_fn: []const u8 = "run",
@@ -41,7 +40,7 @@ const Options = struct {
 };
 
 const usage =
-    "Usage: zttp-bench [--json] [--quiet] [--no-compare] [--script <path>] [--bench]\n" ++
+    "Usage: zttp-bench [--json] [--quiet] [--script <path>] [--bench]\n" ++
     "                   [--bench-fn <name>] [--iterations <n>] [--warmup <n>] [--warmup-iters <n>]\n";
 
 fn writeStdout(data: []const u8) void {
@@ -72,8 +71,6 @@ fn parseOptions() Options {
             options.json = true;
         } else if (std.mem.eql(u8, arg, "--quiet")) {
             options.quiet = true;
-        } else if (std.mem.eql(u8, arg, "--no-compare")) {
-            options.compare = false;
         } else if (std.mem.eql(u8, arg, "--script")) {
             const path = args.next() orelse {
                 writeStdout("Missing value for --script\n");
@@ -602,62 +599,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
         output = aw.toArrayList();
         writeStdout(output.items);
         return;
-    }
-
-    if (!options.quiet and options.compare) {
-        println("");
-        println("=== Comparison with Baseline (2026-01-10) ===");
-        println("");
-    }
-
-    // Baseline values from benchmarks/2026-01-10-mod-const-optimization.json
-    const baseline = [_]struct { name: []const u8, ops_per_sec: u64 }{
-        .{ .name = "intArithmetic", .ops_per_sec = 17225787 },
-        .{ .name = "stringConcat", .ops_per_sec = 10323733 },
-        .{ .name = "stringOps", .ops_per_sec = 22449208 },
-        .{ .name = "objectCreate", .ops_per_sec = 9923588 },
-        .{ .name = "propertyAccess", .ops_per_sec = 17985611 },
-        .{ .name = "arrayOps", .ops_per_sec = 13231594 },
-        .{ .name = "functionCalls", .ops_per_sec = 12000000 },
-        .{ .name = "recursion", .ops_per_sec = 2500 },
-        .{ .name = "jsonOps", .ops_per_sec = 85355 },
-        .{ .name = "gcPressure", .ops_per_sec = 274482 },
-        .{ .name = "httpHandler", .ops_per_sec = 1131466 },
-        .{ .name = "forOfLoop", .ops_per_sec = 53210339 },
-    };
-
-    if (!options.quiet and options.compare) {
-        printFmt("{s:<20} {s:>15} {s:>15} {s:>10}", .{ "Benchmark", "zts", "baseline", "Ratio" });
-        println("------------------------------------------------------------");
-    }
-
-    const getBaseline = struct {
-        fn find(name: []const u8) ?u64 {
-            for (baseline) |entry| {
-                if (std.mem.eql(u8, entry.name, name)) return entry.ops_per_sec;
-            }
-            return null;
-        }
-    }.find;
-
-    if (!options.quiet and options.compare) {
-        for (results) |result| {
-            if (!result.success) continue;
-            const base_ops = getBaseline(result.name) orelse continue;
-            const ratio = if (base_ops > 0)
-                @as(f64, @floatFromInt(result.ops_per_sec)) / @as(f64, @floatFromInt(base_ops))
-            else
-                0.0;
-            const indicator: []const u8 = if (ratio >= 1.0) " " else " ";
-            printFmt("{s:<20} {d:>12}/s {d:>12}/s {d:>7.2}x{s}", .{
-                result.name,
-                result.ops_per_sec,
-                base_ops,
-                ratio,
-                indicator,
-            });
-        }
-        println("");
     }
 
     const total_ms = @as(f64, @floatFromInt(total_time_ns)) / 1_000_000.0;
