@@ -8,17 +8,21 @@ If you embed `Server` directly in Zig code, these `ServerConfig` fields tune per
 
 ```zig
 const std = @import("std");
-const Server = @import("server.zig").Server;
-const ServerConfig = @import("server.zig").ServerConfig;
+const server_mod = @import("server.zig");
+const Server = server_mod.Server;
+const ServerConfig = server_mod.ServerConfig;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    defer _ = debug_alloc.deinit();
+    const allocator = debug_alloc.allocator();
 
     const config = ServerConfig{
+        // Handler source. Required: the field has no default.
+        .handler = .{ .file_path = "handler.js" },
+
         // Pool configuration
-        .pool_size = 16,                        // Handler pool size (default: auto)
+        .pool_size = 16,                        // Handler pool size (0 = auto)
         .pool_wait_timeout_ms = 5000,           // Max wait for available handler (ms)
 
         // Static file cache configuration
@@ -35,21 +39,18 @@ pub fn main() !void {
 
         // Features
         .static_dir = null,                     // Static file directory
-
-        // Runtime configuration
-        .runtime_config = .{
-            .jit_code_max_bytes = 16 * 1024 * 1024, // Per-context native code cap
-        },
     };
     // For CORS, import `cors` from the `zttp:http` virtual module in the handler.
 
     var server = try Server.init(allocator, config);
     defer server.deinit();
 
-    try server.loadHandler("handler.js");
-    try server.listen();
+    try server.run();
 }
 ```
+
+`HandlerSource` is a union: `.inline_code`, `.file_path`, `.embedded_bytecode`
+(from `-Dhandler=`), and `.appended_payload` (from a self-extracting binary).
 
 ### Configuration Fields
 
@@ -73,30 +74,33 @@ Add custom native functions callable from JavaScript by implementing the `Native
 ### Native Function Signature
 
 ```zig
-pub const NativeFn = *const fn(ctx: *Context, this: JSValue, args: []const JSValue) Error!JSValue;
+pub const NativeFn = *const fn (ctx: *anyopaque, this: JSValue, args: []const JSValue) anyerror!JSValue;
 ```
+
+The first parameter is erased to `*anyopaque` so `object.zig` does not have to
+import `Context`. Cast it back with `@ptrCast(@alignCast(ctx))` when you need
+the context.
 
 ### Example: Custom Math Function
 
 ```zig
 const zts = @import("zts");
 
-fn mySquare(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
-    if (args.len < 1) {
-        return zts.JSValue.fromInt(0);
-    }
-
-    const num = try args[0].toNumber(ctx);
-    const result = num * num;
-
-    return zts.JSValue.fromFloat(result);
+fn mySquare(_: *anyopaque, _: zts.JSValue, args: []const zts.JSValue) anyerror!zts.JSValue {
+    if (args.len < 1 or !args[0].isInt()) return zts.JSValue.undefined_val;
+    const n = args[0].getInt();
+    return zts.JSValue.fromInt(n * n);
 }
 
 pub fn registerCustomFunctions(ctx: *zts.Context) !void {
-    const fn_value = try ctx.createNativeFunction("square", mySquare);
-    try ctx.setGlobal("square", fn_value);
+    const name = try ctx.atoms.intern("square");
+    try ctx.registerGlobalFunction(name, mySquare, 1);
 }
 ```
+
+`registerGlobalFunction` takes an `Atom`, not a string. Predefined names are
+enum members (`.abs`, `.max`); anything else is interned first. `Atom` is
+non-exhaustive and dynamic atoms start at `Atom.FIRST_DYNAMIC`.
 
 Usage in JavaScript:
 
@@ -109,54 +113,56 @@ function handler(request) {
 
 ### Value Conversion
 
-#### From JavaScript to Zig
+`JSValue` is NaN-boxed. Reads are tag checks followed by an unchecked getter,
+not coercions: there is no `toNumber` or `toString` that converts across types
+the way the JavaScript abstract operations do.
 
 ```zig
-const num: f64 = try value.toNumber(ctx);
-const int: i32 = try value.toInt32(ctx);
-const str: []const u8 = try value.toString(ctx);
-const bool_val: bool = try value.toBoolean(ctx);
-const obj: *zts.Object = try value.toObject(ctx);
-```
+// Inspect
+if (v.isInt()) { const n: i32 = v.getInt(); }
+if (v.isFloat64()) { const f: f64 = v.getFloat64(); }
+if (v.isBool()) { const b: bool = v.getBool(); }
+if (v.isNullish()) { ... }              // null or undefined
+if (v.isString()) { ... }
 
-#### From Zig to JavaScript
-
-```zig
+// Construct
 const num = zts.JSValue.fromInt(42);
 const float = zts.JSValue.fromFloat(3.14);
-const str = try zts.JSValue.fromString(ctx, "hello");
 const true_val = zts.JSValue.fromBool(true);
-const null_val = zts.JSValue.null();
-const undef_val = zts.JSValue.undefined();
+const nul = zts.JSValue.null_val;       // constant, not a call
+const undef = zts.JSValue.undefined_val;
+const str = try ctx.createString("hello");
 
-const obj = try ctx.createObject();
-try obj.setProperty(ctx, "key", zts.JSValue.fromInt(123));
+const obj = try ctx.createObject(null); // takes an optional prototype
 ```
+
+`toConditionBool()` is the one conversion the engine exposes, and it is the
+sound-mode truthiness rule rather than JavaScript's: it returns `null` for a
+value with no falsy state instead of coercing it. See
+[Sound Mode](../sound-mode.md).
 
 ### Error Handling
 
+A native function reports failure through the Zig error union. To surface a JS
+exception instead, set it on the context and return the exception sentinel:
+
 ```zig
-fn mayFailFunction(ctx: *zts.Context, this: zts.JSValue, args: []const zts.JSValue) !zts.JSValue {
-    if (args.len < 1) {
-        return ctx.throwError("Missing required argument");
+fn mayFail(ctx_ptr: *anyopaque, _: zts.JSValue, args: []const zts.JSValue) anyerror!zts.JSValue {
+    const ctx: *zts.Context = @ptrCast(@alignCast(ctx_ptr));
+    if (args.len < 1 or !args[0].isInt()) {
+        ctx.throwException(try ctx.createString("expected one integer"));
+        return zts.JSValue.exception_val;
     }
-
-    const value = try args[0].toNumber(ctx);
-
-    if (value < 0) {
-        return ctx.throwError("Value must be non-negative");
-    }
-
-    return zts.JSValue.fromFloat(@sqrt(value));
+    return zts.JSValue.fromInt(args[0].getInt());
 }
 ```
 
 ### Best Practices
 
 1. **Always use errdefer**: Clean up resources on error paths
-2. **Validate arguments**: Check argument count and types before conversion
+2. **Validate arguments**: Check argument count and tags before reading a value
 3. **Use appropriate allocators**: Request-scoped allocations should use the context's arena allocator (no manual free needed)
-4. **Handle null and undefined**: Check `isNullOrUndefined()` before conversion
+4. **Handle null and undefined**: Check `isNullish()` before reading
 
 ### Build-Time Handler Precompilation
 

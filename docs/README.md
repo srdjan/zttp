@@ -60,6 +60,9 @@ here. Finished plans live under [archive](archive/README.md).
   excludes, and why the zruntime suite is standalone.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.
+- [zts-advanced-1 Formal Spec](zts-formal-spec-northstar-advanced.md) - the
+  north-star language specification the roadmap's language program implements.
+  It describes the target profile, not today's compiler.
 
 ## Archive
 

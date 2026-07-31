@@ -241,6 +241,34 @@ done < <(listed_commands)
   fail "only $command_count commands parsed from the dispatch registries; the table format changed"
 
 # ---------------------------------------------------------------------------
+# Capability inventory coverage.
+#
+# docs/internals/capabilities.md splits every built-in into "declares
+# capabilities" and "declares none". It is hand-maintained, and zttp:queue and
+# zttp:workflow were absent from both halves. Every registry specifier has to
+# appear somewhere in the file.
+# ---------------------------------------------------------------------------
+
+capabilities_doc="docs/internals/capabilities.md"
+[[ -f "$capabilities_doc" ]] || fail "missing $capabilities_doc"
+
+while IFS= read -r specifier; do
+  grep -qF -- "\`$specifier\`" "$capabilities_doc" ||
+    fail "$capabilities_doc does not list $specifier in either capability inventory"
+done < <(
+  awk '
+    /pub const builtin_governance_entries/ { in_entries = 1 }
+    in_entries && /\.specifier = "zttp:/ {
+      line = $0
+      sub(/^.*\.specifier = "/, "", line)
+      sub(/".*$/, "", line)
+      print line
+    }
+    in_entries && /^};/ { exit }
+  ' "$registry_file"
+)
+
+# ---------------------------------------------------------------------------
 # Restriction matrix coverage.
 #
 # docs/restrictions-to-proofs.md renders packages/zts/src/restriction_registry.zig.

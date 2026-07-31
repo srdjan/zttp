@@ -66,11 +66,13 @@ This pattern is visible in `id.zig`, `env.zig`, `sql.zig`, `service.zig`, `cache
 | `zttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
 | `zttp:io` | `runtime_callback` | `parallel()` and `race()` schedule outbound fetches through the runtime's I/O collector. |
 | `zttp:log` | `clock`, `stderr` | Timestamped log emission. |
+| `zttp:queue` | `runtime_callback` | Mailbox send, lease, ack, nack, and reply dispatch through the server-owned actor queue. |
 | `zttp:ratelimit` | `clock` | Token bucket expiry. |
 | `zttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
 | `zttp:service` | `network`, `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
 | `zttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
 | `zttp:websocket` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` | Sends frames, manages rooms, and serializes hibernated attachment state through the gateway. |
+| `zttp:workflow` | `runtime_callback` | `call`, `follow`, `fanout`, and `saga` dispatch to co-located sub-handlers through the runtime. |
 
 ### Modules that declare no capabilities
 

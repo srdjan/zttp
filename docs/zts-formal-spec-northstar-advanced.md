@@ -175,8 +175,9 @@ The important gaps are not more loop or class syntax:
 
 1. Generic function syntax is accepted, but sound instantiation and inference
    are incomplete.
-2. Dynamic keyed data has no supported typed collection. JavaScript `Map` and
-   `Set` implementations exist internally but are intentionally not exposed.
+2. Dynamic keyed data has no supported typed collection. Internal JavaScript
+   `Map` and `Set` implementations existed but were never reachable, and have
+   since been removed.
 3. Runtime `Result` values are not represented by one precise generic ADT
    across the type and module surfaces.
 4. Recursive application data cannot be expressed soundly as a recursive
@@ -2844,12 +2845,13 @@ humans.
 
 ## Sources inspected
 
-- `docs/zts-formal-spec-northstar.html`
-- `docs/zts-formal-spec-design.html`
-- `docs/typescript.md`
-- `docs/typescript-patterns.md`
+- `docs/archive/spec-explainers/zts-formal-spec-northstar.html` (then at
+  `docs/zts-formal-spec-northstar.html`)
+- `docs/archive/spec-explainers/zts-formal-spec-design.html` (then at
+  `docs/zts-formal-spec-design.html`)
+- `docs/typescript.md`, which has since absorbed `docs/typescript-patterns.md`
 - `docs/feature-detection.md`
-- `docs/canonical-profile.md`
+- `docs/cli.md`, which has since absorbed `docs/canonical-profile.md`
 - `docs/restrictions-to-proofs.md`
 - `docs/verification.md`
 - `packages/zts/src/parser/ir.zig`

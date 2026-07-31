@@ -15,6 +15,8 @@ severity: high
 tags: [zts, builtins, teardown, use-after-free, ownership, guard-malloc, glibc]
 ---
 
+> **Path note.** `packages/runtime/src/zruntime.zig` was split after this record was written: production `HandlerInstance` code moved to `packages/runtime/src/handler_instance.zig`, and the test root was renamed to `packages/runtime/src/zruntime_tests.zig`. The line numbers below are the ones that were current at the time.
+
 # Builtin Graph Teardown Dereferenced Freed Prototypes
 
 ## Problem
