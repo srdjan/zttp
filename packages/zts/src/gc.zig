@@ -15,18 +15,12 @@ pub const GCConfig = struct {
     nursery_size: usize = 4 * 1024 * 1024, // 4MB
     /// Tenured (old generation) initial size
     tenured_initial_size: usize = 16 * 1024 * 1024, // 16MB
-    /// Object survival threshold for promotion
-    survival_threshold: u8 = 2,
     /// Enable SIMD bitvector sweeping
     simd_sweep: bool = true,
     /// Enable advancing wavefront (no marking regression)
     advancing_wavefront: bool = true,
-    /// Enable soft handshakes (future: for concurrent pools)
-    soft_handshakes: bool = false,
     /// Objects per incremental sweep step (also used as SIMD batch hint)
     sweep_chunk_size: usize = 4096,
-    /// Gray stack initial capacity
-    gray_stack_capacity: usize = 1024,
     /// Cap on automatic major-GC threshold growth (number of tenured objects).
     /// Bounds the live_count*2 growth in continueIncrementalMajorGCSweep so a
     /// transient live-set spike cannot push the threshold arbitrarily high and

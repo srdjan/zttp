@@ -1404,9 +1404,6 @@ pub const ServerConfig = struct {
     /// Max time to wait for a runtime from the pool (0 = fail immediately)
     pool_wait_timeout_ms: u32 = 5000, // Wait up to 5s for pool slot
 
-    /// Log pool metrics every N requests (0 = disabled)
-    pool_metrics_every: u64 = 0,
-
     /// Embedded contract JSON (from self-extracting binary).
     /// When present, enables contract-aware runtime behavior:
     /// startup env validation, route pre-filtering, property logging.

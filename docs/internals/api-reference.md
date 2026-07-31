@@ -20,7 +20,6 @@ pub fn main() !void {
         // Pool configuration
         .pool_size = 16,                        // Handler pool size (default: auto)
         .pool_wait_timeout_ms = 5000,           // Max wait for available handler (ms)
-        .pool_metrics_every = 1000,             // Log metrics every N requests (0 = disabled)
 
         // Static file cache configuration
         .static_cache_max_bytes = 1024 * 1024,         // Max total cache size (default: 1MB)
@@ -60,11 +59,6 @@ pub fn main() !void {
 
 **`pool_wait_timeout_ms`** (default: 5000) - Maximum time to wait for available handler (milliseconds). Returns 503 if timeout exceeded.
 
-**`pool_metrics_every`** (default: 0 = disabled) - Log pool metrics every N requests. Output: `Pool metrics: in_use=2/8 exhausted=0 avg_wait_us=3 max_wait_us=20 avg_exec_us=120 max_exec_us=500`
-
-#### Runtime Configuration
-
-**`runtime_config.jit_code_max_bytes`** (default: 16MB) - Soft cap for native JIT code bytes per runtime context. When the cap is exceeded at a JIT compile safe point, compiled function pointers are cleared and the context's native code pages are released. Set to `0` to disable native-code eviction.
 
 #### Static File Cache
 

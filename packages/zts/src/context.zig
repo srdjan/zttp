@@ -24,7 +24,6 @@ pub const cost_meter = @import("cost_meter.zig");
 pub const ContextConfig = struct {
     stack_size: usize = 1024 * 1024, // 1MB value stack
     call_stack_size: usize = 1024, // Max call depth
-    init_globals: bool = true, // Initialize global object
     use_http_shape_cache: bool = true, // Prebuild HTTP Request/Response shapes
     use_http_string_cache: bool = true, // Cache common HTTP strings
 };

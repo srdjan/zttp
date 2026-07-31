@@ -49,7 +49,6 @@ pub const Actor = union(enum) {
     anonymous,
     user: []const u8,
     service: []const u8,
-    compiler_tool: []const u8,
 };
 
 pub const Resource = struct {
@@ -66,7 +65,6 @@ pub const PolicyInput = struct {
     actor: Actor = .anonymous,
     action: Action,
     resource: ?Resource = null,
-    args_hash: ?[]const u8 = null,
     env: Environment = .{},
     timestamp_ns: u64 = 0,
 };
