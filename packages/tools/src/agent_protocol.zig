@@ -18,6 +18,7 @@ const expert_meta = @import("expert_meta.zig");
 const edit_simulate = @import("edit_simulate.zig");
 const json_diagnostics = @import("json_diagnostics.zig");
 const precompile = @import("precompile.zig");
+const canonicalize = @import("canonicalize.zig");
 
 const rule_registry = zts.rule_registry;
 const restriction_registry = zts.restriction_registry;
@@ -89,10 +90,10 @@ pub const operations = [_]OperationSpec{
     .{ .op = .check, .status = .implemented, .input_fields = &.{"file"}, .payload_fields = &.{
         "file", "source_digest", "counts", "properties", "paths", "contract_available",
     } },
-    .{ .op = .canonicalize, .status = .deferred, .input_fields = &.{ "file", "simulate" }, .payload_fields = &.{
+    .{ .op = .canonicalize, .status = .implemented, .input_fields = &.{ "file", "simulate" }, .payload_fields = &.{
         "file", "source_digest", "candidates", "simulation",
-    }, .deferred_note = "phase 1 task 10" },
-    .{ .op = .normalize, .status = .deferred, .input_fields = &.{"file"}, .payload_fields = &.{
+    } },
+    .{ .op = .normalize, .status = .implemented, .input_fields = &.{ "file", "write" }, .payload_fields = &.{
         "file",                 "source_digest", "converged",     "fully_canonical",
         "iterations",           "residual",      "rewrite_trace", "canonical_source",
         "residual_diagnostics",
@@ -332,6 +333,17 @@ pub fn handleRequest(
         .module_graph_hash = if (graph) |g| g.hash else module_graph_record.contextFreeHash(),
     };
 
+    // Writing is `apply_repair`'s job, and that operation is phase 6. Refusing
+    // here is louder than accepting the flag and ignoring it, which would
+    // report a rewrite the client believes was persisted.
+    if (op == .normalize and boolField(input, "write")) {
+        return writeErrorEnvelope(&json, op_name, identity, .{
+            .code = .operation_not_implemented,
+            .message = "normalize does not write in schema version 2; apply the returned canonical_source through apply_repair (phase 6)",
+            .field = "input.write",
+        });
+    }
+
     // Spec 4.8: one guard rule for every operation, run before any work. When
     // `apply_repair` lands in phase 6, this ordering is what makes a stale
     // request write nothing.
@@ -354,6 +366,8 @@ pub fn handleRequest(
         .restrictions => try writeRestrictionsPayload(&payload_json),
         .describe_rule => try writeDescribeRulePayload(&payload_json, input),
         .modules => try writeModulesPayload(&payload_json, &graph.?),
+        .canonicalize => try runCanonicalize(allocator, &payload_json, canonical_root, file_rel.?, input),
+        .normalize => try runNormalize(allocator, &payload_json, canonical_root, file_rel.?),
         .check => try runCheck(
             allocator,
             io,
@@ -993,6 +1007,190 @@ fn byteOffsetOf(source: []const u8, line: u32, column: u32) usize {
     }
     const offset = idx + @as(usize, if (column > 0) column - 1 else 0);
     return @min(offset, source.len);
+}
+
+// ---------------------------------------------------------------------------
+// canonicalize and normalize
+// ---------------------------------------------------------------------------
+
+/// Spec 4.8: "Until a rewrite has a registered equivalence validator,
+/// `canonicalize` and `normalize` MUST report it as a proposed refactor, not a
+/// mechanical repair." No validator registry exists before phase 6, so the
+/// grade is constant, and it is written from here so phase 6 changes one line.
+const candidate_grade = "proposed_refactor";
+
+fn boolField(input: std.json.Value, name: []const u8) bool {
+    const obj = switch (input) {
+        .object => |o| o,
+        else => return false,
+    };
+    const value = obj.get(name) orelse return false;
+    return value == .bool and value.bool;
+}
+
+fn runCanonicalize(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    canonical_root: []const u8,
+    file_rel: []const u8,
+    input: std.json.Value,
+) !bool {
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
+    defer allocator.free(abs);
+
+    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
+    defer allocator.free(source);
+    const digest = agent_identity.sourceDigest(source);
+
+    var result = try canonicalize.collect(allocator, abs);
+    defer result.deinit(allocator);
+
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("source_digest");
+    try json.write(&digest);
+
+    try json.objectField("candidates");
+    try json.beginArray();
+    for (result.refactors.items) |refactor| {
+        try json.beginObject();
+        try json.objectField("kind");
+        try json.write(refactor.kind);
+        try json.objectField("grade");
+        try json.write(candidate_grade);
+        // No Refactor kind corresponds to an idiom row today: measured against
+        // the catalog, every line-keyed refactor repairs a canonical-profile
+        // restriction, while the idiom table picks among admitted spellings.
+        // The one wired pair (drop_unused_index_alias) is a span-keyed rewrite
+        // and surfaces in normalize's rewrite_trace instead.
+        try json.objectField("idiom_id");
+        try json.write(null);
+        try json.objectField("line");
+        try json.write(refactor.line);
+        try json.objectField("column");
+        try json.write(refactor.column);
+        try json.objectField("message");
+        try json.write(refactor.message);
+        // D3 §5: the v1 JSON drops original_line, so a client cannot
+        // re-validate staleness. The v2 wire publishes it.
+        try json.objectField("original");
+        if (refactor.original_line) |line| try json.write(line) else try json.write(null);
+        try json.objectField("replacement");
+        try json.write(refactor.replacement);
+        try json.endObject();
+    }
+    try json.endArray();
+
+    try json.objectField("simulation");
+    if (boolField(input, "simulate")) {
+        const summary = try canonicalize.simulateRefactors(allocator, abs, &result);
+        try json.beginObject();
+        try json.objectField("ok");
+        try json.write(summary.ok);
+        try json.objectField("total");
+        try json.write(summary.total);
+        try json.objectField("new_count");
+        try json.write(summary.new_count);
+        try json.objectField("preexisting_count");
+        try json.write(summary.preexisting_count);
+        try json.endObject();
+    } else {
+        // Present and null rather than absent: the key set of a payload is part
+        // of the operation's published schema, and a client should not have to
+        // distinguish "not requested" from "field removed".
+        try json.write(null);
+    }
+
+    try json.endObject();
+    // Candidates are proposals, not failures. A file with refactors available
+    // is still a file that canonicalized successfully.
+    return true;
+}
+
+fn runNormalize(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    canonical_root: []const u8,
+    file_rel: []const u8,
+) !bool {
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
+    defer allocator.free(abs);
+
+    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
+    defer allocator.free(source);
+    const digest = agent_identity.sourceDigest(source);
+
+    var result = try canonicalize.normalize(allocator, abs);
+    defer result.deinit(allocator);
+
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("source_digest");
+    try json.write(&digest);
+    try json.objectField("converged");
+    try json.write(result.converged);
+    try json.objectField("fully_canonical");
+    try json.write(result.fully_canonical);
+    try json.objectField("iterations");
+    try json.write(result.iterations);
+    try json.objectField("residual");
+    try json.write(result.residual);
+
+    try json.objectField("rewrite_trace");
+    try json.beginArray();
+    for (result.rewrite_trace.items) |intent| {
+        const name = @tagName(intent);
+        try json.beginObject();
+        try json.objectField("intent");
+        try json.write(name);
+        try json.objectField("grade");
+        try json.write(candidate_grade);
+        // The phase 0 back-reference: an applied intent resolves to the idiom
+        // row it realizes, where one exists.
+        try json.objectField("idiom_id");
+        if (zts.idiom_registry.findByRewriteRule(name)) |idiom| {
+            try json.write(idiom.id);
+        } else {
+            try json.write(null);
+        }
+        try json.endObject();
+    }
+    try json.endArray();
+
+    try json.objectField("canonical_source");
+    try json.write(result.canonical_source);
+
+    try json.objectField("residual_diagnostics");
+    try json.beginArray();
+    for (result.residual_diagnostics.items) |diag| {
+        try json.beginObject();
+        try json.objectField("code");
+        try json.write(diag.code);
+        try json.objectField("severity");
+        try json.write(diag.severity);
+        try json.objectField("message");
+        try json.write(diag.message);
+        try json.objectField("line");
+        try json.write(diag.line);
+        try json.objectField("column");
+        try json.write(diag.column);
+        try json.objectField("suggestion");
+        if (diag.suggestion) |sug| try json.write(sug) else try json.write(null);
+        try json.objectField("repair_intent");
+        if (diag.repair_intent) |intent| try json.write(intent) else try json.write(null);
+        try json.objectField("reason");
+        try json.write(diag.reason);
+        try json.endObject();
+    }
+    try json.endArray();
+
+    try json.endObject();
+    // Spec 4.8 requires normalization to reach a fixed point. Residual
+    // canonical-band diagnostics mean it did not, so the operation reports the
+    // shortfall rather than calling a partial normalization a success.
+    return result.converged and result.fully_canonical;
 }
 
 // ---------------------------------------------------------------------------
@@ -1899,6 +2097,183 @@ test "check publishes the path-coverage cause, not only a bool" {
     try testing.expect(paths.get("exhaustive").? == .bool);
     // Phase 0 replaced a bare bool with a cause; the wire carries the cause.
     try testing.expect(paths.get("coverage_note").?.string.len > 0);
+}
+
+const let_handler =
+    \\import type { Spec } from "zttp:types";
+    \\
+    \\type Guardrails = Spec<"state_isolated">;
+    \\
+    \\export function handler(req: Request): Response & Guardrails {
+    \\    let name = "world";
+    \\    return Response.json({ hello: name });
+    \\}
+    \\
+;
+
+test "canonicalize candidates carry a grade and the original span text" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    // Candidates are proposals, not failures.
+    try testing.expect(parsed.value.object.get("success").?.bool);
+
+    const candidates = payload.get("candidates").?.array;
+    try testing.expect(candidates.items.len >= 1);
+    const first = candidates.items[0].object;
+    // Spec 4.8: without a registered validator every candidate is a proposed
+    // refactor, never a mechanical repair.
+    try testing.expectEqualStrings("proposed_refactor", first.get("grade").?.string);
+    try testing.expect(first.get("replacement").? == .string);
+    // D3 §5: v1 drops original_line at the JSON boundary, so a client cannot
+    // re-validate staleness. The v2 wire carries it.
+    try testing.expect(first.get("original").? == .string);
+    try testing.expect(first.get("line").?.integer > 0);
+}
+
+test "canonicalize simulates only when asked, and says so either way" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const plain = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(plain);
+    const plain_out = try respond(a, plain);
+    defer a.free(plain_out);
+    var plain_parsed = try parse(a, plain_out);
+    defer plain_parsed.deinit();
+    // Present and null: the key set is part of the published schema, so a
+    // client never has to tell "not requested" from "field removed".
+    try testing.expect(plain_parsed.value.object.get("payload").?.object.get("simulation").? == .null);
+
+    const simulated = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts","simulate":true}}}}
+    , .{root});
+    defer a.free(simulated);
+    const sim_out = try respond(a, simulated);
+    defer a.free(sim_out);
+    var sim_parsed = try parse(a, sim_out);
+    defer sim_parsed.deinit();
+    const summary = sim_parsed.value.object.get("payload").?.object.get("simulation").?.object;
+    try testing.expect(summary.get("ok").? == .bool);
+    try testing.expect(summary.get("new_count").? == .integer);
+    try testing.expect(summary.get("preexisting_count").? == .integer);
+}
+
+test "normalize reaches a fixed point and writes nothing to disk" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expect(payload.get("converged").?.bool);
+    try testing.expect(payload.get("iterations").?.integer >= 1);
+    try testing.expect(payload.get("canonical_source").?.string.len > 0);
+    // The rewrite happened in memory only.
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "normalize with write true is refused, not silently ignored" {
+    // Accepting the flag and ignoring it would report a rewrite the client
+    // believes was persisted.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts","write":true}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("operation_not_implemented", err.get("code").?.string);
+    try testing.expectEqualStrings("input.write", err.get("field").?.string);
+    try testing.expect(std.mem.indexOf(u8, err.get("message").?.string, "apply_repair") != null);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .unlimited);
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "normalize maps an applied intent back to the idiom row it realizes" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // The ZTS619 vehicle: `.entries()` with an index the body never reads.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\type Guardrails = Spec<"state_isolated">;
+        \\
+        \\export function handler(req: Request): Response & Guardrails {
+        \\    const arr = [10, 20];
+        \\    const out = [];
+        \\    for (const pair of arr.entries()) {
+        \\        const [_i, x] = pair;
+        \\        out.push(x);
+        \\    }
+        \\    return Response.json({ out });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const trace = parsed.value.object.get("payload").?.object.get("rewrite_trace").?.array;
+    try testing.expectEqual(@as(usize, 1), trace.items.len);
+    const entry = trace.items[0].object;
+    try testing.expectEqualStrings("drop_unused_index_alias", entry.get("intent").?.string);
+    try testing.expectEqualStrings("idiom.element-iteration", entry.get("idiom_id").?.string);
+    try testing.expectEqualStrings("proposed_refactor", entry.get("grade").?.string);
 }
 
 test "identical requests produce byte-identical responses" {
