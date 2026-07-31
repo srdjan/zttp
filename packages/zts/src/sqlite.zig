@@ -99,55 +99,6 @@ pub const Stmt = struct {
         return c.sqlite3_stmt_readonly(self.handle) != 0;
     }
 
-    pub fn columnCount(self: Stmt) usize {
-        return @intCast(c.sqlite3_column_count(self.handle));
-    }
-
-    pub fn columnName(self: Stmt, index: usize) []const u8 {
-        const raw = c.sqlite3_column_name(self.handle, @intCast(index));
-        return if (raw) |ptr| std.mem.span(ptr) else "";
-    }
-
-    pub fn columnType(self: Stmt, index: usize) c_int {
-        return c.sqlite3_column_type(self.handle, @intCast(index));
-    }
-
-    pub fn columnInt64(self: Stmt, index: usize) i64 {
-        return c.sqlite3_column_int64(self.handle, @intCast(index));
-    }
-
-    pub fn columnDouble(self: Stmt, index: usize) f64 {
-        return c.sqlite3_column_double(self.handle, @intCast(index));
-    }
-
-    pub fn columnText(self: Stmt, index: usize) []const u8 {
-        const ptr = c.sqlite3_column_text(self.handle, @intCast(index)) orelse return "";
-        const len: usize = @intCast(c.sqlite3_column_bytes(self.handle, @intCast(index)));
-        return ptr[0..len];
-    }
-
-    pub fn bindNull(self: *Stmt, index: usize) !void {
-        if (c.sqlite3_bind_null(self.handle, @intCast(index)) != c.SQLITE_OK) return error.SqliteBindFailed;
-    }
-
-    pub fn bindInt64(self: *Stmt, index: usize, value: i64) !void {
-        if (c.sqlite3_bind_int64(self.handle, @intCast(index), value) != c.SQLITE_OK) return error.SqliteBindFailed;
-    }
-
-    pub fn bindDouble(self: *Stmt, index: usize, value: f64) !void {
-        if (c.sqlite3_bind_double(self.handle, @intCast(index), value) != c.SQLITE_OK) return error.SqliteBindFailed;
-    }
-
-    pub fn bindText(self: *Stmt, index: usize, value: []const u8) !void {
-        if (c.sqlite3_bind_text(
-            self.handle,
-            @intCast(index),
-            value.ptr,
-            @intCast(value.len),
-            null,
-        ) != c.SQLITE_OK) return error.SqliteBindFailed;
-    }
-
     pub fn errmsg(self: Stmt) []const u8 {
         return std.mem.span(c.sqlite3_errmsg(self.db));
     }
