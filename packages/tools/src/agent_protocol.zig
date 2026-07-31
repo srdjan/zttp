@@ -16,8 +16,10 @@ const agent_identity = @import("agent_identity.zig");
 const module_graph_record = @import("module_graph_record.zig");
 const expert_meta = @import("expert_meta.zig");
 const edit_simulate = @import("edit_simulate.zig");
+const json_diagnostics = @import("json_diagnostics.zig");
 
 const rule_registry = zts.rule_registry;
+const restriction_registry = zts.restriction_registry;
 
 /// The closed operation set (spec 4.8).
 pub const Operation = enum {
@@ -77,9 +79,9 @@ pub const operations = [_]OperationSpec{
         "policy_hash",       "operations", "error_codes",
         "deferred_sections",
     } },
-    .{ .op = .features, .status = .deferred, .input_fields = &.{}, .payload_fields = &.{"features"}, .deferred_note = "phase 1 task 7" },
-    .{ .op = .restrictions, .status = .deferred, .input_fields = &.{"by"}, .payload_fields = &.{"restrictions"}, .deferred_note = "phase 1 task 7" },
-    .{ .op = .describe_rule, .status = .deferred, .input_fields = &.{"rule"}, .payload_fields = &.{"rules"}, .deferred_note = "phase 1 task 7" },
+    .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
+    .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
+    .{ .op = .describe_rule, .status = .implemented, .input_fields = &.{"rule"}, .payload_fields = &.{"rules"} },
     .{ .op = .modules, .status = .deferred, .input_fields = &.{"file"}, .payload_fields = &.{
         "graph", "builtins", "extensions", "rejected", "module_graph_hash",
     }, .deferred_note = "phase 1 task 8" },
@@ -117,6 +119,7 @@ pub const deferred_sections = [_]DeferredSection{
     .{ .name = "type_serialization", .note = "phase 2: the canonical type serialization is D1's artifact" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "verifiers", .note = "phase 6: property discovery arrives with the verify operation" },
+    .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
     .{ .name = "repair_budget", .note = "phase 6: the repair-iteration and tool-call budget is a loop policy no code implements" },
 };
 
@@ -273,8 +276,13 @@ pub fn handleRequest(
     defer payload.deinit();
     var payload_json: std.json.Stringify = .{ .writer = &payload.writer };
 
+    const input = root.get("input") orelse std.json.Value{ .null = {} };
+
     const success = switch (op) {
         .meta => try writeMetaPayload(&payload_json),
+        .features => try writeFeaturesPayload(&payload_json),
+        .restrictions => try writeRestrictionsPayload(&payload_json),
+        .describe_rule => try writeDescribeRulePayload(&payload_json, input),
         else => unreachable, // every other row is `.deferred` and returned above
     };
 
@@ -483,6 +491,132 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     }
     try json.endArray();
 
+    try json.endObject();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// features, restrictions, describe_rule
+// ---------------------------------------------------------------------------
+
+/// Every surface form the profile has an opinion about. `restriction_id` links a
+/// refused form to its matrix row; an admitted form has none.
+///
+/// D3 §6 sketched `{ id, category, status }`. There is no category data behind
+/// `category` - the v1 table never had one - so the field is absent rather than
+/// invented, and the link to the matrix takes its place.
+fn writeFeaturesPayload(json: *std.json.Stringify) !bool {
+    try json.beginObject();
+    try json.objectField("features");
+    try json.beginArray();
+
+    for (json_diagnostics.allowed_feature_names) |name| {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(name);
+        try json.objectField("status");
+        try json.write("allowed");
+        try json.objectField("restriction_id");
+        try json.write(null);
+        try json.endObject();
+    }
+    for (&restriction_registry.entries) |*entry| {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(entry.feature);
+        try json.objectField("status");
+        try json.write("blocked");
+        try json.objectField("restriction_id");
+        try json.write(entry.id);
+        try json.endObject();
+    }
+
+    try json.endArray();
+    try json.endObject();
+    return true;
+}
+
+/// The whole section-12 matrix, including the rows the frozen v1 surface never
+/// published. `enforced_by` and `unenforced_note` are both published: a client
+/// that reads only the exclusion list would otherwise believe six rows are
+/// enforced when the compiler admits them.
+fn writeRestrictionsPayload(json: *std.json.Stringify) !bool {
+    try json.beginObject();
+    try json.objectField("restrictions");
+    try json.beginArray();
+
+    for (&restriction_registry.entries) |*entry| {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(entry.id);
+        try json.objectField("feature");
+        try json.write(entry.feature);
+        try json.objectField("boundary");
+        try json.write(entry.boundary);
+        try json.objectField("nature");
+        try json.write(entry.nature.label());
+        try json.objectField("note");
+        try json.write(entry.note);
+        try json.objectField("alternative");
+        if (entry.alternative) |a| try json.write(a) else try json.write(null);
+        try json.objectField("failure_class");
+        if (entry.failure_class) |f| try json.write(f) else try json.write(null);
+        try json.objectField("proof_unlocked");
+        if (entry.proof_unlocked) |p| try json.write(p) else try json.write(null);
+        try json.objectField("enforced_by");
+        try json.beginArray();
+        for (entry.enforced_by) |code| try json.write(code);
+        try json.endArray();
+        try json.objectField("unenforced_note");
+        if (entry.unenforced_note) |n| try json.write(n) else try json.write(null);
+        try json.endObject();
+    }
+
+    try json.endArray();
+    try json.endObject();
+    return true;
+}
+
+/// The rule registry, optionally filtered to one rule by name or code. An
+/// unknown rule is an empty list and `success: true` - the closed operation set
+/// answers "no such rule" as data, not as a protocol failure.
+///
+/// No `severity` field: see the `rule_severity` deferred section.
+fn writeDescribeRulePayload(json: *std.json.Stringify, input: std.json.Value) !bool {
+    const filter: ?[]const u8 = blk: {
+        const obj = switch (input) {
+            .object => |o| o,
+            else => break :blk null,
+        };
+        const value = obj.get("rule") orelse break :blk null;
+        break :blk if (value == .string) value.string else null;
+    };
+
+    try json.beginObject();
+    try json.objectField("rules");
+    try json.beginArray();
+    for (&rule_registry.all_rules) |*rule| {
+        if (filter) |name| {
+            if (!std.mem.eql(u8, rule.name, name) and !std.mem.eql(u8, rule.code, name)) continue;
+        }
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write(rule.name);
+        try json.objectField("code");
+        try json.write(rule.code);
+        try json.objectField("category");
+        try json.write(rule.category.label());
+        try json.objectField("description");
+        try json.write(rule.description);
+        try json.objectField("example");
+        if (rule.example) |e| try json.write(e) else try json.write(null);
+        try json.objectField("help");
+        try json.write(rule.help);
+        try json.objectField("repair_intent");
+        if (rule.repair) |r| try json.write(@tagName(r)) else try json.write(null);
+        try json.endObject();
+    }
+    try json.endArray();
     try json.endObject();
     return true;
 }
@@ -896,6 +1030,148 @@ test "the guard runs before the operation does any work" {
         "operation_not_implemented",
         parsed.value.object.get("error").?.object.get("code").?.string,
     );
+}
+
+test "restrictions publishes every matrix row, not only the frozen v1 set" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"restrictions","project_root":".","input":{}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const rows = parsed.value.object.get("payload").?.object.get("restrictions").?.array;
+    try testing.expectEqual(restriction_registry.entries.len, rows.items.len);
+    try testing.expect(rows.items.len > restriction_registry.v1_count);
+
+    const first = rows.items[0].object;
+    try testing.expect(std.mem.startsWith(u8, first.get("id").?.string, "restriction."));
+    try testing.expect(first.get("nature") != null);
+    try testing.expect(first.get("enforced_by").? == .array);
+}
+
+test "restrictions publishes the rows nothing enforces as unenforced" {
+    // Six rows the profile excludes on paper and admits in practice. A client
+    // reading only the exclusion list would otherwise believe they are enforced.
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"restrictions","project_root":".","input":{}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const rows = parsed.value.object.get("payload").?.object.get("restrictions").?.array;
+    var unenforced: usize = 0;
+    for (rows.items) |row| {
+        const codes = row.object.get("enforced_by").?.array;
+        const note = row.object.get("unenforced_note").?;
+        if (codes.items.len == 0) {
+            try testing.expect(note == .string);
+            unenforced += 1;
+        } else {
+            try testing.expect(note == .null);
+        }
+    }
+    try testing.expect(unenforced >= 6);
+}
+
+test "features publishes both halves and links refused forms to the matrix" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"features","project_root":".","input":{}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const items = parsed.value.object.get("payload").?.object.get("features").?.array;
+    try testing.expectEqual(
+        json_diagnostics.allowed_feature_names.len + restriction_registry.entries.len,
+        items.items.len,
+    );
+    var allowed: usize = 0;
+    for (items.items) |f| {
+        const status = f.object.get("status").?.string;
+        if (std.mem.eql(u8, status, "allowed")) {
+            allowed += 1;
+            try testing.expect(f.object.get("restriction_id").? == .null);
+        } else {
+            try testing.expectEqualStrings("blocked", status);
+            const id = f.object.get("restriction_id").?.string;
+            try testing.expect(restriction_registry.findById(id) != null);
+        }
+    }
+    try testing.expectEqual(json_diagnostics.allowed_feature_names.len, allowed);
+}
+
+test "describe_rule with no filter returns every registry rule" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"describe_rule","project_root":".","input":{}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const rules = parsed.value.object.get("payload").?.object.get("rules").?.array;
+    try testing.expectEqual(rule_registry.all_rules.len, rules.items.len);
+    // No severity field: it is a property of the emission site, not the rule.
+    try testing.expect(rules.items[0].object.get("severity") == null);
+}
+
+test "describe_rule filters by code and by name" {
+    const a = testing.allocator;
+    for ([_][]const u8{
+        \\{"schema_version":2,"operation":"describe_rule","project_root":".","input":{"rule":"ZTS303"}}
+        ,
+        \\{"schema_version":2,"operation":"describe_rule","project_root":".","input":{"rule":"unchecked_result_value"}}
+        ,
+    }) |body| {
+        const out = try respond(a, body);
+        defer a.free(out);
+        var parsed = try parse(a, out);
+        defer parsed.deinit();
+        const rules = parsed.value.object.get("payload").?.object.get("rules").?.array;
+        try testing.expectEqual(@as(usize, 1), rules.items.len);
+        try testing.expectEqualStrings("ZTS303", rules.items[0].object.get("code").?.string);
+        try testing.expectEqualStrings("unchecked_result_value", rules.items[0].object.get("name").?.string);
+    }
+}
+
+test "describe_rule with an unknown rule succeeds with an empty list" {
+    // The closed operation set answers "no such rule" as data, not as a
+    // protocol failure.
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"describe_rule","project_root":".","input":{"rule":"ZTS999"}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("success").?.bool);
+    try testing.expectEqual(
+        @as(usize, 0),
+        parsed.value.object.get("payload").?.object.get("rules").?.array.items.len,
+    );
+    try testing.expect(parsed.value.object.get("error") == null);
+}
+
+test "meta names rule_severity as a section no registry can answer" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{}}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const sections = parsed.value.object.get("payload").?.object.get("deferred_sections").?.array;
+    var found = false;
+    for (sections.items) |sec| {
+        if (std.mem.eql(u8, sec.object.get("name").?.string, "rule_severity")) found = true;
+    }
+    try testing.expect(found);
 }
 
 test "identical requests produce byte-identical responses" {

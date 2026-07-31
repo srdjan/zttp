@@ -727,6 +727,15 @@ const blocked_features = blk: {
 
 const features = allowed_features ++ blocked_features;
 
+/// The admitted surface forms, by name. The v2 `features` operation publishes
+/// these beside the restriction matrix; the refused half comes from the
+/// registry directly, so this is the only part of the v1 table it needs.
+pub const allowed_feature_names = blk: {
+    var out: [allowed_features.len][]const u8 = undefined;
+    for (allowed_features, 0..) |f, i| out[i] = f.name;
+    break :blk out;
+};
+
 // Comptime assertion: every blocked feature must populate `alternative`,
 // `blocked_reason`, `failure_class`, and `proof_unlocked`. Allowed features
 // must leave all four null. Drift causes a compile-time error.
