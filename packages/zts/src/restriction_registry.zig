@@ -369,9 +369,9 @@ pub const entries = [_]RestrictionEntry{
         .nature = .essential,
         .note = "essential to the selected checker model",
         // Stripper codes, measured: ZTS041 `any`, ZTS042 `as`, ZTS043
-        // `satisfies` (json_diagnostics.stripErrorCode). ZTS041 is also the
-        // parser's `nesting_too_deep` code - a collision recorded for a later
-        // phase, not introduced here.
+        // `satisfies` (json_diagnostics.stripErrorCode). ZTS041 once also
+        // named the parser's `nesting_too_deep`; that one moved to ZTS044, and
+        // json_diagnostics now fails its own test if any code names two kinds.
         .enforced_by = &.{ "ZTS041", "ZTS042", "ZTS043" },
     },
     .{

@@ -94,7 +94,13 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
         .invalid_export => "ZTS038",
         .duplicate_export => "ZTS039",
         .unexpected_character => "ZTS040",
-        .nesting_too_deep => "ZTS041",
+        // ZTS041-ZTS043 belong to the type stripper (`stripErrorCode`). This
+        // row read ZTS041 too, so one code named both the nesting limit and
+        // the `any` rejection. The nesting limit moved because it is the
+        // rarer of the two and the only reference to it is this table, where
+        // the stripper block is contiguous and cited by
+        // `restriction_registry`'s type-evidence row.
+        .nesting_too_deep => "ZTS044",
     };
 }
 
@@ -229,7 +235,8 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
     };
 }
 
-/// Type stripper error codes: ZTS04x (continues the parser ZTS0xx range).
+/// Type stripper error codes: ZTS041-ZTS043 (inside the parser ZTS0xx range,
+/// which ends at ZTS040 plus the relocated ZTS044).
 fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
     return switch (kind) {
         .any_type => "ZTS041",
@@ -1123,6 +1130,49 @@ test "writeRestrictionsMarkdown mentions every blocked feature" {
         if (f.status != .blocked) continue;
         const found = std.mem.indexOf(u8, buf.items, f.name) != null;
         try std.testing.expect(found);
+    }
+}
+
+test "fromParseError maps the nesting limit to ZTS044" {
+    const jd = fromParseError(.{
+        .kind = .nesting_too_deep,
+        .message = "statements nest too deeply",
+        .token_text = null,
+        .expected = null,
+        .location = .{ .line = 2, .column = 5, .offset = 0 },
+    }, "handler.ts");
+    try std.testing.expectEqualStrings("ZTS044", jd.code);
+}
+
+test "every diagnostic code names exactly one diagnostic" {
+    // ZTS041 once named both the parser's nesting limit and the stripper's
+    // `any` rejection, so a client could not tell which one it had received.
+    // Walk every mapper and fail on any code two kinds share.
+    var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
+    defer seen.deinit(std.testing.allocator);
+
+    const mappers = .{
+        .{ ErrorKind, parserErrorCode },
+        .{ bool_checker.DiagnosticKind, boolCheckerCode },
+        .{ type_checker.DiagnosticKind, typeCheckerCode },
+        .{ handler_verifier.DiagnosticKind, verifierCode },
+        .{ strict_checker.DiagnosticKind, strictCheckerCode },
+        .{ flow_checker.DiagnosticKind, flowCheckerCode },
+        .{ zts.StripDiagnosticKind, stripErrorCode },
+    };
+
+    inline for (mappers) |mapper| {
+        const Kind = mapper[0];
+        const codeOf = mapper[1];
+        inline for (@typeInfo(Kind).@"enum".fields) |field| {
+            const kind: Kind = @enumFromInt(field.value);
+            const code = codeOf(kind);
+            if (seen.get(code)) |owner| {
+                std.debug.print("{s} names both {s} and {s}\n", .{ code, owner, field.name });
+                return error.DuplicateDiagnosticCode;
+            }
+            try seen.put(std.testing.allocator, code, field.name);
+        }
     }
 }
 
