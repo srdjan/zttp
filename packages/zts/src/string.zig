@@ -59,14 +59,6 @@ pub const JSString = extern struct {
         return @constCast(self).getHash();
     }
 
-    /// Get string length in UTF-8 codepoints
-    pub fn codepointLength(self: *const JSString) u32 {
-        if (self.flags.is_ascii) {
-            return self.len;
-        }
-        return countCodepoints(self.data());
-    }
-
     /// Check if string is empty
     pub fn isEmpty(self: *const JSString) bool {
         return self.len == 0;
@@ -1393,58 +1385,6 @@ pub fn formatFloatToBuf(buf: []u8, f: f64) []const u8 {
         @memcpy(buf[0..3], "NaN");
         return buf[0..3];
     };
-    return result;
-}
-
-/// Concatenate a string and a number without intermediate string allocation
-/// Uses arena allocation for the result
-pub fn concatStringNumberWithArena(arena: *arena_mod.Arena, str: *const JSString, num_buf: []const u8) ?*JSString {
-    const total_len = std.math.add(u32, str.len, @intCast(num_buf.len)) catch return null;
-    const total_size = @sizeOf(JSString) + total_len;
-    const mem = arena.alloc(total_size) orelse return null;
-
-    const result: *JSString = @ptrCast(@alignCast(mem));
-    result.* = .{
-        .header = heap.MemBlockHeader.init(.string, total_size),
-        .flags = .{
-            .is_unique = false,
-            .is_ascii = str.flags.is_ascii and isAscii(num_buf),
-            .is_numeric = false,
-            .hash_computed = false,
-        },
-        .len = total_len,
-        .hash = 0,
-    };
-
-    const data_mut = result.dataMut();
-    @memcpy(data_mut[0..str.len], str.data());
-    @memcpy(data_mut[str.len..], num_buf);
-    return result;
-}
-
-/// Concatenate a number and a string without intermediate string allocation
-/// Uses arena allocation for the result
-pub fn concatNumberStringWithArena(arena: *arena_mod.Arena, num_buf: []const u8, str: *const JSString) ?*JSString {
-    const total_len = std.math.add(u32, @intCast(num_buf.len), str.len) catch return null;
-    const total_size = @sizeOf(JSString) + total_len;
-    const mem = arena.alloc(total_size) orelse return null;
-
-    const result: *JSString = @ptrCast(@alignCast(mem));
-    result.* = .{
-        .header = heap.MemBlockHeader.init(.string, total_size),
-        .flags = .{
-            .is_unique = false,
-            .is_ascii = isAscii(num_buf) and str.flags.is_ascii,
-            .is_numeric = false,
-            .hash_computed = false,
-        },
-        .len = total_len,
-        .hash = 0,
-    };
-
-    const data_mut = result.dataMut();
-    @memcpy(data_mut[0..num_buf.len], num_buf);
-    @memcpy(data_mut[num_buf.len..], str.data());
     return result;
 }
 

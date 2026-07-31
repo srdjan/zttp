@@ -16,18 +16,6 @@ pub fn consoleLog(ctx: *context.Context, this: value.JSValue, args: []const valu
     return value.JSValue.undefined_val;
 }
 
-pub fn consoleWarn(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = ctx;
-    _ = this;
-    writeToFd(std.c.STDERR_FILENO, "[WARN] ");
-    for (args, 0..) |arg, i| {
-        if (i > 0) writeToFd(std.c.STDERR_FILENO, " ");
-        printValue(std.c.STDERR_FILENO, arg);
-    }
-    writeToFd(std.c.STDERR_FILENO, "\n");
-    return value.JSValue.undefined_val;
-}
-
 pub fn consoleError(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = ctx;
     _ = this;
