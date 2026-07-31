@@ -81,7 +81,33 @@ by construction rather than by test alone.
   and putting it in `zts` would need a new `scripts/module-boundary.allow` row for
   no gain.
 
-- [ ] **Step 1: Write the failing tests**
+**Two deviations, both found while running this task on 2026-07-31.**
+
+1. **Zig 0.16 removed `std.fs.cwd()`.** Every filesystem call goes through an
+   `std.Io` instance (`std.Io.Dir.realPathFileAlloc(.cwd(), io, path, allocator)`),
+   so both path functions take an `io: std.Io` parameter the plan's signatures
+   omitted. Callers build the backend the way the rest of `tools` does:
+   `std.Io.Threaded.init(allocator, .{ .environ = .empty })`. Tests pass
+   `std.testing.io`. Tasks 4, 5, 8, 9, and 10 inherit the extra parameter.
+2. **A re-export is not a reference, so the file needs its own test root.** The
+   plan's Step 2 assumed adding `pub const agent_identity = @import(...)` to
+   `zts_cli.zig` puts the file's tests into `zig build test-zts-cli`. It does not:
+   Zig collects tests only from files it analyzes, and an unreferenced `pub const`
+   import is compiled by AstGen alone. Measured - with the file wired that way, a
+   deliberately wrong `expectEqualStrings` **and** a call to the nonexistent
+   `std.fs.cwd()` both passed the step, and the test count stayed at 82. The file
+   gets a `test-agent-identity` row in `build.zig`'s `host_test_roots` table,
+   which `zig build test` picks up automatically (build.zig:701).
+
+   **Pre-existing hole found by the same probe, not fixed here:**
+   `packages/tools/src/verify_paths_core.zig` calls `tmp_dir.dir.realpath(path, &buf)`
+   at lines 169, 201, and 233, which does not compile against 0.16
+   (`Io.Dir.realPath` takes `io`). Its three tests have therefore never run. Rooting
+   that file as a test target fails with `member function expected 2 argument(s),
+   found 1` on all three. Any file in `tools` that is re-exported but never called
+   is in the same state; an audit belongs in its own commit.
+
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 const std = @import("std");
@@ -133,7 +159,7 @@ test "canonicalRelPath maps the root itself to the empty string" {
 }
 ```
 
-- [ ] **Step 2: Run, expect failure** (file missing).
+- [x] **Step 2: Run, expect failure** (file missing).
 
 Run: `zig build test-zts-cli -- --test-filter "canonicalRelPath"`
 Expected: compile error, `agent_identity.zig` not found / not imported.
@@ -143,7 +169,7 @@ Wire the new file into the tools test surface the same way a sibling does: add
 at the top of `packages/tools/src/zts_cli.zig` (lines 3-16), which is what
 `zig build test-zts-cli` roots on.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```zig
 //! Identity primitives for the version-2 agent protocol.
@@ -221,13 +247,13 @@ The tests pass `/project`, which does not exist on disk, so the `realpathAlloc`
 fallback path is the one under test. Keep the fallback: it is also the production
 path for a file the client names before creating it.
 
-- [ ] **Step 4: Run, expect PASS**
+- [x] **Step 4: Run, expect PASS**
 
 Run: `zig build test-zts-cli -- --test-filter "canonicalRelPath"` then
 `zig build test-zts-cli -- --test-filter "sourceDigest"`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_identity.zig packages/tools/src/zts_cli.zig
