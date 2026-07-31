@@ -257,6 +257,14 @@ pub fn build(b: *std.Build) void {
         // through an unreferenced re-export - is not analyzed. Verified by
         // planting a failing test in every tools file and recording which ones
         // the aggregate suite reported.
+        //
+        // The same audit ran over zts, runtime, and pi on 2026-07-31: 276 files
+        // carry tests and every one is collected. 274 by `zig build test`,
+        // `runtime/src/studio.zig` by the `zig build test-cli -Dstudio` step in
+        // scripts/verify.sh (studio compiles out by default), and
+        // `runtime/src/zruntime_tests.zig` by `zig build test-zruntime`. No new
+        // root needed there: those three packages reach their files through
+        // analyzed imports, not through named modules the way tools does.
         .{ .owner = .tools, .src = "src/module_audit.zig", .step = "test-module-audit", .desc = "Run module-contract audit tests", .project_config = true },
         .{ .owner = .tools, .src = "src/manifest_alignment.zig", .step = "test-manifest-alignment", .desc = "Run manifest alignment tests", .project_config = true },
         .{ .owner = .tools, .src = "src/smt_solver.zig", .step = "test-smt-solver", .desc = "Run SMT solver harness tests", .project_config = true },

@@ -352,6 +352,34 @@ Findings recorded, none fixed in this phase:
 - **`zts check` emits `ZTS601` twice** at one position for one function. v1 does
   the same, so it predates this phase.
 
+**Backlog closed, 2026-07-31.** Every finding above is now either fixed or
+reduced to a named blocker:
+
+- **ZTS601 twice** - fixed. `walkStmt`'s `.export_decl` arm called
+  `checkExportedDeclaration` and then walked the same declaration; both reached
+  `checkFunctionAnnotation`. The export path now checks only ZTS609.
+- **ZTS041 for two diagnostics** - fixed. The parser's `nesting_too_deep` moved
+  to ZTS044; the stripper keeps the contiguous ZTS041-ZTS043 block the
+  type-evidence row cites. A `json_diagnostics` test now walks every mapper and
+  fails on any code two kinds share.
+- **Six unenforced restriction rows** - five enforced. `eval`, `Proxy`, and
+  `Reflect` join the parser's removed-global list; object methods, getters, and
+  setters are rejected at the parse site (codegen dropped them silently, so the
+  method vanished from the object it was written into); numeric record keys are
+  rejected at the key, because a numeric key parsed to the same string key as
+  the quoted spelling. Mutable live iteration became ZTS622 in the strict
+  checker. `restriction.interface` is the one that stays, still blocked on the
+  D-workstream migration policy, and the agent-protocol test now pins the
+  remaining gap at exactly three rows.
+- **`delete` in a function body never terminates** - fixed earlier, in
+  `fix(parser): block recovery always consumes a token`.
+- **Test roots for the other packages** - audited, nothing to fix. All 276
+  test-carrying files under zts, runtime, and pi are collected: 274 by
+  `zig build test`, `studio.zig` by verify.sh's `zig build test-cli -Dstudio`
+  step, and `zruntime_tests.zig` by `zig build test-zruntime`. Those packages
+  reach their files through analyzed imports, not through the named modules and
+  unreferenced re-exports that hid eight tools files.
+
 **Spec edits owed, added by Phase 1:** section 4.8 requires every rule to declare
 its severity, which contradicts how the checkers work today - either the
 requirement moves to the diagnostic (where severity genuinely lives) or the
