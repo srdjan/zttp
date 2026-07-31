@@ -423,7 +423,9 @@ fn writeTempFile(allocator: std.mem.Allocator, original_name: []const u8, conten
     return tmp_path;
 }
 
-fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
+/// Read stdin to EOF, capped at `max_stdin_json_bytes`. Public so the v2
+/// agent transport reads its request through the same capped reader.
+pub fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 

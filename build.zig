@@ -250,6 +250,7 @@ pub fn build(b: *std.Build) void {
         // collected_via_named_module: same as agent_identity - nothing analyzed
         // references it yet, so only its own root runs its tests.
         .{ .owner = .tools, .src = "src/module_graph_record.zig", .step = "test-module-graph-record", .desc = "Run v2 resolved module graph and digest tests" },
+        .{ .owner = .tools, .src = "src/agent_protocol.zig", .step = "test-agent-protocol", .desc = "Run v2 agent protocol envelope tests", .project_config = true },
         .{ .owner = .pi, .src = "src/tests.zig", .step = "test-expert-app", .desc = "Run zts expert in-process app tests", .project_config = true, .pi_modules = true },
         // Focused subset covering only the record/replay layer: runs offline,
         // never needs an API key, and does not transitively pull in the

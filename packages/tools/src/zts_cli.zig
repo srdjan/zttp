@@ -7,6 +7,7 @@ pub const upgrade_verifier = @import("upgrade_verifier.zig");
 // the `zts_cli` named module instead of reaching into tools/src/ directly.
 pub const agent_identity = @import("agent_identity.zig");
 pub const module_graph_record = @import("module_graph_record.zig");
+pub const agent_protocol = @import("agent_protocol.zig");
 pub const expert_meta = @import("expert_meta.zig");
 pub const verify_paths_core = @import("verify_paths_core.zig");
 pub const describe_rule = @import("describe_rule.zig");
@@ -71,6 +72,7 @@ pub const commands = [_]Command{
     .{ .name = "modules", .run = runModulesCommand, .category = .machine, .args = "", .blurb = "List virtual module exports", .usage = "modules [--json]" },
     .{ .name = "restrictions", .run = runRestrictionsCommand, .category = .machine, .args = "", .blurb = "Show language restrictions and the proofs they unlock", .usage = "restrictions [--json] [--by proof|class]" },
     .{ .name = "meta", .run = expert.runMeta, .category = .machine, .args = "", .blurb = "Compiler and policy metadata", .usage = "meta [--json]" },
+    .{ .name = "agent", .run = agent_protocol.runWithArgs, .category = .machine, .args = "--stdin-json", .blurb = "Version-2 agent protocol over stdin/stdout", .usage = "agent --stdin-json" },
     .{ .name = "describe-rule", .run = describe_rule.runWithArgs, .category = .machine, .args = "[name|code]", .blurb = "Look up a diagnostic rule", .usage = "describe-rule [rule-name|code] [--json] [--hash]" },
     .{ .name = "search", .run = search_rules.runWithArgs, .category = .machine, .args = "<keyword>", .blurb = "Search rules by keyword", .usage = "search <keyword> [--json]" },
     .{ .name = "spec-check", .run = semantics_cli.runSpecCheckCommand, .category = .machine, .args = "", .blurb = "Check the semantics registry against the IR/bytecode tables", .usage = "spec-check [--json]" },

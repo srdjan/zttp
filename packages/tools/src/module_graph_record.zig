@@ -223,12 +223,21 @@ fn collectImports(
     // The parser reads stripped source, exactly as the runtime graph does. A
     // strip failure is not fatal here: an unparseable module still belongs in
     // the graph with its digest, and `check` is what reports the error.
-    var stripped: ?zts.stripper.StripResult = null;
-    defer if (stripped) |*sr| sr.deinit();
+    //
+    // The stripped code is copied out and the result released immediately, so
+    // this file names only the curated `zts.strip` and never the internal
+    // `stripper` module - keeping the module boundary as narrow as the work
+    // needs. The copy is one source file's bytes.
+    var stripped_code: ?[]u8 = null;
+    defer if (stripped_code) |c| allocator.free(c);
     if (is_ts) {
-        stripped = zts.strip(allocator, source, .{ .tsx_mode = is_tsx }) catch null;
+        if (zts.strip(allocator, source, .{ .tsx_mode = is_tsx })) |result| {
+            var owned = result;
+            stripped_code = allocator.dupe(u8, owned.code) catch null;
+            owned.deinit();
+        } else |_| {}
     }
-    const parse_source = if (stripped) |sr| sr.code else source;
+    const parse_source = if (stripped_code) |c| c else source;
 
     var js_parser = parser.JsParser.init(allocator, parse_source) catch return;
     defer js_parser.deinit();

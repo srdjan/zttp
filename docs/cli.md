@@ -287,6 +287,7 @@ zttp features [--json]
 zttp modules [--json]
 zttp restrictions [--json] [--by proof|class]
 zttp meta [--json]
+zttp agent --stdin-json
 zttp describe-rule [name|code] [--json] [--hash] [--idioms]
 zttp search <keyword> [--json]
 zttp spec-check [--json]
@@ -301,6 +302,16 @@ zttp extension-status --module-manifest <path>... [--json]
 ```
 
 Use JSON mode for IDEs, CI, and review-bot integrations.
+
+`zttp agent --stdin-json` is the only version-2 surface. It reads one request
+object from standard input and writes one response object to standard output,
+with logs on standard error. Every other command listed here is version 1: their
+bare arrays and version-1 objects are legacy or human-facing interfaces, and an
+agent must not read them as advanced-profile responses. Send `meta` first - its
+payload publishes the operation set, the identity hashes each response binds,
+and the payload sections this compiler does not yet generate. A request naming
+any other `schema_version` gets a frozen three-key negotiation response, so
+version discovery is one deterministic round trip.
 
 Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove` and `prove-behavior` return 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence, with a `ZTS75x` counterexample), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the five mechanisms, the SMT layer, the exclusion audit, and the generated artifacts these commands own.
 
