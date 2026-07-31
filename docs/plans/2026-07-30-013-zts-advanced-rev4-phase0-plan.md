@@ -530,9 +530,33 @@ git add -A && git commit -m "fix(paths): summarized loops and cut recursion clea
 - Consumes: nothing new.
 - Produces: a handler containing direct or mutual recursion reports its cost bound as unbounded/unavailable and any totality-adjacent property as unproven, unless a decreasing argument is proven (none is, in Phase 0 — so recursion always downgrades). Spec 5.6: "No runtime stack cap may be presented as a termination proof."
 
-- [ ] **Step 1: Locate the claim.** Trace how a recursive handler flows today: does `handler_verifier` or the contract builder emit any field a consumer reads as total/bounded (`envelope.total` constant bound, contract properties)? Record findings as a comment in the test added next. If the claim genuinely cannot be produced today for recursive input, this task reduces to adding the pinning test that proves it — that is a valid outcome.
+- [x] **Step 1: Locate the claim.** Trace how a recursive handler flows today: does `handler_verifier` or the contract builder emit any field a consumer reads as total/bounded (`envelope.total` constant bound, contract properties)? Record findings as a comment in the test added next. If the claim genuinely cannot be produced today for recursive input, this task reduces to adding the pinning test that proves it — that is a valid outcome.
 
-- [ ] **Step 2: Write the failing (or pinning) test**
+**Findings, 2026-07-31. The totality half was already honest; the cost half was
+not.**
+
+- **Totality: no change needed.** `spec_discharge.CapsuleFacts.holds` returns
+  false for every property, `total` included, whenever `recursive` is set. A
+  recursive helper is already refused capsule discharge with its own suggestion
+  text. Nothing to downgrade.
+- **Cost: a live over-claim.** Measured on a handler whose recursive helper
+  calls `sqlOne` once per level, with the level count taken from the request:
+  `cost_bounded PROVEN`, `Max I/O depth: 0`, `Execution paths: 1 (exhaustive)`.
+  All three false.
+- **Why it is that wrong: the path generator never walks into user functions at
+  all.** Verified by comparing a module call inline in the handler
+  (`Max I/O depth: 1`) against the identical call moved into a one-line
+  non-recursive helper (`Max I/O depth: 0`). So the cost envelope counts only
+  the module calls written syntactically in the handler body.
+
+That last point is a real defect **wider than this task**: every helper's module
+calls are uncounted, recursive or not. Fixing it is whole-program cost analysis,
+not Phase 0, and it is **not** fixed here. Task 7 covers only what it names -
+recursion must not yield a constant cost bound - and the fix is keyed on
+recursion, with a test pinning that a non-recursive helper keeps its bound. The
+general under-count is recorded here for a later phase to pick up.
+
+- [x] **Step 2: Write the failing (or pinning) test**
 
 ```zig
 test "recursive handler gets no constant cost bound" {
@@ -542,11 +566,38 @@ test "recursive handler gets no constant cost bound" {
 }
 ```
 
-- [ ] **Step 3: Implement** recursion detection where the claim is emitted: build the call graph the verifier already walks, detect a cycle reaching the handler, and force the bound to the unbounded variant (`contract_types.Bound` — read its variants first) and any proof-ish marker to its unproven variant.
+- [x] **Step 3: Implement** recursion detection where the claim is emitted: build the call graph the verifier already walks, detect a cycle reaching the handler, and force the bound to the unbounded variant (`contract_types.Bound` — read its variants first) and any proof-ish marker to its unproven variant.
 
-- [ ] **Step 4: Run, expect PASS**, then `zig build test-zts` and `zig build test` for contract consumers.
+**No new call graph was built.** `effect_inference.Analyzer` already builds one
+(CSR-encoded) and already marks `row.recursive` via a Tarjan-style pass. What was
+missing is a reachability query: `propagate` deliberately resets `recursive` to
+each function's own value, because a caller of a recursive helper is not itself
+recursive and must not lose capsule discharge for one. A cost claim needs the
+other question, so `Analyzer.reachesRecursion` walks the existing graph.
 
-- [ ] **Step 5: Commit**
+Three details worth carrying forward:
+
+1. **Key on the body node, not the declaration.** `findHandlerFunction` returns
+   the `.function_expr`; the analyzer records the enclosing `.function_decl`.
+   They are adjacent indices and never equal, so matching on `decl_node`
+   silently returned false for every handler. The body is the node both agree
+   on.
+2. **Hand the analyzer the program root, not the handler.** It collects
+   functions by walking down from its argument, so given `handler_func` it never
+   sees the sibling declarations the handler calls.
+3. **Fail closed.** No program root, no analyzable handler function, or an
+   analysis that could not allocate all set `reaches_recursion = true`. Absence
+   of evidence is not proof of termination.
+
+The `check` display needed a third rework. Task 6 gave its non-exhaustive branch
+the wording "summarized: a loop body is walked once", which is the wrong cause
+for a recursive handler with no loop in it. Cause and message now travel
+together as `PathGenerator.Coverage`, whose four cases each carry their own note,
+replacing the bool-plus-guesswork the display had been doing.
+
+- [x] **Step 4: Run, expect PASS**, then `zig build test-zts` and `zig build test` for contract consumers.
+
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/zts/src/handler_verifier.zig packages/zts/src/path_generator.zig

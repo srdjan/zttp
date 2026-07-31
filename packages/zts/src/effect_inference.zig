@@ -198,6 +198,62 @@ pub const Analyzer = struct {
         return self.functions.items;
     }
 
+    /// Whether the function whose body is `body_node` is recursive or can reach
+    /// a recursive function through the call graph.
+    ///
+    /// Keyed on the body rather than the declaration because callers hold
+    /// different nodes for the same function: `findHandlerFunction` returns the
+    /// `.function_expr`, while `decl_node` here is the enclosing
+    /// `.function_decl`. The body is the node both agree on.
+    ///
+    /// `EffectRow.recursive` answers only the first half: `propagate` resets it
+    /// to the function's own value on purpose, because a caller of a recursive
+    /// helper is not itself recursive and must not be refused capsule discharge
+    /// for one. A cost or termination claim needs the other question, so this
+    /// walks the same CSR call graph instead of reading the row.
+    ///
+    /// Returns false when `body_node` names no analyzed function, and on
+    /// allocation failure, so a caller that cannot allocate does not silently
+    /// gain a claim it has not earned - the caller should treat false as "no
+    /// evidence of recursion", never as "proven non-recursive".
+    pub fn reachesRecursion(self: *const Analyzer, body_node: NodeIndex) bool {
+        const fn_count = self.functions.items.len;
+        if (fn_count == 0) return false;
+
+        var start_idx: usize = 0;
+        while (start_idx < fn_count) : (start_idx += 1) {
+            if (self.functions.items[start_idx].body_node == body_node) break;
+        } else return false;
+
+        const visited = self.allocator.alloc(bool, fn_count) catch return false;
+        defer self.allocator.free(visited);
+        @memset(visited, false);
+
+        const stack = self.allocator.alloc(usize, fn_count) catch return false;
+        defer self.allocator.free(stack);
+
+        var depth: usize = 1;
+        stack[0] = start_idx;
+        visited[start_idx] = true;
+
+        while (depth > 0) {
+            depth -= 1;
+            const idx = stack[depth];
+            if (self.functions.items[idx].row.recursive) return true;
+
+            const start_off = self.callee_starts.items[idx];
+            const count = self.calleeCount(idx);
+            for (0..count) |k| {
+                const callee_idx = self.callee_storage.items[start_off + k];
+                if (visited[callee_idx]) continue;
+                visited[callee_idx] = true;
+                stack[depth] = callee_idx;
+                depth += 1;
+            }
+        }
+        return false;
+    }
+
     // ----- internal -----
 
     /// Resolve the index to read: the injected one, or a private one built on

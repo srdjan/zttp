@@ -33,6 +33,8 @@ pub const CheckResult = struct {
     no_unreachable: bool = true,
     paths_enumerated: u32 = 0,
     paths_exhaustive: bool = false,
+    /// Why coverage is or is not complete. A static string, so nothing owns it.
+    paths_coverage_note: []const u8 = "exhaustive",
     max_io_depth: ?u32 = null,
     fault_total: u32 = 0,
     fault_covered: u32 = 0,
@@ -396,18 +398,10 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writer.print("  Fault coverage: {d}/{d} paths covered\n", .{ r.fault_covered, r.fault_total }) catch return;
     }
     if (r.paths_enumerated > 0) {
-        writer.print("  Execution paths: {d}", .{r.paths_enumerated}) catch return;
-        if (r.paths_exhaustive) {
-            writer.print(" (exhaustive)\n", .{}) catch return;
-        } else if (r.paths_enumerated >= zts.PathGenerator.MAX_PATHS) {
-            writer.print(" (limit reached)\n", .{}) catch return;
-        } else {
-            // Not the limit: a loop body was walked once as a representative
-            // iteration rather than enumerated, so paths through other
-            // iteration counts were never emitted. Saying "limit reached" here
-            // named the wrong cause.
-            writer.print(" (summarized: a loop body is walked once, not enumerated)\n", .{}) catch return;
-        }
+        // The note names the actual cause. A single bool made every cause read
+        // as whichever one this line happened to name, which was "limit
+        // reached" for a handler nowhere near the limit.
+        writer.print("  Execution paths: {d} ({s})\n", .{ r.paths_enumerated, r.paths_coverage_note }) catch return;
     }
     if (r.max_io_depth) |depth| {
         writer.print("  Max I/O depth: {d}\n", .{depth}) catch return;

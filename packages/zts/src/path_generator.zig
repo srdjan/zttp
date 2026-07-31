@@ -18,6 +18,7 @@ const object = @import("object.zig");
 const atom_table = @import("atom_table.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const module_facts_mod = @import("module_facts.zig");
+const effect_inference = @import("effect_inference.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
 const handler_contract = @import("handler_contract.zig");
@@ -171,6 +172,12 @@ pub const PathGenerator = struct {
     /// counts other than one - including zero - are never emitted. Spec gap 11:
     /// a summary must not be presented as exhaustive coverage.
     summarized: bool,
+    /// Set when the handler is recursive or reaches a recursive function. The
+    /// generator does not follow calls into user functions at all, so the
+    /// recursion is neither enumerated nor costed, and no constant bound over
+    /// it is earned. Spec 5.6: no runtime stack cap may be presented as a
+    /// termination proof.
+    reaches_recursion: bool,
 
     pub const MAX_PATHS = 1024;
 
@@ -255,6 +262,7 @@ pub const PathGenerator = struct {
             .tests = .empty,
             .path_count = 0,
             .summarized = false,
+            .reaches_recursion = false,
         };
     }
 
@@ -291,9 +299,49 @@ pub const PathGenerator = struct {
     pub fn generate(self: *PathGenerator, handler_func: NodeIndex) !void {
         try self.scanImports();
         try self.findHandlerBindings(handler_func);
+        try self.detectRecursionReach(handler_func);
 
         const func = self.ir_view.getFunction(handler_func) orelse return;
         try self.walkPaths(func.body);
+    }
+
+    /// Record whether the handler reaches recursion, so the cost and coverage
+    /// claims below can refuse to over-claim over a call graph this generator
+    /// never walks into.
+    fn detectRecursionReach(self: *PathGenerator, handler_func: NodeIndex) !void {
+        // The analyzer collects functions by walking down from its argument, so
+        // it needs the program root: handed `handler_func` it would never see
+        // the sibling declarations the handler calls.
+        const root = self.findProgramRoot() orelse {
+            self.reaches_recursion = true;
+            return;
+        };
+
+        var analyzer = effect_inference.Analyzer.init(self.allocator, self.ir_view, self.atoms);
+        defer analyzer.deinit();
+        // Fail closed: an analysis that could not run is not evidence that the
+        // handler is recursion-free.
+        analyzer.analyze(root) catch {
+            self.reaches_recursion = true;
+            return;
+        };
+        // `reachesRecursion` keys on the body: callers hold the
+        // `.function_expr` while the analyzer records the `.function_decl`, and
+        // the body is the node both agree on.
+        const handler_fn = self.ir_view.getFunction(handler_func) orelse {
+            self.reaches_recursion = true;
+            return;
+        };
+        self.reaches_recursion = analyzer.reachesRecursion(handler_fn.body);
+    }
+
+    fn findProgramRoot(self: *const PathGenerator) ?NodeIndex {
+        var idx: NodeIndex = 0;
+        while (idx < self.ir_view.nodeCount()) : (idx += 1) {
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag == .program) return idx;
+        }
+        return null;
     }
 
     pub fn getTests(self: *const PathGenerator) []const GeneratedTest {
@@ -306,7 +354,36 @@ pub const PathGenerator = struct {
     /// read this rather than recomputing the `MAX_PATHS` comparison, or half of
     /// them keep over-claiming.
     pub fn pathsExhaustive(self: *const PathGenerator) bool {
-        return !self.summarized and self.tests.items.len < MAX_PATHS;
+        return self.coverage() == .exhaustive;
+    }
+
+    /// Why the enumerated paths are or are not the complete set. Reported
+    /// verbatim, because a single "not exhaustive" bool made every cause read
+    /// as whichever one the display happened to name.
+    pub const Coverage = enum {
+        exhaustive,
+        /// Hit `MAX_PATHS`; the paths beyond it were never built.
+        truncated,
+        /// A loop body was walked once as a representative iteration.
+        summarized_loop,
+        /// The handler reaches recursion, which the walk does not follow.
+        recursion,
+
+        pub fn note(self: Coverage) []const u8 {
+            return switch (self) {
+                .exhaustive => "exhaustive",
+                .truncated => "limit reached",
+                .summarized_loop => "summarized: a loop body is walked once, not enumerated",
+                .recursion => "summarized: the handler reaches recursion, which is not followed",
+            };
+        }
+    };
+
+    pub fn coverage(self: *const PathGenerator) Coverage {
+        if (self.tests.items.len >= MAX_PATHS) return .truncated;
+        if (self.reaches_recursion) return .recursion;
+        if (self.summarized) return .summarized_loop;
+        return .exhaustive;
     }
 
     /// Fold every enumerated path's io_seq multiplicities into a per-module
@@ -377,6 +454,18 @@ pub const PathGenerator = struct {
                 .line = 0,
                 .column = 0,
                 .desc = truncated_desc,
+            } };
+        } else if (self.reaches_recursion) {
+            // The recursion's depth is not proven to decrease, and the
+            // generator never walks into the call, so every module call the
+            // cycle performs is missing from the count above. A constant bound
+            // over that is not a bound. Spec 5.6.
+            const recursion_desc = try allocator.dupe(u8, "recursion with no proven decreasing argument");
+            envelope.total.deinitOwned(allocator);
+            envelope.total = .{ .unbounded = .{
+                .line = 0,
+                .column = 0,
+                .desc = recursion_desc,
             } };
         }
 
@@ -2096,6 +2185,96 @@ fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGenera
         .atoms = atoms,
         .generator = generator,
     };
+}
+
+test "recursive handler gets no constant cost bound" {
+    const allocator = std.testing.allocator;
+    // Measured before this test existed: `zts check` on this shape reported
+    // `cost_bounded PROVEN`, `Max I/O depth: 0`, and `1 (exhaustive)`. All
+    // three are false. `depth` calls `sqlOne` once per level and the level
+    // count comes from the request, so the module-call count is unbounded, and
+    // the generator never followed the call at all. Spec 5.6: no runtime stack
+    // cap may be presented as a termination proof.
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\function depth(n) {
+        \\  if (n === 0) {
+        \\    return 0;
+        \\  }
+        \\  sqlOne("row");
+        \\  return depth(n - 1) + 1;
+        \\}
+        \\export function handler(req) {
+        \\  const d = depth(req.n);
+        \\  return Response.json({ d });
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expect(envelope.total.class() == .unbounded);
+    try std.testing.expect(!envelope.exhaustive);
+}
+
+test "handler calling a recursive helper gets no constant cost bound" {
+    const allocator = std.testing.allocator;
+    // The recursion is one hop away, and `EffectRow.recursive` does not
+    // propagate to callers by design, so this needs call-graph reachability
+    // rather than the handler's own row.
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\function inner(n) {
+        \\  if (n === 0) {
+        \\    return 0;
+        \\  }
+        \\  sqlOne("row");
+        \\  return inner(n - 1);
+        \\}
+        \\function outer(n) {
+        \\  return inner(n);
+        \\}
+        \\export function handler(req) {
+        \\  const d = outer(req.n);
+        \\  return Response.json({ d });
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expect(envelope.total.class() == .unbounded);
+}
+
+test "non-recursive helper keeps its constant cost bound" {
+    const allocator = std.testing.allocator;
+    // The downgrade must be keyed on recursion, not on calling a helper at all.
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\function load(id) {
+        \\  return id;
+        \\}
+        \\export function handler(req) {
+        \\  sqlOne("row");
+        \\  const a = load("x");
+        \\  return Response.json({ a });
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expect(envelope.total.class() != .unbounded);
+    try std.testing.expect(envelope.exhaustive);
 }
 
 test "envelope is not exhaustive when a loop body is summarized" {

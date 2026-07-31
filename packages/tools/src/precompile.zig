@@ -932,6 +932,9 @@ pub fn runCheckOnlyWithOptions(
 const PathAnalysis = struct {
     paths_enumerated: u32,
     paths_exhaustive: bool,
+    /// Why coverage is or is not complete. A static string from
+    /// `PathGenerator.Coverage.note`, so nothing owns it.
+    paths_coverage_note: []const u8,
     max_io_depth: ?u32,
     cost_bounded: bool,
     cost_envelope: ?handler_contract.CostEnvelope,
@@ -965,6 +968,7 @@ fn analyzeHandlerPaths(
         // it also knows whether anything was summarized instead of enumerated,
         // which this copy of the predicate used to miss (spec gap 11).
         .paths_exhaustive = generator.pathsExhaustive(),
+        .paths_coverage_note = generator.coverage().note(),
         .max_io_depth = null,
         .cost_bounded = false,
         .cost_envelope = null,
@@ -1361,6 +1365,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
 
             result.paths_enumerated = path_analysis.paths_enumerated;
             result.paths_exhaustive = path_analysis.paths_exhaustive;
+            result.paths_coverage_note = path_analysis.paths_coverage_note;
             result.max_io_depth = path_analysis.max_io_depth;
             result.fault_total = path_analysis.fault_coverage.total_failable;
             result.fault_covered = path_analysis.fault_coverage.covered;
