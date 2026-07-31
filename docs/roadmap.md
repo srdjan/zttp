@@ -24,8 +24,9 @@ behavior lives in [User Guide](user-guide.md).
 ## Current Limitations
 
 - Hosted cloud deploy is not part of the current CLI surface. `deploy` builds a
-  local binary; account, grant, remote review, and provider-control-plane flows
-  are not documented as supported user workflows.
+  local binary, `deploy --cloud` parses and rejects with a "not available in
+  this beta" message, and the account verbs (`login`, `logout`, `review`,
+  `grants`, `revoke-grant`) are not dispatched at all.
 - The runtime uses the threaded HTTP server path. The evented `std.Io`
   networking path is not a supported request backend.
 - Handlers receive raw `multipart/form-data` bodies from the HTTP server. Use
@@ -42,8 +43,10 @@ behavior lives in [User Guide](user-guide.md).
   and panic isolation; hosted request-timeout policy; and shutdown
   thread-safety semantics.
 - Finish the engine-to-runtime boundary refactor by routing runtime calls
-  through a strict facade, exposing stable runtime-facing engine types, and
-  splitting `zruntime.zig` by concern without changing ownership semantics.
+  through a strict facade and exposing stable runtime-facing engine types. The
+  file split landed (`handler_instance.zig` owns `HandlerInstance`;
+  `zruntime_tests.zig` is the test root), but six import cycles remain between
+  the instance and the sibling files its methods moved into.
 - Keep near-term module work limited to table-stakes gaps: fetch resilience,
   capability surfacing, and build-feature diagnostics. Cloud-adapter modules
   stay in a separate evaluated track.
@@ -83,8 +86,8 @@ in [docs/archive/plans/](archive/README.md).
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | `Bytes` and `zttp:bytes`; the HTTP, WebSocket, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText`; trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch, websocket, and queue examples re-typed; ceiling-rule repair tests. |
 | 6. Full idiom table, validators, gate-complete protocol | The remaining idiom rows; equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
 
-Three design documents own the decisions the phases consume, and each retires
-an interim marker left in the code:
+Three design documents own the decisions the phases consume. Two of them also
+retire an interim marker left in the code by phase 0:
 
 - [D1 type system](plans/2026-07-30-014-d1-type-system-design.md) - assignability,
   generic inference, narrowing dataflow, join and union normalization, canonical
@@ -101,10 +104,10 @@ Four risks carry across phases. The generics retrofit in phase 2 has a long
 tail, mitigated by the frozen signature corpus and by ordering constraints
 before inference. Normalization in phase 6 may not be confluent, mitigated by
 running the double-normalize property test from day one and falling back to
-advisory-only rows. Hand-written meta payloads would multiply drift gates,
-which ground rule three forbids. Silent decisions leaking into wire formats is
-why D1 lands before phase 2, D2 before phase 4, and D3's digest section before
-the phase-1 hash freeze.
+advisory-only rows. Hand-written meta payloads would multiply drift gates, which
+is why the ground rule above bans them. Silent decisions leaking into wire
+formats is why D1 lands before phase 2, D2 before phase 4, and D3's digest
+section before the phase-1 hash freeze.
 
 Two spelling decisions stay unresolved: the no-ASI flip waits for phase 6 and
 its unique-parse-insertion validator, because the live parser has `return`-ASI
@@ -115,23 +118,25 @@ D workstream produces a migration policy for removing published surface.
 
 The reset ledger is
 [2026-07-28-001-reset-simplification-plan.md](plans/2026-07-28-001-reset-simplification-plan.md).
-Waves 0 through 4 and wave 6 are executed. Three items remain:
+Waves 0 through 3 and wave 6 are executed, and waves 4 and 5 are done except
+for three items:
 
-- **Shared IR shape helpers** (wave 4, item 4). The shared import and binding
-  index shipped as `packages/zts/src/module_facts.zig` and all six analyzers
-  adopted it. The shape-helper library is deferred, and the orchestration move
-  is closed as declined: it had an architectural justification and no
-  performance or correctness one, and it needed an IO boundary inside
-  `pipeline.zig` that does not exist. Revisit only with a concrete consumer for
-  a fourth `LoweredModule` phase, such as a build cache or incremental compile.
-- **Collector role** (wave 5, item 3). Inverted by the wave 0 RSS measurement.
-  The memory defect it started from was found, fixed, and closed by a two-hour
-  soak (per-runtime lifetime arena), but the collector's role is still
-  unexamined. No GC code is deleted until the remaining growth is attributed.
-- **`comptime.zig` unification** (wave 5, item 4). Replacing its separate
-  tokenizer, parser, and value model with evaluation over the main IR after
-  parse would delete roughly 1,800 lines and structurally resolve the `==`
-  inconsistency. It needs more comptime tests first.
+- Shared IR shape helpers (wave 4, item 4). The shared import and binding index
+  shipped as `packages/zts/src/module_facts.zig` and all six analyzers adopted
+  it. The shape-helper library is deferred, and the orchestration move is closed
+  as declined: it had an architectural justification and no performance or
+  correctness one, and it needed an IO boundary inside `pipeline.zig` that does
+  not exist. Revisit only with a concrete consumer for a fourth `LoweredModule`
+  phase, such as a build cache or incremental compile.
+- The collector's role (wave 5, item 3). Inverted by the wave 0 RSS
+  measurement. The memory defect it started from was found, fixed, and closed by
+  a two-hour soak (per-runtime lifetime arena), but what the collector still
+  earns has not been measured. No GC code is deleted until the remaining growth
+  is attributed.
+- `comptime.zig` unification (wave 5, item 4). Replacing its separate tokenizer,
+  parser, and value model with evaluation over the main IR after parse would
+  delete roughly 1,800 lines and structurally resolve the `==` inconsistency. It
+  needs more comptime tests first.
 
 VM-loop dedupe stays deferred behind the FaaS hardening, engine facade, and
 measurement gates. The standalone plan is

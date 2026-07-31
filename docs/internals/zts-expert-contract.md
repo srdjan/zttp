@@ -50,6 +50,7 @@ Code ranges:
 | ZTS4xx | Flow and data-safety checks |
 | ZTS5xx | Active spec discharge |
 | ZTS6xx | Canonical profile |
+| ZTS7xx | Semantics registry conformance, emitted by `spec-check` rather than by handler analysis |
 
 ## Stable Commands
 
@@ -120,7 +121,8 @@ Event kinds and their `d` payloads:
 
 `tools.list` exposes compiler-native Pi tools in addition to the stable analyzer
 commands above. These tools are additive and run inside the same vetoed expert
-loop:
+loop. `tools.list` is the live inventory; the ones below are the compiler-native
+core:
 
 | Tool | Purpose |
 |---|---|

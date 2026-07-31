@@ -187,7 +187,7 @@ The check walks all assignment nodes in the handler body. If the target is an id
 let counter = 0;
 
 function handler(req: Request): Response {
-    counter += 1;  // verify error: module_scope_mutation
+    counter = counter + 1;  // verify error: module_scope_mutation
     return Response.json({ count: counter });
 }
 ```

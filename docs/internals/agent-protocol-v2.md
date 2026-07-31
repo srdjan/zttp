@@ -166,15 +166,15 @@ measurement that says why it cannot exist. A client reads one machine-readable
 list instead of discovering absence key by key. Nothing is stubbed with prose:
 a section that cannot be generated is absent.
 
-Two entries are findings rather than schedules:
+One entry is a finding rather than a schedule. `rule_severity` says severity is
+chosen at each emission site, not stored per rule: `handler_verifier` emits
+ZTS305 as a warning and ZTS500 as an error from one category, so no table can
+answer what severity a rule emits, and `describe_rule` publishes none rather
+than a derived guess. Every other entry names the phase that builds it.
 
-- `rule_severity` - severity is chosen at each emission site, not stored per
-  rule. `handler_verifier` emits ZTS305 as a warning and ZTS500 as an error from
-  one category, so no table can answer what severity a rule emits, and
-  `describe_rule` publishes none rather than a derived guess.
-- `extension_manifests` - no `zttp-ext:` manifest is authenticated, so every
-  extension specifier is reported under `rejected` rather than silently
-  resolved.
+`extension_manifests` is the one worth knowing about early: no `zttp-ext:`
+manifest is authenticated yet, so every extension specifier is reported under
+`rejected` rather than silently resolved, and the `extensions` list is empty.
 
 ## Determinism
 
