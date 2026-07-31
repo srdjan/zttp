@@ -13,26 +13,6 @@ const QueryParam = http_types.QueryParam;
 pub const DEFAULT_MAX_URL_LENGTH: usize = 8192;
 pub const DEFAULT_MAX_QUERY_LENGTH: usize = 8192;
 
-/// Comptime lookup table for O(1) ASCII lowercase conversion.
-/// Eliminates branch-per-character overhead in header normalization.
-const LowerTable = blk: {
-    var t: [256]u8 = undefined;
-    for (&t, 0..) |*b, i| {
-        b.* = if (i >= 'A' and i <= 'Z') @intCast(i + 32) else @intCast(i);
-    }
-    break :blk t;
-};
-
-/// Fast lowercase string conversion using comptime lookup table.
-/// Returns slice into dest buffer.
-fn lowerStringFast(dest: []u8, src: []const u8) []u8 {
-    const len = @min(dest.len, src.len);
-    for (dest[0..len], src[0..len]) |*d, s| {
-        d.* = LowerTable[s];
-    }
-    return dest[0..len];
-}
-
 /// SIMD-accelerated search for HTTP header terminator (\r\n\r\n).
 /// Returns offset to start of terminator, or null if not found.
 /// Uses 16-byte vector operations when buffer is large enough.
