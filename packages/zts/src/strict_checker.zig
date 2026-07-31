@@ -647,27 +647,26 @@ pub const StrictChecker = struct {
         }
     }
 
+    /// Checks only what being *exported* adds: ZTS609. Annotation is not
+    /// checked here. `walkStmt`'s `.export_decl` arm walks the declaration
+    /// right after this call, and that walk already reaches every function
+    /// node - `.function_decl` directly, a function-valued initializer through
+    /// `walkExpr`. Checking it here too emitted ZTS601 twice at one position
+    /// for every `export function`.
     fn checkExportedDeclaration(self: *StrictChecker, node: NodeIndex) void {
         const tag = self.ir_view.getTag(node) orelse return;
-        if (tag == .function_decl) {
-            const decl = self.ir_view.getVarDecl(node) orelse return;
-            self.checkFunctionAnnotation(decl.init);
-        } else if (tag == .var_decl) {
-            const decl = self.ir_view.getVarDecl(node) orelse return;
-            if (decl.init != null_node and self.isFunctionNode(decl.init)) {
-                if (decl.kind == .@"const") {
-                    self.addDiagnostic(.{
-                        .severity = self.canonicalSeverity(),
-                        .kind = .canonical_export_function_const,
-                        .node = node,
-                        .message = "exported function-valued const should be an export function declaration",
-                        .help = "use `export function name(...) { ... }` unless the export is intentionally a first-class function value",
-                        .repair_intent = .replace_export_arrow_with_function,
-                    });
-                }
-                self.checkFunctionAnnotation(decl.init);
-            }
-        }
+        if (tag != .var_decl) return;
+        const decl = self.ir_view.getVarDecl(node) orelse return;
+        if (decl.init == null_node or !self.isFunctionNode(decl.init)) return;
+        if (decl.kind != .@"const") return;
+        self.addDiagnostic(.{
+            .severity = self.canonicalSeverity(),
+            .kind = .canonical_export_function_const,
+            .node = node,
+            .message = "exported function-valued const should be an export function declaration",
+            .help = "use `export function name(...) { ... }` unless the export is intentionally a first-class function value",
+            .repair_intent = .replace_export_arrow_with_function,
+        });
     }
 
     fn checkFunctionAnnotation(self: *StrictChecker, node: NodeIndex) void {
@@ -1458,6 +1457,24 @@ fn getSourceLine(source: []const u8, line_num: u32) ?[]const u8 {
 
 const testing = std.testing;
 
+test "missing_public_annotation fires once for an exported function" {
+    var checker = try checkSource("export function handler(req) { return Response.json({ok: true}); }");
+    defer checker.deinit();
+    try testing.expectEqual(@as(usize, 1), countKind(&checker, .missing_public_annotation));
+}
+
+test "missing_public_annotation count is the same exported and not" {
+    var plain = try checkSource("function handler(req) { return Response.json({ok: true}); }");
+    defer plain.deinit();
+    try testing.expectEqual(@as(usize, 1), countKind(&plain, .missing_public_annotation));
+}
+
+test "canonical_export_function_const survives the export annotation split" {
+    var checker = try checkSource("export const handler = (req) => Response.json({ok: true});");
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_export_function_const);
+}
+
 test "strict checker flags avoidable let" {
     const source = "function handler(req) { let x = 1; return Response.json({x}); }";
     var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
@@ -1561,6 +1578,14 @@ fn expectKind(checker: *const StrictChecker, kind: DiagnosticKind) !void {
         if (diag.kind == kind) return;
     }
     return error.DiagnosticNotEmitted;
+}
+
+fn countKind(checker: *const StrictChecker, kind: DiagnosticKind) usize {
+    var n: usize = 0;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == kind) n += 1;
+    }
+    return n;
 }
 
 test "StrictChecker fails closed when profile facts cannot allocate" {
