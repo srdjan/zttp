@@ -77,9 +77,11 @@ pub const operations = [_]OperationSpec{
     // failing test rather than a promise on the wire. Task 11 grows both
     // together.
     .{ .op = .meta, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{
-        "compiler_version",  "profile_id", "policy_version",
-        "policy_hash",       "operations", "error_codes",
-        "deferred_sections",
+        "compiler_version",      "profile_id",        "policy_version",
+        "policy_hash",           "idiom_table_hash",  "restriction_matrix_hash",
+        "builtin_registry_hash", "operations",        "error_codes",
+        "severities",            "idioms",            "limits",
+        "module_catalog",        "deferred_sections",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -574,6 +576,92 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     try json.objectField("error_codes");
     try json.beginArray();
     inline for (@typeInfo(ErrorCode).@"enum".fields) |field| try json.write(field.name);
+    try json.endArray();
+
+    try json.objectField("idiom_table_hash");
+    try json.write(&zts.idiom_registry.tableHash());
+    try json.objectField("restriction_matrix_hash");
+    try json.write(&restriction_registry.matrixHash());
+    try json.objectField("builtin_registry_hash");
+    try json.write(&zts.module_manifest.registryHashFromBindings(&zts.builtin_modules.all));
+
+    try json.objectField("severities");
+    try json.beginObject();
+    try json.objectField("set");
+    try json.beginArray();
+    // Derived from the checker's enum, so the closed set on the wire is the one
+    // the compiler can actually emit.
+    inline for (@typeInfo(zts.strict_checker.Severity).@"enum".fields) |field| {
+        const severity: zts.strict_checker.Severity = @enumFromInt(field.value);
+        try json.write(severity.label());
+    }
+    try json.endArray();
+    try json.objectField("success_rule");
+    try json.write("a response reports success true exactly when it produced no error diagnostic, so warnings and advisories never fail a check");
+    try json.endObject();
+
+    try json.objectField("idioms");
+    try json.beginArray();
+    for (&zts.idiom_registry.entries) |*entry| {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(entry.id);
+        try json.objectField("operation");
+        try json.write(entry.operation);
+        try json.objectField("idiomatic");
+        try json.write(entry.idiomatic);
+        try json.objectField("superseded");
+        try json.write(entry.superseded);
+        try json.objectField("precondition");
+        try json.write(entry.precondition);
+        // The rewrite that realizes the row, or null when the row is
+        // advisory-only. Spec 4.2.1 permits a row with no mechanical rewrite.
+        try json.objectField("rewrite_rule");
+        if (entry.rewrite_rule) |rule| try json.write(rule) else try json.write(null);
+        try json.endObject();
+    }
+    try json.endArray();
+
+    // Only constants the code enforces. The repair-iteration and tool-call
+    // budget spec 4.8 also asks for is a loop policy nothing implements, so it
+    // is a deferred section rather than a number invented here.
+    try json.objectField("limits");
+    try json.beginObject();
+    try json.objectField("normalize_iterations");
+    try json.write(canonicalize.max_normalize_iterations);
+    try json.objectField("request_bytes");
+    try json.write(edit_simulate.max_stdin_json_bytes);
+    try json.objectField("source_bytes");
+    try json.write(module_graph_record.max_source_bytes);
+    try json.objectField("module_graph_modules");
+    try json.write(module_graph_record.max_modules);
+    try json.endObject();
+
+    try json.objectField("module_catalog");
+    try json.beginArray();
+    for (zts.builtin_modules.all) |binding| {
+        try json.beginObject();
+        try json.objectField("specifier");
+        try json.write(binding.specifier);
+        try json.objectField("name");
+        try json.write(binding.name);
+        try json.objectField("required_capabilities");
+        try json.beginArray();
+        for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
+        try json.endArray();
+        try json.objectField("exports");
+        try json.beginArray();
+        for (binding.exports) |exp| {
+            try json.beginObject();
+            try json.objectField("name");
+            try json.write(exp.name);
+            try json.objectField("effect");
+            try json.write(@tagName(exp.effect));
+            try json.endObject();
+        }
+        try json.endArray();
+        try json.endObject();
+    }
     try json.endArray();
 
     try json.objectField("deferred_sections");
@@ -2274,6 +2362,139 @@ test "normalize maps an applied intent back to the idiom row it realizes" {
     try testing.expectEqualStrings("drop_unused_index_alias", entry.get("intent").?.string);
     try testing.expectEqualStrings("idiom.element-iteration", entry.get("idiom_id").?.string);
     try testing.expectEqualStrings("proposed_refactor", entry.get("grade").?.string);
+}
+
+fn metaPayload(a: std.mem.Allocator, out: *[]u8) !std.json.Parsed(std.json.Value) {
+    out.* = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{}}
+    );
+    return parse(a, out.*);
+}
+
+test "meta publishes the three registry hashes it binds work to" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqualStrings(&rule_registry.policyHash(), payload.get("policy_hash").?.string);
+    try testing.expectEqualStrings(&zts.idiom_registry.tableHash(), payload.get("idiom_table_hash").?.string);
+    try testing.expectEqualStrings(&restriction_registry.matrixHash(), payload.get("restriction_matrix_hash").?.string);
+    try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);
+}
+
+test "meta publishes the closed severity set and the rule that decides success" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const severities = parsed.value.object.get("payload").?.object.get("severities").?.object;
+    const set = severities.get("set").?.array;
+    // Derived from the checker's enum, so the wire set is what the compiler can
+    // actually emit - three since phase 0 added advisory.
+    try testing.expectEqual(
+        @typeInfo(zts.strict_checker.Severity).@"enum".fields.len,
+        set.items.len,
+    );
+    var found_advisory = false;
+    for (set.items) |item| {
+        if (std.mem.eql(u8, item.string, "advisory")) found_advisory = true;
+    }
+    try testing.expect(found_advisory);
+    try testing.expect(std.mem.indexOf(u8, severities.get("success_rule").?.string, "no error diagnostic") != null);
+}
+
+test "meta publishes the idiom table with its rewrite back-reference" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const idioms = parsed.value.object.get("payload").?.object.get("idioms").?.array;
+    try testing.expectEqual(zts.idiom_registry.entries.len, idioms.items.len);
+
+    var wired: usize = 0;
+    for (idioms.items) |item| {
+        const row = item.object;
+        try testing.expect(std.mem.startsWith(u8, row.get("id").?.string, "idiom."));
+        try testing.expect(row.get("precondition").? == .string);
+        if (row.get("rewrite_rule").? == .string) {
+            wired += 1;
+            // A named rewrite must resolve back to this row, or the mapping a
+            // client follows from a normalize trace is broken.
+            const entry = zts.idiom_registry.findByRewriteRule(row.get("rewrite_rule").?.string).?;
+            try testing.expectEqualStrings(row.get("id").?.string, entry.id);
+        }
+    }
+    // Advisory-only rows are legal (spec 4.2.1), so most rows carry no rewrite.
+    try testing.expect(wired >= 1);
+}
+
+test "meta limits are the constants the code enforces" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const limits = parsed.value.object.get("payload").?.object.get("limits").?.object;
+    try testing.expectEqual(
+        @as(i64, canonicalize.max_normalize_iterations),
+        limits.get("normalize_iterations").?.integer,
+    );
+    try testing.expectEqual(
+        @as(i64, @intCast(edit_simulate.max_stdin_json_bytes)),
+        limits.get("request_bytes").?.integer,
+    );
+    try testing.expectEqual(
+        @as(i64, @intCast(module_graph_record.max_source_bytes)),
+        limits.get("source_bytes").?.integer,
+    );
+    try testing.expectEqual(
+        @as(i64, @intCast(module_graph_record.max_modules)),
+        limits.get("module_graph_modules").?.integer,
+    );
+}
+
+test "meta publishes the built-in module catalog from the bindings" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const catalog = parsed.value.object.get("payload").?.object.get("module_catalog").?.array;
+    try testing.expectEqual(zts.builtin_modules.all.len, catalog.items.len);
+    for (catalog.items) |item| {
+        const module = item.object;
+        try testing.expect(std.mem.startsWith(u8, module.get("specifier").?.string, "zttp:"));
+        try testing.expect(module.get("exports").?.array.items.len >= 1);
+        try testing.expect(module.get("required_capabilities").? == .array);
+    }
+}
+
+test "the repair budget is deferred rather than guessed" {
+    // Spec 4.8 asks limits to publish a repair-iteration and tool-call budget.
+    // No code implements that loop policy, so it is named as deferred instead
+    // of appearing as an invented number.
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expect(payload.get("limits").?.object.get("repair_iterations") == null);
+    var named = false;
+    for (payload.get("deferred_sections").?.array.items) |section| {
+        if (std.mem.eql(u8, section.object.get("name").?.string, "repair_budget")) named = true;
+    }
+    try testing.expect(named);
 }
 
 test "identical requests produce byte-identical responses" {

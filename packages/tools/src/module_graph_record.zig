@@ -22,12 +22,13 @@ const file_resolver = zts.modules.file_resolver;
 const parser = zts.parser;
 
 /// Largest source file the walker will read. Matches `canonicalize.collect`.
-const max_source_bytes: usize = 10 * 1024 * 1024;
+/// Published in `meta.payload.limits`.
+pub const max_source_bytes: usize = 10 * 1024 * 1024;
 
 /// Guards a pathological import graph. The runtime graph caps nesting depth at
 /// 32; this caps total modules, since the walker is breadth-first and a wide
-/// graph is as expensive as a deep one.
-const max_modules: usize = 1024;
+/// graph is as expensive as a deep one. Published in `meta.payload.limits`.
+pub const max_modules: usize = 1024;
 
 pub const ImportKind = enum {
     /// A `zttp:*` module served by a built-in binding.

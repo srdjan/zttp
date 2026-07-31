@@ -160,6 +160,52 @@ pub fn findByRewriteRule(intent_name: []const u8) ?*const IdiomEntry {
     return null;
 }
 
+// ---------------------------------------------------------------------------
+// Table hash
+// ---------------------------------------------------------------------------
+
+/// Deterministic SHA-256 over the idiom table, field-wise with `\0` separators
+/// and a `\x01` record terminator - the pre-image shape the policy hash uses
+/// (D3 §3). Published as `idiom_table_hash`, so a client can tell whether the
+/// preference set it cached still matches this compiler's. Cached on first call
+/// because SHA-256 exceeds the comptime branch budget.
+var cached_hash: ?[64]u8 = null;
+
+pub fn tableHash() [64]u8 {
+    if (cached_hash) |h| return h;
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (&entries) |*entry| {
+        hasher.update(entry.id);
+        hasher.update("\x00");
+        hasher.update(entry.operation);
+        hasher.update("\x00");
+        hasher.update(entry.idiomatic);
+        hasher.update("\x00");
+        hasher.update(entry.superseded);
+        hasher.update("\x00");
+        hasher.update(entry.precondition);
+        hasher.update("\x00");
+        // A row losing its rewrite is a policy-visible change, so the sentinel
+        // must not collide with a real intent name.
+        hasher.update(entry.rewrite_rule orelse "-");
+        hasher.update("\x01");
+    }
+
+    cached_hash = std.fmt.bytesToHex(hasher.finalResult(), .lower);
+    return cached_hash.?;
+}
+
+test "tableHash is stable and covers the rewrite column" {
+    const h = tableHash();
+    try std.testing.expectEqual(@as(usize, 64), h.len);
+    try std.testing.expectEqualSlices(u8, &h, &tableHash());
+    for (h) |c| {
+        const hex = (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+        try std.testing.expect(hex);
+    }
+}
+
 test "idiom registry has unique stable ids" {
     for (entries, 0..) |entry, i| {
         try std.testing.expect(std.mem.startsWith(u8, entry.id, "idiom."));

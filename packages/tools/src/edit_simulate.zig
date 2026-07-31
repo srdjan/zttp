@@ -15,7 +15,9 @@ const file_io = zts.file_io;
 const writeJsonString = zts.handler_contract.writeJsonString;
 const HandlerProperties = zts.handler_contract.HandlerProperties;
 
-const max_stdin_json_bytes: usize = 20 * 1024 * 1024;
+/// Largest request body the stdin readers accept. Published in
+/// `meta.payload.limits`.
+pub const max_stdin_json_bytes: usize = 20 * 1024 * 1024;
 
 pub const EditSimulateInput = struct {
     file: []const u8,
