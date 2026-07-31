@@ -88,7 +88,9 @@ Exit: `scripts/verify.sh` green; ternary admission/rejection tests;
 `describe-rule --json` shows `advisory` and idiom IDs; double-normalize
 byte-idempotence over `examples/` holds.
 
-### Phase 1 — registry seed + protocol v2 skeleton
+### Phase 1 — registry seed + protocol v2 skeleton (detailed plan exists)
+
+Detailed plan: `2026-07-31-017-zts-advanced-rev4-phase1-plan.md`.
 
 Consolidate `rule_registry.zig` as the single generated source for the
 section-12 matrix; implement `zts agent --stdin-json` with the v2 envelope,
