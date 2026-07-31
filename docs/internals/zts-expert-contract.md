@@ -1,5 +1,11 @@
 # zts Structured Tool Contract
 
+> **Version 1.** Every shape in this document is a version-1 surface. Spec
+> 4.8 keeps them available as explicitly selected legacy or human-facing
+> interfaces, and an agent must not read them as advanced-profile responses.
+> The version-2 protocol is `zts agent --stdin-json`, documented in
+> [agent-protocol-v2.md](agent-protocol-v2.md).
+
 This page documents the stable machine-facing analyzer surfaces used by
 `zttp expert`, IDE integrations, and CI. The live command list comes from
 `packages/tools/src/zts_cli.zig`.

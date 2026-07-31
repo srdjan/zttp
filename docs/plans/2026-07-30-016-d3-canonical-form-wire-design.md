@@ -296,7 +296,13 @@ returns exactly this shape to a v1 client.
 **Protocol error codes** (the `error` object's `code`): `unknown_operation`,
 `malformed_request`, `unsupported_schema_version`, `project_root_unresolvable`,
 `path_outside_project_root`, `file_unreadable`, `identity_mismatch`,
-`internal_error`. Closed set, registry-published.
+`operation_not_implemented`, `internal_error`. Closed set, registry-published.
+
+**Amended 2026-07-31 (phase 1).** `operation_not_implemented` is the ninth code.
+This section assumed every operation exists; phase 1 serves eight of the eleven,
+and calling a named member of the spec's closed operation set `unknown_operation`
+would be false, while a structured unsupported result is for source constructs,
+not for an unbuilt operation. The response names the phase that builds it.
 
 **Determinism.** Response JSON on stdout, one object, trailing newline; logs to
 stderr; array order deterministic for identical authenticated inputs (spec 4.8).

@@ -768,7 +768,7 @@ graph also owns runtime execution ordering; adding record-keeping to it would pu
 protocol concerns on the interpreter's path. The new walker reuses the same
 resolution calls, so the two cannot disagree about what a specifier resolves to.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 const std = @import("std");
@@ -876,11 +876,11 @@ test "contextFreeHash is the builtin-only digest and is stable" {
 }
 ```
 
-- [ ] **Step 2: Run, expect failure** (file missing).
+- [x] **Step 2: Run, expect failure** (file missing).
 
 Run: `zig build test-zts-cli -- --test-filter "graph"`
 
-- [ ] **Step 3: Implement the walker.** Structure:
+- [x] **Step 3: Implement the walker.** Structure:
 
 ```zig
 //! The resolved module environment for one entry file, and its digest.
@@ -967,12 +967,12 @@ pub fn contextFreeHash() [64]u8 {
 }
 ```
 
-- [ ] **Step 4: Run, expect PASS**
+- [x] **Step 4: Run, expect PASS**
 
 Run: `zig build test-zts-cli -- --test-filter "graph"`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/tools/src/module_graph_record.zig packages/tools/src/zts_cli.zig
@@ -1024,7 +1024,7 @@ would be false, and a structured unsupported result is for unsupported *source*
 constructs, not for an unbuilt operation. The ninth code is added here and D3 §6 is
 amended in the same commit.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 const std = @import("std");
@@ -1142,11 +1142,11 @@ test "identical requests produce byte-identical responses" {
 }
 ```
 
-- [ ] **Step 2: Run, expect failure** (file missing).
+- [x] **Step 2: Run, expect failure** (file missing).
 
 Run: `zig build test-zts-cli -- --test-filter "schema version"`
 
-- [ ] **Step 3: Implement the envelope**
+- [x] **Step 3: Implement the envelope**
 
 ```zig
 //! `zts agent --stdin-json`: the version-2 agent protocol transport.
@@ -1321,12 +1321,12 @@ An error response still carries the identity block: a client that hit
 `identity_mismatch` needs the current values to recover, and a client that hit
 `unknown_operation` needs to know which binary answered.
 
-- [ ] **Step 4: Implement the `meta` payload minimally** - just enough for the
+- [x] **Step 4: Implement the `meta` payload minimally** - just enough for the
 tests above to pass: `compiler_version`, `profile_id`, `policy_version`,
 `policy_hash`, `operations` (from the table), `deferred_sections`. Task 11 fills
 the rest. Do not write a placeholder for anything else.
 
-- [ ] **Step 5: Wire the CLI**
+- [x] **Step 5: Wire the CLI**
 
 ```zig
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -1368,12 +1368,12 @@ Change `fn readAllStdin` to `pub fn readAllStdin` in `edit_simulate.zig` rather
 than copying the 16-line reader; it already caps at `max_stdin_json_bytes` and
 handles `WouldBlock`.
 
-- [ ] **Step 6: Run, expect PASS**, then the whole tools suite:
+- [x] **Step 6: Run, expect PASS**, then the whole tools suite:
 
 Run: `zig build test-zts-cli` then `zig build test-cli`
 Expected: PASS. `zig build test-expert-golden` must stay green - no v1 byte moved.
 
-- [ ] **Step 7: Smoke it**
+- [x] **Step 7: Smoke it**
 
 ```bash
 zig build
@@ -1386,11 +1386,11 @@ echo '{"schema_version":1,"operation":"meta","project_root":".","input":{}}' \
 Expected: a full envelope, then exactly
 `{"schema_version_unsupported":true,"supported_schema_versions":[2],"compiler_version":"0.18.0"}`.
 
-- [ ] **Step 8: Document.** Add one row to the Machine tools table in
+- [x] **Step 8: Document.** Add one row to the Machine tools table in
 `docs/cli.md` and a sentence that `agent` is the only version-2 surface, with the
 v1 commands named as legacy per spec 4.8.
 
-- [ ] **Step 9: Commit**
+- [x] **Step 9: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_protocol.zig packages/tools/src/zts_cli.zig packages/tools/src/edit_simulate.zig
@@ -1410,7 +1410,7 @@ git add -A && git commit -m "feat(agent): v2 envelope, frozen version negotiatio
 - Produces: `fn checkExpected(expected: ?std.json.Value, identity: Identity) ?ProtocolError`.
   Runs for every operation, before any work, after identity computation.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 test "a matching expected block passes the guard" {
@@ -1490,11 +1490,11 @@ test "an unknown key inside expected is malformed, not ignored" {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** (guard absent, every request succeeds).
+- [x] **Step 2: Run, expect FAIL** (guard absent, every request succeeds).
 
 Run: `zig build test-zts-cli -- --test-filter "expected"`
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```zig
 /// Spec 4.8: one rule for every operation. A supplied field that does not match
@@ -1537,12 +1537,12 @@ Note the iteration order: `std.json.ObjectMap` is an `ArrayHashMap`, so iteratio
 follows insertion order, which is request order - deterministic for a given
 request. Two mismatched fields report the first in request order.
 
-- [ ] **Step 4: Run, expect PASS**
+- [x] **Step 4: Run, expect PASS**
 
 Run: `zig build test-zts-cli -- --test-filter "expected"`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_protocol.zig
@@ -1566,7 +1566,7 @@ git add -A && git commit -m "feat(agent): uniform expected-identity staleness gu
   - `restrictions` -> `{ "restrictions": [{ "id", "feature", "boundary", "nature", "note", "alternative", "failure_class", "proof_unlocked", "enforced_by", "unenforced_note" }] }`
   - `describe_rule` -> `{ "rules": [{ "name", "code", "category", "description", "example", "help", "repair_intent", "severity" }] }`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 test "restrictions payload publishes every matrix row, not only the v1 set" {
@@ -1650,11 +1650,11 @@ test "features payload ids match the v1 feature names" {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL** (operations still `deferred`).
+- [x] **Step 2: Run, expect FAIL** (operations still `deferred`).
 
 Run: `zig build test-zts-cli -- --test-filter "payload"`
 
-- [ ] **Step 3: Implement the three writers.** Each takes
+- [x] **Step 3: Implement the three writers.** Each takes
 `(*std.json.Stringify, input: std.json.Value)` and writes one object.
 
 **Severity projection.** `rule_registry.RuleEntry` carries no severity field, and
@@ -1692,12 +1692,12 @@ If any observed pair contradicts the mapping, fix the mapping to match the
 observed emission and note the exception inline - the compiler's behavior is the
 truth, not the category.
 
-- [ ] **Step 4: Run, expect PASS**
+- [x] **Step 4: Run, expect PASS**
 
 Run: `zig build test-zts-cli -- --test-filter "payload"`
 Expected: PASS (5 tests).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_protocol.zig
@@ -1719,7 +1719,7 @@ git add -A && git commit -m "feat(agent): features, restrictions, and describe_r
   The envelope's `module_graph_hash` and the payload's are the same value,
   computed once.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```zig
 test "modules returns the resolved graph and binds the same hash twice" {
@@ -1796,18 +1796,18 @@ test "modules on a missing file reports file_unreadable" {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL.**
+- [x] **Step 2: Run, expect FAIL.**
 
 Run: `zig build test-zts-cli -- --test-filter "modules"`
 
-- [ ] **Step 3: Implement.** `builtins` comes from `zts.builtin_modules.all`:
+- [x] **Step 3: Implement.** `builtins` comes from `zts.builtin_modules.all`:
 specifier plus each export's `name` and `@tagName(effect)`. `extensions` is an
 empty array in Phase 1 with the reason recorded in `meta.deferred_sections` (Task
 11), not with a prose note in the payload.
 
-- [ ] **Step 4: Run, expect PASS.** `zig build test-zts-cli -- --test-filter "modules"`
+- [x] **Step 4: Run, expect PASS.** `zig build test-zts-cli -- --test-filter "modules"`
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_protocol.zig
@@ -1851,7 +1851,7 @@ git add -A && git commit -m "feat(agent): modules operation over the resolved gr
    `zts check --json --contract`; a snake_case contract serializer lands with
    `verify` in Phase 6.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 test "check on a clean handler succeeds with no diagnostics" {
@@ -1945,11 +1945,11 @@ done
 Use the smallest fixture whose severity set is exactly `['warning']` as
 `warning_only_handler`.
 
-- [ ] **Step 2: Run, expect FAIL.**
+- [x] **Step 2: Run, expect FAIL.**
 
 Run: `zig build test-zts-cli -- --test-filter "check on"`
 
-- [ ] **Step 3: Implement.** The operation:
+- [x] **Step 3: Implement.** The operation:
 
 1. Resolves `input.file` through `canonicalRelPath`; reads the bytes once and
    keeps them for both `sourceDigest` and `byteOffsetOf`.
@@ -1977,12 +1977,12 @@ fn byteOffsetOf(source: []const u8, line: u32, column: u32) usize {
 }
 ```
 
-- [ ] **Step 4: Run, expect PASS**, then the full suite:
+- [x] **Step 4: Run, expect PASS**, then the full suite:
 
 Run: `zig build test-zts-cli` then `zig build test`
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_protocol.zig
@@ -2016,7 +2016,7 @@ one named constant so Phase 6 changes one line rather than hunting for literals.
 v1 JSON boundary (`canonicalize.zig:2581-2610`), which leaves a client unable to
 re-validate staleness. The v2 payload publishes it. The v1 emitter is not touched.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 test "canonicalize candidates carry a grade and their idiom where wired" {
@@ -2059,11 +2059,11 @@ test "canonicalize simulation runs only when asked" {
 Fill the two elided bodies from the harness the first test establishes; the
 assertions listed are the deliverable.
 
-- [ ] **Step 2: Run, expect FAIL.**
+- [x] **Step 2: Run, expect FAIL.**
 
 Run: `zig build test-zts-cli -- --test-filter "canonicalize"`
 
-- [ ] **Step 3: Implement.** `Refactor.kind` is a string today
+- [x] **Step 3: Implement.** `Refactor.kind` is a string today
 (`canonicalize.zig:13-20`), so `kind` is published verbatim and `idiom_id` is
 resolved through `idiom_registry.findByRewriteRule` on the `RepairIntent` tag name
 where one exists, null otherwise - the Phase 0 back-reference direction, unchanged.
@@ -2074,13 +2074,13 @@ with its idiom id when the registry has one.
 message "normalize does not write in schema version 2; apply the returned
 canonical_source through apply_repair (phase 6)".
 
-- [ ] **Step 4: Run, expect PASS**, then the canonicalize suite:
+- [x] **Step 4: Run, expect PASS**, then the canonicalize suite:
 
 Run: `zig build test-zts-cli -- --test-filter "canonicalize"` then
 `zig build test-canonicalize`
 Expected: PASS, and the idempotence gate untouched.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_protocol.zig
@@ -2113,7 +2113,7 @@ hand-writing them, so each is listed in `deferred_sections` with the phase that
 builds it. A client reads one machine-readable list instead of discovering
 absence key by key.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```zig
 test "meta publishes every operation in the dispatch table" {
@@ -2161,16 +2161,16 @@ test "idiom tableHash is stable" {
 }
 ```
 
-- [ ] **Step 2: Run, expect FAIL.**
+- [x] **Step 2: Run, expect FAIL.**
 
 Run: `zig build test-zts-cli -- --test-filter "meta publishes"` and
 `zig build test-zts -- --test-filter "tableHash"`
 
-- [ ] **Step 3: Add `tableHash` to `idiom_registry.zig`**, pre-image per D3 §3:
+- [x] **Step 3: Add `tableHash` to `idiom_registry.zig`**, pre-image per D3 §3:
 `id \0 operation \0 idiomatic \0 superseded \0 precondition \0 rewrite_rule-or-"-" \x01`,
 cached the same way `rule_registry.policyHash` caches.
 
-- [ ] **Step 4: Implement the payload.** `limits` carries only constants that
+- [x] **Step 4: Implement the payload.** `limits` carries only constants that
 exist in the tree - no invented numbers:
 
 ```zig
@@ -2192,11 +2192,11 @@ code implements; it goes in `deferred_sections`, not in `limits` as a guess.
 capabilities, and each export's name and effect - all from the bindings, which are
 already the generated source for `packages/modules/module-specs/`.
 
-- [ ] **Step 5: Run, expect PASS**
+- [x] **Step 5: Run, expect PASS**
 
 Run: `zig build test-zts-cli -- --test-filter "meta"` then `zig build test-zts -- --test-filter "tableHash"`
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 zig fmt packages/tools/src/agent_protocol.zig packages/zts/src/idiom_registry.zig
@@ -2215,7 +2215,7 @@ git add -A && git commit -m "feat(agent): registry-generated meta payload with e
 - Modify: `docs/plans/2026-07-30-016-d3-canonical-form-wire-design.md` (§6 error-code set)
 - Modify: `docs/internals/zts-expert-contract.md` (one paragraph: v1 is legacy)
 
-- [ ] **Step 1: The determinism gate**
+- [x] **Step 1: The determinism gate**
 
 ```bash
 #!/usr/bin/env bash
@@ -2264,7 +2264,7 @@ echo "agent determinism OK"
 Wire it into `scripts/verify.sh` directly after the
 `check-normalize-idempotent.sh` step, using the same `step "..."` wrapper.
 
-- [ ] **Step 2: The v1 non-regression gate.** `features --json`, `modules --json`,
+- [x] **Step 2: The v1 non-regression gate.** `features --json`, `modules --json`,
 and `restrictions --json` are already pinned by `test-contract-golden`, and
 `meta --json`, `describe-rule ZTS303 --json`, and both `canonicalize` goldens by
 `test-expert-golden`. Confirm both steps are green and that no golden file moved
@@ -2280,7 +2280,7 @@ Expected: both green, and the third command prints nothing. A moved fixture mean
 a v1 surface changed and the phase's exit criterion is not met - fix the code, not
 the fixture.
 
-- [ ] **Step 3: Full local gate.** In order, all green:
+- [x] **Step 3: Full local gate.** In order, all green:
 
 ```bash
 zig build test
@@ -2289,7 +2289,7 @@ bash scripts/verify.sh
 ./zig-out/bin/zts spec-check --json
 ```
 
-- [ ] **Step 4: Manual smoke.** Record the actual output in this file under a
+- [x] **Step 4: Manual smoke.** Record the actual output in this file under a
 "Results" heading, the way the Phase 0 plan's Task 8 does:
 
 ```bash
@@ -2300,7 +2300,7 @@ echo '{"schema_version":2,"operation":"modules","project_root":".","input":{"fil
 ./zig-out/bin/zts restrictions --json | python3 -c "import json,sys; print(len(json.load(sys.stdin)))"
 ```
 
-- [ ] **Step 5: Write `docs/internals/agent-protocol-v2.md`.** Contents: the
+- [x] **Step 5: Write `docs/internals/agent-protocol-v2.md`.** Contents: the
 envelope, the operation table with each operation's status, the closed error-code
 set including `operation_not_implemented`, the frozen negotiation response, the
 `expected` guard rule, the diagnostic shape with its two Phase 1 gaps
@@ -2308,10 +2308,10 @@ set including `operation_not_implemented`, the frozen negotiation response, the
 `docs/internals/zts-expert-contract.md` for the v1 surfaces. Generate the
 operation table by running `meta` rather than typing it.
 
-- [ ] **Step 6: Amend D3 §6.** Add `operation_not_implemented` to the protocol
+- [x] **Step 6: Amend D3 §6.** Add `operation_not_implemented` to the protocol
 error-code list with the one-line rationale from Task 5.
 
-- [ ] **Step 7: Append to the master plan's decision log.** Date the entry
+- [x] **Step 7: Append to the master plan's decision log.** Date the entry
 2026-07-31 and record, at minimum:
 
 - the restriction matrix is its own registry with its own hash, not rows in
@@ -2336,7 +2336,7 @@ error-code list with the one-line rationale from Task 5.
 Also record every deviation the implementation actually made, in the Phase 0
 plan's style: what the task assumed, what the code found, and what changed.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -A && git commit -m "docs(plans): record phase 1 completion, decisions, and recorded debts"

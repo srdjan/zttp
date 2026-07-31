@@ -284,3 +284,79 @@ non-idiomatic column should also list the `items.entries()`-with-unread-index
 spelling. Spec 4.2.1 gives only the `range(items.length)` form, but ZTS619 has
 rewritten the other since before this program, targeting the same idiomatic
 spelling for the same operation.
+
+**2026-07-31 — Phase 1 complete.** `bash scripts/verify.sh` green end to end,
+including the new `check-agent-determinism.sh` step; `zig build test` 4233/4239
+(6 skipped); `zts spec-check --json` ok, no drift; `features --json`,
+`restrictions --json`, and both text surfaces byte-identical to the pre-phase
+capture; `test-contract-golden` and `test-expert-golden` green with no fixture
+moved. Detail and per-task deviations:
+`2026-07-31-017-zts-advanced-rev4-phase1-plan.md`.
+
+`zts agent --stdin-json` serves eight of the spec's eleven operations: `meta`,
+`features`, `restrictions`, `describe_rule`, `modules`, `check`, `canonicalize`,
+`normalize`. `simulate_edit`, `apply_repair`, and `verify` are declared and
+answer `operation_not_implemented`. Protocol reference:
+`docs/internals/agent-protocol-v2.md`.
+
+Decisions made in this phase:
+
+1. **The section-12 matrix is its own registry**, `restriction_registry.zig`
+   with its own `matrixHash()`, not rows in `all_rules`. A restriction carries no
+   code, no severity, and no repair, most rows are enforced by the parser rather
+   than by a rule, and folding them in would shift `policy_hash` and the
+   `rule_count` every consumer asserts on. Same shape as Phase 0's idiom table.
+2. **The v1 `features` / `restrictions` output is frozen at its 20 blocked
+   rows**, selected by a `v1_feature_name` column. The 14 spec-12 rows v1 never
+   published reach clients through the v2 `restrictions` operation only.
+3. **`operation_not_implemented` is the ninth protocol error code**, amending
+   D3 §6, which assumed every operation exists. Calling a named member of the
+   spec's closed operation set "unknown" would be false.
+4. **`describe_rule` publishes no severity.** Spec 4.8 requires every rule to
+   declare the severity it emits; measured, no registry can answer that, because
+   severity is chosen at each `addDiagnostic` call site - `handler_verifier`
+   emits ZTS305 as a warning and ZTS500 as an error from one category. Published
+   as the `rule_severity` deferred section instead of a derived guess.
+5. **`check` publishes `byte_offset` and no `span`**, because no producer
+   computes a half-open range, and **`repair_available` is uniformly false**,
+   because spec 4.8 permits advertising an exact repair only where a registered
+   equivalence validator exists. Every `canonicalize` candidate and `normalize`
+   rewrite grades `proposed_refactor` for the same reason.
+6. **`meta` omits what no registry can generate** and names all twelve such
+   sections in `deferred_sections`, per ground rule 3. Nothing is stubbed.
+7. **Diagnostic paths are project-relative on the wire.** The checker reports the
+   absolute path it was handed; publishing that would leak the host layout and
+   return a path the client cannot use in a follow-up request.
+8. **`normalize` refuses `write: true`** rather than accepting and ignoring it,
+   which would report a rewrite the client believes was persisted. Writing is
+   `apply_repair`'s job, in Phase 6.
+
+Findings recorded, none fixed in this phase:
+
+- **Six restriction rows are excluded on paper and admitted in practice.**
+  Measured per construct: `eval`, numeric record keys, object methods, getters,
+  and mutable live iteration produce no diagnostic; `interface` is admitted by
+  decision, pending the migration policy the D workstream owes. Each row carries
+  an `unenforced_note` naming the measurement.
+- **`ZTS041` names two different diagnostics**: the parser's `nesting_too_deep`
+  and the stripper's `any`-type rejection (`json_diagnostics.zig:96` and `:234`).
+- **`zts check` does not terminate on `delete` inside a function body.** Over 40
+  seconds, no output. The same statement at module scope reports ZTS001 in
+  milliseconds.
+- **`verify_paths_core.zig`'s three tests have never compiled** against Zig
+  0.16 (`tmp_dir.dir.realpath` with one argument). Any tools file that is
+  re-exported but never called is in the same state - Zig collects tests only
+  from files it analyzes, so an unreferenced `pub const x = @import(...)` leaves
+  a whole file unchecked. Both new protocol files therefore have their own test
+  roots, and an audit of the rest belongs in its own commit.
+- **`zts check` emits `ZTS601` twice** at one position for one function. v1 does
+  the same, so it predates this phase.
+
+**Spec edits owed, added by Phase 1:** section 4.8 requires every rule to declare
+its severity, which contradicts how the checkers work today - either the
+requirement moves to the diagnostic (where severity genuinely lives) or the
+checkers gain a per-kind severity table. Phase 0's owed edit for
+`idiom.element-iteration` should also name the vehicle precisely: ZTS619 fires on
+`for (const pair of arr.entries()) { const [_i, x] = pair; }`, not on a
+head-destructured `for (const [i, item] of items.entries())`, which the parser
+rejects outright (ZTS003).

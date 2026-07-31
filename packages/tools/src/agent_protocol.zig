@@ -99,7 +99,7 @@ pub const operations = [_]OperationSpec{
         "file",                 "source_digest", "converged",     "fully_canonical",
         "iterations",           "residual",      "rewrite_trace", "canonical_source",
         "residual_diagnostics",
-    }, .deferred_note = "phase 1 task 10" },
+    } },
     .{ .op = .simulate_edit, .status = .deferred, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
         "ok", "new_count", "preexisting_count", "diagnostics",
     }, .deferred_note = "phase 6: needs the unified repair vocabulary" },
@@ -1366,6 +1366,17 @@ test "the operation table covers the closed operation set exactly once" {
         try testing.expectEqual(@as(usize, 1), seen);
     }
     try testing.expectEqual(@typeInfo(Operation).@"enum".fields.len, operations.len);
+}
+
+test "an implemented operation carries no deferred note" {
+    // A note left behind after an operation lands would tell a client the
+    // operation is still missing.
+    for (&operations) |*spec| {
+        switch (spec.status) {
+            .implemented => try testing.expect(spec.deferred_note == null),
+            .deferred => try testing.expect(spec.deferred_note != null),
+        }
+    }
 }
 
 test "meta response carries the full identity block" {
