@@ -6,6 +6,7 @@ pub const upgrade_verifier = @import("upgrade_verifier.zig");
 // Re-exports for the pi package, which consumes shared tool cores through
 // the `zts_cli` named module instead of reaching into tools/src/ directly.
 pub const agent_identity = @import("agent_identity.zig");
+pub const module_graph_record = @import("module_graph_record.zig");
 pub const expert_meta = @import("expert_meta.zig");
 pub const verify_paths_core = @import("verify_paths_core.zig");
 pub const describe_rule = @import("describe_rule.zig");
