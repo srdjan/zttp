@@ -166,6 +166,11 @@ pub const PathGenerator = struct {
     /// Completed test cases.
     tests: std.ArrayList(GeneratedTest),
     path_count: u32,
+    /// Set when a construct was walked as a representative skeleton rather than
+    /// enumerated. A loop body is walked once, so the paths through iteration
+    /// counts other than one - including zero - are never emitted. Spec gap 11:
+    /// a summary must not be presented as exhaustive coverage.
+    summarized: bool,
 
     pub const MAX_PATHS = 1024;
 
@@ -249,6 +254,7 @@ pub const PathGenerator = struct {
             .path_costs = .empty,
             .tests = .empty,
             .path_count = 0,
+            .summarized = false,
         };
     }
 
@@ -294,13 +300,29 @@ pub const PathGenerator = struct {
         return self.tests.items;
     }
 
+    /// Whether the emitted paths are the complete set. False when enumeration
+    /// hit `MAX_PATHS`, and false when any construct was summarized rather than
+    /// enumerated (spec gap 11). Every consumer that reports path coverage MUST
+    /// read this rather than recomputing the `MAX_PATHS` comparison, or half of
+    /// them keep over-claiming.
+    pub fn pathsExhaustive(self: *const PathGenerator) bool {
+        return !self.summarized and self.tests.items.len < MAX_PATHS;
+    }
+
     /// Fold every enumerated path's io_seq multiplicities into a per-module
     /// worst-path CostEnvelope. Caller owns the result.
     pub fn buildCostEnvelope(self: *const PathGenerator, allocator: std.mem.Allocator) !contract_types.CostEnvelope {
+        // Truncation and summarization are different failures. Truncation
+        // means the cost of the paths that were dropped is unknown, so the
+        // total below is forced to unbounded. Summarization means the loop was
+        // walked once instead of enumerated, which loses path coverage but not
+        // the cost bound: `loopMultiplier` still carries the collection length
+        // symbolically. Only the first may touch `total`.
+        const truncated = self.tests.items.len >= MAX_PATHS;
         var envelope = contract_types.CostEnvelope{
             .entries = .empty,
             .total = .{ .constant = 0 },
-            .exhaustive = self.tests.items.len < MAX_PATHS,
+            .exhaustive = self.pathsExhaustive(),
         };
         errdefer envelope.deinit(allocator);
 
@@ -348,7 +370,7 @@ pub const PathGenerator = struct {
             envelope.total = owned_total;
         }
 
-        if (!envelope.exhaustive) {
+        if (truncated) {
             const truncated_desc = try allocator.dupe(u8, "path enumeration truncated at 1024");
             envelope.total.deinitOwned(allocator);
             envelope.total = .{ .unbounded = .{
@@ -629,6 +651,11 @@ pub const PathGenerator = struct {
 
             .for_of_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
+                // The body is walked once below, as a representative iteration.
+                // Paths through zero iterations, or through differing branch
+                // choices across iterations, are never emitted, so from here on
+                // this handler's enumeration is a summary.
+                self.summarized = true;
                 const bound = self.resolveLoopBound(fi.iterable, node);
                 self.retired_loop_descs.ensureUnusedCapacity(self.allocator, 1) catch |err| {
                     self.freeLoopBound(bound);
@@ -2071,6 +2098,82 @@ fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGenera
     };
 }
 
+test "envelope is not exhaustive when a loop body is summarized" {
+    const allocator = std.testing.allocator;
+    // The generator walks a for...of body once, as a representative iteration,
+    // and never enumerates the zero-iteration case. Both branches of the `if`
+    // below therefore appear on the enumerated paths, but the interleavings
+    // across iterations do not. That is a summary, not an enumeration, so the
+    // envelope must not claim exhaustive coverage (spec gap 11).
+    const source =
+        \\export function handler(req) {
+        \\  const items = req.items;
+        \\  for (const item of items) {
+        \\    if (item.ok) {
+        \\      return Response.json({ ok: true });
+        \\    }
+        \\  }
+        \\  return Response.json({ ok: false });
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expect(!envelope.exhaustive);
+    try std.testing.expect(!fixture.generator.pathsExhaustive());
+}
+
+test "envelope stays exhaustive for a loop-free handler" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req) {
+        \\  if (req.method === "GET") {
+        \\    return Response.json({ ok: true });
+        \\  }
+        \\  return Response.json({ ok: false });
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expect(envelope.exhaustive);
+    try std.testing.expect(fixture.generator.pathsExhaustive());
+}
+
+test "a summarized loop does not make the cost total unbounded" {
+    const allocator = std.testing.allocator;
+    // Losing exhaustive path coverage is not losing the cost bound: the loop
+    // still carries a symbolic linear bound in the collection's length. Only
+    // MAX_PATHS truncation forces the total to unbounded.
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\export function handler(req) {
+        \\  const ids = req.ids;
+        \\  for (const id of ids) {
+        \\    sqlOne("row");
+        \\  }
+        \\  return Response.json({});
+        \\}
+    ;
+
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    var envelope = try fixture.generator.buildCostEnvelope(allocator);
+    defer envelope.deinit(allocator);
+
+    try std.testing.expect(!envelope.exhaustive);
+    try std.testing.expect(envelope.total.class() != .unbounded);
+}
+
 test "for...of over request-derived array yields linear io multiplicity" {
     const allocator = std.testing.allocator;
     const source =
@@ -2091,7 +2194,9 @@ test "for...of over request-derived array yields linear io multiplicity" {
     var envelope = try fixture.generator.buildCostEnvelope(allocator);
     defer envelope.deinit(allocator);
 
-    try std.testing.expect(envelope.exhaustive);
+    // Spec gap 11: the loop body is summarized, not enumerated, so the envelope
+    // cannot claim exhaustive path coverage. The cost bound below is unaffected.
+    try std.testing.expect(!envelope.exhaustive);
     const total = envelope.total.linear;
     try std.testing.expectEqual(@as(u32, 1), total.coefficient);
     try std.testing.expectEqual(@as(u32, 1), total.base);

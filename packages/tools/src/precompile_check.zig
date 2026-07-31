@@ -399,8 +399,14 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writer.print("  Execution paths: {d}", .{r.paths_enumerated}) catch return;
         if (r.paths_exhaustive) {
             writer.print(" (exhaustive)\n", .{}) catch return;
-        } else {
+        } else if (r.paths_enumerated >= zts.PathGenerator.MAX_PATHS) {
             writer.print(" (limit reached)\n", .{}) catch return;
+        } else {
+            // Not the limit: a loop body was walked once as a representative
+            // iteration rather than enumerated, so paths through other
+            // iteration counts were never emitted. Saying "limit reached" here
+            // named the wrong cause.
+            writer.print(" (summarized: a loop body is walked once, not enumerated)\n", .{}) catch return;
         }
     }
     if (r.max_io_depth) |depth| {

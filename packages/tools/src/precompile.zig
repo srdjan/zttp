@@ -961,7 +961,10 @@ fn analyzeHandlerPaths(
     const tests = generator.getTests();
     var analysis = PathAnalysis{
         .paths_enumerated = @intCast(tests.len),
-        .paths_exhaustive = tests.len < zts.PathGenerator.MAX_PATHS,
+        // Ask the generator rather than recomputing the MAX_PATHS comparison:
+        // it also knows whether anything was summarized instead of enumerated,
+        // which this copy of the predicate used to miss (spec gap 11).
+        .paths_exhaustive = generator.pathsExhaustive(),
         .max_io_depth = null,
         .cost_bounded = false,
         .cost_envelope = null,
@@ -977,8 +980,10 @@ fn analyzeHandlerPaths(
             .constant => |count| count,
             else => null,
         };
-        analysis.cost_bounded = analysis.cost_envelope.?.exhaustive and
-            analysis.cost_envelope.?.total.class() != .unbounded;
+        // Not conjoined with `exhaustive`: a summarized loop loses path
+        // coverage but keeps its symbolic cost bound, and truncation already
+        // forces the total to unbounded, so the class test alone covers it.
+        analysis.cost_bounded = analysis.cost_envelope.?.total.class() != .unbounded;
     }
     if (include_behaviors) {
         analysis.behaviors = try generator.toBehaviorPaths(output_allocator);
@@ -2012,8 +2017,10 @@ pub fn compileHandler(
                         .constant => |n| n,
                         else => null,
                     } else null;
+                    // See analyzeHandlerPaths: `exhaustive` is deliberately not
+                    // a conjunct here.
                     props.cost_bounded = if (cost_envelope) |envelope|
-                        envelope.exhaustive and envelope.total.class() != .unbounded
+                        envelope.total.class() != .unbounded
                     else
                         false;
                 }

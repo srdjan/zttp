@@ -470,7 +470,7 @@ git add -A && git commit -m "feat(canonicalize): attach idiom ids to rewrites an
 - Consumes: nothing new.
 - Produces: `envelope.exhaustive == false` whenever any loop body was summarized once rather than path-expanded, or any recursive call was cut off — independent of `MAX_PATHS`. Downstream consumers (contract JSON, prove-behavior verdicts) read the same field, so no schema change.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```zig
 test "envelope is not exhaustive when a loop body is summarized" {
@@ -483,13 +483,37 @@ test "envelope is not exhaustive when a loop body is summarized" {
 
 Build it with the same harness as the test at line ~2094.
 
-- [ ] **Step 2: Run, expect FAIL** (today it reports exhaustive when under MAX_PATHS).
+- [x] **Step 2: Run, expect FAIL** (today it reports exhaustive when under MAX_PATHS).
 
-- [ ] **Step 3: Implement.** Add a `summarized: bool = false` flag on the generator; set it at every site that emits a summarized loop skeleton or truncates recursion (find them: grep the file for the loop-handling and MAX_PATHS sites). Change line 303 to `.exhaustive = !self.summarized and self.tests.items.len < MAX_PATHS`.
+- [x] **Step 3: Implement.** Add a `summarized: bool = false` flag on the generator; set it at every site that emits a summarized loop skeleton or truncates recursion (find them: grep the file for the loop-handling and MAX_PATHS sites). Change line 303 to `.exhaustive = !self.summarized and self.tests.items.len < MAX_PATHS`.
 
-- [ ] **Step 4: Run, expect PASS**, then the full engine suite: `zig build test-zts`. Fix downstream tests that asserted `exhaustive == true` over loop-bearing handlers — those assertions were the bug this task exists to fix; update them to expect `false` and leave a one-line comment citing spec gap 11.
+**Three things the plan's one-line change did not account for, 2026-07-31.**
 
-- [ ] **Step 5: Commit**
+1. **The predicate is written twice, independently.** `path_generator.zig:303`
+   sets `envelope.exhaustive`, and `precompile.zig:964` separately computes
+   `paths_exhaustive = tests.len < MAX_PATHS` for the proof-trace summaries and
+   the `check` display. Fixing only the first leaves every "Checked across N
+   enumerated path(s) (exhaustive)" summary still over-claiming. The predicate
+   now lives once, as `PathGenerator.pathsExhaustive()`, and both read it.
+2. **`cost_bounded` was conjoined with `exhaustive`** at `precompile.zig:980`
+   and `:2016`. Left alone, this task would have stripped `cost_bounded` from
+   every loop-bearing handler - a much larger and wrong claim change, since a
+   summarized loop still carries a symbolic linear bound in the collection's
+   length. The conjunct was already redundant: truncation forces
+   `envelope.total` to `.unbounded`, so the class test alone covered it. Dropped
+   from both, with the truncation-to-unbounded coupling in `buildCostEnvelope`
+   re-keyed onto truncation specifically rather than onto `exhaustive`.
+3. **The `check` display named the wrong cause.** Its non-exhaustive branch
+   printed "(limit reached)", which is false for a summarized handler. It now
+   distinguishes the two: "(limit reached)" only at `MAX_PATHS`, otherwise
+   "(summarized: a loop body is walked once, not enumerated)".
+
+Recursion truncation is deliberately not wired into `summarized` here; it is
+Task 7's subject and is set there if that task finds a claim to downgrade.
+
+- [x] **Step 4: Run, expect PASS**, then the full engine suite: `zig build test-zts`. Fix downstream tests that asserted `exhaustive == true` over loop-bearing handlers — those assertions were the bug this task exists to fix; update them to expect `false` and leave a one-line comment citing spec gap 11.
+
+- [x] **Step 5: Commit**
 
 ```bash
 zig fmt packages/zts/src/path_generator.zig
