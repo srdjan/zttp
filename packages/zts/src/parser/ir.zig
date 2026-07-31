@@ -772,21 +772,6 @@ pub const DataPayload = extern struct {
     /// Second 4 bytes - secondary data or extra index
     b: u32,
 
-    pub const Tag = enum(u4) {
-        /// Direct integer value (a = value, b unused)
-        int_direct,
-        /// Index references: a = index, b = count or secondary index
-        index_pair,
-        /// Extra data reference: a = extra_start, b = extra_len
-        extra_ref,
-        /// Binding reference packed
-        binding,
-        /// Binary op packed: a[0:8] = op, a[8:32] = left, b = right
-        binary_packed,
-        /// Flags and indices
-        flags_index,
-    };
-
     /// Pack an integer directly
     pub fn fromInt(val: i32) DataPayload {
         return .{ .a = @bitCast(val), .b = 0 };
