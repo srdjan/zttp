@@ -14,8 +14,6 @@ const RuntimePolicy = handler_policy.RuntimePolicy;
 
 pub const resource_kind_host = "host";
 pub const resource_kind_sql_query = "sql_query";
-pub const resource_kind_namespace = "namespace";
-pub const resource_kind_env_var = "env_var";
 
 pub const Action = enum {
     env_read,

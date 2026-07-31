@@ -12,7 +12,6 @@ const atom_table_mod = @import("atom_table.zig");
 const http_cache_mod = @import("http_cache.zig");
 const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
-const interp_util = @import("interpreter/util.zig");
 const cmp = @import("interpreter/cmp.zig");
 const builtins = @import("builtins/root.zig");
 const bytecode = @import("bytecode.zig");

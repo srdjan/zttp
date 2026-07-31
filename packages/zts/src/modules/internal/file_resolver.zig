@@ -9,8 +9,6 @@ const std = @import("std");
 const probe_extensions = [_][]const u8{ ".ts", ".tsx", ".js", ".jsx" };
 
 /// Maximum path length to prevent allocation issues
-const MAX_PATH_LEN = 4096;
-
 /// Resolve an import specifier relative to the importing file's directory.
 ///
 /// Returns an owned absolute path string. Caller must free with the same allocator.
