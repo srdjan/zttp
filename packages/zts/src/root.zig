@@ -116,7 +116,6 @@ pub const contract_diff = @import("contract_diff.zig");
 pub const system_linker = @import("system_linker.zig");
 pub const perf_receipt = @import("perf_receipt.zig");
 pub const equivalence_receipt = @import("equivalence_receipt.zig");
-pub const rule_error = @import("rule_error.zig");
 pub const rule_registry = @import("rule_registry.zig");
 pub const idiom_registry = @import("idiom_registry.zig");
 pub const restriction_registry = @import("restriction_registry.zig");
