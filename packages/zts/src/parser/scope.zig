@@ -124,16 +124,6 @@ pub const Scope = struct {
         return null;
     }
 
-    /// Find a mutable binding by name (legacy - O(n) string comparison)
-    pub fn findLocalMut(self: *Scope, name: []const u8) ?*Binding {
-        for (self.bindings.items) |*binding| {
-            if (std.mem.eql(u8, binding.name, name)) {
-                return binding;
-            }
-        }
-        return null;
-    }
-
     /// Check if this is a function scope
     pub fn isFunction(self: *const Scope) bool {
         return self.kind == .function;
@@ -384,18 +374,6 @@ pub const ScopeAnalyzer = struct {
         return slot;
     }
 
-    /// Check if a name_atom is already declared in current scope (O(1) comparison)
-    pub fn isDeclaredInCurrentScopeByAtom(self: *ScopeAnalyzer, name_atom: u16) bool {
-        const scope = &self.scopes.items[self.current_scope];
-        return scope.findLocalByAtom(name_atom) != null;
-    }
-
-    /// Check if a name is already declared in current scope (legacy - O(n) string comparison)
-    pub fn isDeclaredInCurrentScope(self: *ScopeAnalyzer, name: []const u8) bool {
-        const scope = &self.scopes.items[self.current_scope];
-        return scope.findLocal(name) != null;
-    }
-
     /// Get the current scope
     pub fn getCurrentScope(self: *ScopeAnalyzer) *Scope {
         return &self.scopes.items[self.current_scope];
@@ -404,12 +382,6 @@ pub const ScopeAnalyzer = struct {
     /// Get a scope by ID
     pub fn getScope(self: *ScopeAnalyzer, id: ScopeId) *Scope {
         return &self.scopes.items[id];
-    }
-
-    /// Get the enclosing function scope
-    pub fn getEnclosingFunction(self: *ScopeAnalyzer) *Scope {
-        const current = &self.scopes.items[self.current_scope];
-        return &self.scopes.items[current.enclosing_function];
     }
 
     /// Get upvalues for a function scope
@@ -421,27 +393,6 @@ pub const ScopeAnalyzer = struct {
     pub fn getLocalCount(self: *const ScopeAnalyzer, function_scope: ScopeId) u8 {
         return self.scopes.items[function_scope].max_local_count;
     }
-
-    /// Check if we're currently in a function (not global)
-    pub fn inFunction(self: *ScopeAnalyzer) bool {
-        const current = &self.scopes.items[self.current_scope];
-        return current.enclosing_function != 0;
-    }
-
-    /// Check if we're in a loop (for break/continue validation)
-    pub fn inLoop(self: *ScopeAnalyzer) bool {
-        var scope_id = self.current_scope;
-        while (true) {
-            const scope = &self.scopes.items[scope_id];
-            if (scope.kind == .for_loop) return true;
-            if (scope.kind == .function) return false; // Don't look past function boundary
-            if (scope.parent) |p| {
-                scope_id = p;
-            } else {
-                return false;
-            }
-        }
-    }
 };
 
 /// Upvalue info for bytecode generation
@@ -449,11 +400,6 @@ pub const UpvalueInfo = struct {
     is_local: bool, // true: from parent's locals, false: from parent's upvalues
     index: u8,
 };
-
-/// Convert upvalues to bytecode format
-pub fn getUpvalueInfo(analyzer: *const ScopeAnalyzer, function_scope: ScopeId) []const Upvalue {
-    return analyzer.scopes.items[function_scope].upvalues.items;
-}
 
 // --- Tests ---
 
