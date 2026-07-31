@@ -71,17 +71,6 @@ pub const bool_property_count: usize = blk: {
     break :blk count;
 };
 
-pub fn boolPropertyNameAt(index: usize) ?[]const u8 {
-    var current: usize = 0;
-    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {
-        if (field.type == bool) {
-            if (current == index) return field.name;
-            current += 1;
-        }
-    }
-    return null;
-}
-
 pub fn boolPropertyIndexOf(name: []const u8) ?usize {
     var current: usize = 0;
     inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {

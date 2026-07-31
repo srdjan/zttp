@@ -40,16 +40,6 @@ pub const Mode = enum {
     }
 };
 
-/// Read `ZTTP_CASSETTE_MODE` from the process environment. Defaults to
-/// `.replay` when unset or unparseable so tests that forget to opt in
-/// never hit the live network. Callers that want to surface bad values
-/// loudly can call `parseModeStrict` instead.
-pub fn modeFromEnv(allocator: std.mem.Allocator) Mode {
-    const raw = std.process.getEnvVarOwned(allocator, "ZTTP_CASSETTE_MODE") catch return .replay;
-    defer allocator.free(raw);
-    return Mode.fromString(raw) orelse .replay;
-}
-
 pub const ParseModeError = error{InvalidMode};
 
 pub fn parseModeStrict(value: []const u8) ParseModeError!Mode {

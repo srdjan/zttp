@@ -51,16 +51,6 @@ pub const PrecompileOptions = struct {
     git_commit: ?[]const u8 = null,
 };
 
-pub fn parsePrecompileArgs(args_vector: std.process.Args) !PrecompileOptions {
-    const allocator = std.heap.smp_allocator;
-    const argv = try collectArgs(allocator, args_vector);
-    defer {
-        for (argv) |arg| allocator.free(arg);
-        allocator.free(argv);
-    }
-    return try parsePrecompileArgSlice(argv[1..]);
-}
-
 pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
     var opts = PrecompileOptions{ .handler_path = "", .output_path = "" };
     var handler_path: ?[]const u8 = null;

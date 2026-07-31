@@ -90,13 +90,6 @@ pub const ApprovalFn = union(enum) {
         return .{ .bare = func };
     }
 
-    pub fn withContext(
-        context: *anyopaque,
-        func: *const fn (context: *anyopaque, preview: ApprovalPreview) anyerror!bool,
-    ) ApprovalFn {
-        return .{ .contextual = .{ .context = context, .func = func } };
-    }
-
     pub fn call(self: ApprovalFn, preview: ApprovalPreview) anyerror!bool {
         return switch (self) {
             .bare => |func| func(preview),

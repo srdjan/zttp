@@ -411,64 +411,6 @@ fn sliceContains(haystack: []const []const u8, needle: []const u8) bool {
 const writeJsonString = handler_contract.writeJsonString;
 const writeJsonStringContent = handler_contract.writeJsonStringContent;
 
-/// Serialize alignment results to JSON and write to a file path.
-pub fn writeAlignmentJson(
-    allocator: std.mem.Allocator,
-    alignment: *const ManifestAlignment,
-    output_path: []const u8,
-) !void {
-    var output: std.ArrayList(u8) = .empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-    const w = &aw.writer;
-
-    try w.writeAll("{\n");
-    try w.writeAll("  \"overall\": ");
-    try writeJsonString(w, alignment.overall.toString());
-    try w.writeAll(",\n");
-
-    try w.writeAll("  \"sections\": [");
-    for (alignment.results, 0..) |result, i| {
-        if (i > 0) try w.writeAll(",");
-        try w.writeAll("\n    {\n");
-
-        try w.writeAll("      \"section\": ");
-        try writeJsonString(w, result.section);
-        try w.writeAll(",\n");
-
-        try w.writeAll("      \"status\": ");
-        try writeJsonString(w, result.status.toString());
-        try w.writeAll(",\n");
-
-        try w.print("      \"declaredCount\": {d},\n", .{result.declared_count});
-        try w.print("      \"matchedCount\": {d},\n", .{result.matched_count});
-
-        try w.writeAll("      \"unmatched\": [");
-        for (result.unmatched, 0..) |item, j| {
-            if (j > 0) try w.writeAll(", ");
-            try writeJsonString(w, item);
-        }
-        try w.writeAll("],\n");
-
-        try w.writeAll("      \"undeclared\": [");
-        for (result.undeclared, 0..) |item, j| {
-            if (j > 0) try w.writeAll(", ");
-            try writeJsonString(w, item);
-        }
-        try w.writeAll("]\n");
-
-        try w.writeAll("    }");
-    }
-    if (alignment.results.len > 0) {
-        try w.writeAll("\n  ");
-    }
-    try w.writeAll("]\n");
-    try w.writeAll("}\n");
-
-    output = aw.toArrayList();
-    try zts.file_io.writeFile(allocator, output_path, output.items);
-}
-
 // -------------------------------------------------------------------------
 // Human-readable summary (stderr)
 // -------------------------------------------------------------------------

@@ -47,19 +47,6 @@ pub const ToolResult = struct {
         };
     }
 
-    pub fn withUiPayload(
-        allocator: std.mem.Allocator,
-        ok: bool,
-        llm_text: []const u8,
-        payload: UiPayload,
-    ) !ToolResult {
-        return .{
-            .ok = ok,
-            .llm_text = try allocator.dupe(u8, llm_text),
-            .ui_payload = try payload.clone(allocator),
-        };
-    }
-
     pub fn withPlainText(
         allocator: std.mem.Allocator,
         ok: bool,
