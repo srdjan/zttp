@@ -587,15 +587,6 @@ pub const Node = struct {
         };
     }
 
-    /// Create a null literal node
-    pub fn litNull(loc: SourceLocation) Node {
-        return .{
-            .tag = .lit_null,
-            .loc = loc,
-            .data = .{ .none = {} },
-        };
-    }
-
     /// Create an undefined literal node
     pub fn litUndefined(loc: SourceLocation) Node {
         return .{
@@ -663,12 +654,6 @@ pub const NodeList = struct {
 
     /// Get a node by index
     pub fn get(self: *const NodeList, idx: NodeIndex) ?*const Node {
-        if (idx == null_node or idx >= self.nodes.items.len) return null;
-        return &self.nodes.items[idx];
-    }
-
-    /// Get a mutable node by index
-    pub fn getMut(self: *NodeList, idx: NodeIndex) ?*Node {
         if (idx == null_node or idx >= self.nodes.items.len) return null;
         return &self.nodes.items[idx];
     }
@@ -807,16 +792,6 @@ pub const DataPayload = extern struct {
         return .{ .a = @bitCast(val), .b = 0 };
     }
 
-    /// Pack two indices
-    pub fn fromIndices(idx1: NodeIndex, idx2: NodeIndex) DataPayload {
-        return .{ .a = idx1, .b = idx2 };
-    }
-
-    /// Pack index and count
-    pub fn fromIndexCount(start: NodeIndex, count: u16) DataPayload {
-        return .{ .a = start, .b = count };
-    }
-
     /// Pack binary expression
     pub fn fromBinary(op: BinaryOp, left: NodeIndex, right: NodeIndex) DataPayload {
         return .{
@@ -842,16 +817,6 @@ pub const DataPayload = extern struct {
     /// Get first index
     pub fn getIndex(self: DataPayload) NodeIndex {
         return self.a;
-    }
-
-    /// Get count (from b)
-    pub fn getCount(self: DataPayload) u16 {
-        return @truncate(self.b);
-    }
-
-    /// Get second index
-    pub fn getIndex2(self: DataPayload) NodeIndex {
-        return self.b;
     }
 };
 
@@ -970,13 +935,6 @@ pub const IRStore = struct {
         return start;
     }
 
-    /// Add a single extra value
-    pub fn addExtraValue(self: *IRStore, value: u32) !u32 {
-        const idx = @as(u32, @intCast(self.extra.items.len));
-        try self.extra.append(self.allocator, value);
-        return idx;
-    }
-
     /// Get node tag
     pub fn getTag(self: *const IRStore, idx: NodeIndex) NodeTag {
         return self.tags.items[idx];
@@ -995,11 +953,6 @@ pub const IRStore = struct {
     /// Get extra data slice
     pub fn getExtra(self: *const IRStore, start: u32, count: u32) []const u32 {
         return self.extra.items[start..][0..count];
-    }
-
-    /// Get single extra value
-    pub fn getExtraValue(self: *const IRStore, idx: u32) u32 {
-        return self.extra.items[idx];
     }
 
     /// Add index list and return start position
