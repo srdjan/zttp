@@ -430,39 +430,6 @@ pub const Context = struct {
     // Hybrid Allocation Helpers
     // ========================================================================
 
-    /// Allocate ephemeral memory (dies at request end)
-    /// Uses arena if hybrid allocator set, otherwise falls back to standard allocator
-    pub fn allocEphemeral(self: *Context, size: usize) !*anyopaque {
-        if (self.hybrid) |h| {
-            return h.alloc(.ephemeral, size) orelse return error.OutOfMemory;
-        }
-        // Fallback to GC-managed allocation
-        return self.gc_state.allocWithGC(size);
-    }
-
-    /// Allocate ephemeral typed object
-    pub fn createEphemeral(self: *Context, comptime T: type) !*T {
-        if (self.hybrid) |h| {
-            return h.create(.ephemeral, T) orelse return error.OutOfMemory;
-        }
-        return self.allocator.create(T);
-    }
-
-    /// Allocate persistent memory (lives forever)
-    /// Always uses standard allocator
-    pub fn allocPersistent(self: *Context, size: usize) !*anyopaque {
-        if (self.hybrid) |h| {
-            return h.alloc(.persistent, size) orelse return error.OutOfMemory;
-        }
-        const mem = try self.allocator.alignedAlloc(u8, .@"8", size);
-        return @ptrCast(mem.ptr);
-    }
-
-    /// Allocate persistent typed object
-    pub fn createPersistent(self: *Context, comptime T: type) !*T {
-        return self.allocator.create(T);
-    }
-
     /// Create a JS object, using arena when hybrid mode is enabled
     pub fn createObject(self: *Context, prototype: ?*object.JSObject) !*object.JSObject {
         if (self.hybrid) |h| {
@@ -510,11 +477,6 @@ pub const Context = struct {
             return val.toPtr(string.JSString).data();
         }
         return null;
-    }
-
-    /// Check if hybrid allocation is enabled
-    pub fn isHybridEnabled(self: *const Context) bool {
-        return self.hybrid != null;
     }
 
     /// Check if a JSValue points to arena-allocated memory
