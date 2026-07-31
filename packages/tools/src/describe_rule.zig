@@ -321,6 +321,7 @@ test "writeIdiomListJson emits every seeded row with a stable id" {
 
     const idioms = parsed.value.object.get("idioms").?.array;
     try testing.expectEqual(idiom_registry.entries.len, idioms.items.len);
+    var wired: usize = 0;
     for (idioms.items) |item| {
         const obj = item.object;
         try testing.expect(std.mem.startsWith(u8, obj.get("id").?.string, "idiom."));
@@ -328,9 +329,12 @@ test "writeIdiomListJson emits every seeded row with a stable id" {
         try testing.expect(obj.get("idiomatic").?.string.len > 0);
         try testing.expect(obj.get("superseded").?.string.len > 0);
         try testing.expect(obj.get("precondition").?.string.len > 0);
-        // Phase 0 wires no rewrites; task 5 fills these in.
-        try testing.expect(obj.get("rewrite_rule").? == .null);
+        // The key is always present: an absent rewrite is the signal that the
+        // row is advisory-only, so a consumer has to be able to see the null.
+        const rewrite = obj.get("rewrite_rule") orelse return error.MissingRewriteRuleKey;
+        if (rewrite == .string) wired += 1;
     }
+    try testing.expect(wired >= 1);
 }
 
 test "writeTypeCheckerJson emits the rule-json shape with a real description" {

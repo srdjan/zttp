@@ -376,9 +376,39 @@ git add -A && git commit -m "feat(types): ternary result type via the spec join 
 - Consumes: idiom IDs from Task 2 (`idiom.element-iteration`, `idiom.multi-field-read`, ...). `rewrite_rule` back-references in Task 2's table get filled in this task for every wired rewrite.
 - Produces: `canonicalize --json` output rows with `idiom_id`; double-normalize idempotence guarantee.
 
-- [ ] **Step 1: Read the rewrite catalog.** Identify each existing rewrite that corresponds to a Task 2 idiom row. Map and record the pairs in a comment block at the top of the catalog. Any Task 2 row with no existing rewrite keeps `rewrite_rule = null` (advisory-only per spec 4.2.1).
+- [x] **Step 1: Read the rewrite catalog.** Identify each existing rewrite that corresponds to a Task 2 idiom row. Map and record the pairs in a comment block at the top of the catalog. Any Task 2 row with no existing rewrite keeps `rewrite_rule = null` (advisory-only per spec 4.2.1).
 
-- [ ] **Step 2: Write the failing test**
+**Result of the mapping, 2026-07-31: exactly one pair, not the several this task
+assumed.** The catalog holds two rewrite families - line/column `Refactor` rows
+(`canonicalize --json`) and span-keyed `StatementRewrite`s (`normalize`'s
+rewrite trace). Every one of them repairs a canonical-profile *restriction*
+(`let` to `const`, arrow to named function, exported function-valued const,
+compound assignment, redundant bool compare, complex template interpolation,
+ternary to match). The idiom table is a different axis: it picks among spellings
+that are all admitted. Only ZTS619 `drop_unused_index_alias` sits on both - it
+supersedes a non-idiomatic iteration spelling in favour of
+`for (const item of items)`, which is the `idiom.element-iteration` row.
+
+Three consequences for the plan as written:
+
+1. **No `idiom_id` field was added anywhere.** With one wired rewrite and no
+   `Refactor` kind mapping to a row, a field on both descriptors plus JSON
+   plumbing on both surfaces would be dead weight. The back-reference runs the
+   other way instead: `rewrite_rule` holds the `RepairIntent` tag name, which is
+   already what `normalize --json` prints in `rewriteTrace`, and
+   `idiom_registry.findByRewriteRule` resolves an applied intent to its row. No
+   new JSON key, no schema change, and `describe-rule --idioms --json` already
+   publishes the mapping. Revisit when Phase 6 lands the rows that do have
+   rewrites.
+2. **`idiom.element-iteration.superseded` gained a second spelling.** Spec 4.2.1
+   lists only the `range(items.length)` form; ZTS619 rewrites the
+   `items.entries()`-with-unread-index form. Same operation, same idiomatic
+   target. **Spec edit owed:** add it to the table's non-idiomatic column.
+3. A `rewrite_rule` is a bare string, so a test asserts every non-null one names
+   a live `RepairIntent` member. Without it a renamed intent breaks the mapping
+   silently.
+
+- [x] **Step 2: Write the failing test**
 
 ```zig
 test "canonicalize candidates carry idiom ids where wired" {
@@ -390,9 +420,9 @@ test "canonicalize candidates carry idiom ids where wired" {
 
 Implement against the file's existing test harness (it has tests — copy the nearest candidate-shape assertion).
 
-- [ ] **Step 3: Implement** the `idiom_id` field, thread it to JSON output, fill Task 2's `rewrite_rule` fields for wired rows.
+- [x] **Step 3: Implement** the `idiom_id` field, thread it to JSON output, fill Task 2's `rewrite_rule` fields for wired rows.
 
-- [ ] **Step 4: Idempotence property test.** Add (or extend, if one exists — grep for "idempot" first):
+- [x] **Step 4: Idempotence property test.** Add (or extend, if one exists — grep for "idempot" first):
 
 ```zig
 test "normalize is idempotent over examples" {
@@ -403,9 +433,27 @@ test "normalize is idempotent over examples" {
 
 If a shell gate fits better than a Zig test, add the loop to `scripts/verify.sh` instead — one of the two must exist and run in CI.
 
-- [ ] **Step 5: Run, expect PASS.** `zig build test-cli` (or the step that owns `packages/tools` tests — check `build.zig` test-step wiring first).
+**Both were built, because the corpus alone does not test the property.**
+Measured 2026-07-31: of the 55 example handlers, 50 normalize to themselves in
+zero passes, 1 is refused as not fully canonical, and only 4 trigger any rewrite
+at all. A gate over that corpus is 91 percent vacuous - it would stay green
+against a rewrite that oscillates on every construct the examples happen not to
+use.
 
-- [ ] **Step 6: Commit**
+- `scripts/check-normalize-idempotent.sh`, wired into `scripts/verify.sh`:
+  double-normalizes every `examples/` handler and compares bytes. Cheap, and it
+  strengthens for free as examples are added.
+- `test "normalize is byte-idempotent over every rewrite"` in `canonicalize.zig`
+  (runs under `zig build test-canonicalize`, not `test-cli`): a table with one
+  non-canonical source per rewrite the normalizer can apply. Each case asserts
+  the first pass rewrote something (`iterations >= 1`), that pass two is
+  byte-identical, and that pass two applied nothing - the last catches a rewrite
+  that undoes itself, which byte-equality alone would pass. Add a row whenever a
+  rewrite is added.
+
+- [x] **Step 5: Run, expect PASS.** `zig build test-cli` (or the step that owns `packages/tools` tests — check `build.zig` test-step wiring first).
+
+- [x] **Step 6: Commit**
 
 ```bash
 zig fmt packages/tools/src/canonicalize.zig

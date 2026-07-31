@@ -3902,6 +3902,151 @@ test "normalizeSource refuses nested destructure flattening that would shadow a 
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const {user: {name}} = payload;") != null);
 }
 
+// One non-canonical source per rewrite the normalizer can apply. Spec 4.2.1
+// requires a second `normalize` of canonical source to produce identical bytes,
+// and rows compose, so the failure mode that matters is a rewrite that
+// oscillates or re-fires on its own output. This table is the day-one guard for
+// that: `scripts/check-normalize-idempotent.sh` runs the same property over
+// `examples/`, but only four example files trigger any rewrite at all, so the
+// corpus alone would leave every row untested.
+//
+// Add a row here whenever a rewrite is added. `iterations >= 1` on the first
+// pass is asserted so a source that silently stops triggering its rewrite fails
+// loudly instead of passing as a vacuous fixed point.
+const NormalizeCase = struct { name: []const u8, source: []const u8 };
+
+const normalize_cases = [_]NormalizeCase{
+    .{
+        .name = "let -> const",
+        .source =
+        \\function handler(req: Request): Response {
+        \\  let n = 1;
+        \\  return Response.json({ n });
+        \\}
+        ,
+    },
+    .{
+        .name = "for-of let -> const",
+        .source =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (let item of items) {
+        \\    Response.text(item);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+        ,
+    },
+    .{
+        .name = "reused arrow helper -> named function",
+        .source =
+        \\const parse = (x: number): number => x;
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+        ,
+    },
+    .{
+        .name = "compound assignment -> explicit",
+        .source =
+        \\function handler(req: Request): Response {
+        \\  let n = 0;
+        \\  n += 1;
+        \\  return Response.json({ n });
+        \\}
+        ,
+    },
+    .{
+        .name = "redundant bool compare",
+        .source =
+        \\function handler(req: Request): Response {
+        \\  const ok = req.method === "GET";
+        \\  if (ok === true) {
+        \\    return Response.text("yes");
+        \\  }
+        \\  return Response.text("no");
+        \\}
+        ,
+    },
+    .{
+        .name = "impure ternary -> match",
+        .source =
+        \\function fallbackStatus(): number { return 500; }
+        \\function handler(req: Request): Response {
+        \\  const ok = req.method === "GET";
+        \\  const status = ok ? 200 : fallbackStatus();
+        \\  return Response.json({ status });
+        \\}
+        ,
+    },
+    .{
+        .name = "chained ternary -> match",
+        .source =
+        \\function handler(req: Request): Response {
+        \\  const a = req.method === "GET";
+        \\  const b = req.method === "POST";
+        \\  const status = a ? 200 : b ? 201 : 500;
+        \\  return Response.json({ status });
+        \\}
+        ,
+    },
+    .{
+        .name = "complex template interpolation -> hoisted const",
+        .source =
+        \\function handler(req: Request): Response {
+        \\  const a = req.headers["a"];
+        \\  const s = `${a.toUpperCase()}!`;
+        \\  return Response.text(s);
+        \\}
+        ,
+    },
+    .{
+        .name = "unused entries index alias",
+        .source =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    Response.text(item);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+        ,
+    },
+};
+
+test "normalize is byte-idempotent over every rewrite" {
+    for (normalize_cases) |case| {
+        var once = try normalizeSource(std.testing.allocator, case.source, "handler.ts");
+        defer once.deinit(std.testing.allocator);
+
+        if (once.iterations == 0) {
+            std.debug.print("\ncase '{s}' triggered no rewrite\n", .{case.name});
+            return error.CaseNoLongerTriggersRewrite;
+        }
+
+        var twice = try normalizeSource(std.testing.allocator, once.canonical_source, "handler.ts");
+        defer twice.deinit(std.testing.allocator);
+
+        if (!std.mem.eql(u8, once.canonical_source, twice.canonical_source)) {
+            std.debug.print(
+                "\ncase '{s}' is not idempotent\n--- once ---\n{s}\n--- twice ---\n{s}\n",
+                .{ case.name, once.canonical_source, twice.canonical_source },
+            );
+            return error.NormalizeNotIdempotent;
+        }
+        // A fixed point applies nothing on the second pass, which is stricter
+        // than byte-equality alone: a rewrite that undid itself would produce
+        // equal bytes with a non-zero iteration count.
+        if (twice.iterations != 0) {
+            std.debug.print("\ncase '{s}' still rewrites on pass 2\n", .{case.name});
+            return error.NormalizeNotAtFixedPoint;
+        }
+    }
+}
+
 test "normalizeSource drops an unused entries index alias" {
     const source =
         \\function handler(req: Request): Response {

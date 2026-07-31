@@ -14,6 +14,7 @@
 //! rewrite is wired, and a row with no rewrite is advisory-only.
 
 const std = @import("std");
+const repair_intent = @import("repair_intent.zig");
 
 pub const IdiomEntry = struct {
     /// Stable identifier, `idiom.<operation-slug>`. Machine consumers key on
@@ -28,8 +29,10 @@ pub const IdiomEntry = struct {
     superseded: []const u8,
     /// When a mechanical rewrite preserves meaning. "none" means always.
     precondition: []const u8,
-    /// The canonicalize rewrite that implements the row, or null when the row
-    /// is advisory-only.
+    /// The `RepairIntent` tag name of the canonicalize rewrite that implements
+    /// the row, or null when the row is advisory-only. A consumer reading a
+    /// `normalize --json` rewrite trace maps an applied intent back to its
+    /// idiom through this field; `findByRewriteRule` does the lookup.
     rewrite_rule: ?[]const u8,
 };
 
@@ -126,9 +129,14 @@ pub const entries = [_]IdiomEntry{
         .id = "idiom.element-iteration",
         .operation = "element iteration",
         .idiomatic = "for (const item of items)",
-        .superseded = "for...of over range(items.length) whose body only indexes items",
+        // The second spelling is beyond spec 4.2.1's table, which lists only the
+        // range-index form. The repo has rewritten the entries-alias form since
+        // before this program (ZTS619), and it supersedes the same idiomatic
+        // spelling for the same operation, so it belongs on this row. Spec edit
+        // owed: add it to the table's non-idiomatic column.
+        .superseded = "for...of over range(items.length) whose body only indexes items, for...of over items.entries() whose index alias is never read",
         .precondition = "none",
-        .rewrite_rule = null,
+        .rewrite_rule = "drop_unused_index_alias",
     },
 };
 
@@ -137,6 +145,17 @@ pub const entries = [_]IdiomEntry{
 pub fn findById(id: []const u8) ?*const IdiomEntry {
     for (&entries) |*entry| {
         if (std.mem.eql(u8, entry.id, id)) return entry;
+    }
+    return null;
+}
+
+/// Find the row a rewrite implements, given the `RepairIntent` tag name a
+/// `normalize --json` trace records. Returns null for an intent that repairs a
+/// restriction rather than realizing an idiom, which is most of them.
+pub fn findByRewriteRule(intent_name: []const u8) ?*const IdiomEntry {
+    for (&entries) |*entry| {
+        const rule = entry.rewrite_rule orelse continue;
+        if (std.mem.eql(u8, rule, intent_name)) return entry;
     }
     return null;
 }
@@ -158,6 +177,26 @@ test "idiom registry rows are fully populated" {
         try std.testing.expect(entry.superseded.len > 0);
         try std.testing.expect(entry.precondition.len > 0);
     }
+}
+
+test "every wired rewrite_rule names a real RepairIntent" {
+    // The back-reference is a bare string, so nothing but this test stops it
+    // drifting when an intent is renamed or removed.
+    for (entries) |entry| {
+        const rule = entry.rewrite_rule orelse continue;
+        _ = std.meta.stringToEnum(repair_intent.RepairIntent, rule) orelse {
+            std.debug.print("\nidiom {s} names unknown repair intent '{s}'\n", .{ entry.id, rule });
+            return error.UnknownRepairIntent;
+        };
+    }
+}
+
+test "findByRewriteRule maps an applied intent back to its idiom" {
+    const entry = findByRewriteRule("drop_unused_index_alias") orelse return error.TestExpectedEntry;
+    try std.testing.expectEqualStrings("idiom.element-iteration", entry.id);
+    // An intent that repairs a restriction rather than realizing an idiom has
+    // no row, and must not be forced into one.
+    try std.testing.expect(findByRewriteRule("replace_let_with_const") == null);
 }
 
 test "findById resolves a seeded row and rejects an unknown one" {
