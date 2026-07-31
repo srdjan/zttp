@@ -28,7 +28,9 @@ pub const MemBlockHeader = packed struct(u32) {
     tag: MemTag,
     // Size in words (for variable-size blocks) - u26 supports up to 512MB objects
     size_words: u26 = 0,
-    is_remembered: bool = false, // In GC remembered set (write barrier optimization)
+    // Padding to keep the header exactly u32. Was is_remembered, a write
+    // barrier bit that nothing ever read or wrote.
+    _reserved: u1 = 0,
 
     pub fn init(tag: MemTag, size_bytes: usize) MemBlockHeader {
         const words = (size_bytes + 7) / 8;
@@ -120,7 +122,6 @@ const LargeHeader = struct {
     size: usize,
     tag: MemTag,
     gc_mark: bool,
-    is_remembered: bool = false, // In GC remembered set (write barrier optimization)
 };
 
 /// Size class allocator with segregated free lists
