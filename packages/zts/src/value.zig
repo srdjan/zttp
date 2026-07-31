@@ -205,10 +205,6 @@ pub const JSValue = packed struct(u64) {
         header: heap.MemBlockHeader,
         _pad: u32,
         value: f64,
-
-        pub fn getValue(self: *const Float64Box) f64 {
-            return self.value;
-        }
     };
 
     /// Create a float value (ALWAYS inline - no heap allocation!)
@@ -288,10 +284,6 @@ pub const JSValue = packed struct(u64) {
         id: u32, // Unique symbol ID
         description_ptr: ?[*]const u8, // Optional description string
         description_len: u32, // Length of description
-
-        pub fn getId(self: *const SymbolBox) u32 {
-            return self.id;
-        }
 
         pub fn getDescription(self: *const SymbolBox) ?[]const u8 {
             if (self.description_ptr) |ptr| {

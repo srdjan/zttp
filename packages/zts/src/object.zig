@@ -1408,40 +1408,6 @@ pub const JSObject = extern struct {
         return obj;
     }
 
-    /// Create object with arena allocation, only initializing needed slots (fast path)
-    /// Used by JIT when property count is known at compile time
-    pub fn createWithArenaFast(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, slot_count: u8) ?*JSObject {
-        const obj = arena.create(JSObject) orelse return null;
-        // Initialize header fields
-        obj.header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject));
-        obj.hidden_class_idx = class_idx;
-        obj.prototype = null;
-        obj.class_id = .object;
-        obj.flags = .{ .is_arena = true };
-        obj.overflow_slots = null;
-        obj.overflow_capacity = 0;
-        obj.arena_ptr = arena;
-
-        // Only initialize the slots we need. For literals wider than the inline slot
-        // budget, pre-allocate overflow storage so direct slot writes stay valid.
-        const count = @min(slot_count, INLINE_SLOT_COUNT);
-        for (0..count) |i| {
-            obj.inline_slots[i] = value.JSValue.undefined_val;
-        }
-
-        if (slot_count > INLINE_SLOT_COUNT) {
-            const overflow_needed: u16 = @intCast(slot_count - INLINE_SLOT_COUNT);
-            const overflow_capacity = @max(overflow_needed, 4);
-            const slots = arena.allocSlice(value.JSValue, overflow_capacity) orelse return null;
-            for (0..overflow_capacity) |i| {
-                slots[i] = value.JSValue.undefined_val;
-            }
-            obj.overflow_slots = slots.ptr;
-            obj.overflow_capacity = overflow_capacity;
-        }
-        return obj;
-    }
-
     /// Create an array object using arena allocation
     pub fn createArrayWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex) ?*JSObject {
         const obj = arena.create(JSObject) orelse return null;

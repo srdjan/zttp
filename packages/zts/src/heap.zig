@@ -402,22 +402,6 @@ pub const Heap = struct {
         return header.gc_mark;
     }
 
-    /// Set remembered set bit (for write barrier optimization)
-    pub fn setRemembered(self: *Heap, ptr: *anyopaque, remembered: bool) void {
-        _ = self;
-        const data_ptr: [*]u8 = @ptrCast(ptr);
-        const header: *MemBlockHeader = @ptrCast(@alignCast(data_ptr - @sizeOf(MemBlockHeader)));
-        header.is_remembered = remembered;
-    }
-
-    /// Get remembered set bit
-    pub fn getRemembered(self: *Heap, ptr: *anyopaque) bool {
-        _ = self;
-        const data_ptr: [*]u8 = @ptrCast(ptr);
-        const header: *MemBlockHeader = @ptrCast(@alignCast(data_ptr - @sizeOf(MemBlockHeader)));
-        return header.is_remembered;
-    }
-
     /// Allocate a Float64 box (raw allocation without extra header)
     pub fn allocFloat64(self: *Heap, val: f64) ?*value.JSValue.Float64Box {
         // Float64Box has its own header, so allocate raw without additional header

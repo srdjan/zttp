@@ -781,12 +781,6 @@ pub const GC = struct {
         return self.upvalue_pool.acquire();
     }
 
-    /// Release an Upvalue back to the pool for reuse
-    /// Call this when an upvalue is no longer needed
-    pub fn releaseUpvalue(self: *GC, uv: *object.Upvalue) void {
-        self.upvalue_pool.release(uv);
-    }
-
     /// Minor GC: evacuate live nursery objects to tenured (Cheney-style copying collector)
     /// Skipped in hybrid mode where arena handles ephemeral allocations
     pub fn minorGC(self: *GC) void {

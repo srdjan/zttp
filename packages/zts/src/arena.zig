@@ -133,13 +133,6 @@ pub const Arena = struct {
         return @ptrCast(@alignCast(ptr));
     }
 
-    /// Allocate with type safety and type's natural alignment
-    /// Use for types that need alignment > 8 bytes
-    pub fn createAligned(self: *Arena, comptime T: type) ?*T {
-        const ptr = self.allocAligned(@sizeOf(T), @alignOf(T)) orelse return null;
-        return @ptrCast(@alignCast(ptr));
-    }
-
     /// Allocate slice
     pub fn allocSlice(self: *Arena, comptime T: type, n: usize) ?[]T {
         const ptr = self.alloc(@sizeOf(T) * n) orelse return null;
@@ -226,11 +219,6 @@ pub const Arena = struct {
     /// Current bytes used in arena (not including overflow)
     pub fn usedBytes(self: *const Arena) usize {
         return @intFromPtr(self.ptr) - @intFromPtr(self.base);
-    }
-
-    /// Remaining bytes in arena before overflow
-    pub fn remainingBytes(self: *const Arena) usize {
-        return @intFromPtr(self.limit) - @intFromPtr(self.ptr);
     }
 
     /// Check if a pointer belongs to this arena (including overflow allocations)
