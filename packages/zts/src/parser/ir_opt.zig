@@ -78,11 +78,6 @@ pub const IROptimizer = struct {
         return self.stats;
     }
 
-    /// Get the replacement for a node, or the node itself if no replacement
-    pub fn getReplacement(self: *const IROptimizer, idx: NodeIndex) NodeIndex {
-        return self.replacements.get(idx) orelse idx;
-    }
-
     /// Error type for optimization operations
     pub const OptError = std.mem.Allocator.Error;
 

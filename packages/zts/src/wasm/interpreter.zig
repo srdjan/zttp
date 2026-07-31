@@ -28,13 +28,4 @@ pub const WasmInterpreter = struct {
     pub fn deinit(self: *WasmInterpreter) void {
         _ = self;
     }
-
-    /// Invoke the `policy-check` export via the WIT ABI (spec section 6).
-    /// Strict timeout and fail-closed trap handling are enforced per spec
-    /// section 10. Returns `.{ .deny = ... }` on any trap or timeout.
-    pub fn callPolicyCheck(self: *WasmInterpreter, input: policy.PolicyInput) Error!policy.PolicyResult {
-        _ = self;
-        _ = input;
-        return error.WasmPolicyUnavailable;
-    }
 };

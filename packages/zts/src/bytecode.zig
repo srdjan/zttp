@@ -1124,11 +1124,6 @@ pub const VersionedFunction = struct {
         return self.code.load(.acquire).bytecode;
     }
 
-    /// Get current code version
-    pub fn getCodeVersion(self: *VersionedFunction) *CodeVersion {
-        return self.code.load(.acquire);
-    }
-
     /// Get current version number
     pub fn getVersion(self: *VersionedFunction) u32 {
         return self.code.load(.acquire).version;

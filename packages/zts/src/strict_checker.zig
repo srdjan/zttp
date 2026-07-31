@@ -99,27 +99,6 @@ pub const DiagnosticKind = enum {
     canonical_destructure_depth,
     canonical_unused_index_alias,
     canonical_redundant_bool_compare,
-
-    pub fn isCanonicalProfile(self: DiagnosticKind) bool {
-        return switch (self) {
-            .canonical_arrow_helper,
-            .canonical_export_function_const,
-            .canonical_public_helper_effects,
-            .canonical_public_helper_proof,
-            .canonical_ternary_impure,
-            .canonical_ternary_chain,
-            .canonical_compound_assignment,
-            .canonical_non_leading_spread,
-            .canonical_template_complex_interp,
-            .canonical_call_spread,
-            .canonical_default_parameter,
-            .canonical_destructure_depth,
-            .canonical_unused_index_alias,
-            .canonical_redundant_bool_compare,
-            => true,
-            else => false,
-        };
-    }
 };
 
 pub const Diagnostic = struct {

@@ -1805,11 +1805,6 @@ pub fn writeAllChecked(fd: std.c.fd_t, data: []const u8) DurablePersistenceError
     }
 }
 
-/// fsync a file descriptor. Best-effort - failure is not fatal.
-fn fsyncFd(fd: std.c.fd_t) void {
-    _ = std.c.fsync(fd);
-}
-
 fn fsyncFdChecked(fd: std.c.fd_t) DurablePersistenceError!void {
     const result = std.c.fsync(fd);
     if (result < 0) return error.DurableFsyncFailed;

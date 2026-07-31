@@ -723,11 +723,6 @@ pub const TypeEnv = struct {
         return self.interfaces.get(name);
     }
 
-    /// Look up a variable type by source location.
-    pub fn getVarTypeByLoc(self: *const TypeEnv, line: u32, col: u32) ?TypeIndex {
-        return self.var_types.get(packLocationKey(line, col));
-    }
-
     /// Look up a function signature by source location.
     pub fn getFnSigByLoc(self: *const TypeEnv, line: u32) ?FunctionSig {
         return self.fn_signatures.get(line);

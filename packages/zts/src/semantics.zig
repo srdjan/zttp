@@ -346,20 +346,6 @@ pub const SpecCode = enum {
 // Drift gate.
 // ---------------------------------------------------------------------------
 
-pub fn isSpecifiedNode(tag: NodeTag) bool {
-    for (node_rules) |r| {
-        if (r.tag == tag) return true;
-    }
-    return false;
-}
-
-pub fn isSpecifiedOpcode(op: Opcode) bool {
-    for (op_rules) |r| {
-        if (r.op == op) return true;
-    }
-    return false;
-}
-
 // The pinned size of each alphabet. The comptime gate fails the build when these
 // no longer match the enums - the moment a NAMED NodeTag or Opcode is added or
 // removed - so the author must specify the new member or consciously re-pin.
