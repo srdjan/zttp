@@ -25,10 +25,32 @@ const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
+const zts = @import("zts");
 
 pub const SeedFile = struct {
     path: []const u8,
     bytes: []const u8,
+};
+
+/// A case's intent check: the behaviour the produced handler must actually
+/// exhibit, as a `zttp test` jsonl spec.
+///
+/// The veto answers "is this program provable". It cannot answer "does this
+/// program do what was asked", and a handler that returns `{ok:true}` for every
+/// prompt clears the veto every time. Without this, the published pass rate
+/// measures convergence on trivial rather than convergence on provable.
+pub const IntentCheck = struct {
+    /// Contents of the `.test.jsonl` spec, written into the case workspace.
+    tests_jsonl: []const u8,
+    /// Relative handler path the produced edit is expected to land on. Used to
+    /// synthesize a `zttp.json` so `zttp test` resolves the same file the turn
+    /// wrote.
+    handler_path: []const u8 = "handler.ts",
+    /// Verbatim `zttp.json` for cases that need more than a handler key - the
+    /// SQL case seeds a `sqlite` path its veto resolves. Synthesizing over the
+    /// top of a seeded config would silently drop that key and the case would
+    /// fail for a reason that has nothing to do with the model.
+    zttp_json: ?[]const u8 = null,
 };
 
 pub const Criterion = enum {
@@ -50,7 +72,17 @@ pub const CodegenCase = struct {
     expected_kind: expert_workflow.TaskKind,
     criterion: Criterion,
     max_attempts: u8 = 1,
+    /// Behaviour the produced handler must exhibit. Null means the case is not
+    /// intent-checked, which `CaseResult.intent` reports as `.not_checked` so a
+    /// missing check can never be counted as a passing one.
+    intent: ?IntentCheck = null,
 };
+
+/// Outcome of a case's intent check. `not_checked` is deliberately distinct
+/// from `passed`: a case with no spec, or one whose turn produced no edit to
+/// run a spec against, has not demonstrated anything and must not be counted
+/// as if it had.
+pub const IntentOutcome = enum { not_checked, passed, failed };
 
 pub const CaseResult = struct {
     name: []const u8,
@@ -62,6 +94,8 @@ pub const CaseResult = struct {
     roundtrips: u8,
     tool_calls: u32,
     proven_guarantees: u32,
+    /// Whether the produced handler does the task the prompt asked for.
+    intent: IntentOutcome = .not_checked,
     /// Leading ZTS code of the first diagnostic when the case missed its
     /// criterion; empty otherwise. A fixed buffer keeps CaseResult allocation
     /// free (ZTS codes are short, e.g. "ZTS303").
@@ -124,12 +158,96 @@ pub fn runCase(
     return cr;
 }
 
+/// Run a case's intent check against the handler the turn produced.
+///
+/// Shells out to the built `zttp test` rather than driving the engine here.
+/// The eval's whole claim is that the veto, the apply path, and the metrics are
+/// the production loop; an intent check that reimplemented request dispatch
+/// could drift from the runtime and would be measuring its own copy instead.
+/// `zttp test` runs the same handler the same way `zttp dev` would.
+///
+/// Returns `.failed` for every reason a check can fail to demonstrate intent -
+/// a missing binary, a workspace that will not build, an expectation that did
+/// not hold. None of those are evidence the handler does the task, and turning
+/// any of them into `.passed` is the fail-open this check exists to close.
+pub fn runIntentCheck(
+    allocator: std.mem.Allocator,
+    intent: IntentCheck,
+    workspace_abs: []const u8,
+    zttp_bin: []const u8,
+) IntentOutcome {
+    const spec_rel = "intent.test.jsonl";
+    writeWorkspaceFile(allocator, workspace_abs, spec_rel, intent.tests_jsonl) catch return .failed;
+
+    const config = if (intent.zttp_json) |verbatim|
+        allocator.dupe(u8, verbatim) catch return .failed
+    else
+        std.fmt.allocPrint(
+            allocator,
+            "{{\n  \"entry\": \"{s}\"\n}}\n",
+            .{intent.handler_path},
+        ) catch return .failed;
+    defer allocator.free(config);
+    writeWorkspaceFile(allocator, workspace_abs, "zttp.json", config) catch return .failed;
+
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var child = std.process.spawn(io, .{
+        .argv = &.{ zttp_bin, "test", spec_rel },
+        .cwd = .{ .path = workspace_abs },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    }) catch return .failed;
+    const term = child.wait(io) catch return .failed;
+    return switch (term) {
+        .exited => |code| if (code == 0) .passed else .failed,
+        // Killed, stopped, or signalled: the run did not get to demonstrate
+        // anything, which is not evidence the handler does the task.
+        else => .failed,
+    };
+}
+
+fn writeWorkspaceFile(
+    allocator: std.mem.Allocator,
+    workspace_abs: []const u8,
+    rel: []const u8,
+    bytes: []const u8,
+) !void {
+    const path = try std.fs.path.resolve(allocator, &.{ workspace_abs, rel });
+    defer allocator.free(path);
+    try zts.file_io.writeFile(allocator, path, bytes);
+}
+
+/// Absolute path to the `zttp` binary the intent check drives, or null when it
+/// is not built. Null makes callers skip the check rather than record a pass.
+pub fn locateZttpBinary(allocator: std.mem.Allocator, repo_root: []const u8) ?[]u8 {
+    const path = std.fs.path.resolve(allocator, &.{ repo_root, "zig-out", "bin", "zttp" }) catch return null;
+    if (!zts.file_io.fileExists(allocator, path)) {
+        allocator.free(path);
+        return null;
+    }
+    return path;
+}
+
 pub const CodegenSummary = struct {
     total: usize,
     routed: usize,
     first_draft_passes: usize,
     greens: usize,
     criterion_passes: usize,
+    /// Cases whose produced handler did the task the prompt asked for.
+    intent_passes: usize = 0,
+    /// Cases that were intent-checked at all. The denominator for
+    /// `intentPassPercent`: reporting intent passes against `total` would let
+    /// an uncovered corpus read as a low score rather than an unmeasured one.
+    intent_checked: usize = 0,
+    /// Median round-trips to green across all cases. The mean would be dragged
+    /// by one case that never converges; the median says what a typical prompt
+    /// costs.
+    median_roundtrips: u8 = 0,
 
     /// First-draft veto-pass rate in percent (0-100), 0 when empty. Integer to
     /// keep the eval free of float-formatting noise; the count fields carry the
@@ -137,6 +255,14 @@ pub const CodegenSummary = struct {
     pub fn firstDraftPassPercent(self: CodegenSummary) usize {
         if (self.total == 0) return 0;
         return self.first_draft_passes * 100 / self.total;
+    }
+
+    /// Intent-pass rate over the cases that were actually checked, in percent.
+    /// Read it beside `intent_checked`/`total`: a high rate over a third of the
+    /// corpus is a different claim from a high rate over all of it.
+    pub fn intentPassPercent(self: CodegenSummary) usize {
+        if (self.intent_checked == 0) return 0;
+        return self.intent_passes * 100 / self.intent_checked;
     }
 };
 
@@ -153,8 +279,77 @@ pub fn summarize(results: []const CaseResult) CodegenSummary {
         if (r.first_draft_pass) s.first_draft_passes += 1;
         if (r.applied) s.greens += 1;
         if (r.passed_criterion) s.criterion_passes += 1;
+        switch (r.intent) {
+            .passed => {
+                s.intent_passes += 1;
+                s.intent_checked += 1;
+            },
+            .failed => s.intent_checked += 1,
+            .not_checked => {},
+        }
     }
+    s.median_roundtrips = medianRoundtrips(results);
     return s;
+}
+
+/// Median of the per-case round-trip counts. Sorts a fixed-size copy so the
+/// caller's slice is untouched and no allocation is needed; a corpus larger
+/// than the buffer falls back to reporting 0 rather than a wrong median.
+fn medianRoundtrips(results: []const CaseResult) u8 {
+    var buf: [64]u8 = undefined;
+    if (results.len == 0 or results.len > buf.len) return 0;
+    for (results, 0..) |r, i| buf[i] = r.roundtrips;
+    const sample = buf[0..results.len];
+    std.mem.sort(u8, sample, {}, std.sort.asc(u8));
+    const mid = sample.len / 2;
+    if (sample.len % 2 == 1) return sample[mid];
+    // Even count: the lower of the two middles, so the reported figure is
+    // always a round-trip count some case actually took.
+    return sample[mid - 1];
+}
+
+test "median roundtrips reports a value a case actually took" {
+    const mk = struct {
+        fn r(n: u8) CaseResult {
+            return .{
+                .name = "x",
+                .routed = true,
+                .first_draft_pass = true,
+                .applied = true,
+                .passed_criterion = true,
+                .roundtrips = n,
+                .tool_calls = 0,
+                .proven_guarantees = 0,
+            };
+        }
+    }.r;
+    try std.testing.expectEqual(@as(u8, 2), medianRoundtrips(&.{ mk(1), mk(2), mk(9) }));
+    try std.testing.expectEqual(@as(u8, 2), medianRoundtrips(&.{ mk(1), mk(2), mk(3), mk(9) }));
+    try std.testing.expectEqual(@as(u8, 0), medianRoundtrips(&.{}));
+}
+
+test "intent rate is measured over checked cases, not the whole corpus" {
+    const mk = struct {
+        fn r(outcome: IntentOutcome) CaseResult {
+            return .{
+                .name = "x",
+                .routed = true,
+                .first_draft_pass = true,
+                .applied = true,
+                .passed_criterion = true,
+                .roundtrips = 1,
+                .tool_calls = 0,
+                .proven_guarantees = 0,
+                .intent = outcome,
+            };
+        }
+    }.r;
+    const s = summarize(&.{ mk(.passed), mk(.failed), mk(.not_checked) });
+    try std.testing.expectEqual(@as(usize, 3), s.total);
+    try std.testing.expectEqual(@as(usize, 2), s.intent_checked);
+    try std.testing.expectEqual(@as(usize, 1), s.intent_passes);
+    // 1 of 2 checked, not 1 of 3 total.
+    try std.testing.expectEqual(@as(usize, 50), s.intentPassPercent());
 }
 
 /// How many failing cases reported a given leading ZTS code. This is the gap

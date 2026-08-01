@@ -151,6 +151,11 @@ const RecordCase = struct {
     /// currently fails is a valid, pinned corpus entry (it feeds the gap
     /// histogram) - not a broken test.
     expect_first_draft_pass: bool = true,
+    /// Behaviour the produced handler must exhibit for the case to count as
+    /// having done the task. Null leaves the case veto-checked but not
+    /// intent-checked, which the summary reports separately rather than
+    /// counting as a pass.
+    intent: ?codegen.IntentCheck = null,
 };
 
 /// The headline model for the published convergence number.
@@ -185,6 +190,16 @@ pub fn corpusVersion() [64]u8 {
         // from accepted-failure to expected-pass changes what the rate means.
         hasher.update(&[_]u8{@intFromBool(rc.expect_first_draft_pass)});
         hasher.update("\x00");
+        // So is the intent spec: loosening what a case must do changes what a
+        // published intent-pass rate is a rate of.
+        if (rc.intent) |intent| {
+            hasher.update(intent.tests_jsonl);
+            hasher.update("\x00");
+            hasher.update(intent.handler_path);
+            hasher.update("\x00");
+            if (intent.zttp_json) |cfg| hasher.update(cfg);
+            hasher.update("\x00");
+        }
     }
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -212,18 +227,46 @@ test "corpus version changes when a case changes" {
 // probe known gap areas (user-input egress, websocket events, durable
 // workflows). Each elicits realistic multi-roundtrip behaviour (explore then
 // edit) and records as step_0/step_1/...
+//
+// Six of the eleven carry an intent spec. The five durable and workflow cases
+// do not: executing them needs the durable store and queue the runtime stands
+// up, and `zttp test` has no offline story for either - `saga()` fails with
+// NativeFunctionError before any assertion runs, and an io stub does not
+// intercept it. Those cases stay veto-checked and report `.not_checked`, which
+// the summary counts apart from passes, so the published figure reads 6 of 11
+// covered instead of pretending to 11. Closing that gap means giving the test
+// runner a durable backend, which is its own piece of work.
 const record_corpus = [_]RecordCase{
     .{
         .name = "health",
         .prompt = "Create a handler in handler.ts that responds to GET /health with " ++
             "Response.json({ ok: true }). Keep it minimal and deterministic.",
         .expect_first_draft_pass = true,
+        // Asserts the task the prompt names, not the shape of one recording: a
+        // different-but-correct handler must still pass, or the check measures
+        // the cassette instead of the model.
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"GET /health reports ok"}
+            \\{"type":"request","method":"GET","url":"/health","headers":{},"body":""}
+            \\{"type":"expect","status":200,"bodyContains":"\"ok\":true"}
+            \\
+            ,
+        },
     },
     .{
         .name = "validate-body",
         .prompt = "Create a handler in handler.ts that decodes the JSON request body with " ++
             "zttp:validate against a schema named \"item\" requiring a string field \"name\", " ++
             "returns the validated data on success, and returns a 400 with the errors on failure.",
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"a body missing name is rejected"}
+            \\{"type":"request","method":"POST","url":"/","headers":{"content-type":"application/json"},"body":"{}"}
+            \\{"type":"expect","status":400}
+            \\
+            ,
+        },
         // Was `true`, but only because the type checker could not see local
         // annotations. The recorded draft declares `errors: string[]` while
         // `validateJson().errors` is statically `unknown` (runtime errors are
@@ -240,6 +283,14 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that requires a bearer JWT using zttp:auth " ++
             "with the secret from env JWT_SECRET, returns 401 when the token is missing or invalid, " ++
             "and otherwise returns the verified claims as JSON. Never use a fallback secret.",
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"a request with no bearer token is unauthorized"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"expect","status":401}
+            \\
+            ,
+        },
         // Was ZTS401 (credential in response). The recorded handler had
         // evaded it by round-tripping the claims through
         // JSON.stringify/JSON.parse, which the taint tracker used to treat as
@@ -257,6 +308,17 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that reads a `city` query parameter and " ++
             "fetches the current weather for that city from https://api.open-meteo.com/v1/forecast " ++
             "using zttp:fetch, returning the JSON response.",
+        // The success path needs egress, which the offline replay has no way to
+        // serve. The missing-parameter path is the part of the task that can be
+        // demonstrated without a network, so that is what this asserts.
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"a request with no city is rejected"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"expect","status":400}
+            \\
+            ,
+        },
         // Was ZTS602 (never converged); closed by the literal-URL + init-query
         // egress teaching.
         .expect_first_draft_pass = true,
@@ -265,6 +327,14 @@ const record_corpus = [_]RecordCase{
         .name = "websocket-echo",
         .prompt = "Create a WebSocket echo handler in handler.ts using zttp:websocket that " ++
             "echoes every received message back to the sending client.",
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the upgrade handshake is accepted"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"expect","status":101}
+            \\
+            ,
+        },
         .expect_first_draft_pass = true,
     },
     .{
@@ -313,6 +383,23 @@ const record_corpus = [_]RecordCase{
         .seed_files = &.{
             .{ .path = "zttp.json", .bytes = "{\n  \"sqlite\": \"schema.sql\"\n}\n" },
             .{ .path = "schema.sql", .bytes = "CREATE TABLE users (\n  id INTEGER PRIMARY KEY,\n  name TEXT NOT NULL\n);\n" },
+        },
+        // Supplies its own config: the seeded `sqlite` key is what the veto and
+        // the runtime resolve the schema through, and synthesizing a
+        // handler-only zttp.json over the top would drop it. The row comes from
+        // an io stub rather than a seeded database - the task is to query and
+        // shape the response, and stubbing the store is what the spec format is
+        // for. Asserting on the stubbed value also proves the rows reach the
+        // body, which asserting on the literal "users" would not.
+        .intent = .{
+            .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"sqlite\": \"schema.sql\"\n}\n",
+            .tests_jsonl =
+            \\{"type":"test","name":"queried rows reach the response body"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"sql","fn":"sqlMany","args":["list_users"],"result":[{"id":1,"name":"ada"}]}
+            \\{"type":"expect","status":200,"bodyContains":"ada"}
+            \\
+            ,
         },
         // Recorded with the best model (Sonnet): writes correct SQL, self-checks
         // cleanly, and first-draft-passes. Previously it failed because the
@@ -453,7 +540,13 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     var registry = try app.buildRegistry(a);
     defer registry.deinit(a);
 
+    // Located before the per-case chdir: the binary lives in the repo, and the
+    // cases run in tmp workspaces.
+    const zttp_bin = codegen.locateZttpBinary(a, repo_root);
+
     var passes: usize = 0;
+    var intent_passes: usize = 0;
+    var intent_checked: usize = 0;
     var missing: std.ArrayList([]const u8) = .empty;
     defer missing.deinit(a);
     for (record_corpus) |rc| {
@@ -494,6 +587,20 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
             return error.CassetteRatchetMismatch;
         }
+        // Intent: does the produced handler do what the prompt asked for? Run
+        // after the turn, against whatever it actually wrote. A case with no
+        // spec, or a run with no built binary, stays `.not_checked` - never a
+        // pass, so an unmeasured corpus reads as unmeasured.
+        if (rc.intent) |intent| {
+            if (zttp_bin) |bin| {
+                const outcome = codegen.runIntentCheck(a, intent, tmp.abs_path, bin);
+                if (outcome == .passed) intent_passes += 1 else {
+                    std.debug.print("[codegen-intent] {s}: handler did not do the task\n", .{rc.name});
+                }
+                intent_checked += 1;
+            }
+        }
+
         // Gap histogram: the first rule each non-passing case tripped, ranking
         // which teaching gap to close next.
         if (!rc.expect_first_draft_pass) {
@@ -516,4 +623,21 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         return error.MissingCodegenCassette;
     }
     try testing.expectEqual(record_corpus.len, passes);
+
+    if (zttp_bin == null) {
+        std.debug.print(
+            "[codegen-intent] zig-out/bin/zttp is not built; intent checks skipped this run\n",
+            .{},
+        );
+    } else {
+        std.debug.print(
+            "[codegen-intent] {d}/{d} intent-checked cases did the task\n",
+            .{ intent_passes, intent_checked },
+        );
+        // Every case carrying a spec must satisfy it. The spec asserts the task
+        // the prompt asked for, not the shape of one recording, so a failure
+        // here means the recorded handler does not do the job - which is the
+        // thing the veto cannot tell us and the whole reason this check exists.
+        try testing.expectEqual(intent_checked, intent_passes);
+    }
 }
