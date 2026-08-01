@@ -44,7 +44,28 @@ fi
 
 payload="${line#\[codegen-convergence\] }"
 
-printf '%s\n' "$payload" > "$json_out"
+# Which build produced this row.
+#
+# The policy hash covers the rule registry, so a change to analysis semantics
+# that adds no rule leaves it untouched - a soundness fix can land between two
+# rows and neither the hash nor the hand-bumped compiler version will say so.
+# The commit is what a reader follows to see what actually changed.
+#
+# A dirty tree is marked. A number published from uncommitted work cannot be
+# reproduced from the commit alone, and saying so is cheaper than someone
+# discovering it later.
+commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if ! git diff --quiet HEAD 2>/dev/null; then
+  commit="$commit-dirty"
+  echo ">> warning: working tree is dirty; the row will be marked $commit" >&2
+fi
+
+printf '%s' "$payload" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+d["commit"] = sys.argv[1]
+print(json.dumps(d))
+' "$commit" > "$json_out"
 echo ">> wrote $json_out"
 
 recorded="$(date -u +%Y-%m-%d)"
@@ -68,7 +89,7 @@ print(
 ')
 EOF
 
-row="| $recorded | \`$corpus_version\` | $cases | $model | \`$policy\` | ${first_pct}% ($first_n/$cases) | $median | ${intent_pct}% ($intent_pass/$intent_n) |"
+row="| $recorded | \`$commit\` | \`$corpus_version\` | $cases | $model | \`$policy\` | ${first_pct}% ($first_n/$cases) | $median | ${intent_pct}% ($intent_pass/$intent_n) |"
 
 if ! grep -q '^| Recorded ' "$md_out" 2>/dev/null; then
   echo "error: $md_out has no results table to append to" >&2

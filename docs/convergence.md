@@ -11,10 +11,10 @@ counted result over a frozen corpus, not an estimate.
 
 ## Results
 
-| Recorded | Corpus | Cases | Model | Policy | First-draft pass | Median round-trips | Intent pass |
-|---|---|---|---|---|---|---|---|
-| 2026-08-01 | `b28a83a531db` | 11 | claude-sonnet-4-6 | `37a115c262dc` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-01 | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| Recorded | Commit | Corpus | Cases | Model | Policy | First-draft pass | Median round-trips | Intent pass |
+|---|---|---|---|---|---|---|---|---|
+| 2026-08-01 | `e4a13aee` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `37a115c262dc` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-01 | `847840a4-dirty` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
@@ -32,6 +32,22 @@ number would have rotted the first time somebody reworded a prompt.
 The fence moves: a new rule can lower the pass rate without the model getting
 worse, and a precision fix can raise it without the model getting better. A row
 without this column would attribute both to the model.
+
+**Commit** is the build the row was produced from, and it is the column that
+covers what the policy hash cannot. The hash is over the rule registry, so a
+change to analysis semantics that adds no rule leaves it identical - the
+determinism fix that stopped `uuid()` proving `deterministic` moved neither the
+policy hash nor the hand-bumped compiler version. Two rows that differ only by
+such a fix would otherwise look like the same build measured twice. A row marked
+`-dirty` was published from uncommitted work and cannot be reproduced from the
+commit alone.
+
+The first two rows are retrofitted: the column was added after they were
+published, and each names the commit the run's tree became - `e4a13aee` and
+`847840a4`, the two commits git shows touching this file. Both runs were made
+from a dirty tree that was committed immediately after, which is why the second
+carries the marker. Rows from here on are stamped by the script rather than
+reconstructed.
 
 **Model** is the product default, so the number describes what a user actually
 gets rather than a tier picked to flatter the result. It is derived from
