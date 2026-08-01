@@ -969,6 +969,27 @@ pub const ContractBuilder = struct {
         const h = findFunctionIndex(functions, "handler") orelse return;
         const hfe = functions[h];
 
+        // ZTS512: the handler's row is a lower bound, so testing it against
+        // the budget proves nothing - the capabilities behind the unresolvable
+        // call are not in the set being tested.
+        if (hfe.row.lower_bound) {
+            const spec_name = try self.allocator.dupe(u8, "Effects");
+            errdefer self.allocator.free(spec_name);
+            const suggestion = try self.allocator.dupe(
+                u8,
+                "the handler calls through a value whose body the compiler cannot see, so the " ++
+                    "capabilities it reaches are unknown and no budget can bound them. Call the " ++
+                    "helper by name, or drop the `Effects<...>` budget this call cannot support.",
+            );
+            errdefer self.allocator.free(suggestion);
+            try contract.spec_diagnostics.append(self.allocator, .{
+                .kind = .effect_row_lower_bound,
+                .spec_name = spec_name,
+                .suggestion = suggestion,
+            });
+            return;
+        }
+
         // Reachability: the budget bounds only helpers the handler can reach.
         var reachable = try self.allocator.alloc(bool, functions.len);
         defer self.allocator.free(reachable);

@@ -598,6 +598,14 @@ const capsule_meta = [_]struct {
         .help = "Write the ceiling as string literals (Effects<Response, \"clock\" | \"crypto\">) or as an alias bound directly to such a union.",
         .repair = .add_capability_declaration,
     },
+    .{
+        .name = "effect_row_lower_bound",
+        .code = "ZTS512",
+        .description = "The function calls through a value the compiler cannot resolve, so its effect row is a lower bound and cannot discharge a declared Effects<...> ceiling or budget.",
+        .example = "function run(f: (x: number) => number): Effects<Response, \"clock\"> { return Response.json(f(1)); } // f is unresolvable",
+        .help = "Call the helper by name so the compiler can see its body, or drop the Effects<...> declaration this call cannot support.",
+        .repair = null,
+    },
 };
 
 // ---------------------------------------------------------------------------

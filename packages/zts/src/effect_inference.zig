@@ -19,6 +19,7 @@ const builtin_modules = @import("builtin_modules.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
 const bool_checker = @import("bool_checker.zig");
+const known_globals = @import("known_globals.zig");
 
 const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;
@@ -53,6 +54,13 @@ pub const EffectRow = struct {
     /// classified `.write`. Drives the per-function `read_only` capsule
     /// property: `read_only == !writes and !has_egress`.
     writes: bool = false,
+    /// True when the function calls through a value this could not resolve to
+    /// an import or a user function - a function-typed parameter, a local
+    /// holding a function, or an unknown global. The row is then a LOWER
+    /// bound: what the callee reaches is unknown and absent from every field
+    /// above. Nothing may read this row as an over-approximation, which is
+    /// what a ceiling check, a budget check, and every capsule property need.
+    lower_bound: bool = false,
 
     pub const empty: EffectRow = .{};
 
@@ -64,6 +72,7 @@ pub const EffectRow = struct {
             .recursive = a.recursive or b.recursive,
             .has_egress = a.has_egress or b.has_egress,
             .writes = a.writes or b.writes,
+            .lower_bound = a.lower_bound or b.lower_bound,
         };
     }
 
@@ -73,7 +82,8 @@ pub const EffectRow = struct {
             a.pure == b.pure and
             a.recursive == b.recursive and
             a.has_egress == b.has_egress and
-            a.writes == b.writes;
+            a.writes == b.writes and
+            a.lower_bound == b.lower_bound;
     }
 
     /// `read_only` capsule property: the function performs no external writes
@@ -561,6 +571,31 @@ pub const Analyzer = struct {
             }
             const gop = try seen_users.getOrPut(self.allocator, callee_idx);
             if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
+            return;
+        }
+
+        // Neither an import nor a user function: the call goes through a value.
+        // Returning here left the row untouched, which reads downstream as
+        // "this callee contributes nothing" - an under-approximation stated
+        // with the confidence of a proof.
+        if (self.calleeIsUnresolvable(binding)) row.lower_bound = true;
+    }
+
+    /// True when a callee identifier names something whose body this cannot
+    /// see. A runtime-provided global (`renderToString`, `range`) is resolvable
+    /// by name and contributes nothing; a parameter, a local holding a
+    /// function, or an unknown global is not.
+    fn calleeIsUnresolvable(self: *const Analyzer, binding: ir.BindingRef) bool {
+        switch (binding.kind) {
+            .global, .undeclared_global => {
+                // `slot` is an atom index only for globals, so the name is
+                // readable here and nowhere else.
+                if (self.resolveAtomName(binding.name_atom)) |name| {
+                    if (known_globals.isKnownGlobalFunction(name)) return false;
+                }
+                return true;
+            },
+            .local, .upvalue, .argument => return true,
         }
     }
 
@@ -1087,6 +1122,80 @@ test "a module neither registry resolves fails closed with every capability" {
         CapabilitySet.initFull().count(),
         use.capabilities.count(),
     );
+}
+
+test "a call through a function-typed parameter marks the row a lower bound" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `f` is a parameter, so its body is invisible here. Leaving the row
+    // untouched claimed the callee reaches nothing, which is an
+    // under-approximation stated as a proof.
+    const source =
+        \\function apply(f, n) { return f(n); }
+        \\function direct(n) { return n + 1; }
+        \\function callsDirect(n) { return direct(n); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const apply = analyzer.lookup("apply") orelse return error.FunctionNotFound;
+    try testing.expect(apply.lower_bound);
+
+    // A call this can resolve is not a lower bound, in either direction.
+    const direct = analyzer.lookup("direct") orelse return error.FunctionNotFound;
+    const calls_direct = analyzer.lookup("callsDirect") orelse return error.FunctionNotFound;
+    try testing.expect(!direct.lower_bound);
+    try testing.expect(!calls_direct.lower_bound);
+}
+
+test "a lower bound propagates to callers" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\function apply(f, n) { return f(n); }
+        \\function outer(n) { return apply(direct, n); }
+        \\function direct(n) { return n + 1; }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const outer = analyzer.lookup("outer") orelse return error.FunctionNotFound;
+    try testing.expect(outer.lower_bound);
+}
+
+test "a call to a runtime-provided global is not a lower bound" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `range` and `renderToString` are provided by the runtime and reach no
+    // capability. Marking them would turn every JSX handler into a lower
+    // bound and drown the signal that the flag exists to carry.
+    const source = "function rows(n) { return range(n); }";
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const rows = analyzer.lookup("rows") orelse return error.FunctionNotFound;
+    try testing.expect(!rows.lower_bound);
 }
 
 test "empty program is a no-op" {

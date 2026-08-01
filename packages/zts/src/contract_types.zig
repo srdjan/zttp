@@ -918,6 +918,12 @@ pub const SpecDiagnostic = struct {
         /// is skipped while the function keeps reaching capabilities. Reported
         /// instead of silently extracting zero names.
         effect_ceiling_not_literal,
+        /// ZTS512: the function calls through a value the compiler cannot
+        /// resolve (a function-typed parameter, a local holding a function, an
+        /// unknown global), so its inferred effect row is a lower bound. A
+        /// ceiling or budget check needs an over-approximation; discharging
+        /// against a lower bound would certify a program nobody analysed.
+        effect_row_lower_bound,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
@@ -935,6 +941,7 @@ pub const SpecDiagnostic = struct {
                 .workflow_call_in_step => "ZTS509",
                 .saga_step_missing_compensate => "ZTS510",
                 .effect_ceiling_not_literal => "ZTS511",
+                .effect_row_lower_bound => "ZTS512",
             };
         }
 

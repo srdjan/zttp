@@ -500,9 +500,14 @@ pub const CapsuleFacts = struct {
     read_only: bool = false,
     deterministic: bool = false,
     recursive: bool = false,
+    /// The row these facts came from is a lower bound: the function calls
+    /// through a value the compiler could not resolve. Every field above is
+    /// then a claim about the part of the function that was analysed, not
+    /// about the function, so no property is proven.
+    lower_bound: bool = false,
 
     pub fn holds(self: CapsuleFacts, prop: CapsuleProperty) bool {
-        if (self.recursive) return false;
+        if (self.recursive or self.lower_bound) return false;
         return switch (prop) {
             .total => self.total,
             .pure => self.pure,
@@ -520,6 +525,10 @@ fn capsuleSuggestionFor(prop: CapsuleProperty) []const u8 {
         .deterministic => "remove Date.now() / Math.random() from the helper.",
     };
 }
+
+const lower_bound_capsule_suggestion =
+    "this function calls through a value whose body the compiler cannot see, so no property " ++
+    "can be proved about it; call the helper by name instead.";
 
 const recursive_capsule_suggestion =
     "recursive functions are not yet supported for capsule discharge; inline or remove the recursion.";
@@ -562,7 +571,12 @@ pub fn dischargeCapsule(
 
         const spec_name = try allocator.dupe(u8, name);
         errdefer allocator.free(spec_name);
-        const text = if (facts.recursive) recursive_capsule_suggestion else capsuleSuggestionFor(prop);
+        const text = if (facts.recursive)
+            recursive_capsule_suggestion
+        else if (facts.lower_bound)
+            lower_bound_capsule_suggestion
+        else
+            capsuleSuggestionFor(prop);
         const suggestion = try allocator.dupe(u8, text);
         errdefer allocator.free(suggestion);
         try out.append(allocator, .{
@@ -615,11 +629,34 @@ pub fn dischargeEffects(
     declared: []const []const u8,
     inferred: CapabilitySet,
     ceiling_not_literal: bool,
+    inferred_is_lower_bound: bool,
 ) !std.ArrayList(SpecDiagnostic) {
     var out: std.ArrayList(SpecDiagnostic) = .empty;
     errdefer {
         for (out.items) |*d| @constCast(d).deinit(allocator);
         out.deinit(allocator);
+    }
+
+    // ZTS512: `inferred` is a lower bound, so `inferred subset-of declared`
+    // proves nothing - the capabilities behind the unresolvable call are not
+    // in the set being tested. Only report when the author declared a ceiling;
+    // an unannotated function claims nothing and owes nothing.
+    if (inferred_is_lower_bound and (declared.len > 0 or ceiling_not_literal)) {
+        const spec_name = try allocator.dupe(u8, "Effects");
+        errdefer allocator.free(spec_name);
+        const suggestion = try allocator.dupe(
+            u8,
+            "this function calls through a value whose body the compiler cannot see, so the " ++
+                "capabilities it reaches are unknown. Call the helper by name, or drop the " ++
+                "`Effects<...>` declaration this call cannot support.",
+        );
+        errdefer allocator.free(suggestion);
+        try out.append(allocator, .{
+            .kind = .effect_row_lower_bound,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        });
+        return out;
     }
 
     // ZTS511: the author wrote a ceiling the extractor cannot read as a closed
@@ -967,7 +1004,7 @@ test "dischargeEffects ceiling matching the inferred row returns empty" {
     inferred.insert(.clock);
     const declared: [2][]const u8 = .{ "env", "clock" };
 
-    var diags = try dischargeEffects(allocator, &declared, inferred, false);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
@@ -979,7 +1016,7 @@ test "dischargeEffects reached capability outside ceiling emits ZTS503" {
     inferred.insert(.crypto);
     const declared: [1][]const u8 = .{"env"};
 
-    var diags = try dischargeEffects(allocator, &declared, inferred, false);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.effect_undeclared, diags.items[0].kind);
@@ -992,7 +1029,7 @@ test "dischargeEffects unknown capability name emits ZTS504" {
     inferred.insert(.env);
     const declared: [2][]const u8 = .{ "env", "databse" };
 
-    var diags = try dischargeEffects(allocator, &declared, inferred, false);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.effect_unknown_capability, diags.items[0].kind);
@@ -1005,12 +1042,55 @@ test "dischargeEffects an unreadable ceiling emits ZTS511, not silence" {
     inferred.insert(.crypto);
     const declared: [0][]const u8 = .{};
 
-    var diags = try dischargeEffects(allocator, &declared, inferred, true);
+    var diags = try dischargeEffects(allocator, &declared, inferred, true, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.effect_ceiling_not_literal, diags.items[0].kind);
     try std.testing.expectEqualStrings("ZTS511", diags.items[0].kind.code());
     try std.testing.expectEqual(SpecDiagnostic.Severity.err, diags.items[0].kind.severity());
+}
+
+test "dischargeEffects a lower-bound row cannot discharge a ceiling" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.env);
+    const declared: [1][]const u8 = .{"env"};
+
+    // The ceiling matches the inferred set exactly, which used to read as
+    // discharged. It is not: the capabilities behind the unresolvable call
+    // are absent from the set being compared.
+    var diags = try dischargeEffects(allocator, &declared, inferred, false, true);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.effect_row_lower_bound, diags.items[0].kind);
+    try std.testing.expectEqualStrings("ZTS512", diags.items[0].kind.code());
+}
+
+test "dischargeEffects a lower-bound row with no ceiling stays silent" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.env);
+    const declared: [0][]const u8 = .{};
+
+    // The capsule is opt-in: a function that declares nothing owes nothing,
+    // even when its row is a lower bound.
+    var diags = try dischargeEffects(allocator, &declared, inferred, false, true);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
+}
+
+test "capsule facts from a lower-bound row prove no property" {
+    const facts: CapsuleFacts = .{
+        .total = true,
+        .pure = true,
+        .read_only = true,
+        .deterministic = true,
+        .lower_bound = true,
+    };
+    try std.testing.expect(!facts.holds(.total));
+    try std.testing.expect(!facts.holds(.pure));
+    try std.testing.expect(!facts.holds(.read_only));
+    try std.testing.expect(!facts.holds(.deterministic));
 }
 
 test "dischargeEffects no annotation at all stays silent" {
@@ -1019,7 +1099,7 @@ test "dischargeEffects no annotation at all stays silent" {
     inferred.insert(.crypto);
     const declared: [0][]const u8 = .{};
 
-    var diags = try dischargeEffects(allocator, &declared, inferred, false);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
@@ -1030,7 +1110,7 @@ test "dischargeEffects over-declared capability emits ZTS505 warning" {
     inferred.insert(.env);
     const declared: [2][]const u8 = .{ "env", "crypto" };
 
-    var diags = try dischargeEffects(allocator, &declared, inferred, false);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.effect_over_declared, diags.items[0].kind);

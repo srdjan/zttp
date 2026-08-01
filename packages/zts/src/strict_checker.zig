@@ -15,6 +15,7 @@ const match_analysis_mod = @import("match_analysis.zig");
 const bool_checker = @import("bool_checker.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 const module_facts_mod = @import("module_facts.zig");
+const known_globals = @import("known_globals.zig");
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
 
@@ -1519,34 +1520,7 @@ fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
     return null;
 }
 
-fn isKnownGlobalFunction(name: []const u8) bool {
-    const names = [_][]const u8{
-        "Array",
-        "Boolean",
-        "Date",
-        "Headers",
-        "JSON",
-        "Math",
-        "Number",
-        "Object",
-        "Request",
-        "Response",
-        "String",
-        "assert",
-        "h",
-        "parallel",
-        "parseFloat",
-        "parseInt",
-        "race",
-        "range",
-        "renderToString",
-        "resource",
-    };
-    for (names) |candidate| {
-        if (std.mem.eql(u8, name, candidate)) return true;
-    }
-    return false;
-}
+const isKnownGlobalFunction = known_globals.isKnownGlobalFunction;
 
 fn isArrayMutator(name: []const u8) bool {
     const names = [_][]const u8{

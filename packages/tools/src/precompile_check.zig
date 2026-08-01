@@ -470,6 +470,7 @@ fn specDiagnosticMessage(diag: handler_contract.SpecDiagnostic) []const u8 {
         .workflow_call_in_step => "workflow.call/saga/fanout/follow used inside a step() callback silently loses durability",
         .saga_step_missing_compensate => "a non-last saga step has no compensate, leaving a partial-rollback hole",
         .effect_ceiling_not_literal => "Effects<...> names its capabilities with something other than a closed union of string literals, so no ceiling was read",
+        .effect_row_lower_bound => "function calls through a value the compiler cannot resolve, so its effect row is a lower bound and cannot discharge a ceiling",
     };
 }
 

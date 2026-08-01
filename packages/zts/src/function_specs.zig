@@ -125,6 +125,7 @@ pub fn discharge(
             .read_only = fe.row.readOnly(),
             .deterministic = fe.row.deterministic,
             .recursive = fe.row.recursive,
+            .lower_bound = fe.row.lower_bound,
         };
 
         var declared: std.ArrayList([]const u8) = .empty;
@@ -152,6 +153,7 @@ pub fn discharge(
             effect_declared.items,
             fe.row.capabilities,
             effect_extraction.non_literal,
+            fe.row.lower_bound,
         );
         errdefer {
             for (effect_diagnostics.items) |*d| @constCast(d).deinit(allocator);
