@@ -570,6 +570,9 @@ pub const FlowChecker = struct {
                 const member = self.ir_view.getMember(node) orelse return null;
                 return self.findGuardInExpr(member.object);
             },
+            // exhaustive: null means "no guard found here", which leaves the
+            // value treated as unguarded. A missed guard adds diagnostics; it
+            // cannot remove one.
             else => return null,
         }
     }
@@ -793,6 +796,9 @@ pub const FlowChecker = struct {
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
             },
+            // exhaustive: the arms above are every node a destructuring pattern
+            // can be - the two pattern containers, the two element kinds, and a
+            // bare identifier. Anything else is not a pattern and binds nothing.
             else => {},
         }
     }
@@ -800,16 +806,51 @@ pub const FlowChecker = struct {
     /// Walk a (possibly nested) member-access assignment target down to its root
     /// identifier binding, so `obj.field = secret` / `obj.a.b = secret` taints
     /// the base object rather than dropping the label entirely.
+    /// Propagate the labels of an assignment's value onto the binding it
+    /// writes. Reached both from a statement-position assignment (via
+    /// `expr_stmt`) and from a bare `.assignment` statement node.
+    fn applyAssignmentLabels(self: *FlowChecker, node: NodeIndex) void {
+        const asgn = self.ir_view.getAssignment(node) orelse return;
+        const labels = self.inferLabels(asgn.value);
+        const target_tag = self.ir_view.getTag(asgn.target) orelse return;
+        if (target_tag == .identifier) {
+            const binding = self.ir_view.getBinding(asgn.target) orelse return;
+            const key = packBindingKey(binding.scope_id, binding.slot);
+            if (asgn.op) |_| {
+                // Compound assignment (+=, etc): merge with existing
+                const existing = self.binding_labels.get(key) orelse LabelSet.empty;
+                self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
+            } else {
+                // Simple assignment: replace
+                self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
+            }
+            self.recordBindingValue(binding, asgn.value);
+        } else if (target_tag == .member_access or target_tag == .optional_chain or target_tag == .computed_access) {
+            // `obj.field = secret` / `obj[k] = secret`: taint the base object so
+            // a later read of `obj` keeps the label. Merge rather than replace,
+            // since other fields may already taint it.
+            if (labels.isEmpty()) return;
+            const binding = self.assignmentRootBinding(asgn.target) orelse return;
+            const key = packBindingKey(binding.scope_id, binding.slot);
+            const existing = self.binding_labels.get(key) orelse LabelSet.empty;
+            self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
+        }
+    }
+
     fn assignmentRootBinding(self: *const FlowChecker, target: NodeIndex) ?ir.BindingRef {
         var node = target;
         while (true) {
             const tag = self.ir_view.getTag(node) orelse return null;
             switch (tag) {
                 .identifier => return self.ir_view.getBinding(node),
-                .member_access, .optional_chain => {
+                .member_access, .optional_chain, .computed_access => {
                     const member = self.ir_view.getMember(node) orelse return null;
                     node = member.object;
                 },
+                // exhaustive: null means the target has no root identifier to
+                // taint - an assignment to a call result or a literal, which
+                // binds nothing the checker tracks. Every target shape that
+                // does reach a binding is walked above.
                 else => return null,
             }
         }
@@ -925,36 +966,7 @@ pub const FlowChecker = struct {
                 }
             },
 
-            .assignment => {
-                const asgn = self.ir_view.getAssignment(node) orelse return;
-                const labels = self.inferLabels(asgn.value);
-                // Track label updates for simple identifier assignments
-                const target_tag = self.ir_view.getTag(asgn.target) orelse return;
-                if (target_tag == .identifier) {
-                    const binding = self.ir_view.getBinding(asgn.target) orelse return;
-                    const key = packBindingKey(binding.scope_id, binding.slot);
-                    if (asgn.op) |_| {
-                        // Compound assignment (+=, etc): merge with existing
-                        const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-                        self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
-                    } else {
-                        // Simple assignment: replace
-                        self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
-                    }
-                    self.recordBindingValue(binding, asgn.value);
-                } else if (target_tag == .member_access or target_tag == .optional_chain or target_tag == .computed_access) {
-                    // `obj.field = secret` / `obj[k] = secret`: taint the base
-                    // object so a later read of `obj` keeps the label. Merge
-                    // rather than replace, since other fields may already taint it.
-                    if (!labels.isEmpty()) {
-                        if (self.assignmentRootBinding(asgn.target)) |binding| {
-                            const key = packBindingKey(binding.scope_id, binding.slot);
-                            const existing = self.binding_labels.get(key) orelse LabelSet.empty;
-                            self.binding_labels.put(self.allocator, key, LabelSet.merge(existing, labels)) catch self.markAllocationFailure();
-                        }
-                    }
-                }
-            },
+            .assignment => self.applyAssignmentLabels(node),
 
             .return_stmt => {
                 if (self.ir_view.getOptValue(node)) |ret_val| {
@@ -971,6 +983,11 @@ pub const FlowChecker = struct {
                 if (self.ir_view.getOptValue(node)) |expr| {
                     self.checkExprSinks(expr);
                     self.propagateMutatingMethodTaint(expr);
+                    // An assignment written as a statement (`obj.field = secret;`)
+                    // parses as an expr_stmt wrapping the assignment, so the
+                    // `.assignment` arm below never sees it. Without this the
+                    // label update never ran for the ordinary form.
+                    if (self.ir_view.getTag(expr) == .assignment) self.applyAssignmentLabels(expr);
                 }
             },
 
@@ -1022,6 +1039,10 @@ pub const FlowChecker = struct {
                 }
             },
 
+            // exhaustive: every statement kind that holds an expression which
+            // can reach a sink, bind a label, or contain further statements is
+            // handled above, including program/block and if_stmt at the top of
+            // this switch. The rest carry no expression to check.
             else => {},
         }
     }
@@ -1226,6 +1247,12 @@ pub const FlowChecker = struct {
                 return LabelSet.empty;
             },
 
+            // exhaustive: the empty set here means "carries no label", and the
+            // arms above cover every expression that can hold one - literals,
+            // identifiers, calls, operators, both literal containers, member and
+            // computed reads, templates, match, spread, and JSX. A new
+            // expression kind would land here silently, so adding one means
+            // visiting this arm.
             else => return LabelSet.empty,
         }
     }
@@ -1456,6 +1483,10 @@ pub const FlowChecker = struct {
                 return all_covered;
             },
 
+            // exhaustive: false means "this shape was not resolved to a
+            // Response helper", which sends the caller to the label-only sink
+            // check on the original value. Failing to resolve costs precision
+            // in the diagnostic, never the check itself.
             else => return false,
         }
     }
@@ -2172,6 +2203,10 @@ pub const FlowChecker = struct {
             .member_access => {
                 return self.extractResultOkConstraint(cond);
             },
+            // exhaustive: null means no path constraint could be read from this
+            // condition. Constraints only sharpen a counterexample witness; a
+            // missing one makes the witness less specific and never decides
+            // whether a diagnostic fires.
             else => return null,
         }
     }
@@ -3664,4 +3699,118 @@ test "the env slot is found through an alias, and unresolved modules are skipped
     try std.testing.expect(checker.env_fn_slot != null);
     // Builtins only: the unresolved module contributes no meta entry.
     try std.testing.expectEqual(@as(u32, 1), checker.module_fn_meta.count());
+}
+
+test "FlowChecker flags a secret carried in an array literal" {
+    // Guards the `array_literal` arm of inferLabels: an array must merge its
+    // elements' labels the way an object literal merges its members', or a
+    // secret launders through one pair of brackets.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const bundle = [secret];
+        \\  return Response.json({ leaked: bundle });
+        \\}
+    ;
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .secret_in_response) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker taints the base object through a member-access assignment" {
+    // The statement form. `obj.field = secret;` parses as an expr_stmt wrapping
+    // the assignment, so the label update in the `.assignment` arm never ran
+    // and the mutated object read as clean at the response sink.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const out = {};
+        \\  out.k = secret;
+        \\  return Response.json(out);
+        \\}
+    ;
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .secret_in_response) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "FlowChecker taints the base object through a computed-access assignment" {
+    // `obj.field = secret` taints `obj`; `obj[key] = secret` walked to a
+    // computed_access the root-binding walk had no arm for, so the label was
+    // dropped entirely - the exact outcome that walk exists to prevent.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const secret = env("SECRET_KEY");
+        \\  const out = {};
+        \\  const key = "k";
+        \\  out[key] = secret;
+        \\  return Response.json(out);
+        \\}
+    ;
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var found = false;
+    for (checker.getDiagnostics()) |d| {
+        if (d.kind == .secret_in_response) found = true;
+    }
+    try std.testing.expect(found);
 }
