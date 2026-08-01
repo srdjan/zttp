@@ -98,6 +98,7 @@ pub const DataLabel = enum(u3) {
     internal, // cache values, internal state
     external, // data from fetchSync responses
     validated, // data that passed through validation
+    nondeterministic, // derived from a clock or RNG read: differs between runs
 };
 
 /// Bitset of data provenance labels. Propagates through operations via merge (OR).
@@ -110,7 +111,10 @@ pub const LabelSet = packed struct(u8) {
     internal: bool = false,
     external: bool = false,
     validated: bool = false,
-    _pad: u1 = 0,
+    /// Derived from a clock or RNG read, so it differs between runs of the
+    /// same request. Seeded from the export's own capabilities rather than
+    /// declared per binding, and consumed where the value reaches a response.
+    nondeterministic: bool = false,
 
     pub const empty: LabelSet = .{};
 

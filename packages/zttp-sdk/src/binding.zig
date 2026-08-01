@@ -65,6 +65,7 @@ pub const DataLabel = enum(u3) {
     internal,
     external,
     validated,
+    nondeterministic,
 };
 
 pub const LabelSet = packed struct(u8) {
@@ -75,7 +76,7 @@ pub const LabelSet = packed struct(u8) {
     internal: bool = false,
     external: bool = false,
     validated: bool = false,
-    _pad: u1 = 0,
+    nondeterministic: bool = false,
 
     pub const empty: LabelSet = .{};
 };

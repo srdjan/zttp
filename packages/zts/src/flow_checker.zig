@@ -180,6 +180,7 @@ pub fn parseDataLabel(s: []const u8) ?DataLabel {
         .{ "internal", DataLabel.internal },
         .{ "external", DataLabel.external },
         .{ "validated", DataLabel.validated },
+        .{ "nondeterministic", DataLabel.nondeterministic },
     };
     inline for (map) |entry| {
         if (std.mem.eql(u8, s, entry[0])) return entry[1];
@@ -687,17 +688,40 @@ pub const FlowChecker = struct {
     /// `.builtin` only, translating the legacy `fromSpecifier(module) == null`
     /// skip: that lookup never consults a manifest registry, so a
     /// partner-registered module was skipped before and stays skipped.
+    /// True when calling this export can read a clock or draw randomness.
+    /// Falls back to the module's declared set when the export declares none,
+    /// which is the same inheritance rule effect inference applies.
+    fn exportReadsVaryingSource(
+        binding: *const mb.ModuleBinding,
+        func: *const mb.FunctionBinding,
+    ) bool {
+        const caps = func.required_capabilities orelse binding.required_capabilities;
+        for (caps) |cap| {
+            if (cap == .clock or cap == .random) return true;
+        }
+        return false;
+    }
+
     fn scanImports(self: *FlowChecker) void {
         const facts = self.resolveFacts() orelse return;
         for (facts.imports.items) |rec| {
             if (rec.resolution != .builtin) continue;
             const entry = builtin_modules.findExport(rec.module_specifier, rec.imported_name) orelse continue;
 
-            if (!entry.func.return_labels.isEmpty()) {
+            // A value produced by an export that reads a clock or draws
+            // randomness differs between runs of the same request. Seeded from
+            // the export's own capability set rather than declared on each
+            // binding, so it tracks the per-export rows automatically:
+            // `jwtVerify` carries it and `parseBearer` does not, because only
+            // one of them declares `.clock`.
+            var labels = entry.func.return_labels;
+            if (exportReadsVaryingSource(entry.binding, entry.func)) labels.nondeterministic = true;
+
+            if (!labels.isEmpty()) {
                 self.module_fn_labels.put(
                     self.allocator,
                     rec.slot,
-                    entry.func.return_labels,
+                    labels,
                 ) catch self.markAllocationFailure();
             }
             self.module_fn_meta.put(
@@ -3813,4 +3837,71 @@ test "FlowChecker taints the base object through a computed-access assignment" {
         if (d.kind == .secret_in_response) found = true;
     }
     try std.testing.expect(found);
+}
+
+test "a clock-reading export labels its result nondeterministic" {
+    // The label is seeded from the export's own capability set, so it tracks
+    // the per-export rows: `jwtVerify` declares `.clock` for its exp check and
+    // `parseBearer` declares nothing, and only the first can vary between runs.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { uuid } from "zttp:id";
+        \\function handler(req) {
+        \\  const id = uuid();
+        \\  return Response.json({ id: id });
+        \\}
+    ;
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var saw = false;
+    var it = checker.module_fn_labels.iterator();
+    while (it.next()) |e| {
+        if (e.value_ptr.nondeterministic) saw = true;
+    }
+    try std.testing.expect(saw);
+}
+
+test "a capability-free export is not labelled nondeterministic" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { parseBearer } from "zttp:auth";
+        \\function handler(req) {
+        \\  const t = parseBearer(req.headers["authorization"] ?? "");
+        \\  return Response.json({ present: t !== undefined });
+        \\}
+    ;
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+
+    var it = checker.module_fn_labels.iterator();
+    while (it.next()) |e| {
+        try std.testing.expect(!e.value_ptr.nondeterministic);
+    }
 }
