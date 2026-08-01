@@ -61,6 +61,183 @@ behavior lives in [User Guide](user-guide.md).
 - Promote hosted deploy only after the control-plane path has CI smoke coverage
   and user-facing commands appear in default docs.
 
+## Agent-Compiler Agenda
+
+[STRATEGY.md](../STRATEGY.md) states the thesis: the set of programs the agent can
+write should converge on the set of programs the compiler can prove. This section is
+the work that closes the gap, ranked by how much it strengthens that claim per unit of
+cost rather than by difficulty. Every count below names the file that owns it, so a
+reader recounts instead of trusting a number that rots here.
+
+The ranking follows three legs. The provable set must be true, or convergence to it has
+no value. The gap must be measured, or the claim is only prose. The mechanisms that
+close the gap should move from rejection toward construction.
+
+### 1. Close the fail-open soundness holes (small)
+
+A non-literal `Effects<T, R>` ceiling must produce a diagnostic instead of silently
+extracting zero names. A `zttp-ext:` module that contributes the empty capability set
+must fail closed. A call through a function-typed parameter must mark its effect row as
+a lower bound rather than under-approximating in silence. The decisions already exist
+in [D2](plans/2026-07-30-015-d2-effects-purity-design.md), which calls the first of
+these "the one hole that lets an unchecked program claim conformance"; this is
+execution, not design.
+
+Why first: every fail-open moves unproven programs into the reported provable set. That
+inflates the convergence number without any convergence. Nothing below is honest until
+this lands. The history argues the same way: a taint fail-open once survived fourteen
+review passes, so this class of defect is proven to evade review here.
+
+Observable: a regression test per hole, plus a test asserting that the count of known
+fail-open paths is zero rather than a comment claiming it.
+
+### 2. Publish an honest convergence number (medium)
+
+Split the eval into a frozen prompt corpus with two run modes: deterministic cassette
+replay for regression, and a live mode against a real model. Add an intent check per
+case by replaying that case's pinned witnesses, so a case passes only when it clears the
+fence and does the task. Publish the result as a versioned artifact rather than a
+gitignored `.zttp/` file.
+
+Why: first-draft veto pass rate is the literal measurement of convergence. Without a
+published, current, intent-checked number, the thesis has no answer to the obvious
+rebuttal that any retry loop eventually passes a linter. The intent check is what
+separates converging on provable from converging on trivial. Today the corpus in
+`packages/pi/src/expert_codegen_record.zig` holds 11 cases with one pinned as an
+accepted failure, it checks compiler compliance rather than intent, and its result is
+published nowhere.
+
+Observable: a published table carrying corpus version, model, first-draft pass, median
+round-trips, and intent-pass rate, whose history is visible across releases.
+
+### 3. Typed holes (medium, decomposable)
+
+A `hole()` builtin that type-checks against its expected type, lets the rest of the
+program verify, and compiles to a 501. Then `check --holes --json` publishing, per hole,
+the expected type, the in-scope bindings with their types, the remaining capability
+budget, and the undischarged obligations. Then a fill-one-hole turn mode in the agent in
+place of whole-file regeneration. Nothing of this exists: there is no `hole()` anywhere
+in `packages/`.
+
+Why: this is the only item that changes the convergence mechanism rather than measuring
+or enforcing it. Today the loop is subtractive - the agent emits from its full
+distribution and the veto rejects. With holes the compiler constructs the frame, and the
+emittable set per step narrows to one typed expression in a known context. Set
+convergence stops being statistical and becomes structural. Ship the capability budget
+marked in the JSON as an over-approximation until item 7 lands.
+
+Observable: round-trips to first green fall for hole-mode sessions against whole-file
+sessions on the same model. The session ledger can already express that comparison.
+
+### 4. Widen the mechanical repair lane (small to medium)
+
+Lower more `RepairIntent` variants to real source edits, starting with the span-local
+rewrites. Implement validator M2, parse identity, from
+[D3](plans/2026-07-30-016-d3-canonical-form-wire-design.md); it does not need the
+canonical formatter. Grade each lowering intent with it and flip `repair_available` on
+the wire for graded intents only. Add `input_validated` and `pii_contained` to
+`supported_goals` in `packages/pi/src/property_goals.zig`, widening the autoloop from
+three driveable properties to five; the counterexample solver already models both.
+
+Why: every intent that lowers and validates pulls a rejected program into the provable
+set with zero model tokens. That is convergence driven from the compiler side, and the
+`compiler_authored_apply` counter already measures it. Today 18 variants are declared in
+`packages/zts/src/repair_intent.zig` and 7 reach a source edit through `applyIntent` in
+`packages/pi/src/tools/repair_apply.zig`; 45 of 59 registry rules carry a typed repair.
+
+Observable: compiler-authored apply share rises on the item-2 corpus, and
+`repair_available: true` appears on the wire for a named, tested subset.
+
+### 5. The small-local-model run (small, once item 2 exists)
+
+Run the item-2 corpus in live mode against a small local model through the existing
+OpenAI-compatible provider path, and report first-draft pass, round-trips, and
+intent-pass against the frontier-model baseline. If the results are close, emit a
+decoding grammar from the restriction registry and test grammar-constrained sampling.
+
+Why: the narrow grammar is the stated reason a small model might be enough, and that is
+currently an argument rather than a result. If a small model reaches the same green
+state with more retries, the fence carries the intelligence rather than the model, which
+is the thesis demonstrated rather than asserted. If it fails, that is also information:
+it makes item 3 required rather than optional, because per-hole fill is the known way to
+shrink a task to small-model size.
+
+Observable: one published row per model in the item-2 table, dated.
+
+### 6. Idempotence gate and the repair-span fix (small)
+
+A confluence and idempotence harness over the existing `normalize` loop in
+`packages/tools/src/canonicalize.zig`, applying rules in different orders and comparing
+by parse identity, with failures collected as a fixture list rather than a build break
+at first. Separately, serialize `original_line` through the JSON boundary so a client
+can re-validate a repair span. D3 records that confluence is "asserted in a comment,
+never verified" and that idempotence "does not exist today".
+
+Why: canonical form is set collapse. Many surface programs mapping to one normal program
+shrinks the emittable set directly. The full canonical formatter is the largest single
+cost in the language program and should not be entered blind; this is the cheap
+measurement of how far the current normalizer sits from canonical. The span fix is a
+precondition for any external client to trust a repair, which item 4 needs on the wire.
+
+Observable: a counted list of non-confluent rule pairs, tracked toward zero, and a JSON
+repair a test client re-validates byte for byte.
+
+### 7. Per-export capability rows (medium)
+
+Move capability declaration from a per-module union to per-export rows, so `escapeHtml`
+carries its own row rather than the whole of `zttp:text`. Keep the module row as the
+ceiling for unlisted exports during migration. D2 states the consequence plainly: the
+current union "makes every ceiling wrong on its face".
+
+Why: over-approximation on the provable side rejects true programs, which pushes the
+agent into workarounds and widens the emitted set away from the natural solution.
+Precision here grows the provable set toward the set of correct programs, which is the
+other half of convergence. It also makes item 3's capability budget truthful. Depends on
+item 1, or it polishes a surface that is still fail-open underneath.
+
+Observable: a test proving `escapeHtml` under a ceiling that excludes the module's I/O
+capabilities.
+
+### 8. Unified repair vocabulary, then the deferred wire verbs (medium to large)
+
+Collapse the parallel repair vocabularies into the one the spec assumes, then ship
+`verify`, then `simulate_edit`, then `apply_repair`.
+
+Why this rank, plainly: the agent package is the only client today and it reaches
+simulate and repair in process, so no convergence behavior changes on the day the verbs
+ship. Shipping `apply_repair` before the vocabulary is unified would freeze inconsistent
+vocabularies into a public protocol, which is worse than the current honest refusal.
+These become strategic the moment a second client exists - an editor, or the item-5
+model run driven from outside the agent package. Ship `verify` first then, because a
+minimal external client needs verify and simulate and nothing else.
+
+Observable: a client outside the agent package completes a propose, simulate, verify
+cycle over the wire with no in-process access.
+
+### Sequencing
+
+Items 1 and 6 start in parallel; both are small and neither depends on anything. Item 2
+lands next and publishes its first table. Item 4 rides alongside. Item 3 begins once
+item 2 provides a baseline to compare against. Item 5 runs the day item 2's live mode
+works. Item 7 follows item 1. Item 8 waits for a second client or for the vocabulary,
+whichever arrives first.
+
+### Considered and refused
+
+Recorded so they are not proposed again:
+
+- **An SMT-grade counterexample solver.** The solver's triviality is a deliberate design
+  choice and no current property needs path-sensitive constraints. Revisit only when a
+  property demands it.
+- **Replay as a training reward signal.** No training loop exists, and a reward computed
+  over a fixed witness set leaks the same way a recorded cassette does. Replay is an
+  acceptance check (item 2), not a reward.
+- **Auto-applying validator M5.** Contract diff is blind to changes in pure computation,
+  and D3 already forbids auto-apply on that basis.
+- **Widening the autoloop past solver-backed boolean properties.** The six verdicts
+  assume a decidable check; stretching them to fuzzy goals would break rollback
+  semantics.
+
 ## The zts-advanced-1 Language Program
 
 Implement the `zts-advanced-1` language profile incrementally on the existing

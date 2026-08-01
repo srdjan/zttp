@@ -5,14 +5,17 @@
 
 # zttp
 
-**The AI writes your handler. The compiler proves it's safe.**
+**The agent writes only what the compiler can prove.**
 
-zttp is a pure-Zig JavaScript/TypeScript runtime for HTTP handlers. Describe
-the handler you want in plain English: the built-in agent writes it, and the
-compiler proves it before it ships - every path returns a Response, no secret
-leaks, declared egress only. zttp ships as one binary, runs without npm or
-Node, and uses a restricted language profile so those proofs are cheap and
-automatic.
+zttp is an agent-compiler: a restricted JavaScript and TypeScript profile whose
+safety properties are decidable, a proof engine that is total over it, and an AI
+coding agent that can only author inside that proof boundary. Describe the handler
+you want in plain English. The agent drafts it, and the compiler simulates every
+draft before it reaches disk - every path returns a Response, no secret leaks,
+declared egress only. A draft that fails is not shipped with a warning; the compiler
+canonicalizes it, and if that is not enough it writes the repair itself. The runtime
+carries what the compiler proves: it replays the compiler's counterexamples, runs the
+proven handler, and ships it as one binary with no npm and no Node.
 
 ```bash
 zttp init my-app --expert
