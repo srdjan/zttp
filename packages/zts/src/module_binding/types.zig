@@ -313,9 +313,12 @@ pub const FunctionBinding = struct {
     effect: EffectClass = .read,
 
     /// Runtime capabilities this export consumes, as opposed to the union its
-    /// module declares. Empty means "inherit the module's set", which is what
+    /// module declares. `null` means "inherit the module's set", which is what
     /// every binding did before this field existed - so an untightened module
-    /// keeps its current behaviour exactly.
+    /// keeps its current behaviour exactly. An empty slice is a different
+    /// claim: this export reaches nothing, which is the answer for
+    /// `parseBearer` and `timingSafeEqual` and is unsayable if empty meant
+    /// inherit.
     ///
     /// The module-level union is an over-approximation per export:
     /// `zttp:websocket` declares six capabilities, and `serializeAttachment`
@@ -326,7 +329,7 @@ pub const FunctionBinding = struct {
     ///
     /// `validateBindings` requires this to be a subset of the module's set, so
     /// tightening an export can never widen its authority by accident.
-    required_capabilities: []const ModuleCapability = &.{},
+    required_capabilities: ?[]const ModuleCapability = null,
 
     /// Return type classification. Drives verifier, bool checker, and type checker.
     returns: ReturnKind = .unknown,
@@ -473,20 +476,22 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             if (f.func == null and f.module_func == null) {
                 @compileError("function binding missing both func and module_func: " ++ f.name);
             }
-            if (findDuplicateRequiredCapability(f.required_capabilities)) |capability| {
-                @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' on " ++ b.specifier ++ "." ++ f.name);
-            }
-            // An export may narrow its module's authority, never widen it.
-            // Without this a tightening pass could hand a function a capability
-            // its module never declared, and the module set is what the runtime
-            // actually grants.
-            for (f.required_capabilities) |cap| {
-                var found = false;
-                for (b.required_capabilities) |mod_cap| {
-                    if (mod_cap == cap) found = true;
+            if (f.required_capabilities) |export_caps| {
+                if (findDuplicateRequiredCapability(export_caps)) |capability| {
+                    @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' on " ++ b.specifier ++ "." ++ f.name);
                 }
-                if (!found) {
-                    @compileError("capability '" ++ @tagName(cap) ++ "' on " ++ b.specifier ++ "." ++ f.name ++ " is not declared by the module; an export may narrow its module's set, never widen it");
+                // An export may narrow its module's authority, never widen it.
+                // Without this a tightening pass could hand a function a
+                // capability its module never declared, and the module set is
+                // what the runtime actually grants.
+                for (export_caps) |cap| {
+                    var found = false;
+                    for (b.required_capabilities) |mod_cap| {
+                        if (mod_cap == cap) found = true;
+                    }
+                    if (!found) {
+                        @compileError("capability '" ++ @tagName(cap) ++ "' on " ++ b.specifier ++ "." ++ f.name ++ " is not declared by the module; an export may narrow its module's set, never widen it");
+                    }
                 }
             }
             // `param_types` is what the type checker enforces at the call site,

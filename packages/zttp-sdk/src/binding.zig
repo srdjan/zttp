@@ -164,6 +164,14 @@ pub const FunctionBinding = struct {
     arg_count: u8,
     required_arg_count: ?u8 = null,
     effect: EffectClass = .read,
+    /// Capabilities this export consumes, as opposed to the union its module
+    /// declares. `null` inherits the module set, which is what every binding
+    /// did before this field existed. An empty slice is the different, sayable
+    /// claim that this export reaches nothing.
+    ///
+    /// `validateBindings` requires it to be a subset of the module's set: an
+    /// export may narrow its module's authority, never widen it.
+    required_capabilities: ?[]const ModuleCapability = null,
     returns: ReturnKind = .unknown,
     param_types: []const ReturnKind = &.{},
     traceable: bool = true,
@@ -214,6 +222,24 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
         }
         if (findDuplicateRequiredCapability(binding.required_capabilities)) |capability| {
             @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
+        }
+        for (binding.exports) |f| {
+            const export_caps = f.required_capabilities orelse continue;
+            if (findDuplicateRequiredCapability(export_caps)) |capability| {
+                @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' on " ++ binding.specifier ++ "." ++ f.name);
+            }
+            // An export may narrow its module's authority, never widen it. The
+            // module set is what the runtime actually grants, so an export
+            // claiming more than it is a binding that lies about the sandbox.
+            for (export_caps) |cap| {
+                var found = false;
+                for (binding.required_capabilities) |mod_cap| {
+                    if (mod_cap == cap) found = true;
+                }
+                if (!found) {
+                    @compileError("capability '" ++ @tagName(cap) ++ "' on " ++ binding.specifier ++ "." ++ f.name ++ " is not declared by the module; an export may narrow its module's set, never widen it");
+                }
+            }
         }
     }
 

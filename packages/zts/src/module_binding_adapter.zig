@@ -72,6 +72,18 @@ fn adaptModuleCapabilities(comptime capabilities: []const sdk.ModuleCapability) 
     return out;
 }
 
+/// Carry an export's own capability set across the SDK boundary, preserving
+/// the null/empty distinction: null inherits the module set, empty declares
+/// that this export reaches nothing.
+fn adaptExportCapabilities(
+    comptime caps: ?[]const sdk.ModuleCapability,
+) ?[]const internal.ModuleCapability {
+    const declared = caps orelse return null;
+    const adapted = adaptModuleCapabilities(declared);
+    const frozen = adapted;
+    return &frozen;
+}
+
 fn adaptFunctionBinding(
     comptime specifier: []const u8,
     comptime required_capabilities: []const sdk.ModuleCapability,
@@ -87,6 +99,7 @@ fn adaptFunctionBinding(
         .arg_count = binding.arg_count,
         .required_arg_count = binding.required_arg_count,
         .effect = @enumFromInt(@intFromEnum(binding.effect)),
+        .required_capabilities = comptime adaptExportCapabilities(binding.required_capabilities),
         .returns = @enumFromInt(@intFromEnum(binding.returns)),
         .param_types = &param_types,
         .traceable = binding.traceable,

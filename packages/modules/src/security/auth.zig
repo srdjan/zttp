@@ -20,6 +20,8 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "parseBearer",
+            // Splits a header string. Reaches neither crypto nor the clock.
+            .required_capabilities = &.{},
             .module_func = parseBearerImpl,
             .arg_count = 1,
             .effect = .none,
@@ -32,6 +34,8 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "jwtVerify",
+            // hmacSha256 for the signature, nowMs for the exp claim.
+            .required_capabilities = &.{ .crypto, .clock },
             .module_func = jwtVerifyImpl,
             .arg_count = 3,
             .required_arg_count = 2,
@@ -52,9 +56,12 @@ pub const binding = sdk.ModuleBinding{
                 } },
             },
         },
-        .{ .name = "jwtSign", .module_func = jwtSignImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
+        // hmacSha256 only: the caller supplies every claim, including exp.
+        .{ .name = "jwtSign", .required_capabilities = &.{.crypto}, .module_func = jwtSignImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
         .{
             .name = "verifyWebhookSignature",
+            // hmacSha256 over the payload; no time window is checked here.
+            .required_capabilities = &.{.crypto},
             .module_func = verifyWebhookSignatureImpl,
             .arg_count = 3,
             .effect = .none,
@@ -64,6 +71,8 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "timingSafeEqual",
+            // A constant-time byte compare. No crypto primitive, no clock.
+            .required_capabilities = &.{},
             .module_func = timingSafeEqualImpl,
             .arg_count = 2,
             .effect = .none,

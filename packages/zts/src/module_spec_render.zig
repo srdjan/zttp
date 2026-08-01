@@ -196,6 +196,22 @@ fn renderExport(buf: *Buf, a: std.mem.Allocator, exp: FunctionBinding) !void {
         try stringArray(buf, a, 6, names[0..exp.param_types.len]);
     }
 
+    // Rendered only when the export declares its own set. Absent means it
+    // inherits the module's `requiredCapabilities` above, which is what an
+    // untightened export does; present - including as an empty array - is the
+    // export's own answer, and an empty array is the meaningful claim that this
+    // export reaches nothing. Omitting it when present would leave the
+    // published spec saying `parseBearer` needs crypto and clock while the
+    // compiler knows it needs neither.
+    if (exp.required_capabilities) |caps| {
+        try buf.appendSlice(a, ",\n");
+        try key(buf, a, 6, "requiredCapabilities");
+        var names: [32][]const u8 = undefined;
+        std.debug.assert(caps.len <= names.len);
+        for (caps, 0..) |c, i| names[i] = @tagName(c);
+        try stringArray(buf, a, 6, names[0..caps.len]);
+    }
+
     // Omitted when `.none`, which is the Zig default and the "always succeeds"
     // case. 23 of 90 committed exports carry it.
     if (exp.failure_severity != .none) {

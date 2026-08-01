@@ -685,8 +685,8 @@ pub const Analyzer = struct {
             // nothing inherits the module set, so an untightened binding
             // behaves exactly as it did before the field existed.
             if (builtin_modules.findExport(module, name)) |exp| {
-                if (exp.func.required_capabilities.len > 0) {
-                    for (exp.func.required_capabilities) |cap| row.capabilities.insert(cap);
+                if (exp.func.required_capabilities) |export_caps| {
+                    for (export_caps) |cap| row.capabilities.insert(cap);
                     return;
                 }
             }
@@ -1109,6 +1109,36 @@ test "partner write-classified import marks function and callers as writing" {
     try testing.expect(!wrapper.readOnly());
     try testing.expect(!clean.writes);
     try testing.expect(clean.readOnly());
+}
+
+test "a tightened export carries only what it reaches" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `zttp:auth` declares crypto + clock at module level. `parseBearer` splits
+    // a header string and reaches neither, so charging it both made every
+    // ceiling over a bearer-parsing helper wrong on its face - the concrete
+    // case D2 2 names. `jwtVerify` genuinely reaches both and must keep them.
+    const source =
+        \\import { parseBearer, jwtVerify } from "zttp:auth";
+        \\function readToken(h) { return parseBearer(h); }
+        \\function checkToken(t, s) { return jwtVerify(t, s); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const read_token = analyzer.lookup("readToken") orelse return error.FunctionNotFound;
+    try testing.expectEqual(@as(usize, 0), read_token.capabilities.count());
+
+    const check_token = analyzer.lookup("checkToken") orelse return error.FunctionNotFound;
+    try testing.expect(check_token.capabilities.contains(.crypto));
+    try testing.expect(check_token.capabilities.contains(.clock));
 }
 
 test "an export with no declared set inherits its module's" {
