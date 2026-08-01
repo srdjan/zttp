@@ -324,15 +324,21 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // Was `true`, but only because the type checker could not see local
-        // annotations. The recorded draft declares `errors: string[]` while
-        // `validateJson().errors` is statically `unknown` (runtime errors are
-        // `{ path, message }` objects), so it now reports:
-        //   ZTS200: type '{ errors: unknown }' is not assignable to '{ errors: string[] }'
-        // The draft never passed; nothing checked it. Recording the honest
-        // outcome instead of re-recording keeps the cassette deterministic and
-        // enrols the case in the [codegen-gap] histogram, where it belongs: the
-        // real gap is teaching the model the shape of validateJson().errors.
+        // The corpus's one accepted failure, and the reason the published
+        // first-draft rate reads 10/11 rather than 11/11.
+        //
+        // The first draft writes `result.value as Item`, and the subset has no
+        // `as`: the stripper rejects it as ZTS042, which is what the
+        // [codegen-gap] histogram prints. The case still reaches green - the
+        // model drops the assertion on retry - so it is a first-draft failure,
+        // not a broken case.
+        //
+        // The teaching gap this ranks is therefore `as`, not the shape of
+        // `validateJson().errors`. The draft does also declare
+        // `errors: string[]` where the value is statically `unknown`, but the
+        // veto reports the assertion first and the model never reaches the
+        // type mismatch. An earlier version of this comment named ZTS200 and
+        // that second gap; it described a draft this cassette no longer holds.
         .expect_first_draft_pass = false,
     },
     .{

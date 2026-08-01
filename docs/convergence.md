@@ -79,10 +79,15 @@ intercept it. Those cases are veto-checked but not intent-checked, which is why
 the intent column reads over 6 rather than over 11. Giving the test runner a
 durable backend would close it.
 
-One case, `validate-body`, is pinned as an accepted failure. It is a real
-corpus entry, not a broken test: it feeds the gap histogram that ranks which
-teaching gap to close next, and the pinned outcome is part of the corpus
-version so quietly flipping it would change what the rate means.
+One case, `validate-body`, is pinned as an accepted failure, and it is the
+reason the rate reads 10/11 rather than 11/11. Its first draft writes
+`result.value as Item`, and the subset has no `as`, so the stripper rejects it
+(ZTS042). The case still reaches green - the model drops the assertion on retry
+- so this is a first-draft failure rather than a broken case.
+
+It is a real corpus entry: it feeds the gap histogram that ranks which teaching
+gap to close next, and the pinned outcome is part of the corpus version, so
+quietly flipping it would change what the rate means.
 
 ## How a run works
 
