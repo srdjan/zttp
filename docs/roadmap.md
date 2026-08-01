@@ -144,12 +144,18 @@ hash column on that table exists to explain.
 
 ### 3. Typed holes (medium, decomposable)
 
-A `hole()` builtin that type-checks against its expected type, lets the rest of the
-program verify, and compiles to a 501. Then `check --holes --json` publishing, per hole,
-the expected type, the in-scope bindings with their types, the remaining capability
-budget, and the undischarged obligations. Then a fill-one-hole turn mode in the agent in
-place of whole-file regeneration. Nothing of this exists: there is no `hole()` anywhere
-in `packages/`.
+Two of three slices have landed. `hole()` exists as a builtin typed `never`, so a
+handler with a hole on one branch checks clean with both paths enumerated and its
+properties proven; reaching one answers 501 rather than the 500 a real fault produces,
+in all three response paths. `zts check --json` publishes a `holes` array carrying each
+site's function, line, column, the value type the expression must produce (with the
+phantom capsule marker erased), and the capability budget the handler declared but has
+not yet spent.
+
+Two pieces of the JSON are still missing: the in-scope bindings with their types, which
+needs scope reconstruction the IR does not retain after parse, and the undischarged
+obligations, which exist in `spec_diagnostics` but are not yet projected per hole. The
+remaining slice is the agent's fill-one-hole turn mode.
 
 Why: this is the only item that changes the convergence mechanism rather than measuring
 or enforcing it. Today the loop is subtractive - the agent emits from its full
@@ -159,7 +165,10 @@ convergence stops being statistical and becomes structural. Ship the capability 
 marked in the JSON as an over-approximation until item 7 lands.
 
 Observable: round-trips to first green fall for hole-mode sessions against whole-file
-sessions on the same model. The session ledger can already express that comparison.
+sessions on the same model. The session ledger can already express that comparison, and
+[convergence.md](convergence.md) is where the comparison gets published. Not claimable
+until the turn mode ships - the builtin and the JSON describe the gap, but nothing yet
+changes how the agent spends a turn.
 
 ### 4. Widen the mechanical repair lane (small to medium)
 

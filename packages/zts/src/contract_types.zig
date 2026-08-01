@@ -1669,6 +1669,39 @@ pub const EffectCapsuleSummary = struct {
     }
 };
 
+/// One `hole()` call site, projected for the `holes` JSON envelope.
+///
+/// A hole is the compiler describing a frame with one expression missing. The
+/// agent's job at that point is to write that expression, not to regenerate the
+/// file, so what it needs is the shape of the gap: where it is, what type goes
+/// there, and what authority is still available to spend filling it.
+pub const HoleSummary = struct {
+    /// Owned name of the function the hole sits in, or "<top-level>".
+    function: []const u8,
+    /// 1-based source line and column of the `hole()` call.
+    line: u32,
+    column: u32,
+    /// Owned rendering of the type the expression must produce. The enclosing
+    /// function's declared return type when the hole is in return position;
+    /// "unknown" when the context does not pin one down.
+    expected_type: []const u8,
+    /// Owned capability names the handler's declared budget still allows and
+    /// its inferred row has not already spent. Empty when no budget is
+    /// declared, which is not the same as "no capabilities available" - read it
+    /// beside `budget_declared`.
+    remaining_budget: std.ArrayList([]const u8) = .empty,
+    /// False when the handler declares no `Effects<...>` budget, in which case
+    /// `remaining_budget` is empty because there is nothing to subtract from.
+    budget_declared: bool = false,
+
+    pub fn deinit(self: *HoleSummary, allocator: std.mem.Allocator) void {
+        allocator.free(self.function);
+        allocator.free(self.expected_type);
+        for (self.remaining_budget.items) |s| allocator.free(s);
+        self.remaining_budget.deinit(allocator);
+    }
+};
+
 pub const HandlerContract = struct {
     version: u32 = 17,
     handler: HandlerLoc,
@@ -1742,6 +1775,8 @@ pub const HandlerContract = struct {
     /// `effectCapsules` in the `--json` analysis envelope. NOT serialized
     /// into contract.json. Owned by the contract.
     function_effect_capsules: std.ArrayList(EffectCapsuleSummary) = .empty,
+    /// Every `hole()` call site in the handler. Empty for a finished program.
+    holes: std.ArrayList(HoleSummary) = .empty,
     behaviors: std.ArrayList(BehaviorPath) = .empty,
     behaviors_exhaustive: bool = false,
     /// Per-module worst-path cost bounds derived from path enumeration.
@@ -1847,6 +1882,10 @@ pub const HandlerContract = struct {
             @constCast(c).deinit(allocator);
         }
         self.function_effect_capsules.deinit(allocator);
+        for (self.holes.items) |*h| {
+            @constCast(h).deinit(allocator);
+        }
+        self.holes.deinit(allocator);
         var ext_it = self.extensions.iterator();
         while (ext_it.next()) |entry| {
             allocator.free(entry.key_ptr.*);

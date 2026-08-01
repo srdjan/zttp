@@ -608,6 +608,9 @@ pub const ContractBuilder = struct {
         // `Effects<...>` budget against its inferred capability row and
         // attribute every over-budget capability (ZTS506 / ZTS607).
         try self.dischargeCapabilityBudget(&contract, &effects, handler_loc);
+        // After the budget: the remaining-budget figure each hole reports is
+        // the declared budget minus what the handler already spends.
+        try self.collectHoles(&contract, &effects);
 
         // Phase 4d: unconditional structural check (ZTS509) - workflow.call/
         // saga/fanout/follow nested inside a durable.step() callback. Unlike
@@ -822,6 +825,103 @@ pub const ContractBuilder = struct {
             }
             try contract.function_effect_capsules.append(self.allocator, effect_summary);
         }
+    }
+
+    /// Collect every `hole()` call site, with the type the expression must
+    /// produce and the authority still available to spend filling it.
+    ///
+    /// A hole is the compiler describing a frame with one expression missing.
+    /// What an agent needs at that point is the shape of the gap, not the whole
+    /// file - so this publishes the gap rather than leaving it to be
+    /// rediscovered by re-running the compiler.
+    fn collectHoles(
+        self: *ContractBuilder,
+        contract: *HandlerContract,
+        analyzer: *const effect_inference.Analyzer,
+    ) !void {
+        // Remaining budget: what the declared budget still allows that the
+        // handler's inferred row has not already spent. A property of the
+        // handler, not of an individual hole, so it is computed once.
+        var remaining = effect_inference.CapabilitySet.initEmpty();
+        const budget_declared = contract.capability_budget.len > 0;
+        if (budget_declared) {
+            for (contract.capability_budget.slice()) |c| remaining.insert(c);
+            const functions = analyzer.all();
+            if (findFunctionIndex(functions, "handler")) |h| {
+                var spent = functions[h].row.capabilities.iterator();
+                while (spent.next()) |c| remaining.remove(c);
+            }
+        }
+
+        var idx: NodeIndex = 0;
+        while (idx < self.ir_view.nodeCount()) : (idx += 1) {
+            if (self.ir_view.getTag(idx) != .call) continue;
+            const call = self.ir_view.getCall(idx) orelse continue;
+            if (!self.isHoleCallee(call.callee)) continue;
+
+            const owner = self.enclosingFunctionName(analyzer, idx);
+            const loc = self.ir_view.getLoc(idx) orelse ir.SourceLocation{ .line = 0, .column = 0, .offset = 0 };
+
+            var type_buf: [256]u8 = undefined;
+            const expected = self.expectedTypeForHole(owner, &type_buf);
+
+            var summary = contract_types.HoleSummary{
+                .function = try self.allocator.dupe(u8, owner),
+                .line = loc.line,
+                .column = loc.column,
+                .expected_type = try self.allocator.dupe(u8, expected),
+                .budget_declared = budget_declared,
+            };
+            errdefer summary.deinit(self.allocator);
+            var it = remaining.iterator();
+            while (it.next()) |c| {
+                try summary.remaining_budget.append(
+                    self.allocator,
+                    try self.allocator.dupe(u8, @tagName(c)),
+                );
+            }
+            try contract.holes.append(self.allocator, summary);
+        }
+    }
+
+    fn isHoleCallee(self: *const ContractBuilder, callee: NodeIndex) bool {
+        if (self.ir_view.getTag(callee) != .identifier) return false;
+        const binding = self.ir_view.getBinding(callee) orelse return false;
+        const name = self.resolveAtomName(binding.name_atom) orelse return false;
+        return std.mem.eql(u8, name, "hole");
+    }
+
+    /// Which analyzed function contains this node. Falls back to the top level
+    /// rather than guessing when no body claims it.
+    fn enclosingFunctionName(
+        self: *ContractBuilder,
+        analyzer: *const effect_inference.Analyzer,
+        node: NodeIndex,
+    ) []const u8 {
+        for (analyzer.all()) |fe| {
+            if (self.subtreeContains(fe.body_node, node)) return fe.name;
+        }
+        return "<top-level>";
+    }
+
+    /// The type the hole must produce. The enclosing function's declared return
+    /// type is the one context the compiler already has in hand; anything else
+    /// reports "unknown" rather than guessing, because a wrong expected type is
+    /// worse for an agent than an honest absence.
+    fn expectedTypeForHole(
+        self: *const ContractBuilder,
+        function_name: []const u8,
+        buf: []u8,
+    ) []const u8 {
+        const env = self.type_env orelse return "unknown";
+        const sig = env.getFnSigByName(function_name) orelse return "unknown";
+        if (sig.return_type == type_pool_mod.null_type_idx) return "unknown";
+        // Report the value type the expression must produce, not the capsule
+        // expansion. `Response & Effects<...>` erases to `Response`: the marker
+        // is a compile-time obligation the returned value never carries, so
+        // showing it would tell an agent to construct a field that does not
+        // exist at runtime.
+        return env.pool.formatType(env.stripProofMarkers(sig.return_type), buf);
     }
 
     fn handlerReachability(

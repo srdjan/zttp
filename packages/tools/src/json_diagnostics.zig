@@ -571,6 +571,32 @@ fn writeSpecAndCapsulesJson(
     try writeProofCapsulesJson(writer, c.function_capsules.items);
     try writer.writeAll(",\"effectCapsules\":");
     try writeEffectCapsulesJson(writer, c.function_effect_capsules.items);
+    try writer.writeAll(",\"holes\":");
+    try writeHolesJson(writer, c.holes.items);
+}
+
+/// Emit the `holes` array: every `hole()` call site with the type the
+/// expression must produce and the capability budget still unspent.
+///
+/// Empty for a finished program. Published unconditionally rather than behind
+/// a flag: an empty array costs a pair of brackets, and a consumer that has to
+/// ask for the information twice is a consumer that will forget to.
+fn writeHolesJson(writer: anytype, items: anytype) !void {
+    try writer.writeByte('[');
+    for (items, 0..) |hole, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writer.writeAll("{\"function\":");
+        try writeJsonString(writer, hole.function);
+        try writer.print(",\"line\":{d},\"column\":{d},\"expectedType\":", .{ hole.line, hole.column });
+        try writeJsonString(writer, hole.expected_type);
+        try writer.print(",\"budgetDeclared\":{},\"remainingBudget\":[", .{hole.budget_declared});
+        for (hole.remaining_budget.items, 0..) |name, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writeJsonString(writer, name);
+        }
+        try writer.writeAll("]}");
+    }
+    try writer.writeByte(']');
 }
 
 /// Emit the `proofCapsules` array: per-helper `Proof<...>` capsule discharge

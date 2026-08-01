@@ -831,7 +831,7 @@ pub const TypeEnv = struct {
     /// the contract extractor, never by the runtime value, so `return s`
     /// with `s: string` satisfies a declared `Effects<string, "env">`.
     /// Non-intersection types pass through unchanged.
-    pub fn stripProofMarkers(self: *TypeEnv, idx: TypeIndex) TypeIndex {
+    pub fn stripProofMarkers(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
         if (idx == null_type_idx) return idx;
         const tag = self.pool.getTag(idx) orelse return idx;
         if (tag != .t_intersection) return idx;

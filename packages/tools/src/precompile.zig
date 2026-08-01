@@ -3916,6 +3916,68 @@ test "runCheckOnlyFromSource: a helper with no Effects ceiling is never flagged"
     }
 }
 
+test "holes: each site reports its expected type and the unspent budget" {
+    const allocator = std.testing.allocator;
+    // Two holes in different return positions. The handler's budget declares
+    // three capabilities and spends two, so `crypto` is what is left to spend
+    // filling either hole.
+    const source =
+        \\import type { Effects } from "zttp:types";
+        \\import { env } from "zttp:env";
+        \\
+        \\function slug(s: string): string {
+        \\  return hole();
+        \\}
+        \\
+        \\function handler(req: Request): Effects<Response, "env" | "policy_check" | "crypto"> {
+        \\  if (req.method === "GET") {
+        \\    return Response.json({ region: env("REGION"), slug: slug("x") });
+        \\  }
+        \\  return hole();
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = if (result.contract) |*c| c else return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 2), contract.holes.items.len);
+
+    var saw_slug = false;
+    var saw_handler = false;
+    for (contract.holes.items) |h| {
+        if (std.mem.eql(u8, h.function, "slug")) {
+            saw_slug = true;
+            try std.testing.expectEqualStrings("string", h.expected_type);
+        }
+        if (std.mem.eql(u8, h.function, "handler")) {
+            saw_handler = true;
+            // The capsule expansion is erased: the returned value never carries
+            // the phantom marker field, so reporting it would be a lie about
+            // what the expression must construct.
+            try std.testing.expectEqualStrings("Response", h.expected_type);
+        }
+        try std.testing.expect(h.budget_declared);
+        try std.testing.expectEqual(@as(usize, 1), h.remaining_budget.items.len);
+        try std.testing.expectEqualStrings("crypto", h.remaining_budget.items[0]);
+    }
+    try std.testing.expect(saw_slug);
+    try std.testing.expect(saw_handler);
+}
+
+test "holes: a finished program reports none" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "done.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = if (result.contract) |*c| c else return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 0), contract.holes.items.len);
+}
+
 test "ZTS623: a module-internal helper may not declare an Effects ceiling" {
     const allocator = std.testing.allocator;
     // Spec 5.7 makes placement decidable: exported with a nonempty row MUST
