@@ -52,6 +52,10 @@ pub const tool: registry_mod.ToolDef = .{
     \\                          must not reach response bodies or logs)
     \\  - injection_safe       (unvalidated user input must not reach
     \\                          sensitive sinks)
+    \\  - input_validated      (user input must pass a validation step
+    \\                          before any egress call)
+    \\  - pii_contained        (user input must not flow to an external
+    \\                          egress host)
     \\
     \\Each witness carries a concrete Request and the virtual-module stub
     \\sequence that drives the handler into the violating path. Use the
@@ -334,23 +338,28 @@ test "parseGoal recognises every supported property tag" {
     try testing.expectEqual(counterexample.PropertyTag.no_secret_leakage, parseGoal("no_secret_leakage").?);
     try testing.expectEqual(counterexample.PropertyTag.no_credential_leakage, parseGoal("no_credential_leakage").?);
     try testing.expectEqual(counterexample.PropertyTag.injection_safe, parseGoal("injection_safe").?);
-    try testing.expect(parseGoal("input_validated") == null);
-    try testing.expect(parseGoal("pii_contained") == null);
+    try testing.expectEqual(counterexample.PropertyTag.input_validated, parseGoal("input_validated").?);
+    try testing.expectEqual(counterexample.PropertyTag.pii_contained, parseGoal("pii_contained").?);
     try testing.expect(parseGoal("totally_not_a_property") == null);
 }
 
-test "execute rejects structural property goals" {
-    var result = try execute(testing.allocator, &.{ "examples/handler/handler.ts", "input_validated" });
+test "execute rejects a property the solver does not model" {
+    // `deterministic` is a structural fact the compiler computes, not a goal:
+    // there is no falsifying input to aim a repair loop at. Driving it would
+    // ask the agent to close a path that was never opened.
+    var result = try execute(testing.allocator, &.{ "examples/handler/handler.ts", "deterministic" });
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal input_validated") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal deterministic") != null);
 }
 
 test "tool description names every currently supported goal" {
     try testing.expect(std.mem.indexOf(u8, tool.description, "no_secret_leakage") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "no_credential_leakage") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "injection_safe") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "input_validated") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "pii_contained") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "close the concrete path") != null);
 }
 

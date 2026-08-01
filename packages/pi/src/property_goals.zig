@@ -10,11 +10,34 @@ const ui_payload = @import("ui_payload.zig");
 
 const counterexample = zts.counterexample;
 
+/// The properties the autoloop can drive as goals.
+///
+/// The bound is what the counterexample solver models, not what the compiler
+/// computes: a goal needs a falsifying input to aim at. All five members of
+/// `PropertyTag` qualify - each has an attack input and the solver builds
+/// witnesses for it - so this list is the full set rather than a subset chosen
+/// for convenience.
 pub const supported_goals = [_]counterexample.PropertyTag{
     .no_secret_leakage,
     .no_credential_leakage,
     .injection_safe,
+    .input_validated,
+    .pii_contained,
 };
+
+test "every modelled property is driveable" {
+    // The solver and the autoloop must not drift: a property the solver can
+    // falsify but the loop refuses to drive is capability left on the floor,
+    // and the reverse would aim the loop at a goal with no counterexample to
+    // work from.
+    for (std.enums.values(counterexample.PropertyTag)) |tag| {
+        var found = false;
+        for (supported_goals) |supported| {
+            if (tag == supported) found = true;
+        }
+        try std.testing.expect(found);
+    }
+}
 
 pub const Driveability = enum {
     goal_driveable,
@@ -96,11 +119,13 @@ test "compiler-only boolean properties are structural" {
     try testing.expectEqual(Driveability.structural, classify("pure"));
     try testing.expectEqual(Driveability.structural, classify("retry_safe"));
     try testing.expectEqual(Driveability.structural, classify("deterministic"));
-    try testing.expectEqual(Driveability.structural, classify("input_validated"));
-    try testing.expectEqual(Driveability.structural, classify("pii_contained"));
     try testing.expect(isStructural("pure"));
-    try testing.expect(!isGoalDriveable("input_validated"));
-    try testing.expect(!isGoalDriveable("pii_contained"));
+    // `input_validated` and `pii_contained` moved from structural to driveable:
+    // the solver models both, so the autoloop can aim at them.
+    try testing.expectEqual(Driveability.goal_driveable, classify("input_validated"));
+    try testing.expectEqual(Driveability.goal_driveable, classify("pii_contained"));
+    try testing.expect(isGoalDriveable("input_validated"));
+    try testing.expect(isGoalDriveable("pii_contained"));
 }
 
 test "unknown or non-boolean properties are not driveable" {
@@ -108,10 +133,13 @@ test "unknown or non-boolean properties are not driveable" {
     try testing.expectEqual(Driveability.unknown, classify("max_io_depth"));
 }
 
-test "supported goal list excludes structural property tags" {
-    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "no_secret_leakage") != null);
-    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "no_credential_leakage") != null);
-    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "injection_safe") != null);
-    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "input_validated") == null);
-    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "pii_contained") == null);
+test "supported goal list names every driveable goal" {
+    // The list is what a rejection message offers the caller, so it has to
+    // match the set `parseDriveableGoal` accepts or the message sends them at
+    // a goal that will be refused.
+    for (supported_goals) |goal| {
+        try testing.expect(std.mem.indexOf(u8, supported_goal_list, @tagName(goal)) != null);
+    }
+    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "input_validated") != null);
+    try testing.expect(std.mem.indexOf(u8, supported_goal_list, "pii_contained") != null);
 }

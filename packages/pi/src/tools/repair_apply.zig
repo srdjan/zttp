@@ -32,6 +32,7 @@ pub const RepairKind = enum {
     replace_arrow_with_function,
     replace_export_arrow_with_function,
     replace_compound_assign_with_explicit,
+    drop_redundant_bool_compare,
 
     pub fn fromString(s: []const u8) ?RepairKind {
         return std.meta.stringToEnum(RepairKind, s);
@@ -51,7 +52,72 @@ pub fn applyIntent(
         .replace_let_with_const, .canonicalize_for_of_const => applyAvoidableLet(allocator, source, intent.line),
         .replace_arrow_with_function, .replace_export_arrow_with_function => applyCanonicalFunction(allocator, source, intent.line),
         .replace_compound_assign_with_explicit => applyCompoundAssign(allocator, source, intent.line),
+        .drop_redundant_bool_compare => applyRedundantBoolCompare(allocator, source, intent.line),
     };
+}
+
+/// `x === true` -> `x`, `x === false` -> `!x`, and the two `!==` mirrors.
+///
+/// `Intent` carries no column, so the comparison is located by scanning the
+/// line. The scan refuses unless exactly one candidate operator is present:
+/// with two, there is no way to tell which one the diagnostic meant, and
+/// rewriting the wrong one would silently change a different expression.
+/// `redundantBoolCompareReplacement` then applies its own conservative rules
+/// on top - it only rewrites when the value operand is a simple lvalue.
+fn applyRedundantBoolCompare(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    line: u32,
+) ![]u8 {
+    const target = canonicalize.sourceLine(source, line) orelse return error.InvalidRepairLine;
+
+    var found_col: ?u32 = null;
+    var found_positive = false;
+    var i: usize = 0;
+    while (i + 3 <= target.len) : (i += 1) {
+        const op = target[i .. i + 3];
+        const is_eq = std.mem.eql(u8, op, "===");
+        if (!is_eq and !std.mem.eql(u8, op, "!==")) continue;
+        const polarity = boolComparePolarity(target, i, is_eq) orelse continue;
+        // A second candidate on the same line makes the target ambiguous.
+        if (found_col != null) return error.UnsupportedRepairIntent;
+        found_col = @intCast(i + 1);
+        found_positive = polarity;
+    }
+
+    const column = found_col orelse return error.UnsupportedRepairIntent;
+    const replacement = canonicalize.redundantBoolCompareReplacement(
+        allocator,
+        target,
+        column,
+        found_positive,
+    ) catch |e| switch (e) {
+        error.UnsupportedRefactor => return error.UnsupportedRepairIntent,
+        else => return e,
+    };
+    defer allocator.free(replacement);
+    return replaceLine(allocator, source, line, replacement);
+}
+
+/// True when the comparison at `op_start` has a boolean literal on exactly one
+/// side, returning the polarity the rewrite needs: `x === true` and
+/// `x !== false` both mean the bare value, the other two mean its negation.
+fn boolComparePolarity(line: []const u8, op_start: usize, is_eq: bool) ?bool {
+    const left = std.mem.trimEnd(u8, line[0..op_start], " \t");
+    const right = std.mem.trimStart(u8, line[op_start + 3 ..], " \t");
+
+    const left_true = std.mem.endsWith(u8, left, "true");
+    const left_false = std.mem.endsWith(u8, left, "false");
+    const right_true = std.mem.startsWith(u8, right, "true");
+    const right_false = std.mem.startsWith(u8, right, "false");
+
+    const left_lit = left_true or left_false;
+    const right_lit = right_true or right_false;
+    // The checker's invariant: exactly one side is the literal.
+    if (left_lit == right_lit) return null;
+
+    const literal_is_true = if (left_lit) left_true else right_true;
+    return if (is_eq) literal_is_true else !literal_is_true;
 }
 
 fn applyCompoundAssign(
@@ -393,6 +459,71 @@ test "canonicalize_capability_key_alias is not dispatched source-only" {
         .plan_id = "rp_g5",
         .intent_kind = "canonicalize_capability_key_alias",
         .line = 3,
+        .template = "",
+    }));
+}
+
+test "applyIntent lowers drop_redundant_bool_compare to the bare boolean" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const ready = req.method === "GET";
+        \\  if (ready === true) { return Response.text("a"); }
+        \\  return Response.text("b");
+        \\}
+        \\
+    ;
+    const out = try applyIntent(allocator, source, .{
+        .plan_id = "p",
+        .intent_kind = "drop_redundant_bool_compare",
+        .line = 3,
+        .template = "",
+    });
+    defer allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "if (ready) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "=== true") == null);
+    // Everything outside the rewritten span survives.
+    try std.testing.expect(std.mem.indexOf(u8, out, "req.method === \"GET\"") != null);
+}
+
+test "applyIntent lowers the false form to a negation" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const ready = false;
+        \\  if (ready === false) { return Response.text("a"); }
+        \\  return Response.text("b");
+        \\}
+        \\
+    ;
+    const out = try applyIntent(allocator, source, .{
+        .plan_id = "p",
+        .intent_kind = "drop_redundant_bool_compare",
+        .line = 3,
+        .template = "",
+    });
+    defer allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "if (!ready) {") != null);
+}
+
+test "applyIntent refuses an ambiguous line with two comparisons" {
+    const allocator = std.testing.allocator;
+    // Two candidate operators on one line: `Intent` carries no column, so
+    // there is no way to tell which one the diagnostic meant. Rewriting a
+    // guess would silently change the other expression.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const a = true;
+        \\  const b = true;
+        \\  if (a === true && b === true) { return Response.text("x"); }
+        \\  return Response.text("y");
+        \\}
+        \\
+    ;
+    try std.testing.expectError(error.UnsupportedRepairIntent, applyIntent(allocator, source, .{
+        .plan_id = "p",
+        .intent_kind = "drop_redundant_bool_compare",
+        .line = 4,
         .template = "",
     }));
 }

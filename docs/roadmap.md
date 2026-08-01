@@ -182,12 +182,37 @@ three driveable properties to five; the counterexample solver already models bot
 
 Why: every intent that lowers and validates pulls a rejected program into the provable
 set with zero model tokens. That is convergence driven from the compiler side, and the
-`compiler_authored_apply` counter already measures it. Today 18 variants are declared in
-`packages/zts/src/repair_intent.zig` and 7 reach a source edit through `applyIntent` in
-`packages/pi/src/tools/repair_apply.zig`; 45 of 59 registry rules carry a typed repair.
+`compiler_authored_apply` counter already measures it. 18 variants are declared in
+`packages/zts/src/repair_intent.zig`; 8 now reach a source edit through `applyIntent` in
+`packages/pi/src/tools/repair_apply.zig`, and the autoloop drives 5 properties rather
+than 3.
+
+`drop_redundant_bool_compare` lowered first because its rewrite already existed, tested
+and deliberately conservative, in the normalizer - it was simply never wired into
+`RepairKind`. `Intent` carries no column, so the apply path locates the comparison by
+scanning the line and refuses when two candidates are present rather than guessing which
+one the diagnostic meant.
+
+`input_validated` and `pii_contained` joined `supported_goals`: the solver models both,
+with an attack input and witness cases each, so refusing to drive them was capability
+left on the floor. A test now asserts the goal list and the solver's `PropertyTag` set
+cannot drift apart in either direction.
+
+Still open is the validator work, and it needs a decision rather than an implementation.
+D3's M2 is parse identity - two spellings whose IR trees match modulo positions. No
+repair intent qualifies: every one of them changes the tree, which is the point of a
+repair. Even the canonicalization-flavoured ones fail it, since `let` and `const` are
+distinct in the declaration node. What discharges `replace_let_with_const` is that the
+checker proved the binding is never reassigned - a precondition-carrying equivalence,
+closer to D3's M4 than M2. `repair_available` stays uniformly false until that is settled:
+spec 4.8 permits advertising an exact repair only when a registered equivalence validator
+exists, and advertising one backed by a validator that does not actually discharge it
+would be worse than the honest false.
 
 Observable: compiler-authored apply share rises on the item-2 corpus, and
-`repair_available: true` appears on the wire for a named, tested subset.
+`repair_available: true` appears on the wire for a named, tested subset. The first half
+is now measurable against [convergence.md](convergence.md); the second waits on the
+validator decision above.
 
 ### 5. The small-local-model run (small, once item 2 exists)
 

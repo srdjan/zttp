@@ -24,8 +24,9 @@ pub const tool: registry_mod.ToolDef = .{
     \\The tool runs handler verification and property witness analysis,
     \\then returns structured repair intents for the narrow supported v1
     \\cases: unchecked Result.value, unchecked optional use, missing
-    \\fallback Response, no_secret_leakage, no_credential_leakage, and
-    \\injection_safe. The compiler does not edit files; apply one plan,
+    \\fallback Response, no_secret_leakage, no_credential_leakage,
+    \\injection_safe, input_validated, and pii_contained. The compiler
+    \\does not edit files; apply one plan,
     \\then re-run the veto / goal check until the proof passes.
     ,
     .input_schema =
@@ -481,20 +482,24 @@ test "decodeJson accepts path and goals" {
     try testing.expectEqualStrings("injection_safe", args[1]);
 }
 
-test "parseGoal rejects structural property tags" {
+test "parseGoal accepts every property the solver models" {
     try testing.expectEqual(counterexample.PropertyTag.no_secret_leakage, parseGoal("no_secret_leakage").?);
     try testing.expectEqual(counterexample.PropertyTag.no_credential_leakage, parseGoal("no_credential_leakage").?);
     try testing.expectEqual(counterexample.PropertyTag.injection_safe, parseGoal("injection_safe").?);
-    try testing.expect(parseGoal("input_validated") == null);
-    try testing.expect(parseGoal("pii_contained") == null);
+    try testing.expectEqual(counterexample.PropertyTag.input_validated, parseGoal("input_validated").?);
+    try testing.expectEqual(counterexample.PropertyTag.pii_contained, parseGoal("pii_contained").?);
+    // A structural fact is not a goal: no falsifying input to aim at.
+    try testing.expect(parseGoal("read_only") == null);
 }
 
-test "execute rejects structural property goals" {
-    var result = try execute(testing.allocator, &.{ "examples/handler/handler.ts", "pii_contained" });
+test "execute rejects a property the solver does not model" {
+    // See pi_goal_check: `read_only` is a structural fact, not a goal with a
+    // counterexample to drive toward.
+    var result = try execute(testing.allocator, &.{ "examples/handler/handler.ts", "read_only" });
     defer result.deinit(testing.allocator);
 
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal pii_contained") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unknown goal read_only") != null);
 }
 
 test "planFromSource plans repairs from an in-memory draft" {
