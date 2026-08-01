@@ -14,6 +14,7 @@ counted result over a frozen corpus, not an estimate.
 | Recorded | Corpus | Cases | Model | Policy | First-draft pass | Median round-trips | Intent pass |
 |---|---|---|---|---|---|---|---|
 | 2026-08-01 | `b28a83a531db` | 11 | claude-sonnet-4-6 | `37a115c262dc` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-01 | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those

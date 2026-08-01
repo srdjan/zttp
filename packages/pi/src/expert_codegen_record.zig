@@ -616,6 +616,8 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     defer results.deinit(a);
     var missing: std.ArrayList([]const u8) = .empty;
     defer missing.deinit(a);
+    var stale: std.ArrayList([]const u8) = .empty;
+    defer stale.deinit(a);
     for (record_corpus) |rc| {
         const dir_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ codegen_dir, rc.name });
         // Read the cassette steps from the repo (absolute) BEFORE chdir. A real
@@ -638,13 +640,24 @@ test "codegen baseline replays at the committed first-draft pass rate" {
 
         var client: CassetteSequenceClient = .{ .steps = steps };
         var tr: transcript_mod.Transcript = .{};
-        const result = try loop.runTurnWith(a, client.asClient(), &registry, &tr, rc.prompt, .{
+        // A cassette that no longer covers its turn is collected, not thrown.
+        // Returning at the first stale case means a compiler change that
+        // invalidates several is discovered one paid recording at a time; the
+        // whole re-record list is worth more than the early exit.
+        const result = loop.runTurnWith(a, client.asClient(), &registry, &tr, rc.prompt, .{
             .workspace_root = ".",
             .max_attempts = loop.interactive_max_attempts,
             .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
             .replay_mode = false,
             .turn_timeout_ms = 0,
-        });
+        }) catch |err| {
+            try stale.append(a, rc.name);
+            std.debug.print(
+                "[codegen-replay] {s}: {s} - its {d}-step cassette no longer covers the turn\n",
+                .{ rc.name, @errorName(err), steps.len },
+            );
+            continue;
+        };
         // Ratchet: replay must reproduce the recorded first-draft outcome
         // exactly. A regression flips a recorded pass to fail (or vice versa).
         if (result.first_draft_veto_pass != rc.expect_first_draft_pass) {
@@ -691,6 +704,16 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             .intent = case_intent,
         });
         passes += 1;
+    }
+
+    if (stale.items.len > 0) {
+        std.debug.print("[codegen-replay] {d} cassette(s) need re-recording:\n", .{stale.items.len});
+        for (stale.items) |name| std.debug.print("  - {s}\n", .{name});
+        std.debug.print(
+            "  ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_ONLY=<name> zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"\n",
+            .{},
+        );
+        return error.StaleCodegenCassette;
     }
 
     if (missing.items.len > 0) {

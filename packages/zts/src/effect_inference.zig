@@ -560,7 +560,30 @@ pub const Analyzer = struct {
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
         if (self.imports.get(binding.slot)) |imported| {
+            const before = row.capabilities;
             self.insertModuleCapabilities(imported.module, imported.name, row);
+            // A call that reads the clock or draws randomness returns something
+            // different next time, so the enclosing function is not
+            // deterministic. Only `Date.now` and `Math.random` cleared this
+            // flag, so `uuid()` reported `deterministic ... PROVEN` - a false
+            // proof, and one a handler could then declare in a `Spec<...>` and
+            // have discharged.
+            //
+            // Per-export capability rows make this precise: `parseBearer`
+            // declares the empty set and stays deterministic, while `jwtVerify`
+            // declares `.clock` for its exp check and does not. Before those
+            // rows every `zttp:auth` call carried the module union and this
+            // would have demoted all five exports.
+            //
+            // Inside a `durable.step()` callback the read is recorded and
+            // replayed, which is the same reason the member-call rule above is
+            // gated on step depth.
+            if (self.durable_callback_depth == 0) {
+                const added = row.capabilities.differenceWith(before);
+                if (added.contains(.clock) or added.contains(.random)) {
+                    row.deterministic = false;
+                }
+            }
             row.pure = false;
             // A `.write`-classified export modifies external state; that
             // demotes the enclosing function's `read_only` capsule property.
