@@ -242,6 +242,25 @@ pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value
 
 /// Global range(end) or range(start, end) or range(start, end, step)
 /// Returns an array of integers for use with for-of iteration
+/// `hole()` - an unfilled expression the author (or the agent) has not written
+/// yet.
+///
+/// Its type is `never`, the bottom type, so it satisfies whatever the
+/// surrounding context expects and the rest of the program keeps type-checking
+/// and verifying. That is the point: the compiler describes the frame, and only
+/// the hole is missing.
+///
+/// Reaching one at runtime is not an error in the program, it is an unfinished
+/// program being run. The runtime maps this to 501 Not Implemented rather than
+/// the 500 a genuine fault produces, so `zttp dev` can serve a
+/// partially-written handler and say exactly which path is still empty.
+pub fn globalHole(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    _ = args;
+    ctx.hole_reached = true;
+    ctx.throwException(value.JSValue.exception_val);
+    return value.JSValue.exception_val;
+}
+
 pub fn globalRange(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     const root_class_idx = ctx.root_class_idx;
 

@@ -1487,8 +1487,13 @@ pub const HandlerInstance = struct {
         try zq.modules.scope.beginRequest(self.ctx);
         defer zq.modules.scope.endRequest(self.ctx);
 
+        self.ctx.hole_reached = false;
         const result = self.callFunction(handler_obj, args) catch |err| {
             if (err == error.RequestTimeout) return error.RequestTimeout;
+            // An unfilled `hole()` is an unfinished program, not a faulting
+            // one. Reporting it as 500 would blame the handler for something
+            // its author has not written yet.
+            if (self.ctx.hole_reached) return error.HandlerNotImplemented;
             if (!builtin.is_test) std.log.err("Handler execution failed: {}", .{err});
             // Preserve the fault class in the error value so the 500 site can
             // map it to the proof chip that guards it (see fault_explain.zig).

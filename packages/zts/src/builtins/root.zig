@@ -238,6 +238,13 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const range_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalRange), range_atom, 1);
     try ctx.setGlobal(range_atom, range_func.toValue());
 
+    // Global hole(): an unfilled expression. Typed `never` so the rest of the
+    // program still checks; throws at runtime, which the handler runtime maps
+    // to 501 rather than 500.
+    const hole_atom = try ctx.atoms.intern("hole");
+    const hole_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalHole), hole_atom, 0);
+    try ctx.setGlobal(hole_atom, hole_func.toValue());
+
     // Global _processRequest
     const process_req_atom = try ctx.atoms.intern("_processRequest");
     const process_req_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalProcessRequest), process_req_atom, 3);

@@ -25,6 +25,7 @@ pub const names = [_][]const u8{
     "String",
     "assert",
     "h",
+    "hole",
     "parallel",
     "parseFloat",
     "parseInt",
@@ -39,6 +40,14 @@ pub fn isKnownGlobalFunction(name: []const u8) bool {
         if (std.mem.eql(u8, name, candidate)) return true;
     }
     return false;
+}
+
+test "hole is a known global" {
+    // `hole()` must be recognised here or effect inference reads it as an
+    // unresolvable callee and marks every holed function's row a lower bound -
+    // which would defeat the whole point of a hole, that the rest of the
+    // program still verifies.
+    try std.testing.expect(isKnownGlobalFunction("hole"));
 }
 
 test "known globals cover the runtime-provided callables" {

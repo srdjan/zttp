@@ -1384,6 +1384,27 @@ test "a lower bound propagates to callers" {
     try testing.expect(outer.lower_bound);
 }
 
+test "a hole does not make the enclosing row a lower bound" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // A hole is a known unknown: the compiler put it there. If it marked the
+    // row a lower bound, no ceiling could discharge and the promise that the
+    // rest of the program still verifies would be empty.
+    const source = "function pending(x) { return hole(); }";
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const pending = analyzer.lookup("pending") orelse return error.FunctionNotFound;
+    try testing.expect(!pending.lower_bound);
+}
+
 test "a call to a runtime-provided global is not a lower bound" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);

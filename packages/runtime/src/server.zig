@@ -736,12 +736,13 @@ const ConnectionPool = struct {
                 .headers = request.headers,
                 .body = request.body,
             }, &fault_location) catch |err| {
-                const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else 500;
+                const status: u16 = if (err == error.PoolExhausted) 503 else if (err == error.RequestTimeout) 504 else if (err == error.HandlerNotImplemented) 501 else 500;
                 var fault_buf: [256]u8 = undefined;
                 var fault_loc_buf: [320]u8 = undefined;
                 const message: []const u8 = blk: {
                     if (err == error.PoolExhausted) break :blk "Service Unavailable";
                     if (err == error.RequestTimeout) break :blk "Gateway Timeout";
+                    if (err == error.HandlerNotImplemented) break :blk "Not Implemented: this path reached a hole() the handler has not filled yet";
                     if (err == error.HandlerTypeFault) {
                         // Proof-explained failure: attribute the fault against the
                         // handler's proven contract, in hand here under contract_lock.

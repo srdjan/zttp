@@ -174,6 +174,11 @@ pub const Context = struct {
     /// Whether to enforce arena escape checking (default true for HTTP handlers)
     /// Set to false for scripts/benchmarks where arena lifetime matches script lifetime
     enforce_arena_escape: bool = true,
+    /// Set when `hole()` runs. An unfilled expression is not a fault in the
+    /// program, it is an unfinished program being executed, so the runtime maps
+    /// it to 501 Not Implemented rather than the 500 a real fault produces.
+    /// Cleared per request by the handler runtime.
+    hole_reached: bool = false,
     /// Reusable buffer for JSON serialization to reduce allocations
     json_writer: std.Io.Writer.Allocating,
     /// Reusable buffer for JSX renderToString to reduce allocations

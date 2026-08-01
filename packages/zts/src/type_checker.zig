@@ -1743,6 +1743,11 @@ pub const TypeChecker = struct {
             };
         }
         const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
+        // `hole()` types as `never`, the bottom type, so it is assignable to
+        // whatever the surrounding context expects and the rest of the program
+        // keeps checking. Inferring `unknown` instead would make every hole a
+        // second diagnostic on top of the one that says the hole is there.
+        if (std.mem.eql(u8, name, "hole")) return self.env.pool.idx_never;
         if (std.mem.eql(u8, name, "serviceCall")) {
             const service_call_type = self.inferServiceCallType(call);
             if (service_call_type != null_type_idx) return service_call_type;

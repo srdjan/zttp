@@ -306,12 +306,15 @@ fn statusForHandlerError(err: anyerror) u16 {
         503
     else if (err == error.RequestTimeout)
         504
+    else if (err == error.HandlerNotImplemented)
+        501
     else
         500;
 }
 
 fn messageForHandlerError(status: u16) []const u8 {
     return switch (status) {
+        501 => "Not Implemented",
         503 => "Service Unavailable",
         504 => "Gateway Timeout",
         else => "Internal Server Error",

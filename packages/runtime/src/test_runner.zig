@@ -211,6 +211,29 @@ fn runOneTest(
         .headers = headers_list,
         .body = ub.slice,
     }) catch |err| {
+        // A hole is an unfinished path, not a failing one, and the servers
+        // answer it with 501. A test asserting that status must see the same
+        // thing here, or `zttp test` would contradict `zttp dev` about what a
+        // half-written handler does.
+        if (err == error.HandlerNotImplemented) {
+            var not_implemented: HttpResponse = .{
+                .status = 501,
+                .headers = .empty,
+                .body = "Not Implemented: this path reached a hole() the handler has not filled yet",
+                .body_owned = false,
+                .body_owner = null,
+                .requires_runtime = false,
+                .allocator = allocator,
+            };
+            defer not_implemented.deinit();
+            checkAssertions(allocator, &not_implemented, &test_case.assertions, &failures);
+            return .{
+                .pass = failures.items.len == 0,
+                .name = test_case.name,
+                .failures = failures,
+                .err = null,
+            };
+        }
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
     };
     defer response.deinit();
