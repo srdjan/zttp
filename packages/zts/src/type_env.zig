@@ -47,6 +47,23 @@ fn utilityKind(name: []const u8) ?UtilityKind {
 /// names and proof-property names in separate extraction passes.
 pub const effect_marker_field = "__zttp_effect__";
 
+/// What a marker extraction found besides the names themselves.
+///
+/// The names alone are ambiguous: an empty list means either "no marker" or
+/// "a marker whose payload the extractor could not reduce to literal names".
+/// Callers that treat the second as the first fail open - an unchecked
+/// program then claims conformance. `non_literal` separates the two.
+/// Walk-depth ceiling for marker search and payload reading. Exceeding it
+/// fails closed rather than returning a partial read.
+const max_marker_depth: u8 = 8;
+
+pub const MarkerExtraction = struct {
+    /// True when a marker was present but its payload contained a type that
+    /// is not a closed union of string literals. The name list is then not
+    /// the declared set and must not be discharged as one.
+    non_literal: bool = false,
+};
+
 // ---------------------------------------------------------------------------
 // Generic scope
 // ---------------------------------------------------------------------------
@@ -733,13 +750,16 @@ pub const TypeEnv = struct {
     /// every declared spec name string found inside a `Spec<...>` marker
     /// to `out`. Strings live as long as the type pool's name storage;
     /// the caller must not free them. Safe to call when no spec marker is
-    /// present (the slice stays empty).
+    /// present (the slice stays empty). Read the returned `non_literal` before
+    /// treating an empty slice as "no marker".
     pub fn extractSpecMembers(
         self: *const TypeEnv,
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
-    ) void {
-        self.collectMarkedMembers(idx, out, spec_marker_field, 0);
+    ) std.mem.Allocator.Error!MarkerExtraction {
+        var status: MarkerExtraction = .{};
+        try self.collectMarkedMembers(idx, out, spec_marker_field, 0, &status);
+        return status;
     }
 
     /// Like `extractSpecMembers`, but recovers the capability name strings
@@ -750,8 +770,10 @@ pub const TypeEnv = struct {
         self: *const TypeEnv,
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
-    ) void {
-        self.collectMarkedMembers(idx, out, effect_marker_field, 0);
+    ) std.mem.Allocator.Error!MarkerExtraction {
+        var status: MarkerExtraction = .{};
+        try self.collectMarkedMembers(idx, out, effect_marker_field, 0, &status);
+        return status;
     }
 
     /// Strip phantom proof-marker members (the capsule records behind
@@ -810,39 +832,51 @@ pub const TypeEnv = struct {
         return false;
     }
 
+    /// Search a return type for `marker` and read the payload behind it.
+    ///
+    /// Failing to find a marker is not a fail-open: the capsule is opt-in, so
+    /// an unannotated return type legitimately yields nothing. Only the
+    /// payload reader below can fail open, so only it sets `status`. The one
+    /// exception is depth exhaustion, which can hide a marker that is present;
+    /// that case fails closed.
     fn collectMarkedMembers(
         self: *const TypeEnv,
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
         marker: []const u8,
         depth: u8,
-    ) void {
-        if (idx == null_type_idx or depth > 8) return;
+        status: *MarkerExtraction,
+    ) std.mem.Allocator.Error!void {
+        if (idx == null_type_idx) return;
+        if (depth > max_marker_depth) {
+            status.non_literal = true;
+            return;
+        }
         const tag = self.pool.getTag(idx) orelse return;
 
         switch (tag) {
             .t_intersection => {
                 for (self.pool.getIntersectionMembers(idx)) |member| {
-                    self.collectMarkedMembers(member, out, marker, depth + 1);
+                    try self.collectMarkedMembers(member, out, marker, depth + 1, status);
                 }
             },
             .t_ref => {
                 const name = self.pool.getRefName(idx);
                 if (self.type_aliases.get(name)) |resolved| {
-                    self.collectMarkedMembers(resolved, out, marker, depth + 1);
+                    try self.collectMarkedMembers(resolved, out, marker, depth + 1, status);
                 }
             },
             .t_nullable => {
                 // A nullable-wrapped marker (`Effects<...> | undefined`) still
                 // carries the obligation; descend into the inner type so the
                 // capability/spec set is recovered.
-                self.collectMarkedMembers(self.pool.getNullableInner(idx), out, marker, depth + 1);
+                try self.collectMarkedMembers(self.pool.getNullableInner(idx), out, marker, depth + 1, status);
             },
             .t_record => {
                 for (self.pool.getRecordFields(idx)) |field| {
                     const fname = self.pool.getName(field.name_start, field.name_len);
                     if (std.mem.eql(u8, fname, marker)) {
-                        self.collectLiteralUnionStrings(field.type_idx, out);
+                        try self.collectLiteralUnionStrings(field.type_idx, out, 0, status);
                     }
                 }
             },
@@ -850,16 +884,30 @@ pub const TypeEnv = struct {
         }
     }
 
+    /// Read a marker payload as a closed union of string literals.
+    ///
+    /// Every path that cannot produce a name sets `status.non_literal`, so an
+    /// empty result is never mistaken for a declared-empty set. Allocation
+    /// failure propagates rather than truncating the set in silence.
     fn collectLiteralUnionStrings(
         self: *const TypeEnv,
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
-    ) void {
-        const tag = self.pool.getTag(idx) orelse return;
+        depth: u8,
+        status: *MarkerExtraction,
+    ) std.mem.Allocator.Error!void {
+        if (depth > max_marker_depth) {
+            status.non_literal = true;
+            return;
+        }
+        const tag = self.pool.getTag(idx) orelse {
+            status.non_literal = true;
+            return;
+        };
         switch (tag) {
             .t_union => {
                 for (self.pool.getUnionMembers(idx)) |member| {
-                    self.collectLiteralUnionStrings(member, out);
+                    try self.collectLiteralUnionStrings(member, out, depth + 1, status);
                 }
             },
             .t_ref => {
@@ -869,14 +917,25 @@ pub const TypeEnv = struct {
                 // literal names are recovered; without this the budget extracts
                 // zero effects and the capability proof silently fails open.
                 const resolved = self.resolveRef(idx);
-                if (resolved != idx) self.collectLiteralUnionStrings(resolved, out);
+                if (resolved != idx) {
+                    try self.collectLiteralUnionStrings(resolved, out, depth + 1, status);
+                } else {
+                    // The reference does not resolve to anything the pool
+                    // holds, so the payload is not a closed literal union.
+                    status.non_literal = true;
+                }
             },
             .t_literal_string => {
                 if (self.pool.getLiteralStringValue(idx)) |val| {
-                    out.append(self.allocator, val) catch {};
+                    try out.append(self.allocator, val);
+                } else {
+                    status.non_literal = true;
                 }
             },
-            else => {},
+            // A computed, generic, primitive, or otherwise non-literal payload
+            // (`Effects<Response, SomeComputedThing>`). Extracting nothing here
+            // and reporting it as "no annotation" is the fail-open D2 5 names.
+            else => status.non_literal = true,
         }
     }
 
@@ -1665,7 +1724,7 @@ test "extractSpecMembers walks intersection through alias to literal union" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractSpecMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 2), names.items.len);
     try std.testing.expectEqualStrings("idempotent", names.items[0]);
@@ -1701,7 +1760,7 @@ test "extractSpecMembers handles inline Response & Spec<\"name\">" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractSpecMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 1), names.items.len);
     try std.testing.expectEqualStrings("idempotent", names.items[0]);
@@ -1735,7 +1794,7 @@ test "extractSpecMembers returns empty when no Spec marker" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractSpecMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 0), names.items.len);
 }
@@ -1771,7 +1830,7 @@ test "resolveType Proof<T, S> carries capsule property members" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    env.extractSpecMembers(idx, &names);
+    _ = try env.extractSpecMembers(idx, &names);
 
     try std.testing.expectEqual(@as(usize, 2), names.items.len);
     try std.testing.expectEqualStrings("total", names.items[0]);
@@ -1807,7 +1866,7 @@ test "extractSpecMembers handles inline return type Proof<T, \"name\">" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractSpecMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 1), names.items.len);
     try std.testing.expectEqualStrings("read_only", names.items[0]);
@@ -1840,7 +1899,7 @@ test "resolveType Effects<T, S> carries capability members under its own marker"
 
     var caps: std.ArrayListUnmanaged([]const u8) = .empty;
     defer caps.deinit(allocator);
-    env.extractEffectMembers(idx, &caps);
+    _ = try env.extractEffectMembers(idx, &caps);
     try std.testing.expectEqual(@as(usize, 2), caps.items.len);
     try std.testing.expectEqualStrings("env", caps.items[0]);
     try std.testing.expectEqualStrings("crypto", caps.items[1]);
@@ -1849,8 +1908,63 @@ test "resolveType Effects<T, S> carries capability members under its own marker"
     // type carries no Spec/Proof members.
     var specs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer specs.deinit(allocator);
-    env.extractSpecMembers(idx, &specs);
+    _ = try env.extractSpecMembers(idx, &specs);
     try std.testing.expectEqual(@as(usize, 0), specs.items.len);
+}
+
+test "a non-literal Effects payload reports non_literal instead of zero names" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // A ceiling naming a type rather than string literals. Extracting nothing
+    // and reporting it as "no annotation" is the fail-open D2 5 names: the
+    // function keeps its capabilities and no ceiling bounds them.
+    const idx = env.resolveType("Effects<string, string>");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    const extraction = try env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 0), caps.items.len);
+    try std.testing.expect(extraction.non_literal);
+}
+
+test "a literal Effects payload reports non_literal false" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const idx = env.resolveType("Effects<string, \"env\" | \"crypto\">");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    const extraction = try env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 2), caps.items.len);
+    try std.testing.expect(!extraction.non_literal);
+}
+
+test "an unannotated return type reports non_literal false" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // No marker at all: the capsule is opt-in, so this must stay quiet.
+    const idx = env.resolveType("string");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    const extraction = try env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 0), caps.items.len);
+    try std.testing.expect(!extraction.non_literal);
 }
 
 test "Proof<Effects<...>, ...> composes: each marker extracted independently" {
@@ -1865,13 +1979,13 @@ test "Proof<Effects<...>, ...> composes: each marker extracted independently" {
 
     var caps: std.ArrayListUnmanaged([]const u8) = .empty;
     defer caps.deinit(allocator);
-    env.extractEffectMembers(idx, &caps);
+    _ = try env.extractEffectMembers(idx, &caps);
     try std.testing.expectEqual(@as(usize, 1), caps.items.len);
     try std.testing.expectEqualStrings("env", caps.items[0]);
 
     var specs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer specs.deinit(allocator);
-    env.extractSpecMembers(idx, &specs);
+    _ = try env.extractSpecMembers(idx, &specs);
     try std.testing.expectEqual(@as(usize, 1), specs.items.len);
     try std.testing.expectEqualStrings("pure", specs.items[0]);
 }

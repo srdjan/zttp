@@ -68,5 +68,6 @@ fn specDiagnosticMessage(d: zts.SpecDiagnostic) []const u8 {
         .missing_proof_capsule_export => d.suggestion orelse "exported helper has no Proof<...> capsule",
         .workflow_call_in_step => d.suggestion orelse "workflow.call/saga/fanout/follow used inside step() silently loses durability",
         .saga_step_missing_compensate => d.suggestion orelse "a non-last saga step has no compensate",
+        .effect_ceiling_not_literal => d.suggestion orelse "Effects<...> is not a closed union of string literals, so no ceiling was read",
     };
 }

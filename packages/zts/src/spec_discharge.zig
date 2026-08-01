@@ -614,11 +614,34 @@ pub fn dischargeEffects(
     allocator: std.mem.Allocator,
     declared: []const []const u8,
     inferred: CapabilitySet,
+    ceiling_not_literal: bool,
 ) !std.ArrayList(SpecDiagnostic) {
     var out: std.ArrayList(SpecDiagnostic) = .empty;
     errdefer {
         for (out.items) |*d| @constCast(d).deinit(allocator);
         out.deinit(allocator);
+    }
+
+    // ZTS511: the author wrote a ceiling the extractor cannot read as a closed
+    // literal union. `declared` is then not the declared set, so discharging
+    // against it would be checking a ceiling nobody wrote. Report the unread
+    // ceiling and stop; the diagnostic is an error, so nothing downstream gets
+    // to treat this function as having passed its capability check.
+    if (ceiling_not_literal) {
+        const spec_name = try allocator.dupe(u8, "Effects");
+        errdefer allocator.free(spec_name);
+        const suggestion = try allocator.dupe(
+            u8,
+            "write the capability set as string literals (`Effects<Response, \"clock\" | \"crypto\">`), " ++
+                "or as an alias bound directly to such a union.",
+        );
+        errdefer allocator.free(suggestion);
+        try out.append(allocator, .{
+            .kind = .effect_ceiling_not_literal,
+            .spec_name = spec_name,
+            .suggestion = suggestion,
+        });
+        return out;
     }
 
     // No `Effects<...>` annotation means no declared ceiling, so no check.
@@ -944,7 +967,7 @@ test "dischargeEffects ceiling matching the inferred row returns empty" {
     inferred.insert(.clock);
     const declared: [2][]const u8 = .{ "env", "clock" };
 
-    var diags = try dischargeEffects(allocator, &declared, inferred);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
@@ -956,7 +979,7 @@ test "dischargeEffects reached capability outside ceiling emits ZTS503" {
     inferred.insert(.crypto);
     const declared: [1][]const u8 = .{"env"};
 
-    var diags = try dischargeEffects(allocator, &declared, inferred);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.effect_undeclared, diags.items[0].kind);
@@ -969,11 +992,36 @@ test "dischargeEffects unknown capability name emits ZTS504" {
     inferred.insert(.env);
     const declared: [2][]const u8 = .{ "env", "databse" };
 
-    var diags = try dischargeEffects(allocator, &declared, inferred);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.effect_unknown_capability, diags.items[0].kind);
     try std.testing.expectEqualStrings("databse", diags.items[0].spec_name);
+}
+
+test "dischargeEffects an unreadable ceiling emits ZTS511, not silence" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.crypto);
+    const declared: [0][]const u8 = .{};
+
+    var diags = try dischargeEffects(allocator, &declared, inferred, true);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqual(SpecDiagnostic.Kind.effect_ceiling_not_literal, diags.items[0].kind);
+    try std.testing.expectEqualStrings("ZTS511", diags.items[0].kind.code());
+    try std.testing.expectEqual(SpecDiagnostic.Severity.err, diags.items[0].kind.severity());
+}
+
+test "dischargeEffects no annotation at all stays silent" {
+    const allocator = std.testing.allocator;
+    var inferred = CapabilitySet.initEmpty();
+    inferred.insert(.crypto);
+    const declared: [0][]const u8 = .{};
+
+    var diags = try dischargeEffects(allocator, &declared, inferred, false);
+    defer freeDiags(allocator, &diags);
+    try std.testing.expectEqual(@as(usize, 0), diags.items.len);
 }
 
 test "dischargeEffects over-declared capability emits ZTS505 warning" {
@@ -982,7 +1030,7 @@ test "dischargeEffects over-declared capability emits ZTS505 warning" {
     inferred.insert(.env);
     const declared: [2][]const u8 = .{ "env", "crypto" };
 
-    var diags = try dischargeEffects(allocator, &declared, inferred);
+    var diags = try dischargeEffects(allocator, &declared, inferred, false);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqual(SpecDiagnostic.Kind.effect_over_declared, diags.items[0].kind);

@@ -132,7 +132,7 @@ pub fn discharge(
             for (declared.items) |s| allocator.free(s);
             declared.deinit(allocator);
         }
-        try collectDeclared(allocator, env, line, &declared, false);
+        _ = try collectDeclared(allocator, env, line, &declared, false);
 
         var diagnostics = try spec_discharge.dischargeCapsule(allocator, declared.items, facts);
         errdefer {
@@ -145,12 +145,13 @@ pub fn discharge(
             for (effect_declared.items) |s| allocator.free(s);
             effect_declared.deinit(allocator);
         }
-        try collectDeclared(allocator, env, line, &effect_declared, true);
+        const effect_extraction = try collectDeclared(allocator, env, line, &effect_declared, true);
 
         var effect_diagnostics = try spec_discharge.dischargeEffects(
             allocator,
             effect_declared.items,
             fe.row.capabilities,
+            effect_extraction.non_literal,
         );
         errdefer {
             for (effect_diagnostics.items) |*d| @constCast(d).deinit(allocator);
@@ -179,25 +180,27 @@ pub fn discharge(
 /// Read the declared capsule property names (`Proof<...>`) or capability
 /// names (`Effects<...>`, when `effects` is true) from a function's
 /// return-type annotation. Owned, de-duplicated copies are appended to `out`.
+/// The returned status says whether the annotation was fully readable; an
+/// empty `out` alone cannot distinguish "no annotation" from "an annotation
+/// this could not read".
 fn collectDeclared(
     allocator: std.mem.Allocator,
     env: ?*const TypeEnv,
     line: u32,
     out: *std.ArrayList([]const u8),
     comptime effects: bool,
-) !void {
-    const e = env orelse return;
-    if (line == 0) return;
-    const sig = e.getFnSigByLoc(line) orelse return;
-    if (sig.return_type == type_pool_mod.null_type_idx) return;
+) !type_env_mod.MarkerExtraction {
+    const e = env orelse return .{};
+    if (line == 0) return .{};
+    const sig = e.getFnSigByLoc(line) orelse return .{};
+    if (sig.return_type == type_pool_mod.null_type_idx) return .{};
 
     var raw: std.ArrayListUnmanaged([]const u8) = .empty;
     defer raw.deinit(allocator);
-    if (effects) {
-        e.extractEffectMembers(sig.return_type, &raw);
-    } else {
-        e.extractSpecMembers(sig.return_type, &raw);
-    }
+    const status = if (effects)
+        try e.extractEffectMembers(sig.return_type, &raw)
+    else
+        try e.extractSpecMembers(sig.return_type, &raw);
 
     for (raw.items) |name| {
         if (json_utils.containsString(out.items, name)) continue;
@@ -205,6 +208,7 @@ fn collectDeclared(
         errdefer allocator.free(dup);
         try out.append(allocator, dup);
     }
+    return status;
 }
 
 // ---------------------------------------------------------------------------

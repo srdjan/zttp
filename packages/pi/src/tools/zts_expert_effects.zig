@@ -175,15 +175,19 @@ fn writeFunction(
         try writer.writeAll(@tagName(cap));
         try writer.writeByte('"');
     }
-    // An empty `declared` array means the function carries no `Effects<...>`.
+    // An empty `declared` array means the function carries no `Effects<...>`,
+    // unless `declaredUnreadable` is true - then an annotation is present and
+    // this could not read it. The agent must not treat the two as the same.
     try writer.writeAll("],\"declared\":[");
+    var declared_unreadable = false;
     {
         var declared: std.ArrayListUnmanaged([]const u8) = .empty;
         defer declared.deinit(ctx.allocator);
         const line: u32 = if (ctx.ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
         if (line != 0) {
             if (ctx.env.getFnSigByLoc(line)) |sig| {
-                ctx.env.extractEffectMembers(sig.return_type, &declared);
+                const extraction = try ctx.env.extractEffectMembers(sig.return_type, &declared);
+                declared_unreadable = extraction.non_literal;
             }
         }
         for (declared.items, 0..) |capname, j| {
@@ -193,7 +197,9 @@ fn writeFunction(
             try writer.writeByte('"');
         }
     }
-    try writer.writeAll("]}");
+    try writer.writeAll("],\"declaredUnreadable\":");
+    try writer.writeAll(if (declared_unreadable) "true" else "false");
+    try writer.writeAll("}");
 }
 
 // ---------------------------------------------------------------------------

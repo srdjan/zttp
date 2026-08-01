@@ -469,6 +469,7 @@ fn specDiagnosticMessage(diag: handler_contract.SpecDiagnostic) []const u8 {
         .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
         .workflow_call_in_step => "workflow.call/saga/fanout/follow used inside a step() callback silently loses durability",
         .saga_step_missing_compensate => "a non-last saga step has no compensate, leaving a partial-rollback hole",
+        .effect_ceiling_not_literal => "Effects<...> names its capabilities with something other than a closed union of string literals, so no ceiling was read",
     };
 }
 

@@ -590,6 +590,14 @@ const capsule_meta = [_]struct {
         .help = "Add a compensate thunk to the step, or move it last if it has no side effect that needs undoing.",
         .repair = null,
     },
+    .{
+        .name = "effect_ceiling_not_literal",
+        .code = "ZTS511",
+        .description = "An Effects<...> ceiling names its capabilities with something other than a closed union of string literals, so no ceiling is recovered and the check is skipped.",
+        .example = "function h(): Effects<Response, Capabilities[number]> { ... } // payload is not a literal union",
+        .help = "Write the ceiling as string literals (Effects<Response, \"clock\" | \"crypto\">) or as an alias bound directly to such a union.",
+        .repair = .add_capability_declaration,
+    },
 };
 
 // ---------------------------------------------------------------------------

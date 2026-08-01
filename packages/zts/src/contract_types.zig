@@ -912,6 +912,12 @@ pub const SpecDiagnostic = struct {
         /// trigger a rollback). Only fires for statically-analyzable sagas;
         /// see `SagaCallInfo.dynamic`.
         saga_step_missing_compensate,
+        /// ZTS511: an `Effects<...>` ceiling whose capability payload is not a
+        /// closed union of string literals. The extractor recovers no names,
+        /// which is indistinguishable from no annotation, so the ceiling check
+        /// is skipped while the function keeps reaching capabilities. Reported
+        /// instead of silently extracting zero names.
+        effect_ceiling_not_literal,
 
         pub fn code(self: Kind) []const u8 {
             return switch (self) {
@@ -928,6 +934,7 @@ pub const SpecDiagnostic = struct {
                 .missing_proof_capsule_export => "ZTS508",
                 .workflow_call_in_step => "ZTS509",
                 .saga_step_missing_compensate => "ZTS510",
+                .effect_ceiling_not_literal => "ZTS511",
             };
         }
 

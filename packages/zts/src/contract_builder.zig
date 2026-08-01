@@ -644,7 +644,11 @@ pub const ContractBuilder = struct {
                 if (loc.line != 0) {
                     if (env.getFnSigByLoc(loc.line)) |sig| {
                         if (sig.return_type != type_pool_mod.null_type_idx) {
-                            env.extractSpecMembers(sig.return_type, &raw_names);
+                            // A payload this cannot read leaves `raw_names`
+                            // empty, which selects the full v1 set below -
+                            // the widest, strictest reading, so there is no
+                            // fail-open to report here.
+                            _ = try env.extractSpecMembers(sig.return_type, &raw_names);
                         }
                     }
                 }
@@ -907,7 +911,29 @@ pub const ContractBuilder = struct {
 
         var raw: std.ArrayListUnmanaged([]const u8) = .empty;
         defer raw.deinit(self.allocator);
-        env.extractEffectMembers(sig.return_type, &raw);
+        const extraction = try env.extractEffectMembers(sig.return_type, &raw);
+
+        // ZTS511: a budget the extractor cannot read as a closed literal union.
+        // Returning here as if nothing were declared is the fail-open: the
+        // handler keeps its capabilities and no budget bounds them.
+        if (extraction.non_literal) {
+            const spec_name = try self.allocator.dupe(u8, "Effects");
+            errdefer self.allocator.free(spec_name);
+            const suggestion = try self.allocator.dupe(
+                u8,
+                "write the capability budget as string literals " ++
+                    "(`Effects<Response, \"clock\" | \"crypto\">`), or as an alias bound " ++
+                    "directly to such a union.",
+            );
+            errdefer self.allocator.free(suggestion);
+            try contract.spec_diagnostics.append(self.allocator, .{
+                .kind = .effect_ceiling_not_literal,
+                .spec_name = spec_name,
+                .suggestion = suggestion,
+            });
+            return;
+        }
+
         if (raw.items.len == 0) return; // no budget declared, no check
 
         // Parse the budget. An unknown name is the handler-level analogue of
@@ -933,9 +959,10 @@ pub const ContractBuilder = struct {
         // can serialise `sandbox.declaredBudget`.
         contract.capability_budget = capabilityMatrixFromSet(budget);
 
-        // An all-invalid budget: the ZTS504s above are the actionable errors;
-        // do not cascade ZTS506 / ZTS607 against an empty budget.
-        if (budget.count() == 0) return;
+        // An all-invalid budget leaves an empty ceiling, and the check runs
+        // against it. Returning early here used to suppress ZTS506 / ZTS607
+        // for every capability the handler reaches, which reads as "budget
+        // satisfied" to anything that only counts diagnostics by kind.
 
         // Locate the handler's FunctionEffect and index.
         const functions = analyzer.all();
