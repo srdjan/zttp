@@ -81,7 +81,7 @@ pub const operations = [_]OperationSpec{
         "policy_hash",           "idiom_table_hash",  "restriction_matrix_hash",
         "builtin_registry_hash", "operations",        "error_codes",
         "severities",            "idioms",            "limits",
-        "module_catalog",        "deferred_sections",
+        "module_catalog",        "deferred_sections", "validators",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -119,7 +119,6 @@ pub const deferred_sections = [_]DeferredSection{
     .{ .name = "grammar", .note = "phase 6: section 8 lives in spec prose, with no machine-readable production table to generate from" },
     .{ .name = "examples", .note = "phase 6: no per-form example registry exists" },
     .{ .name = "ambient_names", .note = "phase 4: the section 6 ambient table lands with Dict, JSON, and Bytes" },
-    .{ .name = "validators", .note = "phase 6: the equivalence-validator taxonomy (D3 §4) has no registry yet" },
     .{ .name = "type_serialization", .note = "phase 2: the canonical type serialization is D1's artifact" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "verifiers", .note = "phase 6: property discovery arrives with the verify operation" },
@@ -664,6 +663,27 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     }
     try json.endArray();
 
+    // The equivalence-validator registry (D3 section 4). Published so a client
+    // can read why a repair is or is not advertised, rather than inferring it
+    // from a flag with no stated reason.
+    try json.objectField("validators");
+    try json.beginArray();
+    for (&zts.repair_validator.rows) |*row| {
+        try json.beginObject();
+        try json.objectField("intent");
+        try json.write(@tagName(row.intent));
+        try json.objectField("method");
+        try json.write(row.method.id());
+        try json.objectField("status");
+        try json.write(@tagName(row.status));
+        try json.objectField("precondition");
+        if (row.precondition) |p| try json.write(p) else try json.write(null);
+        try json.objectField("gradable");
+        try json.write(row.gradable());
+        try json.endObject();
+    }
+    try json.endArray();
+
     try json.objectField("deferred_sections");
     try json.beginArray();
     for (&deferred_sections) |*section| {
@@ -1028,11 +1048,16 @@ fn writeCheckPayload(
 
 /// One source-bound diagnostic.
 ///
-/// Two deliberate absences, both published in `meta.deferred_sections`:
-/// no `span`, because no producer computes a half-open byte range and inventing
-/// an end would be a lie of precision; and `repair_available` is uniformly
-/// false, because spec 4.8 permits advertising an exact repair only when a
-/// registered equivalence validator exists, and that registry is phase 6.
+/// One deliberate absence, published in `meta.deferred_sections`: no `span`,
+/// because no producer computes a half-open byte range and inventing an end
+/// would be a lie of precision.
+///
+/// `repair_available` answers from `meta.validators` rather than a constant.
+/// Spec 4.8 permits advertising an exact repair only when a registered
+/// equivalence validator exists, so the flag is true exactly when this
+/// diagnostic's repair intent has a row whose method is implemented. Every row
+/// is `planned` today, so every answer is still false - but it is now false
+/// because the registry says so, and one row flipping is what changes it.
 fn writeDiagnostic(
     json: *std.json.Stringify,
     allocator: std.mem.Allocator,
@@ -1081,8 +1106,18 @@ fn writeDiagnostic(
     try json.objectField("suggestion");
     if (diag.suggestion) |sug| try json.write(sug) else try json.write(null);
     try json.objectField("repair_available");
-    try json.write(false);
+    try json.write(repairAvailableFor(diag.code));
     try json.endObject();
+}
+
+/// True when the rule behind this diagnostic carries a repair intent whose
+/// equivalence validator is registered and implemented. A code with no rule, or
+/// a rule with no typed repair, answers false: an unclassified rewrite is
+/// exactly what must not be advertised.
+fn repairAvailableFor(code: []const u8) bool {
+    const rule = rule_registry.findByCode(code) orelse return false;
+    const intent = rule.repair orelse return false;
+    return zts.repair_validator.gradable(intent);
 }
 
 /// Byte offset of a 1-based line and column. Exact for the reported position;

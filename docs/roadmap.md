@@ -198,16 +198,30 @@ with an attack input and witness cases each, so refusing to drive them was capab
 left on the floor. A test now asserts the goal list and the solver's `PropertyTag` set
 cannot drift apart in either direction.
 
-Still open is the validator work, and it needs a decision rather than an implementation.
-D3's M2 is parse identity - two spellings whose IR trees match modulo positions. No
-repair intent qualifies: every one of them changes the tree, which is the point of a
-repair. Even the canonicalization-flavoured ones fail it, since `let` and `const` are
-distinct in the declaration node. What discharges `replace_let_with_const` is that the
-checker proved the binding is never reassigned - a precondition-carrying equivalence,
-closer to D3's M4 than M2. `repair_available` stays uniformly false until that is settled:
-spec 4.8 permits advertising an exact repair only when a registered equivalence validator
-exists, and advertising one backed by a validator that does not actually discharge it
-would be worse than the honest false.
+The validator question is settled and the registry exists:
+`packages/zts/src/repair_validator.zig`, published as `meta.validators`.
+
+M4, declared law with a carried precondition, is the family for the canonicalization
+rewrites. The other four are ruled out by evidence rather than preference. M2 is parse
+identity and discharges none of them - every repair changes the IR tree, which is the
+point; even `let` to `const` fails it, since the declaration node distinguishes the two
+kinds. M1 needs the canonical formatter and M3 needs the semantic kernel, and neither
+exists; `semantics.zig` is explicitly a partial slice with statements structural-only.
+M5 is advisory-only by construction and can never justify the flag. M4's machinery is the
+one that already runs: `semantics_smt.encodeEquivalence` under z3, live in
+`scripts/verify.sh`. Its published shape - a law plus preconditions carried on the row -
+is what these rewrites need, with the checker as the precondition source: the rewrite is
+sound exactly where the diagnostic that requested it fired.
+
+The second half of the decision is a classification, not a gap. A behaviour-changing
+repair claims no equivalence and never will: `add_trailing_return` exists to change what
+the program does on a path that previously fell off the end. Those rows are `.none` and
+ship advisory-only, which D3 blesses directly.
+
+`repair_available` now answers from the registry instead of a constant. Every row is
+`planned`, so every answer is still false - but false because the registry says so, and
+one row reaching `implemented` is what changes it. A `status` distinct from `method` is
+what keeps that honest: naming the right validator is not the same as having one.
 
 Observable: compiler-authored apply share rises on the item-2 corpus, and
 `repair_available: true` appears on the wire for a named, tested subset. The first half

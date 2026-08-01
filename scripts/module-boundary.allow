@@ -76,6 +76,7 @@ tools pipeline
 tools proof_trace
 tools property_diagnostics
 tools repair_intent
+tools repair_validator
 tools restriction_registry
 tools route_match
 tools rule_registry

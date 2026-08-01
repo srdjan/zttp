@@ -120,6 +120,7 @@ pub const rule_registry = @import("rule_registry.zig");
 pub const idiom_registry = @import("idiom_registry.zig");
 pub const restriction_registry = @import("restriction_registry.zig");
 pub const repair_intent = @import("repair_intent.zig");
+pub const repair_validator = @import("repair_validator.zig");
 pub const ws_consistency = @import("ws_consistency.zig");
 pub const spec_discharge = @import("spec_discharge.zig");
 pub const function_specs = @import("function_specs.zig");
