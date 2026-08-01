@@ -325,6 +325,12 @@ pub const Analyzer = struct {
                     try self.recordNamedFunction(decl.binding, node, decl.init, exported);
                 }
             },
+            // exhaustive: this descends only through the statement kinds that
+            // can hold a top-level declaration. A function declared inside an
+            // `if` or loop body is missed, and that is caught downstream rather
+            // than ignored: a call to an uncollected function resolves to no
+            // user function, which sets `EffectRow.lower_bound` and refuses the
+            // ceiling. Missing it costs precision, never soundness.
             else => {},
         }
     }
@@ -463,6 +469,12 @@ pub const Analyzer = struct {
                 try self.walkBaseExpr(call.callee, owner, row, seen_users);
                 for (0..call.args_count) |i| {
                     const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+                    // A named helper handed to a callback slot (`items.map(fmt)`)
+                    // is called, but never through a call node this walk can
+                    // see: the callee is `items.map`, and `fmt` is only an
+                    // argument. Without an edge here the helper's capabilities
+                    // stay out of the caller's row entirely.
+                    try self.recordFunctionValueArg(arg, owner, seen_users);
                     if (durable_step and i == 1 and self.isFunctionNode(arg)) {
                         self.durable_callback_depth += 1;
                         defer self.durable_callback_depth -= 1;
@@ -519,6 +531,11 @@ pub const Analyzer = struct {
                     try self.walkBaseStmt(func.body, owner, row, seen_users);
                 }
             },
+            // exhaustive: the remaining tags are leaves - literals and bare
+            // identifiers - with no sub-expression that could reach a
+            // capability. The one identifier that does carry effect, a named
+            // helper passed as a callback, gets its call-graph edge from
+            // `recordFunctionValueArg` at the argument site above.
             else => {},
         }
     }
@@ -581,6 +598,28 @@ pub const Analyzer = struct {
         // "this callee contributes nothing" - an under-approximation stated
         // with the confidence of a proof.
         if (self.calleeIsUnresolvable(binding)) row.lower_bound = true;
+    }
+
+    /// Record a call-graph edge for a bare identifier passed as an argument
+    /// that names a user function.
+    ///
+    /// This over-approximates: an identifier handed to a function is not proof
+    /// that it gets called. Over-approximating is the safe direction for a
+    /// ceiling - the caller's row gains capabilities it might not reach, which
+    /// can only reject, never wrongly certify. Under-approximating is what the
+    /// missing edge did.
+    fn recordFunctionValueArg(
+        self: *Analyzer,
+        arg: NodeIndex,
+        owner: usize,
+        seen_users: *std.AutoHashMapUnmanaged(usize, void),
+    ) WalkError!void {
+        if (self.ir_view.getTag(arg) != .identifier) return;
+        const binding = self.ir_view.getBinding(arg) orelse return;
+        const callee_idx = self.user_fn_by_slot.get(binding.slot) orelse return;
+        if (callee_idx == owner) return;
+        const gop = try seen_users.getOrPut(self.allocator, callee_idx);
+        if (!gop.found_existing) try self.callee_storage.append(self.allocator, callee_idx);
     }
 
     /// True when a callee identifier names something whose body this cannot
@@ -1124,6 +1163,35 @@ test "a module neither registry resolves fails closed with every capability" {
         CapabilitySet.initFull().count(),
         use.capabilities.count(),
     );
+}
+
+test "a named helper passed as a callback reaches the caller's row" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `fmt` is called by `map`, but never through a call node this walk sees:
+    // the callee is `items.map` and `fmt` is only an argument. Without the
+    // argument-site edge, `fmt`'s capabilities stayed out of `render`'s row
+    // entirely and any ceiling on `render` was checked against a set missing
+    // them.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function fmt(x) { return env("PREFIX") + x; }
+        \\function render(items) { return items.map(fmt); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const fmt = analyzer.lookup("fmt") orelse return error.FunctionNotFound;
+    const render = analyzer.lookup("render") orelse return error.FunctionNotFound;
+    try testing.expect(fmt.capabilities.contains(.env));
+    try testing.expect(render.capabilities.contains(.env));
 }
 
 test "a call through a function-typed parameter marks the row a lower bound" {

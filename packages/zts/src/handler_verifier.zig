@@ -252,6 +252,11 @@ fn lookupTrackedFunction(module_specifier: []const u8, name: []const u8) ?Functi
         .result => .result,
         .optional_string => .optional_string,
         .optional_object => .optional_object,
+        // exhaustive: null means "this export returns nothing that needs
+        // unwrap-checking". The remaining `returns` kinds are plain values with
+        // no Result or optional to guard. A new kind that did need guarding
+        // would land here silently, which is why the set is spelled out rather
+        // than defaulted - adding one means visiting this arm.
         else => null,
     };
 }
@@ -758,6 +763,9 @@ pub const HandlerVerifier = struct {
                     self.walkExprForRefs(val);
                 }
             },
+            // exhaustive: the remaining statement kinds hold no expression that
+            // can reference a tracked binding; the kinds that do are handled
+            // above and recurse.
             else => {},
         }
     }
