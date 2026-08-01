@@ -27,6 +27,10 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "sql",
+            // Registration only: registerQuery stores an owned name/statement
+            // pair in a map. ensureDb is lazy and belongs to the query
+            // executors below, so declaring a statement opens no database.
+            .required_capabilities = &.{},
             .module_func = sqlRegisterImpl,
             .arg_count = 2,
             .effect = .write,

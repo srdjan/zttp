@@ -22,6 +22,8 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "rateCheck",
+            // rateCheckImpl reads sdk.nowMs for the window.
+            .required_capabilities = &.{.clock},
             .module_func = rateCheckImpl,
             .arg_count = 3,
             .returns = .result,
@@ -33,6 +35,8 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "rateReset",
+            // store.reset removes a map entry. No window, no clock.
+            .required_capabilities = &.{},
             .module_func = rateResetImpl,
             .arg_count = 1,
             .returns = .boolean,

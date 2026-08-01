@@ -15,6 +15,9 @@
         "number",
         "number"
       ],
+      "requiredCapabilities": [
+        "clock"
+      ],
       "failureSeverity": "critical",
       "contractExtractions": [
         {
@@ -28,7 +31,8 @@
       "returns": "boolean",
       "params": [
         "string"
-      ]
+      ],
+      "requiredCapabilities": []
     }
   ]
 }
