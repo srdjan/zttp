@@ -158,6 +158,14 @@ pub const TypeEnv = struct {
     /// Keys must not move after insertion, so each name owns its own allocation.
     name_storage: std.ArrayListUnmanaged([]const u8),
 
+    /// Set when an allocation failed while populating the environment. Every
+    /// such failure drops a type alias, an interface, or a function signature
+    /// on the floor, and a missing signature is invisible: the annotation
+    /// readers below simply find nothing and the caller reads that as "the
+    /// author declared nothing". `TypeChecker` and `TypePool` already carry
+    /// the same flag for the same reason.
+    allocation_failed: bool = false,
+
     pub fn init(allocator: std.mem.Allocator, pool: *TypePool) TypeEnv {
         var env: TypeEnv = .{
             .pool = pool,
@@ -177,6 +185,13 @@ pub const TypeEnv = struct {
         };
         env.registerBuiltins();
         return env;
+    }
+
+    /// Record that the environment is missing something it was asked to hold.
+    /// Callers that read annotations out of it must refuse to answer rather
+    /// than report the gap as an absent declaration.
+    fn markAllocationFailure(self: *TypeEnv) void {
+        self.allocation_failed = true;
     }
 
     /// Register built-in type aliases (`Spec<S>` and friends) so user code
@@ -222,7 +237,7 @@ pub const TypeEnv = struct {
         alias.param_names[0] = owned_param;
         alias.param_count = 1;
         alias.body = body;
-        self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
+        self.generic_aliases.put(self.allocator, owned_name, alias) catch self.markAllocationFailure();
     }
 
     /// Register a two-param capsule alias `Name<T, S>` whose body is
@@ -260,7 +275,7 @@ pub const TypeEnv = struct {
         alias.param_names[1] = owned_s;
         alias.param_count = 2;
         alias.body = body;
-        self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
+        self.generic_aliases.put(self.allocator, owned_name, alias) catch self.markAllocationFailure();
     }
 
     pub fn deinit(self: *TypeEnv) void {
@@ -296,7 +311,7 @@ pub const TypeEnv = struct {
         for (tm.entries.items) |entry| {
             if (entry.kind == .generic_params and entry.name_start != 0) {
                 const key = (@as(u64, entry.name_start) << 32) | entry.name_end;
-                generic_params_map.put(self.allocator, key, entry) catch {};
+                generic_params_map.put(self.allocator, key, entry) catch self.markAllocationFailure();
             }
         }
 
@@ -320,7 +335,10 @@ pub const TypeEnv = struct {
             switch (entry.kind) {
                 .var_annotation => self.processVarAnnotation(tm, entry),
                 .param_annotation => {
-                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch continue;
+                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                        self.markAllocationFailure();
+                        continue;
+                    };
                     if (!gop.found_existing) {
                         gop.value_ptr.* = .{};
                     }
@@ -334,14 +352,17 @@ pub const TypeEnv = struct {
                 .return_annotation => {
                     const type_text = tm.getTypeText(entry);
                     const type_idx = self.resolveType(type_text);
-                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch continue;
+                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                        self.markAllocationFailure();
+                        continue;
+                    };
                     if (!gop.found_existing) {
                         gop.value_ptr.* = .{};
                     }
                     gop.value_ptr.return_type = type_idx;
                     if (tm.getNameText(entry)) |name| {
                         const owned_name = self.internName(name);
-                        fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch {};
+                        fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch self.markAllocationFailure();
                     }
                 },
                 else => {},
@@ -351,10 +372,10 @@ pub const TypeEnv = struct {
         // Merge function signatures
         var iter = fn_params_by_line.iterator();
         while (iter.next()) |kv| {
-            self.fn_signatures.put(self.allocator, kv.key_ptr.*, kv.value_ptr.*) catch {};
+            self.fn_signatures.put(self.allocator, kv.key_ptr.*, kv.value_ptr.*) catch self.markAllocationFailure();
             if (fn_names_by_line.get(kv.key_ptr.*)) |name| {
-                self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch {};
-                self.source_fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch {};
+                self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
+                self.source_fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
             }
         }
     }
@@ -392,7 +413,7 @@ pub const TypeEnv = struct {
                 self.popGenericScope();
 
                 const owned_name = self.internName(name);
-                self.generic_aliases.put(self.allocator, owned_name, alias) catch {};
+                self.generic_aliases.put(self.allocator, owned_name, alias) catch self.markAllocationFailure();
                 return;
             }
         }
@@ -400,7 +421,7 @@ pub const TypeEnv = struct {
         // Non-generic alias: simple name -> type mapping.
         const type_idx = self.resolveType(type_text);
         const owned_name = self.internName(name);
-        self.type_aliases.put(self.allocator, owned_name, type_idx) catch {};
+        self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
     }
 
     fn processDistinctType(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
@@ -415,7 +436,7 @@ pub const TypeEnv = struct {
         if (nominal_idx == null_type_idx) return;
 
         const owned_name = self.internName(name);
-        self.type_aliases.put(self.allocator, owned_name, nominal_idx) catch {};
+        self.type_aliases.put(self.allocator, owned_name, nominal_idx) catch self.markAllocationFailure();
     }
 
     fn processInterface(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
@@ -442,7 +463,7 @@ pub const TypeEnv = struct {
         }
 
         const owned_name = self.internName(name);
-        self.interfaces.put(self.allocator, owned_name, type_idx) catch {};
+        self.interfaces.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
     }
 
     fn processVarAnnotation(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
@@ -451,18 +472,18 @@ pub const TypeEnv = struct {
 
         const type_idx = self.resolveType(type_text);
         const key = packLocationKey(entry.context_line, entry.context_col);
-        self.var_types.put(self.allocator, key, type_idx) catch {};
+        self.var_types.put(self.allocator, key, type_idx) catch self.markAllocationFailure();
 
         // Also store by name for name-based lookup
         if (tm.getNameText(entry)) |name| {
             const owned_name = self.internName(name);
-            self.var_types_by_name.put(self.allocator, owned_name, type_idx) catch {};
+            self.var_types_by_name.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
             if (entry.name_ordinal) |ordinal| {
                 self.var_annotations.append(self.allocator, .{
                     .name = owned_name,
                     .ordinal = ordinal,
                     .type_idx = type_idx,
-                }) catch {};
+                }) catch self.markAllocationFailure();
             }
         }
     }
@@ -757,6 +778,7 @@ pub const TypeEnv = struct {
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
     ) std.mem.Allocator.Error!MarkerExtraction {
+        if (self.allocation_failed) return error.OutOfMemory;
         var status: MarkerExtraction = .{};
         try self.collectMarkedMembers(idx, out, spec_marker_field, 0, &status);
         return status;
@@ -771,6 +793,11 @@ pub const TypeEnv = struct {
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
     ) std.mem.Allocator.Error!MarkerExtraction {
+        // A degraded environment may be missing the very signature this is
+        // asked to read. Answering "no annotation" from a gap in the
+        // environment is the same fail-open ZTS511 closes one layer up, so
+        // surface the allocation failure that actually happened instead.
+        if (self.allocation_failed) return error.OutOfMemory;
         var status: MarkerExtraction = .{};
         try self.collectMarkedMembers(idx, out, effect_marker_field, 0, &status);
         return status;
@@ -944,7 +971,7 @@ pub const TypeEnv = struct {
     // -------------------------------------------------------------------
 
     pub fn pushGenericScope(self: *TypeEnv) void {
-        self.generic_scopes.append(self.allocator, .{}) catch {};
+        self.generic_scopes.append(self.allocator, .{}) catch self.markAllocationFailure();
     }
 
     pub fn popGenericScope(self: *TypeEnv) void {
@@ -966,9 +993,17 @@ pub const TypeEnv = struct {
     // -------------------------------------------------------------------
 
     pub fn internName(self: *TypeEnv, name: []const u8) []const u8 {
-        const owned = self.allocator.dupe(u8, name) catch return "";
+        // The empty-string fallback is a key nothing will match, so every
+        // lookup keyed on this name silently misses. Record the failure so a
+        // reader refuses to answer instead of reporting the gap as an absent
+        // declaration.
+        const owned = self.allocator.dupe(u8, name) catch {
+            self.markAllocationFailure();
+            return "";
+        };
         self.name_storage.append(self.allocator, owned) catch {
             self.allocator.free(owned);
+            self.markAllocationFailure();
             return "";
         };
         return owned;

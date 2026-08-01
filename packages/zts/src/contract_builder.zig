@@ -2019,7 +2019,7 @@ pub const ContractBuilder = struct {
         if (tag != .call) return false;
 
         const call = self.ir_view.getCall(expr) orelse return false;
-        const workflow_call = self.describeWorkflowCall(call) orelse return false;
+        const workflow_call = (try self.describeWorkflowCall(call)) orelse return false;
         _ = try self.appendWorkflowNode(
             workflow_call.kind,
             workflow_call.label,
@@ -2172,19 +2172,19 @@ pub const ContractBuilder = struct {
         detail: ?[]const u8 = null,
     };
 
-    fn describeWorkflowCall(self: *ContractBuilder, call: Node.CallExpr) ?WorkflowCall {
+    fn describeWorkflowCall(self: *ContractBuilder, call: Node.CallExpr) !?WorkflowCall {
         if (self.isModuleBindingName(call.callee, "step")) {
             const label = if (call.args_count > 0)
                 self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
             else
-                self.allocator.dupe(u8, "step") catch return null;
+                try self.allocator.dupe(u8, "step");
             return .{ .kind = .step, .label = label };
         }
         if (self.isModuleBindingName(call.callee, "stepWithTimeout")) {
             const label = if (call.args_count > 0)
                 self.workflowStringLabel(call.args_start, 0, "<dynamic step>")
             else
-                self.allocator.dupe(u8, "stepWithTimeout") catch return null;
+                try self.allocator.dupe(u8, "stepWithTimeout");
             return .{
                 .kind = .step_with_timeout,
                 .label = label,
@@ -2194,14 +2194,14 @@ pub const ContractBuilder = struct {
         if (self.isModuleBindingName(call.callee, "sleep")) {
             return .{
                 .kind = .sleep,
-                .label = self.allocator.dupe(u8, "sleep") catch return null,
+                .label = try self.allocator.dupe(u8, "sleep"),
                 .detail = self.workflowNumberDetail(call.args_start, 0, "delayMs"),
             };
         }
         if (self.isModuleBindingName(call.callee, "sleepUntil")) {
             return .{
                 .kind = .sleep_until,
-                .label = self.allocator.dupe(u8, "sleepUntil") catch return null,
+                .label = try self.allocator.dupe(u8, "sleepUntil"),
                 .detail = self.workflowNumberDetail(call.args_start, 0, "untilMs"),
             };
         }
@@ -2209,21 +2209,21 @@ pub const ContractBuilder = struct {
             const label = if (call.args_count > 0)
                 self.workflowStringLabel(call.args_start, 0, "<dynamic signal>")
             else
-                self.allocator.dupe(u8, "waitSignal") catch return null;
+                try self.allocator.dupe(u8, "waitSignal");
             return .{ .kind = .wait_signal, .label = label };
         }
         if (self.isModuleBindingName(call.callee, "signal")) {
             const label = if (call.args_count > 1)
                 self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
             else
-                self.allocator.dupe(u8, "signal") catch return null;
+                try self.allocator.dupe(u8, "signal");
             return .{ .kind = .signal, .label = label };
         }
         if (self.isModuleBindingName(call.callee, "signalAt")) {
             const label = if (call.args_count > 1)
                 self.workflowStringLabel(call.args_start, 1, "<dynamic signal>")
             else
-                self.allocator.dupe(u8, "signalAt") catch return null;
+                try self.allocator.dupe(u8, "signalAt");
             return .{
                 .kind = .signal_at,
                 .label = label,
@@ -3589,12 +3589,24 @@ pub const ContractBuilder = struct {
             if (std.mem.eql(u8, schema.name, schema_ref)) break schema.schema_json;
         } else return;
 
-        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema_json, .{}) catch return;
+        // Anything unreadable here is an unanalyzable schema, not an absent
+        // one: say so with the flag this function already carries rather than
+        // returning as if the route took no query parameters.
+        var parsed = std.json.parseFromSlice(std.json.Value, self.allocator, schema_json, .{}) catch {
+            route.query_params_dynamic = true;
+            return;
+        };
         defer parsed.deinit();
-        if (parsed.value != .object) return;
+        if (parsed.value != .object) {
+            route.query_params_dynamic = true;
+            return;
+        }
 
         const props = parsed.value.object.get("properties") orelse return;
-        if (props != .object) return;
+        if (props != .object) {
+            route.query_params_dynamic = true;
+            return;
+        }
 
         var required_names: std.ArrayList([]const u8) = .empty;
         defer required_names.deinit(self.allocator);
@@ -3602,7 +3614,7 @@ pub const ContractBuilder = struct {
             if (required_val == .array) {
                 for (required_val.array.items) |item| {
                     if (item != .string) continue;
-                    required_names.append(self.allocator, item.string) catch {};
+                    try required_names.append(self.allocator, item.string);
                 }
             }
         }

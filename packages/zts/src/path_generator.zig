@@ -332,7 +332,9 @@ pub const PathGenerator = struct {
             self.reaches_recursion = true;
             return;
         };
-        self.reaches_recursion = analyzer.reachesRecursion(handler_fn.body);
+        // Same reason as above: a walk that could not allocate found no cycle
+        // because it never looked.
+        self.reaches_recursion = analyzer.reachesRecursion(handler_fn.body) catch true;
     }
 
     fn findProgramRoot(self: *const PathGenerator) ?NodeIndex {

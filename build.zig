@@ -338,6 +338,10 @@ pub fn build(b: *std.Build) void {
     const module_boundary_step = b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
     module_boundary_step.dependOn(&module_boundary.step);
 
+    const proof_swallow = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-proof-swallow.sh" });
+    const proof_swallow_step = b.step("test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
+    proof_swallow_step.dependOn(&proof_swallow.step);
+
     const docs_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-docs-drift.sh" });
     const docs_drift_step = b.step("test-docs-drift", "Check docs against current registry and build paths");
     docs_drift_step.dependOn(&docs_drift.step);
@@ -732,6 +736,7 @@ pub fn build(b: *std.Build) void {
     for (host_test_runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&module_boundary.step);
+    test_step.dependOn(&proof_swallow.step);
     test_step.dependOn(&run_release_check_tests.step);
     // The docs drift and link gates run here, and only here: neither Run step is
     // cached, so `zig build test` always executes both scripts. CI and

@@ -222,11 +222,13 @@ pub const Analyzer = struct {
     /// for one. A cost or termination claim needs the other question, so this
     /// walks the same CSR call graph instead of reading the row.
     ///
-    /// Returns false when `body_node` names no analyzed function, and on
-    /// allocation failure, so a caller that cannot allocate does not silently
-    /// gain a claim it has not earned - the caller should treat false as "no
-    /// evidence of recursion", never as "proven non-recursive".
-    pub fn reachesRecursion(self: *const Analyzer, body_node: NodeIndex) bool {
+    /// Returns false when `body_node` names no analyzed function, so a caller
+    /// should treat false as "no evidence of recursion", never as "proven
+    /// non-recursive". Allocation failure is returned as an error rather than
+    /// as false: the walk that would have found the cycle never ran, and
+    /// reporting its silence as a clean result is the fail-open this doc
+    /// comment used to claim it avoided.
+    pub fn reachesRecursion(self: *const Analyzer, body_node: NodeIndex) !bool {
         const fn_count = self.functions.items.len;
         if (fn_count == 0) return false;
 
@@ -235,11 +237,11 @@ pub const Analyzer = struct {
             if (self.functions.items[start_idx].body_node == body_node) break;
         } else return false;
 
-        const visited = self.allocator.alloc(bool, fn_count) catch return false;
+        const visited = try self.allocator.alloc(bool, fn_count);
         defer self.allocator.free(visited);
         @memset(visited, false);
 
-        const stack = self.allocator.alloc(usize, fn_count) catch return false;
+        const stack = try self.allocator.alloc(usize, fn_count);
         defer self.allocator.free(stack);
 
         var depth: usize = 1;

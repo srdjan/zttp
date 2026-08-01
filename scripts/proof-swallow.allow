@@ -1,0 +1,39 @@
+# Swallows in the proof pipeline that were read and found unable to weaken a
+# verdict. Enforced in both directions by scripts/check-proof-swallow.sh: an
+# unlisted swallow fails, and so does a row nothing matches.
+#
+# One row per (file, enclosing function, pattern), with the reason above it.
+# A row is not an exemption. It is a claim that this particular swallow cannot
+# turn an unproven program into a reported-proven one. If that claim is wrong,
+# the fix is the code, not the row.
+#
+# The list only ratchets down. Adding a row is a deliberate widening and should
+# carry its reason in the commit as well as here.
+
+# The failure is already reported, and reported the same way whether or not
+# this line runs: `self.api_schemas_dynamic = true` on the caller's side marks
+# the schema unanalyzable, and null from here is how a non-literal schema
+# argument is spelled in the first place. A parse failure and a non-literal
+# argument are the same fact to every consumer.
+packages/zts/src/contract_builder.zig extractSchemaJson catch-return
+
+# Diagnostic prose only. The fallback returns the base message without the
+# parenthesised reason; the diagnostic still fires, with the same kind, at the
+# same node. No analysis result reads this string.
+packages/zts/src/flow_checker.zig messageWithReason catch-return
+
+# The label half of this function fails closed through markAllocationFailure.
+# The `catch return` entries are the human-readable `external_reasons` strings
+# that annotate a diagnostic; losing one costs the explanation, not the label
+# that decides whether the diagnostic fires.
+packages/zts/src/flow_checker.zig registerExternalField catch-return
+
+# `ensureHealthy` is the checker's poison check, not an error being dropped:
+# the pool has already recorded a failure, and returning early stops work that
+# would read corrupt types. The poison is surfaced by pipeline.zig, which calls
+# `TypeChecker.ensureHealthy` and propagates, so a build cannot finish green on
+# a poisoned pool. The binding-map writes and `collectSchemaCompileCall` on the
+# same paths call markAllocationFailure, which ensureHealthy also reports.
+packages/zts/src/type_checker.zig inferType catch-return
+packages/zts/src/type_checker.zig walkExpr catch-return
+packages/zts/src/type_checker.zig walkStmt catch-return
