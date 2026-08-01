@@ -148,6 +148,10 @@ pub const Analyzer = struct {
     callee_starts: std.ArrayListUnmanaged(u32),
     callee_storage: std.ArrayListUnmanaged(usize),
     durable_callback_depth: u32,
+    /// The call node whose result the enclosing statement throws away, or
+    /// `null_node`. Set only for the outermost call of an `expr_stmt`, so a
+    /// nested call inside that statement is not mistaken for a discarded one.
+    discarded_call: NodeIndex = null_node,
     /// Every `zttp:workflow` call found nested inside a `step()` callback.
     /// See `NestedWorkflowCall` - this is collected unconditionally during
     /// the same walk that computes effect rows, regardless of any declared
@@ -414,8 +418,19 @@ pub const Analyzer = struct {
                 try self.walkBaseExpr(for_iter.iterable, owner, row, seen_users);
                 try self.walkBaseStmt(for_iter.body, owner, row, seen_users);
             },
-            .return_stmt, .expr_stmt => {
+            .return_stmt => {
                 if (self.ir_view.getOptValue(node)) |value| {
+                    try self.walkBaseExpr(value, owner, row, seen_users);
+                }
+            },
+            .expr_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| {
+                    // A statement's value is thrown away. Split from
+                    // `return_stmt`, whose value is the result, because the
+                    // determinism rule below turns on exactly that difference.
+                    const saved = self.discarded_call;
+                    self.discarded_call = value;
+                    defer self.discarded_call = saved;
                     try self.walkBaseExpr(value, owner, row, seen_users);
                 }
             },
@@ -578,7 +593,26 @@ pub const Analyzer = struct {
             // Inside a `durable.step()` callback the read is recorded and
             // replayed, which is the same reason the member-call rule above is
             // gated on step depth.
-            if (self.durable_callback_depth == 0) {
+            const effect = self.importEffect(imported.module, imported.name);
+
+            // A write-effect call whose result the statement throws away is a
+            // sink, not a source: `logInfo(...)` reads the clock for its
+            // timestamp, and that value reaches stderr and stops. It cannot
+            // reach the response, so the handler's runs produce the same
+            // answer and it stays `deterministic` - and therefore
+            // `idempotent`, which is `deterministic and retry_safe` and means
+            // "safe under at-least-once delivery". A duplicate log line is not
+            // a duplicated side effect anyone is protecting against.
+            //
+            // This is an approximation, in the same family as the
+            // `Date.now`-only rule it extends. It still misses a clock value
+            // laundered through a store - `cacheSet(k, Date.now())` then
+            // `cacheGet(k)` into the response. Closing that needs the value
+            // tracked as a flow label to a response sink, the way
+            // `no_secret_leakage` already works; see the roadmap item.
+            const result_discarded = node == self.discarded_call;
+            const sinks_the_read = result_discarded and effect == .write;
+            if (self.durable_callback_depth == 0 and !sinks_the_read) {
                 const added = row.capabilities.differenceWith(before);
                 if (added.contains(.clock) or added.contains(.random)) {
                     row.deterministic = false;
@@ -587,7 +621,7 @@ pub const Analyzer = struct {
             row.pure = false;
             // A `.write`-classified export modifies external state; that
             // demotes the enclosing function's `read_only` capsule property.
-            if (self.importEffect(imported.module, imported.name) == .write) row.writes = true;
+            if (effect == .write) row.writes = true;
             if (std.mem.eql(u8, imported.module, fetch_module_specifier) and
                 std.mem.eql(u8, imported.name, fetch_sync_export))
             {
@@ -1226,6 +1260,88 @@ test "a websocket room snapshot does not reach the network" {
     // really reaches.
     const reply_fn = analyzer.lookup("reply") orelse return error.FunctionNotFound;
     try testing.expect(reply_fn.capabilities.contains(.network));
+}
+
+test "a discarded write-effect clock read does not demote determinism" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `logInfo` reads the clock for its timestamp, which reaches stderr and
+    // stops. The response is identical across runs, so the handler stays
+    // deterministic. Demoting it was a false negative on the Spec surface: an
+    // author could no longer declare `deterministic` on a handler that merely
+    // logs.
+    const source =
+        \\import { logInfo } from "zttp:log";
+        \\function handler(req) {
+        \\  logInfo("served", {});
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const h = analyzer.lookup("handler") orelse return error.FunctionNotFound;
+    try testing.expect(h.deterministic);
+    // The write still counts: `read_only` and `retry_safe` are unaffected by
+    // this rule, which is why `idempotent` does not come back with it.
+    try testing.expect(h.writes);
+}
+
+test "a bound write-effect result still demotes determinism" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // Same call, but its result is bound and returned, so the clock-derived
+    // value can reach the response. The exemption turns on the value being
+    // thrown away, not on the callee being a logger.
+    const source =
+        \\import { logInfo } from "zttp:log";
+        \\function handler(req) {
+        \\  const r = logInfo("served", {});
+        \\  return Response.json({ r: r });
+        \\}
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const h = analyzer.lookup("handler") orelse return error.FunctionNotFound;
+    try testing.expect(!h.deterministic);
+}
+
+test "a read-effect clock or random call still demotes determinism" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `uuid()` is read-effect and its value is the answer, so the exemption
+    // must not reach it. This is the false proof the rule exists to stop.
+    const source =
+        \\import { uuid } from "zttp:id";
+        \\function handler(req) { return Response.json({ id: uuid() }); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const h = analyzer.lookup("handler") orelse return error.FunctionNotFound;
+    try testing.expect(!h.deterministic);
 }
 
 test "an export with no declared set inherits its module's" {

@@ -142,6 +142,38 @@ of steps mid-turn. Re-record that one case with
 [convergence.md](convergence.md) - the rate is expected to move, which is what the policy
 hash column on that table exists to explain.
 
+### 2b. Non-determinism as a flow property, not a capability property (medium)
+
+`deterministic` is demoted today by the presence of a capability, not by where its value
+goes. A clock read is a source; a log write is a sink. `logInfo` reads the clock for its
+timestamp, that value reaches stderr and stops, and the response is identical across
+runs - yet the capability rule saw only that `.clock` was reached.
+
+The interim rule in `effect_inference.handleCall` exempts a write-effect call whose
+result the statement throws away, which covers logging exactly and leaves `uuid()`
+demoted. It is an approximation in the same family as the `Date.now`-only rule it
+extends, and it misses a value laundered through a store: `cacheSet(k, Date.now())` then
+`cacheGet(k)` into the response reads as deterministic under both the old rule and the
+new one.
+
+The sound version is a data label. `flow_checker` already propagates `DataLabel`s to a
+sink list, which is how `no_secret_leakage` works: label the value a clock or random read
+produces, propagate it through bindings and calls, and demote `deterministic` only when
+it reaches a response sink. That closes the store-laundering case, replaces a capability
+heuristic with a flow fact, and adds no second mechanism - the labels, the propagation,
+and the sink list all exist.
+
+Why it is worth doing rather than living with the approximation: `deterministic` is the
+declarable property authors reach for most, and it feeds `idempotent`
+(`deterministic and retry_safe`). A property that answers from "was a capability
+touched" rather than "did the value reach the answer" will keep producing false negatives
+that authors work around by narrowing their `Spec`, which widens the emitted set in
+exactly the direction item 7 is trying to shrink.
+
+Observable: a handler that writes a timestamp to a cache and reads it back into the
+response reports non-deterministic, and one that logs a timestamp does not - both from
+the flow trace rather than from the capability set.
+
 ### 3. Typed holes (medium, decomposable)
 
 Two of three slices have landed. `hole()` exists as a builtin typed `never`, so a
