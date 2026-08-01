@@ -50,6 +50,7 @@ const pi_remember_fact_tool = @import("tools/pi_remember_fact.zig");
 const pi_recall_facts_tool = @import("tools/pi_recall_facts.zig");
 const pi_extension_catalog_tool = @import("tools/pi_extension_catalog.zig");
 const effects_tool = @import("tools/zts_expert_effects.zig");
+const holes_tool = @import("tools/zts_expert_holes.zig");
 const narrow_tool = @import("tools/zts_expert_narrow.zig");
 const ratchet_tool = @import("tools/zts_expert_ratchet.zig");
 
@@ -123,6 +124,7 @@ const analysis_bundle = [_]ToolDef{
     modules_tool.tool,
     verify_modules_tool.tool,
     effects_tool.tool,
+    holes_tool.tool,
     narrow_tool.tool,
     ratchet_tool.tool,
 };
@@ -632,6 +634,7 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_recall_facts",
         "pi_extension_catalog",
         "zts_expert_effects",
+        "zts_expert_holes",
         "zts_expert_narrow",
         "zts_expert_ratchet",
     };

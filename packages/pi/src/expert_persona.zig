@@ -168,6 +168,16 @@ const prologue =
     \\                                recursion, and egress flags; call before
     \\                                editing to surface a refactor's effect
     \\                                delta
+    \\  zts_expert_holes          - every `hole()` in a file with the frame
+    \\                                around it: enclosing function, line and
+    \\                                column, the type the expression must
+    \\                                produce, and the capability budget still
+    \\                                unspent. Fill ONE hole per turn from that
+    \\                                frame; do not regenerate the file. A
+    \\                                holed program still type-checks and still
+    \\                                proves its properties, so the compiler
+    \\                                has already fixed everything except the
+    \\                                expression you are writing
     \\  zts_expert_ratchet        - the property set the compiler currently
     \\                                proves for a handler, straight from
     \\                                contract.json provenSpecs (also signed in
@@ -260,6 +270,7 @@ const prologue =
     \\  Apply a typed canonical RepairIntent   -> zts_expert_ast_rewrite
     \\  Per-path label flow / guard discovery  -> zts_expert_narrow
     \\  Inferred effect row for a file         -> zts_expert_effects
+    \\  Unfilled hole()s and their frames      -> zts_expert_holes
     \\  Proven property set (ratchet/tighten)  -> zts_expert_ratchet
     \\  Contract-pair compatibility proof      -> zts_expert_prove_patch
     \\  Cross-handler system proof             -> zts_expert_system_proof

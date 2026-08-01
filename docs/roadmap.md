@@ -154,8 +154,18 @@ not yet spent.
 
 Two pieces of the JSON are still missing: the in-scope bindings with their types, which
 needs scope reconstruction the IR does not retain after parse, and the undischarged
-obligations, which exist in `spec_diagnostics` but are not yet projected per hole. The
-remaining slice is the agent's fill-one-hole turn mode.
+obligations, which exist in `spec_diagnostics` but are not yet projected per hole.
+
+The third slice has started. `zts_expert_holes` gives the agent the frame per hole -
+enclosing function, position, expected type, unspent budget - and the persona instructs
+it to fill one hole per turn rather than regenerate the file. Before this the data was
+reachable only inside a full `zts check --json` envelope that the tool description never
+mentioned, so the agent had no reason to look for it.
+
+What remains is the loop change itself: nothing yet *makes* a turn spend itself on one
+hole, so the mode is available rather than enforced. That is what the item's observable
+measures, and it cannot be claimed until a hole-mode session can be run against the
+corpus and compared with a whole-file session on the same model.
 
 Why: this is the only item that changes the convergence mechanism rather than measuring
 or enforcing it. Today the loop is subtractive - the agent emits from its full
