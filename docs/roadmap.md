@@ -142,7 +142,7 @@ of steps mid-turn. Re-record that one case with
 [convergence.md](convergence.md) - the rate is expected to move, which is what the policy
 hash column on that table exists to explain.
 
-### 2b. Non-determinism as a flow property, not a capability property (medium)
+### 2b. Non-determinism as a flow property, not a capability property (done)
 
 `deterministic` is demoted today by the presence of a capability, not by where its value
 goes. A clock read is a source; a log write is a sink. `logInfo` reads the clock for its
@@ -156,12 +156,22 @@ extends, and it misses a value laundered through a store: `cacheSet(k, Date.now(
 `cacheGet(k)` into the response reads as deterministic under both the old rule and the
 new one.
 
-The sound version is a data label. `flow_checker` already propagates `DataLabel`s to a
-sink list, which is how `no_secret_leakage` works: label the value a clock or random read
-produces, propagate it through bindings and calls, and demote `deterministic` only when
-it reaches a response sink. That closes the store-laundering case, replaces a capability
-heuristic with a flow fact, and adds no second mechanism - the labels, the propagation,
-and the sink list all exist.
+The sound version is a data label, and it has landed. `DataLabel.nondeterministic` is
+seeded in `scanImports` from each export's own capability set - so it tracks the
+per-export rows from item 7 without any binding declaring anything about determinism -
+propagates for free through `LabelSet.merge`, and clears `FlowProperties.deterministic`
+when it reaches a response sink. The store-laundering case is closed:
+`cacheSet(k, ...)` then `cacheGet(k)` into the response now reports non-deterministic,
+which neither the `Date.now`-only rule nor the interim sink heuristic could see.
+
+The flow answer is ANDed with the capability answer rather than replacing it. `Date.now()`
+is a global member call, not a module import, so it carries no label and only effect
+inference sees it. Two sources, neither sufficient alone.
+
+The interim rule in `handleCall` stays for that reason, and it is no longer the thing
+keeping a logging handler deterministic - under the flow rule `logInfo`'s timestamp never
+reaches the response, so the property falls out of the flow rather than out of a
+special case about write effects.
 
 Why it is worth doing rather than living with the approximation: `deterministic` is the
 declarable property authors reach for most, and it feeds `idempotent`
@@ -170,9 +180,10 @@ touched" rather than "did the value reach the answer" will keep producing false 
 that authors work around by narrowing their `Spec`, which widens the emitted set in
 exactly the direction item 7 is trying to shrink.
 
-Observable: a handler that writes a timestamp to a cache and reads it back into the
-response reports non-deterministic, and one that logs a timestamp does not - both from
-the flow trace rather than from the capability set.
+Observable, and met: a handler that writes a timestamp to a cache and reads it back into
+the response reports non-deterministic, and one that logs a timestamp does not - both
+from the flow rather than from the capability set. Three tests in `flow_checker.zig` pin
+the two directions and the untouched baseline.
 
 ### 3. Typed holes (medium, decomposable)
 

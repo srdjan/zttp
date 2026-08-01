@@ -155,6 +155,13 @@ pub const FlowProperties = struct {
     pii_contained: bool = true,
     /// No unvalidated user input reaches sensitive sinks (egress, HTML responses).
     injection_safe: bool = true,
+    /// No clock- or RNG-derived value reaches the response.
+    ///
+    /// Only ever falsified here. The capability rule in effect inference is the
+    /// other source - it sees `Date.now()`, which is a global member call and
+    /// never a labelled module import - so the two are ANDed rather than one
+    /// replacing the other.
+    deterministic: bool = true,
 };
 
 // ---------------------------------------------------------------------------
@@ -1661,6 +1668,12 @@ pub const FlowChecker = struct {
                         .repair_intent = .insert_guard_before_line,
                     });
                     self.properties.no_secret_leakage = false;
+                }
+                if (labels.has(.nondeterministic)) {
+                    // No diagnostic: returning a clock- or RNG-derived value is
+                    // legitimate, unlike leaking a secret. It costs the
+                    // property, and the proof card is where that shows up.
+                    self.properties.deterministic = false;
                 }
                 if (labels.has(.credential)) {
                     self.addDiagnostic(.{
@@ -3904,4 +3917,62 @@ test "a capability-free export is not labelled nondeterministic" {
     while (it.next()) |e| {
         try std.testing.expect(!e.value_ptr.nondeterministic);
     }
+}
+
+/// Run the flow checker over `source` and report whether it still proves
+/// `deterministic`.
+fn runDeterministic(allocator: std.mem.Allocator, source: []const u8) !bool {
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+    return checker.getProperties().deterministic;
+}
+
+test "a clock-derived value reaching the response costs determinism" {
+    // The case the capability heuristic cannot see. `cacheGet` returns a value
+    // the store may answer differently on a later run, and the label follows it
+    // through the binding into the response body.
+    const source =
+        \\import { cacheSet, cacheGet } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", "v");
+        \\  const seen = cacheGet("ns", "k");
+        \\  return Response.json({ seen: seen });
+        \\}
+    ;
+    try std.testing.expect(!try runDeterministic(std.testing.allocator, source));
+}
+
+test "a clock read that never reaches the response keeps determinism" {
+    // `logInfo` reads the clock for its timestamp and returns nothing that is
+    // used, so no label reaches the response sink. This is the false negative
+    // the interim capability rule had to special-case; here it falls out of the
+    // flow rather than out of a rule about write effects.
+    const source =
+        \\import { logInfo } from "zttp:log";
+        \\function handler(req) {
+        \\  logInfo("served", {});
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect(try runDeterministic(std.testing.allocator, source));
+}
+
+test "a handler touching no varying source keeps determinism" {
+    const source =
+        \\function handler(req) { return Response.json({ ok: true }); }
+    ;
+    try std.testing.expect(try runDeterministic(std.testing.allocator, source));
 }

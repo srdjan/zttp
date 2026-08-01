@@ -2492,6 +2492,11 @@ fn buildContractWithPolicy(
                 props.input_validated = flow_props.input_validated;
                 props.pii_contained = flow_props.pii_contained;
                 props.injection_safe = flow_props.injection_safe;
+                // ANDed, not assigned: effect inference already cleared this
+                // for a direct `Date.now()`, which is a global member call and
+                // so carries no flow label. Flow adds the values that reach the
+                // response through a binding or a store.
+                props.deterministic = props.deterministic and flow_props.deterministic;
             }
 
             if (violations_out) |vout| {
