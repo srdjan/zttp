@@ -1,9 +1,14 @@
 ---
 name: zttp
-last_updated: 2026-06-28
+last_updated: 2026-08-01
 ---
 
 # zttp Strategy
+
+Why this product exists, who it serves, and how we know it is working. What is
+built, what is planned, and what is refused as a feature decision live in
+[docs/roadmap.md](docs/roadmap.md); release history lives in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Target problem
 
@@ -75,19 +80,12 @@ targets.
 _Why it serves the approach:_ The execution floor plus the last mile - a proof is worth
 nothing if the proven handler can't ship fast and small.
 
-## Milestones
-
-- **v0.1.0-beta** (undated) - first public release; expert-first authoring with
-  compiler-proven handlers.
-
 ## Not working on
 
-- Portable trust artifacts as a headline (signed proof receipts, `verify <url>`,
-  `/.well-known/zttp-attest`) - built, but deferred from this release; it serves the
-  team/platform-owner need, not the launch persona.
-- Hosted cloud deploy (`deploy --cloud` rejected; `studio` and `edge` compiled out).
 - The team / platform-owner persona - whoever has to vouch that a deploy is safe on
-  someone else's behalf.
+  someone else's behalf. Portable trust artifacts (signed proof receipts,
+  `verify <url>`, `/.well-known/zttp-attest`) ship and are on by default, but they
+  serve that persona, so they stay a supporting feature rather than the headline.
 - Full Node/V8 language fidelity - the permanent non-goal; it is what makes the proofs
   intractable.
 
