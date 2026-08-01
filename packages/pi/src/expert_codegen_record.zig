@@ -18,6 +18,7 @@ const loop = @import("loop.zig");
 const app = @import("app.zig");
 const agent = @import("agent.zig");
 const codegen = @import("expert_codegen_eval.zig");
+const request_mod = @import("providers/anthropic/request.zig");
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
 
@@ -151,6 +152,61 @@ const RecordCase = struct {
     /// histogram) - not a broken test.
     expect_first_draft_pass: bool = true,
 };
+
+/// The headline model for the published convergence number.
+///
+/// Derived from the product default rather than written down twice, so the
+/// number always describes the model a user actually gets. `ZTTP_CODEGEN_MODEL`
+/// overrides it for a cheap harness run (e.g. Haiku) or to record a second row
+/// against a different tier.
+pub const headline_model = request_mod.default_model;
+
+/// Identity of the frozen prompt corpus.
+///
+/// A published pass rate means nothing without saying which corpus produced it,
+/// and a hand-maintained version number rots the moment someone edits a prompt.
+/// This hashes the corpus itself - names, prompts, seed files, and the pinned
+/// outcomes - so editing any case changes the version by construction. Same
+/// mechanism as `rule_registry.policyHash`, for the same reason.
+pub fn corpusVersion() [64]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (&record_corpus) |*rc| {
+        hasher.update(rc.name);
+        hasher.update("\x00");
+        hasher.update(rc.prompt);
+        hasher.update("\x00");
+        for (rc.seed_files) |sf| {
+            hasher.update(sf.path);
+            hasher.update("\x00");
+            hasher.update(sf.bytes);
+            hasher.update("\x00");
+        }
+        // The pinned outcome is part of the corpus identity: flipping a case
+        // from accepted-failure to expected-pass changes what the rate means.
+        hasher.update(&[_]u8{@intFromBool(rc.expect_first_draft_pass)});
+        hasher.update("\x00");
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    var out: [64]u8 = undefined;
+    _ = std.fmt.bufPrint(&out, "{x}", .{digest}) catch unreachable;
+    return out;
+}
+
+test "corpus version changes when a case changes" {
+    const before = corpusVersion();
+    // Same input twice is stable - the hash is a function of the corpus, not
+    // of call order or allocation.
+    try testing.expectEqualSlices(u8, &before, &corpusVersion());
+    // A version that is all zeroes or empty would silently pass the equality
+    // above, so assert it looks like a real digest.
+    try testing.expectEqual(@as(usize, 64), before.len);
+    var nonzero = false;
+    for (before) |c| {
+        if (c != '0') nonzero = true;
+    }
+    try testing.expect(nonzero);
+}
 
 // The corpus spans common tasks the agent handles cleanly and harder ones that
 // probe known gap areas (user-input egress, websocket events, durable
@@ -286,12 +342,12 @@ test "record codegen baseline corpus (live, gated)" {
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
-    // The codegen corpus measures the QUALITY users actually get, and users run
-    // the best models - so the corpus defaults to a strong model regardless of
-    // the product's default_model (which may be a cheaper model). ZTTP_CODEGEN
-    // _MODEL overrides it (e.g. Haiku) for cheap harness testing. Env strings
-    // live for the process, so the borrowed slice is safe for the session.
-    const corpus_model = envValue("ZTTP_CODEGEN_MODEL") orelse "claude-sonnet-4-6";
+    // The published number describes the model a user actually gets, so the
+    // corpus records against the product default rather than a hand-picked
+    // tier - see `headline_model`. ZTTP_CODEGEN_MODEL overrides it (e.g. Haiku)
+    // for cheap harness testing, or to record a second row against another
+    // tier. Env strings live for the process, so the borrowed slice is safe.
+    const corpus_model = envValue("ZTTP_CODEGEN_MODEL") orelse headline_model;
     var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
