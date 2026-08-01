@@ -28,6 +28,7 @@
 | `docs/verification.md` | `-Dverify` compile-time proof of handler correctness |
 | `docs/sound-mode.md` | Type-directed analysis across operators (arithmetic, comparison, boolean) |
 | `docs/roadmap.md` | What is deferred from the current beta and what comes next |
+| `docs/convergence.md` | Measured first-draft veto-pass rate over the frozen prompt corpus; regenerate with `scripts/update-convergence.sh` |
 | `docs/solutions/` | Categorized solutions to past bugs and engineering problems, searchable by YAML frontmatter (`module`, `tags`, `problem_type`); relevant when implementing or debugging in documented areas |
 
 ## Build, Test, and Development Commands

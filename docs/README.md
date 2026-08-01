@@ -18,6 +18,9 @@ here. Finished plans live under [archive](archive/README.md).
 - [Roadmap](roadmap.md) - supported platforms, current limitations, planned
   runtime work, the `zts-advanced-1` language program, and what remains of the
   reset.
+- [Convergence](convergence.md) - the measured first-draft veto-pass rate over
+  the frozen prompt corpus, with the corpus version and policy hash each figure
+  was recorded against.
 
 ## Reference
 

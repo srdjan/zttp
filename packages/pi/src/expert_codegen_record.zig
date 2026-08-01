@@ -547,6 +547,8 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     var passes: usize = 0;
     var intent_passes: usize = 0;
     var intent_checked: usize = 0;
+    var results: std.ArrayList(codegen.CaseResult) = .empty;
+    defer results.deinit(a);
     var missing: std.ArrayList([]const u8) = .empty;
     defer missing.deinit(a);
     for (record_corpus) |rc| {
@@ -587,14 +589,16 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
             return error.CassetteRatchetMismatch;
         }
+        var case_intent: codegen.IntentOutcome = .not_checked;
+
         // Intent: does the produced handler do what the prompt asked for? Run
         // after the turn, against whatever it actually wrote. A case with no
         // spec, or a run with no built binary, stays `.not_checked` - never a
         // pass, so an unmeasured corpus reads as unmeasured.
         if (rc.intent) |intent| {
             if (zttp_bin) |bin| {
-                const outcome = codegen.runIntentCheck(a, intent, tmp.abs_path, bin);
-                if (outcome == .passed) intent_passes += 1 else {
+                case_intent = codegen.runIntentCheck(a, intent, tmp.abs_path, bin);
+                if (case_intent == .passed) intent_passes += 1 else {
                     std.debug.print("[codegen-intent] {s}: handler did not do the task\n", .{rc.name});
                 }
                 intent_checked += 1;
@@ -610,6 +614,17 @@ test "codegen baseline replays at the committed first-draft pass rate" {
                 result.applied_edit,
             });
         }
+        try results.append(a, .{
+            .name = rc.name,
+            .routed = true,
+            .first_draft_pass = result.first_draft_veto_pass,
+            .applied = result.applied_edit,
+            .passed_criterion = result.first_draft_veto_pass,
+            .roundtrips = result.roundtrips,
+            .tool_calls = result.tool_call_count,
+            .proven_guarantees = result.proven_guarantees,
+            .intent = case_intent,
+        });
         passes += 1;
     }
 
@@ -623,6 +638,32 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         return error.MissingCodegenCassette;
     }
     try testing.expectEqual(record_corpus.len, passes);
+
+    // The publishable record of this run, on one line so
+    // scripts/update-convergence.sh can lift it without parsing the rest of the
+    // test output. Emitted every run, including when intent checks were
+    // skipped - a row that says `intentChecked: 0` is honest; a missing row
+    // would just look like the eval was not run.
+    const summary = codegen.summarize(results.items);
+    const version = corpusVersion();
+    std.debug.print(
+        "[codegen-convergence] {{\"corpusVersion\":\"{s}\",\"corpusCases\":{d}," ++
+            "\"model\":\"{s}\",\"policyHash\":\"{s}\",\"firstDraftPassPercent\":{d}," ++
+            "\"firstDraftPasses\":{d},\"medianRoundtrips\":{d},\"intentPassPercent\":{d}," ++
+            "\"intentPasses\":{d},\"intentChecked\":{d}}}\n",
+        .{
+            version[0..],
+            summary.total,
+            headline_model,
+            zts.rule_registry.policyHash()[0..],
+            summary.firstDraftPassPercent(),
+            summary.first_draft_passes,
+            summary.median_roundtrips,
+            summary.intentPassPercent(),
+            summary.intent_passes,
+            summary.intent_checked,
+        },
+    );
 
     if (zttp_bin == null) {
         std.debug.print(
