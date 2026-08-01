@@ -196,7 +196,7 @@ pub const entries = [_]RestrictionEntry{
         .boundary = "deterministic replay and finite scheduler state",
         .nature = .essential,
         .note = "ambient scheduling produces interleavings the replay log cannot reproduce.",
-        .alternative = "use fetchSync(), parallel(), race()",
+        .alternative = "use fetch() from zttp:fetch, or parallel()/race() from zttp:io",
         .failure_class = "ambient scheduling and non-deterministic interleavings",
         .proof_unlocked = "deterministic effect boundary and replayable I/O",
         // Measured: `export async function handler` is rejected by the parser's

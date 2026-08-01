@@ -34,7 +34,7 @@ current handler, so you can see which restrictions earned each `[+]` chip.
 | `for...in` | prototype-chain iteration and non-deterministic order | deterministic iteration and shape-stable access | use 'for (const k of Object.keys(obj))' |
 | `try/catch` | hidden exceptional control flow | Result narrowing and exhaustive path enumeration | use Result types and check .ok |
 | `throw` | hidden exceptional control flow | Result narrowing and exhaustive return analysis | return an error Response |
-| `async/await` | ambient scheduling and non-deterministic interleavings | deterministic effect boundary and replayable I/O | use fetchSync(), parallel(), race() |
+| `async/await` | ambient scheduling and non-deterministic interleavings | deterministic effect boundary and replayable I/O | use fetch() from zttp:fetch, or parallel()/race() from zttp:io |
 | `new` | constructor dispatch and hidden initialization effects | explicit factory call sites and visible effects | use factory functions or object literals |
 | `this` | dynamic receiver binding | static call-graph and visible data flow | use explicit parameter passing |
 | `null` | dual absent-value sentinels | optional-narrowing proof totality | use undefined |

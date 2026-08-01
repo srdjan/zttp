@@ -2315,7 +2315,7 @@ pub const Parser = struct {
         // async handler the runtime would otherwise execute as an empty 200.
         // (Bare `async` as an identifier or property name is still fine.)
         if (self.check(.kw_function) or self.isArrowFunction()) {
-            self.errors.addErrorAt(.unsupported_feature, async_token, "'async' functions are not supported; handlers run synchronously - use 'fetchSync', or 'parallel'/'race' from zttp:io for concurrency");
+            self.errors.addErrorAt(.unsupported_feature, async_token, "'async' functions are not supported; handlers run synchronously - use 'fetch' from zttp:fetch, or 'parallel'/'race' from zttp:io for concurrency");
             return error.ParseError;
         }
 
@@ -2328,7 +2328,7 @@ pub const Parser = struct {
     fn parseAwaitExpression(self: *Parser) anyerror!NodeIndex {
         // `await` is unsupported: handlers run synchronously. Reject at parse
         // time rather than executing it as a no-op that yields an empty 200.
-        self.errors.addErrorAt(.invalid_await, self.current, "'await' is not supported; handlers run synchronously - use 'fetchSync', or 'parallel'/'race' from zttp:io for concurrency");
+        self.errors.addErrorAt(.invalid_await, self.current, "'await' is not supported; handlers run synchronously - use 'fetch' from zttp:fetch, or 'parallel'/'race' from zttp:io for concurrency");
         return error.ParseError;
     }
 
