@@ -64,6 +64,63 @@ fn removeCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []
     parent.deleteTree(io, name) catch {};
 }
 
+/// Suffix for a case's stashed cassette while a live recording runs.
+const stash_suffix = ".recording-backup";
+
+/// Move a case's committed cassette aside before recording over it.
+///
+/// The recorder used to delete the directory outright, and its failure path
+/// deleted the partial too - so a run that failed left nothing where a working
+/// cassette had been. That is survivable only because cassettes are committed,
+/// and it has cost the whole corpus once: a full run with every turn failing
+/// clears all eleven cases. Stashing makes a failed recording a no-op instead.
+///
+/// Returns true when a stash was taken, so the caller knows whether there is
+/// anything to restore.
+fn stashCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) bool {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return false;
+    defer parent.close(io);
+
+    const stashed = std.fmt.allocPrint(allocator, "{s}{s}", .{ name, stash_suffix }) catch return false;
+    defer allocator.free(stashed);
+
+    // A stash left behind by an interrupted run would block the rename.
+    parent.deleteTree(io, stashed) catch {};
+    parent.rename(name, parent, stashed, io) catch return false;
+    return true;
+}
+
+/// Put the stashed cassette back, discarding whatever the failed run wrote.
+fn restoreCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return;
+    defer parent.close(io);
+
+    const stashed = std.fmt.allocPrint(allocator, "{s}{s}", .{ name, stash_suffix }) catch return;
+    defer allocator.free(stashed);
+
+    parent.deleteTree(io, name) catch {};
+    parent.rename(stashed, parent, name, io) catch {};
+}
+
+/// Drop the stash after a recording that succeeded.
+fn dropStashedCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return;
+    defer parent.close(io);
+
+    const stashed = std.fmt.allocPrint(allocator, "{s}{s}", .{ name, stash_suffix }) catch return;
+    defer allocator.free(stashed);
+    parent.deleteTree(io, stashed) catch {};
+}
+
 /// Read step_0.jsonl, step_1.jsonl, ... from an absolute case directory until a
 /// step is missing. Returns an empty slice when the case has no cassette yet.
 fn readCaseSteps(allocator: std.mem.Allocator, dir_abs: []const u8) ![][]u8 {
@@ -470,9 +527,11 @@ test "record codegen baseline corpus (live, gated)" {
         defer tmp.cleanup(allocator);
         for (rc.seed_files) |sf| try tmp.writeFile(allocator, sf.path, sf.bytes);
 
-        // Clear any prior cassette for this case so a shorter new recording (or
-        // a transient mid-turn failure) cannot leave stale trailing steps that
-        // would corrupt replay.
+        // Move the committed cassette aside rather than deleting it. A shorter
+        // new recording, or a mid-turn failure, must not leave stale trailing
+        // steps that would corrupt replay - and a failed run must not leave the
+        // case with nothing, which deleting up front used to do.
+        const stashed = stashCaseDir(allocator, out_dir, rc.name);
         removeCaseDir(allocator, out_dir, rc.name);
 
         const saved_cwd = try cwdPathAlloc(allocator);
@@ -497,8 +556,14 @@ test "record codegen baseline corpus (live, gated)" {
             // truncated step sequence.
             std.debug.print("[codegen-record] {s}: turn failed: {s} (skipped)\n", .{ rc.name, @errorName(err) });
             removeCaseDir(allocator, out_dir, rc.name);
+            if (stashed) {
+                restoreCaseDir(allocator, out_dir, rc.name);
+                std.debug.print("[codegen-record] {s}: previous cassette restored\n", .{rc.name});
+            }
             continue;
         };
+        // The turn produced a cassette, so the stash is no longer needed.
+        if (stashed) dropStashedCaseDir(allocator, out_dir, rc.name);
         if (result.first_draft_veto_pass) first_draft_passes += 1;
         if (result.applied_edit) greens += 1;
         const fail_code = codegen.firstZtsCode(&tr) orelse "-";
@@ -632,7 +697,8 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         std.debug.print("[codegen-replay] missing committed cassette(s) for {d} case(s):\n", .{missing.items.len});
         for (missing.items) |name| std.debug.print("  - {s}\n", .{name});
         std.debug.print(
-            "  record with: ZTTP_CODEGEN_RECORD=1 zig build test-expert-app -- --test-filter \"record codegen baseline corpus\"\n",
+            "  record with: ZTTP_CODEGEN_RECORD=1 zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"\n" ++
+                "  (the filter is a build option; `-- --test-filter` is dropped and records the whole corpus)\n",
             .{},
         );
         return error.MissingCodegenCassette;
@@ -681,4 +747,60 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         // thing the veto cannot tell us and the whole reason this check exists.
         try testing.expectEqual(intent_checked, intent_passes);
     }
+}
+
+test "a failed recording restores the previous cassette" {
+    // The recorder deletes the case directory before recording over it, and its
+    // failure path deletes the partial too. Without a stash a failed run leaves
+    // the case with nothing where a working cassette had been - which has
+    // wiped the corpus once, recoverable only because cassettes are committed.
+    const allocator = testing.allocator;
+
+    var tmp = try IsolatedTmp.init(allocator, "codegen-stash");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "case/step_0.jsonl", "{\"sse\":\"original\"}\n");
+
+    // Stash, then clear, as the recorder does before a live turn.
+    try testing.expect(stashCaseDir(allocator, tmp.abs_path, "case"));
+    removeCaseDir(allocator, tmp.abs_path, "case");
+
+    const cleared = try tmp.childPath(allocator, "case/step_0.jsonl");
+    defer allocator.free(cleared);
+    try testing.expect(!zts.file_io.fileExists(allocator, cleared));
+
+    // The turn fails: restore.
+    restoreCaseDir(allocator, tmp.abs_path, "case");
+
+    const restored = try zts.file_io.readFile(allocator, cleared, 4096);
+    defer allocator.free(restored);
+    try testing.expectEqualStrings("{\"sse\":\"original\"}\n", restored);
+
+    // The stash itself is gone, so a later run does not trip over it.
+    const leftover = try tmp.childPath(allocator, "case" ++ stash_suffix ++ "/step_0.jsonl");
+    defer allocator.free(leftover);
+    try testing.expect(!zts.file_io.fileExists(allocator, leftover));
+}
+
+test "a successful recording drops the stash" {
+    const allocator = testing.allocator;
+
+    var tmp = try IsolatedTmp.init(allocator, "codegen-stash-ok");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "case/step_0.jsonl", "{\"sse\":\"old\"}\n");
+
+    try testing.expect(stashCaseDir(allocator, tmp.abs_path, "case"));
+    removeCaseDir(allocator, tmp.abs_path, "case");
+    // The turn succeeds and writes a new cassette.
+    try tmp.writeFile(allocator, "case/step_0.jsonl", "{\"sse\":\"new\"}\n");
+    dropStashedCaseDir(allocator, tmp.abs_path, "case");
+
+    const current = try tmp.childPath(allocator, "case/step_0.jsonl");
+    defer allocator.free(current);
+    const bytes = try zts.file_io.readFile(allocator, current, 4096);
+    defer allocator.free(bytes);
+    try testing.expectEqualStrings("{\"sse\":\"new\"}\n", bytes);
+
+    const leftover = try tmp.childPath(allocator, "case" ++ stash_suffix ++ "/step_0.jsonl");
+    defer allocator.free(leftover);
+    try testing.expect(!zts.file_io.fileExists(allocator, leftover));
 }

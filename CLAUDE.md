@@ -125,7 +125,7 @@ bash scripts/verify.sh             # Full local gate mirroring CI, including zig
 zig build test-zts                 # Engine tests only
 zig build test-zruntime            # Runtime tests only
 zig build test-cli                 # Developer CLI tests only
-zig build test -- --test-filter "name"  # Single test
+zig build test -Dtest-filter="name"    # Single test (compile-time filter)
 bash scripts/test-examples.sh      # All example handler tests
 
 zig build bench                    # Zig-native benchmarks (packages/runtime/bench/benchmark.zig)

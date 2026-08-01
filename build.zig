@@ -3,6 +3,19 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+
+    // `-Dtest-filter="<substring>"` runs only the matching tests. Zig takes
+    // this at compile time, not as a runtime argument to the test binary, so
+    // the `-- --test-filter ...` form documented elsewhere panics the runner.
+    // Without a working filter, a command written to run one gated test runs
+    // the whole root instead - which is how a live recording meant for a
+    // single case cleared every committed cassette.
+    const test_filter = b.option(
+        []const u8,
+        "test-filter",
+        "Run only tests whose name contains this substring",
+    );
+    const test_filters: []const []const u8 = if (test_filter) |f| &.{f} else &.{};
     const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
     const studio_enabled = b.option(bool, "studio", "Compile the browser proof workbench (zttp studio) into the dev CLI") orelse false;
@@ -119,6 +132,7 @@ pub fn build(b: *std.Build) void {
     });
     zts_tests_root.addIncludePath(zts_dep.path("deps/sqlite"));
     const zts_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = zts_tests_root,
     });
     const run_zts_tests = b.addRunArtifact(zts_tests);
@@ -134,6 +148,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     const sdk_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = zttp_sdk_dep.path("src/test_root.zig"),
             .target = target,
@@ -149,6 +164,7 @@ pub fn build(b: *std.Build) void {
     sdk_test_step.dependOn(&run_sdk_tests.step);
 
     const modules_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = zttp_modules_dep.path("src/test_root.zig"),
             .target = target,
@@ -175,6 +191,7 @@ pub fn build(b: *std.Build) void {
         .perf_histogram = perf_histogram_enabled,
     });
     const proof_review_pkg_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = b.createModule(.{
             .root_source_file = proof_review_pkg_dep.path("src/test_root.zig"),
             .target = target,
@@ -287,6 +304,7 @@ pub fn build(b: *std.Build) void {
             .pi => pi_dep,
         };
         const tests = b.addTest(.{
+            .filters = test_filters,
             .root_module = b.createModule(.{
                 .root_source_file = owner_dep.path(root.src),
                 .target = b.graph.host,
@@ -329,7 +347,7 @@ pub fn build(b: *std.Build) void {
     const release_check_step = b.step("release-check", "Print this repository's release-readiness passport");
     release_check_step.dependOn(&release_check_cmd.step);
 
-    const release_check_tests = b.addTest(.{ .root_module = release_check_mod });
+    const release_check_tests = b.addTest(.{ .filters = test_filters, .root_module = release_check_mod });
     const run_release_check_tests = b.addRunArtifact(release_check_tests);
     const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
     release_check_test_step.dependOn(&run_release_check_tests.step);
@@ -702,6 +720,7 @@ pub fn build(b: *std.Build) void {
 
     // Tests
     const unit_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = runtime_dep.module("runtime_main_tests"),
     });
 
@@ -718,6 +737,7 @@ pub fn build(b: *std.Build) void {
     // Dev-CLI-side tests (cli_main.zig root) — covers dev_cli and its
     // dependencies (deploy, pi_app wiring, zts_cli delegation).
     const cli_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = runtime_dep.module("cli_main_tests"),
         .test_runner = .{
             .path = runtime_dep.path("src/cli_test_runner.zig"),
@@ -755,6 +775,7 @@ pub fn build(b: *std.Build) void {
 
     // ZRuntime tests (native Zig runtime)
     const zruntime_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = runtime_dep.module("zruntime"),
     });
     attachEmbeddedHandlerStub(zruntime_tests, runtime_dep, zts_mod);
@@ -770,6 +791,7 @@ pub fn build(b: *std.Build) void {
     // Tests through public entry points (Server.init/deinit, HandlerPool
     // execute*, RuntimeConfig) — never interpreter/JIT internals.
     const server_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = runtime_dep.module("server_tests"),
     });
     attachEmbeddedHandlerStub(server_tests, runtime_dep, zts_mod);
@@ -861,6 +883,7 @@ pub fn build(b: *std.Build) void {
     compile_bench_step.dependOn(&compile_bench_cmd.step);
 
     const compile_bench_tests = b.addTest(.{
+        .filters = test_filters,
         .root_module = runtime_dep.module("compile_benchmark"),
     });
     const run_compile_bench_tests = b.addRunArtifact(compile_bench_tests);
