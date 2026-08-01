@@ -4243,36 +4243,26 @@ fn normalizeOnlyKind(
 
 /// Row pairs that are known not to join, with the reason.
 ///
-/// D3 requires the rewrite relation be confluent and calls a non-joining pair a
-/// build failure. This list is the interim step the roadmap asks for - collect
-/// failures as fixtures first - because closing the entry below is a rule
-/// change with its own blast radius, not a normalizer fix.
+/// Empty, which is the state D3 requires: it calls a non-joining pair a build
+/// failure, and the harness below fails on any pair not listed here. The list
+/// exists as the interim step the roadmap allows - record a failure as a
+/// fixture when closing it needs a rule change rather than a normalizer fix -
+/// and its one entry has been closed.
 ///
-/// Deleting an entry is the goal. An entry that starts joining fails the test,
-/// so the list can only shrink.
+/// That entry was `canonicalize_let_const` against
+/// `canonicalize_redundant_bool_compare`: rewriting the binding to `const`
+/// first disabled the comparison row, so one program had two canonical forms.
+/// The cause was a type guard comparing against `idx_boolean` by identity while
+/// a `const` binding keeps its literal type; `checkRedundantBoolCompare` now
+/// widens first.
+///
+/// An entry that starts joining also fails the test, so the list can only
+/// shrink.
 const known_non_joining = [_]struct {
     a: []const u8,
     b: []const u8,
     why: []const u8,
-}{
-    .{
-        .a = "canonicalize_let_const",
-        .b = "canonicalize_redundant_bool_compare",
-        // `let ready = true; if (ready === true)` has two canonical forms.
-        // Rewriting the comparison first reaches `const ready = true;
-        // if (ready)`. Rewriting the binding first reaches `const ready = true;
-        // if (ready === true)` and stops: ZTS620 no longer fires once `ready`
-        // is const, so the comparison is never removed - and that result also
-        // passes `normalize --check`, so it is a second canonical form rather
-        // than a stuck one.
-        //
-        // The normalize loop applies both rows in one pass and lands on the
-        // first form, which is why this went unnoticed. A client applying
-        // repairs one intent at a time lands on the second. Canonical form is
-        // meant to be unique; here one surface program has two.
-        .why = "ZTS620 stops firing once the binding is const, so the comparison survives in one order",
-    },
-};
+}{};
 
 fn isKnownNonJoining(a: []const u8, b: []const u8) bool {
     for (known_non_joining) |pair| {

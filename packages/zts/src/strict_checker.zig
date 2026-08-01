@@ -812,8 +812,21 @@ pub const StrictChecker = struct {
         };
 
         // Soundness guard: the non-literal operand must be statically boolean.
+        //
+        // Widened before the comparison because a `const` binding keeps its
+        // literal type (`t_literal_bool`) while a `let` widens to `boolean` -
+        // see `widenLiteral`, which exists to stop let bindings locking to a
+        // value. Comparing by identity against `idx_boolean` therefore fired
+        // for `let ready = true` and not for `const ready = true`, which made
+        // canonicalization non-confluent: rewriting the binding to `const`
+        // first disabled this row, so one program had two canonical forms.
+        //
+        // Widening does not loosen the guard. `t_literal_bool` widens only to
+        // `idx_boolean`, so nothing non-boolean reaches the rewrite, and a
+        // value of literal type `true` is a boolean - `x === true` is still
+        // exactly `x`.
         const tc = self.type_checker orelse return;
-        if (tc.inferType(value_node) != tc.env.pool.idx_boolean) return;
+        if (tc.env.pool.widenLiteral(tc.inferType(value_node)) != tc.env.pool.idx_boolean) return;
 
         // `=== true` / `!== false` reduce to `x`; `=== false` / `!== true`
         // reduce to `!x`.
@@ -1796,6 +1809,30 @@ test "canonical_redundant_bool_compare fires on `=== true` for a boolean" {
 test "canonical_redundant_bool_compare fires on `!== false` for a boolean" {
     var h = try checkSourceTyped(
         "function handler(req) { const ready = req.method === \"GET\"; if (ready !== false) { return Response.text(\"a\"); } return Response.text(\"b\"); }",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare fires for a const-bound literal boolean" {
+    // A `const` binding keeps its literal type (`t_literal_bool`) while a `let`
+    // widens to `boolean`. A guard comparing against `idx_boolean` by identity
+    // saw the two differently, so this rule fired for the let form and not the
+    // const form - which made canonicalization non-confluent: rewriting the
+    // binding to `const` first disabled this row, leaving `x === true` in a
+    // file that still passed `normalize --check`.
+    var h = try checkSourceTyped(
+        "function handler(req) { const ready = true; if (ready === true) { return Response.text(\"a\"); } return Response.text(\"b\"); }",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare fires for a let-bound literal boolean" {
+    // The other half of the pair: both bindings must reach the same canonical
+    // form, which is the property the confluence harness checks.
+    var h = try checkSourceTyped(
+        "function handler(req) { let ready = true; if (ready === true) { return Response.text(\"a\"); } return Response.text(\"b\"); }",
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_bool_compare);
