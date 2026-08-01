@@ -433,6 +433,10 @@ pub const ContractBuilder = struct {
                     .prefix => {
                         if (pattern.response_template_prefix != null) pattern_count += 1;
                     },
+                    // exhaustive: PatternType has three members and the third is
+                    // `.dynamic`, which the enum itself documents as "not
+                    // optimizable". Leaving it out of the fast-path count is the
+                    // point of the count.
                     else => {},
                 }
             }
@@ -1485,6 +1489,10 @@ pub const ContractBuilder = struct {
                 const arm = self.ir_view.getMatchArm(root) orelse return false;
                 return self.subtreeContains(arm.pattern, target) or self.subtreeContains(arm.body, target);
             },
+            // exhaustive: falling through reaches `return false` - the target was
+            // not found in this subtree. The arms above cover every node with
+            // children to search; the rest are leaves that can only be the
+            // target itself, which the identity check at the top already made.
             else => {},
         }
         return false;
@@ -1803,6 +1811,9 @@ pub const ContractBuilder = struct {
                     try self.walkScopeDepth(self.ir_view.getListIndex(call.args_start, i), depth);
                 }
             },
+            // exhaustive: scope depth only deepens through the nesting constructs
+            // handled above. A leaf carries no scope, so there is nothing to
+            // descend into and nothing to count.
             else => {},
         }
     }
@@ -1917,6 +1928,9 @@ pub const ContractBuilder = struct {
                     }
                 }
             },
+            // exhaustive: not finding a `durable.run` call here leaves the handler
+            // with no workflow to prove, which claims nothing. The arms above
+            // cover every node a call can be reached through.
             else => {},
         }
 
@@ -1964,6 +1978,12 @@ pub const ContractBuilder = struct {
             .match_expr, .switch_stmt, .for_stmt, .for_of_stmt, .for_in_stmt, .while_stmt, .do_while_stmt => {
                 self.markWorkflowPartial();
             },
+            // exhaustive: the control-flow kinds above mark the proof partial
+            // because the graph cannot model them. What remains carries no
+            // workflow call of its own - a nested function declaration is not
+            // walked here, but calling it is an unmodeled call at its own
+            // statement, which `isUnhandledWorkflowCall` catches and which a
+            // regression test covers.
             else => {},
         }
     }
@@ -2154,6 +2174,9 @@ pub const ContractBuilder = struct {
                 .return_response => has_return = true,
                 .wait_signal => has_wait_signal = true,
                 .signal, .signal_at => has_signal_producer = true,
+                // exhaustive: this loop asks three yes/no questions of the graph, and
+                // only the node kinds above answer any of them. The rest are
+                // steps and sleeps, which bear on neither.
                 else => {},
             }
         }
@@ -2366,6 +2389,8 @@ pub const ContractBuilder = struct {
                     value < @as(f64, @floatFromInt(std.math.minInt(i64)))) break :blk null;
                 break :blk @intFromFloat(value);
             },
+            // exhaustive: null means "not a literal number the compiler can read",
+            // which leaves the value dynamic rather than pinning a wrong one.
             else => null,
         };
     }
@@ -2537,6 +2562,9 @@ pub const ContractBuilder = struct {
                 const json_arg = self.getJsonStringifyArg(node_idx) orelse return null;
                 return try self.serializeJsonLiteral(json_arg);
             },
+            // exhaustive: null is how a non-literal schema argument is spelled, and
+            // the caller answers it by setting `api_schemas_dynamic`. Reporting
+            // an unreadable schema as unanalyzable is the conservative outcome.
             else => return null,
         }
     }
@@ -2640,6 +2668,8 @@ pub const ContractBuilder = struct {
                 try writer.writeByte('}');
                 return true;
             },
+            // exhaustive: false abandons the literal serialization, so the caller
+            // treats the value as dynamic instead of recording a partial one.
             else => return false,
         }
     }
@@ -2652,6 +2682,9 @@ pub const ContractBuilder = struct {
                 const binding = self.ir_view.getBinding(key_idx) orelse break :blk null;
                 break :blk self.resolveAtomName(binding.name_atom);
             },
+            // exhaustive: an object key is a string literal or a bare identifier. A
+            // computed key is not statically known, and null stops the read
+            // rather than inventing a name.
             else => null,
         };
     }
@@ -3004,6 +3037,8 @@ pub const ContractBuilder = struct {
                 const binding = self.ir_view.getBinding(node_idx) orelse return null;
                 return self.findObjectLiteralBinding(binding.slot);
             },
+            // exhaustive: null means no object literal was resolved, which leaves
+            // the fact unextracted rather than extracted wrongly.
             else => return null,
         }
     }
@@ -3046,6 +3081,8 @@ pub const ContractBuilder = struct {
                     const init_tag = self.ir_view.getTag(decl.init) orelse continue;
                     if (init_tag == .function_expr or init_tag == .arrow_function) return decl.init;
                 },
+                // exhaustive: only a declaration can bind a function to the slot being
+                // searched for. Other statement kinds bind nothing and are skipped.
                 else => {},
             }
         }
@@ -3064,6 +3101,9 @@ pub const ContractBuilder = struct {
                 const binding = self.ir_view.getBinding(node_idx) orelse return null;
                 return self.findFunctionNodeByBinding(binding.slot);
             },
+            // exhaustive: null means the expression does not resolve to a function
+            // body this can read, so the caller extracts no facts from it rather
+            // than facts from the wrong node.
             else => return null,
         }
     }
@@ -3309,6 +3349,9 @@ pub const ContractBuilder = struct {
             },
             .break_stmt, .continue_stmt => {},
             .function_decl, .function_expr, .arrow_function => return,
+            // exhaustive: API facts are read from the response-producing constructs
+            // above. What remains holds no route, status, or schema to record,
+            // and a missed fact leaves contract.json quieter, never wronger.
             else => {},
         }
     }
@@ -3427,6 +3470,8 @@ pub const ContractBuilder = struct {
                 }
                 return candidate;
             },
+            // exhaustive: null means this call is not a Response helper, so there is
+            // no documented response to describe.
             else => return null,
         }
     }
@@ -3667,6 +3712,9 @@ pub const ContractBuilder = struct {
             for (enum_val.array.items) |item| {
                 switch (item) {
                     .string, .integer, .float, .bool => {},
+                    // exhaustive: false rejects the schema as a query parameter, which
+                    // makes the caller mark the route's query params dynamic.
+                    // Rejecting is the conservative direction.
                     else => return false,
                 }
             }
@@ -3791,6 +3839,9 @@ pub const ContractBuilder = struct {
                 const init_node = self.findBindingInitNode(binding.slot) orelse return null;
                 return try self.extractResponseSchemaRef(init_node);
             },
+            // exhaustive: null means no schema reference was found, leaving the
+            // response undocumented rather than documented against the wrong
+            // schema.
             else => return null,
         }
     }
@@ -3852,6 +3903,8 @@ pub const ContractBuilder = struct {
                     if (value < 0 or value > std.math.maxInt(u16)) return null;
                     return @intCast(value);
                 },
+                // exhaustive: a status that is not an integer literal is not statically
+                // known, and null leaves it unrecorded rather than guessed.
                 else => return null,
             }
         }
@@ -4053,6 +4106,9 @@ pub const ContractBuilder = struct {
                 const func = self.ir_view.getFunction(node) orelse return;
                 try self.includeReachableNodeEffects(func.body, summary, seen_functions);
             },
+            // exhaustive: every node that can contain a call is walked above,
+            // including match_expr and both literal containers. What remains are
+            // leaves - identifiers and literals - which reach no effect.
             else => {},
         }
     }
@@ -4354,6 +4410,8 @@ fn findTestFunctionNode(view: IrView, atoms: *atom_table.AtomTable, name: []cons
                 if (init_tag == .function_expr or init_tag == .arrow_function) return decl.init;
                 return null;
             },
+            // exhaustive: only a declaration binds the named function being looked
+            // up; other statement kinds cannot answer the question.
             else => {},
         }
     }

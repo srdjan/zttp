@@ -470,6 +470,10 @@ fn propKeyName(deps: Deps, key_idx: NodeIndex) ?[]const u8 {
             const binding = deps.ir_view.getBinding(key_idx) orelse return null;
             return resolverCall(deps, binding.name_atom);
         },
+        // exhaustive: null means the key is not statically known, which drops
+        // the assertion from the extracted intent rather than recording it
+        // under a key the author did not write. The caller marks the intent
+        // dynamic.
         else => return null,
     }
 }

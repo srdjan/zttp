@@ -911,6 +911,9 @@ pub const HandlerVerifier = struct {
                     self.checkOptionalObjectAccess(member, node);
                 }
             },
+            // exhaustive: this walk looks for unguarded Result and optional reads,
+            // and every expression that can perform one is handled above. A leaf
+            // reads nothing, so there is no access to check.
             else => {},
         }
     }
