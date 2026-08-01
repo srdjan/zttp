@@ -312,6 +312,22 @@ pub const FunctionBinding = struct {
     /// Effect classification for handler property derivation.
     effect: EffectClass = .read,
 
+    /// Runtime capabilities this export consumes, as opposed to the union its
+    /// module declares. Empty means "inherit the module's set", which is what
+    /// every binding did before this field existed - so an untightened module
+    /// keeps its current behaviour exactly.
+    ///
+    /// The module-level union is an over-approximation per export:
+    /// `zttp:websocket` declares six capabilities, and `serializeAttachment`
+    /// reaches none of them. Under a mandatory-ceiling rule that turns into
+    /// annotations that are wrong on their face, and over-approximating on the
+    /// provable side rejects true programs. Declaring the real set per export
+    /// is what makes a ceiling truthful.
+    ///
+    /// `validateBindings` requires this to be a subset of the module's set, so
+    /// tightening an export can never widen its authority by accident.
+    required_capabilities: []const ModuleCapability = &.{},
+
     /// Return type classification. Drives verifier, bool checker, and type checker.
     returns: ReturnKind = .unknown,
 
@@ -456,6 +472,22 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
         for (b.exports) |f| {
             if (f.func == null and f.module_func == null) {
                 @compileError("function binding missing both func and module_func: " ++ f.name);
+            }
+            if (findDuplicateRequiredCapability(f.required_capabilities)) |capability| {
+                @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' on " ++ b.specifier ++ "." ++ f.name);
+            }
+            // An export may narrow its module's authority, never widen it.
+            // Without this a tightening pass could hand a function a capability
+            // its module never declared, and the module set is what the runtime
+            // actually grants.
+            for (f.required_capabilities) |cap| {
+                var found = false;
+                for (b.required_capabilities) |mod_cap| {
+                    if (mod_cap == cap) found = true;
+                }
+                if (!found) {
+                    @compileError("capability '" ++ @tagName(cap) ++ "' on " ++ b.specifier ++ "." ++ f.name ++ " is not declared by the module; an export may narrow its module's set, never widen it");
+                }
             }
             // `param_types` is what the type checker enforces at the call site,
             // so an under-declared list silently drops the diagnostic for that

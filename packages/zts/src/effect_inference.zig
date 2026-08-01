@@ -560,7 +560,7 @@ pub const Analyzer = struct {
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
         if (self.imports.get(binding.slot)) |imported| {
-            self.insertModuleCapabilities(imported.module, row);
+            self.insertModuleCapabilities(imported.module, imported.name, row);
             row.pure = false;
             // A `.write`-classified export modifies external state; that
             // demotes the enclosing function's `read_only` capsule property.
@@ -671,8 +671,25 @@ pub const Analyzer = struct {
     /// fail closed") applied at the row level: an unresolvable import is a
     /// missing manifest, and guessing zero authority for it is the same
     /// fail-open in a different place.
-    fn insertModuleCapabilities(self: *const Analyzer, module: []const u8, row: *EffectRow) void {
+    fn insertModuleCapabilities(
+        self: *const Analyzer,
+        module: []const u8,
+        name: []const u8,
+        row: *EffectRow,
+    ) void {
         if (builtin_modules.fromSpecifier(module)) |mb| {
+            // An export that declares its own set is the truthful answer: the
+            // module union is an over-approximation, and `zttp:websocket`
+            // charging `serializeAttachment` for network and filesystem makes
+            // every ceiling over it wrong on its face. An export that declares
+            // nothing inherits the module set, so an untightened binding
+            // behaves exactly as it did before the field existed.
+            if (builtin_modules.findExport(module, name)) |exp| {
+                if (exp.func.required_capabilities.len > 0) {
+                    for (exp.func.required_capabilities) |cap| row.capabilities.insert(cap);
+                    return;
+                }
+            }
             for (mb.required_capabilities) |cap| row.capabilities.insert(cap);
             return;
         }
@@ -1092,6 +1109,32 @@ test "partner write-classified import marks function and callers as writing" {
     try testing.expect(!wrapper.readOnly());
     try testing.expect(!clean.writes);
     try testing.expect(clean.readOnly());
+}
+
+test "an export with no declared set inherits its module's" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `zttp:env` declares env + policy_check at module level and its one export
+    // declares nothing, so the export inherits both. This is the migration
+    // default: an untightened binding behaves exactly as it did before
+    // per-export capabilities existed.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function region() { return env("REGION"); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const region = analyzer.lookup("region") orelse return error.FunctionNotFound;
+    try testing.expect(region.capabilities.contains(.env));
+    try testing.expect(region.capabilities.contains(.policy_check));
 }
 
 test "a partner module's declared capabilities reach the caller's row" {
