@@ -3916,8 +3916,13 @@ test "runCheckOnlyFromSource: a helper with no Effects ceiling is never flagged"
     }
 }
 
-test "appendExportCapsuleDiagnostics: exported helper without capsules gets ZTS507/ZTS508" {
+test "appendExportCapsuleDiagnostics: a capability-free export owes no Effects capsule" {
     const allocator = std.testing.allocator;
+    // `clean` reaches nothing, so there is no ceiling for it to declare.
+    // Asking for one contradicted the always-on rule beside it, which fires
+    // only on a nonempty row, and the annotation would have drawn a ZTS505
+    // over-declaration warning the moment it was written. ZTS508 still fires:
+    // the helper does have proven properties to document.
     const source =
         \\export function clean(s: string): string {
         \\  return s;
@@ -3938,8 +3943,37 @@ test "appendExportCapsuleDiagnostics: exported helper without capsules gets ZTS5
         if (std.mem.eql(u8, d.code, "ZTS507")) saw_507 = true;
         if (std.mem.eql(u8, d.code, "ZTS508")) saw_508 = true;
     }
-    try std.testing.expect(saw_507);
+    try std.testing.expect(!saw_507);
     try std.testing.expect(saw_508);
+}
+
+test "appendExportCapsuleDiagnostics: ZTS507 names the capabilities it wants declared" {
+    const allocator = std.testing.allocator;
+    // `region` reaches zttp:env, so it does have a ceiling to declare, and the
+    // suggestion is computed from the inferred row rather than left as a
+    // placeholder the author has to re-derive.
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\export function region(): string {
+        \\  return env("REGION") ?? "unknown";
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(region());
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "docs.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    appendExportCapsuleDiagnostics(allocator, &result, "docs.ts");
+
+    var suggestion: ?[]const u8 = null;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS507")) suggestion = d.suggestion;
+    }
+    const text = suggestion orelse return error.MissingZts507;
+    try std.testing.expect(std.mem.indexOf(u8, text, "\"env\"") != null);
 }
 
 test "buildTestContractForSource marks durable workflow partial for dynamic signal name" {

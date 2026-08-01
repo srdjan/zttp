@@ -8,6 +8,7 @@ const zts = @import("zts");
 
 const handler_contract = zts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
+const SpecDiagnostic = handler_contract.SpecDiagnostic;
 const json_diag = @import("json_diagnostics.zig");
 
 pub const CheckResult = struct {
@@ -206,28 +207,86 @@ pub fn appendExportCapsuleDiagnostics(
     const contract = if (result.contract) |*c| c else return;
     for (contract.function_effect_capsules.items) |cap| {
         if (!cap.exported or cap.declared.items.len > 0) continue;
+        // A helper that reaches nothing has no ceiling to declare. Asking for
+        // one anyway contradicts the always-on rule beside it, which fires
+        // only on a nonempty row, and the annotation it asks for would draw a
+        // ZTS505 over-declaration warning the moment it was written.
+        const repair = computedCapsuleRepair(allocator, "Effects", cap.inferred.items) orelse continue;
         result.json_diagnostics.append(allocator, .{
-            .code = "ZTS507",
+            .code = SpecDiagnostic.Kind.missing_effects_capsule.code(),
             .severity = "warning",
             .message = "exported helper carries no Effects<...> capsule",
             .file = handler_path,
             .line = cap.line,
             .column = 0,
-            .suggestion = "annotate the exported helper's return type with `Effects<T, \"...\">` to document its capability ceiling.",
-        }) catch {};
+            .suggestion = repair,
+            .suggestion_owned = true,
+        }) catch allocator.free(repair);
     }
     for (contract.function_capsules.items) |cap| {
         if (!cap.exported or cap.declared.items.len > 0) continue;
+        var proven_buf: [4][]const u8 = undefined;
+        // Same rule: a helper with nothing proved about it has no capsule to
+        // write down.
+        const repair = computedCapsuleRepair(allocator, "Proof", provenPropertyNames(cap, &proven_buf)) orelse continue;
         result.json_diagnostics.append(allocator, .{
-            .code = "ZTS508",
+            .code = SpecDiagnostic.Kind.missing_proof_capsule_export.code(),
             .severity = "warning",
             .message = "exported helper carries no Proof<...> capsule",
             .file = handler_path,
             .line = cap.line,
             .column = 0,
-            .suggestion = "annotate the exported helper's return type with `Proof<T, \"...\">` to document its proven properties.",
-        }) catch {};
+            .suggestion = repair,
+            .suggestion_owned = true,
+        }) catch allocator.free(repair);
     }
+}
+
+/// Build the exact annotation an author should write, from the set the
+/// compiler already inferred. D2 5 asks for a repair "computed from the
+/// inferred row": `Effects<T, "clock" | "crypto">` tells the author (and the
+/// agent) what to type, where a `"..."` placeholder makes them re-derive what
+/// the compiler just worked out. Caller owns the result.
+fn computedCapsuleRepair(
+    allocator: std.mem.Allocator,
+    comptime capsule: []const u8,
+    names: []const []const u8,
+) ?[]u8 {
+    if (names.len == 0) return null;
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    buf.appendSlice(allocator, "annotate the exported helper's return type with `" ++ capsule ++ "<T, ") catch return null;
+    for (names, 0..) |name, i| {
+        if (i > 0) buf.appendSlice(allocator, " | ") catch return null;
+        buf.append(allocator, '"') catch return null;
+        buf.appendSlice(allocator, name) catch return null;
+        buf.append(allocator, '"') catch return null;
+    }
+    buf.appendSlice(allocator, ">`.") catch return null;
+    return buf.toOwnedSlice(allocator) catch null;
+}
+
+/// The capsule properties the compiler proved for a helper, in the order the
+/// v1 set declares them.
+fn provenPropertyNames(cap: anytype, out: *[4][]const u8) []const []const u8 {
+    var n: usize = 0;
+    if (cap.proven_total) {
+        out[n] = "total";
+        n += 1;
+    }
+    if (cap.proven_pure) {
+        out[n] = "pure";
+        n += 1;
+    }
+    if (cap.proven_read_only) {
+        out[n] = "read_only";
+        n += 1;
+    }
+    if (cap.proven_deterministic) {
+        out[n] = "deterministic";
+        n += 1;
+    }
+    return out[0..n];
 }
 
 /// Default canonical profile: public helpers that participate in capability
@@ -241,30 +300,39 @@ pub fn appendCanonicalPublicHelperDiagnostics(
 
     for (contract.function_effect_capsules.items) |cap| {
         if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0 or cap.inferred.items.len == 0) continue;
+        const repair = computedCapsuleRepair(allocator, "Effects", cap.inferred.items);
         result.json_diagnostics.append(allocator, .{
-            .code = "ZTS610",
+            .code = json_diag.strictCheckerCode(.canonical_public_helper_effects),
             .severity = "error",
             .message = "public helper reaches capabilities and should declare Effects<...>",
             .file = handler_path,
             .line = cap.line,
             .column = 0,
-            .suggestion = "annotate the exported helper's return type with `Effects<T, \"...\">` for the reached capabilities.",
-        }) catch {};
+            .suggestion = repair,
+            .suggestion_owned = repair != null,
+        }) catch {
+            if (repair) |r| allocator.free(r);
+        };
         result.canonical_errors += 1;
     }
 
     if (!declaresProofSupportedSpec(contract.declared_specs.items)) return;
     for (contract.function_capsules.items) |cap| {
         if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0) continue;
+        var proven_buf: [4][]const u8 = undefined;
+        const repair = computedCapsuleRepair(allocator, "Proof", provenPropertyNames(cap, &proven_buf));
         result.json_diagnostics.append(allocator, .{
-            .code = "ZTS611",
+            .code = json_diag.strictCheckerCode(.canonical_public_helper_proof),
             .severity = "error",
             .message = "public helper participates in declared specs and should declare Proof<...>",
             .file = handler_path,
             .line = cap.line,
             .column = 0,
-            .suggestion = "annotate the exported helper's return type with `Proof<T, \"...\">` for the declared proof properties it preserves.",
-        }) catch {};
+            .suggestion = repair,
+            .suggestion_owned = repair != null,
+        }) catch {
+            if (repair) |r| allocator.free(r);
+        };
         result.canonical_errors += 1;
     }
 }

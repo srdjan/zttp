@@ -41,9 +41,16 @@ pub const JsonDiagnostic = struct {
     /// `deinit` frees it; static-string messages keep this false and are
     /// left untouched. See `fromCheckerDiagnostic`.
     message_owned: bool = false,
+    /// True when `suggestion` is a heap copy owned by this diagnostic. A repair
+    /// computed from an inferred row has to be built at diagnosis time, so it
+    /// cannot be a static string like most suggestions are.
+    suggestion_owned: bool = false,
 
     pub fn deinit(self: *JsonDiagnostic, allocator: std.mem.Allocator) void {
         if (self.message_owned) allocator.free(self.message);
+        if (self.suggestion_owned) {
+            if (self.suggestion) |sug| allocator.free(sug);
+        }
     }
 };
 
@@ -152,8 +159,13 @@ fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
     };
 }
 
-/// StrictChecker error codes: ZTS6xx
-fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
+/// StrictChecker error codes: ZTS6xx.
+///
+/// Public so emitters that build a `JsonDiagnostic` directly derive their code
+/// from the kind rather than writing the string twice. Two ZTS6xx kinds had
+/// exactly that duplication and read as dead enum variants because nothing
+/// named them.
+pub fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
     return switch (kind) {
         .implicit_unknown => "ZTS600",
         .missing_public_annotation => "ZTS601",
