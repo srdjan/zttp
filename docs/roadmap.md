@@ -233,20 +233,28 @@ empty slice is the separate claim that an export reaches nothing. `validateBindi
 enforces subset-of-module on both binding boundaries, so a tightening can narrow
 authority and never widen it, and `module-spec-render` publishes the per-export set.
 
-Two of the 24 modules are tightened, each verified against its implementation rather
+Five of the 24 modules are tightened, each verified against its implementation rather
 than its comment: `zttp:auth` (parseBearer and timingSafeEqual reach neither crypto nor
-clock) and `zttp:id` (only ulid reads the clock). The rest still inherit; each is its own
-reviewable commit.
+clock), `zttp:id` (only ulid reads the clock), `zttp:websocket` (traced through dispatch
+to the runtime callbacks and the connection pool: only send and close write to the
+socket, only serializeAttachment can touch disk), `zttp:ratelimit` (rateReset removes a
+map entry and reads no clock), and `zttp:sql` (`sql()` registers a statement in a map and
+opens no database). The rest still inherit; each is its own reviewable commit.
+
+What is left is either single-capability, where there is nothing to narrow, or routes
+through module state and needs the same per-method trace: cache, log, env, crypto, and
+the runtime_callback-only workflow modules.
 
 Note the original observable named `escapeHtml`, which cannot demonstrate anything:
 `zttp:text` declares no capabilities at all, so the test would pass before the change as
 readily as after. The modules where the union actually over-approximates are
 `zttp:websocket` (six capabilities over six exports), `zttp:auth`, `zttp:id`, and
-`zttp:sql`. `zttp:websocket` is the largest and is deliberately not tightened yet: all
-six exports funnel through one dispatch requiring only `.runtime_callback`, and its
-network and filesystem entries describe what the runtime callback reaches in another
-package. Narrowing on the strength of the binding comment could drop `.network` from a
-row that does write to a socket, so it needs a runtime-side audit first.
+`zttp:sql`. `zttp:websocket` was the largest and the audit is done: `.clock`,
+`.policy_check`, and `.websocket` are reached by no export path, since the only
+`requireCapability` in the module is `.runtime_callback` in dispatch. They stay in the
+module set, which is what the sandbox grants and what the frame loop and hibernation
+paths run under - per-export declarations are analysis-side only, because
+`wrapToNativeFn` builds the runtime's active-context capabilities from the module set.
 
 Observable: a test proving a `zttp:auth` bearer-token parse under a ceiling that excludes
 the module's crypto and clock capabilities.
