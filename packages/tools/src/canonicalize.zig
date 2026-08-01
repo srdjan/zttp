@@ -4183,3 +4183,186 @@ test "nestedDestructureRewrite flattens a single-line nested pattern" {
     try std.testing.expect(std.mem.indexOf(u8, rw.replacement, "const {user} = makeUser(1);") != null);
     try std.testing.expect(std.mem.indexOf(u8, rw.replacement, "const {name} = user;") != null);
 }
+
+// ---------------------------------------------------------------------------
+// Confluence: critical pairs over the rewrite rows
+// ---------------------------------------------------------------------------
+
+/// The rewrite rows the normalizer can emit. Kept beside the confluence check
+/// so a new row that nobody pairs against is visible as a gap rather than
+/// silently untested.
+pub const rewrite_row_kinds = [_][]const u8{
+    "canonicalize_arrow_helper",
+    "canonicalize_capability_key_alias",
+    "canonicalize_compound_assign",
+    "canonicalize_export_function",
+    "canonicalize_for_of_const",
+    "canonicalize_let_const",
+    "canonicalize_redundant_bool_compare",
+};
+
+/// Apply only the refactors of one row kind, to a fixed point.
+///
+/// The normalizer's own loop applies every enabled row per pass. Restricting to
+/// one row is what makes a critical pair observable: it lets the harness drive
+/// A-then-B and B-then-A over the same input and compare where they land.
+fn normalizeOnlyKind(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    virtual_path: []const u8,
+    kind: []const u8,
+) ![]u8 {
+    var current = try allocator.dupe(u8, source);
+    errdefer allocator.free(current);
+
+    var pass: u32 = 0;
+    while (pass < max_normalize_iterations) : (pass += 1) {
+        var result = collectFromSource(allocator, current, virtual_path) catch break;
+        defer result.deinit(allocator);
+
+        var selected: std.ArrayListUnmanaged(Refactor) = .empty;
+        defer selected.deinit(allocator);
+        var seen_lines: std.ArrayListUnmanaged(u32) = .empty;
+        defer seen_lines.deinit(allocator);
+        for (result.refactors.items) |r| {
+            if (!std.mem.eql(u8, r.kind, kind)) continue;
+            // `applyRefactors` refuses two refactors on one line; take the
+            // first and let the next pass pick up the rest.
+            if (std.mem.indexOfScalar(u32, seen_lines.items, r.line) != null) continue;
+            try seen_lines.append(allocator, r.line);
+            try selected.append(allocator, r);
+        }
+        if (selected.items.len == 0) break;
+
+        const next = applyRefactors(allocator, current, selected.items) catch break;
+        allocator.free(current);
+        current = next;
+    }
+    return current;
+}
+
+/// Row pairs that are known not to join, with the reason.
+///
+/// D3 requires the rewrite relation be confluent and calls a non-joining pair a
+/// build failure. This list is the interim step the roadmap asks for - collect
+/// failures as fixtures first - because closing the entry below is a rule
+/// change with its own blast radius, not a normalizer fix.
+///
+/// Deleting an entry is the goal. An entry that starts joining fails the test,
+/// so the list can only shrink.
+const known_non_joining = [_]struct {
+    a: []const u8,
+    b: []const u8,
+    why: []const u8,
+}{
+    .{
+        .a = "canonicalize_let_const",
+        .b = "canonicalize_redundant_bool_compare",
+        // `let ready = true; if (ready === true)` has two canonical forms.
+        // Rewriting the comparison first reaches `const ready = true;
+        // if (ready)`. Rewriting the binding first reaches `const ready = true;
+        // if (ready === true)` and stops: ZTS620 no longer fires once `ready`
+        // is const, so the comparison is never removed - and that result also
+        // passes `normalize --check`, so it is a second canonical form rather
+        // than a stuck one.
+        //
+        // The normalize loop applies both rows in one pass and lands on the
+        // first form, which is why this went unnoticed. A client applying
+        // repairs one intent at a time lands on the second. Canonical form is
+        // meant to be unique; here one surface program has two.
+        .why = "ZTS620 stops firing once the binding is const, so the comparison survives in one order",
+    },
+};
+
+fn isKnownNonJoining(a: []const u8, b: []const u8) bool {
+    for (known_non_joining) |pair| {
+        if (std.mem.eql(u8, pair.a, a) and std.mem.eql(u8, pair.b, b)) return true;
+        if (std.mem.eql(u8, pair.a, b) and std.mem.eql(u8, pair.b, a)) return true;
+    }
+    return false;
+}
+
+test "rewrite rows join in either order" {
+    const allocator = std.testing.allocator;
+
+    // Each fixture enables more than one row, which is what makes it a
+    // critical pair rather than two independent rewrites. Sources are inline
+    // rather than drawn from examples/: the obligation is over the rows, and a
+    // corpus file that happens not to trigger a pair proves nothing about it.
+    const fixtures = [_]struct { name: []const u8, source: []const u8 }{
+        .{
+            .name = "let-const beside a compound assign",
+            .source =
+            \\function handler(req: Request): Response {
+            \\  let total = 1;
+            \\  total += 2;
+            \\  let label = "x";
+            \\  return Response.text(label + total);
+            \\}
+            \\
+            ,
+        },
+        .{
+            .name = "let-const beside a redundant bool compare",
+            .source =
+            \\function handler(req: Request): Response {
+            \\  let ready = true;
+            \\  if (ready === true) { return Response.text("a"); }
+            \\  return Response.text("b");
+            \\}
+            \\
+            ,
+        },
+        .{
+            .name = "for-of const beside a let-const",
+            .source =
+            \\function handler(req: Request): Response {
+            \\  let out = "";
+            \\  for (let item of ["a", "b"]) { out = out + item; }
+            \\  return Response.text(out);
+            \\}
+            \\
+            ,
+        },
+    };
+
+    var non_joining: usize = 0;
+    var matched_known: usize = 0;
+    for (fixtures) |fixture| {
+        for (rewrite_row_kinds, 0..) |a, i| {
+            for (rewrite_row_kinds[i + 1 ..]) |b| {
+                const ab_first = try normalizeOnlyKind(allocator, fixture.source, "conf.ts", a);
+                defer allocator.free(ab_first);
+                const ab = try normalizeOnlyKind(allocator, ab_first, "conf.ts", b);
+                defer allocator.free(ab);
+
+                const ba_first = try normalizeOnlyKind(allocator, fixture.source, "conf.ts", b);
+                defer allocator.free(ba_first);
+                const ba = try normalizeOnlyKind(allocator, ba_first, "conf.ts", a);
+                defer allocator.free(ba);
+
+                if (!std.mem.eql(u8, ab, ba)) {
+                    if (isKnownNonJoining(a, b)) {
+                        matched_known += 1;
+                        continue;
+                    }
+                    non_joining += 1;
+                    std.debug.print(
+                        "[confluence] {s}: {s} then {s} does not join {s} then {s}\n",
+                        .{ fixture.name, a, b, b, a },
+                    );
+                }
+            }
+        }
+    }
+
+    // Reported as a count rather than an assertion on the first mismatch, so a
+    // run names every unrecorded non-joining pair at once instead of stopping
+    // at the first.
+    try std.testing.expectEqual(@as(usize, 0), non_joining);
+
+    // Ratchets the other way too: a recorded pair that starts joining means
+    // the entry is stale and should be deleted, the same rule the module
+    // boundary and proof-swallow allowlists follow.
+    try std.testing.expect(matched_known >= known_non_joining.len);
+}
