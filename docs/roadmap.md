@@ -260,7 +260,8 @@ measurement of how far the current normalizer sits from canonical. The span fix 
 precondition for any external client to trust a repair, which item 4 needs on the wire.
 
 Observable: a counted list of non-confluent rule pairs, tracked toward zero, and a JSON
-repair a test client re-validates byte for byte.
+repair a test client re-validates byte for byte. The count is 1, and the harness fails on
+any pair not on the list.
 
 ### 7. Per-export capability rows (medium)
 
