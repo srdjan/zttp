@@ -246,12 +246,37 @@ Observable: one published row per model in the item-2 table, dated.
 
 ### 6. Idempotence gate and the repair-span fix (small)
 
-A confluence and idempotence harness over the existing `normalize` loop in
-`packages/tools/src/canonicalize.zig`, applying rules in different orders and comparing
-by parse identity, with failures collected as a fixture list rather than a build break
-at first. Separately, serialize `original_line` through the JSON boundary so a client
-can re-validate a repair span. D3 records that confluence is "asserted in a comment,
-never verified" and that idempotence "does not exist today".
+Two of the three parts were already done and this item's premise was stale.
+Double-normalize byte-idempotence has run as `scripts/check-normalize-idempotent.sh`
+inside `scripts/verify.sh` for some time (54 files, 1 skipped as not fully canonical),
+and `original_line` reaches the JSON boundary at `agent_protocol.zig:1201`, so a client
+can already re-validate a repair span. D3's "idempotence does not exist today" no longer
+holds.
+
+Confluence was the part that genuinely did not exist, and the first run of the harness
+found a non-joining pair. `let ready = true; if (ready === true)` had two canonical
+forms: rewriting the comparison first reached `if (ready)`, rewriting the binding first
+reached `const ready = true; if (ready === true)` and stopped. Both passed
+`normalize --check`, so the second was a second canonical form rather than a stuck one.
+The normalize loop applies every enabled row per pass and lands on the first, which is
+why it went unnoticed; a client applying repairs one intent at a time lands on the
+second. Canonical form is set collapse, so a surface program with two normal forms is
+the property failing rather than a cosmetic wart.
+
+It is closed. The cause was one line: the rule's soundness guard compared the inferred
+type against `idx_boolean` by identity, and a `const` binding keeps its literal type
+(`t_literal_bool`) where a `let` widens to `boolean` - `widenLiteral` exists precisely
+to stop let bindings locking to a value. `checkRedundantBoolCompare` now widens before
+comparing, which does not loosen the guard: `t_literal_bool` widens only to
+`idx_boolean`, and a value of literal type `true` is a boolean, so `x === true` is still
+exactly `x`. The policy hash did not move - the registry text is unchanged and only the
+firing condition widened.
+
+The harness restricts the loop to one row kind at a time, which is what makes a critical
+pair observable: within a single pass `applyRefactors` walks lines and rejects same-line
+pairs, so permuting the refactor slice cannot change the output and would prove nothing.
+`known_non_joining` is empty, which is the state D3 requires, and the harness fails both
+on an unlisted non-joining pair and on a listed pair that starts joining.
 
 Why: canonical form is set collapse. Many surface programs mapping to one normal program
 shrinks the emittable set directly. The full canonical formatter is the largest single
@@ -260,7 +285,7 @@ measurement of how far the current normalizer sits from canonical. The span fix 
 precondition for any external client to trust a repair, which item 4 needs on the wire.
 
 Observable: a counted list of non-confluent rule pairs, tracked toward zero, and a JSON
-repair a test client re-validates byte for byte. The count is 1, and the harness fails on
+repair a test client re-validates byte for byte. The count is 0, and the harness fails on
 any pair not on the list.
 
 ### 7. Per-export capability rows (medium)
