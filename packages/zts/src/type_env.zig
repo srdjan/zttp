@@ -320,6 +320,9 @@ pub const TypeEnv = struct {
                 .type_alias => self.processTypeAlias(tm, entry, &generic_params_map),
                 .interface_decl => self.processInterface(tm, entry),
                 .distinct_type => self.processDistinctType(tm, entry),
+                // exhaustive: this is the type-namespace pass. The annotation
+                // kinds it skips are consumed by the second pass below, so
+                // nothing is dropped - only deferred.
                 else => {},
             }
         }
@@ -365,6 +368,8 @@ pub const TypeEnv = struct {
                         fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch self.markAllocationFailure();
                     }
                 },
+                // exhaustive: mirror of the first pass. The kinds skipped here
+                // are the type-namespace ones already processed above.
                 else => {},
             }
         }
@@ -630,6 +635,22 @@ pub const TypeEnv = struct {
                 if (!changed) return idx;
                 return self.pool.addUnion(self.allocator, new_members);
             },
+            .t_nullable => {
+                // `Effects<Response, "env"> | undefined` parses as a nullable
+                // wrapping an uninstantiated generic application. Without this
+                // arm the wrapper is returned as-is, the marker search below
+                // finds a `t_generic_app` it has no case for, and the ceiling
+                // reads as absent - so the annotation the author wrote never
+                // bound anything.
+                const inner = self.pool.getNullableInner(idx);
+                const instantiated = self.tryInstantiateGenericApp(inner);
+                if (instantiated == inner) return idx;
+                return self.pool.addNullable(self.allocator, instantiated);
+            },
+            // exhaustive: returning the index unchanged is the identity, not a
+            // dropped case. Every tag that can wrap or be a generic application
+            // is handled above; the rest have nothing to instantiate, and the
+            // caller gets back the same type it passed in.
             else => return idx,
         }
     }
@@ -853,6 +874,10 @@ pub const TypeEnv = struct {
                     return std.mem.eql(u8, fname, spec_marker_field) or
                         std.mem.eql(u8, fname, effect_marker_field);
                 },
+                // exhaustive: false narrows erasure - the member is kept rather
+                // than stripped, so the returned expression must satisfy a type
+                // that still carries the phantom field. That can only reject a
+                // valid return, never let an undischarged proof through.
                 else => return false,
             }
         }
@@ -899,6 +924,23 @@ pub const TypeEnv = struct {
                 // capability/spec set is recovered.
                 try self.collectMarkedMembers(self.pool.getNullableInner(idx), out, marker, depth + 1, status);
             },
+            .t_union => {
+                // `Effects<Response, "env"> | string` puts the marker on one
+                // branch only, so there is no single ceiling for the type. The
+                // ceiling is present and unreadable, which is not the same as
+                // absent: report it rather than returning the empty set that
+                // every consumer reads as "the author declared nothing".
+                for (self.pool.getUnionMembers(idx)) |member| {
+                    var probe: std.ArrayListUnmanaged([]const u8) = .empty;
+                    defer probe.deinit(self.allocator);
+                    var probe_status: MarkerExtraction = .{};
+                    try self.collectMarkedMembers(member, &probe, marker, depth + 1, &probe_status);
+                    if (probe.items.len > 0 or probe_status.non_literal) {
+                        status.non_literal = true;
+                        return;
+                    }
+                }
+            },
             .t_record => {
                 for (self.pool.getRecordFields(idx)) |field| {
                     const fname = self.pool.getName(field.name_start, field.name_len);
@@ -907,6 +949,12 @@ pub const TypeEnv = struct {
                     }
                 }
             },
+            // exhaustive: the remaining tags are value types that cannot
+            // contain a marker record - a marker only ever reaches a return
+            // type through an intersection, an alias ref, a nullable wrapper,
+            // or a union, each handled above. Finding no marker is not a
+            // fail-open: the capsule is opt-in, so an unannotated return type
+            // legitimately yields nothing.
             else => {},
         }
     }
@@ -1981,6 +2029,64 @@ test "a literal Effects payload reports non_literal false" {
     defer caps.deinit(allocator);
     const extraction = try env.extractEffectMembers(idx, &caps);
     try std.testing.expectEqual(@as(usize, 2), caps.items.len);
+    try std.testing.expect(!extraction.non_literal);
+}
+
+test "a marker on one union branch reports non_literal, not an empty set" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // The ceiling is present but applies to one branch only, so there is no
+    // single ceiling for the type. Returning the empty set here would read as
+    // "the author declared nothing" - the same fail-open as a non-literal
+    // payload, reached through the marker search instead of the payload read.
+    const idx = env.resolveType("Effects<string, \"env\"> | string");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    const extraction = try env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 0), caps.items.len);
+    try std.testing.expect(extraction.non_literal);
+}
+
+test "a union carrying no marker at all stays silent" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const idx = env.resolveType("string | number");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    const extraction = try env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 0), caps.items.len);
+    try std.testing.expect(!extraction.non_literal);
+}
+
+test "a nullable-wrapped marker still resolves to its ceiling" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    // `| undefined` is the one union shape that does carry the obligation
+    // whole, and it must keep resolving after the t_union arm above.
+    const idx = env.resolveType("Effects<string, \"env\"> | undefined");
+
+    var caps: std.ArrayListUnmanaged([]const u8) = .empty;
+    defer caps.deinit(allocator);
+    const extraction = try env.extractEffectMembers(idx, &caps);
+    try std.testing.expectEqual(@as(usize, 1), caps.items.len);
+    try std.testing.expectEqualStrings("env", caps.items[0]);
     try std.testing.expect(!extraction.non_literal);
 }
 

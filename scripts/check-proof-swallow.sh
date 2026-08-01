@@ -118,5 +118,58 @@ if [[ -n "${stale//[[:space:]]/}" ]]; then
 fi
 
 row_count="$(printf '%s\n' "$found_rows" | grep -c . || true)"
-printf 'proof swallow: OK (%s files, %s reviewed swallows, 0 unreviewed)\n' \
-  "${#proof_files[@]}" "$row_count"
+
+# ---------------------------------------------------------------------------
+# Second scan: silent `else` arms.
+#
+# This is the shape the `Effects<...>` fail-open actually took.
+# `collectLiteralUnionStrings` dispatched on a type tag, handled union / ref /
+# string-literal, and sent everything else to `else => {}` - so a computed
+# payload returned zero names and read as "no annotation". Nothing about that
+# line looked wrong; the bug was in what the arm did not say.
+#
+# An allowlist is the wrong tool here. Most of these arms are correct - an IR
+# walker ignores node kinds with no children - and the justification is about
+# which kinds fall through, which belongs beside the arm rather than in a file
+# keyed on a function name that renames break. So the marker is inline: an
+# `// exhaustive:` comment on the arm or within the three lines above it,
+# naming why the ignored cases cannot carry anything this function owes.
+#
+# Arms that re-raise (`else => return err`, `else => return error.X`) are
+# propagation, not silence, and are not counted.
+unmarked_arms="$(
+  for f in "${proof_files[@]}"; do
+    awk -v file="$f" '
+      /^test "/ { in_test = 1 }
+      /^(pub )?fn [A-Za-z_]/ { in_test = 0 }
+      !in_test && /else => (\{\}|return|continue|null)/ &&
+      $0 !~ /else => return err[;,]?$/ && $0 !~ /else => return error\./ {
+        if (!pending && $0 !~ /\/\/ exhaustive:/) printf "%s:%d: %s\n", file, NR, $0
+        pending = 0
+        next
+      }
+      # The reason attaches to the comment block directly above the arm, however
+      # long it runs. Any code line between the two breaks the attachment, so a
+      # marker cannot drift onto an arm it was not written for.
+      /^[[:space:]]*\/\/.*exhaustive:/ { pending = 1; next }
+      /^[[:space:]]*\/\// { next }
+      /^[[:space:]]*$/ { next }
+      { pending = 0 }
+    ' "$f"
+  done
+)"
+
+if [[ -n "${unmarked_arms//[[:space:]]/}" ]]; then
+  printf 'proof swallow: these switch arms drop cases in silence and carry no `// exhaustive:` reason:\n' >&2
+  printf '%s\n' "$unmarked_arms" | sed 's/^/  /' >&2
+  printf 'Name the ignored cases and why this function owes them nothing, or handle them.\n' >&2
+  exit 1
+fi
+
+arm_count="$(
+  for f in "${proof_files[@]}"; do grep -c '// exhaustive:' "$f" || true; done |
+    awk '{s += $1} END {print s + 0}'
+)"
+
+printf 'proof swallow: OK (%s files, %s reviewed swallows, %s reviewed silent arms, 0 unreviewed)\n' \
+  "${#proof_files[@]}" "$row_count" "$arm_count"
