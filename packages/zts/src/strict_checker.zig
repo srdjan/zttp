@@ -1731,6 +1731,12 @@ fn expectKind(checker: *const StrictChecker, kind: DiagnosticKind) !void {
     return error.DiagnosticNotEmitted;
 }
 
+fn expectNoKind(checker: *const StrictChecker, kind: DiagnosticKind) !void {
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == kind) return error.UnexpectedDiagnostic;
+    }
+}
+
 fn countKind(checker: *const StrictChecker, kind: DiagnosticKind) usize {
     var n: usize = 0;
     for (checker.getDiagnostics()) |diag| {
@@ -1812,6 +1818,88 @@ test "canonical_redundant_bool_compare fires on `!== false` for a boolean" {
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+/// Strip, parse, and strict-check `source`, so the type env is populated from
+/// the stripper's TypeMap the way the real pipeline populates it. The typed
+/// harness above parses raw source and never strips, so it has no TypeMap and
+/// cannot exercise annotation lookup at all.
+const StrippedHarness = struct {
+    stripped: @import("stripper.zig").StripResult,
+    parser: @import("parser/root.zig").JsParser,
+    pool: type_pool_mod.TypePool,
+    env: TypeEnv,
+    tc: TypeChecker,
+    checker: StrictChecker,
+
+    fn deinit(self: *StrippedHarness) void {
+        self.checker.deinit();
+        self.tc.deinit();
+        self.env.deinit();
+        self.pool.deinit(testing.allocator);
+        self.parser.deinit();
+        self.stripped.deinit();
+        testing.allocator.destroy(self);
+    }
+};
+
+fn checkStripped(source: []const u8) !*StrippedHarness {
+    const h = try testing.allocator.create(StrippedHarness);
+    errdefer testing.allocator.destroy(h);
+    h.stripped = try @import("stripper.zig").strip(testing.allocator, source, .{});
+    h.parser = try @import("parser/root.zig").JsParser.init(testing.allocator, h.stripped.code);
+    const root = try h.parser.parse();
+    const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
+    h.pool = type_pool_mod.TypePool.init(testing.allocator);
+    h.env = TypeEnv.init(testing.allocator, &h.pool);
+    h.env.populateFromTypeMap(&h.stripped.type_map);
+    h.tc = TypeChecker.init(testing.allocator, view, null, &h.env, null);
+    _ = try h.tc.check(root);
+    h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);
+    _ = try h.checker.check(root);
+    return h;
+}
+
+test "a multi-line signature is fully annotated" {
+    // Annotations are stamped with the line their signature starts on, so a
+    // signature split across lines assembles into one entry. Before that,
+    // parameters and the return type landed in buckets keyed by their own
+    // lines, neither held a complete signature, and a fully annotated function
+    // was reported as missing its annotations.
+    var h = try checkStripped(
+        "function handler(\n    req: Request,\n): Response {\n  return Response.json({});\n}\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .missing_public_annotation);
+}
+
+test "a signature whose brace sits on the next line is fully annotated" {
+    // The narrowest form of the same bug: the whole signature is on one line
+    // and only the brace moved, which is enough to shift the function node's
+    // line away from the annotations'.
+    var h = try checkStripped(
+        "function handler(req: Request): Response\n{\n  return Response.json({});\n}\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .missing_public_annotation);
+}
+
+test "a multi-line signature missing a parameter type still fails" {
+    // The fix must not loosen the check: assembling the signature correctly is
+    // the point, not accepting more.
+    var h = try checkStripped(
+        "function handler(\n    req,\n): Response {\n  return Response.json({});\n}\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .missing_public_annotation);
+}
+
+test "a multi-line signature missing the return type still fails" {
+    var h = try checkStripped(
+        "function handler(\n    req: Request,\n) {\n  return Response.json({});\n}\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .missing_public_annotation);
 }
 
 test "canonical_redundant_bool_compare fires for a const-bound literal boolean" {

@@ -156,6 +156,10 @@ const Stripper = struct {
     // State
     line: u32,
     col: u32,
+    /// Line the function signature currently being scanned starts on, or null
+    /// outside one. Parameter and return annotations are stamped with it so a
+    /// signature split across lines stays one unit downstream.
+    signature_line: ?u32 = null,
 
     // Context tracking for smart colon handling
     // When true, colons are for expressions (object literals), not types
@@ -551,6 +555,20 @@ const Stripper = struct {
     fn handleFunctionDeclaration(self: *Self) StripError!void {
         // We've already output "function"
         // Now handle: [name]<generics>(params): returnType { ... }
+
+        // Stamp every annotation in this signature with the line the signature
+        // starts on. Without it each annotation carries the line it sits on, so
+        // a signature split across lines lands in separate buckets in
+        // `TypeEnv.populateFromTypeMap` - parameters under one, the return type
+        // under another - and no bucket holds a complete signature. The strict
+        // checker then reports a fully annotated function as missing its
+        // annotations.
+        //
+        // Saved and restored so a nested function does not leave the enclosing
+        // signature stamped with the inner line.
+        const saved_signature_line = self.signature_line;
+        self.signature_line = self.line;
+        defer self.signature_line = saved_signature_line;
 
         // Copy whitespace
         const ws_start = self.pos;
@@ -1960,7 +1978,12 @@ const Stripper = struct {
             .kind = kind,
             .source_start = @intCast(type_start),
             .source_end = @intCast(type_end),
-            .context_line = self.line,
+            // Parameters and return types belong to their signature, not to
+            // the line they were typed on; every other kind is positional.
+            .context_line = switch (kind) {
+                .param_annotation, .return_annotation => self.signature_line orelse self.line,
+                else => self.line,
+            },
             .context_col = self.col,
             .name_start = @intCast(name_start),
             .name_end = @intCast(name_end),
