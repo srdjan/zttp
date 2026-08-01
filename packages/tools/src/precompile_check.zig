@@ -316,6 +316,24 @@ pub fn appendCanonicalPublicHelperDiagnostics(
         result.canonical_errors += 1;
     }
 
+    // Spec 5.7's other half. An internal ceiling proves nothing the compiler
+    // does not already infer, and the handler's budget already bounds every
+    // helper it reaches (ZTS607) - so this costs no safety and buys one right
+    // answer for where an annotation goes.
+    for (contract.function_effect_capsules.items) |cap| {
+        if (cap.exported or cap.declared.items.len == 0) continue;
+        result.json_diagnostics.append(allocator, .{
+            .code = json_diag.strictCheckerCode(.canonical_internal_helper_effects),
+            .severity = "error",
+            .message = "module-internal helper declares an Effects<...> ceiling",
+            .file = handler_path,
+            .line = cap.line,
+            .column = 0,
+            .suggestion = "remove the `Effects<...>` ceiling: the compiler infers the row for a module-internal function, and the handler's budget already bounds it. Export the helper if the ceiling is meant to be part of the module's public surface.",
+        }) catch {};
+        result.canonical_errors += 1;
+    }
+
     if (!declaresProofSupportedSpec(contract.declared_specs.items)) return;
     for (contract.function_capsules.items) |cap| {
         if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0) continue;

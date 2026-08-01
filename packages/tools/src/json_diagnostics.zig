@@ -177,6 +177,7 @@ pub fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .canonical_arrow_helper => "ZTS608",
         .canonical_export_function_const => "ZTS609",
         .canonical_public_helper_effects => "ZTS610",
+        .canonical_internal_helper_effects => "ZTS623",
         .canonical_public_helper_proof => "ZTS611",
         .canonical_ternary_impure => "ZTS612",
         .canonical_ternary_chain => "ZTS621",

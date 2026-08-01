@@ -277,6 +277,14 @@ const strict_meta = [_]struct {
         .repair = .add_capability_declaration,
     },
     .{
+        .kind = .canonical_internal_helper_effects,
+        .code = "ZTS623",
+        .description = "A module-internal function declares an Effects<...> ceiling. Placement is decidable: exported with a nonempty row must declare, module-internal must not.",
+        .example = "function digest(s: string): Effects<string, \"crypto\"> { return sha256(s); } // not exported",
+        .help = "Remove the Effects<...> ceiling. The compiler infers the row for a module-internal function, and the handler's Effects budget already bounds every helper it reaches (ZTS607).",
+        .repair = null,
+    },
+    .{
         .kind = .canonical_public_helper_proof,
         .code = "ZTS611",
         .description = "A public helper used under declared specs should declare its Proof<...> capsule.",

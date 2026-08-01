@@ -89,6 +89,10 @@ pub const DiagnosticKind = enum {
     canonical_arrow_helper,
     canonical_export_function_const,
     canonical_public_helper_effects,
+    /// A module-internal function carries an `Effects<...>` ceiling. Spec 5.7
+    /// makes placement decidable rather than a style choice: exported with a
+    /// nonempty row MUST declare, module-internal MUST NOT.
+    canonical_internal_helper_effects,
     canonical_public_helper_proof,
     canonical_ternary_impure,
     canonical_ternary_chain,

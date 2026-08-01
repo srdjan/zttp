@@ -3916,6 +3916,62 @@ test "runCheckOnlyFromSource: a helper with no Effects ceiling is never flagged"
     }
 }
 
+test "ZTS623: a module-internal helper may not declare an Effects ceiling" {
+    const allocator = std.testing.allocator;
+    // Spec 5.7 makes placement decidable: exported with a nonempty row MUST
+    // declare, module-internal MUST NOT. The internal ceiling proves nothing
+    // the compiler does not infer, and ZTS607 already bounds the helper through
+    // the handler's budget.
+    const source =
+        \\import type { Effects } from "zttp:types";
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\function digest(s: string): Effects<string, "crypto"> {
+        \\  sha256(s);
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Effects<Response, "crypto"> {
+        \\  return Response.text(digest("zttp"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "internal.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    var saw_623 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS623")) saw_623 = true;
+    }
+    try std.testing.expect(saw_623);
+}
+
+test "ZTS623: dropping the internal ceiling satisfies the placement rule" {
+    const allocator = std.testing.allocator;
+    // Same program with the internal ceiling removed. The handler's budget
+    // still bounds `digest`, so nothing about the proof weakens.
+    const source =
+        \\import type { Effects } from "zttp:types";
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\function digest(s: string): string {
+        \\  sha256(s);
+        \\  return s;
+        \\}
+        \\
+        \\function handler(req: Request): Effects<Response, "crypto"> {
+        \\  return Response.text(digest("zttp"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "internal.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    for (result.json_diagnostics.items) |d| {
+        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS623"));
+        // The budget check must still be satisfied: no helper-budget breach.
+        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS607"));
+    }
+}
+
 test "appendExportCapsuleDiagnostics: a capability-free export owes no Effects capsule" {
     const allocator = std.testing.allocator;
     // `clean` reaches nothing, so there is no ceiling for it to declare.

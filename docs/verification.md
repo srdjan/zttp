@@ -290,7 +290,10 @@ The declared budget is recorded in `contract.json` under
 `sandbox.declaredBudget`. `zts check --json` adds an `effectCapsules`
 array alongside `proofCapsules`.
 
-`Effects<...>` is opt-in - a function with no annotation gets no check.
+Where a ceiling goes is decidable rather than optional: an exported function
+with a nonempty inferred row must declare one (ZTS610), and a module-internal
+function must not (ZTS623), because the compiler infers the internal row and
+the handler's budget already bounds it.
 The budget and every ceiling are discharged only against inferred facts
 from real function bodies, never an assumed claim. The opt-in
 `zts check --require-export-capsules` docs mode additionally warns

@@ -339,6 +339,7 @@ where the rewrite is provable, and otherwise left in place. Rows whose
 | ZTS609 | Exported function-valued `const` | Export a function declaration. |
 | ZTS610 | Public helper effects | Annotate the helper return type with `Effects<T, "...">`. |
 | ZTS611 | Public helper proof capsule | Annotate the helper return type with `Proof<T, "...">`. |
+| ZTS623 | Internal helper ceiling | Remove the `Effects<...>`: placement is decidable, and the handler budget already bounds an internal helper. |
 | ZTS612 | Effectful `?:` arm | A `?:` arm must be a pure value. Bind the effectful call first, or use `match`. |
 | ZTS613 | Compound assignment | Write the full assignment. |
 | ZTS614 | Non-leading object spread | Put spread first or write explicit fields. |

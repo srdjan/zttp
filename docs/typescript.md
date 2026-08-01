@@ -118,10 +118,17 @@ be no wider than `S`. It resolves to `T` for type checking and carries
 ```typescript
 import type { Effects } from "zttp:types";
 
-function loadRegion(): Effects<string, "env"> {
+export function loadRegion(): Effects<string, "env"> {
     return env("REGION");
 }
 ```
+
+Placement is a decidable rule, not a style choice: an **exported** function
+with a nonempty inferred row must declare a ceiling (ZTS610 when it does
+not), and a **module-internal** function must not (ZTS623 when it does).
+`loadRegion` is exported above, which is why it carries one. An internal
+helper needs no ceiling because the compiler infers its row and the
+handler's budget already bounds it.
 
 The capability vocabulary is the runtime capability set: `env`, `clock`,
 `random`, `crypto`, `stderr`, `runtime_callback`, `sqlite`,
@@ -141,12 +148,11 @@ function handler(req: Request): Effects<Response, "env" | "clock"> {
 }
 ```
 
-`Effects<...>` is opt-in: a function with no annotation gets no ceiling
-and no check. Because the effect marker is distinct from the proof
-marker, the two capsules compose - a helper can carry both:
+Because the effect marker is distinct from the proof marker, the two
+capsules compose - an exported helper can carry both:
 
 ```typescript
-function makeToken(u: User): Proof<Effects<string, "crypto">, "total"> {
+export function makeToken(u: User): Proof<Effects<string, "crypto">, "total"> {
     return sign(u.id);
 }
 ```
