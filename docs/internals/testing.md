@@ -40,8 +40,9 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-release-check`, `test-server`, `test-compile-bench`.
 
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
-`test-module-governance`, `test-runtime-purity`, `test-contract-golden`,
-`test-expert-golden`, `test-docs-drift`, `test-doc-links`.
+`test-proof-swallow`, `test-module-governance`, `test-runtime-purity`,
+`test-contract-golden`, `test-expert-golden`, `test-docs-drift`,
+`test-doc-links`.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and
@@ -111,3 +112,9 @@ when it consumes the shared tool cores through the `zts_cli` and
 Reaching a new `zts` internal module from `runtime`, `tools`, `pi`, or
 `proof-review` also needs a row in `scripts/module-boundary.allow`, and a row
 that nothing uses fails the same gate. Run `zig build test-module-boundary`.
+
+Discarding an error inside the analysis files that decide whether a program is
+proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot
+weaken a verdict, and a row nothing matches fails the same gate. A swallow
+there does not surface as a failure, it surfaces as a pass. Run `zig build
+test-proof-swallow`.

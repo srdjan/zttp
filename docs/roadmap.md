@@ -73,23 +73,29 @@ The ranking follows three legs. The provable set must be true, or convergence to
 no value. The gap must be measured, or the claim is only prose. The mechanisms that
 close the gap should move from rejection toward construction.
 
-### 1. Close the fail-open soundness holes (small)
+### 1. Close the fail-open soundness holes (done)
 
-A non-literal `Effects<T, R>` ceiling must produce a diagnostic instead of silently
-extracting zero names. A `zttp-ext:` module that contributes the empty capability set
-must fail closed. A call through a function-typed parameter must mark its effect row as
-a lower bound rather than under-approximating in silence. The decisions already exist
-in [D2](plans/2026-07-30-015-d2-effects-purity-design.md), which calls the first of
-these "the one hole that lets an unchecked program claim conformance"; this is
-execution, not design.
+The three holes [D2](plans/2026-07-30-015-d2-effects-purity-design.md) named are closed.
+A non-literal `Effects<T, R>` ceiling reports ZTS511 instead of extracting zero names and
+reading as no annotation. A `zttp-ext:` module contributes the capabilities its manifest
+declares, and a module neither registry resolves fails closed with the full set. A call
+through a value the compiler cannot resolve sets `EffectRow.lower_bound`, and the ceiling
+check, the handler budget, and every capsule property refuse a row so marked (ZTS512).
 
-Why first: every fail-open moves unproven programs into the reported provable set. That
-inflates the convergence number without any convergence. Nothing below is honest until
-this lands. The history argues the same way: a taint fail-open once survived fourteen
-review passes, so this class of defect is proven to evade review here.
+`zig build test-proof-swallow` is the standing check. It scans the eleven analysis files
+between the parsed IR and the reported verdict and fails on any discarded error not
+listed in `scripts/proof-swallow.allow` with a reason it cannot weaken a verdict, and
+also on a listed row nothing matches. The count of unreviewed swallows is asserted, not
+claimed in a comment. Its first run found ten more paths of the same shape, all closed
+in the same series: `type_env` dropping signatures on allocation failure with no record,
+`reachesRecursion` returning false against the promise in its own doc comment,
+`describeWorkflowCall` dropping a node out of the durable graph, and
+`appendQueryParamsFromSchema` recording a required query parameter as optional.
 
-Observable: a regression test per hole, plus a test asserting that the count of known
-fail-open paths is zero rather than a comment claiming it.
+Why it came first: every fail-open moves unproven programs into the reported provable
+set, inflating the convergence number without any convergence. The history argues the
+same way: a taint fail-open once survived fourteen review passes, so this class of defect
+is proven to evade review here, which is why the standing check scans rather than trusts.
 
 ### 2. Publish an honest convergence number (medium)
 
@@ -192,8 +198,8 @@ current union "makes every ceiling wrong on its face".
 Why: over-approximation on the provable side rejects true programs, which pushes the
 agent into workarounds and widens the emitted set away from the natural solution.
 Precision here grows the provable set toward the set of correct programs, which is the
-other half of convergence. It also makes item 3's capability budget truthful. Depends on
-item 1, or it polishes a surface that is still fail-open underneath.
+other half of convergence. It also makes item 3's capability budget truthful. It depended
+on item 1, which is done, so the surface underneath is no longer fail-open.
 
 Observable: a test proving `escapeHtml` under a ceiling that excludes the module's I/O
 capabilities.

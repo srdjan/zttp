@@ -54,6 +54,7 @@
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
 - Add tests near the feature you touched in `packages/runtime/` or `packages/zts/` and run the relevant `zig build test*` step.
 - Reaching a new `zts` internal module (anything in the internal tier of `packages/zts/src/root.zig`) from `runtime`, `tools`, `pi`, or `proof-review` needs a row in `scripts/module-boundary.allow`, and a row that nothing uses fails the same gate. Prefer the curated surface at the bottom of `root.zig`; widen the allowlist only deliberately, and say why in the commit. Run `zig build test-module-boundary`.
+- Discarding an error in the analysis files that decide whether a program is proven (the eleven listed in `scripts/check-proof-swallow.sh`) needs a row in `scripts/proof-swallow.allow` with the reason it cannot weaken a verdict, and a row nothing matches fails the same gate. A swallow there does not surface as a failure, it surfaces as a pass. Run `zig build test-proof-swallow`.
 
 ## Commit & Pull Request Guidelines
 - Commit history is informal; keep subjects short and descriptive (lowercase is common). Use `WIP-#:` only for intentional multi-step series.
