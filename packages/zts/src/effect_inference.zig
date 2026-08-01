@@ -1171,6 +1171,40 @@ test "uuid does not reach the clock, ulid does" {
     try testing.expect(mint_ulid.capabilities.contains(.clock));
 }
 
+test "a websocket room snapshot does not reach the network" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `zttp:websocket` declares six capabilities and charged every export all
+    // six. Traced through dispatch -> runtime callback -> pool: `send` writes
+    // to the socket fd, `getWebSockets` takes a locked map snapshot and touches
+    // nothing else. Charging a room listing for network, filesystem, clock, and
+    // policy_check is the largest over-approximation in the module set.
+    const source =
+        \\import { send, getWebSockets } from "zttp:websocket";
+        \\function listRoom(room) { return getWebSockets(room); }
+        \\function reply(ws, msg) { return send(ws, msg); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const list_room = analyzer.lookup("listRoom") orelse return error.FunctionNotFound;
+    try testing.expect(list_room.capabilities.contains(.runtime_callback));
+    try testing.expect(!list_room.capabilities.contains(.network));
+    try testing.expect(!list_room.capabilities.contains(.filesystem));
+
+    // The socket write keeps network: narrowing must not drop what a call
+    // really reaches.
+    const reply_fn = analyzer.lookup("reply") orelse return error.FunctionNotFound;
+    try testing.expect(reply_fn.capabilities.contains(.network));
+}
+
 test "an export with no declared set inherits its module's" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);

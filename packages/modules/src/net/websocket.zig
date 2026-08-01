@@ -33,12 +33,21 @@ pub const binding = sdk.ModuleBinding{
     .required_capabilities = &.{ .clock, .runtime_callback, .network, .filesystem, .policy_check, .websocket },
     .stateful = true,
     .exports = &.{
-        .{ .name = "send", .module_func = sendImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string } },
-        .{ .name = "close", .module_func = closeImpl, .arg_count = 3, .required_arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .number, .string } },
-        .{ .name = "serializeAttachment", .module_func = serializeAttachmentImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string } },
-        .{ .name = "deserializeAttachment", .module_func = deserializeAttachmentImpl, .arg_count = 1, .effect = .read, .returns = .optional_string, .param_types = &.{.object} },
-        .{ .name = "getWebSockets", .module_func = getWebSocketsImpl, .arg_count = 1, .effect = .read, .returns = .object, .param_types = &.{.string} },
-        .{ .name = "setAutoResponse", .module_func = setAutoResponseImpl, .arg_count = 3, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string, .string } },
+        // pool.sendFrame -> writeServerFrame(fd): a socket write.
+        .{ .name = "send", .required_capabilities = &.{ .runtime_callback, .network }, .module_func = sendImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string } },
+        // pool.sendFrameAndShutdown -> writeServerFrame(fd) + shutdown(fd).
+        .{ .name = "close", .required_capabilities = &.{ .runtime_callback, .network }, .module_func = closeImpl, .arg_count = 3, .required_arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .number, .string } },
+        // pool.setAttachment writes an attachment file when the pool has an
+        // attachments dir configured; otherwise it is memory only. Declares
+        // filesystem because the disk path is reachable.
+        .{ .name = "serializeAttachment", .required_capabilities = &.{ .runtime_callback, .filesystem }, .module_func = serializeAttachmentImpl, .arg_count = 2, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string } },
+        // pool.copyAttachment reads the in-memory attachment; the disk read
+        // helper belongs to the hibernation resume path, not this export.
+        .{ .name = "deserializeAttachment", .required_capabilities = &.{.runtime_callback}, .module_func = deserializeAttachmentImpl, .arg_count = 1, .effect = .read, .returns = .optional_string, .param_types = &.{.object} },
+        // pool.snapshotRoom: a locked map lookup and a slice copy.
+        .{ .name = "getWebSockets", .required_capabilities = &.{.runtime_callback}, .module_func = getWebSocketsImpl, .arg_count = 1, .effect = .read, .returns = .object, .param_types = &.{.string} },
+        // pool.setAutoResponse stores two owned slices on the connection.
+        .{ .name = "setAutoResponse", .required_capabilities = &.{.runtime_callback}, .module_func = setAutoResponseImpl, .arg_count = 3, .effect = .write, .returns = .undefined, .param_types = &.{ .object, .string, .string } },
     },
 };
 

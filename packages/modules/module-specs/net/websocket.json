@@ -18,6 +18,10 @@
       "params": [
         "object",
         "string"
+      ],
+      "requiredCapabilities": [
+        "runtime_callback",
+        "network"
       ]
     },
     {
@@ -28,6 +32,10 @@
         "object",
         "number",
         "string"
+      ],
+      "requiredCapabilities": [
+        "runtime_callback",
+        "network"
       ]
     },
     {
@@ -37,6 +45,10 @@
       "params": [
         "object",
         "string"
+      ],
+      "requiredCapabilities": [
+        "runtime_callback",
+        "filesystem"
       ]
     },
     {
@@ -45,6 +57,9 @@
       "returns": "optional_string",
       "params": [
         "object"
+      ],
+      "requiredCapabilities": [
+        "runtime_callback"
       ]
     },
     {
@@ -53,6 +68,9 @@
       "returns": "object",
       "params": [
         "string"
+      ],
+      "requiredCapabilities": [
+        "runtime_callback"
       ]
     },
     {
@@ -63,6 +81,9 @@
         "object",
         "string",
         "string"
+      ],
+      "requiredCapabilities": [
+        "runtime_callback"
       ]
     }
   ]
