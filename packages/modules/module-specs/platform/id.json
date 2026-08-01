@@ -10,12 +10,19 @@
     {
       "name": "uuid",
       "effect": "read",
-      "returns": "string"
+      "returns": "string",
+      "requiredCapabilities": [
+        "random"
+      ]
     },
     {
       "name": "ulid",
       "effect": "read",
-      "returns": "string"
+      "returns": "string",
+      "requiredCapabilities": [
+        "clock",
+        "random"
+      ]
     },
     {
       "name": "nanoid",
@@ -23,6 +30,9 @@
       "returns": "string",
       "params": [
         "number"
+      ],
+      "requiredCapabilities": [
+        "random"
       ]
     }
   ]

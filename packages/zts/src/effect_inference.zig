@@ -1141,6 +1141,36 @@ test "a tightened export carries only what it reaches" {
     try testing.expect(check_token.capabilities.contains(.clock));
 }
 
+test "uuid does not reach the clock, ulid does" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `zttp:id` declares clock + random. Only `ulid` reads the clock, for its
+    // timestamp prefix; a v4 uuid carries no timestamp. A deterministic handler
+    // that mints uuids should not have to declare a clock it never reads.
+    const source =
+        \\import { uuid, ulid } from "zttp:id";
+        \\function mintUuid() { return uuid(); }
+        \\function mintUlid() { return ulid(); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const mint_uuid = analyzer.lookup("mintUuid") orelse return error.FunctionNotFound;
+    try testing.expect(mint_uuid.capabilities.contains(.random));
+    try testing.expect(!mint_uuid.capabilities.contains(.clock));
+
+    const mint_ulid = analyzer.lookup("mintUlid") orelse return error.FunctionNotFound;
+    try testing.expect(mint_ulid.capabilities.contains(.random));
+    try testing.expect(mint_ulid.capabilities.contains(.clock));
+}
+
 test "an export with no declared set inherits its module's" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);

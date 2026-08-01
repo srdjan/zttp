@@ -8,9 +8,12 @@ pub const binding = sdk.ModuleBinding{
     .name = "id",
     .required_capabilities = &.{ .clock, .random },
     .exports = &.{
-        .{ .name = "uuid", .module_func = uuidImpl, .arg_count = 0, .returns = .string, .param_types = &.{}, .effect = .read, .return_labels = .{ .internal = true } },
-        .{ .name = "ulid", .module_func = ulidImpl, .arg_count = 0, .returns = .string, .param_types = &.{}, .effect = .read, .return_labels = .{ .internal = true } },
-        .{ .name = "nanoid", .module_func = nanoidImpl, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .effect = .read, .return_labels = .{ .internal = true } },
+        // formatUuidV4 -> fillRandom only; v4 carries no timestamp.
+        .{ .name = "uuid", .required_capabilities = &.{.random}, .module_func = uuidImpl, .arg_count = 0, .returns = .string, .param_types = &.{}, .effect = .read, .return_labels = .{ .internal = true } },
+        // formatUlid -> nowMs for the timestamp prefix, fillRandom for the suffix.
+        .{ .name = "ulid", .required_capabilities = &.{ .clock, .random }, .module_func = ulidImpl, .arg_count = 0, .returns = .string, .param_types = &.{}, .effect = .read, .return_labels = .{ .internal = true } },
+        // fillRandom only; the length argument comes from the caller.
+        .{ .name = "nanoid", .required_capabilities = &.{.random}, .module_func = nanoidImpl, .arg_count = 1, .returns = .string, .param_types = &.{.number}, .effect = .read, .return_labels = .{ .internal = true } },
     },
 };
 
