@@ -473,6 +473,11 @@ pub const TypeChecker = struct {
                 self.walkExpr(node);
             },
 
+            // exhaustive: the remaining tags hold no sub-expression this
+            // checker types. Not descending costs a type error that would have
+            // been reported, never a proof: an untyped value reaches the
+            // lattice top, and `TypePool.isAssignableTo` skips rather than
+            // rejects against it.
             else => {},
         }
     }
@@ -628,6 +633,9 @@ pub const TypeChecker = struct {
                 self.current_return_type = saved_return;
             },
 
+            // exhaustive: same as the expression walker above - the statement
+            // kinds not listed carry nothing this checker types, and a missed
+            // type is a missed rejection, not a granted proof.
             else => {},
         }
     }
@@ -669,6 +677,9 @@ pub const TypeChecker = struct {
                 self.markAllocationFailure();
                 return error.OutOfMemory;
             },
+            // exhaustive: a schema that is not parseable JSON yields no type,
+            // which constrains nothing downstream. The one error that must not
+            // be treated that way, allocation failure, is marked above.
             else => return null_type_idx,
         };
         defer parsed.deinit();
@@ -679,6 +690,9 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
         const obj = switch (value_json) {
             .object => |o| o,
+            // exhaustive: a schema node that is not an object describes no
+            // shape, so unknown is the honest answer - the lattice top, which
+            // permits nothing to be proved from it.
             else => return pool.idx_unknown,
         };
 
@@ -800,6 +814,9 @@ pub const TypeChecker = struct {
                 const json_arg = self.getJsonStringifyArg(node_idx) orelse break :blk null;
                 break :blk try self.serializeJsonLiteral(json_arg);
             },
+            // exhaustive: null means "not a literal the compiler can read", and
+            // the caller treats an unreadable schema as dynamic rather than as
+            // an absent one.
             else => null,
         };
     }
@@ -876,6 +893,9 @@ pub const TypeChecker = struct {
                 try writer.writeByte('}');
                 return true;
             },
+            // exhaustive: false means "this node is not a JSON literal", which
+            // abandons the serialization. The caller then has no literal to
+            // reason about, which is the conservative outcome.
             else => return false,
         }
     }
@@ -888,6 +908,9 @@ pub const TypeChecker = struct {
                 const binding = self.ir_view.getBinding(node_idx) orelse break :blk null;
                 break :blk self.resolveAtomName(binding.name_atom);
             },
+            // exhaustive: an object key is a string literal or a bare
+            // identifier; a computed key is not statically known, and null
+            // stops the literal read rather than inventing a name.
             else => null,
         };
     }
@@ -1260,6 +1283,10 @@ pub const TypeChecker = struct {
 
             .match_expr => self.inferMatchType(node),
 
+            // exhaustive: no inferred type. `TypePool.isAssignableTo` treats
+            // null_type_idx as "inference produced no result, so skip rather
+            // than reject", so an expression that lands here loses a type
+            // error and gains nothing.
             else => null_type_idx,
         };
     }

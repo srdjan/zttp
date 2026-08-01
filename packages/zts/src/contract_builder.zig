@@ -2098,6 +2098,22 @@ pub const ContractBuilder = struct {
                     if (self.containsUnmodeledCall(self.ir_view.getListIndex(tmpl.parts_start, @intCast(i)))) return true;
                 }
             },
+            .match_expr => {
+                const match = self.ir_view.getMatchExpr(root) orelse return false;
+                if (self.containsUnmodeledCall(match.discriminant)) return true;
+                for (0..match.arms_count) |i| {
+                    if (self.containsUnmodeledCall(self.ir_view.getListIndex(match.arms_start, @intCast(i)))) return true;
+                }
+            },
+            .match_arm => {
+                const arm = self.ir_view.getMatchArm(root) orelse return false;
+                return self.containsUnmodeledCall(arm.pattern) or self.containsUnmodeledCall(arm.body);
+            },
+            // exhaustive: false means "no call in this subtree", and the caller
+            // reads that as nothing to model. The arms above cover every
+            // expression that can hold one. Nested function and arrow bodies are
+            // excluded on purpose, per the doc comment: a call there fires at its
+            // own statement, which is walked independently.
             else => {},
         }
         return false;
@@ -4746,6 +4762,30 @@ test "durable workflow properties prove stable step workflow" {
     try std.testing.expect(contract.durable.workflow.properties.retry_safe);
     try std.testing.expect(contract.durable.workflow.properties.idempotent);
     try std.testing.expect(contract.durable.workflow.properties.fault_covered);
+}
+
+test "durable workflow properties reject a side effect inside a match arm" {
+    // `containsUnmodeledCall` walks every expression that can hold a call, and
+    // had no arm for `match_expr` - so a call in a match arm returned false,
+    // and `isUnhandledWorkflowCall` read that as "nothing unmodeled here" and
+    // over-claimed proof_level == .complete.
+    const source =
+        \\import { run } from "zttp:durable";
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  return run("job:match", () => {
+        \\    const v = match (req) {
+        \\      when { method: "POST" }: cacheSet(req.url, "x")
+        \\      default: 0
+        \\    };
+        \\    return Response.json({ ok: true, v });
+        \\  });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(DurableWorkflowProofLevel.partial, contract.durable.workflow.proof_level);
 }
 
 test "durable workflow properties reject unmodeled side effects" {
