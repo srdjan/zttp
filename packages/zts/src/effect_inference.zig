@@ -531,9 +531,7 @@ pub const Analyzer = struct {
         const binding = self.ir_view.getBinding(call.callee) orelse return;
 
         if (self.imports.get(binding.slot)) |imported| {
-            if (builtin_modules.fromSpecifier(imported.module)) |mb| {
-                for (mb.required_capabilities) |cap| row.capabilities.insert(cap);
-            }
+            self.insertModuleCapabilities(imported.module, row);
             row.pure = false;
             // A `.write`-classified export modifies external state; that
             // demotes the enclosing function's `read_only` capsule property.
@@ -582,6 +580,35 @@ pub const Analyzer = struct {
             std.mem.eql(u8, name, "saga") or
             std.mem.eql(u8, name, "fanout") or
             std.mem.eql(u8, name, "follow");
+    }
+
+    /// Union the capabilities a call into `module` grants into `row`.
+    ///
+    /// Both registries answer this: built-ins from the comptime table, partner
+    /// `zttp-ext:` modules from the session manifest registry. Resolving only
+    /// the built-in table left every partner call carrying no capability at
+    /// all, so an extension's authority never appeared in any row, ceiling
+    /// check, or budget.
+    ///
+    /// A module neither registry knows fails closed with every capability.
+    /// That is spec rev 4 4.5 ("an unknown module makes the certified build
+    /// fail closed") applied at the row level: an unresolvable import is a
+    /// missing manifest, and guessing zero authority for it is the same
+    /// fail-open in a different place.
+    fn insertModuleCapabilities(self: *const Analyzer, module: []const u8, row: *EffectRow) void {
+        if (builtin_modules.fromSpecifier(module)) |mb| {
+            for (mb.required_capabilities) |cap| row.capabilities.insert(cap);
+            return;
+        }
+        if (self.manifest_registry) |registry| {
+            if (registry.fromSpecifier(module)) |manifest| {
+                for (manifest.required_capabilities.items) |decl| {
+                    row.capabilities.insert(decl.effective);
+                }
+                return;
+            }
+        }
+        row.capabilities = CapabilitySet.initFull();
     }
 
     fn importEffect(self: *const Analyzer, module: []const u8, name: []const u8) module_binding.EffectClass {
@@ -989,6 +1016,77 @@ test "partner write-classified import marks function and callers as writing" {
     try testing.expect(!wrapper.readOnly());
     try testing.expect(!clean.writes);
     try testing.expect(clean.readOnly());
+}
+
+test "a partner module's declared capabilities reach the caller's row" {
+    const allocator = testing.allocator;
+
+    const manifest_json =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:stripe",
+        \\  "requiredCapabilities": ["network", "clock"],
+        \\  "exports": [
+        \\    { "name": "chargeCard", "effect": "write", "returns": "result" }
+        \\  ]
+        \\}
+    ;
+    var manifest = try module_manifest.parse(allocator, manifest_json);
+
+    var registry = manifest_registry_mod.Registry.init(allocator);
+    defer registry.deinit();
+    registry.register(manifest) catch |err| {
+        manifest.deinit(allocator);
+        return err;
+    };
+
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { chargeCard } from "zttp-ext:stripe";
+        \\function charge(tok) { return chargeCard(tok); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.initWithManifestRegistry(allocator, view, &atoms, &registry);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    // Before this, the union was guarded by the built-in table alone, so a
+    // partner call carried no capability at all and no ceiling or budget
+    // could ever bound it.
+    const charge = analyzer.lookup("charge") orelse return error.FunctionNotFound;
+    try testing.expect(charge.capabilities.contains(.network));
+    try testing.expect(charge.capabilities.contains(.clock));
+    try testing.expect(!charge.capabilities.contains(.random));
+}
+
+test "a module neither registry resolves fails closed with every capability" {
+    const allocator = testing.allocator;
+
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { thing } from "zttp-ext:unregistered";
+        \\function use(x) { return thing(x); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const use = analyzer.lookup("use") orelse return error.FunctionNotFound;
+    try testing.expectEqual(
+        CapabilitySet.initFull().count(),
+        use.capabilities.count(),
+    );
 }
 
 test "empty program is a no-op" {
