@@ -368,7 +368,7 @@ ships; what remains is the measurement, which needs hole-mode sessions recorded 
 live model. The frozen corpus cannot answer it - a cassette replay cannot produce turns
 that were never recorded.
 
-### 4. Widen the mechanical repair lane (small to medium)
+### 4. Widen the mechanical repair lane (done)
 
 Lower more `RepairIntent` variants to real source edits, starting with the span-local
 rewrites. Implement validator M2, parse identity, from
@@ -425,11 +425,18 @@ repair claims no equivalence and never will: `add_trailing_return` exists to cha
 the program does on a path that previously fell off the end. Those rows are `.none` and
 ship advisory-only, which D3 blesses directly.
 
-`repair_available` answers from the registry instead of a constant, and one row has
-reached `implemented`: `drop_redundant_bool_compare`, so ZTS620 is the first diagnostic
-on the wire to advertise an exact repair. A `status` distinct from `method` is what kept
-that honest while the rest waited: naming the right validator is not the same as having
-one, and the other seventeen rows still answer false.
+`repair_available` answers from the registry instead of a constant, and every
+declared-law row is now `implemented`: the two arrow-to-function rewrites, let-to-const,
+its for-of form, compound assignment, and the bool compare. Six of eighteen intents are
+gradable, and ZTS604 and ZTS620 advertise exact repairs. A `status` distinct from
+`method` is what kept that honest while they waited, and it still does: the four M3 rows
+name the right method and the semantic kernel they need does not exist, so they answer
+false.
+
+`candidate_grade` stopped being a constant with them. It was true by accident while no
+row was implemented; it answers from the registry now, so `canonicalize` calls a rewrite
+`mechanical_repair` exactly when something discharges it - the same condition
+`repair_available` keys on, read from the same place.
 
 `repair_validator.validateApplication` is what discharges it, and it lives beside the
 registry rather than beside the rewrite on purpose. A validator that reuses the
@@ -447,6 +454,15 @@ The discharge is published next to the existing verification in
 `pi_apply_repair_plan`, which answers a different question. A candidate can introduce no
 new diagnostics and still not be the law's rewrite: `x === true` edited to `!x`
 type-checks exactly as well as `x` does and means the opposite.
+
+The independence is checked rather than asserted. A differential test in
+`canonicalize.zig` runs the rewriter and the law over the same real inputs and requires
+them to agree byte for byte, driven off `rewrite_row_intents` so a row that becomes
+gradable without a fixture fails instead of shipping untested. The compound-assignment
+law is the one that earns it: `total -= fee + tax` must become
+`total = total - (fee + tax)`, and without the parentheses it reassociates to
+`(total - fee) + tax` and computes something else, so a validator that accepted the
+unparenthesized form would grade a value-changing edit as an equivalence.
 
 Observable: compiler-authored apply share rises on the item-2 corpus, and
 `repair_available: true` appears on the wire for a named, tested subset. The second half
@@ -600,7 +616,7 @@ the module's crypto and clock capabilities. It is `a tightened export carries on
 it reaches` in `packages/zts/src/effect_inference.zig`, alongside one per tightened
 module.
 
-### 8. Unified repair vocabulary, then the deferred wire verbs (`apply_repair` remains)
+### 8. Unified repair vocabulary, then the deferred wire verbs (done)
 
 Collapse the parallel repair vocabularies into the one the spec assumes, then ship
 `verify`, then `simulate_edit`, then `apply_repair`.
@@ -637,10 +653,22 @@ waiting on. A repair is the object `canonicalize` published, round-tripped uncha
 `original` is required rather than optional - it is the client's snapshot of the line it
 decided to change, and an absent snapshot would make the staleness check silently skip.
 
-`apply_repair` is what remains. It is the only one of the three that writes, and the
-equivalence-validator registry its deferral names now has one implemented row rather
-than none (item 4), so the precondition has moved but is not met: `apply_repair` should
-not write on the strength of a single graded intent.
+`apply_repair` shipped once the registry had six rows rather than one. It is the only
+operation on this wire that writes, and it is gated four ways before it does. Every
+repair's intent must be gradable, because applying a rewrite unasked is a stronger claim
+than advertising it - `add_trailing_return` exists to change what the program does and
+can never be auto-applied. Each repair is then applied on its own and discharged against
+its law on the actual edit, so one that names `replace_let_with_const` and rewrites the
+line to something else is caught rather than trusted. The result runs the veto, and one
+new diagnostic refuses the whole set. Applying one at a time rather than in bulk is what
+makes the second gate meaningful: a bulk apply plus one check could not say which repair
+was wrong, nor catch two rewrites each wrong in ways that cancel in the final text.
+
+Atomic by construction, and the tests assert it as file bytes rather than a status code:
+a refusal that had already written would report the same reason as one that had not.
+
+With it, spec 4.8's closed operation set is fully served, so the dispatch lost its
+`else => unreachable` prong - an unhandled operation is now a compile error.
 
 Observable: a client outside the agent package completes a propose, simulate, verify
 cycle over the wire with no in-process access. Met, as `an external client completes
@@ -659,14 +687,20 @@ item 2 provides a baseline to compare against. Item 5 runs the day item 2's live
 works. Item 7 follows item 1. Item 8 waits for a second client or for the vocabulary,
 whichever arrives first.
 
-Items 1, 2, 2a, 2b, 3, 6, and 7 are done. Item 4 has shipped both halves and item 8 all
-but `apply_repair`.
+Every item on this agenda has shipped. What is open is measurement, not construction,
+and both open measurements are the same shape: item 3's hole-mode comparison and item
+5's small-model row each need sessions recorded against a live model. A cassette replay
+is a ratchet over outcomes already recorded - it can prove a compiler change did not
+flip one, and cannot produce a turn nobody recorded. Neither is blocked on this
+repository.
 
-Three things are open, and two of them are the same shape: item 3's comparison and item
-5's model row both need sessions recorded against a live model, which a cassette replay
-cannot produce. The frozen corpus is a ratchet over outcomes already recorded, not a way
-to measure a loop change or a model swap. The third is `apply_repair`, which waits on
-more than one graded validator row.
+What the agenda leaves behind, for the next reader deciding where the gap still is: the
+provable set is true as far as the standing checks can see (item 1, and the two fail-open
+classes written up in `docs/solutions/`), the gap is published and dated
+([convergence.md](convergence.md)), and the mechanisms moved from rejection toward
+construction - six intents repair mechanically, and a turn can spend itself on one typed
+hole. The eleven-case corpus is now the binding constraint on all three legs, which is
+the honest next thing to grow.
 
 ### Considered and refused
 
