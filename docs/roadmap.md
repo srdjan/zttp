@@ -128,30 +128,39 @@ on the same runtime a user gets. The five durable and workflow cases carry no sp
 `zttp test` has no offline durable backend - and they report as unchecked rather than as
 passes, so the intent column reads over 6 rather than a flattering 11.
 
-### 2a. A clock or random read does not clear `deterministic` (small, blocked)
+### 2a. A clock or random read does not clear `deterministic` (done)
 
-`uuid()` reports `deterministic ....... PROVEN`, and a handler can then declare that
-property in a `Spec<...>` and have it discharged. It is a false proof: the function
+`uuid()` reported `deterministic ....... PROVEN`, and a handler could then declare that
+property in a `Spec<...>` and have it discharged. It was a false proof: the function
 returns a different value on every call.
 
-`isNonDeterministic` (`effect_inference.zig`) clears the flag for `Date.now` and
-`Math.random` member calls only. A module call that reaches the `.clock` or `.random`
-capability leaves it set, so every `zttp:id` mint and every clock-reading export escapes
-the rule that the equivalent global call obeys.
+`isNonDeterministic` (`effect_inference.zig`) cleared the flag for `Date.now` and
+`Math.random` member calls only. A module call that reached the `.clock` or `.random`
+capability left it set, so every `zttp:id` mint and every clock-reading export escaped the
+rule that the equivalent global call obeys.
 
-The fix is a few lines: after resolving a call's capabilities, clear `deterministic` when
-the newly added set contains `.clock` or `.random`, gated on `durable_callback_depth == 0`
-for the same reason the member-call rule is - inside a `step()` the read is recorded and
-replayed. Per-export capability rows (item 7) are what make it precise: `parseBearer`
-stays deterministic while `jwtVerify`, which reads the clock for `exp`, does not.
+The fix was a few lines, and it has landed. After resolving a call's capabilities,
+`deterministic` clears when the newly added set contains `.clock` or `.random`, gated on
+`durable_callback_depth == 0` for the same reason the member-call rule is - inside a
+`step()` the read is recorded and replayed. Per-export capability rows (item 7) are what
+make it precise: `parseBearer` stays deterministic while `jwtVerify`, which reads the
+clock for `exp`, does not.
 
-Blocked on a corpus re-record, not on design. Landing it flips the `jwt-auth` case: its
-recorded handler declares no `Spec<...>`, so the default profile now demands a
-`deterministic` it no longer holds, the turn retries, and the committed cassette runs out
-of steps mid-turn. Re-record that one case with
-`ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_ONLY=jwt-auth`, then land the fix and refresh
-[convergence.md](convergence.md) - the rate is expected to move, which is what the policy
-hash column on that table exists to explain.
+The corpus re-record it was blocked on rode in the same commit. Landing it flipped the
+`jwt-auth` case, as expected: its recorded handler declares no `Spec<...>`, so the default
+profile demanded a `deterministic` it no longer held, the turn retried, and the committed
+cassette ran out of steps mid-turn. That one case was re-recorded with
+`ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_ONLY=jwt-auth`.
+
+What the prediction got wrong: [convergence.md](convergence.md) was expected to move, and
+the rate did not. The policy hash went `37a115c262dc` to `118885d3f647` and first-draft
+pass stayed at 90% (10/11) over the same corpus. Why it held is not measured here - the
+row records the outcome, not the cause. The policy hash column is what makes the two rows
+comparable enough to state the outcome at all.
+
+Observable, and met: a handler returning `uuid()` reports non-deterministic, and a
+`zttp:id` import gives `mintUuid` the `.random` capability without the `.clock` that only
+`ulid` reads. Both are pinned in `effect_inference.zig`.
 
 ### 2b. Non-determinism as a flow property, not a capability property (done)
 
