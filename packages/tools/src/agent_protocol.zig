@@ -105,9 +105,9 @@ pub const operations = [_]OperationSpec{
         "file",              "source_digest",    "ok",          "new_count",
         "preexisting_count", "proposed_content", "diagnostics", "refusal",
     } },
-    .{ .op = .apply_repair, .status = .deferred, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
-        "applied", "source_digest", "module_graph_hash",
-    }, .deferred_note = "phase 6: needs the equivalence-validator registry" },
+    .{ .op = .apply_repair, .status = .implemented, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
+        "file", "applied", "source_digest", "module_graph_hash", "refusal",
+    } },
     .{ .op = .verify, .status = .implemented, .input_fields = &.{ "file", "properties", "content" }, .payload_fields = &.{
         "file", "source_digest", "results",
     } },
@@ -382,8 +382,12 @@ pub fn handleRequest(
         ),
         .verify => try runVerify(allocator, &payload_json, canonical_root, file_rel.?, input),
         .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, input),
-        else => unreachable, // every other row is `.deferred` and returned above
+        .apply_repair => try runApplyRepair(allocator, &payload_json, canonical_root, file_rel.?, input),
     };
+    // No `else` prong: spec 4.8's operation set is closed and every member is
+    // served, so an unhandled one is a compile error rather than a runtime
+    // `unreachable`. The `.deferred` early-return above still stands - it is
+    // what a future added-but-unbuilt operation would take.
 
     const diagnostics_json = if (diagnostics.writer.buffered().len > 0)
         diagnostics.writer.buffered()
@@ -952,6 +956,218 @@ fn writeModulesPayload(
 ///
 /// `success` is exactly "produced no error diagnostic" (spec 4.8): warnings and
 /// advisories never fail a check.
+/// `apply_repair`: the same repairs as `simulate_edit`, written to disk.
+///
+/// The only operation on this wire that writes, and it is gated four ways
+/// before it does. Every repair's intent must be gradable, meaning the registry
+/// says something discharges it - spec 4.8 permits advertising an exact repair
+/// only under that condition, and applying one unasked is a stronger claim than
+/// advertising it. Each repair is then applied on its own and discharged
+/// against its law on the actual edit, so a rewriter that mis-locates a
+/// construct is caught here rather than trusted. The result runs the veto, and
+/// a single new diagnostic refuses the whole set. The write happens once, at
+/// the end, from a buffer that passed all three.
+///
+/// Atomic by construction: repairs accumulate in memory and any refusal returns
+/// before the file is touched, so a rejected set leaves the file exactly as it
+/// was rather than half-repaired.
+fn runApplyRepair(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    canonical_root: []const u8,
+    file_rel: []const u8,
+    input: ?std.json.Value,
+) !bool {
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
+    defer allocator.free(abs);
+
+    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
+    defer allocator.free(source);
+    const before_digest = agent_identity.sourceDigest(source);
+
+    var repairs: std.ArrayListUnmanaged(canonicalize.Refactor) = .empty;
+    defer repairs.deinit(allocator);
+    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, input)) |refused| return refused;
+
+    if (repairs.items.len == 0) {
+        return try writeApplyRefusal(json, file_rel, before_digest, "no_repairs", "`repairs` must carry at least one repair");
+    }
+
+    // Gradability first, before anything is applied: refusing early keeps the
+    // reason about the request rather than about a rewrite it should not have
+    // reached.
+    for (repairs.items) |r| {
+        if (!zts.repair_validator.gradable(r.intent)) {
+            return try writeApplyRefusal(
+                json,
+                file_rel,
+                before_digest,
+                "ungraded_intent",
+                "this operation applies only repairs a registered validator discharges; read meta.validators, and use simulate_edit to preview an ungraded one",
+            );
+        }
+    }
+
+    // One at a time, each discharged against its own law on the edit it
+    // produced. A bulk apply followed by one check could not say which repair
+    // was wrong, and could not catch two rewrites that are each wrong in ways
+    // that cancel in the final text.
+    var current = try allocator.dupe(u8, source);
+    defer allocator.free(current);
+    for (repairs.items) |r| {
+        var one = [_]canonicalize.Refactor{r};
+        const next = canonicalize.applyRefactors(allocator, current, &one) catch |err| switch (err) {
+            error.StaleRefactorLine => return try writeApplyRefusal(json, file_rel, before_digest, "stale_repair", "a repair's `original` does not match the file as it stands"),
+            error.OverlappingRefactors => return try writeApplyRefusal(json, file_rel, before_digest, "overlapping_repairs", "two repairs target the same line"),
+            error.RefactorLineNotFound => return try writeApplyRefusal(json, file_rel, before_digest, "line_not_found", "a repair names a line past the end of the file"),
+            error.UnsupportedRefactor => return try writeApplyRefusal(json, file_rel, before_digest, "multiline_replacement", "a replacement spanning lines needs the span-keyed path"),
+            else => return err,
+        };
+
+        switch (zts.repair_validator.validateApplication(r.intent, current, next, r.line)) {
+            .equivalent => {},
+            .not_law_shape => |why| {
+                allocator.free(next);
+                return try writeApplyRefusal(json, file_rel, before_digest, "not_law_shape", why);
+            },
+            .no_validator => {
+                allocator.free(next);
+                return try writeApplyRefusal(json, file_rel, before_digest, "ungraded_intent", "no validator discharges this intent");
+            },
+        }
+
+        allocator.free(current);
+        current = next;
+    }
+
+    var verdict = try edit_simulate.simulate(allocator, .{
+        .file = abs,
+        .content = current,
+        .before = source,
+    });
+    defer verdict.deinit(allocator);
+    if (verdict.new_count > 0) {
+        return try writeApplyRefusal(
+            json,
+            file_rel,
+            before_digest,
+            "veto",
+            "the repaired file carries diagnostics the original did not; nothing was written",
+        );
+    }
+
+    try zts.file_io.writeFile(allocator, abs, current);
+    const after_digest = agent_identity.sourceDigest(current);
+
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("applied");
+    try json.write(repairs.items.len);
+    // The digest of what is now on disk, so the client's next request can bind
+    // to the file it just changed rather than the one it read.
+    try json.objectField("source_digest");
+    try json.write(&after_digest);
+    try json.objectField("module_graph_hash");
+    const graph_hash = module_graph_record.contextFreeHash();
+    try json.write(&graph_hash);
+    try json.objectField("refusal");
+    try json.write(null);
+    try json.endObject();
+    return true;
+}
+
+fn writeApplyRefusal(
+    json: *std.json.Stringify,
+    file_rel: []const u8,
+    digest: [64]u8,
+    reason: []const u8,
+    message: []const u8,
+) !bool {
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("applied");
+    try json.write(0);
+    // The digest the file still carries: nothing was written, and a client
+    // must be able to see that from the response rather than infer it.
+    try json.objectField("source_digest");
+    try json.write(&digest);
+    try json.objectField("module_graph_hash");
+    const graph_hash = module_graph_record.contextFreeHash();
+    try json.write(&graph_hash);
+    try json.objectField("refusal");
+    try json.beginObject();
+    try json.objectField("reason");
+    try json.write(reason);
+    try json.objectField("message");
+    try json.write(message);
+    try json.endObject();
+    try json.endObject();
+    return false;
+}
+
+/// Decode `input.repairs` into line-keyed refactors. Returns a refusal verdict
+/// when the request is malformed, and null when `repairs` is populated.
+///
+/// Shared by `simulate_edit` and `apply_repair` so the two cannot disagree
+/// about what a repair is - a client that previewed a set and then applied it
+/// must not find the second call parsing it differently.
+fn parseRepairs(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    out: *std.ArrayListUnmanaged(canonicalize.Refactor),
+    file_rel: []const u8,
+    digest: [64]u8,
+    input: ?std.json.Value,
+) !?bool {
+    const items: []const std.json.Value = blk: {
+        const obj = (input orelse break :blk &.{}).object;
+        const value = obj.get("repairs") orelse break :blk &.{};
+        if (value != .array) break :blk &.{};
+        break :blk value.array.items;
+    };
+
+    for (items) |item| {
+        if (item != .object) return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "each entry in `repairs` must be an object");
+        const o = item.object;
+
+        const intent_value = o.get("intent") orelse
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must name its `intent`");
+        if (intent_value != .string)
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`intent` must be a string");
+        const intent = zts.repair_intent.RepairIntent.fromString(intent_value.string) orelse
+            return try writeApplyRefusal(json, file_rel, digest, "unknown_intent", "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
+
+        const line_value = o.get("line") orelse
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry the `line` it applies to");
+        if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`line` must be a positive integer");
+
+        const replacement_value = o.get("replacement") orelse
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry its `replacement`");
+        if (replacement_value != .string)
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`replacement` must be a string");
+
+        // Required, not optional. An absent snapshot would make the staleness
+        // check silently skip, which is the one thing this field exists for.
+        const original_value = o.get("original") orelse
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry `original`, the snapshot of the line it replaces");
+        if (original_value != .string)
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`original` must be a string");
+
+        try out.append(allocator, .{
+            .intent = intent,
+            .line = @intCast(line_value.integer),
+            .column = 1,
+            .message = "",
+            .replacement = replacement_value.string,
+            .original_line = original_value.string,
+        });
+    }
+    return null;
+}
+
 /// `simulate_edit`: apply a set of repairs in memory and report what the
 /// compiler says about the result. Never writes.
 ///
@@ -981,51 +1197,11 @@ fn runSimulateEdit(
 
     var repairs: std.ArrayListUnmanaged(canonicalize.Refactor) = .empty;
     defer repairs.deinit(allocator);
-
-    const items: []const std.json.Value = blk: {
-        const obj = (input orelse break :blk &.{}).object;
-        const value = obj.get("repairs") orelse break :blk &.{};
-        if (value != .array) break :blk &.{};
-        break :blk value.array.items;
-    };
-
-    for (items) |item| {
-        if (item != .object) return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "each entry in `repairs` must be an object");
-        const o = item.object;
-
-        const intent_value = o.get("intent") orelse
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must name its `intent`");
-        if (intent_value != .string)
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`intent` must be a string");
-        const intent = zts.repair_intent.RepairIntent.fromString(intent_value.string) orelse
-            return try writeSimulateRefusal(json, file_rel, digest, "unknown_intent", "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
-
-        const line_value = o.get("line") orelse
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry the `line` it applies to");
-        if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`line` must be a positive integer");
-
-        const replacement_value = o.get("replacement") orelse
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry its `replacement`");
-        if (replacement_value != .string)
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`replacement` must be a string");
-
-        // Required, not optional. An absent snapshot would make the staleness
-        // check silently skip, which is the one thing this field exists for.
-        const original_value = o.get("original") orelse
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry `original`, the snapshot of the line it replaces");
-        if (original_value != .string)
-            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`original` must be a string");
-
-        try repairs.append(allocator, .{
-            .intent = intent,
-            .line = @intCast(line_value.integer),
-            .column = 1,
-            .message = "",
-            .replacement = replacement_value.string,
-            .original_line = original_value.string,
-        });
-    }
+    // Shared with `apply_repair`: a client that previewed a set and then
+    // applied it must not find the second call parsing it differently. The
+    // refusal shape differs by operation, so the parser writes `apply_repair`'s
+    // and simulate maps it - both carry the same `reason` strings.
+    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, input)) |refused| return refused;
 
     if (repairs.items.len == 0) {
         return try writeSimulateRefusal(json, file_rel, digest, "no_repairs", "`repairs` must carry at least one repair; simulating nothing has no answer to give");
@@ -1962,18 +2138,23 @@ test "an unknown operation is a protocol error, not a diagnostic" {
     try testing.expectEqualStrings("operation", err.get("field").?.string);
 }
 
-test "a deferred operation says so instead of claiming it is unknown" {
-    const a = testing.allocator;
-    const out = try respond(a,
-        \\{"schema_version":2,"operation":"apply_repair","project_root":".","input":{}}
-    );
-    defer a.free(out);
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const err = parsed.value.object.get("error").?.object;
-    try testing.expectEqualStrings("operation_not_implemented", err.get("code").?.string);
-    // The message names the phase that builds it.
-    try testing.expect(std.mem.indexOf(u8, err.get("message").?.string, "phase") != null);
+test "spec 4.8's operation set is closed and every member is served" {
+    // This test used to drive `apply_repair` and assert
+    // `operation_not_implemented`, which was the honest answer while three
+    // operations were unbuilt. There are none left, so it asserts the state
+    // that replaced it. A future operation added as `.deferred` fails here and
+    // has to say so deliberately rather than inheriting a passing test.
+    //
+    // The deferred branch in `handleRequest` stays: it is what such an
+    // operation would take, and the sibling test below pins that a deferred row
+    // must carry the note naming the phase that builds it.
+    for (&operations) |*spec| {
+        if (spec.status == .deferred) {
+            std.debug.print("{s} is deferred; update this test deliberately\n", .{@tagName(spec.op)});
+            return error.TestFailed;
+        }
+    }
+    try testing.expectEqual(@as(usize, @typeInfo(Operation).@"enum".fields.len), operations.len);
 }
 
 test "malformed input is a protocol error naming the offending field" {
@@ -2150,21 +2331,40 @@ test "a non-string expected value is malformed" {
 }
 
 test "the guard runs before the operation does any work" {
-    // A deferred operation reports operation_not_implemented before the guard,
-    // and an implemented one reports staleness before dispatching - so a stale
-    // request never reaches the code that would act on it.
+    // A stale request never reaches the code that would act on it. The example
+    // is `apply_repair` on purpose: it is the one operation that writes, so
+    // "the guard runs first" is the difference between a refusal and a file
+    // changed on the strength of a policy the client no longer has.
+    //
+    // The file exists and carries a real, applicable repair, so the only thing
+    // standing between the request and a write is the guard. Asserting the file
+    // is byte-identical afterwards is the part that matters; the error code
+    // alone would not distinguish "refused" from "wrote, then refused".
     const a = testing.allocator;
-    const out = try respond(a,
-        \\{"schema_version":2,"operation":"apply_repair","project_root":".","input":{},
-        \\ "expected":{"policy_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}
-    );
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}},
+        \\ "expected":{{"policy_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
     defer a.free(out);
+
     var parsed = try parse(a, out);
     defer parsed.deinit();
     try testing.expectEqualStrings(
-        "operation_not_implemented",
+        "identity_mismatch",
         parsed.value.object.get("error").?.object.get("code").?.string,
     );
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
 }
 
 test "restrictions publishes every matrix row, not only the frozen v1 set" {
@@ -2609,6 +2809,131 @@ test "repair_available is true for the one intent with an implemented validator"
         try testing.expect(d.get("repair_available").?.bool);
     }
     try testing.expect(found);
+}
+
+test "apply_repair writes a graded repair and rebinds the digest" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("success").?.bool);
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 1), payload.get("applied").?.integer);
+    try testing.expect(payload.get("refusal").? == .null);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "const name") != null);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
+
+    // The digest names what is now on disk, so the client's next request binds
+    // to the file it just changed rather than the one it read.
+    const digest = agent_identity.sourceDigest(on_disk);
+    try testing.expectEqualStrings(&digest, payload.get("source_digest").?.string);
+}
+
+test "apply_repair refuses an ungraded intent without touching the file" {
+    // The gate that separates this operation from `simulate_edit`. Applying a
+    // rewrite unasked is a stronger claim than advertising it, so only an
+    // intent a registered validator discharges may be written.
+    // `add_trailing_return` is correctly ungradable - it exists to change what
+    // the program does - and must never be auto-applied.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"add_trailing_return","line":6,"original":"    let name = \"world\";","replacement":"    return Response.json({{}});"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
+    try testing.expectEqualStrings("ungraded_intent", payload.get("refusal").?.object.get("reason").?.string);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "apply_repair is atomic: a rejected set leaves the file untouched" {
+    // Two repairs, the first applicable and the second stale. Repairs
+    // accumulate in memory and any refusal returns before the file is touched,
+    // so the file must not come back half-repaired - which is the failure a
+    // client cannot recover from, because it no longer matches either the
+    // digest it read or the one it expected.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}},{{"intent":"replace_let_with_const","line":7,"original":"    let other = 1;","replacement":"    const other = 1;"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
+    try testing.expect(payload.get("refusal").? == .object);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "apply_repair refuses an edit its own law does not discharge" {
+    // The discharge runs on the actual edit, not on the intent name. A repair
+    // that claims `replace_let_with_const` and rewrites the line to something
+    // else is caught here rather than trusted, which is why the validator
+    // re-derives independently instead of calling the rewriter.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"attacker\";"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
+    try testing.expectEqualStrings("not_law_shape", payload.get("refusal").?.object.get("reason").?.string);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
 }
 
 test "simulate_edit round-trips a canonicalize candidate" {
