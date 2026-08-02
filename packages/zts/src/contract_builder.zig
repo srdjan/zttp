@@ -4285,11 +4285,23 @@ pub const ContractBuilder = struct {
         const s = try self.computeEffectSummary(handler_fn);
 
         var read_only = s.io != .write;
-        var deterministic = !self.has_nondeterministic_builtin;
+        // Determinism is decided by the flow walk, which the caller ANDs in:
+        // it answers whether a varying value reaches the response rather than
+        // whether one was read at all, so a handler that logs a timestamp and
+        // answers a constant keeps the property. The presence scan and the
+        // effect row both demote on the read, which cost that handler the
+        // property and, through `deterministic and retry_safe`, `idempotent`
+        // with it. Both still run: the row answers the per-function question
+        // for a helper's `Proof<...>` capsule, which flow cannot reach, and the
+        // scan names the first varying call site for the reload HUD.
+        //
+        // With no handler function there is nothing for flow to walk and
+        // nothing to prove, so the property stays unproven rather than
+        // defaulting to held.
+        const deterministic = handler_fn != null;
         var pure = !s.has_any_call and !s.has_egress;
 
         if (handler_row) |row| {
-            deterministic = deterministic and row.deterministic;
             read_only = read_only and row.readOnly();
             pure = pure and row.pure;
         }
@@ -4534,9 +4546,7 @@ test "computeProperties pure handler stays pure" {
     try std.testing.expect(props.read_only);
     try std.testing.expect(props.stateless);
     try std.testing.expect(props.retry_safe);
-    try std.testing.expect(props.deterministic);
     try std.testing.expect(!props.has_egress);
-    try std.testing.expect(props.idempotent);
 }
 
 test "computeProperties cache read is read-only but not stateless" {
@@ -4551,9 +4561,7 @@ test "computeProperties cache read is read-only but not stateless" {
     try std.testing.expect(props.read_only);
     try std.testing.expect(!props.stateless);
     try std.testing.expect(props.retry_safe);
-    try std.testing.expect(props.deterministic);
     try std.testing.expect(!props.has_egress);
-    try std.testing.expect(props.idempotent);
 }
 
 test "computeProperties bare writes are not retry safe" {
@@ -4568,9 +4576,7 @@ test "computeProperties bare writes are not retry safe" {
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.stateless);
     try std.testing.expect(!props.retry_safe);
-    try std.testing.expect(props.deterministic);
     try std.testing.expect(!props.has_egress);
-    try std.testing.expect(!props.idempotent);
 }
 
 test "computeProperties registration functions are request-path writes" {
@@ -4639,41 +4645,14 @@ test "computeProperties durable-only writes stay retry safe" {
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.stateless);
     try std.testing.expect(props.retry_safe);
-    try std.testing.expect(props.deterministic);
     try std.testing.expect(!props.has_egress);
-    try std.testing.expect(props.idempotent);
 }
 
-test "computeProperties nondeterministic builtins clear idempotence" {
-    var builder = ContractBuilder.init(std.testing.allocator, undefined, null, null, null);
-    defer builder.deinit();
-
-    try appendTrackedFunction(&builder, "zttp:cache", "cacheGet");
-    builder.has_nondeterministic_builtin = true;
-
-    const props = try builder.computeProperties(null, null);
-
-    try std.testing.expect(!props.pure);
-    try std.testing.expect(props.read_only);
-    try std.testing.expect(!props.stateless);
-    try std.testing.expect(props.retry_safe);
-    try std.testing.expect(!props.deterministic);
-    try std.testing.expect(!props.has_egress);
-    try std.testing.expect(!props.idempotent);
-}
-
-test "contract builder preserves determinism for durable step callback" {
-    const source =
-        \\import { step } from "zttp:durable";
-        \\function handler(req) { return step("ts", () => Date.now()); }
-    ;
-    var contract = try buildTestContract(source);
-    defer contract.deinit(std.testing.allocator);
-
-    const props = contract.properties orelse return error.MissingProperties;
-    try std.testing.expect(props.deterministic);
-    try std.testing.expect(props.idempotent);
-}
+// Determinism is not decided here any more, so the tests that pinned it moved
+// to `precompile.zig`, where the flow walk that decides it actually runs.
+// `has_nondeterministic_builtin` still records the first varying call site for
+// the reload HUD, and `computeProperties` still answers whether there was a
+// handler to walk, but neither is the property.
 
 test "saga extractor collects steps and has_compensate flags from a static saga" {
     const source =
@@ -4801,18 +4780,9 @@ test "ZTS510 never fires for a dynamically-constructed saga" {
     try std.testing.expect(!contract.sagas.items[0].compensationProven());
 }
 
-test "contract builder does not exempt eager durable step argument" {
-    const source =
-        \\import { step } from "zttp:durable";
-        \\function handler(req) { return step("ts", Date.now()); }
-    ;
-    var contract = try buildTestContract(source);
-    defer contract.deinit(std.testing.allocator);
-
-    const props = contract.properties orelse return error.MissingProperties;
-    try std.testing.expect(!props.deterministic);
-    try std.testing.expect(!props.idempotent);
-}
+// The eager-argument case - `step("ts", Date.now())`, where the clock is read
+// before the step ever runs and so is not replayed - moved to `precompile.zig`
+// with the rest of the determinism tests.
 
 /// True if `contract.spec_diagnostics` contains a ZTS509 for `workflow_fn`.
 fn hasWorkflowCallInStepDiagnostic(contract: *const HandlerContract, workflow_fn: []const u8) bool {
@@ -5076,9 +5046,7 @@ test "computeProperties egress is conservative write" {
     try std.testing.expect(!props.read_only);
     try std.testing.expect(!props.stateless);
     try std.testing.expect(!props.retry_safe);
-    try std.testing.expect(props.deterministic);
     try std.testing.expect(props.has_egress);
-    try std.testing.expect(!props.idempotent);
 }
 
 test "registered partner manifest contributes effect class to handler properties" {

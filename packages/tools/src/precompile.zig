@@ -2571,11 +2571,18 @@ fn buildContractWithPolicy(
                 props.input_validated = flow_props.input_validated;
                 props.pii_contained = flow_props.pii_contained;
                 props.injection_safe = flow_props.injection_safe;
-                // ANDed, not assigned: effect inference already cleared this
-                // for a direct `Date.now()`, which is a global member call and
-                // so carries no flow label. Flow adds the values that reach the
-                // response through a binding or a store.
+                // Flow owns determinism: it answers whether a varying value
+                // reaches the response rather than whether one was read, so a
+                // handler that logs a timestamp and answers a constant keeps
+                // the property. `computeProperties` contributes only whether
+                // there was a handler to walk at all.
                 props.deterministic = props.deterministic and flow_props.deterministic;
+                // Re-derived here, because it is derived FROM determinism and
+                // the contract builder computed it before this line ran. Left
+                // alone, `uuid()` in a response reported `deterministic ---`
+                // beside `idempotent PROVEN` - and idempotent is the one that
+                // means safe under at-least-once delivery.
+                props.idempotent = props.deterministic and props.retry_safe;
             }
 
             if (violations_out) |vout| {
@@ -3474,6 +3481,66 @@ test "runCheckOnly propagates path analysis allocation failure" {
             .{},
         ),
     );
+}
+
+/// Determinism lives here rather than in `contract_builder.zig`: the contract
+/// builder answers only whether there was a handler to walk, and the flow walk
+/// that decides the property runs in this file. Its test helper never ran that
+/// walk, so the assertions below were passing on a value nothing had computed.
+fn contractDeterminism(allocator: std.mem.Allocator, source: []const u8) !struct { deterministic: bool, idempotent: bool } {
+    var contract = try buildTestContractForSource(allocator, source, "handler.ts", null);
+    defer contract.deinit(allocator);
+    const props = contract.properties orelse return error.MissingProperties;
+    return .{ .deterministic = props.deterministic, .idempotent = props.idempotent };
+}
+
+test "a durable step callback keeps determinism" {
+    // The read is recorded on the first run and replayed after, so every run
+    // answers the same thing.
+    const props = try contractDeterminism(std.testing.allocator,
+        \\import { step } from "zttp:durable";
+        \\function handler(req) { return step("ts", () => Date.now()); }
+    );
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.idempotent);
+}
+
+test "an eager durable step argument does not keep determinism" {
+    // `Date.now()` here is evaluated before `step` is called, so it is not the
+    // value the step records, and nothing replays it.
+    const props = try contractDeterminism(std.testing.allocator,
+        \\import { step } from "zttp:durable";
+        \\function handler(req) { return step("ts", Date.now()); }
+    );
+    try std.testing.expect(!props.deterministic);
+    try std.testing.expect(!props.idempotent);
+}
+
+test "a varying read that only reaches a log keeps determinism" {
+    // The property the flow answer exists to give back: the timestamp reaches
+    // stderr and stops, so the response is the same on every run. The presence
+    // rules demoted this handler, and `idempotent` with it.
+    const props = try contractDeterminism(std.testing.allocator,
+        \\import { logInfo } from "zttp:log";
+        \\function handler(req) {
+        \\  logInfo("served", { at: Date.now() });
+        \\  return Response.json({ ok: true });
+        \\}
+    );
+    try std.testing.expect(props.deterministic);
+}
+
+test "a minted id in the response costs determinism and idempotence" {
+    // `idempotent` is derived from determinism, and is re-derived after the
+    // flow answer lands. Without that it read PROVEN beside a cleared
+    // `deterministic` - the worse of the two to get wrong, since it means safe
+    // under at-least-once delivery.
+    const props = try contractDeterminism(std.testing.allocator,
+        \\import { uuid } from "zttp:id";
+        \\function handler(req) { return Response.json({ id: uuid() }); }
+    );
+    try std.testing.expect(!props.deterministic);
+    try std.testing.expect(!props.idempotent);
 }
 
 test "buildTestContractForSource keeps decodeQuery schemas out of request bodies" {

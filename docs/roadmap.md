@@ -243,27 +243,33 @@ check and the import scan skip empty sets. No module export hit it - every clock
 random-reading export also carries `internal` or `credential` - but the label on a bare
 `Date.now()` is the first pure one.
 
-The interim rule in `handleCall` stays, and the reason has moved. It is no longer the
-thing keeping a logging handler deterministic: under the flow rule `logInfo`'s timestamp
-never reaches the response. What keeps it is that flow cannot answer the per-function
-question. `function_specs` reads the effect row directly to discharge a helper's
-`Spec<...>`, and flow only walks the handler. Two presence-based rules answer there -
-`isNonDeterministic` in effect inference and `has_nondeterministic_builtin` in the
-contract builder - and each demotes on presence rather than on reachability, so a
-handler that only logs a timestamp still reports non-deterministic at the contract level.
-Retiring them means making flow the sole source. That fallback objection is now gone -
-those exits carry `unknown` - so the question was put to a measurement instead of an
-argument: `computeProperties` was temporarily switched to a flow-only answer and two
-handlers were checked. The one that only logs a timestamp flipped to `PROVEN`, which is
-the win the item is after. `[1, 2, 3].map(() => Date.now())` reaching the response also
-reported `PROVEN`, which is a false proof - the closure hole, since fixed.
+Handler determinism is now the flow answer, and only that. The change waited on a sweep
+of every position that can hold a value, because retiring a backstop means asserting the
+walk has no blind spots left, and the first attempt at this measurement produced a false
+proof rather than a win: with `computeProperties` switched to a flow-only answer, the
+handler that only logs a timestamp flipped to `PROVEN` as intended, and
+`[1, 2, 3].map(() => Date.now())` reaching the response reported `PROVEN` too. The sweep
+that followed found two more holes, both since closed.
 
-The rules stay anyway. One repaired blind spot is not evidence that the last one is
-repaired: four fail-opens of one shape turned up in a single session, every one found by
-probing a position rather than by reading the arms that handle it. Retiring the backstop
-means asserting flow sees every value position, so that assertion gets made once, from a
-sweep of every tag that can hold a value, with a test per reachable case - not from the
-next spot check that happens to pass.
+What each source answers now:
+
+- **flow** decides the handler's `deterministic`, from whether a varying value reaches the
+  response.
+- **`contract_builder`** answers only whether there was a handler to walk. Its scan for
+  `Date.now` and `Math.random` still runs, but to name the first varying call site for the
+  reload HUD rather than to set the property.
+- **the effect row** answers the per-function question, which flow cannot reach:
+  `function_specs` reads it directly to discharge a helper's `Proof<...>` capsule. The
+  interim sink rule in `handleCall` stays with it, for that surface alone.
+
+`idempotent` is re-derived after the flow answer lands. It is computed from determinism,
+the contract builder computes it before the walk runs, and leaving it there had `uuid()`
+in a response reporting `deterministic ---` beside `idempotent PROVEN` - the worse of the
+two to get wrong, since idempotent is what claims safety under at-least-once delivery.
+
+Six tests in `contract_builder.zig` were asserting determinism through a helper that never
+ran the flow walk; they passed because the presence rule answered there. Four dropped the
+assertion and three cases moved to `precompile.zig`, where the walk runs.
 
 Why it is worth doing rather than living with the approximation: `deterministic` is the
 declarable property authors reach for most, and it feeds `idempotent`
@@ -273,10 +279,16 @@ that authors work around by narrowing their `Spec`, which widens the emitted set
 exactly the direction item 7 is trying to shrink.
 
 Observable, and met: a handler that writes a timestamp to a cache and reads it back into
-the response reports non-deterministic, and one that logs a timestamp does not - both
-from the flow rather than from the capability set. Seven tests in `flow_checker.zig` pin
-the two directions, the untouched baseline, the two global reads, the shadowed receiver,
-and the read behind a helper.
+the response reports non-deterministic, and one that logs a timestamp reports
+deterministic - both from the flow rather than from the capability set, and the second
+now at the contract level rather than only inside the flow checker.
+
+`flow_checker.zig` pins the label side: each direction of the cache case, the untouched
+baseline, both global reads, a shadowed `Date`, a read behind a helper, a read inside a
+closure, and a durable callback keeping determinism while still carrying a secret.
+`precompile.zig` pins the contract side, where the two answers are combined: the logging
+handler, the minted id with its `idempotent`, and the durable step in both its callback
+and its eager form.
 
 ### 3. Typed holes (medium, decomposable)
 

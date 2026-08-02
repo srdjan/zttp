@@ -457,46 +457,72 @@ pub const FlowChecker = struct {
     /// it is the same on every run, while a secret it returns is still a secret
     /// in the response.
     fn closureArgLabels(self: *FlowChecker, slot: u16, call_data: Node.CallExpr) LabelSet {
+        const is_durable = if (self.module_fn_meta.get(slot)) |meta|
+            std.mem.eql(u8, meta.module, "durable")
+        else
+            false;
+
         var labels = LabelSet.empty;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
-            labels = LabelSet.merge(labels, self.closuresWithin(arg));
-        }
-        if (labels.isEmpty()) return labels;
 
-        if (self.module_fn_meta.get(slot)) |meta| {
-            if (std.mem.eql(u8, meta.module, "durable")) labels.nondeterministic = false;
+            // Whether a closure is present is a question about the argument's
+            // shape, not about the labels it produced: `() => Date.now()` under
+            // a durable export produces exactly one label and then loses it, so
+            // an emptiness test would read it as "no closure here" and fall to
+            // the eager branch that puts the label back.
+            if (self.closuresWithin(arg)) |from_closure| {
+                var l = from_closure;
+                if (is_durable) l.nondeterministic = false;
+                labels = LabelSet.merge(labels, l);
+            } else if (is_durable) {
+                // Only what a closure returns is replayed. `step("ts",
+                // Date.now())` reads the clock before `step` is ever called, so
+                // no replay reproduces that value and the eager form keeps the
+                // label the callback form loses.
+                labels = LabelSet.merge(labels, self.inferLabels(arg));
+            }
         }
         return labels;
     }
 
-    /// Union of what every closure inside `node` produces, descending through
-    /// the array and object literals a callback is usually wrapped in and
-    /// ignoring every other value.
-    fn closuresWithin(self: *FlowChecker, node: NodeIndex) LabelSet {
-        if (node == null_node) return LabelSet.empty;
-        const tag = self.ir_view.getTag(node) orelse return LabelSet.empty;
+    /// Union of what every closure inside `node` produces, or null when `node`
+    /// holds no closure at all. Null and the empty set are different answers: a
+    /// callback that returns nothing labelled still went through a call the
+    /// module makes, and a durable export replays only what such a call
+    /// returned. Testing emptiness instead would read `() => Date.now()` under
+    /// `step` - one label, then dropped as replayed - as "no closure here".
+    ///
+    /// Descends through the array and object literals a callback is usually
+    /// wrapped in, and ignores every other value.
+    fn closuresWithin(self: *FlowChecker, node: NodeIndex) ?LabelSet {
+        if (node == null_node) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
         switch (tag) {
             .arrow_function, .function_expr => return self.closureResultLabels(node),
             .array_literal => {
-                const arr = self.ir_view.getArray(node) orelse return LabelSet.empty;
-                var labels = LabelSet.empty;
+                const arr = self.ir_view.getArray(node) orelse return null;
+                var labels: ?LabelSet = null;
                 var i: u16 = 0;
                 while (i < arr.elements_count) : (i += 1) {
                     const elem = self.ir_view.getListIndex(arr.elements_start, i);
-                    labels = LabelSet.merge(labels, self.closuresWithin(elem));
+                    if (self.closuresWithin(elem)) |found| {
+                        labels = LabelSet.merge(labels orelse LabelSet.empty, found);
+                    }
                 }
                 return labels;
             },
             .object_literal => {
-                const obj = self.ir_view.getObject(node) orelse return LabelSet.empty;
-                var labels = LabelSet.empty;
+                const obj = self.ir_view.getObject(node) orelse return null;
+                var labels: ?LabelSet = null;
                 var i: u16 = 0;
                 while (i < obj.properties_count) : (i += 1) {
                     const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
                     if ((self.ir_view.getTag(prop_idx) orelse continue) != .object_property) continue;
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-                    labels = LabelSet.merge(labels, self.closuresWithin(prop.value));
+                    if (self.closuresWithin(prop.value)) |found| {
+                        labels = LabelSet.merge(labels orelse LabelSet.empty, found);
+                    }
                 }
                 return labels;
             },
@@ -506,9 +532,9 @@ pub const FlowChecker = struct {
             // closures contribute, and answering `inferLabels` for every
             // identifier would taint results that carry no argument data.
             .identifier => {
-                const binding = self.ir_view.getBinding(node) orelse return LabelSet.empty;
+                const binding = self.ir_view.getBinding(node) orelse return null;
                 const key = packBindingKey(binding.scope_id, binding.slot);
-                const fn_node = self.user_fn_decls.get(key) orelse return LabelSet.empty;
+                const fn_node = self.user_fn_decls.get(key) orelse return null;
                 return self.closureResultLabels(fn_node);
             },
 
@@ -516,9 +542,9 @@ pub const FlowChecker = struct {
             // and the arms above are the shapes one arrives in - bare, in an
             // array, as an object field, or under a name. No other tag can hold
             // a closure the callee invokes without going through one of them.
-            // Returning empty owes nothing here: this set is added to the
-            // export's declared labels rather than replacing them.
-            else => return LabelSet.empty,
+            // Null owes nothing here: it reports that the argument is a plain
+            // value, which is what tells the two durable forms apart.
+            else => return null,
         }
     }
 
