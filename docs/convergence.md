@@ -19,12 +19,13 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-02 | `79e9fc86` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `845025e7` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `2db4545c` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `ec31f5a8` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
 two files.
 
-The last five rows share a corpus and a policy hash and differ only by build.
+The last six rows share a corpus and a policy hash and differ only by build.
 Between the second and the third, the flow checker stopped proving through
 three fail-opens - a call it could not enter, and two shapes of egress options
 object it could not read field by field - and gained the ability to walk a
@@ -52,13 +53,24 @@ counters. `zttp:sql` declares no clock at all, so the same rule had been proving
 `deterministic` for a handler returning database rows. A read from mutable
 module state is now its own varying source, which no capability set can express.
 
+The seventh moves no fence at all, and it is here to say so. It is the first
+row published after the compiler started advertising an exact repair - ZTS620
+carries `repair_available: true` - and after five more repair intents became
+reachable from a single request rather than only through a whole-file
+normalize. Neither can change a first-draft rate: a repair is what happens
+*after* a draft is vetoed, so it shows up in round-trips and in the
+compiler-authored apply share, not in the headline. The row exists so the two
+are separable later, when a corpus large enough to move round-trips exists.
+
 None of it adds a rule, so the policy hash cannot separate these rows and the
-commit column is what does. The rate held at 90% throughout - six tightenings
-and one loosening, and this corpus felt none of them. The replay is a ratchet,
-failing if a compiler change flips a recorded first-draft outcome, so that is a
-checked result rather than a quiet one. What it also says is that eleven cases
-are too few to see a fence move: none of them logs a timestamp, none returns a
-row it read from a store, and none writes the shapes the fail-opens hid behind.
+commit column is what does. The rate held at 90% throughout - six tightenings,
+one loosening, and one repair-side change - and this corpus felt none of them.
+The replay is a ratchet, failing if a compiler change flips a recorded
+first-draft outcome, so that is a checked result rather than a quiet one. What
+it also says is that eleven cases are too few to see a fence move: none of them
+logs a timestamp, none returns a row it read from a store, none writes the
+shapes the fail-opens hid behind, and none has a first draft that trips one of
+the five newly reachable rewrites.
 
 ## Reading the table
 
