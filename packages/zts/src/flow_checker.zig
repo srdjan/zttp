@@ -1568,6 +1568,14 @@ pub const FlowChecker = struct {
                 const call_data = self.ir_view.getCall(node) orelse return false;
                 if (!self.isResponseHelper(call_data.callee)) return false;
 
+                // Only the first argument is sink-checked, and that matches
+                // what leaves the process: `Response.json/text/html` read the
+                // second argument for `status` alone (see `http.zig`), so a
+                // value placed in `{ headers: ... }` is dropped rather than
+                // transmitted. If those helpers ever honor custom headers, the
+                // init argument becomes a response sink and has to be checked
+                // here in the same change - otherwise a secret in a header
+                // would discharge no_secret_leakage.
                 if (call_data.args_count > 0) {
                     const data_arg = self.ir_view.getListIndex(call_data.args_start, 0);
                     const labels = self.inferLabels(data_arg);
