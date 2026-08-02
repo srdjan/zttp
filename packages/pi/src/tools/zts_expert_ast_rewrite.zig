@@ -243,7 +243,7 @@ fn applyCapabilityAlias(
     // unambiguous for the common case; the fallback covers UI ergonomics.
     var chosen: ?usize = null;
     for (preview.refactors.items, 0..) |r, i| {
-        if (!std.mem.eql(u8, r.kind, "canonicalize_capability_key_alias")) continue;
+        if (r.intent != .canonicalize_capability_key_alias) continue;
         if (r.line == line) {
             chosen = i;
             break;
@@ -253,7 +253,7 @@ fn applyCapabilityAlias(
         var count_alias: usize = 0;
         var last_alias_idx: usize = 0;
         for (preview.refactors.items, 0..) |r, i| {
-            if (!std.mem.eql(u8, r.kind, "canonicalize_capability_key_alias")) continue;
+            if (r.intent != .canonicalize_capability_key_alias) continue;
             count_alias += 1;
             last_alias_idx = i;
         }
@@ -750,7 +750,7 @@ test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → vet
     var saw_arrow = false;
     var arrow_line: u32 = 0;
     for (preview.refactors.items) |r| {
-        if (std.mem.eql(u8, r.kind, "canonicalize_arrow_helper")) {
+        if (r.intent == .replace_arrow_with_function) {
             saw_arrow = true;
             arrow_line = r.line;
             break;

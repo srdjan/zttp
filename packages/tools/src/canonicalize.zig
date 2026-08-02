@@ -11,13 +11,39 @@ const writeJsonString = zts.handler_contract.writeJsonString;
 pub const RepairIntent = zts.repair_intent.RepairIntent;
 
 pub const Refactor = struct {
-    kind: []const u8,
+    /// The typed intent this rewrite realizes. `StatementRewrite` has carried
+    /// one since it existed; this side carried a free string, which is what
+    /// made three vocabularies out of one (D3 §5). They are one enum now, and
+    /// `legacyKind` is the only place the old spelling survives.
+    intent: RepairIntent,
     line: u32,
     column: u32,
     message: []const u8,
     replacement: []const u8,
     original_line: ?[]const u8 = null,
 };
+
+/// The v1 `canonicalize --json` name for an intent.
+///
+/// Five of these differ from the tag by more than spelling -
+/// `canonicalize_arrow_helper` against `replace_arrow_with_function` - which is
+/// why the string field read as a separate vocabulary rather than a rendering
+/// of this one. D3 §6 freezes v1 command shapes, so the names stay on that
+/// surface and nowhere else: the v2 wire publishes the tag, and every internal
+/// comparison is now on the enum.
+///
+/// An intent with no legacy name never reached the line-keyed path, so it has
+/// no v1 spelling to preserve; it renders as its tag.
+pub fn legacyKind(intent: RepairIntent) []const u8 {
+    return switch (intent) {
+        .replace_arrow_with_function => "canonicalize_arrow_helper",
+        .replace_export_arrow_with_function => "canonicalize_export_function",
+        .replace_let_with_const => "canonicalize_let_const",
+        .replace_compound_assign_with_explicit => "canonicalize_compound_assign",
+        .drop_redundant_bool_compare => "canonicalize_redundant_bool_compare",
+        else => @tagName(intent),
+    };
+}
 
 pub const Result = struct {
     file: []const u8,
@@ -79,10 +105,10 @@ fn buildRefactors(
                 else => return err,
             };
             try appendRefactorUnique(allocator, result, .{
-                .kind = if (std.mem.eql(u8, diag.code, "ZTS608"))
-                    "canonicalize_arrow_helper"
+                .intent = if (std.mem.eql(u8, diag.code, "ZTS608"))
+                    .replace_arrow_with_function
                 else
-                    "canonicalize_export_function",
+                    .replace_export_arrow_with_function,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -95,10 +121,10 @@ fn buildRefactors(
                 else => return err,
             };
             try appendRefactorUnique(allocator, result, .{
-                .kind = if (std.mem.indexOf(u8, line, "for (let ") != null)
-                    "canonicalize_for_of_const"
+                .intent = if (std.mem.indexOf(u8, line, "for (let ") != null)
+                    .canonicalize_for_of_const
                 else
-                    "canonicalize_let_const",
+                    .replace_let_with_const,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -111,7 +137,7 @@ fn buildRefactors(
                 else => return err,
             };
             try appendRefactorUnique(allocator, result, .{
-                .kind = "canonicalize_compound_assign",
+                .intent = .replace_compound_assign_with_explicit,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -125,7 +151,7 @@ fn buildRefactors(
                 else => return err,
             };
             try appendRefactorUnique(allocator, result, .{
-                .kind = "canonicalize_redundant_bool_compare",
+                .intent = .drop_redundant_bool_compare,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -146,8 +172,8 @@ fn appendRefactorUnique(allocator: std.mem.Allocator, result: *Result, refactor:
     var owned = refactor;
     for (result.refactors.items) |*existing| {
         if (existing.line == owned.line and std.mem.eql(u8, existing.replacement, owned.replacement)) {
-            if (std.mem.eql(u8, owned.kind, "canonicalize_capability_key_alias")) {
-                existing.kind = owned.kind;
+            if (owned.intent == .canonicalize_capability_key_alias) {
+                existing.intent = owned.intent;
                 existing.column = owned.column;
                 // Move ownership of the duped message: free the old one, take
                 // owned's, and clear owned's so freeRefactorOwned skips it.
@@ -173,7 +199,7 @@ fn freeRefactorOwned(allocator: std.mem.Allocator, refactor: *Refactor) void {
     allocator.free(refactor.replacement);
     if (refactor.original_line) |line| allocator.free(line);
     refactor.* = .{
-        .kind = "",
+        .intent = .canonicalize_capability_key_alias,
         .line = 0,
         .column = 0,
         .message = "",
@@ -536,7 +562,7 @@ fn capabilityAliasReplacement(
     errdefer allocator.free(alias.replacement);
     errdefer allocator.free(alias.original_line);
     return .{
-        .kind = "canonicalize_capability_key_alias",
+        .intent = .canonicalize_capability_key_alias,
         .line = alias.line,
         .column = 1,
         .message = try allocator.dupe(u8, "make capability key alias compiler-visible"),
@@ -2228,20 +2254,6 @@ fn isCanonicalBandCode(code: []const u8) bool {
     return zts.rule_registry.isCanonicalProfileCode(code);
 }
 
-/// Map a `Refactor.kind` string to the typed `RepairIntent` it realizes, so a
-/// normalize pass records *what* it rewrote without re-parsing prose. Returns
-/// null for kinds with no 1:1 intent (none today; future-proofing).
-fn repairIntentForKind(kind: []const u8) ?RepairIntent {
-    if (std.mem.eql(u8, kind, "canonicalize_arrow_helper")) return .replace_arrow_with_function;
-    if (std.mem.eql(u8, kind, "canonicalize_export_function")) return .replace_export_arrow_with_function;
-    if (std.mem.eql(u8, kind, "canonicalize_let_const")) return .replace_let_with_const;
-    if (std.mem.eql(u8, kind, "canonicalize_for_of_const")) return .canonicalize_for_of_const;
-    if (std.mem.eql(u8, kind, "canonicalize_compound_assign")) return .replace_compound_assign_with_explicit;
-    if (std.mem.eql(u8, kind, "canonicalize_capability_key_alias")) return .canonicalize_capability_key_alias;
-    if (std.mem.eql(u8, kind, "canonicalize_redundant_bool_compare")) return .drop_redundant_bool_compare;
-    return null;
-}
-
 pub const NormalizeResult = struct {
     /// The handler source after reaching the rewrite fixed point. Owned.
     canonical_source: []u8,
@@ -2402,7 +2414,7 @@ pub fn normalizeSource(
             errdefer if (s.intents_owned) allocator.free(s.intents);
             if (result.refactors.items.len > 0) {
                 for (result.refactors.items) |r| {
-                    if (repairIntentForKind(r.kind)) |intent| try trace.append(allocator, intent);
+                    try trace.append(allocator, r.intent);
                 }
             } else {
                 for (s.intents) |intent| try trace.append(allocator, intent);
@@ -2656,8 +2668,10 @@ pub fn writeJsonWithSimulation(
     try writer.writeAll(",\"refactors\":[");
     for (result.refactors.items, 0..) |r, i| {
         if (i > 0) try writer.writeByte(',');
+        // v1 keeps its spelling. D3 §6 freezes v1 command shapes, so this is
+        // the one surface where the legacy names still appear.
         try writer.writeAll("{\"kind\":");
-        try writeJsonString(writer, r.kind);
+        try writeJsonString(writer, legacyKind(r.intent));
         try writer.print(",\"line\":{d},\"column\":{d},\"message\":", .{ r.line, r.column });
         try writeJsonString(writer, r.message);
         try writer.writeAll(",\"replacement\":");
@@ -2881,6 +2895,31 @@ test "writeJson envelope is stable with no refactors" {
     defer parsed.deinit();
 }
 
+test "every rewrite row has a v1 name, and only the renamed five differ" {
+    // The mapping is the whole compatibility surface. Five rows are renamed
+    // and the other two are their own tag; asserting both directions is what
+    // stops a future row from quietly acquiring a sixth legacy name, or a
+    // renamed one from losing its v1 spelling.
+    try std.testing.expectEqualStrings("canonicalize_arrow_helper", legacyKind(.replace_arrow_with_function));
+    try std.testing.expectEqualStrings("canonicalize_export_function", legacyKind(.replace_export_arrow_with_function));
+    try std.testing.expectEqualStrings("canonicalize_let_const", legacyKind(.replace_let_with_const));
+    try std.testing.expectEqualStrings("canonicalize_compound_assign", legacyKind(.replace_compound_assign_with_explicit));
+    try std.testing.expectEqualStrings("canonicalize_redundant_bool_compare", legacyKind(.drop_redundant_bool_compare));
+
+    try std.testing.expectEqualStrings("canonicalize_for_of_const", legacyKind(.canonicalize_for_of_const));
+    try std.testing.expectEqualStrings("canonicalize_capability_key_alias", legacyKind(.canonicalize_capability_key_alias));
+
+    // An intent that never reached the line-keyed path renders as its tag:
+    // there is no v1 output to stay compatible with.
+    try std.testing.expectEqualStrings("replace_ternary_with_if", legacyKind(.replace_ternary_with_if));
+
+    var renamed: usize = 0;
+    for (rewrite_row_intents) |intent| {
+        if (!std.mem.eql(u8, legacyKind(intent), @tagName(intent))) renamed += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 5), renamed);
+}
+
 test "writeJson envelope covers all deterministic refactor kinds" {
     const cases = [_]struct {
         name: []const u8,
@@ -3051,7 +3090,7 @@ test "applyRefactors rejects stale line mismatch" {
         \\}
     ;
     const refactor = Refactor{
-        .kind = "canonicalize_let_const",
+        .intent = .replace_let_with_const,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
@@ -3069,7 +3108,7 @@ test "applyRefactors rejects overlapping replacements" {
         \\}
     ;
     const first = Refactor{
-        .kind = "canonicalize_let_const",
+        .intent = .replace_let_with_const,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
@@ -3077,7 +3116,7 @@ test "applyRefactors rejects overlapping replacements" {
         .original_line = "  let count = 1;",
     };
     const second = Refactor{
-        .kind = "canonicalize_capability_key_alias",
+        .intent = .canonicalize_capability_key_alias,
         .line = 2,
         .column = 1,
         .message = "make capability key alias compiler-visible",
@@ -3099,7 +3138,7 @@ test "applyRefactors applies multiple lines and edit simulation stays clean" {
         \\}
     ;
     const first = Refactor{
-        .kind = "canonicalize_let_const",
+        .intent = .replace_let_with_const,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
@@ -3107,7 +3146,7 @@ test "applyRefactors applies multiple lines and edit simulation stays clean" {
         .original_line = "  let count = 1;",
     };
     const second = Refactor{
-        .kind = "canonicalize_for_of_const",
+        .intent = .canonicalize_for_of_const,
         .line = 4,
         .column = 3,
         .message = "for-of binding uses let",
@@ -3135,7 +3174,7 @@ test "invalid applied replacement is caught by edit simulation" {
         \\}
     ;
     const bad = Refactor{
-        .kind = "canonicalize_let_const",
+        .intent = .replace_let_with_const,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
@@ -3166,7 +3205,7 @@ test "collect output can clear canonical diagnostic through edit simulation" {
     var preview = try collectFromSource(std.testing.allocator, source, "handler.ts");
     defer preview.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), preview.refactors.items.len);
-    try std.testing.expectEqualStrings("canonicalize_arrow_helper", preview.refactors.items[0].kind);
+    try std.testing.expectEqual(RepairIntent.replace_arrow_with_function, preview.refactors.items[0].intent);
 
     const proposed = try std.fmt.allocPrint(
         std.testing.allocator,
@@ -4252,14 +4291,14 @@ test "nestedDestructureRewrite flattens a single-line nested pattern" {
 /// The rewrite rows the normalizer can emit. Kept beside the confluence check
 /// so a new row that nobody pairs against is visible as a gap rather than
 /// silently untested.
-pub const rewrite_row_kinds = [_][]const u8{
-    "canonicalize_arrow_helper",
-    "canonicalize_capability_key_alias",
-    "canonicalize_compound_assign",
-    "canonicalize_export_function",
-    "canonicalize_for_of_const",
-    "canonicalize_let_const",
-    "canonicalize_redundant_bool_compare",
+pub const rewrite_row_intents = [_]RepairIntent{
+    .replace_arrow_with_function,
+    .canonicalize_capability_key_alias,
+    .replace_compound_assign_with_explicit,
+    .replace_export_arrow_with_function,
+    .canonicalize_for_of_const,
+    .replace_let_with_const,
+    .drop_redundant_bool_compare,
 };
 
 /// Apply only the refactors of one row kind, to a fixed point.
@@ -4267,11 +4306,11 @@ pub const rewrite_row_kinds = [_][]const u8{
 /// The normalizer's own loop applies every enabled row per pass. Restricting to
 /// one row is what makes a critical pair observable: it lets the harness drive
 /// A-then-B and B-then-A over the same input and compare where they land.
-fn normalizeOnlyKind(
+fn normalizeOnlyIntent(
     allocator: std.mem.Allocator,
     source: []const u8,
     virtual_path: []const u8,
-    kind: []const u8,
+    intent: RepairIntent,
 ) ![]u8 {
     var current = try allocator.dupe(u8, source);
     errdefer allocator.free(current);
@@ -4286,7 +4325,7 @@ fn normalizeOnlyKind(
         var seen_lines: std.ArrayListUnmanaged(u32) = .empty;
         defer seen_lines.deinit(allocator);
         for (result.refactors.items) |r| {
-            if (!std.mem.eql(u8, r.kind, kind)) continue;
+            if (r.intent != intent) continue;
             // `applyRefactors` refuses two refactors on one line; take the
             // first and let the next pass pick up the rest.
             if (std.mem.indexOfScalar(u32, seen_lines.items, r.line) != null) continue;
@@ -4320,15 +4359,15 @@ fn normalizeOnlyKind(
 /// An entry that starts joining also fails the test, so the list can only
 /// shrink.
 const known_non_joining = [_]struct {
-    a: []const u8,
-    b: []const u8,
+    a: RepairIntent,
+    b: RepairIntent,
     why: []const u8,
 }{};
 
-fn isKnownNonJoining(a: []const u8, b: []const u8) bool {
+fn isKnownNonJoining(a: RepairIntent, b: RepairIntent) bool {
     for (known_non_joining) |pair| {
-        if (std.mem.eql(u8, pair.a, a) and std.mem.eql(u8, pair.b, b)) return true;
-        if (std.mem.eql(u8, pair.a, b) and std.mem.eql(u8, pair.b, a)) return true;
+        if (pair.a == a and pair.b == b) return true;
+        if (pair.a == b and pair.b == a) return true;
     }
     return false;
 }
@@ -4380,16 +4419,16 @@ test "rewrite rows join in either order" {
     var non_joining: usize = 0;
     var matched_known: usize = 0;
     for (fixtures) |fixture| {
-        for (rewrite_row_kinds, 0..) |a, i| {
-            for (rewrite_row_kinds[i + 1 ..]) |b| {
-                const ab_first = try normalizeOnlyKind(allocator, fixture.source, "conf.ts", a);
+        for (rewrite_row_intents, 0..) |a, i| {
+            for (rewrite_row_intents[i + 1 ..]) |b| {
+                const ab_first = try normalizeOnlyIntent(allocator, fixture.source, "conf.ts", a);
                 defer allocator.free(ab_first);
-                const ab = try normalizeOnlyKind(allocator, ab_first, "conf.ts", b);
+                const ab = try normalizeOnlyIntent(allocator, ab_first, "conf.ts", b);
                 defer allocator.free(ab);
 
-                const ba_first = try normalizeOnlyKind(allocator, fixture.source, "conf.ts", b);
+                const ba_first = try normalizeOnlyIntent(allocator, fixture.source, "conf.ts", b);
                 defer allocator.free(ba_first);
-                const ba = try normalizeOnlyKind(allocator, ba_first, "conf.ts", a);
+                const ba = try normalizeOnlyIntent(allocator, ba_first, "conf.ts", a);
                 defer allocator.free(ba);
 
                 if (!std.mem.eql(u8, ab, ba)) {
@@ -4400,7 +4439,7 @@ test "rewrite rows join in either order" {
                     non_joining += 1;
                     std.debug.print(
                         "[confluence] {s}: {s} then {s} does not join {s} then {s}\n",
-                        .{ fixture.name, a, b, b, a },
+                        .{ fixture.name, @tagName(a), @tagName(b), @tagName(b), @tagName(a) },
                     );
                 }
             }

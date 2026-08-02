@@ -1181,10 +1181,30 @@ fn runCanonicalize(
     try json.beginArray();
     for (result.refactors.items) |refactor| {
         try json.beginObject();
-        try json.objectField("kind");
-        try json.write(refactor.kind);
+        // D3 §5's `repair` carries the typed intent, not a per-producer string.
+        // `Refactor` used to carry one and that is what made the third parallel
+        // vocabulary: five of its names differed from the tag by more than
+        // spelling. The legacy names survive only on the frozen v1 surface.
+        try json.objectField("intent");
+        try json.write(@tagName(refactor.intent));
         try json.objectField("grade");
         try json.write(candidate_grade);
+        // The row from the equivalence-validator registry, so a client reads
+        // what would discharge this rewrite and whether anything runs it, in
+        // the same object as the rewrite. Null for an intent with no row.
+        try json.objectField("validator");
+        if (zts.repair_validator.find(refactor.intent)) |row| {
+            try json.beginObject();
+            try json.objectField("method");
+            try json.write(row.method.id());
+            try json.objectField("status");
+            try json.write(@tagName(row.status));
+            try json.objectField("precondition");
+            if (row.precondition) |p| try json.write(p) else try json.write(null);
+            try json.endObject();
+        } else {
+            try json.write(null);
+        }
         // No Refactor kind corresponds to an idiom row today: measured against
         // the catalog, every line-keyed refactor repairs a canonical-profile
         // restriction, while the idiom table picks among admitted spellings.
@@ -2326,6 +2346,20 @@ test "canonicalize candidates carry a grade and the original span text" {
     // re-validate staleness. The v2 wire carries it.
     try testing.expect(first.get("original").? == .string);
     try testing.expect(first.get("line").?.integer > 0);
+
+    // D3 §5: the v2 candidate carries the typed intent, not a producer-local
+    // string. `canonicalize_let_const` is the v1 name for this row and must not
+    // appear here - shipping it would freeze the third vocabulary into the
+    // protocol, which is the thing item 8 exists to prevent.
+    try testing.expectEqualStrings("replace_let_with_const", first.get("intent").?.string);
+    try testing.expect(first.get("kind") == null);
+
+    // The validator row travels with the rewrite, so a client reads what would
+    // discharge it and whether anything runs it without a second request.
+    const validator = first.get("validator").?.object;
+    try testing.expectEqualStrings("M4", validator.get("method").?.string);
+    try testing.expectEqualStrings("planned", validator.get("status").?.string);
+    try testing.expect(validator.get("precondition").? == .string);
 }
 
 test "canonicalize simulates only when asked, and says so either way" {
