@@ -1660,7 +1660,13 @@ pub const FlowChecker = struct {
             // token in `const opts = { headers: { authorization: token } }`
             // reached the wire with no_credential_leakage still proven. Route
             // the whole object to the one sink that assumes any field.
-            if (self.ir_view.getTag(opts_arg) != .object_literal) {
+            // A computed key (`{ [field]: token }`) has no name to match, so
+            // the extractors skip it and the `body:` early return can stop the
+            // whole-object fallback from ever running. The object is a literal
+            // but its fields are no more readable than a hoisted one's.
+            if (self.ir_view.getTag(opts_arg) != .object_literal or
+                self.hasUnnameableKey(opts_arg))
+            {
                 self.checkSinkLabels(self.inferLabels(opts_arg), node, .egress_opaque);
                 return;
             }
@@ -2158,6 +2164,25 @@ pub const FlowChecker = struct {
             }
         }
         return labels;
+    }
+
+    /// True when any property of this object literal carries a key the checker
+    /// cannot match by name. A computed key is the case that matters, and it
+    /// must be recognized by the `is_computed` flag rather than by a failed
+    /// name lookup: `getPropertyKeyName` resolves `{ [field]: v }` to "field",
+    /// the name of the variable holding the key, so a by-name extractor would
+    /// otherwise both miss the real field and answer for one that is not there.
+    fn hasUnnameableKey(self: *const FlowChecker, node: NodeIndex) bool {
+        const obj = self.ir_view.getObject(node) orelse return true;
+        var i: u16 = 0;
+        while (i < obj.properties_count) : (i += 1) {
+            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+            if ((self.ir_view.getTag(prop_idx) orelse continue) != .object_property) continue;
+            const prop = self.ir_view.getProperty(prop_idx) orelse return true;
+            if (prop.is_computed) return true;
+            if (self.getPropertyKeyName(prop.key) == null) return true;
+        }
+        return false;
     }
 
     /// Get the name of an object property key (identifier or string literal).
@@ -3714,6 +3739,23 @@ test "FlowChecker flags a credential in a hoisted egress options object" {
         \\  const token = req.headers.authorization;
         \\  const opts = { headers: { authorization: token } };
         \\  fetch("https://api.example.com/v1", opts);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a credential under a computed key in egress options" {
+    // `getPropertyKeyName` answers null for a computed key, and every per-field
+    // extractor skips what it cannot name. `inferObjectBodyLabels` returns just
+    // the `body` value once a body key is present, so its whole-object fallback
+    // never runs either - the token reaches no sink at all.
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const token = req.headers.authorization;
+        \\  const field = "authorization";
+        \\  fetch("https://api.example.com/v1", { body: "ping", [field]: token });
         \\  return Response.json({ ok: true });
         \\}
     ;
