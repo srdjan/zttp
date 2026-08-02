@@ -22,12 +22,13 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-02 | `ec31f5a8` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `631aabd6` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `9b7518ea` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `7ec8ba85` | `ed809ba50da1` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 4 | 100% (6/6) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
 two files.
 
-The last eight rows share a corpus and a policy hash and differ only by build.
+The first nine rows share a corpus and a policy hash and differ only by build.
 Between the second and the third, the flow checker stopped proving through
 three fail-opens - a call it could not enter, and two shapes of egress options
 object it could not read field by field - and gained the ability to walk a
@@ -95,6 +96,27 @@ That list has stopped being a caveat and become the finding. Nine rows over one
 corpus, every one of them 90%, is the corpus reporting its own resolution rather
 than the compiler holding still - eleven cases cannot separate nine builds. The
 next thing worth doing to this number is growing what it measures over.
+
+The tenth row is the first on a different corpus, and the corpus column says so:
+`ed809ba50da1` rather than `b28a83a531db`. It must not be read as the tenth
+point of the series above. The forge tools left the guidance, so every case is
+now authored by the model rather than synthesized in Zig, and the persona gained
+an instruction to dry-run each draft through `zts_expert_edit_simulate` before
+`apply_edit`.
+
+The headline did not move, and what sits behind it did. `validate-body` stopped
+being the pinned failure: its `as` draft never reaches the veto now, because the
+model sees ZTS042 in simulation first. `jwt-auth` took its place, and for a
+different reason - returning the claims the prompt asks for trips ZTS401, so the
+first draft is rejected for doing what was requested. One gap closed and another
+opened, netting the same 90%, which is a reminder that a held rate is not
+evidence of a held cause.
+
+Median round-trips moved for the first time, 5 to 4. That column had been flat
+across nine builds, and the dry-run instruction is the visible reason: a draft
+that would have cost a veto retry now costs a simulate call instead. The intent
+column reads 100% again but over a corrected check - see the section below on
+`websocket-echo` - so it is not comparable to the 100% above it either.
 
 ## Reading the table
 
