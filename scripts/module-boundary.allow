@@ -113,6 +113,7 @@ pi module_manifest
 pi parser
 pi repair_intent
 pi repair_plan
+pi repair_validator
 pi rule_registry
 pi system_linker
 pi witness_corpus

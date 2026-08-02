@@ -107,6 +107,8 @@ pub fn execute(
     try json_utils.writeJsonString(w, intent.intent_kind);
     try w.writeAll(",\"proposed_content\":");
     try json_utils.writeJsonString(w, proposed);
+    try w.writeAll(",\"equivalence\":");
+    try writeEquivalenceJson(w, intent, source, proposed);
     try w.writeAll(",\"verification\":");
     try edit_simulate.writeResultJson(w, &result);
     try w.writeByte('}');
@@ -140,6 +142,49 @@ pub fn execute(
         .llm_text = llm_text,
         .ui_payload = payload,
     };
+}
+
+/// Publish what the intent's registered equivalence validator says about this
+/// candidate, or `null` when the intent has none.
+///
+/// This is a different question from `verification`, which asks whether the
+/// candidate introduces new diagnostics. A candidate can be clean and still not
+/// be the rewrite the law describes - `x === true` edited to `!x` type-checks
+/// exactly as well as `x` does and means the opposite. Only the discharge
+/// separates them, which is why an implemented row is what `repair_available`
+/// keys on rather than a clean simulate.
+fn writeEquivalenceJson(
+    w: anytype,
+    intent: RepairIntent,
+    source: []const u8,
+    proposed: []const u8,
+) !void {
+    const typed = std.meta.stringToEnum(zts.repair_intent.RepairIntent, intent.intent_kind) orelse {
+        try w.writeAll("null");
+        return;
+    };
+    const row = zts.repair_validator.find(typed) orelse {
+        try w.writeAll("null");
+        return;
+    };
+
+    switch (zts.repair_validator.validateApplication(typed, source, proposed, intent.line)) {
+        .no_validator => try w.writeAll("null"),
+        .equivalent => {
+            try w.writeAll("{\"method\":");
+            try json_utils.writeJsonString(w, row.method.id());
+            try w.writeAll(",\"discharged\":true,\"precondition\":");
+            try json_utils.writeJsonString(w, row.precondition orelse "");
+            try w.writeByte('}');
+        },
+        .not_law_shape => |why| {
+            try w.writeAll("{\"method\":");
+            try json_utils.writeJsonString(w, row.method.id());
+            try w.writeAll(",\"discharged\":false,\"reason\":");
+            try json_utils.writeJsonString(w, why);
+            try w.writeByte('}');
+        },
+    }
 }
 
 fn parseRepairIntent(plan_value: std.json.Value) !RepairIntent {
@@ -292,6 +337,28 @@ test "execute dry-runs an add_trailing_return intent" {
         },
         else => return error.TestFailed,
     }
+}
+
+test "a bool-compare candidate carries its discharged equivalence" {
+    const input =
+        \\{"path":"handler.ts","source":"const ready = true;\nconst go = ready === true;\n","plan":{"id":"rp_010","edit_intent":{"kind":"drop_redundant_bool_compare","line":2,"column":18,"template":""}}}
+    ;
+    var result = try execute(testing.allocator, &.{input});
+    defer result.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"discharged\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"method\":\"M4\"") != null);
+}
+
+test "an intent with no implemented validator publishes a null equivalence" {
+    // `add_trailing_return` claims no equivalence and never will: it exists to
+    // change what the program does on a path that fell off the end. A null here
+    // is the row's classification reaching the wire, not a missing feature.
+    const input =
+        \\{"path":"handler.ts","source":"function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const data = auth.value;\n}","plan":{"id":"rp_011","edit_intent":{"kind":"add_trailing_return","line":3,"column":1,"template":"return Response.json({ data: auth.value });"}}}
+    ;
+    var result = try execute(testing.allocator, &.{input});
+    defer result.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"equivalence\":null") != null);
 }
 
 test "execute returns typed failure for unsupported intent" {

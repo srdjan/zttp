@@ -1055,9 +1055,12 @@ fn writeCheckPayload(
 /// `repair_available` answers from `meta.validators` rather than a constant.
 /// Spec 4.8 permits advertising an exact repair only when a registered
 /// equivalence validator exists, so the flag is true exactly when this
-/// diagnostic's repair intent has a row whose method is implemented. Every row
-/// is `planned` today, so every answer is still false - but it is now false
-/// because the registry says so, and one row flipping is what changes it.
+/// diagnostic's repair intent has a row whose method is implemented.
+///
+/// One row is: `drop_redundant_bool_compare` (ZTS620), discharged by
+/// `repair_validator.validateApplication` re-deriving the declared law's
+/// rewrite from the original line and requiring the candidate to match it byte
+/// for byte. Every other row is still `planned` and still answers false.
 fn writeDiagnostic(
     json: *std.json.Stringify,
     allocator: std.mem.Allocator,
@@ -2146,6 +2149,47 @@ test "check on a rejected handler binds every diagnostic to the digest" {
         }
     }
     try testing.expect(found_chain);
+}
+
+test "repair_available is true for the one intent with an implemented validator" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // ZTS620 carries `drop_redundant_bool_compare`, whose registry row reached
+    // `.implemented`. The sibling test above pins the other direction: ZTS621
+    // names no implemented validator and still answers false. Both matter -
+    // a flag that is true everywhere advertises exactly as little as one that
+    // is false everywhere.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\export function handler(req: Request): Response {
+        \\  const ready = true;
+        \\  if (ready === true) { return Response.json({ ok: true }); }
+        \\  return Response.json({ ok: false });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    var found = false;
+    for (parsed.value.object.get("diagnostics").?.array.items) |item| {
+        const d = item.object;
+        if (!std.mem.eql(u8, d.get("code").?.string, "ZTS620")) continue;
+        found = true;
+        try testing.expectEqualStrings("canonical_redundant_bool_compare", d.get("rule_id").?.string);
+        try testing.expect(d.get("repair_available").?.bool);
+    }
+    try testing.expect(found);
 }
 
 test "byte_offset indexes into the bytes the digest covers" {
