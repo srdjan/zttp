@@ -1,12 +1,21 @@
-//! Deterministic add-route authoring and OpenAI Responses SSE rendering.
+//! Deterministic task playbooks and OpenAI Responses SSE rendering.
 
 const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const expert_workflow = @import("../expert_workflow.zig");
+const range = @import("range.zig");
 const request = @import("request.zig");
 
-pub const version = "step-4a-v1";
+pub const version = range.version;
 pub const protocol = "openai-responses-sse";
+
+pub const kinds = [_]expert_workflow.TaskKind{
+    .route_add,
+    .review_explain,
+    .env_feature,
+    .test_generation,
+    .violation_fix,
+};
 
 pub const RouteSpec = struct {
     file: []const u8,
@@ -22,8 +31,26 @@ pub fn renderResponse(
     parsed: request.ParsedRequest,
 ) ![]u8 {
     const hint = expert_workflow.classify(parsed.ask);
-    if (hint.kind != .route_add) return renderMiss(allocator, parsed.ask);
+    if (!range.hasKind(hint.kind)) return renderMiss(allocator, parsed.ask);
 
+    return switch (hint.kind) {
+        .route_add => renderRouteAdd(allocator, parsed),
+        .review_explain => renderReviewExplain(allocator, parsed),
+        .env_feature => renderEnvFeature(allocator, parsed),
+        .test_generation => renderTestGeneration(allocator, parsed),
+        .violation_fix => renderViolationFix(allocator, parsed),
+        else => renderMiss(allocator, parsed.ask),
+    };
+}
+
+pub fn hasPlaybook(kind: expert_workflow.TaskKind) bool {
+    for (kinds) |candidate| {
+        if (candidate == kind) return true;
+    }
+    return false;
+}
+
+fn renderRouteAdd(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
     const spec = try parseRouteIntent(allocator, parsed.ask);
     defer deinitRouteSpec(allocator, spec);
 
@@ -51,15 +78,343 @@ pub fn renderResponse(
 }
 
 pub fn renderMiss(allocator: std.mem.Allocator, ask: []const u8) ![]u8 {
+    var text = TextBuffer.init(allocator);
+    defer text.deinit();
+    const writer = text.writer();
+    try writer.print(
+        "[standin-miss] The deterministic playbook server understood the ask as: \"{s}\". " ++
+            "The supported range is ",
+        .{ask},
+    );
+    for (range.entries, 0..) |entry, index| {
+        if (index > 0) {
+            if (index + 1 == range.entries.len) {
+                try writer.writeAll(", and ");
+            } else {
+                try writer.writeAll(", ");
+            }
+        }
+        try writer.writeAll(entry.id);
+    }
+    try writer.writeAll(
+        ". Run `zig build zttp-standin -- --range` to inspect it. " ++
+            "Use a hosted model, or point ZTS_OPENAI_BASE_URL at a real local model.",
+    );
+    const owned = try text.toOwnedSlice();
+    defer allocator.free(owned);
+    return renderText(allocator, owned);
+}
+
+fn renderReviewExplain(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
+    const is_review = if (range.findByPrompt(parsed.ask)) |entry|
+        std.mem.eql(u8, entry.id, "review")
+    else
+        containsFold(parsed.ask, "review");
+    return switch (parsed.step_index) {
+        0 => if (is_review) blk: {
+            const args = try renderReadArgs(allocator, findFile(parsed.ask) orelse "handler.ts");
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
+        } else try renderToolCall(allocator, 0, "zts_expert_modules", "{}"),
+        else => if (is_review)
+            renderReviewText(allocator, parsed.source)
+        else
+            renderText(
+                allocator,
+                "The deterministic playbook server used the live module facts. In ZigTS, `Response.json(value)` creates a JSON response. A handler must return a Response on every path. Example: `function handler(req: Request): Response { return Response.json({ ok: true }); }`.",
+            ),
+    };
+}
+
+fn renderReviewText(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var text = TextBuffer.init(allocator);
+    defer text.deinit();
+    const writer = text.writer();
+    try writer.writeAll("The deterministic playbook server inspected the supplied handler source. ");
+    if (std.mem.indexOf(u8, source, "function handler(") != null) {
+        try writer.writeAll("Visible observation: it contains a `function handler` declaration. ");
+    } else {
+        try writer.writeAll("Visible observation: it does not contain a `function handler` declaration. ");
+    }
+
+    if (hasUncheckedResultValue(source)) {
+        try writer.writeAll(
+            "Visible observation: `result.value` follows `validateJson` with a missing visible `result.ok` guard. " ++
+                "Add a guard before that value read. ",
+        );
+    } else if (std.mem.indexOf(u8, source, "if (!result.ok)") != null) {
+        try writer.writeAll("Visible observation: the source contains a `result.ok` guard. ");
+    } else {
+        try writer.writeAll("Visible observation: this limited review found no unchecked `result.value` read after `validateJson`. ");
+    }
+    try writer.writeAll(
+        "This deterministic review did not run the compiler and makes no compiler verdict. " ++
+            "Run `zttp check handler.ts` for diagnostics and the proof record before you change the handler.",
+    );
+    const owned = try text.toOwnedSlice();
+    defer allocator.free(owned);
+    return renderText(allocator, owned);
+}
+
+fn renderEnvFeature(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
+    const file = findFile(parsed.ask) orelse "handler.ts";
+    return switch (parsed.step_index) {
+        0 => try renderToolCall(allocator, 0, "zts_expert_modules", "{}"),
+        1 => blk: {
+            const args = try renderReadArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 1, "workspace_read_file", args);
+        },
+        2 => blk: {
+            const variable = findEnvName(parsed.ask) orelse "APP_NAME";
+            const transform = try synthesizeEnvFeature(allocator, parsed.source, variable);
+            break :blk switch (transform) {
+                .edit => |proposed| blk_edit: {
+                    defer allocator.free(proposed);
+                    const args = try renderApplyArgs(allocator, file, proposed, parsed.source);
+                    defer allocator.free(args);
+                    break :blk_edit try renderToolCall(allocator, 2, "apply_edit", args);
+                },
+                .unsupported_handler => renderSourceMiss(
+                    allocator,
+                    "environment",
+                    "the supplied source has no supported `function handler` body",
+                ),
+                .conflicting_env_import => renderSourceMiss(
+                    allocator,
+                    "environment",
+                    "the supplied source has a conflicting `zttp:env` import",
+                ),
+                .existing_read => renderSourceMiss(
+                    allocator,
+                    "environment",
+                    "the supplied source already reads the requested environment variable",
+                ),
+            };
+        },
+        else => try renderText(
+            allocator,
+            "The deterministic environment playbook is complete. No further step is available.",
+        ),
+    };
+}
+
+fn renderTestGeneration(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
+    const handler_file = findFile(parsed.ask) orelse "handler.ts";
+    const test_file = findJsonlFile(parsed.ask) orelse "handler.test.jsonl";
+    return switch (parsed.step_index) {
+        0 => blk: {
+            const args = try renderReadArgs(allocator, handler_file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
+        },
+        1 => blk: {
+            const args = try renderVerifyPathsArgs(allocator, handler_file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 1, "zts_expert_verify_paths", args);
+        },
+        2 => blk: {
+            const args = try renderReadArgs(allocator, test_file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 2, "workspace_read_file", args);
+        },
+        3 => blk: {
+            const proposed = try synthesizeTestFile(allocator, parsed.source);
+            defer allocator.free(proposed);
+            const args = try renderApplyArgs(allocator, test_file, proposed, parsed.source);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 3, "apply_edit", args);
+        },
+        else => try renderText(
+            allocator,
+            "The deterministic test-generation playbook is complete. No further step is available.",
+        ),
+    };
+}
+
+fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
+    const file = findFile(parsed.ask) orelse "handler.ts";
+    return switch (parsed.step_index) {
+        0 => blk: {
+            const args = try renderVerifyPathsArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 0, "zts_expert_verify_paths", args);
+        },
+        1 => blk: {
+            const args = try renderReadArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 1, "pi_repair_plan", args);
+        },
+        2 => blk: {
+            const args = try renderReadArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 2, "workspace_read_file", args);
+        },
+        3 => blk: {
+            const transform = try synthesizeViolationFix(allocator, parsed.source);
+            break :blk switch (transform) {
+                .edit => |proposed| blk_edit: {
+                    defer allocator.free(proposed);
+                    const args = try renderApplyArgs(allocator, file, proposed, parsed.source);
+                    defer allocator.free(args);
+                    break :blk_edit try renderToolCall(allocator, 3, "apply_edit", args);
+                },
+                .unsupported_seed => renderSourceMiss(
+                    allocator,
+                    "violation-fix",
+                    "the supplied source does not contain the supported unchecked validateJson result shape",
+                ),
+                .already_guarded => renderSourceMiss(
+                    allocator,
+                    "violation-fix",
+                    "the supplied source already has a visible `result.ok` guard",
+                ),
+            };
+        },
+        else => try renderText(
+            allocator,
+            "The deterministic violation-fix playbook is complete. No further step is available.",
+        ),
+    };
+}
+
+const EnvTransform = union(enum) {
+    edit: []u8,
+    unsupported_handler,
+    conflicting_env_import,
+    existing_read,
+};
+
+fn synthesizeEnvFeature(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    variable: []const u8,
+) !EnvTransform {
+    const handler_open = findHandlerBodyOpen(source) orelse return .unsupported_handler;
+    const env_import = "import { env } from \"zttp:env\";";
+    const has_env_import = std.mem.indexOf(u8, source, env_import) != null;
+    if (hasConflictingEnvImport(source, env_import)) {
+        return .conflicting_env_import;
+    }
+
+    const read_marker = try std.fmt.allocPrint(allocator, "env(\"{s}\")", .{variable});
+    defer allocator.free(read_marker);
+    if (std.mem.indexOf(u8, source, read_marker) != null) return .existing_read;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    if (!has_env_import) {
+        try out.appendSlice(allocator, env_import);
+        try out.appendSlice(allocator, "\n");
+    }
+    try out.appendSlice(allocator, source[0 .. handler_open + 1]);
+    try out.print(allocator, "\n    env(\"{s}\");", .{variable});
+    try out.appendSlice(allocator, source[handler_open + 1 ..]);
+    return .{ .edit = try out.toOwnedSlice(allocator) };
+}
+
+fn synthesizeTestFile(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    const test_case =
+        \\{"type":"test","name":"GET /health returns 200"}
+        \\{"type":"request","method":"GET","url":"/health","headers":{},"body":null}
+        \\{"type":"expect","status":200,"bodyContains":"ok"}
+        \\
+    ;
+    if (std.mem.indexOf(u8, source, "GET /health returns 200") != null) {
+        return allocator.dupe(u8, source);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, source);
+    if (source.len > 0 and source[source.len - 1] != '\n') try out.append(allocator, '\n');
+    if (source.len > 0) try out.append(allocator, '\n');
+    try out.appendSlice(allocator, test_case);
+    return try out.toOwnedSlice(allocator);
+}
+
+const ViolationTransform = union(enum) {
+    edit: []u8,
+    unsupported_seed,
+    already_guarded,
+};
+
+fn synthesizeViolationFix(allocator: std.mem.Allocator, source: []const u8) !ViolationTransform {
+    const result_marker = "const result = validateJson(\"item\", req.body);";
+    const result_start = std.mem.indexOf(u8, source, result_marker) orelse return .unsupported_seed;
+    const data_marker = "const data = result.value;";
+    const data_start = std.mem.indexOfPos(u8, source, result_start + result_marker.len, data_marker) orelse {
+        return .unsupported_seed;
+    };
+    const guard_marker = "if (!result.ok)";
+    if (std.mem.indexOfPos(u8, source, result_start + result_marker.len, guard_marker)) |guard_start| {
+        if (guard_start < data_start) return .already_guarded;
+    }
+
+    const line_start = std.mem.lastIndexOfScalar(u8, source[0..data_start], '\n') orelse return .unsupported_seed;
+    const indentation = source[line_start + 1 .. data_start];
+    if (!isIndentation(indentation)) return .unsupported_seed;
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    try out.appendSlice(allocator, source[0 .. line_start + 1]);
+    try out.print(
+        allocator,
+        "{s}if (!result.ok) {{\n{s}    return Response.json({{ error: result.error }}, {{ status: 400 }});\n{s}}}\n",
+        .{ indentation, indentation, indentation },
+    );
+    try out.appendSlice(allocator, source[line_start + 1 ..]);
+    return .{ .edit = try out.toOwnedSlice(allocator) };
+}
+
+fn renderSourceMiss(allocator: std.mem.Allocator, playbook_name: []const u8, reason: []const u8) ![]u8 {
     const text = try std.fmt.allocPrint(
         allocator,
-        "[standin-miss] The deterministic playbook server understood the ask as: \"{s}\". " ++
-            "This step supports add-route only. Use a hosted model, or point " ++
-            "ZTS_OPENAI_BASE_URL at a real local model.",
-        .{ask},
+        "[standin-miss] The deterministic {s} playbook did not apply an edit: {s}. " ++
+            "Use a hosted model, or point ZTS_OPENAI_BASE_URL at a real local model.",
+        .{ playbook_name, reason },
     );
     defer allocator.free(text);
     return renderText(allocator, text);
+}
+
+fn findHandlerBodyOpen(source: []const u8) ?usize {
+    const handler_start = std.mem.indexOf(u8, source, "function handler(") orelse return null;
+    const body_open = std.mem.indexOfScalarPos(u8, source, handler_start, '{') orelse return null;
+    return body_open;
+}
+
+fn hasUncheckedResultValue(source: []const u8) bool {
+    const result_marker = "const result = validateJson(";
+    const result_start = std.mem.indexOf(u8, source, result_marker) orelse return false;
+    const data_marker = "const data = result.value;";
+    const data_start = std.mem.indexOfPos(u8, source, result_start + result_marker.len, data_marker) orelse return false;
+    const guard_marker = "if (!result.ok)";
+    if (std.mem.indexOfPos(u8, source, result_start + result_marker.len, guard_marker)) |guard_start| {
+        return guard_start > data_start;
+    }
+    return true;
+}
+
+fn hasConflictingEnvImport(source: []const u8, allowed_import: []const u8) bool {
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |raw_line| {
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (std.mem.startsWith(u8, line, "import ") and
+            std.mem.indexOf(u8, line, "zttp:env") != null and
+            !std.mem.eql(u8, line, allowed_import))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn isIndentation(bytes: []const u8) bool {
+    for (bytes) |byte| {
+        if (byte != ' ' and byte != '\t') return false;
+    }
+    return true;
 }
 
 pub fn parseRouteIntent(allocator: std.mem.Allocator, ask: []const u8) !RouteSpec {
@@ -243,6 +598,40 @@ fn findKeyValue(ask: []const u8, key: []const u8) ?[]const u8 {
     return null;
 }
 
+fn findJsonlFile(ask: []const u8) ?[]const u8 {
+    var words = std.mem.tokenizeAny(u8, ask, " \t\r\n`\"'(),;");
+    while (words.next()) |word| {
+        if (std.mem.endsWith(u8, word, ".jsonl")) return std.mem.trimEnd(u8, word, ".!?");
+    }
+    return null;
+}
+
+fn findEnvName(ask: []const u8) ?[]const u8 {
+    var words = std.mem.tokenizeAny(u8, ask, " \t\r\n`\"'(),;:.");
+    while (words.next()) |word| {
+        if (word.len < 2 or !std.ascii.isUpper(word[0])) continue;
+        var valid = true;
+        for (word) |ch| {
+            if (!std.ascii.isUpper(ch) and !std.ascii.isDigit(ch) and ch != '_') {
+                valid = false;
+                break;
+            }
+        }
+        if (valid) return word;
+    }
+    return null;
+}
+
+fn containsFold(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+    var index: usize = 0;
+    while (index + needle.len <= haystack.len) : (index += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[index .. index + needle.len], needle)) return true;
+    }
+    return false;
+}
+
 pub fn routeHandlerName(allocator: std.mem.Allocator, method: []const u8, path: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
     errdefer out.deinit(allocator);
@@ -410,6 +799,15 @@ fn renderReadArgs(allocator: std.mem.Allocator, file: []const u8) ![]u8 {
     try buf.writer().writeAll("{\"path\":");
     try writeJsonString(buf.writer(), file);
     try buf.writer().writeByte('}');
+    return try buf.toOwnedSlice();
+}
+
+fn renderVerifyPathsArgs(allocator: std.mem.Allocator, file: []const u8) ![]u8 {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try buf.writer().writeAll("{\"paths\":[");
+    try writeJsonString(buf.writer(), file);
+    try buf.writer().writeAll("]}");
     return try buf.toOwnedSlice();
 }
 

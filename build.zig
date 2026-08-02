@@ -299,6 +299,13 @@ pub fn build(b: *std.Build) void {
         .{ .owner = .pi, .src = "src/standin_tests.zig", .step = "test-standin", .desc = "Run the deterministic stand-in through the real expert loop", .project_config = true, .pi_modules = true, .standin_only = true },
     };
 
+    const standin_range_doc = b.addOptions();
+    standin_range_doc.addOption(
+        []const u8,
+        "contents",
+        @embedFile("packages/pi/docs/standin-range.md"),
+    );
+
     var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
     for (host_test_roots, 0..) |root, i| {
         const owner_dep = switch (root.owner) {
@@ -320,6 +327,7 @@ pub fn build(b: *std.Build) void {
             tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
             tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
         }
+        if (root.standin_only) tests.root_module.addOptions("standin_range_doc", standin_range_doc);
         host_test_runs[i] = b.addRunArtifact(tests);
         b.step(root.step, root.desc).dependOn(&host_test_runs[i].step);
     }
@@ -369,7 +377,7 @@ pub fn build(b: *std.Build) void {
     const standin_cmd = b.addRunArtifact(standin_exe);
     standin_cmd.has_side_effects = true;
     if (b.args) |args| standin_cmd.addArgs(args);
-    const standin_step = b.step("zttp-standin", "Run the deterministic add-route playbook server");
+    const standin_step = b.step("zttp-standin", "Run the deterministic playbook server");
     standin_step.dependOn(&standin_cmd.step);
 
     const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-module-boundary.sh" });
