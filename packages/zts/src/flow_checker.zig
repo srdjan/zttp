@@ -1332,6 +1332,16 @@ pub const FlowChecker = struct {
             return .{ .credential = true };
         }
 
+        // `Date.now()` and `Math.random()` are global member calls rather than
+        // module imports, so `scanImports` has no binding to hang a label on
+        // and the union below would return the empty set for them. Label the
+        // read itself: the value then follows the same path as a clock-reading
+        // module export, and reaching the response costs `deterministic` while
+        // reaching only a log does not.
+        if (callee_tag == .member_access and self.isVaryingGlobalRead(call_data.callee)) {
+            return .{ .nondeterministic = true };
+        }
+
         // Any other callee shape (member `obj.method(x)`, computed `obj[k](x)`,
         // a call result `f()(x)`, an optional call, an IIFE) is not a known
         // pure builtin. Returning empty here would LAUNDER taint: a labelled
@@ -1919,6 +1929,23 @@ pub const FlowChecker = struct {
         if (binding.kind != .undeclared_global) return false;
         const name = self.resolveAtomName(binding.name_atom) orelse return false;
         return std.mem.eql(u8, name, "renderToString");
+    }
+
+    /// True for `Date.now()` and `Math.random()` - the two global reads whose
+    /// result differs between runs. The receiver must be an undeclared global,
+    /// so a user-defined `Date` shadowing the builtin does not pick up the
+    /// label. Same pair as `effect_inference.isNonDeterministic`, which answers
+    /// the per-function question these labels cannot reach.
+    fn isVaryingGlobalRead(self: *const FlowChecker, callee: NodeIndex) bool {
+        const member = self.ir_view.getMember(callee) orelse return false;
+        if (self.ir_view.getTag(member.object) != .identifier) return false;
+        const binding = self.ir_view.getBinding(member.object) orelse return false;
+        if (binding.kind != .undeclared_global) return false;
+        const object_name = self.resolveAtomName(binding.name_atom) orelse return false;
+        const property_name = self.resolveAtomName(member.property) orelse return false;
+        if (std.mem.eql(u8, object_name, "Date") and std.mem.eql(u8, property_name, "now")) return true;
+        if (std.mem.eql(u8, object_name, "Math") and std.mem.eql(u8, property_name, "random")) return true;
+        return false;
     }
 
     fn isReqProperty(self: *const FlowChecker, node: NodeIndex, expected_prop: []const u8) bool {
@@ -3973,6 +4000,63 @@ test "a clock read that never reaches the response keeps determinism" {
 test "a handler touching no varying source keeps determinism" {
     const source =
         \\function handler(req) { return Response.json({ ok: true }); }
+    ;
+    try std.testing.expect(try runDeterministic(std.testing.allocator, source));
+}
+
+test "a clock read reaching the response costs determinism" {
+    // `Date.now()` is a global member call, so it carries no import to seed a
+    // label from. The label is attached to the read itself and follows the
+    // binding into the response body.
+    const source =
+        \\function handler(req) {
+        \\  const at = Date.now();
+        \\  return Response.json({ at: at });
+        \\}
+    ;
+    try std.testing.expect(!try runDeterministic(std.testing.allocator, source));
+}
+
+test "a random draw reaching the response costs determinism" {
+    const source =
+        \\function handler(req) { return Response.json({ roll: Math.random() }); }
+    ;
+    try std.testing.expect(!try runDeterministic(std.testing.allocator, source));
+}
+
+test "a clock read reaching only a log keeps determinism" {
+    // The direction the capability rule cannot express: the timestamp reaches
+    // stderr and stops, so the two runs answer the same body.
+    const source =
+        \\import { logInfo } from "zttp:log";
+        \\function handler(req) {
+        \\  logInfo("served", { at: Date.now() });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect(try runDeterministic(std.testing.allocator, source));
+}
+
+test "a clock read behind a helper reaches the response" {
+    // The call summary collects the helper's return labels, so the read does
+    // not launder through a wrapper the way it would if only the handler body
+    // were walked.
+    const source =
+        \\function stamp() { return Date.now(); }
+        \\function handler(req) { return Response.json({ at: stamp() }); }
+    ;
+    try std.testing.expect(!try runDeterministic(std.testing.allocator, source));
+}
+
+test "a shadowed Date does not carry the varying label" {
+    // `Date` here is a local object, not the global, so its `now()` is whatever
+    // the handler defined. Labelling it would demote a handler that is in fact
+    // deterministic.
+    const source =
+        \\function handler(req) {
+        \\  const Date = { now: () => 7 };
+        \\  return Response.json({ at: Date.now() });
+        \\}
     ;
     try std.testing.expect(try runDeterministic(std.testing.allocator, source));
 }

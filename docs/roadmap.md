@@ -164,14 +164,31 @@ when it reaches a response sink. The store-laundering case is closed:
 `cacheSet(k, ...)` then `cacheGet(k)` into the response now reports non-deterministic,
 which neither the `Date.now`-only rule nor the interim sink heuristic could see.
 
-The flow answer is ANDed with the capability answer rather than replacing it. `Date.now()`
-is a global member call, not a module import, so it carries no label and only effect
-inference sees it. Two sources, neither sufficient alone.
+The flow answer is ANDed with the capability answer rather than replacing it. Two sources,
+and the flow one now covers both kinds of read: `Date.now()` and `Math.random()` are
+global member calls with no import to hang a label on, so `inferCallLabels` labels the
+read itself when the receiver is the undeclared global, and the value then follows the
+same path a clock-reading export's does. A shadowed `Date` carries nothing, and a read
+behind a helper still arrives, because the call summary collects the helper's return
+labels.
 
-The interim rule in `handleCall` stays for that reason, and it is no longer the thing
-keeping a logging handler deterministic - under the flow rule `logInfo`'s timestamp never
-reaches the response, so the property falls out of the flow rather than out of a
-special case about write effects.
+That fix needed one in `LabelSet.isEmpty`, which masked bit 7 off as padding. Bit 7 is
+`nondeterministic`, so a set carrying only that label read as empty, and both the sink
+check and the import scan skip empty sets. No module export hit it - every clock- or
+random-reading export also carries `internal` or `credential` - but the label on a bare
+`Date.now()` is the first pure one.
+
+The interim rule in `handleCall` stays, and the reason has moved. It is no longer the
+thing keeping a logging handler deterministic: under the flow rule `logInfo`'s timestamp
+never reaches the response. What keeps it is that flow cannot answer the per-function
+question. `function_specs` reads the effect row directly to discharge a helper's
+`Spec<...>`, and flow only walks the handler. Two presence-based rules answer there -
+`isNonDeterministic` in effect inference and `has_nondeterministic_builtin` in the
+contract builder - and each demotes on presence rather than on reachability, so a
+handler that only logs a timestamp still reports non-deterministic at the contract level.
+Retiring them means making flow the sole source, and its call summary falls back to the
+argument union past `max_summary_depth` or `max_summary_params`, which would launder the
+label through a deep helper chain. The conservative AND stays until that fallback closes.
 
 Why it is worth doing rather than living with the approximation: `deterministic` is the
 declarable property authors reach for most, and it feeds `idempotent`
@@ -182,8 +199,9 @@ exactly the direction item 7 is trying to shrink.
 
 Observable, and met: a handler that writes a timestamp to a cache and reads it back into
 the response reports non-deterministic, and one that logs a timestamp does not - both
-from the flow rather than from the capability set. Three tests in `flow_checker.zig` pin
-the two directions and the untouched baseline.
+from the flow rather than from the capability set. Seven tests in `flow_checker.zig` pin
+the two directions, the untouched baseline, the two global reads, the shadowed receiver,
+and the read behind a helper.
 
 ### 3. Typed holes (medium, decomposable)
 

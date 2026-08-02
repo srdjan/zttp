@@ -151,10 +151,13 @@ pub const LabelSet = packed struct(u8) {
         return (si & mi) != 0;
     }
 
-    /// True if no labels are set.
+    /// True if no labels are set. Every bit of the byte is a named label since
+    /// `nondeterministic` took bit 7, so nothing is masked off here: masking it
+    /// made a set carrying only that label read as empty, and both the sink
+    /// check and the import scan skip empty sets.
     pub fn isEmpty(self: LabelSet) bool {
         const raw: u8 = @bitCast(self);
-        return (raw & 0x7F) == 0; // ignore pad bit
+        return raw == 0;
     }
 
     /// Create a LabelSet from a single label.
