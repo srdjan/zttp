@@ -465,6 +465,75 @@ fn dupJsonValue(
     return try allocator.dupe(u8, value.string);
 }
 
+/// Return labels for every function imported from a sibling file, keyed by the
+/// local binding slot. Each imported module is read and walked on its own, one
+/// level deep: a call it makes into a module *it* imports stays untraceable, so
+/// the answer never claims more evidence than one file provides.
+///
+/// Every failure here - a specifier that is not relative, a file that will not
+/// read, strip, or parse, an export that is not a function - drops the entry
+/// rather than the build. A missing entry means the flow checker falls back to
+/// treating the call as untraceable, which is the conservative direction.
+fn collectImportedFnLabels(
+    allocator: std.mem.Allocator,
+    facts: *const zts.pipeline.ModuleFacts,
+    handler_path: []const u8,
+) std.ArrayList(zts.pipeline.ImportedFnLabels) {
+    var out: std.ArrayList(zts.pipeline.ImportedFnLabels) = .empty;
+    const base_dir = std.fs.path.dirname(handler_path) orelse ".";
+
+    for (facts.imports.items) |rec| {
+        if (rec.resolution != .unresolved) continue;
+        if (!std.mem.startsWith(u8, rec.module_specifier, "./") and
+            !std.mem.startsWith(u8, rec.module_specifier, "../")) continue;
+
+        const path = std.fs.path.resolve(allocator, &.{ base_dir, rec.module_specifier }) catch continue;
+        defer allocator.free(path);
+
+        const labels = importedFunctionLabels(allocator, path, rec.imported_name) orelse continue;
+        out.append(allocator, .{ .slot = rec.slot, .labels = labels }) catch return out;
+    }
+    return out;
+}
+
+/// Walk one imported file and answer the return labels of `name`, or null when
+/// the file cannot be read, stripped, parsed, or carries no such function.
+fn importedFunctionLabels(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    name: []const u8,
+) ?zts.module_binding.LabelSet {
+    const source = readFilePosix(allocator, path, 10 * 1024 * 1024) catch return null;
+    defer allocator.free(source);
+
+    const is_ts = std.mem.endsWith(u8, path, ".ts");
+    const is_tsx = std.mem.endsWith(u8, path, ".tsx");
+    var strip_result: ?zts.StripResult = null;
+    defer if (strip_result) |*sr| sr.deinit();
+    var to_parse: []const u8 = source;
+    if (is_ts or is_tsx) {
+        strip_result = zts.strip(allocator, source, .{
+            .tsx_mode = is_tsx,
+            .enable_comptime = true,
+            .comptime_env = .{},
+        }) catch return null;
+        to_parse = strip_result.?.code;
+    }
+
+    var atoms = zts.context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = zts.parser.JsParser.init(allocator, to_parse) catch return null;
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    if (is_tsx or std.mem.endsWith(u8, path, ".jsx")) parser.enableJsx();
+    _ = parser.parse() catch return null;
+
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var flow = zts.FlowChecker.init(allocator, view, &atoms);
+    defer flow.deinit();
+    return flow.exportedReturnLabels(name);
+}
+
 fn resolveGeneratorPack(
     allocator: std.mem.Allocator,
     path: []const u8,
@@ -1256,7 +1325,17 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     var checked_opt: ?zts.pipeline.CheckedModule = null;
     defer if (checked_opt) |*c| c.deinit();
     if (zts.handler_verifier.findHandlerFunction(ir_view, root)) |hf| {
-        var checked = try zts.pipeline.check(allocator, &resolved, hf, .{ .module_facts = &module_facts });
+        // Return labels for helpers imported from sibling files. Without them
+        // the flow checker has no body to walk for such a call and has to
+        // treat its value as untraceable, which costs every property the
+        // value's sink decides.
+        var imported_labels = collectImportedFnLabels(allocator, &module_facts, handler_path);
+        defer imported_labels.deinit(allocator);
+
+        var checked = try zts.pipeline.check(allocator, &resolved, hf, .{
+            .module_facts = &module_facts,
+            .imported_fn_labels = imported_labels.items,
+        });
         result.verify_ran = true;
         result.verify_errors = @intCast(checked.verifier_error_count);
         const verifier_diags = checked.verifierDiagnostics();

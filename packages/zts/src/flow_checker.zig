@@ -278,6 +278,12 @@ pub const FlowChecker = struct {
     /// keyed by the same slot as `module_fn_labels`. Populated by `scanImports`
     /// and consumed by the counterexample-witness capture pipeline.
     module_fn_meta: std.AutoHashMapUnmanaged(u16, counterexample.StubInfo),
+    /// Return labels for functions imported from another file, local slot ->
+    /// labels. The checker has no file access, so the caller computes these
+    /// with `exportedReturnLabels` over the imported module and installs them
+    /// before `check`. Without them a cross-file call is untraceable and costs
+    /// every property its value's sink decides.
+    file_fn_labels: std.AutoHashMapUnmanaged(u16, LabelSet),
     /// Per-binding origin: packed(scope_id, slot) -> metadata for the module
     /// call that initialised this binding. Lets the constraint extractor emit
     /// per-call stub constraints on `if (binding)` patterns.
@@ -348,6 +354,7 @@ pub const FlowChecker = struct {
             .binding_labels = .empty,
             .module_fn_labels = .empty,
             .module_fn_meta = .empty,
+            .file_fn_labels = .empty,
             .binding_origin = .empty,
             .result_binding_labels = .empty,
             .result_binding_guard = .empty,
@@ -381,6 +388,7 @@ pub const FlowChecker = struct {
         if (self.owned_facts) |*owned| owned.deinit();
         self.module_fn_labels.deinit(self.allocator);
         self.module_fn_meta.deinit(self.allocator);
+        self.file_fn_labels.deinit(self.allocator);
         self.binding_origin.deinit(self.allocator);
         self.working_constraints.deinit(self.allocator);
         self.working_io_calls.deinit(self.allocator);
@@ -430,6 +438,60 @@ pub const FlowChecker = struct {
             if (diag.severity == .err) error_count += 1;
         }
         return error_count;
+    }
+
+    /// Record the return labels of a function imported from another file,
+    /// keyed by the local binding slot the import produced. Call before
+    /// `check`; the labels come from `exportedReturnLabels` run over that file.
+    pub fn setFileFunctionLabels(self: *FlowChecker, slot: u16, labels: LabelSet) void {
+        self.file_fn_labels.put(self.allocator, slot, labels) catch self.markAllocationFailure();
+    }
+
+    /// Return labels of the exported function named `name`, for a caller in
+    /// another module. Parameters are left unlabelled: the caller unions this
+    /// with its own argument labels, and a label reaching the return came
+    /// either from an argument, which that union covers, or from the body,
+    /// which this covers. Null when the module exports no such function.
+    ///
+    /// Only the named function's body is walked. Its own calls into modules
+    /// this checker cannot resolve stay `unknown`, so the answer never claims
+    /// more than one file's worth of evidence.
+    pub fn exportedReturnLabels(self: *FlowChecker, name: []const u8) ?LabelSet {
+        self.scanImports();
+        self.scanFunctionDecls();
+
+        const fn_node = self.findFunctionByName(name) orelse return null;
+        const func = self.ir_view.getFunction(fn_node) orelse return null;
+
+        var collected = LabelSet.empty;
+        const body_tag = self.ir_view.getTag(func.body) orelse return null;
+        if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
+            const saved = self.summary_returns;
+            self.summary_returns = &collected;
+            defer self.summary_returns = saved;
+            self.walkStmt(func.body);
+            return collected;
+        }
+        return self.inferLabels(func.body);
+    }
+
+    /// The function declaration bound to `name` at module scope, or null.
+    fn findFunctionByName(self: *const FlowChecker, name: []const u8) ?NodeIndex {
+        const node_count = self.ir_view.nodeCount();
+        for (0..node_count) |idx_usize| {
+            const idx: NodeIndex = @intCast(idx_usize);
+            const tag = self.ir_view.getTag(idx) orelse continue;
+            if (tag != .function_decl and tag != .var_decl) continue;
+            const vd = self.ir_view.getVarDecl(idx) orelse continue;
+            if (vd.init == null_node or vd.pattern != null_node) continue;
+            if (tag == .var_decl) {
+                const init_tag = self.ir_view.getTag(vd.init) orelse continue;
+                if (init_tag != .function_expr and init_tag != .arrow_function) continue;
+            }
+            const decl_name = self.resolveAtomName(vd.binding.name_atom) orelse continue;
+            if (std.mem.eql(u8, decl_name, name)) return vd.init;
+        }
+        return null;
     }
 
     /// After the walk, record `.never_reached` defended paths for the leak
@@ -1418,6 +1480,13 @@ pub const FlowChecker = struct {
             // call through a value: a callback parameter, or an import the
             // resolver did not follow.
             if (binding.kind == .undeclared_global) return arg_union;
+            // A function imported from another file, whose return labels the
+            // caller computed from that file and installed here. Unioned with
+            // the arguments rather than replacing them, because those labels
+            // were computed with the parameters left unlabelled.
+            if (self.file_fn_labels.get(binding.slot)) |imported| {
+                return LabelSet.merge(arg_union, imported);
+            }
             return unresolved;
         };
         if (self.summary_depth >= max_summary_depth) return unresolved;
@@ -3683,6 +3752,94 @@ test "FlowChecker keeps validated label through a wrapper returning a validator 
         try std.testing.expect(d.kind != .unvalidated_input_in_egress);
     }
     try std.testing.expect(checker.getProperties().injection_safe);
+}
+
+/// Shared harness for the cross-file path: run `exportedReturnLabels` over
+/// `imported_source` for `name`, install the result on a checker built over
+/// `source`, and report whether no_secret_leakage was proven. Mirrors what the
+/// caller does with a real file, without touching the filesystem.
+fn runWithImportedFunction(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    imported_source: []const u8,
+    name: []const u8,
+) !bool {
+    var imported_parser = try @import("parser/parse.zig").Parser.init(allocator, imported_source);
+    var imported_atoms = atom_table.AtomTable.init(allocator);
+    defer imported_atoms.deinit();
+    imported_parser.setAtomTable(&imported_atoms);
+    defer imported_parser.deinit();
+    _ = try imported_parser.parse();
+    const imported_view = IrView.fromIRStore(&imported_parser.nodes, &imported_parser.constants);
+
+    var imported_checker = FlowChecker.init(allocator, imported_view, &imported_atoms);
+    defer imported_checker.deinit();
+    const imported_labels = imported_checker.exportedReturnLabels(name) orelse
+        return error.ExportNotFound;
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    // The import's local slot, recovered the way the caller recovers it.
+    var facts = try @import("pipeline.zig").buildModuleFacts(
+        allocator,
+        @import("pipeline.zig").ParsedModule.fromExisting(ir_view, root, &atoms),
+        null,
+    );
+    defer facts.deinit();
+    for (facts.imports.items) |rec| {
+        if (std.mem.eql(u8, rec.imported_name, name)) {
+            checker.setFileFunctionLabels(rec.slot, imported_labels);
+        }
+    }
+    _ = try checker.check(handler_fn);
+    return checker.getProperties().no_secret_leakage;
+}
+
+test "a secret returned by an imported function reaches the response" {
+    const imported =
+        \\import { env } from "zttp:env";
+        \\export function readKey() { return env("SECRET_KEY"); }
+    ;
+    const source =
+        \\import { readKey } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: readKey() }); }
+    ;
+    try std.testing.expect(!try runWithImportedFunction(
+        std.testing.allocator,
+        source,
+        imported,
+        "readKey",
+    ));
+}
+
+test "an imported function carrying nothing keeps the property" {
+    // The point of the cross-file summary: an ordinary helper in another file
+    // must not cost the proof the way an untraceable call does.
+    const imported =
+        \\export function greet(name) { return "hello " + name; }
+    ;
+    const source =
+        \\import { greet } from "./utils.ts";
+        \\function handler(req) { return Response.json({ v: greet("world") }); }
+    ;
+    try std.testing.expect(try runWithImportedFunction(
+        std.testing.allocator,
+        source,
+        imported,
+        "greet",
+    ));
 }
 
 /// Shared harness: parse `source`, run the FlowChecker on its handler, and

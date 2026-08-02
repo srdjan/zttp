@@ -71,7 +71,10 @@ const HandlerContract = handler_contract_mod.HandlerContract;
 const VerificationInfo = handler_contract_mod.VerificationInfo;
 const ContractBuilder = handler_contract_mod.ContractBuilder;
 const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
-const ModuleFacts = module_facts_mod.ModuleFacts;
+/// Public because `buildModuleFacts` returns one and callers outside the
+/// package need to name it. Reaching `zts.module_facts` directly for the same
+/// type would widen the internal surface the boundary gate pins.
+pub const ModuleFacts = module_facts_mod.ModuleFacts;
 
 // ---------------------------------------------------------------------------
 // Phase 1: Parsed
@@ -265,11 +268,22 @@ pub const CheckedModule = struct {
     }
 };
 
+/// Return labels of a function imported from another file, paired with the
+/// local binding slot the import produced. The pipeline does no file I/O, so
+/// the caller reads and walks those files and hands the answers in.
+pub const ImportedFnLabels = struct {
+    slot: u16,
+    labels: @import("module_binding.zig").LabelSet,
+};
+
 pub const CheckOptions = struct {
     /// Shared import index for this compile. Same lifetime rule as
     /// `ResolveOptions.module_facts`. An options struct rather than a fourth
     /// positional parameter so the next addition does not churn every call site.
     module_facts: ?*const ModuleFacts = null,
+    /// Cross-file helper return labels. Empty means every such call is treated
+    /// as untraceable, which is the conservative direction, not the neutral one.
+    imported_fn_labels: []const ImportedFnLabels = &.{},
 };
 
 pub fn check(
@@ -300,6 +314,9 @@ pub fn check(
     );
     flow.facts = opts.module_facts;
     errdefer flow.deinit();
+    for (opts.imported_fn_labels) |entry| {
+        flow.setFileFunctionLabels(entry.slot, entry.labels);
+    }
     const flow_errors = try flow.check(handler_func);
 
     return .{
