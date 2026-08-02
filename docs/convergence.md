@@ -155,15 +155,51 @@ intercept it. Those cases are veto-checked but not intent-checked, which is why
 the intent column reads over 6 rather than over 11. Giving the test runner a
 durable backend would close it.
 
-One case, `validate-body`, is pinned as an accepted failure, and it is the
-reason the rate reads 10/11 rather than 11/11. Its first draft writes
-`result.value as Item`, and the subset has no `as`, so the stripper rejects it
-(ZTS042). The case still reaches green - the model drops the assertion on retry
-- so this is a first-draft failure rather than a broken case.
+One case is pinned as an accepted failure, and it is the reason the rate reads
+10/11 rather than 11/11. It used to be `validate-body`, whose first draft wrote
+`result.value as Item` against a subset with no `as` (ZTS042). That draft is
+gone: the persona now tells the model to dry-run with `zts_expert_edit_simulate`
+before `apply_edit`, so it sees ZTS042 in simulation and never submits the
+assertion.
+
+The pin moved to `jwt-auth`, and the gap it ranks is sharper. The prompt asks
+the handler to return the verified claims, and returning them trips ZTS401 -
+a flow-family credential-leakage warning, not a spec-discharge failure - which
+the veto counts as a new violation introduced by the patch. The first draft
+returns the claims the prompt asked for and is rejected for it; the model then
+spends a round trip finding the sanctioned pattern and reaches green. So this
+is a first-draft failure rather than a broken case, and what it ranks is the
+tension between "return the claims" and `no_credential_leakage`.
 
 It is a real corpus entry: it feeds the gap histogram that ranks which teaching
 gap to close next, and the pinned outcome is part of the corpus version, so
 quietly flipping it would change what the rate means.
+
+## The intent column before and after the websocket-echo fix
+
+Every row above through `9b7518ea` reports 100% (6/6) intent, and one of those
+six passes was false. The `websocket-echo` check sent a GET with no headers and
+asserted status 101.
+
+The runtime owns the upgrade, not the handler: it upgrades only when the request
+carries an RFC 6455 upgrade and the contract exports `onMessage`, and it writes
+the 101 itself (`packages/runtime/src/server.zig:634-635`, `:1173`). A
+header-less GET never upgrades, so it reaches the handler, and the only way a
+handler returns 101 for it is by hardcoding that status - claiming a protocol
+switch on every plain request. The check rewarded a bug rather than catching
+one.
+
+Nothing model-facing taught 101 either. It appears in `docs/reliability.md` and
+an archived plan, both describing server internals, and the websocket example is
+not among the four vendored under `skills/zts-expert/examples/`. The recorded
+pass was luck, and a later re-record produced a handler that returned 200 and
+failed the same check.
+
+The prompt now states the non-upgrade behavior and the check asserts exactly
+that, so the expectation is discoverable rather than assumed. Intent figures
+from the first row carrying the new corpus version onward are therefore not
+comparable to the rows above: those measured six cases of which one could not be
+satisfied honestly.
 
 ## How a run works
 

@@ -339,7 +339,7 @@ const record_corpus = [_]RecordCase{
         // veto reports the assertion first and the model never reaches the
         // type mismatch. An earlier version of this comment named ZTS200 and
         // that second gap; it described a draft this cassette no longer holds.
-        .expect_first_draft_pass = false,
+        .expect_first_draft_pass = true,
     },
     .{
         .name = "jwt-auth",
@@ -364,7 +364,7 @@ const record_corpus = [_]RecordCase{
         // confirmation (`{ authenticated: true }`) instead of the raw claims;
         // returning any claim field (even `result.value.sub`) stays credential
         // labelled and would leak. Re-record from a live model to refresh.
-        .expect_first_draft_pass = true,
+        .expect_first_draft_pass = false,
     },
     .{
         .name = "weather-egress",
@@ -388,13 +388,31 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "websocket-echo",
+        // The runtime owns the upgrade, not the handler: server.zig:634-635
+        // upgrades only when the request carries an RFC 6455 upgrade and the
+        // contract exports onMessage, and it writes the 101 itself
+        // (server.zig:1173). A header-less GET never upgrades, so it reaches
+        // the handler.
+        //
+        // This check used to send `"headers":{}` and assert 101, which only a
+        // handler hardcoding `{ status: 101 }` could satisfy - claiming a
+        // protocol switch on every plain GET. It rewarded a bug, and nothing
+        // model-facing taught 101: it appears only in docs/reliability.md and
+        // an archived plan, and the websocket example is not among the four
+        // vendored under skills/zts-expert/examples. A recorded pass on it was
+        // luck.
+        //
+        // The non-upgrade status is a convention, so the prompt states it
+        // rather than leaving the model to guess. 404 matches
+        // examples/websocket/chat.ts:48.
         .prompt = "Create a WebSocket echo handler in handler.ts using zttp:websocket that " ++
-            "echoes every received message back to the sending client.",
+            "echoes every received message back to the sending client. " ++
+            "Return 404 for a request that is not a WebSocket upgrade.",
         .intent = .{
             .tests_jsonl =
-            \\{"type":"test","name":"the upgrade handshake is accepted"}
+            \\{"type":"test","name":"a non-upgrade request does not claim a protocol switch"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
-            \\{"type":"expect","status":101}
+            \\{"type":"expect","status":404}
             \\
             ,
         },
