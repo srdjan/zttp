@@ -128,6 +128,17 @@ the `secret` label when the env name is not a literal instead of downgrading it 
 `config`; and `inferLabels` over an object literal, which merges every property value
 whether or not the key can be named.
 
+The caps that remain cost precision, never soundness, and the cost was measured rather
+than assumed. Over all 55 example handlers the depth cap trips zero times and the
+parameter cap zero times, so memoizing the summary over the call graph would buy nothing
+and was not built. The only fallback that fires is the one for a call with no declaration
+to walk, twice, both from a relative file import - and that one did cost something real:
+splitting a handler across files lost both leakage proofs. `exportedReturnLabels` walks
+one imported module and answers its function's return labels with the parameters left
+unlabelled, which the caller unions with its own argument labels. One level deep, so the
+imported module's own imports stay untraceable and the answer never claims more evidence
+than one file provides.
+
 ### 2. Publish an honest convergence number (done)
 
 [docs/convergence.md](convergence.md) carries the table: corpus version, model, policy
