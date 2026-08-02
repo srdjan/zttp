@@ -1550,7 +1550,7 @@ test "processSubmit: /settings reports compile-time defaults without themes" {
 test "processSubmit: /model lists only the active provider and marks current" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
-    var session = try agent.AgentSession.initOpenAI(testing.allocator, "k", "p", null);
+    var session = try agent.AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
     defer session.deinit(testing.allocator);
 
     var outcome = try processSubmit(testing.allocator, &session, &reg, "/model", null);

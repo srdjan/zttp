@@ -460,6 +460,29 @@ is the thesis demonstrated rather than asserted. If it fails, that is also infor
 it makes item 3 required rather than optional, because per-hole fill is the known way to
 shrink a task to small-model size.
 
+The plumbing is in place and the measurement is not. "Through the existing
+OpenAI-compatible provider path" was optimistic: the path existed but had no way to be
+pointed anywhere. `base_url` was a `Config` field nothing set, and the model id came
+from `models.zig`, which only knows hosted models - so a local runtime was unreachable
+even though it speaks the same wire shape. `ZTS_OPENAI_BASE_URL` and `ZTS_OPENAI_MODEL`
+now set both, an off-registry model takes the provider default output ceiling rather
+than inheriting a hosted model's, and unset means the hosted path is exactly what it
+was.
+
+To run it, with any server that serves the OpenAI Responses shape:
+
+```bash
+export OPENAI_API_KEY=unused-by-a-local-server
+export ZTS_OPENAI_BASE_URL=http://127.0.0.1:11434/v1/responses
+export ZTS_OPENAI_MODEL=qwen2.5-coder:7b
+zig build test-expert-app          # replay first: confirms the harness is sound offline
+# then the live corpus run, and `bash scripts/update-convergence.sh` to publish
+```
+
+What remains is running it, which needs a local model server. Note the wire shape is the
+Responses API, not Chat Completions - a runtime that serves only the latter needs a
+shim, and that is worth checking before reading a failure as a result about the model.
+
 Observable: one published row per model in the item-2 table, dated.
 
 ### 6. Idempotence gate and the repair-span fix (small)

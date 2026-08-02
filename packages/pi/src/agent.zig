@@ -194,6 +194,27 @@ pub const SessionMetrics = struct {
     }
 };
 
+/// Where to send OpenAI-shaped requests when the target is not OpenAI.
+///
+/// `model` is optional because the two things vary independently: a proxy in
+/// front of OpenAI keeps the registry model id and only moves the endpoint,
+/// while a local runtime serves a model the registry has never heard of.
+pub const OpenAiEndpoint = struct {
+    base_url: []const u8,
+    model: ?[]const u8 = null,
+};
+
+/// Read an endpoint override out of the environment, or null when
+/// `ZTS_OPENAI_BASE_URL` is unset - which is the hosted path, unchanged.
+///
+/// The slices borrow from the process environment, which outlives any session,
+/// and `initOpenAI` copies them anyway so one ownership rule covers both the
+/// env source and a caller-supplied literal.
+pub fn openAiEndpointFromEnv() ?OpenAiEndpoint {
+    const base_url = envVar("ZTS_OPENAI_BASE_URL") orelse return null;
+    return .{ .base_url = base_url, .model = envVar("ZTS_OPENAI_MODEL") };
+}
+
 pub const AgentSession = struct {
     transcript: Transcript = .{},
     backend: Backend = .{ .stub = .{} },
@@ -201,6 +222,11 @@ pub const AgentSession = struct {
     /// Anthropic client's Config. Null for the stub path.
     system_prompt_owned: ?[]u8 = null,
     tools_json_owned: ?[]u8 = null,
+    /// Set only when `initOpenAI` was given an endpoint override; the client's
+    /// Config borrows these, so the session outlives the caller's buffers the
+    /// same way it does for the prompt.
+    base_url_owned: ?[]u8 = null,
+    model_owned: ?[]u8 = null,
 
     session_id: ?[]u8 = null,
     session_dir: ?[]u8 = null,
@@ -264,11 +290,19 @@ pub const AgentSession = struct {
     /// api_key, system prompt, and tools_json are all duped so the caller's
     /// buffers can be freed independently. `tools_json` is the
     /// Responses-API tools array produced by `openai_client.writeToolsArray`.
+    ///
+    /// `override` points the client at an OpenAI-compatible server that is not
+    /// OpenAI - a local runtime serving the same wire shape. Roadmap item 5
+    /// needs exactly that and had no way to ask for it: both the endpoint and
+    /// the model id were read from the registry, which only knows about hosted
+    /// models. `null` keeps the registry default, so the hosted path is byte
+    /// for byte what it was.
     pub fn initOpenAI(
         allocator: std.mem.Allocator,
         api_key: []const u8,
         system_prompt: []const u8,
         tools_json: ?[]const u8,
+        override: ?OpenAiEndpoint,
     ) !AgentSession {
         const prompt_owned = try allocator.dupe(u8, system_prompt);
         errdefer allocator.free(prompt_owned);
@@ -279,17 +313,41 @@ pub const AgentSession = struct {
         else
             null;
         errdefer if (tools_owned) |json| allocator.free(json);
+
         const model = models_registry.defaultForProvider(.openai);
+        var config = openai_client.Config{
+            .api_key = key_owned,
+            .system_prompt = prompt_owned,
+            .tools_json = tools_owned,
+            .model = model.id,
+            .max_tokens = model.request_policy.max_output_tokens,
+        };
+
+        var base_url_owned: ?[]u8 = null;
+        errdefer if (base_url_owned) |s| allocator.free(s);
+        var model_owned: ?[]u8 = null;
+        errdefer if (model_owned) |s| allocator.free(s);
+
+        if (override) |ep| {
+            base_url_owned = try allocator.dupe(u8, ep.base_url);
+            config.base_url = base_url_owned.?;
+            if (ep.model) |id| {
+                model_owned = try allocator.dupe(u8, id);
+                config.model = model_owned.?;
+                // An off-registry model has no policy to read, so the request
+                // keeps the provider default rather than inheriting a hosted
+                // model's ceiling, which would be a number about a different
+                // model entirely.
+                config.max_tokens = openai_client.default_max_tokens;
+            }
+        }
+
         return .{
-            .backend = .{ .openai = openai_client.Client.init(.{
-                .api_key = key_owned,
-                .system_prompt = prompt_owned,
-                .tools_json = tools_owned,
-                .model = model.id,
-                .max_tokens = model.request_policy.max_output_tokens,
-            }) },
+            .backend = .{ .openai = openai_client.Client.init(config) },
             .system_prompt_owned = prompt_owned,
             .tools_json_owned = tools_owned,
+            .base_url_owned = base_url_owned,
+            .model_owned = model_owned,
         };
     }
 
@@ -297,6 +355,8 @@ pub const AgentSession = struct {
         self.transcript.deinit(allocator);
         if (self.system_prompt_owned) |s| allocator.free(s);
         if (self.tools_json_owned) |json| allocator.free(json);
+        if (self.base_url_owned) |s| allocator.free(s);
+        if (self.model_owned) |s| allocator.free(s);
         if (self.session_id) |s| allocator.free(s);
         if (self.session_dir) |s| allocator.free(s);
         if (self.events_path) |s| allocator.free(s);
@@ -421,7 +481,13 @@ pub fn initFromEnvWithSessionConfig(
             else
                 null;
             defer if (tools_json) |json| allocator.free(json);
-            break :blk try AgentSession.initOpenAI(allocator, api_key, system_prompt, tools_json);
+            break :blk try AgentSession.initOpenAI(
+                allocator,
+                api_key,
+                system_prompt,
+                tools_json,
+                openAiEndpointFromEnv(),
+            );
         }
         break :blk AgentSession.initStub();
     };
@@ -1092,6 +1158,7 @@ test "initOpenAI dupes api_key and system_prompt and routes through openai backe
         "openai-fixture-key",
         "you are a zts expert",
         "[{\"type\":\"function\",\"function\":{\"name\":\"x\"}}]",
+        null,
     );
     defer session.deinit(testing.allocator);
 
@@ -1102,6 +1169,49 @@ test "initOpenAI dupes api_key and system_prompt and routes through openai backe
     try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
     try testing.expectEqual(AuthKind.openai_api_key, session.authKind());
     try testing.expectEqualStrings("openai", session.backendDescriptor().provider_label);
+}
+
+test "an endpoint override redirects the client without touching the hosted default" {
+    // Item 5 runs the corpus against a local runtime serving the OpenAI wire
+    // shape. Both halves have to move: the endpoint, and a model id the
+    // registry has never heard of.
+    var local = try AgentSession.initOpenAI(
+        testing.allocator,
+        "unused-by-a-local-server",
+        "p",
+        null,
+        .{ .base_url = "http://127.0.0.1:11434/v1/responses", .model = "qwen2.5-coder:7b" },
+    );
+    defer local.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("http://127.0.0.1:11434/v1/responses", local.backend.openai.config.base_url);
+    try testing.expectEqualStrings("qwen2.5-coder:7b", local.backend.openai.config.model);
+    // An off-registry model carries the provider default rather than a hosted
+    // model's ceiling, which would be a number about a different model.
+    try testing.expectEqual(openai_client.default_max_tokens, local.backend.openai.config.max_tokens);
+
+    var hosted = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
+    defer hosted.deinit(testing.allocator);
+    try testing.expectEqualStrings("gpt-4o-mini", hosted.backend.openai.config.model);
+    try testing.expectEqual(@as(u32, 8_192), hosted.backend.openai.config.max_tokens);
+}
+
+test "an endpoint that moves only the host keeps the registry model" {
+    // A proxy in front of OpenAI: the wire shape and the model are unchanged,
+    // only where the request goes. Forcing a model id here would silently
+    // replace one the caller never asked to change.
+    var session = try AgentSession.initOpenAI(
+        testing.allocator,
+        "k",
+        "p",
+        null,
+        .{ .base_url = "http://proxy.internal/v1/responses" },
+    );
+    defer session.deinit(testing.allocator);
+
+    try testing.expectEqualStrings("http://proxy.internal/v1/responses", session.backend.openai.config.base_url);
+    try testing.expectEqualStrings("gpt-4o-mini", session.backend.openai.config.model);
+    try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
 }
 
 test "modelClient returns an anthropic client vtable when backend is anthropic" {
@@ -1126,7 +1236,7 @@ test "registry defaults match provider client model defaults" {
 }
 
 test "contextWindowTokens uses provider registry metadata" {
-    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null);
+    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
     defer openai.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 128_000), contextWindowTokens(&openai));
 
@@ -1154,7 +1264,7 @@ test "setModel validates provider and commits model with request policy atomical
 }
 
 test "OpenAI and stub model selection respect backend provider state" {
-    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null);
+    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
     defer openai.deinit(testing.allocator);
     try testing.expectEqual(Provider.openai, openai.activeProvider().?);
     try openai.setModel("gpt-4o-mini");

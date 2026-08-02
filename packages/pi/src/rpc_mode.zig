@@ -912,7 +912,7 @@ test "rpc: model.list filters models to the active provider" {
     }
 
     {
-        var session = try agent.AgentSession.initOpenAI(allocator, "k", "p", null);
+        var session = try agent.AgentSession.initOpenAI(allocator, "k", "p", null, null);
         defer session.deinit(allocator);
         var buf = TextBuffer.init(allocator);
         defer buf.deinit();
