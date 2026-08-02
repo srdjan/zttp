@@ -108,7 +108,7 @@ pub const operations = [_]OperationSpec{
     .{ .op = .apply_repair, .status = .deferred, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
         "applied", "source_digest", "module_graph_hash",
     }, .deferred_note = "phase 6: needs the equivalence-validator registry" },
-    .{ .op = .verify, .status = .implemented, .input_fields = &.{ "file", "properties" }, .payload_fields = &.{
+    .{ .op = .verify, .status = .implemented, .input_fields = &.{ "file", "properties", "content" }, .payload_fields = &.{
         "file", "source_digest", "results",
     } },
 };
@@ -1150,15 +1150,36 @@ fn runVerify(
     const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
     defer allocator.free(abs);
 
-    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
+    // An optional `content` override is what closes the propose -> simulate ->
+    // verify cycle without a write. `simulate_edit` hands back
+    // `proposed_content`; without this a client could only verify the file it
+    // had not repaired yet, and would have to write the candidate to disk to
+    // ask about it - which is `apply_repair`'s job and still deferred.
+    //
+    // The digest covers whatever was analyzed, so a verdict about supplied
+    // bytes is never bound to the digest of bytes on disk that nobody checked.
+    const supplied: ?[]const u8 = blk: {
+        const obj = (input orelse break :blk null).object;
+        const value = obj.get("content") orelse break :blk null;
+        if (value != .string) break :blk null;
+        break :blk value.string;
+    };
+
+    const source = if (supplied) |c|
+        try allocator.dupe(u8, c)
+    else
+        try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
     defer allocator.free(source);
     const digest = agent_identity.sourceDigest(source);
 
-    var result = precompile.runCheckOnlyWithOptions(allocator, abs, .{
-        .json_mode = true,
-        .sql_schema_path = null,
-        .system_path = null,
-    }) catch |err| switch (err) {
+    var result = (if (supplied != null)
+        precompile.runCheckOnlyFromSource(allocator, source, abs, null, true, null, false)
+    else
+        precompile.runCheckOnlyWithOptions(allocator, abs, .{
+            .json_mode = true,
+            .sql_schema_path = null,
+            .system_path = null,
+        })) catch |err| switch (err) {
         // Every property is undecided rather than false: the analysis never
         // ran, and reporting `not_proven` would claim a verdict nothing
         // produced.
@@ -2667,6 +2688,103 @@ test "simulate_edit refuses a repair outside the vocabulary" {
     defer parsed.deinit();
     const payload = parsed.value.object.get("payload").?.object;
     try testing.expectEqualStrings("unknown_intent", payload.get("refusal").?.object.get("reason").?.string);
+}
+
+test "an external client completes propose, simulate, verify over the wire" {
+    // Item 8's observable. Three `respond` calls and nothing else: no
+    // canonicalize call in process, no shared state between steps, and each
+    // request carries only what the previous response published.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    // 1. Propose.
+    const propose_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(propose_req);
+    const propose_out = try respond(a, propose_req);
+    defer a.free(propose_out);
+    var proposed = try parse(a, propose_out);
+    defer proposed.deinit();
+    const candidate = proposed.value.object.get("payload").?.object.get("candidates").?.array.items[0].object;
+
+    // 2. Simulate, using the candidate's own fields verbatim.
+    const simulate_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"{s}","line":{d},"original":{f},"replacement":{f}}}]}}}}
+    , .{
+        root,
+        candidate.get("intent").?.string,
+        candidate.get("line").?.integer,
+        std.json.fmt(candidate.get("original").?.string, .{}),
+        std.json.fmt(candidate.get("replacement").?.string, .{}),
+    });
+    defer a.free(simulate_req);
+    const simulate_out = try respond(a, simulate_req);
+    defer a.free(simulate_out);
+    var simulated = try parse(a, simulate_out);
+    defer simulated.deinit();
+    const sim_payload = simulated.value.object.get("payload").?.object;
+    try testing.expect(sim_payload.get("ok").?.bool);
+
+    // 3. Verify the candidate itself. Without the `content` override the client
+    // could only ask about the file it has not repaired, and would have to
+    // write the candidate to disk to ask about it - which is `apply_repair`'s
+    // job and still deferred.
+    const verify_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["state_isolated","canonical"],"content":{f}}}}}
+    , .{ root, std.json.fmt(sim_payload.get("proposed_content").?.string, .{}) });
+    defer a.free(verify_req);
+    const verify_out = try respond(a, verify_req);
+    defer a.free(verify_out);
+    var verified = try parse(a, verify_out);
+    defer verified.deinit();
+
+    const results = verified.value.object.get("payload").?.object.get("results").?.array;
+    for (results.items) |r| {
+        try testing.expectEqualStrings("proven", r.object.get("grade").?.string);
+    }
+
+    // The file on disk never changed: the whole cycle is read-only.
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") != null);
+}
+
+test "verify binds its digest to the bytes it analyzed" {
+    // A verdict about supplied content must not be bound to the digest of the
+    // file on disk: that would name bytes nobody checked.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const file_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"]}}}}
+    , .{root});
+    defer a.free(file_req);
+    const file_out = try respond(a, file_req);
+    defer a.free(file_out);
+    var from_file = try parse(a, file_out);
+    defer from_file.deinit();
+
+    const content_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":"export function handler(req: Request): Response {{ return Response.json({{ ok: true }}); }}\\n"}}}}
+    , .{root});
+    defer a.free(content_req);
+    const content_out = try respond(a, content_req);
+    defer a.free(content_out);
+    var from_content = try parse(a, content_out);
+    defer from_content.deinit();
+
+    const file_digest = from_file.value.object.get("payload").?.object.get("source_digest").?.string;
+    const content_digest = from_content.value.object.get("payload").?.object.get("source_digest").?.string;
+    try testing.expect(!std.mem.eql(u8, file_digest, content_digest));
 }
 
 test "verify answers only the properties it was asked about" {
