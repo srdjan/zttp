@@ -68,6 +68,10 @@ pub const DataLabel = enum(u3) {
     nondeterministic,
 };
 
+/// The provenance labels an extension can declare on a return value. The
+/// analyzer's own set carries one more - `unknown`, for a value it could not
+/// trace - which it assigns and no binding declares, so the adapter maps these
+/// fields across by name rather than by bit pattern.
 pub const LabelSet = packed struct(u8) {
     secret: bool = false,
     credential: bool = false,

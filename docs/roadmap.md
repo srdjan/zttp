@@ -97,6 +97,17 @@ set, inflating the convergence number without any convergence. The history argue
 same way: a taint fail-open once survived fourteen review passes, so this class of defect
 is proven to evade review here, which is why the standing check scans rather than trusts.
 
+A fourth of the same class turned up later, in the flow checker rather than in the effect
+row, and is closed. `userCallLabels` summarizes a callee's return labels, and every exit
+that could not read the body - past the depth cap, past the parameter cap, or a call
+through a value with no declaration to find - returned the union of the call's arguments.
+For a zero-argument call that union is empty, and the empty set is the positive claim
+that the value carries nothing, so `env("SECRET_KEY")` behind a helper chain reached the
+response unlabelled and `no_secret_leakage` held. The check that scans for swallowed
+errors could not see it: nothing was discarded, a wrong answer was returned. Those exits
+now carry the `unknown` label, and a sink it reaches clears every property that sink
+decides rather than proving it. The caps cost precision now, never soundness.
+
 ### 2. Publish an honest convergence number (done)
 
 [docs/convergence.md](convergence.md) carries the table: corpus version, model, policy

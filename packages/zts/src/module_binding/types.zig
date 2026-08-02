@@ -90,7 +90,7 @@ pub const FailureSeverity = enum {
 /// Classification of data sensitivity for compile-time information flow analysis.
 /// The flow checker tracks these labels through the handler's data flow graph,
 /// proving that sensitive data never reaches unauthorized sinks.
-pub const DataLabel = enum(u3) {
+pub const DataLabel = enum(u4) {
     secret, // env vars with sensitive names (PASSWORD, KEY, TOKEN, SECRET, PRIVATE)
     credential, // auth tokens, JWT payloads, bearer tokens
     user_input, // request body, headers, query params, path params
@@ -99,11 +99,12 @@ pub const DataLabel = enum(u3) {
     external, // data from fetchSync responses
     validated, // data that passed through validation
     nondeterministic, // derived from a clock or RNG read: differs between runs
+    unknown, // provenance the checker could not follow: proves nothing
 };
 
 /// Bitset of data provenance labels. Propagates through operations via merge (OR).
-/// Compact enough (1 byte) to store per-node in the flow checker's label map.
-pub const LabelSet = packed struct(u8) {
+/// Compact enough (2 bytes) to store per-node in the flow checker's label map.
+pub const LabelSet = packed struct(u16) {
     secret: bool = false,
     credential: bool = false,
     user_input: bool = false,
@@ -115,13 +116,19 @@ pub const LabelSet = packed struct(u8) {
     /// same request. Seeded from the export's own capabilities rather than
     /// declared per binding, and consumed where the value reaches a response.
     nondeterministic: bool = false,
+    /// The checker could not follow where this value came from - a call it
+    /// could not summarize. Distinct from the empty set, which is the positive
+    /// claim that a value carries nothing: a sink that this reaches cannot
+    /// prove the properties it governs, so they are cleared rather than held.
+    unknown: bool = false,
+    _reserved: u7 = 0,
 
     pub const empty: LabelSet = .{};
 
     /// Bitwise OR: union of two label sets.
     pub fn merge(a: LabelSet, b: LabelSet) LabelSet {
-        const ai: u8 = @bitCast(a);
-        const bi: u8 = @bitCast(b);
+        const ai: u16 = @bitCast(a);
+        const bi: u16 = @bitCast(b);
         return @bitCast(ai | bi);
     }
 
@@ -130,40 +137,39 @@ pub const LabelSet = packed struct(u8) {
     /// considered validated when ALL branches that produce it are validated;
     /// otherwise one unvalidated path launders the flag for the entire ternary).
     pub fn mergeConditional(a: LabelSet, b: LabelSet) LabelSet {
-        const ai: u8 = @bitCast(a);
-        const bi: u8 = @bitCast(b);
-        const validated_mask: u8 = 1 << @intFromEnum(DataLabel.validated);
+        const ai: u16 = @bitCast(a);
+        const bi: u16 = @bitCast(b);
+        const validated_mask: u16 = @as(u16, 1) << @intFromEnum(DataLabel.validated);
         return @bitCast(((ai | bi) & ~validated_mask) | ((ai & bi) & validated_mask));
     }
 
     /// Check if a specific label is present.
     pub fn has(self: LabelSet, label: DataLabel) bool {
-        const bit: u3 = @intFromEnum(label);
-        const mask: u8 = @as(u8, 1) << bit;
-        const raw: u8 = @bitCast(self);
+        const mask: u16 = @as(u16, 1) << @intFromEnum(label);
+        const raw: u16 = @bitCast(self);
         return (raw & mask) != 0;
     }
 
     /// Check if any label in the mask is present.
     pub fn hasAny(self: LabelSet, mask: LabelSet) bool {
-        const si: u8 = @bitCast(self);
-        const mi: u8 = @bitCast(mask);
+        const si: u16 = @bitCast(self);
+        const mi: u16 = @bitCast(mask);
         return (si & mi) != 0;
     }
 
-    /// True if no labels are set. Every bit of the byte is a named label since
-    /// `nondeterministic` took bit 7, so nothing is masked off here: masking it
-    /// made a set carrying only that label read as empty, and both the sink
-    /// check and the import scan skip empty sets.
+    /// True if no labels are set. `_reserved` is never written, so the whole
+    /// word answers this: an earlier version masked off what it took to be a
+    /// pad bit, and a set carrying only `nondeterministic` - which had moved
+    /// into that bit - read as empty, which both the sink check and the import
+    /// scan take as "nothing to do".
     pub fn isEmpty(self: LabelSet) bool {
-        const raw: u8 = @bitCast(self);
+        const raw: u16 = @bitCast(self);
         return raw == 0;
     }
 
     /// Create a LabelSet from a single label.
     pub fn fromLabel(label: DataLabel) LabelSet {
-        const bit: u3 = @intFromEnum(label);
-        const mask: u8 = @as(u8, 1) << bit;
+        const mask: u16 = @as(u16, 1) << @intFromEnum(label);
         return @bitCast(mask);
     }
 };

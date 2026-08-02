@@ -255,10 +255,13 @@ pub fn parseExternalLabels(allocator: std.mem.Allocator, json_bytes: []const u8)
 // ---------------------------------------------------------------------------
 
 /// Caps for callee return-label summaries and return-value resolution. Beyond
-/// these the checker falls back to the conservative direction (labels kept,
-/// label-only sink check) rather than dropping taint.
+/// these the checker falls back to the conservative direction: the call's value
+/// carries `.unknown`, so a sink it reaches clears what it governs instead of
+/// proving it. The caps therefore cost precision, never soundness. The summary
+/// is not memoized, so a call site re-walks the callee body, and the depth is
+/// what bounds that work.
 const max_summary_params = 8;
-const max_summary_depth = 4;
+const max_summary_depth = 8;
 const response_resolve_limit = 16;
 
 pub const FlowChecker = struct {
@@ -1303,6 +1306,13 @@ pub const FlowChecker = struct {
                 return base_labels;
             }
 
+            // A builtin module export with no labels to store above: the empty
+            // set is its declared answer, not a gap in the walk. `scanImports`
+            // records every builtin import here, including those, so this must
+            // precede the user-function summary - which has no body for an
+            // import and would otherwise report the value untraceable.
+            if (self.module_fn_meta.contains(binding.slot)) return LabelSet.empty;
+
             // renderToString(jsx) auto-escapes its output, so a user_input value
             // interpolated into the JSX and sent via Response.html is HTML-safe
             // (defended). Model it as `.validated` so the XSS check does not warn.
@@ -1392,14 +1402,36 @@ pub const FlowChecker = struct {
             arg_union = LabelSet.merge(arg_union, labels);
         }
 
+        // Every exit below that does not read the callee's body returns the
+        // argument union, which for a zero-argument call is the empty set - and
+        // the empty set is the positive claim that the value carries nothing.
+        // A secret returned by a helper the walk could not enter would reach a
+        // sink unlabelled and falsely discharge no_secret_leakage, so those
+        // exits carry `.unknown` and the sink clears what it governs instead.
+        const unresolved = LabelSet.merge(arg_union, .{ .unknown = true });
+
         const fn_key = packBindingKey(binding.scope_id, binding.slot);
-        const fn_node = self.user_fn_decls.get(fn_key) orelse return arg_union;
-        if (self.summary_depth >= max_summary_depth) return arg_union;
+        const fn_node = self.user_fn_decls.get(fn_key) orelse {
+            // An implicit global is a builtin - `h`, `range`, `renderToString`
+            // - whose body is not in this module to walk and which launders
+            // nothing on its own. Any other binding without a declaration is a
+            // call through a value: a callback parameter, or an import the
+            // resolver did not follow.
+            if (binding.kind == .undeclared_global) return arg_union;
+            return unresolved;
+        };
+        if (self.summary_depth >= max_summary_depth) return unresolved;
         for (self.summary_stack[0..self.summary_depth]) |active| {
+            // Recursion, and the only exit that stays with the argument union.
+            // The value this call produces is one of the callee's returns, and
+            // the frame already on the stack for that same function collects
+            // every one of them, so nothing is lost by stopping here.
             if (active == fn_key) return arg_union;
         }
-        const func = self.ir_view.getFunction(fn_node) orelse return arg_union;
-        if (func.params_count > max_summary_params) return arg_union;
+        const func = self.ir_view.getFunction(fn_node) orelse return unresolved;
+        // Past the parameter cap the arguments cannot be bound, so the body
+        // would read every parameter as unlabelled and launder its arguments.
+        if (func.params_count > max_summary_params) return unresolved;
 
         for (0..func.params_count) |i| {
             const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
@@ -1408,7 +1440,7 @@ pub const FlowChecker = struct {
             const labels = if (i < call_data.args_count) arg_labels[i] else LabelSet.empty;
             self.binding_labels.put(self.allocator, key, labels) catch {
                 self.markAllocationFailure();
-                return arg_union;
+                return unresolved;
             };
         }
 
@@ -1416,7 +1448,7 @@ pub const FlowChecker = struct {
         self.summary_depth += 1;
         defer self.summary_depth -= 1;
 
-        const body_tag = self.ir_view.getTag(func.body) orelse return arg_union;
+        const body_tag = self.ir_view.getTag(func.body) orelse return unresolved;
         // A concise arrow body (`(x) => x`) is stored as a `.return_stmt`
         // wrapping the expression, not the bare expression, so it must go
         // through the same returns-collector as a block/program body. Routing
@@ -1666,6 +1698,13 @@ pub const FlowChecker = struct {
     fn checkSinkLabels(self: *FlowChecker, labels: LabelSet, node: NodeIndex, sink: SinkKind) void {
         if (labels.isEmpty()) return;
 
+        // A value the walk could not trace proves nothing about itself, so
+        // every property this sink decides is cleared rather than held. No
+        // diagnostic: nothing is known to be wrong, and the proof card showing
+        // the property unproven is the honest report. The same treatment
+        // `nondeterministic` gets at the response sink, for the same reason.
+        if (labels.has(.unknown)) self.clearSinkProperties(sink);
+
         switch (sink) {
             .response => {
                 if (labels.has(.secret)) {
@@ -1835,6 +1874,36 @@ pub const FlowChecker = struct {
                 if (labels.has(.user_input)) {
                     self.properties.pii_contained = false;
                 }
+            },
+        }
+    }
+
+    /// Clear every property the given sink can decide. Called when a value
+    /// carrying `.unknown` reaches it: the sink cannot tell what the value is,
+    /// so it cannot hold any property that depends on knowing.
+    fn clearSinkProperties(self: *FlowChecker, sink: SinkKind) void {
+        switch (sink) {
+            .response => {
+                self.properties.no_secret_leakage = false;
+                self.properties.no_credential_leakage = false;
+                self.properties.deterministic = false;
+            },
+            .console => {
+                self.properties.no_secret_leakage = false;
+                self.properties.no_credential_leakage = false;
+            },
+            .egress_url, .egress_headers => {
+                self.properties.no_secret_leakage = false;
+                self.properties.no_credential_leakage = false;
+                self.properties.input_validated = false;
+                self.properties.injection_safe = false;
+                self.properties.pii_contained = false;
+            },
+            .egress_body => {
+                self.properties.no_secret_leakage = false;
+                self.properties.input_validated = false;
+                self.properties.injection_safe = false;
+                self.properties.pii_contained = false;
             },
         }
     }
@@ -3547,6 +3616,53 @@ fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
     defer checker.deinit();
     _ = try checker.check(handler_fn);
     return checker.getProperties().no_secret_leakage;
+}
+
+test "FlowChecker flags a secret laundered through a helper chain past the summary depth" {
+    // Nested zero-argument helpers put the `env` read past
+    // `max_summary_depth`. The fallback used to be the union of the call's
+    // arguments, which for a zero-argument call is empty, so the secret
+    // arrived at the response carrying no label and the property held. It now
+    // carries `.unknown` and the response sink refuses to prove.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function l10() { return env("SECRET_KEY"); }
+        \\function l9() { return l10(); }
+        \\function l8() { return l9(); }
+        \\function l7() { return l8(); }
+        \\function l6() { return l7(); }
+        \\function l5() { return l6(); }
+        \\function l4() { return l5(); }
+        \\function l3() { return l4(); }
+        \\function l2() { return l3(); }
+        \\function l1() { return l2(); }
+        \\function handler(req) { return Response.json({ v: l1() }); }
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker refuses to prove through a call it cannot resolve" {
+    // `pick` is a parameter, so there is no body to walk. The old fallback
+    // returned the argument union - empty here - which reads as the positive
+    // claim that the value carries nothing.
+    const source =
+        \\function handler(req) {
+        \\  const pick = req.pick;
+        \\  return Response.json({ v: pick() });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker still proves a shallow helper chain" {
+    // The conservative fallback must not swallow the ordinary case: a helper
+    // the walk can enter, returning a value with no label, still proves.
+    const source =
+        \\function inner(x) { return x + 1; }
+        \\function outer(x) { return inner(x) * 2; }
+        \\function handler(req) { return Response.json({ v: outer(1) }); }
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
 }
 
 test "FlowChecker flags a secret laundered through JSON.stringify in a response" {
