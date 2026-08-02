@@ -97,16 +97,36 @@ set, inflating the convergence number without any convergence. The history argue
 same way: a taint fail-open once survived fourteen review passes, so this class of defect
 is proven to evade review here, which is why the standing check scans rather than trusts.
 
-A fourth of the same class turned up later, in the flow checker rather than in the effect
-row, and is closed. `userCallLabels` summarizes a callee's return labels, and every exit
-that could not read the body - past the depth cap, past the parameter cap, or a call
-through a value with no declaration to find - returned the union of the call's arguments.
-For a zero-argument call that union is empty, and the empty set is the positive claim
-that the value carries nothing, so `env("SECRET_KEY")` behind a helper chain reached the
-response unlabelled and `no_secret_leakage` held. The check that scans for swallowed
-errors could not see it: nothing was discarded, a wrong answer was returned. Those exits
-now carry the `unknown` label, and a sink it reaches clears every property that sink
-decides rather than proving it. The caps cost precision now, never soundness.
+Three more of the same class turned up later, in the flow checker rather than in the
+effect row, and all three are closed. The shape they share: an empty label set is the
+positive claim that a value carries nothing, and each returned one where the honest
+answer was that the checker could not look. The check that scans for swallowed errors
+cannot see this - nothing is discarded, a wrong answer is returned.
+
+`userCallLabels` summarizes a callee's return labels, and every exit that could not read
+the body - past the depth cap, past the parameter cap, or a call through a value with no
+declaration to find - returned the union of the call's arguments, which for a
+zero-argument call is empty. `env("SECRET_KEY")` behind a helper chain reached the
+response unlabelled and `no_secret_leakage` held. Those exits now carry the `unknown`
+label, and a sink it reaches clears every property that sink decides rather than proving
+it. The caps cost precision now, never soundness.
+
+The egress options object had two. Hoisted into a binding it is no longer a literal, so
+every by-name extractor answered empty and only the whole-object body fallback ran - and
+the body arm checks neither `credential` nor the URL-side properties, so a caller's token
+in `const opts = { headers: { authorization: token } }` reached the third party with
+`no_credential_leakage` proven. A computed key, `{ [field]: token }`, is invisible to the
+same extractors even when the object is a literal, and the `body:` early return can stop
+the whole-object fallback from running at all. Both now route the whole object to one
+sink that assumes any field. Recognizing the second needed the `is_computed` flag rather
+than a failed name lookup, because `getPropertyKeyName` resolves `{ [field]: v }` to
+"field" - the variable holding the key, not the key.
+
+Audited and found sound in the same pass: the response resolver's step limit, which falls
+back to a label-only sink check on the whole return value; `refineEnvLabels`, which keeps
+the `secret` label when the env name is not a literal instead of downgrading it to
+`config`; and `inferLabels` over an object literal, which merges every property value
+whether or not the key can be named.
 
 ### 2. Publish an honest convergence number (done)
 
