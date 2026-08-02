@@ -440,6 +440,88 @@ pub const FlowChecker = struct {
         return error_count;
     }
 
+    /// Labels a module call inherits from closures passed to it. A module
+    /// export answers with its declared return labels, which describe what the
+    /// module itself produces and cannot describe what a caller's callback
+    /// returns: `parallel([() => env("SECRET_KEY")])` declares `external` and
+    /// the secret vanished.
+    ///
+    /// Only closures contribute. Unioning every argument would taint results
+    /// that carry no argument data - `cacheSet("ns", key, userInput)` answers a
+    /// boolean, not the user's data - and the pass-through shape that needs
+    /// this is always a callback the module invokes: `parallel`, `race`,
+    /// `step`, `call`, `saga`, `using`.
+    ///
+    /// `nondeterministic` is dropped for a durable export, and only that label:
+    /// the callback's value is recorded on the first run and replayed after, so
+    /// it is the same on every run, while a secret it returns is still a secret
+    /// in the response.
+    fn closureArgLabels(self: *FlowChecker, slot: u16, call_data: Node.CallExpr) LabelSet {
+        var labels = LabelSet.empty;
+        for (0..call_data.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            labels = LabelSet.merge(labels, self.closuresWithin(arg));
+        }
+        if (labels.isEmpty()) return labels;
+
+        if (self.module_fn_meta.get(slot)) |meta| {
+            if (std.mem.eql(u8, meta.module, "durable")) labels.nondeterministic = false;
+        }
+        return labels;
+    }
+
+    /// Union of what every closure inside `node` produces, descending through
+    /// the array and object literals a callback is usually wrapped in and
+    /// ignoring every other value.
+    fn closuresWithin(self: *FlowChecker, node: NodeIndex) LabelSet {
+        if (node == null_node) return LabelSet.empty;
+        const tag = self.ir_view.getTag(node) orelse return LabelSet.empty;
+        switch (tag) {
+            .arrow_function, .function_expr => return self.closureResultLabels(node),
+            .array_literal => {
+                const arr = self.ir_view.getArray(node) orelse return LabelSet.empty;
+                var labels = LabelSet.empty;
+                var i: u16 = 0;
+                while (i < arr.elements_count) : (i += 1) {
+                    const elem = self.ir_view.getListIndex(arr.elements_start, i);
+                    labels = LabelSet.merge(labels, self.closuresWithin(elem));
+                }
+                return labels;
+            },
+            .object_literal => {
+                const obj = self.ir_view.getObject(node) orelse return LabelSet.empty;
+                var labels = LabelSet.empty;
+                var i: u16 = 0;
+                while (i < obj.properties_count) : (i += 1) {
+                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
+                    if ((self.ir_view.getTag(prop_idx) orelse continue) != .object_property) continue;
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    labels = LabelSet.merge(labels, self.closuresWithin(prop.value));
+                }
+                return labels;
+            },
+            // A closure bound to a name and passed by that name. Resolved
+            // through the same declaration index the user-call summary uses,
+            // because the identifier's own labels are not consulted here - only
+            // closures contribute, and answering `inferLabels` for every
+            // identifier would taint results that carry no argument data.
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return LabelSet.empty;
+                const key = packBindingKey(binding.scope_id, binding.slot);
+                const fn_node = self.user_fn_decls.get(key) orelse return LabelSet.empty;
+                return self.closureResultLabels(fn_node);
+            },
+
+            // exhaustive: this function looks for closures a module will call,
+            // and the arms above are the shapes one arrives in - bare, in an
+            // array, as an object field, or under a name. No other tag can hold
+            // a closure the callee invokes without going through one of them.
+            // Returning empty owes nothing here: this set is added to the
+            // export's declared labels rather than replacing them.
+            else => return LabelSet.empty,
+        }
+    }
+
     /// Labels of the value a closure produces when called. Parameters are left
     /// as they are: a caller that passes a labelled argument unions it in
     /// separately, and a higher-order function supplying the argument itself
@@ -1403,7 +1485,7 @@ pub const FlowChecker = struct {
                     const arg = self.ir_view.getListIndex(call_data.args_start, 0);
                     return self.refineEnvLabels(arg, base_labels);
                 }
-                return base_labels;
+                return LabelSet.merge(base_labels, self.closureArgLabels(binding.slot, call_data));
             }
 
             // A builtin module export with no labels to store above: the empty
@@ -1411,7 +1493,15 @@ pub const FlowChecker = struct {
             // records every builtin import here, including those, so this must
             // precede the user-function summary - which has no body for an
             // import and would otherwise report the value untraceable.
-            if (self.module_fn_meta.contains(binding.slot)) return LabelSet.empty;
+            // Carries whatever a callback it invokes returns, and nothing else:
+            // the empty declared set is the export's own answer, not a gap.
+            // `step` is the case that matters - it declares no labels at all,
+            // so without this a secret read inside its callback would arrive
+            // unlabelled while the same read inside `parallel`'s callback,
+            // which does declare labels, would not.
+            if (self.module_fn_meta.contains(binding.slot)) {
+                return self.closureArgLabels(binding.slot, call_data);
+            }
 
             // renderToString(jsx) auto-escapes its output, so a user_input value
             // interpolated into the JSX and sent via Response.html is HTML-safe
@@ -3946,6 +4036,57 @@ test "FlowChecker flags a credential in a hoisted egress options object" {
         \\}
     ;
     try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret returned by a callback a module invokes" {
+    // A module export answers with its declared return labels, and `parallel`
+    // declares `external`. Those describe what the module produces and cannot
+    // describe what a caller's callback returns, so the secret vanished.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { parallel } from "zttp:io";
+        \\function handler(req) {
+        \\  const results = parallel([() => env("SECRET_KEY")]);
+        \\  return Response.json({ results: results });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret through a callback passed by name" {
+    // Same laundering with the closure bound first. The argument is an
+    // identifier, so finding it needs the declaration index rather than the
+    // shape of the argument expression.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { parallel } from "zttp:io";
+        \\function handler(req) {
+        \\  const cb = () => env("SECRET_KEY");
+        \\  const results = parallel([cb]);
+        \\  return Response.json({ results: results });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a durable step callback keeps determinism but not secrecy" {
+    // The replay boundary neutralizes one label and not the other: the clock
+    // read is recorded and replayed, so the response is the same on every run,
+    // while a secret the callback returns is still a secret in the response.
+    const deterministic_source =
+        \\import { step } from "zttp:durable";
+        \\function handler(req) { return Response.json({ at: step("ts", () => Date.now()) }); }
+    ;
+    try std.testing.expect(try runDeterministic(std.testing.allocator, deterministic_source));
+
+    const secret_source =
+        \\import { env } from "zttp:env";
+        \\import { step } from "zttp:durable";
+        \\function handler(req) {
+        \\  return Response.json({ k: step("key", () => env("SECRET_KEY")) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, secret_source));
 }
 
 test "FlowChecker flags a secret produced by a closure argument" {
