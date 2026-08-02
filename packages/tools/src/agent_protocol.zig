@@ -1534,9 +1534,15 @@ fn byteOffsetOf(source: []const u8, line: u32, column: u32) usize {
 
 /// Spec 4.8: "Until a rewrite has a registered equivalence validator,
 /// `canonicalize` and `normalize` MUST report it as a proposed refactor, not a
-/// mechanical repair." No validator registry exists before phase 6, so the
-/// grade is constant, and it is written from here so phase 6 changes one line.
-const candidate_grade = "proposed_refactor";
+/// mechanical repair."
+///
+/// The grade was a constant while no row was implemented, which made it true
+/// by accident. It answers from the registry now, so a rewrite is called
+/// mechanical exactly when something discharges it - the same condition
+/// `repair_available` keys on, read from the same place.
+fn candidateGrade(intent: zts.repair_intent.RepairIntent) []const u8 {
+    return if (zts.repair_validator.gradable(intent)) "mechanical_repair" else "proposed_refactor";
+}
 
 fn boolField(input: std.json.Value, name: []const u8) bool {
     const obj = switch (input) {
@@ -1581,7 +1587,7 @@ fn runCanonicalize(
         try json.objectField("intent");
         try json.write(@tagName(refactor.intent));
         try json.objectField("grade");
-        try json.write(candidate_grade);
+        try json.write(candidateGrade(refactor.intent));
         // The row from the equivalence-validator registry, so a client reads
         // what would discharge this rewrite and whether anything runs it, in
         // the same object as the rewrite. Null for an intent with no row.
@@ -1685,7 +1691,7 @@ fn runNormalize(
         try json.objectField("intent");
         try json.write(name);
         try json.objectField("grade");
-        try json.write(candidate_grade);
+        try json.write(candidateGrade(intent));
         // The phase 0 back-reference: an applied intent resolves to the idiom
         // row it realizes, where one exists.
         try json.objectField("idiom_id");
@@ -3018,9 +3024,10 @@ test "canonicalize candidates carry a grade and the original span text" {
     const candidates = payload.get("candidates").?.array;
     try testing.expect(candidates.items.len >= 1);
     const first = candidates.items[0].object;
-    // Spec 4.8: without a registered validator every candidate is a proposed
-    // refactor, never a mechanical repair.
-    try testing.expectEqualStrings("proposed_refactor", first.get("grade").?.string);
+    // Spec 4.8: a candidate is a mechanical repair exactly when a registered
+    // validator discharges it, and a proposed refactor otherwise. This one is
+    // `replace_let_with_const`, whose M4 row is implemented.
+    try testing.expectEqualStrings("mechanical_repair", first.get("grade").?.string);
     try testing.expect(first.get("replacement").? == .string);
     // D3 §5: v1 drops original_line at the JSON boundary, so a client cannot
     // re-validate staleness. The v2 wire carries it.
@@ -3038,7 +3045,7 @@ test "canonicalize candidates carry a grade and the original span text" {
     // discharge it and whether anything runs it without a second request.
     const validator = first.get("validator").?.object;
     try testing.expectEqualStrings("M4", validator.get("method").?.string);
-    try testing.expectEqualStrings("planned", validator.get("status").?.string);
+    try testing.expectEqualStrings("implemented", validator.get("status").?.string);
     try testing.expect(validator.get("precondition").? == .string);
 }
 
@@ -3170,6 +3177,8 @@ test "normalize maps an applied intent back to the idiom row it realizes" {
     const entry = trace.items[0].object;
     try testing.expectEqualStrings("drop_unused_index_alias", entry.get("intent").?.string);
     try testing.expectEqualStrings("idiom.element-iteration", entry.get("idiom_id").?.string);
+    // The other side of the same rule: `drop_unused_index_alias` names M2,
+    // which discharges nothing, so it stays a proposal however well it works.
     try testing.expectEqualStrings("proposed_refactor", entry.get("grade").?.string);
 }
 

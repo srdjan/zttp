@@ -2920,6 +2920,114 @@ test "every rewrite row has a v1 name, and only the renamed five differ" {
     try std.testing.expectEqual(@as(usize, 5), renamed);
 }
 
+test "every graded rewrite this rewriter emits discharges against its law" {
+    // The differential check, and the reason the validator lives in `zts` with
+    // its own scanners rather than calling back into this file. Two independent
+    // derivations of the same law run over the same real input: this rewriter
+    // produces the edit, and `repair_validator` re-derives what the edit should
+    // have been and compares byte for byte. Agreeing proves both; a unit test
+    // on either alone proves only that it agrees with itself.
+    //
+    // Driven off `rewrite_row_intents`, so a row that becomes gradable without
+    // a fixture here fails the coverage assertion at the end rather than
+    // slipping through untested.
+    const allocator = std.testing.allocator;
+    const fixtures = [_]struct { intent: RepairIntent, source: []const u8 }{
+        .{ .intent = .replace_let_with_const, .source =
+        \\function handler(req: Request): Response {
+        \\  let count = 1;
+        \\  return Response.json({ count });
+        \\}
+        },
+        .{ .intent = .canonicalize_for_of_const, .source =
+        \\function handler(req: Request): Response {
+        \\  const items = [1, 2];
+        \\  for (let item of items) {
+        \\    Response.json({ item });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+        },
+        .{ .intent = .replace_compound_assign_with_explicit, .source =
+        \\function handler(req: Request): Response {
+        \\  let total = 10;
+        \\  total -= 2 + 3;
+        \\  return Response.json({ total });
+        \\}
+        },
+        .{ .intent = .replace_arrow_with_function, .source =
+        \\const parse = (x: number): number => x;
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a, b });
+        \\}
+        },
+        .{ .intent = .replace_export_arrow_with_function, .source =
+        \\export const load = (id: string): Response => Response.text(id);
+        \\function handler(req: Request): Response {
+        \\  return load("x");
+        \\}
+        },
+        .{ .intent = .drop_redundant_bool_compare, .source =
+        \\function handler(req: Request): Response {
+        \\  const ready = true;
+        \\  if (ready === true) { return Response.json({ ok: true }); }
+        \\  return Response.json({ ok: false });
+        \\}
+        },
+    };
+
+    var checked: usize = 0;
+    for (fixtures) |fixture| {
+        if (!zts.repair_validator.gradable(fixture.intent)) continue;
+
+        var result = try collectFromSource(allocator, fixture.source, "handler.ts");
+        defer result.deinit(allocator);
+
+        var found: ?Refactor = null;
+        for (result.refactors.items) |r| {
+            if (r.intent == fixture.intent) {
+                found = r;
+                break;
+            }
+        }
+        const refactor = found orelse {
+            std.debug.print("no {s} refactor emitted for its fixture\n", .{@tagName(fixture.intent)});
+            return error.TestFailed;
+        };
+
+        var one = [_]Refactor{refactor};
+        const repaired = try applyRefactors(allocator, fixture.source, &one);
+        defer allocator.free(repaired);
+
+        switch (zts.repair_validator.validateApplication(
+            fixture.intent,
+            fixture.source,
+            repaired,
+            refactor.line,
+        )) {
+            .equivalent => checked += 1,
+            .not_law_shape => |why| {
+                std.debug.print("{s}: the rewriter and its law disagree: {s}\n", .{ @tagName(fixture.intent), why });
+                return error.TestFailed;
+            },
+            .no_validator => {
+                std.debug.print("{s} is gradable and has no validator\n", .{@tagName(fixture.intent)});
+                return error.TestFailed;
+            },
+        }
+    }
+
+    // Every gradable row this rewriter can emit is covered above. A new one
+    // fails here rather than shipping a graded intent nothing cross-checks.
+    var gradable_rows: usize = 0;
+    for (rewrite_row_intents) |intent| {
+        if (zts.repair_validator.gradable(intent)) gradable_rows += 1;
+    }
+    try std.testing.expectEqual(gradable_rows, checked);
+}
+
 test "writeJson envelope covers all deterministic refactor kinds" {
     const cases = [_]struct {
         name: []const u8,
