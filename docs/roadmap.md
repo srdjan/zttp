@@ -97,8 +97,8 @@ set, inflating the convergence number without any convergence. The history argue
 same way: a taint fail-open once survived fourteen review passes, so this class of defect
 is proven to evade review here, which is why the standing check scans rather than trusts.
 
-Three more of the same class turned up later, in the flow checker rather than in the
-effect row, and all three are closed. The shape they share: an empty label set is the
+Four more of the same class turned up later, in the flow checker rather than in the
+effect row, and all four are closed. The shape they share: an empty label set is the
 positive claim that a value carries nothing, and each returned one where the honest
 answer was that the checker could not look. The check that scans for swallowed errors
 cannot see this - nothing is discarded, a wrong answer is returned.
@@ -122,11 +122,25 @@ sink that assumes any field. Recognizing the second needed the `is_computed` fla
 than a failed name lookup, because `getPropertyKeyName` resolves `{ [field]: v }` to
 "field" - the variable holding the key, not the key.
 
+The fourth was the closure, and the audit that found the first three declared it absent.
+`["a", "b"].map(() => env("SECRET_KEY"))` reaching the response proved
+`no_secret_leakage`: `inferLabels` had no arm for an arrow or function expression, so the
+callback contributed the empty set. A closure now carries the labels of the value calling
+it would produce. What the audit did was enumerate the unhandled tags that could appear
+in a value position and conclude only the comma-expression pair qualified, which no
+parser path emits - it did not notice that closures are values and are passed as
+arguments constantly. Reading the arms is how that was missed; probing each position is
+how it was found, and the sweep that gates the determinism work below is the systematic
+version of the probe.
+
 Audited and found sound in the same pass: the response resolver's step limit, which falls
 back to a label-only sink check on the whole return value; `refineEnvLabels`, which keeps
 the `secret` label when the env name is not a literal instead of downgrading it to
 `config`; and `inferLabels` over an object literal, which merges every property value
-whether or not the key can be named.
+whether or not the key can be named. Also checked and left alone: the response sink reads
+argument zero only, which matches what leaves the process, since `Response.json/text/html`
+take `status` from their second argument and drop everything else. If those helpers ever
+honor custom headers, that argument becomes a sink in the same change.
 
 The caps that remain cost precision, never soundness, and the cost was measured rather
 than assumed. Over all 55 example handlers the depth cap trips zero times and the
@@ -237,9 +251,19 @@ question. `function_specs` reads the effect row directly to discharge a helper's
 `isNonDeterministic` in effect inference and `has_nondeterministic_builtin` in the
 contract builder - and each demotes on presence rather than on reachability, so a
 handler that only logs a timestamp still reports non-deterministic at the contract level.
-Retiring them means making flow the sole source, and its call summary falls back to the
-argument union past `max_summary_depth` or `max_summary_params`, which would launder the
-label through a deep helper chain. The conservative AND stays until that fallback closes.
+Retiring them means making flow the sole source. That fallback objection is now gone -
+those exits carry `unknown` - so the question was put to a measurement instead of an
+argument: `computeProperties` was temporarily switched to a flow-only answer and two
+handlers were checked. The one that only logs a timestamp flipped to `PROVEN`, which is
+the win the item is after. `[1, 2, 3].map(() => Date.now())` reaching the response also
+reported `PROVEN`, which is a false proof - the closure hole, since fixed.
+
+The rules stay anyway. One repaired blind spot is not evidence that the last one is
+repaired: four fail-opens of one shape turned up in a single session, every one found by
+probing a position rather than by reading the arms that handle it. Retiring the backstop
+means asserting flow sees every value position, so that assertion gets made once, from a
+sweep of every tag that can hold a value, with a test per reachable case - not from the
+next spot check that happens to pass.
 
 Why it is worth doing rather than living with the approximation: `deterministic` is the
 declarable property authors reach for most, and it feeds `idempotent`
