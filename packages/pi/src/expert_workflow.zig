@@ -137,7 +137,7 @@ pub fn renderSystemNote(
 fn workflowRoute(kind: TaskKind) []const u8 {
     return switch (kind) {
         .route_add =>
-        \\Read the target file, run `zts_expert_verify_paths`, and gather current module facts with `zts_expert_modules`. Author the COMPLETE file content yourself. Submit exactly one `apply_edit` call so the host veto and approval gate own the write.
+        \\Read the target file, run `zts_expert_verify_paths`, and gather current module facts with `zts_expert_modules`. Author the COMPLETE file content yourself. Dry-run the draft with `zts_expert_edit_simulate` and resolve every new violation. Submit exactly one `apply_edit` call so the host veto and approval gate own the write.
         ,
         .handler_scaffold =>
         \\Create the smallest canonical handler that satisfies the request. Read nearby handlers first, use live module/rule tools for imports and syntax, then let the compiler veto verify the complete scaffold before apply.

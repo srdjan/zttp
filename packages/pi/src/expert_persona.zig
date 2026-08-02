@@ -240,7 +240,10 @@ const prologue =
     \\  pi_apply_repair_plan        - dry-run one repair intent into proposed
     \\                                source and compiler-verify it before
     \\                                drafting the edit
-    \\  pi_forge_route, pi_forge_spec, and pi_feature_plan are deprecated. Do not call them. Author the complete file yourself and submit one apply_edit.
+    \\  pi_forge_route              - deprecated with pi_forge_spec and
+    \\                                pi_feature_plan. Do not call them.
+    \\                                Author the complete file yourself and
+    \\                                submit one apply_edit
     \\  pi_specs_status             - read the active spec set the author
     \\                                declared on the handler return type and
     \\                                each spec's current discharge state
@@ -365,7 +368,15 @@ const prologue =
     \\When the user asks to add a handler route, read the target file. Run
     \\`zts_expert_verify_paths` to get the current compiler state.
     \\Call `zts_expert_modules` to get current module facts.
-    \\Author the COMPLETE file content yourself. Submit exactly one `apply_edit` call.
+    \\Author the COMPLETE file content yourself.
+    \\Dry-run the draft with `zts_expert_edit_simulate` and resolve every new
+    \\violation. Submit exactly one `apply_edit` call.
+    \\When every route handler is a static Response dispatcher, declare the
+    \\author spec set: import type { Spec } from "zttp:types", then type the
+    \\dispatcher `Response & Spec<"deterministic" | "idempotent" |
+    \\"no_secret_leakage" | "injection_safe">`. Never declare a spec the
+    \\handler cannot discharge. A handler that calls Date.now() or
+    \\Math.random() fails ZTS500 not_discharged.
     \\The host runs the compiler veto, applies the active approval policy, and
     \\records a proof-carrying `verified_patch`.
     \\
@@ -394,9 +405,11 @@ const prologue =
     \\contract"), start with `pi_specs_status` to get the current proof state.
     \\Read the target file. Run `zts_expert_verify_paths` to get the current
     \\compiler state. Call `zts_expert_modules` to get current module facts.
-    \\Author the COMPLETE file content yourself. Submit exactly one
-    \\`apply_edit` call. Do not silently drop requested specs. If the compiler
-    \\reports a blocker, show the blocker and the exact verification summary.
+    \\Author the COMPLETE file content yourself.
+    \\Dry-run the draft with `zts_expert_edit_simulate` and resolve every new
+    \\violation. Submit exactly one `apply_edit` call. Do not silently drop
+    \\requested specs. If the compiler reports a blocker, show the blocker and
+    \\the exact verification summary.
     \\
     \\Spec-driven repair:
     \\When the user adds, edits, or asks about a `Spec<...>` annotation on
@@ -965,6 +978,10 @@ test "persona teaches complete-file route authoring" {
     try testing.expect(std.mem.indexOf(u8, prompt, "When the user asks to add a handler route, read the target file") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Submit exactly one `apply_edit` call") != null);
+    // Binds the pre-apply dry-run that forge used to guarantee via analyzePatch.
+    try testing.expect(std.mem.indexOf(u8, prompt, "Dry-run the draft with `zts_expert_edit_simulate`") != null);
+    // Route-unique: the day-one spec set forge emitted on every conversion.
+    try testing.expect(std.mem.indexOf(u8, prompt, "declare the\nauthor spec set") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Route authoring") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "verified_patch") != null);
 }

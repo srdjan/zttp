@@ -22,7 +22,7 @@ pub const cases = [_]EvalCase{
         .prompt = "Add a GET /users route",
         .expected_kind = .route_add,
         .expected_confidence = .high,
-        .note_must_contain = "Submit exactly one `apply_edit` call",
+        .note_must_contain = "Author the COMPLETE file content yourself. Dry-run the draft with `zts_expert_edit_simulate`",
     },
     .{
         .name = "jwt-auth",
