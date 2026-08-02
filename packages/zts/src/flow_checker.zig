@@ -1254,6 +1254,32 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Labels a value carries. The empty set is a claim - "this carries
+    /// nothing" - so an arm that returns it because the walk could not look is
+    /// a fail-open, and five of those shipped before anyone noticed. Reading
+    /// the arms is how they were missed; running a handler through each
+    /// position is how they were found.
+    ///
+    /// Every position that can hold a value was probed with a handler that
+    /// launders `env("SECRET_KEY")` through it into the response. Result, so
+    /// the next pass does not re-derive it:
+    ///
+    ///   carried:      binary and template concatenation, ternary, match arms,
+    ///                 member and computed reads, optional chains and calls,
+    ///                 assignment, array and object literals, object spread,
+    ///                 array and object destructuring, for-of bindings, array
+    ///                 HOFs, JSX trees and expression containers, user calls,
+    ///                 imported-file calls, closures, callbacks a module
+    ///                 invokes, and the pipe operator
+    ///   unreachable:  object methods and getters and setters (rejected at
+    ///                 parse, with a property holding an arrow suggested
+    ///                 instead, which is carried), spread in a call argument
+    ///                 (arity is checked before expansion, so it does not type
+    ///                 check), sequence and comma expressions (a tag and an
+    ///                 `ir.zig` arm exist, no parser path emits them), await
+    ///                 and yield (not in the subset)
+    ///
+    /// Adding an expression kind means probing it, not reasoning about it.
     fn inferLabels(self: *FlowChecker, node: NodeIndex) LabelSet {
         if (node == null_node) return LabelSet.empty;
         const tag = self.ir_view.getTag(node) orelse return LabelSet.empty;
