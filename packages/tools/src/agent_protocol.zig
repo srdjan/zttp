@@ -101,9 +101,10 @@ pub const operations = [_]OperationSpec{
         "iterations",           "residual",      "rewrite_trace", "canonical_source",
         "residual_diagnostics",
     } },
-    .{ .op = .simulate_edit, .status = .deferred, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
-        "ok", "new_count", "preexisting_count", "diagnostics",
-    }, .deferred_note = "phase 6: needs the unified repair vocabulary" },
+    .{ .op = .simulate_edit, .status = .implemented, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
+        "file",              "source_digest",    "ok",          "new_count",
+        "preexisting_count", "proposed_content", "diagnostics", "refusal",
+    } },
     .{ .op = .apply_repair, .status = .deferred, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
         "applied", "source_digest", "module_graph_hash",
     }, .deferred_note = "phase 6: needs the equivalence-validator registry" },
@@ -380,6 +381,7 @@ pub fn handleRequest(
             file_rel.?,
         ),
         .verify => try runVerify(allocator, &payload_json, canonical_root, file_rel.?, input),
+        .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, input),
         else => unreachable, // every other row is `.deferred` and returned above
     };
 
@@ -950,6 +952,183 @@ fn writeModulesPayload(
 ///
 /// `success` is exactly "produced no error diagnostic" (spec 4.8): warnings and
 /// advisories never fail a check.
+/// `simulate_edit`: apply a set of repairs in memory and report what the
+/// compiler says about the result. Never writes.
+///
+/// The repairs are the objects `canonicalize` published as candidates - same
+/// vocabulary, round-tripped. That is what the deferral was waiting on: before
+/// the vocabulary collapsed there was no single shape a client could take from
+/// one operation and hand to another.
+///
+/// `original` is required on every repair, and is why. It is the client's
+/// snapshot of the line it decided to change, re-validated here against the
+/// file as it stands. A client that read a file, thought about it, and sent
+/// repairs against bytes that have since moved gets `stale_repair` rather than
+/// a splice into a program it never saw.
+fn runSimulateEdit(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    canonical_root: []const u8,
+    file_rel: []const u8,
+    input: ?std.json.Value,
+) !bool {
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
+    defer allocator.free(abs);
+
+    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
+    defer allocator.free(source);
+    const digest = agent_identity.sourceDigest(source);
+
+    var repairs: std.ArrayListUnmanaged(canonicalize.Refactor) = .empty;
+    defer repairs.deinit(allocator);
+
+    const items: []const std.json.Value = blk: {
+        const obj = (input orelse break :blk &.{}).object;
+        const value = obj.get("repairs") orelse break :blk &.{};
+        if (value != .array) break :blk &.{};
+        break :blk value.array.items;
+    };
+
+    for (items) |item| {
+        if (item != .object) return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "each entry in `repairs` must be an object");
+        const o = item.object;
+
+        const intent_value = o.get("intent") orelse
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must name its `intent`");
+        if (intent_value != .string)
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`intent` must be a string");
+        const intent = zts.repair_intent.RepairIntent.fromString(intent_value.string) orelse
+            return try writeSimulateRefusal(json, file_rel, digest, "unknown_intent", "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
+
+        const line_value = o.get("line") orelse
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry the `line` it applies to");
+        if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`line` must be a positive integer");
+
+        const replacement_value = o.get("replacement") orelse
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry its `replacement`");
+        if (replacement_value != .string)
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`replacement` must be a string");
+
+        // Required, not optional. An absent snapshot would make the staleness
+        // check silently skip, which is the one thing this field exists for.
+        const original_value = o.get("original") orelse
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry `original`, the snapshot of the line it replaces");
+        if (original_value != .string)
+            return try writeSimulateRefusal(json, file_rel, digest, "malformed_repair", "`original` must be a string");
+
+        try repairs.append(allocator, .{
+            .intent = intent,
+            .line = @intCast(line_value.integer),
+            .column = 1,
+            .message = "",
+            .replacement = replacement_value.string,
+            .original_line = original_value.string,
+        });
+    }
+
+    if (repairs.items.len == 0) {
+        return try writeSimulateRefusal(json, file_rel, digest, "no_repairs", "`repairs` must carry at least one repair; simulating nothing has no answer to give");
+    }
+
+    const proposed = canonicalize.applyRefactors(allocator, source, repairs.items) catch |err| switch (err) {
+        error.StaleRefactorLine => return try writeSimulateRefusal(json, file_rel, digest, "stale_repair", "a repair's `original` does not match the file as it stands; re-read the file and re-derive the repair"),
+        error.OverlappingRefactors => return try writeSimulateRefusal(json, file_rel, digest, "overlapping_repairs", "two repairs target the same line, so which one applies is undefined"),
+        error.RefactorLineNotFound => return try writeSimulateRefusal(json, file_rel, digest, "line_not_found", "a repair names a line past the end of the file"),
+        error.UnsupportedRefactor => return try writeSimulateRefusal(json, file_rel, digest, "multiline_replacement", "this operation applies line-local repairs; a replacement spanning lines needs the span-keyed path"),
+        else => return err,
+    };
+    defer allocator.free(proposed);
+
+    var verdict = try edit_simulate.simulate(allocator, .{
+        .file = abs,
+        .content = proposed,
+        .before = source,
+    });
+    defer verdict.deinit(allocator);
+
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("source_digest");
+    try json.write(&digest);
+    try json.objectField("ok");
+    try json.write(verdict.new_count == 0);
+    try json.objectField("new_count");
+    try json.write(verdict.new_count);
+    try json.objectField("preexisting_count");
+    try json.write(verdict.preexisting_count);
+    try json.objectField("proposed_content");
+    try json.write(proposed);
+    try json.objectField("diagnostics");
+    try json.beginArray();
+    for (verdict.violations.items) |v| {
+        try json.beginObject();
+        try json.objectField("code");
+        try json.write(v.code);
+        try json.objectField("severity");
+        try json.write(v.severity);
+        try json.objectField("message");
+        try json.write(v.message);
+        try json.objectField("line");
+        try json.write(v.line);
+        try json.objectField("column");
+        try json.write(v.column);
+        try json.objectField("is_new");
+        try json.write(v.introduced_by_patch);
+        try json.endObject();
+    }
+    try json.endArray();
+    // Present and null rather than absent, matching every other optional field
+    // on this wire: the key set of a payload is part of the operation's
+    // published schema, and a client should not have to distinguish "succeeded"
+    // from "field removed".
+    try json.objectField("refusal");
+    try json.write(null);
+    try json.endObject();
+
+    // `ok` is "introduced nothing new", which is the veto's semantics: a client
+    // repairing a file that already has violations must not be blocked by the
+    // ones it did not cause.
+    return verdict.new_count == 0;
+}
+
+/// A refusal that still fills the payload's published key set. A client reading
+/// `ok` must not have to also handle the key being absent.
+fn writeSimulateRefusal(
+    json: *std.json.Stringify,
+    file_rel: []const u8,
+    digest: [64]u8,
+    reason: []const u8,
+    message: []const u8,
+) !bool {
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("source_digest");
+    try json.write(&digest);
+    try json.objectField("ok");
+    try json.write(false);
+    try json.objectField("new_count");
+    try json.write(0);
+    try json.objectField("preexisting_count");
+    try json.write(0);
+    try json.objectField("proposed_content");
+    try json.write(null);
+    try json.objectField("diagnostics");
+    try json.beginArray();
+    try json.endArray();
+    try json.objectField("refusal");
+    try json.beginObject();
+    try json.objectField("reason");
+    try json.write(reason);
+    try json.objectField("message");
+    try json.write(message);
+    try json.endObject();
+    try json.endObject();
+    return false;
+}
+
 /// `verify`: answer, per requested property, whether the compiler discharged it.
 ///
 /// Distinct from `check`, which reports every property and every diagnostic and
@@ -2403,6 +2582,91 @@ test "repair_available is true for the one intent with an implemented validator"
         try testing.expect(d.get("repair_available").?.bool);
     }
     try testing.expect(found);
+}
+
+test "simulate_edit round-trips a canonicalize candidate" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    // The repair is exactly what `canonicalize` published: same intent name,
+    // same `original` snapshot, same replacement. That round trip is what the
+    // unified vocabulary bought, and the reason this operation was deferred
+    // until it existed.
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("error") == null);
+
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expect(payload.get("ok").?.bool);
+    try testing.expectEqual(@as(i64, 0), payload.get("new_count").?.integer);
+    try testing.expect(std.mem.indexOf(u8, payload.get("proposed_content").?.string, "const name") != null);
+    // Never writes: the file on disk still carries the `let`.
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") != null);
+}
+
+test "simulate_edit refuses a repair whose snapshot has moved" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    // `original` is required for exactly this: a client that read the file,
+    // thought about it, and sent repairs against bytes that have since moved
+    // must not get a splice into a program it never saw.
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"mars\";","replacement":"    const name = \"mars\";"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expect(!payload.get("ok").?.bool);
+    try testing.expectEqualStrings("stale_repair", payload.get("refusal").?.object.get("reason").?.string);
+    // The published key set is intact on a refusal: a client reading `ok`
+    // must not also have to handle the key being absent.
+    try testing.expect(payload.get("diagnostics").? == .array);
+    try testing.expect(payload.get("proposed_content").? == .null);
+}
+
+test "simulate_edit refuses a repair outside the vocabulary" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    // The v1 spelling is not the vocabulary. Accepting it here would recreate
+    // the second vocabulary inside the protocol that just retired it.
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"canonicalize_let_const","line":6,"original":"x","replacement":"y"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqualStrings("unknown_intent", payload.get("refusal").?.object.get("reason").?.string);
 }
 
 test "verify answers only the properties it was asked about" {
