@@ -880,6 +880,56 @@ pub const ContractBuilder = struct {
                     try self.allocator.dupe(u8, @tagName(c)),
                 );
             }
+
+            // What filling this hole has to satisfy. Spec discharge and capsule
+            // discharge both ran before this phase, so the failures are already
+            // in `contract.spec_diagnostics` and only need attributing: a
+            // handler-level diagnostic carries no function name, and a capsule
+            // one names the helper it belongs to.
+            for (contract.spec_diagnostics.items) |d| {
+                // Both kinds are obligations on an expression filling this
+                // hole. ZTS500 is the property the function claims and does not
+                // hold; ZTS606 is the property the handler demands that this
+                // helper breaks without a capsule to declare it. The capability
+                // dimension is `remaining_budget`, not these.
+                switch (d.kind) {
+                    .not_discharged, .missing_capsule => {},
+                    // exhaustive: the rest are not obligations on an
+                    // expression. `unknown_name` and
+                    // `effect_unknown_capability` say the author wrote a name
+                    // the v1 set does not have, which no fill can satisfy;
+                    // `incompatible_with_import` is settled by the import list
+                    // rather than by this expression; the `effect_*` kinds and
+                    // `effect_row_lower_bound` are the capability dimension,
+                    // which this hole reports as `remaining_budget`; and the
+                    // structural kinds (workflow-call-in-step,
+                    // saga-compensation) are about program shape elsewhere.
+                    // Dropping them here loses nothing: every one is still
+                    // reported in `spec_diagnostics`, which this projects from.
+                    else => continue,
+                }
+                const belongs = if (d.function) |f|
+                    std.mem.eql(u8, f, owner)
+                else
+                    std.mem.eql(u8, owner, "handler");
+                if (!belongs) continue;
+                // One diagnostic can name several properties: the implicit
+                // default profile reports every property it demands and the
+                // handler does not hold as one comma-joined `spec_name`, which
+                // is how the HUD wants to render it. This is a machine surface,
+                // so it carries them apart.
+                var parts = std.mem.splitSequence(u8, d.spec_name, ", ");
+                while (parts.next()) |part| {
+                    if (part.len == 0) continue;
+                    try summary.undischarged.append(
+                        self.allocator,
+                        try self.allocator.dupe(u8, part),
+                    );
+                }
+            }
+
+            try self.collectHoleScope(&summary, analyzer, idx);
+
             try contract.holes.append(self.allocator, summary);
         }
     }
@@ -908,6 +958,81 @@ pub const ContractBuilder = struct {
     /// type is the one context the compiler already has in hand; anything else
     /// reports "unknown" rather than guessing, because a wrong expected type is
     /// worse for an agent than an honest absence.
+    /// Bindings an expression filling this hole can be built from: the
+    /// enclosing function's parameters, then every declaration in that function
+    /// the hole comes after.
+    ///
+    /// Ordering is by node index rather than by scope walk. The parser builds
+    /// the IR as it reads, so a declaration the hole comes after carries the
+    /// lower index and one written below it does not, which is what keeps a
+    /// binding that is not initialized yet off the list. Block structure is not
+    /// modelled: a binding from a sibling block that already closed is still
+    /// listed, so this over-offers rather than under-offers.
+    fn collectHoleScope(
+        self: *ContractBuilder,
+        summary: *contract_types.HoleSummary,
+        analyzer: *const effect_inference.Analyzer,
+        hole_node: NodeIndex,
+    ) !void {
+        const owner: *const effect_inference.FunctionEffect = blk: {
+            for (analyzer.all()) |*fe| {
+                if (self.subtreeContains(fe.body_node, hole_node)) break :blk fe;
+            }
+            return;
+        };
+
+        // `decl_node` is the declaration, which for `function f() {}` wraps the
+        // function expression rather than being it.
+        const fn_node: NodeIndex = if (self.ir_view.getTag(owner.decl_node) == .function_expr or
+            self.ir_view.getTag(owner.decl_node) == .arrow_function)
+            owner.decl_node
+        else if (self.ir_view.getVarDecl(owner.decl_node)) |vd| vd.init else owner.decl_node;
+
+        if (self.ir_view.getFunction(fn_node)) |func| {
+            for (0..func.params_count) |i| {
+                const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                const pb = self.ir_view.paramBinding(param_idx) orelse continue;
+                const name = self.resolveAtomName(pb.name_atom) orelse continue;
+                try self.appendScopeBinding(summary, name, pb.scope_id, pb.name_atom);
+            }
+        }
+
+        var idx: NodeIndex = 0;
+        while (idx < hole_node) : (idx += 1) {
+            if (self.ir_view.getTag(idx) != .var_decl) continue;
+            const vd = self.ir_view.getVarDecl(idx) orelse continue;
+            // Destructuring binds names this walk cannot name: the binding on
+            // the declaration is a placeholder for the whole pattern.
+            if (vd.pattern != null_node) continue;
+            if (!self.subtreeContains(owner.body_node, idx)) continue;
+            const name = self.resolveAtomName(vd.binding.name_atom) orelse continue;
+            try self.appendScopeBinding(summary, name, vd.binding.scope_id, vd.binding.name_atom);
+        }
+    }
+
+    fn appendScopeBinding(
+        self: *ContractBuilder,
+        summary: *contract_types.HoleSummary,
+        name: []const u8,
+        scope_id: u16,
+        name_atom: u16,
+    ) !void {
+        for (summary.in_scope.items) |existing| {
+            if (std.mem.eql(u8, existing.name, name)) return;
+        }
+        var type_buf: [256]u8 = undefined;
+        const rendered: []const u8 = blk: {
+            const env = self.type_env orelse break :blk "unknown";
+            const t = env.getVarTypeByBinding(scope_id, name_atom) orelse break :blk "unknown";
+            if (t == type_pool_mod.null_type_idx) break :blk "unknown";
+            break :blk env.pool.formatType(env.stripProofMarkers(t), &type_buf);
+        };
+        try summary.in_scope.append(self.allocator, .{
+            .name = try self.allocator.dupe(u8, name),
+            .type_name = try self.allocator.dupe(u8, rendered),
+        });
+    }
+
     fn expectedTypeForHole(
         self: *const ContractBuilder,
         function_name: []const u8,

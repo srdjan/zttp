@@ -27,17 +27,22 @@ pub const tool: registry_mod.ToolDef = .{
     .description =
     \\List every `hole()` in a handler with the frame around it: the
     \\enclosing function, the line and column, the type the expression
-    \\must produce, and the capability budget the handler declared but
-    \\has not yet spent.
+    \\must produce, the bindings in scope with their types, the properties
+    \\that function has not discharged, and the capability budget the
+    \\handler declared but has not yet spent.
     \\
     \\`hole()` is typed `never`, so a program with holes still type-checks
     \\and still proves its properties - the compiler describes the frame
     \\and only the expression is missing. Reaching one at runtime answers
     \\501, not 500.
     \\
-    \\Fill one hole per turn, using the reported expected type and the
-    \\remaining budget, rather than regenerating the file. An empty list
-    \\means the program has no holes left.
+    \\Fill one hole per turn rather than regenerating the file. The frame
+    \\is what narrows the expression: `inScope` is the material to build
+    \\from, `expectedType` is what it must produce, `remainingBudget` is
+    \\what it may spend, and `undischarged` is what it must not break. A
+    \\binding typed "unknown" carries no annotation the compiler could
+    \\read, so treat its type as open rather than assuming one. An empty
+    \\list means the program has no holes left.
     ,
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"]}",
     .decode_json = decodeJson,

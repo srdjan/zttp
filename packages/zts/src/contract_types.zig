@@ -1675,6 +1675,18 @@ pub const EffectCapsuleSummary = struct {
 /// agent's job at that point is to write that expression, not to regenerate the
 /// file, so what it needs is the shape of the gap: where it is, what type goes
 /// there, and what authority is still available to spend filling it.
+/// One binding visible at a hole. Both fields owned.
+pub const ScopeBinding = struct {
+    name: []const u8,
+    /// Rendered type, or "unknown" when no annotation reaches this binding.
+    type_name: []const u8,
+
+    pub fn deinit(self: *ScopeBinding, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        allocator.free(self.type_name);
+    }
+};
+
 pub const HoleSummary = struct {
     /// Owned name of the function the hole sits in, or "<top-level>".
     function: []const u8,
@@ -1693,10 +1705,23 @@ pub const HoleSummary = struct {
     /// False when the handler declares no `Effects<...>` budget, in which case
     /// `remaining_budget` is empty because there is nothing to subtract from.
     budget_declared: bool = false,
+    /// Owned names of the properties still undischarged in the function this
+    /// hole sits in - what filling it has to satisfy, or at least not break.
+    /// Attributed by function: a hole in a helper carries that helper's
+    /// capsule failures, and a hole in the handler carries the handler's.
+    undischarged: std.ArrayList([]const u8) = .empty,
+    /// Bindings visible where the hole sits, innermost scope first, each with
+    /// its rendered type or "unknown". The material an expression filling the
+    /// hole can be built from.
+    in_scope: std.ArrayList(ScopeBinding) = .empty,
 
     pub fn deinit(self: *HoleSummary, allocator: std.mem.Allocator) void {
         allocator.free(self.function);
         allocator.free(self.expected_type);
+        for (self.undischarged.items) |s| allocator.free(s);
+        self.undischarged.deinit(allocator);
+        for (self.in_scope.items) |*b| b.deinit(allocator);
+        self.in_scope.deinit(allocator);
         for (self.remaining_budget.items) |s| allocator.free(s);
         self.remaining_budget.deinit(allocator);
     }

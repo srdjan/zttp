@@ -576,7 +576,9 @@ fn writeSpecAndCapsulesJson(
 }
 
 /// Emit the `holes` array: every `hole()` call site with the type the
-/// expression must produce and the capability budget still unspent.
+/// expression must produce, the capability budget still unspent, and the
+/// properties its enclosing function has not discharged - what an expression
+/// filling it has to satisfy, or at least not break.
 ///
 /// Empty for a finished program. Published unconditionally rather than behind
 /// a flag: an empty array costs a pair of brackets, and a consumer that has to
@@ -593,6 +595,20 @@ fn writeHolesJson(writer: anytype, items: anytype) !void {
         for (hole.remaining_budget.items, 0..) |name, j| {
             if (j > 0) try writer.writeByte(',');
             try writeJsonString(writer, name);
+        }
+        try writer.writeAll("],\"undischarged\":[");
+        for (hole.undischarged.items, 0..) |name, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writeJsonString(writer, name);
+        }
+        try writer.writeAll("],\"inScope\":[");
+        for (hole.in_scope.items, 0..) |b, j| {
+            if (j > 0) try writer.writeByte(',');
+            try writer.writeAll("{\"name\":");
+            try writeJsonString(writer, b.name);
+            try writer.writeAll(",\"type\":");
+            try writeJsonString(writer, b.type_name);
+            try writer.writeByte('}');
         }
         try writer.writeAll("]}");
     }

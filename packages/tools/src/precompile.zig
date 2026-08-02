@@ -4115,6 +4115,107 @@ test "holes: each site reports its expected type and the unspent budget" {
     try std.testing.expect(saw_handler);
 }
 
+test "holes: each site reports the properties its own function has not discharged" {
+    const allocator = std.testing.allocator;
+    // The handler declares no Spec, so the default profile demands the full
+    // set and reports every property it does not hold. `mint` breaks two the
+    // handler needs and carries no capsule declaring them (ZTS606), so a hole
+    // in `mint` owes those rather than the handler's list.
+    const source =
+        \\import { uuid } from "zttp:id";
+        \\
+        \\function mint(): string {
+        \\  const v = uuid();
+        \\  return hole();
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  if (req.method === "GET") return Response.json({ id: mint() });
+        \\  return hole();
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = if (result.contract) |*c| c else return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 2), contract.holes.items.len);
+
+    for (contract.holes.items) |h| {
+        // Every entry is a single property name. The implicit default profile
+        // reports its failures as one comma-joined diagnostic, which is right
+        // for the HUD and useless to a consumer that wants to match on names.
+        try std.testing.expect(h.undischarged.items.len > 0);
+        for (h.undischarged.items) |name| {
+            try std.testing.expect(std.mem.indexOfScalar(u8, name, ',') == null);
+            try std.testing.expect(std.mem.indexOfScalar(u8, name, ' ') == null);
+        }
+
+        if (std.mem.eql(u8, h.function, "mint")) {
+            // Attributed to the helper, so the handler's own failures are not
+            // on this list: `pure` is there because `mint` breaks it, not
+            // because the handler does.
+            var saw_deterministic = false;
+            for (h.undischarged.items) |name| {
+                if (std.mem.eql(u8, name, "deterministic")) saw_deterministic = true;
+            }
+            try std.testing.expect(saw_deterministic);
+        }
+    }
+}
+
+test "holes: each site reports the bindings it can be filled from" {
+    const allocator = std.testing.allocator;
+    // `later` is declared below the hole, so it is not material an expression
+    // there can use, and neither is the hole's own binding.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const early: string = "a";
+        \\  const filled: string = hole();
+        \\  const later: number = 3;
+        \\  return Response.json({ filled: filled, later: later });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = if (result.contract) |*c| c else return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 1), contract.holes.items.len);
+
+    const in_scope = contract.holes.items[0].in_scope.items;
+    try std.testing.expectEqual(@as(usize, 2), in_scope.len);
+    // The parameter first, then declarations in the order they were written.
+    try std.testing.expectEqualStrings("req", in_scope[0].name);
+    try std.testing.expectEqualStrings("Request", in_scope[0].type_name);
+    try std.testing.expectEqualStrings("early", in_scope[1].name);
+    try std.testing.expectEqualStrings("string", in_scope[1].type_name);
+}
+
+test "holes: a binding with no annotation is reported as unknown" {
+    const allocator = std.testing.allocator;
+    // An honest absence rather than a guess: an agent that reads a wrong type
+    // writes an expression that does not compile.
+    const source =
+        \\import { uuid } from "zttp:id";
+        \\function mint(): string {
+        \\  const v = uuid();
+        \\  return hole();
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ id: mint() });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "holes.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    const contract = if (result.contract) |*c| c else return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 1), contract.holes.items.len);
+
+    const in_scope = contract.holes.items[0].in_scope.items;
+    try std.testing.expectEqual(@as(usize, 1), in_scope.len);
+    try std.testing.expectEqualStrings("v", in_scope[0].name);
+    try std.testing.expectEqualStrings("unknown", in_scope[0].type_name);
+}
+
 test "holes: a finished program reports none" {
     const allocator = std.testing.allocator;
     const source =

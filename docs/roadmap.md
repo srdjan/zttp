@@ -300,15 +300,34 @@ site's function, line, column, the value type the expression must produce (with 
 phantom capsule marker erased), and the capability budget the handler declared but has
 not yet spent.
 
-Two pieces of the JSON are still missing: the in-scope bindings with their types, which
-needs scope reconstruction the IR does not retain after parse, and the undischarged
-obligations, which exist in `spec_diagnostics` but are not yet projected per hole.
+The two pieces that were missing have landed, and one of them was not the job it was
+written up as. The undischarged obligations were a projection: spec discharge and capsule
+discharge both finish before holes are collected, so the failures were already sitting in
+`spec_diagnostics` and only needed attributing by function. A hole in a helper carries
+what that helper breaks (ZTS606) or claims and does not hold (ZTS500); a hole in the
+handler carries the handler's. The implicit default profile reports its failures as one
+comma-joined name, which is right for the HUD and useless to a consumer matching on
+names, so this surface carries them apart.
 
-The third slice has started. `zts_expert_holes` gives the agent the frame per hole -
-enclosing function, position, expected type, unspent budget - and the persona instructs
-it to fill one hole per turn rather than regenerate the file. Before this the data was
-reachable only inside a full `zts check --json` envelope that the tool description never
-mentioned, so the agent had no reason to look for it.
+The in-scope bindings were described as needing scope reconstruction the IR does not
+retain. It does retain it - the parser keeps the whole scope tree, block nodes carry their
+scope id, and `TypeEnv.getVarTypeByBinding` already answers by scope and name - but none
+of that was needed either. The enclosing function's parameters plus every declaration the
+hole comes after, ordered by node index, is the same answer for every shape the subset
+allows: a binding written below the hole has the higher index and stays off the list,
+which is what keeps an uninitialized name from being offered. Block structure is not
+modelled, so a binding from a sibling block that already closed is still listed. That
+over-offers rather than under-offers, and an offered name that does not resolve fails
+loudly at the next check rather than silently.
+
+A binding whose type no annotation reaches reads `unknown` rather than a guess. A wrong
+type is worse than an absent one: it is the difference between an agent asking and an
+agent confidently writing an expression that cannot compile.
+
+The third slice has started. `zts_expert_holes` gives the agent that whole frame, and the
+persona instructs it to fill one hole per turn rather than regenerate the file. Before
+this the data was reachable only inside a full `zts check --json` envelope that the tool
+description never mentioned, so the agent had no reason to look for it.
 
 What remains is the loop change itself: nothing yet *makes* a turn spend itself on one
 hole, so the mode is available rather than enforced. That is what the item's observable
