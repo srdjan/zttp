@@ -478,7 +478,7 @@ Observable: a counted list of non-confluent rule pairs, tracked toward zero, and
 repair a test client re-validates byte for byte. The count is 0, and the harness fails on
 any pair not on the list.
 
-### 7. Per-export capability rows (medium)
+### 7. Per-export capability rows (done)
 
 Move capability declaration from a per-module union to per-export rows, so `escapeHtml`
 carries its own row rather than the whole of `zttp:text`. Keep the module row as the
@@ -497,17 +497,33 @@ empty slice is the separate claim that an export reaches nothing. `validateBindi
 enforces subset-of-module on both binding boundaries, so a tightening can narrow
 authority and never widen it, and `module-spec-render` publishes the per-export set.
 
-Five of the 24 modules are tightened, each verified against its implementation rather
+Eight of the 24 modules are tightened, each verified against its implementation rather
 than its comment: `zttp:auth` (parseBearer and timingSafeEqual reach neither crypto nor
 clock), `zttp:id` (only ulid reads the clock), `zttp:websocket` (traced through dispatch
 to the runtime callbacks and the connection pool: only send and close write to the
 socket, only serializeAttachment can touch disk), `zttp:ratelimit` (rateReset removes a
-map entry and reads no clock), and `zttp:sql` (`sql()` registers a statement in a map and
-opens no database). The rest still inherit; each is its own reviewable commit.
+map entry and reads no clock), `zttp:sql` (`sql()` registers a statement in a map and
+opens no database), `zttp:crypto` (base64 is a transport encoding: both impls are
+`std.base64` over the module allocator and reach no gated helper), `zttp:cache`
+(cacheDelete unlinks by key and cacheStats sums counters already held, so neither
+evaluates an expiry or reads a clock), and `zttp:service` (the system.json read happens
+once in `installState`, so the one export reaches no file).
 
-What is left is either single-capability, where there is nothing to narrow, or routes
-through module state and needs the same per-method trace: cache, log, env, crypto, and
-the runtime_callback-only workflow modules.
+Nothing is left to narrow. The rest are single-capability, where there is nothing to
+say, or their exports each reach the whole module set: `zttp:env` has one export that
+uses both its capabilities, and all four `zttp:log` exports stamp a timestamp and write
+to stderr.
+
+The last tightening did not land quietly, and that is the part worth keeping. Taking the
+clock off `cacheStats` flipped a golden fixture's `deterministic` from false to true,
+because the flow checker read its varying-value label off the capability set and the
+module-level `.clock` had been covering a call that returns live counters. The verdict
+was right and the reason was an accident. The same rule was already wrong on `zttp:sql`,
+which declares no clock: a handler returning `sqlOne` rows proved `deterministic` while
+its answer moved under it, and `examples/sql/sql-crud.ts` declared the property on that
+basis. A read from mutable module state is now a second varying source - `stateful` plus
+a `.read` effect - which no capability set can express. Written up as
+[a-proxy-signal-carried-a-proof-it-never-claimed](solutions/logic-errors/a-proxy-signal-carried-a-proof-it-never-claimed.md).
 
 Note the original observable named `escapeHtml`, which cannot demonstrate anything:
 `zttp:text` declares no capabilities at all, so the test would pass before the change as
@@ -521,7 +537,9 @@ paths run under - per-export declarations are analysis-side only, because
 `wrapToNativeFn` builds the runtime's active-context capabilities from the module set.
 
 Observable: a test proving a `zttp:auth` bearer-token parse under a ceiling that excludes
-the module's crypto and clock capabilities.
+the module's crypto and clock capabilities. It is `a tightened export carries only what
+it reaches` in `packages/zts/src/effect_inference.zig`, alongside one per tightened
+module.
 
 ### 8. Unified repair vocabulary, then the deferred wire verbs (medium to large)
 
@@ -546,6 +564,9 @@ lands next and publishes its first table. Item 4 rides alongside. Item 3 begins 
 item 2 provides a baseline to compare against. Item 5 runs the day item 2's live mode
 works. Item 7 follows item 1. Item 8 waits for a second client or for the vocabulary,
 whichever arrives first.
+
+Items 1, 2, 2a, 2b, 6, and 7 are done. What is open is the tail of item 3 (the turn loop
+itself), item 4, item 5, and item 8.
 
 ### Considered and refused
 
