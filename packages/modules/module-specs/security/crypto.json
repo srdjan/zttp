@@ -13,6 +13,9 @@
       "params": [
         "string"
       ],
+      "requiredCapabilities": [
+        "crypto"
+      ],
       "laws": [
         "pure"
       ]
@@ -25,6 +28,9 @@
         "string",
         "string"
       ],
+      "requiredCapabilities": [
+        "crypto"
+      ],
       "laws": [
         "pure"
       ]
@@ -36,6 +42,7 @@
       "params": [
         "string"
       ],
+      "requiredCapabilities": [],
       "laws": [
         "pure",
         {
@@ -50,6 +57,7 @@
       "params": [
         "string"
       ],
+      "requiredCapabilities": [],
       "laws": [
         "pure",
         {

@@ -16,6 +16,9 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "sha256",
+            // Reaches sha256Checked through the SDK, which is what `.crypto`
+            // gates.
+            .required_capabilities = &.{.crypto},
             .module_func = sha256Impl,
             .arg_count = 1,
             .effect = .none,
@@ -25,6 +28,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "hmacSha256",
+            .required_capabilities = &.{.crypto},
             .module_func = hmacSha256Impl,
             .arg_count = 2,
             .effect = .none,
@@ -34,6 +38,11 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "base64Encode",
+            // Base64 is a transport encoding, not a cryptographic one. The impl
+            // is `std.base64` over the module allocator and reaches no gated
+            // helper, so charging it `.crypto` made every ceiling over a
+            // base64-encoding handler wrong on its face.
+            .required_capabilities = &.{},
             .module_func = base64EncodeImpl,
             .arg_count = 1,
             .effect = .none,
@@ -43,6 +52,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "base64Decode",
+            .required_capabilities = &.{},
             .module_func = base64DecodeImpl,
             .arg_count = 1,
             .effect = .none,

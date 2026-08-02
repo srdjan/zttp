@@ -1228,6 +1228,35 @@ test "uuid does not reach the clock, ulid does" {
     try testing.expect(mint_ulid.capabilities.contains(.clock));
 }
 
+test "base64 does not reach crypto, sha256 does" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `zttp:crypto` declares `.crypto` for the whole module, but base64 is a
+    // transport encoding: both impls are `std.base64` over the module allocator
+    // and reach no gated helper. Charging them `.crypto` made a handler that
+    // only encodes a payload declare a cryptographic capability it never uses.
+    const source =
+        \\import { base64Encode, sha256 } from "zttp:crypto";
+        \\function encode(s) { return base64Encode(s); }
+        \\function digest(s) { return sha256(s); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const encode_fn = analyzer.lookup("encode") orelse return error.FunctionNotFound;
+    try testing.expectEqual(@as(usize, 0), encode_fn.capabilities.count());
+
+    const digest_fn = analyzer.lookup("digest") orelse return error.FunctionNotFound;
+    try testing.expect(digest_fn.capabilities.contains(.crypto));
+}
+
 test "a websocket room snapshot does not reach the network" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
