@@ -244,6 +244,7 @@ pub fn build(b: *std.Build) void {
         /// The pi roots consume the shared tool cores through named modules
         /// rather than relative imports, so their file graphs stay disjoint.
         pi_modules: bool = false,
+        standin_only: bool = false,
     };
 
     const host_test_roots = [_]HostTestRoot{
@@ -295,6 +296,7 @@ pub fn build(b: *std.Build) void {
         // never needs an API key, and does not transitively pull in the
         // tools/skills tests, so it stays fast.
         .{ .owner = .pi, .src = "src/cassette_tests.zig", .step = "test-cassette", .desc = "Run pi provider cassette harness tests (offline)", .project_config = true, .pi_modules = true },
+        .{ .owner = .pi, .src = "src/standin_tests.zig", .step = "test-standin", .desc = "Run the deterministic stand-in through the real expert loop", .project_config = true, .pi_modules = true, .standin_only = true },
     };
 
     var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
@@ -304,7 +306,7 @@ pub fn build(b: *std.Build) void {
             .pi => pi_dep,
         };
         const tests = b.addTest(.{
-            .filters = test_filters,
+            .filters = if (root.standin_only) &.{"stand-in"} else test_filters,
             .root_module = b.createModule(.{
                 .root_source_file = owner_dep.path(root.src),
                 .target = b.graph.host,
@@ -351,6 +353,24 @@ pub fn build(b: *std.Build) void {
     const run_release_check_tests = b.addRunArtifact(release_check_tests);
     const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
     release_check_test_step.dependOn(&run_release_check_tests.step);
+
+    // Development-only deterministic author. It speaks the OpenAI Responses
+    // wire on loopback and is never part of the install step.
+    const standin_mod = b.createModule(.{
+        .root_source_file = pi_host_dep.path("src/standin_main.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    const standin_exe = b.addExecutable(.{
+        .name = "zttp-standin",
+        .root_module = standin_mod,
+    });
+    const standin_cmd = b.addRunArtifact(standin_exe);
+    standin_cmd.has_side_effects = true;
+    if (b.args) |args| standin_cmd.addArgs(args);
+    const standin_step = b.step("zttp-standin", "Run the deterministic add-route playbook server");
+    standin_step.dependOn(&standin_cmd.step);
 
     const module_boundary = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-module-boundary.sh" });
     const module_boundary_step = b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
@@ -752,7 +772,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_cli_tests.step);
-    // Every host test root from the table above; the aggregate runs all nine.
+    // Every host test root from the table above.
     for (host_test_runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&module_boundary.step);
