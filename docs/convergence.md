@@ -21,12 +21,13 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-02 | `2db4545c` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `ec31f5a8` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `631aabd6` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `9b7518ea` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
 two files.
 
-The last seven rows share a corpus and a policy hash and differ only by build.
+The last eight rows share a corpus and a policy hash and differ only by build.
 Between the second and the third, the flow checker stopped proving through
 three fail-opens - a call it could not enter, and two shapes of egress options
 object it could not read field by field - and gained the ability to walk a
@@ -73,15 +74,27 @@ a compiler change did not flip one and it cannot produce a turn nobody recorded.
 Measuring the loop change needs hole-mode sessions run against a live model,
 which is the same blocker as the item-5 model row.
 
+The ninth closes the agenda's construction work: the remaining declared-law
+rows discharge, so six intents repair mechanically rather than one, and
+`apply_repair` writes. It moves nothing here for the seventh row's reason -
+repairs act after a veto - and it does raise the ceiling on what the
+compiler-authored apply share could reach, which is the counter to watch once a
+corpus large enough to move round-trips exists.
+
 None of it adds a rule, so the policy hash cannot separate these rows and the
 commit column is what does. The rate held at 90% throughout - six tightenings,
-one loosening, and two changes the headline cannot see - and this corpus felt
+one loosening, and three changes the headline cannot see - and this corpus felt
 none of them. The replay is a ratchet, failing if a compiler change flips a
 recorded first-draft outcome, so that is a checked result rather than a quiet
 one. What it also says is that eleven cases are too few to see a fence move:
 none of them logs a timestamp, none returns a row it read from a store, none
 writes the shapes the fail-opens hid behind, none has a first draft that trips
 one of the five newly reachable rewrites, and none was recorded in hole mode.
+
+That list has stopped being a caveat and become the finding. Nine rows over one
+corpus, every one of them 90%, is the corpus reporting its own resolution rather
+than the compiler holding still - eleven cases cannot separate nine builds. The
+next thing worth doing to this number is growing what it measures over.
 
 ## Reading the table
 
