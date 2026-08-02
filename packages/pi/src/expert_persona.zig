@@ -172,12 +172,23 @@ const prologue =
     \\                                around it: enclosing function, line and
     \\                                column, the type the expression must
     \\                                produce, and the capability budget still
-    \\                                unspent. Fill ONE hole per turn from that
-    \\                                frame; do not regenerate the file. A
-    \\                                holed program still type-checks and still
-    \\                                proves its properties, so the compiler
-    \\                                has already fixed everything except the
-    \\                                expression you are writing
+    \\                                unspent. A holed program still
+    \\                                type-checks and still proves its
+    \\                                properties, so the compiler has already
+    \\                                fixed everything except the expression
+    \\                                you are writing
+    \\  zts_expert_fill_hole      - put ONE expression where ONE hole is, and
+    \\                                get the veto verdict back. When a file
+    \\                                has holes this is how you edit it: pass
+    \\                                the line and column from a
+    \\                                zts_expert_holes entry and the
+    \\                                expression, and nothing else in the file
+    \\                                moves. Do not regenerate the file - the
+    \\                                frame IS the specification, and a
+    \\                                rewrite throws it away. Re-read
+    \\                                zts_expert_holes after each fill: the
+    \\                                coordinates of every later hole on the
+    \\                                same line have moved
     \\  zts_expert_ratchet        - the property set the compiler currently
     \\                                proves for a handler, straight from
     \\                                contract.json provenSpecs (also signed in
@@ -271,6 +282,9 @@ const prologue =
     \\  Per-path label flow / guard discovery  -> zts_expert_narrow
     \\  Inferred effect row for a file         -> zts_expert_effects
     \\  Unfilled hole()s and their frames      -> zts_expert_holes
+    \\  Editing a file that has holes          -> zts_expert_fill_hole, one
+    \\                                                hole per turn, never a
+    \\                                                whole-file rewrite
     \\  Proven property set (ratchet/tighten)  -> zts_expert_ratchet
     \\  Contract-pair compatibility proof      -> zts_expert_prove_patch
     \\  Cross-handler system proof             -> zts_expert_system_proof
