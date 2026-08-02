@@ -82,6 +82,7 @@ pub const operations = [_]OperationSpec{
         "builtin_registry_hash", "operations",        "error_codes",
         "severities",            "idioms",            "limits",
         "module_catalog",        "deferred_sections", "validators",
+        "verifiers",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -106,7 +107,9 @@ pub const operations = [_]OperationSpec{
     .{ .op = .apply_repair, .status = .deferred, .input_fields = &.{ "file", "repairs" }, .payload_fields = &.{
         "applied", "source_digest", "module_graph_hash",
     }, .deferred_note = "phase 6: needs the equivalence-validator registry" },
-    .{ .op = .verify, .status = .deferred, .input_fields = &.{ "file", "properties" }, .payload_fields = &.{"results"}, .deferred_note = "phase 6: needs the verifier discovery registry" },
+    .{ .op = .verify, .status = .implemented, .input_fields = &.{ "file", "properties" }, .payload_fields = &.{
+        "file", "source_digest", "results",
+    } },
 };
 
 /// Payload sections spec 4.8 requires that no registry can generate yet. Ground
@@ -121,7 +124,6 @@ pub const deferred_sections = [_]DeferredSection{
     .{ .name = "ambient_names", .note = "phase 4: the section 6 ambient table lands with Dict, JSON, and Bytes" },
     .{ .name = "type_serialization", .note = "phase 2: the canonical type serialization is D1's artifact" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
-    .{ .name = "verifiers", .note = "phase 6: property discovery arrives with the verify operation" },
     .{ .name = "diagnostic_span", .note = "phase 6: JsonDiagnostic carries line and column and no byte range, so a diagnostic publishes an exact byte_offset and no half-open span. Threading offsets through every producer lands with the repair vocabulary" },
     .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
     .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
@@ -377,6 +379,7 @@ pub fn handleRequest(
             canonical_root,
             file_rel.?,
         ),
+        .verify => try runVerify(allocator, &payload_json, canonical_root, file_rel.?, input),
         else => unreachable, // every other row is `.deferred` and returned above
     };
 
@@ -684,6 +687,23 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     }
     try json.endArray();
 
+    // The verifier discovery registry: every property `verify` will answer
+    // about, and the family of reasoning that decides it. Derived from
+    // `proof_trace.property_info`, which a comptime check ties to
+    // `HandlerProperties`, so a new contract property appears here without an
+    // edit and `verify` can never advertise a name it would then refuse.
+    try json.objectField("verifiers");
+    try json.beginArray();
+    for (zts.proof_trace.verifiers) |v| {
+        try json.beginObject();
+        try json.objectField("property");
+        try json.write(v.id);
+        try json.objectField("kind");
+        try json.write(v.kind.asString());
+        try json.endObject();
+    }
+    try json.endArray();
+
     try json.objectField("deferred_sections");
     try json.beginArray();
     for (&deferred_sections) |*section| {
@@ -930,6 +950,179 @@ fn writeModulesPayload(
 ///
 /// `success` is exactly "produced no error diagnostic" (spec 4.8): warnings and
 /// advisories never fail a check.
+/// `verify`: answer, per requested property, whether the compiler discharged it.
+///
+/// Distinct from `check`, which reports every property and every diagnostic and
+/// leaves the client to search. A client asking "does this hold" wants that
+/// question answered for the properties it named, including the answer that a
+/// name it used is not a property this compiler decides.
+///
+/// The verdicts are projected from `proofTrace`, the compiler's own rendering,
+/// rather than recomputed. Recomputing would be a second implementation of the
+/// thing being reported on, and the two could disagree - which is the failure
+/// mode a verification surface can least afford.
+fn runVerify(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    canonical_root: []const u8,
+    file_rel: []const u8,
+    input: ?std.json.Value,
+) !bool {
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
+    defer allocator.free(abs);
+
+    const source = try zts.file_io.readFile(allocator, abs, 10 * 1024 * 1024);
+    defer allocator.free(source);
+    const digest = agent_identity.sourceDigest(source);
+
+    var result = precompile.runCheckOnlyWithOptions(allocator, abs, .{
+        .json_mode = true,
+        .sql_schema_path = null,
+        .system_path = null,
+    }) catch |err| switch (err) {
+        // Every property is undecided rather than false: the analysis never
+        // ran, and reporting `not_proven` would claim a verdict nothing
+        // produced.
+        error.MissingSqlSchema => {
+            try writeVerifyPayload(allocator, json, file_rel, digest, null, input);
+            return false;
+        },
+        else => return err,
+    };
+    defer result.deinit(allocator);
+
+    try writeVerifyPayload(allocator, json, file_rel, digest, result.proof_trace_json, input);
+    return result.totalErrors() == 0;
+}
+
+/// The requested property ids, or every id in the registry when `properties` is
+/// absent or empty. Asking about nothing is a request nobody means to make, and
+/// answering it with an empty array would look like "none of them hold".
+fn writeVerifyPayload(
+    allocator: std.mem.Allocator,
+    json: *std.json.Stringify,
+    file_rel: []const u8,
+    digest: [64]u8,
+    proof_trace_json: ?[]const u8,
+    input: ?std.json.Value,
+) !void {
+    var traces: ?std.json.Parsed(std.json.Value) = null;
+    defer if (traces) |*t| t.deinit();
+    if (proof_trace_json) |raw| {
+        traces = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch null;
+    }
+
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file_rel);
+    try json.objectField("source_digest");
+    try json.write(&digest);
+
+    try json.objectField("results");
+    try json.beginArray();
+
+    const requested: ?[]const std.json.Value = blk: {
+        const obj = (input orelse break :blk null).object;
+        const value = obj.get("properties") orelse break :blk null;
+        if (value != .array or value.array.items.len == 0) break :blk null;
+        break :blk value.array.items;
+    };
+
+    if (requested) |items| {
+        for (items) |item| {
+            if (item != .string) continue;
+            try writeVerifyResult(json, item.string, traces);
+        }
+    } else {
+        for (zts.proof_trace.verifiers) |v| {
+            try writeVerifyResult(json, v.id, traces);
+        }
+    }
+
+    try json.endArray();
+    try json.endObject();
+}
+
+fn writeVerifyResult(
+    json: *std.json.Stringify,
+    id: []const u8,
+    traces: ?std.json.Parsed(std.json.Value),
+) !void {
+    try json.beginObject();
+    try json.objectField("property");
+    try json.write(id);
+
+    const kind = zts.proof_trace.verifierKind(id) orelse {
+        // Named, and not a property this compiler decides. Reported per
+        // property rather than failing the request: a client discovering the
+        // registry by asking is a normal use of this operation.
+        try json.objectField("grade");
+        try json.write("unknown_property");
+        try json.objectField("evidence");
+        try json.write(null);
+        try json.endObject();
+        return;
+    };
+
+    const entry = findTraceEntry(traces, id);
+    if (entry == null) {
+        // In the registry, absent from the trace: the file produced no
+        // contract, so nothing decided this either way.
+        try json.objectField("grade");
+        try json.write("not_decided");
+        try json.objectField("evidence");
+        try json.beginObject();
+        try json.objectField("kind");
+        try json.write(kind.asString());
+        try json.objectField("summary");
+        try json.write("the file did not analyze far enough to produce a contract");
+        try json.endObject();
+        try json.endObject();
+        return;
+    }
+
+    const obj = entry.?.object;
+    const holds = if (obj.get("holds")) |h| h == .bool and h.bool else false;
+    try json.objectField("grade");
+    try json.write(if (holds) "proven" else "not_proven");
+
+    try json.objectField("evidence");
+    try json.beginObject();
+    try json.objectField("kind");
+    // The trace's own `kind` when it carries one: a property's family is
+    // static, but the trace is what actually decided this file.
+    if (obj.get("kind")) |k| {
+        if (k == .string) try json.write(k.string) else try json.write(kind.asString());
+    } else {
+        try json.write(kind.asString());
+    }
+    try json.objectField("summary");
+    if (obj.get("summary")) |s| {
+        if (s == .string) try json.write(s.string) else try json.write(null);
+    } else {
+        try json.write(null);
+    }
+    // The concrete demonstration, when the compiler derived one. A failed
+    // verify without it is a verdict; with it, it is a reproduction.
+    try json.objectField("counterexample");
+    if (obj.get("counterexample")) |c| try json.write(c) else try json.write(null);
+    try json.objectField("resisted");
+    if (obj.get("resisted")) |r| try json.write(r) else try json.write(null);
+    try json.endObject();
+
+    try json.endObject();
+}
+
+fn findTraceEntry(traces: ?std.json.Parsed(std.json.Value), id: []const u8) ?std.json.Value {
+    const parsed = traces orelse return null;
+    if (parsed.value != .object) return null;
+    var it = parsed.value.object.iterator();
+    while (it.next()) |kv| {
+        if (std.mem.eql(u8, kv.key_ptr.*, id)) return kv.value_ptr.*;
+    }
+    return null;
+}
+
 fn runCheck(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -2210,6 +2403,111 @@ test "repair_available is true for the one intent with an implemented validator"
         try testing.expect(d.get("repair_available").?.bool);
     }
     try testing.expect(found);
+}
+
+test "verify answers only the properties it was asked about" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // A secret reaching the response body: `no_secret_leakage` fails with a
+    // derived counterexample, `deterministic` holds, and a name outside the
+    // registry is a fact about the request rather than a failed request.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ k: env("SECRET") ?? "none" });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["no_secret_leakage","deterministic","not_a_property"]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("error") == null);
+
+    const results = parsed.value.object.get("payload").?.object.get("results").?.array;
+    try testing.expectEqual(@as(usize, 3), results.items.len);
+
+    const leak = results.items[0].object;
+    try testing.expectEqualStrings("no_secret_leakage", leak.get("property").?.string);
+    try testing.expectEqualStrings("not_proven", leak.get("grade").?.string);
+    const evidence = leak.get("evidence").?.object;
+    try testing.expectEqualStrings("flow-trace", evidence.get("kind").?.string);
+    // A failed verify with a counterexample is a reproduction, not a verdict.
+    try testing.expect(evidence.get("counterexample").? == .object);
+
+    try testing.expectEqualStrings("proven", results.items[1].object.get("grade").?.string);
+
+    // Named, and not a property this compiler decides. Reported per property:
+    // a client discovering the registry by asking is a normal use.
+    const unknown = results.items[2].object;
+    try testing.expectEqualStrings("unknown_property", unknown.get("grade").?.string);
+    try testing.expect(unknown.get("evidence").? == .null);
+}
+
+test "verify with no property list answers the whole registry" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const results = parsed.value.object.get("payload").?.object.get("results").?.array;
+    // Asking about nothing is a request nobody means to make, so an absent
+    // list means every property rather than an empty answer that would read
+    // as "none of them hold".
+    try testing.expectEqual(zts.proof_trace.verifiers.len, results.items.len);
+}
+
+test "meta publishes the verifier registry it will answer about" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":"."}
+    );
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const verifiers = parsed.value.object.get("payload").?.object.get("verifiers").?.array;
+    try testing.expectEqual(zts.proof_trace.verifiers.len, verifiers.items.len);
+
+    // The registry advertises wire names. Publishing the internal spelling
+    // would name a property `verify` then answers `unknown_property` about.
+    var saw_results_safe = false;
+    for (verifiers.items) |item| {
+        const id = item.object.get("property").?.string;
+        try testing.expect(zts.proof_trace.isVerifier(id));
+        if (std.mem.eql(u8, id, "results_safe")) saw_results_safe = true;
+    }
+    try testing.expect(saw_results_safe);
+
+    // The section retires in the same change that makes it answerable.
+    for (parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section| {
+        try testing.expect(!std.mem.eql(u8, section.object.get("name").?.string, "verifiers"));
+    }
 }
 
 test "byte_offset indexes into the bytes the digest covers" {

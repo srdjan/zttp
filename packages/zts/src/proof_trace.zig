@@ -274,6 +274,50 @@ comptime {
     }
 }
 
+/// One row of the verifier discovery registry: a property a client may ask
+/// `verify` about, and the family of reasoning that decides it.
+pub const Verifier = struct {
+    id: []const u8,
+    kind: ProofKind,
+};
+
+/// Every property the compiler can decide, in `property_info` order.
+///
+/// Derived rather than written. `property_info` already carries the closed set
+/// and a comptime check ties it to `HandlerProperties`, so a property added to
+/// the contract reaches this registry - and therefore `meta.verifiers` and the
+/// `verify` operation - without an edit here. Hand-maintaining the list would
+/// be a second closed set that could disagree with the first.
+///
+/// Ids are wire names: `result_safe` is `results_safe` everywhere a client can
+/// see it, and publishing the internal spelling would name a property `verify`
+/// then refuses to answer about.
+pub const verifiers = blk: {
+    var rows: [property_info.len]Verifier = undefined;
+    for (property_info, 0..) |p, i| {
+        rows[i] = .{ .id = wirePropertyName(p.name), .kind = proofKind(p.family) };
+    }
+    const frozen = rows;
+    break :blk frozen;
+};
+
+/// True when `id` is a property a client may ask about. A `verify` request
+/// naming anything else is answered, not rejected: an unknown id is a fact
+/// about the request that the response reports per property.
+pub fn isVerifier(id: []const u8) bool {
+    for (verifiers) |v| {
+        if (eql(v.id, id)) return true;
+    }
+    return false;
+}
+
+pub fn verifierKind(id: []const u8) ?ProofKind {
+    for (verifiers) |v| {
+        if (eql(v.id, id)) return v.kind;
+    }
+    return null;
+}
+
 fn infoFor(name: []const u8) PropertyInfo {
     for (property_info) |p| {
         if (eql(p.name, name)) return p;
@@ -917,4 +961,19 @@ test "writeJson emits a flow-chain counterexample" {
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"flow\":[\"env() call\",\"the response body\"]") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"method\":\"POST\"") != null);
     try testing.expect(std.mem.indexOf(u8, buf.items, "\"hasAuthHeader\":false") != null);
+}
+
+test "the verifier registry covers every contract property" {
+    // The registry is derived from `property_info`, which a comptime check
+    // already ties to `HandlerProperties`. This asserts the derivation did not
+    // lose a row, and that the ids published are the wire spellings - a client
+    // that asks about `result_safe` is asking about a name the wire never uses.
+    try std.testing.expectEqual(property_info.len, verifiers.len);
+    try std.testing.expect(isVerifier("results_safe"));
+    try std.testing.expect(!isVerifier("result_safe"));
+    try std.testing.expect(!isVerifier("not_a_property"));
+
+    try std.testing.expectEqual(ProofKind.flow_trace, verifierKind("no_secret_leakage").?);
+    try std.testing.expectEqual(ProofKind.path_enumeration, verifierKind("fault_covered").?);
+    try std.testing.expectEqual(ProofKind.structural, verifierKind("pure").?);
 }
