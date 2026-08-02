@@ -1651,6 +1651,20 @@ pub const FlowChecker = struct {
         }
         if (call_data.args_count > body_idx) {
             const opts_arg = self.ir_view.getListIndex(call_data.args_start, body_idx);
+
+            // Hoisted into a binding, the options object is not a literal, so
+            // none of the per-field extractors below can see which init field
+            // a value lands in - they answer empty, which reads as "no such
+            // field". Only the body fallback ran, and the body arm checks
+            // neither `credential` nor the URL-side properties, so a caller's
+            // token in `const opts = { headers: { authorization: token } }`
+            // reached the wire with no_credential_leakage still proven. Route
+            // the whole object to the one sink that assumes any field.
+            if (self.ir_view.getTag(opts_arg) != .object_literal) {
+                self.checkSinkLabels(self.inferLabels(opts_arg), node, .egress_opaque);
+                return;
+            }
+
             const body_labels = self.inferObjectBodyLabels(opts_arg);
             self.checkSinkLabels(body_labels, node, .egress_body);
             // Defended: a validated value safely reaches an egress body.
@@ -1693,7 +1707,11 @@ pub const FlowChecker = struct {
         }
     }
 
-    const SinkKind = enum { response, console, egress_url, egress_body, egress_headers };
+    /// `egress_opaque` is an egress call whose options object the checker
+    /// cannot read field by field - it was built elsewhere and passed by name.
+    /// It carries the union of the URL, body, and header checks, since the
+    /// value may land in any of them.
+    const SinkKind = enum { response, console, egress_url, egress_body, egress_headers, egress_opaque };
 
     fn checkSinkLabels(self: *FlowChecker, labels: LabelSet, node: NodeIndex, sink: SinkKind) void {
         if (labels.isEmpty()) return;
@@ -1875,6 +1893,51 @@ pub const FlowChecker = struct {
                     self.properties.pii_contained = false;
                 }
             },
+            .egress_opaque => {
+                // Same properties as the URL and header arms, which check the
+                // same set; the messages differ only in naming the options
+                // object rather than a field, because which field this lands
+                // in is exactly what could not be determined. The diagnostic
+                // kinds are the existing egress ones, so no new rule reaches
+                // the policy hash.
+                if (labels.has(.secret)) {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .secret_in_egress_body,
+                        .node = node,
+                        .message = self.messageWithReason("secret data flows into a fetch options object", .secret),
+                        .help = "build the options object at the call site so each field can be checked, and do not send env secrets to external services",
+                        .repair_intent = .insert_guard_before_line,
+                    });
+                    self.properties.no_secret_leakage = false;
+                }
+                if (labels.has(.credential)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .credential_in_egress_url,
+                        .node = node,
+                        .message = self.messageWithReason("credential data flows into a fetch options object", .credential),
+                        .help = "forwarding a caller's auth token to a third party can leak it; scope credentials per service",
+                        .repair_intent = .insert_guard_before_line,
+                    });
+                    self.properties.no_credential_leakage = false;
+                }
+                if (labels.has(.user_input) and !labels.has(.validated)) {
+                    self.addDiagnostic(.{
+                        .severity = .warning,
+                        .kind = .unvalidated_input_in_egress,
+                        .node = node,
+                        .message = "unvalidated user input flows into a fetch options object",
+                        .help = "validate user input before sending it to an external service",
+                        .repair_intent = .insert_guard_before_line,
+                    });
+                    self.properties.input_validated = false;
+                    self.properties.injection_safe = false;
+                }
+                if (labels.has(.user_input)) {
+                    self.properties.pii_contained = false;
+                }
+            },
         }
     }
 
@@ -1892,7 +1955,7 @@ pub const FlowChecker = struct {
                 self.properties.no_secret_leakage = false;
                 self.properties.no_credential_leakage = false;
             },
-            .egress_url, .egress_headers => {
+            .egress_url, .egress_headers, .egress_opaque => {
                 self.properties.no_secret_leakage = false;
                 self.properties.no_credential_leakage = false;
                 self.properties.input_validated = false;
@@ -3616,6 +3679,45 @@ fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
     defer checker.deinit();
     _ = try checker.check(handler_fn);
     return checker.getProperties().no_secret_leakage;
+}
+
+/// Shared harness: parse `source`, run the FlowChecker on its handler, and
+/// return whether no_credential_leakage was proven.
+fn runNoCredentialLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+    return checker.getProperties().no_credential_leakage;
+}
+
+test "FlowChecker flags a credential in a hoisted egress options object" {
+    // Inline, the `headers` extractor sees the credential. Hoisted into a
+    // binding the options object is no longer a literal, so the per-field
+    // extractors return empty and only the whole-object fallback runs - and it
+    // routes to the egress body sink, which checks secret and user input but
+    // never credential.
+    const source =
+        \\import { fetch } from "zttp:fetch";
+        \\function handler(req) {
+        \\  const token = req.headers.authorization;
+        \\  const opts = { headers: { authorization: token } };
+        \\  fetch("https://api.example.com/v1", opts);
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
 }
 
 test "FlowChecker flags a secret laundered through a helper chain past the summary depth" {
