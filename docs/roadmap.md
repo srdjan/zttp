@@ -97,11 +97,14 @@ set, inflating the convergence number without any convergence. The history argue
 same way: a taint fail-open once survived fourteen review passes, so this class of defect
 is proven to evade review here, which is why the standing check scans rather than trusts.
 
-Four more of the same class turned up later, in the flow checker rather than in the
-effect row, and all four are closed. The shape they share: an empty label set is the
+Five more of the same class turned up later, in the flow checker rather than in the
+effect row, and all five are closed. The shape they share: an empty label set is the
 positive claim that a value carries nothing, and each returned one where the honest
 answer was that the checker could not look. The check that scans for swallowed errors
-cannot see this - nothing is discarded, a wrong answer is returned.
+cannot see this - nothing is discarded, a wrong answer is returned. The whole class is
+written up in
+[docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md](solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md),
+including the probe method that found every one of them.
 
 `userCallLabels` summarizes a callee's return labels, and every exit that could not read
 the body - past the depth cap, past the parameter cap, or a call through a value with no
@@ -132,6 +135,16 @@ parser path emits - it did not notice that closures are values and are passed as
 arguments constantly. Reading the arms is how that was missed; probing each position is
 how it was found, and the sweep that gates the determinism work below is the systematic
 version of the probe.
+
+The fifth came out of that sweep, and it is the one the closure fix did not cover. A
+module export answers with its declared return labels, which describe what the module
+produces and cannot describe what a caller's callback returns, so
+`parallel([() => env("SECRET_KEY")])` still proved `no_secret_leakage` after closures
+carried labels everywhere else. Only closure-derived labels are unioned into a module
+call's result - unioning every argument would taint results that carry no argument data -
+and a durable export drops `nondeterministic` and only that label, because a recorded and
+replayed clock read is the same on every run while a secret the same callback returns is
+still a secret.
 
 Audited and found sound in the same pass: the response resolver's step limit, which falls
 back to a label-only sink check on the whole return value; `refineEnvLabels`, which keeps

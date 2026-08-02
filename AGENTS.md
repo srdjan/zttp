@@ -30,6 +30,7 @@
 | `docs/roadmap.md` | What is deferred from the current beta and what comes next |
 | `docs/convergence.md` | Measured first-draft veto-pass rate over the frozen prompt corpus; regenerate with `scripts/update-convergence.sh` |
 | `docs/solutions/` | Categorized solutions to past bugs and engineering problems, searchable by YAML frontmatter (`module`, `tags`, `problem_type`); relevant when implementing or debugging in documented areas |
+| `CONCEPTS.md` | Shared domain vocabulary - entities, named processes, and status concepts with project-specific meaning; relevant when orienting to the codebase or discussing domain concepts |
 
 ## Build, Test, and Development Commands
 - `zig build` - debug build.
@@ -55,7 +56,7 @@
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
 - Add tests near the feature you touched in `packages/runtime/` or `packages/zts/` and run the relevant `zig build test*` step.
 - Reaching a new `zts` internal module (anything in the internal tier of `packages/zts/src/root.zig`) from `runtime`, `tools`, `pi`, or `proof-review` needs a row in `scripts/module-boundary.allow`, and a row that nothing uses fails the same gate. Prefer the curated surface at the bottom of `root.zig`; widen the allowlist only deliberately, and say why in the commit. Run `zig build test-module-boundary`.
-- Discarding an error in the analysis files that decide whether a program is proven (the eleven listed in `scripts/check-proof-swallow.sh`) needs a row in `scripts/proof-swallow.allow` with the reason it cannot weaken a verdict, and a row nothing matches fails the same gate. A swallow there does not surface as a failure, it surfaces as a pass. Run `zig build test-proof-swallow`.
+- Discarding an error in the analysis files that decide whether a program is proven (the eleven listed in `scripts/check-proof-swallow.sh`) needs a row in `scripts/proof-swallow.allow` with the reason it cannot weaken a verdict, and a row nothing matches fails the same gate. A swallow there does not surface as a failure, it surfaces as a pass. Run `zig build test-proof-swallow`. The gate sees discarded errors, not wrong answers: a function that returns a value claiming more than it checked passes it, and five such fail-opens shipped past it in the flow checker - see [docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md](docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md) for the class and the probe method that finds it.
 
 ## Commit & Pull Request Guidelines
 - Commit history is informal; keep subjects short and descriptive (lowercase is common). Use `WIP-#:` only for intentional multi-step series.

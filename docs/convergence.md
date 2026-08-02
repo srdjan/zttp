@@ -31,14 +31,18 @@ helper imported from a sibling file. The fourth adds one more: a closure passed
 as an argument now carries the labels of the value it produces, so a secret
 returned from a `map` callback no longer reaches the response unlabelled.
 
-The fifth moves the other way. `deterministic` used to answer whether a varying
-value was read and now answers whether one reaches the response, so a handler
-that logs a timestamp and returns a constant keeps the property, and keeps
-`idempotent` with it. That is a loosening: strictly more programs prove than
-before.
+The fifth carries one of each. A callback a module invokes now carries what it
+returns out of that module, closing the last of the fail-opens: a module export
+answers with its declared return labels, and those cannot describe what a
+caller's callback produced, so `parallel([() => env("SECRET_KEY")])` had still
+been proving clean. Alongside it, `deterministic` moved from answering whether a
+varying value was read to whether one reaches the response, so a handler that
+logs a timestamp and returns a constant keeps the property and keeps
+`idempotent` with it. That second change is a loosening: strictly more programs
+prove than before.
 
 None of it adds a rule, so the policy hash cannot separate these rows and the
-commit column is what does. The rate held at 90% throughout - four tightenings
+commit column is what does. The rate held at 90% throughout - five tightenings
 and one loosening, and this corpus felt none of them. The replay is a ratchet,
 failing if a compiler change flips a recorded first-draft outcome, so that is a
 checked result rather than a quiet one. What it also says is that eleven cases
