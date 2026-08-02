@@ -17,6 +17,10 @@
         "string",
         "object"
       ],
+      "requiredCapabilities": [
+        "network",
+        "runtime_callback"
+      ],
       "contractExtractions": [
         {
           "category": "service_call"

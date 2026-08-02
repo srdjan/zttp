@@ -27,6 +27,8 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "cacheGet",
+            // Reads the clock to decide whether the entry has expired.
+            .required_capabilities = &.{ .clock, .policy_check },
             .module_func = cacheGetImpl,
             .arg_count = 2,
             .effect = .read,
@@ -42,6 +44,8 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "cacheSet",
+            // Reads the clock to stamp the entry's expiry.
+            .required_capabilities = &.{ .clock, .policy_check },
             .module_func = cacheSetImpl,
             .arg_count = 4,
             .effect = .write,
@@ -56,6 +60,9 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "cacheDelete",
+            // Unlinks the entry by key. `CacheStore.delete` takes no `now_s`
+            // and no expiry is consulted, so removal reads no clock.
+            .required_capabilities = &.{.policy_check},
             .module_func = cacheDeleteImpl,
             .arg_count = 2,
             .effect = .write,
@@ -68,6 +75,9 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "cacheIncr",
+            // Reads the current value through the expiry check and writes back
+            // with a fresh expiry, so it reaches the clock on both halves.
+            .required_capabilities = &.{ .clock, .policy_check },
             .module_func = cacheIncrImpl,
             .arg_count = 4,
             .effect = .write,
@@ -79,6 +89,10 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "cacheStats",
+            // Sums counters already held in the store. Entries are reported as
+            // they stand, expired or not, so no expiry is evaluated and no
+            // clock is read. The namespace form still consults policy.
+            .required_capabilities = &.{.policy_check},
             .module_func = cacheStatsImpl,
             .arg_count = 1,
             // The namespace is optional: `cacheStats()` reports the whole store.

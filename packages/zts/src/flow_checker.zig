@@ -897,13 +897,34 @@ pub const FlowChecker = struct {
     /// `.builtin` only, translating the legacy `fromSpecifier(module) == null`
     /// skip: that lookup never consults a manifest registry, so a
     /// partner-registered module was skipped before and stays skipped.
-    /// True when calling this export can read a clock or draw randomness.
-    /// Falls back to the module's declared set when the export declares none,
-    /// which is the same inheritance rule effect inference applies.
+    /// True when calling this export can return a different value in a later
+    /// run of the same request.
+    ///
+    /// Two sources, and both are needed. The capability set catches a clock
+    /// read or a draw of randomness; it falls back to the module's declared set
+    /// when the export declares none, which is the same inheritance rule effect
+    /// inference applies.
+    ///
+    /// A read from mutable module state is the second, and it cannot be read
+    /// off the capabilities. `sqlOne` declares `.sqlite` and `.policy_check`
+    /// and no clock, yet the row it returns is whatever the last write left
+    /// there, so a handler embedding that row in its response was proving
+    /// `deterministic` while its answer moved under it. `cacheStats` was caught
+    /// only by accident: `zttp:cache` declared `.clock` at module level for the
+    /// expiry checks in `cacheGet`, and tightening the rows to what each export
+    /// really reaches removed the coincidence and exposed the same hole.
+    ///
+    /// `stateful` and a `.read` effect is the precise test for "another request
+    /// could have written what this returns". It selects `cacheGet`,
+    /// `cacheStats`, `sqlOne`, `sqlMany`, `getWebSockets`, and
+    /// `deserializeAttachment`, and it excludes `zttp:validate`, whose state is
+    /// a schema registry the handler compiles from literals in its own run.
     fn exportReadsVaryingSource(
         binding: *const mb.ModuleBinding,
         func: *const mb.FunctionBinding,
     ) bool {
+        if (binding.stateful and func.effect == .read) return true;
+
         const caps = func.required_capabilities orelse binding.required_capabilities;
         for (caps) |cap| {
             if (cap == .clock or cap == .random) return true;
@@ -917,12 +938,13 @@ pub const FlowChecker = struct {
             if (rec.resolution != .builtin) continue;
             const entry = builtin_modules.findExport(rec.module_specifier, rec.imported_name) orelse continue;
 
-            // A value produced by an export that reads a clock or draws
-            // randomness differs between runs of the same request. Seeded from
-            // the export's own capability set rather than declared on each
-            // binding, so it tracks the per-export rows automatically:
-            // `jwtVerify` carries it and `parseBearer` does not, because only
-            // one of them declares `.clock`.
+            // A value produced by an export that reads a clock, draws
+            // randomness, or reads mutable module state differs between runs of
+            // the same request. The capability half is seeded from the export's
+            // own set rather than declared on each binding, so it tracks the
+            // per-export rows automatically: `jwtVerify` carries it and
+            // `parseBearer` does not, because only one of them declares
+            // `.clock`.
             var labels = entry.func.return_labels;
             if (exportReadsVaryingSource(entry.binding, entry.func)) labels.nondeterministic = true;
 
@@ -4671,6 +4693,54 @@ test "a clock read that never reaches the response keeps determinism" {
 test "a handler touching no varying source keeps determinism" {
     const source =
         \\function handler(req) { return Response.json({ ok: true }); }
+    ;
+    try std.testing.expect(try runDeterministic(std.testing.allocator, source));
+}
+
+test "a row read out of the database costs determinism" {
+    // `zttp:sql` declares `.sqlite` and `.policy_check` and no clock, so the
+    // capability rule saw nothing varying and this handler proved
+    // `deterministic` while the row it returns is whatever the last write left
+    // in the table. A read from mutable module state is the second varying
+    // source, and it is the one no capability set can express.
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\function handler(req) {
+        \\  const row = sqlOne("getUser");
+        \\  return Response.json({ row: row });
+        \\}
+    ;
+    try std.testing.expect(!try runDeterministic(std.testing.allocator, source));
+}
+
+test "cache counters in the response cost determinism" {
+    // `cacheStats` reads no clock: it sums counters the store already holds.
+    // Before the rows were tightened it was demoted anyway, because
+    // `zttp:cache` declared `.clock` at module level for the expiry checks in
+    // `cacheGet`. The verdict was right and the reason was an accident, so
+    // making the row truthful had to come with the rule that really covers it.
+    const source =
+        \\import { cacheStats } from "zttp:cache";
+        \\function handler(req) {
+        \\  return Response.json({ stats: cacheStats() });
+        \\}
+    ;
+    try std.testing.expect(!try runDeterministic(std.testing.allocator, source));
+}
+
+test "a compiled schema is not a varying source" {
+    // `zttp:validate` is stateful too, but its state is a schema registry the
+    // handler compiles from literals inside its own run, so `validateJson`
+    // answers the same way every time. Demoting it would be a false negative on
+    // the most common validation path, which is why the rule keys on a `.read`
+    // effect rather than on `stateful` alone.
+    const source =
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  schemaCompile("user", "{}");
+        \\  const r = validateJson("user", req.body);
+        \\  return Response.json({ ok: r.ok });
+        \\}
     ;
     try std.testing.expect(try runDeterministic(std.testing.allocator, source));
 }

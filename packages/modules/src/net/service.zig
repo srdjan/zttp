@@ -68,6 +68,10 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "serviceCall",
+            // The system.json read happens once in `installState`, which runs
+            // under the module set. A call looks the base URL up in the already
+            // populated map and dispatches, so the export reaches no file.
+            .required_capabilities = &.{ .network, .runtime_callback },
             .module_func = serviceCallImpl,
             .arg_count = 3,
             .effect = .write,

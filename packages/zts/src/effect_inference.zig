@@ -1228,6 +1228,64 @@ test "uuid does not reach the clock, ulid does" {
     try testing.expect(mint_ulid.capabilities.contains(.clock));
 }
 
+test "a cache delete does not reach the clock, a get does" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `zttp:cache` declares clock + policy_check. The clock is there to decide
+    // expiry: `cacheGet` evaluates it, `cacheDelete` unlinks by key and
+    // `CacheStore.delete` takes no `now_s` at all. Charging a delete for a
+    // clock read makes a handler that only evicts look non-deterministic.
+    const source =
+        \\import { cacheGet, cacheDelete } from "zttp:cache";
+        \\function evict(ns, k) { return cacheDelete(ns, k); }
+        \\function lookup(ns, k) { return cacheGet(ns, k); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const evict_fn = analyzer.lookup("evict") orelse return error.FunctionNotFound;
+    try testing.expect(evict_fn.capabilities.contains(.policy_check));
+    try testing.expect(!evict_fn.capabilities.contains(.clock));
+
+    const lookup_fn = analyzer.lookup("lookup") orelse return error.FunctionNotFound;
+    try testing.expect(lookup_fn.capabilities.contains(.clock));
+}
+
+test "a service call does not reach the filesystem" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    // `zttp:service` declares `.filesystem` for the one-time system.json read in
+    // `installState`. That runs under the module set before any handler does;
+    // `serviceCall` reads the already populated registry map and dispatches, so
+    // charging every call a filesystem capability was over-approximation on the
+    // module's only export.
+    const source =
+        \\import { serviceCall } from "zttp:service";
+        \\function callBilling(route, init) { return serviceCall("billing", route, init); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const call_billing = analyzer.lookup("callBilling") orelse return error.FunctionNotFound;
+    try testing.expect(call_billing.capabilities.contains(.network));
+    try testing.expect(call_billing.capabilities.contains(.runtime_callback));
+    try testing.expect(!call_billing.capabilities.contains(.filesystem));
+}
+
 test "base64 does not reach crypto, sha256 does" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);

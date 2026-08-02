@@ -15,6 +15,10 @@
         "string",
         "string"
       ],
+      "requiredCapabilities": [
+        "clock",
+        "policy_check"
+      ],
       "failureSeverity": "expected",
       "contractExtractions": [
         {
@@ -32,6 +36,10 @@
         "string",
         "number"
       ],
+      "requiredCapabilities": [
+        "clock",
+        "policy_check"
+      ],
       "contractExtractions": [
         {
           "category": "cache_namespace"
@@ -48,6 +56,9 @@
       "params": [
         "string",
         "string"
+      ],
+      "requiredCapabilities": [
+        "policy_check"
       ],
       "contractExtractions": [
         {
@@ -68,6 +79,10 @@
         "number",
         "number"
       ],
+      "requiredCapabilities": [
+        "clock",
+        "policy_check"
+      ],
       "contractExtractions": [
         {
           "category": "cache_namespace"
@@ -80,6 +95,9 @@
       "returns": "object",
       "params": [
         "string"
+      ],
+      "requiredCapabilities": [
+        "policy_check"
       ]
     }
   ]
