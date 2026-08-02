@@ -20,12 +20,13 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-02 | `845025e7` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `2db4545c` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `ec31f5a8` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `631aabd6` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
 two files.
 
-The last six rows share a corpus and a policy hash and differ only by build.
+The last seven rows share a corpus and a policy hash and differ only by build.
 Between the second and the third, the flow checker stopped proving through
 three fail-opens - a call it could not enter, and two shapes of egress options
 object it could not read field by field - and gained the ability to walk a
@@ -62,15 +63,25 @@ normalize. Neither can change a first-draft rate: a repair is what happens
 compiler-authored apply share, not in the headline. The row exists so the two
 are separable later, when a corpus large enough to move round-trips exists.
 
+The eighth is the same kind of row and worth the same honesty. It is the first
+published after the hole-mode turn loop exists - a turn can now spend itself on
+one hole, structurally, rather than being asked to - and after the protocol grew
+`verify` and `simulate_edit`. Neither is visible here either, for a sharper
+reason than the seventh: this corpus contains no hole-mode session at all. A
+cassette replay is a ratchet over outcomes already recorded, so it can confirm
+a compiler change did not flip one and it cannot produce a turn nobody recorded.
+Measuring the loop change needs hole-mode sessions run against a live model,
+which is the same blocker as the item-5 model row.
+
 None of it adds a rule, so the policy hash cannot separate these rows and the
 commit column is what does. The rate held at 90% throughout - six tightenings,
-one loosening, and one repair-side change - and this corpus felt none of them.
-The replay is a ratchet, failing if a compiler change flips a recorded
-first-draft outcome, so that is a checked result rather than a quiet one. What
-it also says is that eleven cases are too few to see a fence move: none of them
-logs a timestamp, none returns a row it read from a store, none writes the
-shapes the fail-opens hid behind, and none has a first draft that trips one of
-the five newly reachable rewrites.
+one loosening, and two changes the headline cannot see - and this corpus felt
+none of them. The replay is a ratchet, failing if a compiler change flips a
+recorded first-draft outcome, so that is a checked result rather than a quiet
+one. What it also says is that eleven cases are too few to see a fence move:
+none of them logs a timestamp, none returns a row it read from a store, none
+writes the shapes the fail-opens hid behind, none has a first draft that trips
+one of the five newly reachable rewrites, and none was recorded in hole mode.
 
 ## Reading the table
 
