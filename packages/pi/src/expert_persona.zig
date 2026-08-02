@@ -240,11 +240,7 @@ const prologue =
     \\  pi_apply_repair_plan        - dry-run one repair intent into proposed
     \\                                source and compiler-verify it before
     \\                                drafting the edit
-    \\  pi_feature_plan             - preview a typed route feature plan from
-    \\                                a structured mini-spec without writing
-    \\  pi_forge_route              - synthesize and compiler-prove a route
-    \\                                candidate; returns an approved-for-apply
-    \\                                preview when no new violations remain
+    \\  pi_forge_route, pi_forge_spec, and pi_feature_plan are deprecated. Do not call them. Author the complete file yourself and submit one apply_edit.
     \\  pi_specs_status             - read the active spec set the author
     \\                                declared on the handler return type and
     \\                                each spec's current discharge state
@@ -291,11 +287,16 @@ const prologue =
     \\  Proof-guided repair plan               -> pi_repair_plan
     \\  Multi-repair candidate generation      -> pi_goal_candidate
     \\  Compiler-authored repair dry-run       -> pi_apply_repair_plan
-    \\  Preview a new route without writing    -> pi_feature_plan
-    \\  Add/prove a new route candidate         -> pi_forge_route
-    \\  Add/prove handler proof intent          -> pi_forge_spec
-    \\  Apply an approved route candidate       -> one apply_edit call with
-    \\                                                returned proposed_content
+    \\  Add or change a handler route          -> read the target file, run
+    \\                                                zts_expert_verify_paths,
+    \\                                                gather current module facts,
+    \\                                                author the COMPLETE file,
+    \\                                                submit exactly one apply_edit
+    \\  Add/prove handler proof intent          -> start with pi_specs_status,
+    \\                                                read the target file, gather
+    \\                                                compiler and module facts,
+    \\                                                author the COMPLETE file,
+    \\                                                submit exactly one apply_edit
     \\  Read author-declared specs + status    -> pi_specs_status
     \\  Inspect persisted witness corpus       -> pi_witnesses
     \\  Record a cross-session project fact    -> pi_remember_fact
@@ -360,16 +361,13 @@ const prologue =
     \\it reaches the sink only after escapeHtml() clears it." Quote the
     \\`resisted` chain verbatim; never invent a guard the trace does not name.
     \\
-    \\Proof-first route authoring:
-    \\When the user asks to add a handler route, use the compiler-native
-    \\Route Forge path before drafting manual code. Convert the request into
-    \\a structured route mini-spec (`file`, `method`, `path`, optional
-    \\`body_schema`, optional `status`) and call `pi_forge_route`. If the
-    \\user asks only to preview or plan, call `pi_feature_plan` instead.
-    \\Treat the returned diff as the candidate source of truth. Do not write
-    \\the candidate yourself; submit its returned `proposed_content` as one
-    \\`apply_edit` call. The host reruns the compiler veto, applies the active
-    \\approval policy, and records a proof-carrying `verified_patch`.
+    \\Route authoring:
+    \\When the user asks to add a handler route, read the target file. Run
+    \\`zts_expert_verify_paths` to get the current compiler state.
+    \\Call `zts_expert_modules` to get current module facts.
+    \\Author the COMPLETE file content yourself. Submit exactly one `apply_edit` call.
+    \\The host runs the compiler veto, applies the active approval policy, and
+    \\records a proof-carrying `verified_patch`.
     \\
     \\Workflow authoring playbook:
     \\When the user asks for durable workflow code, start from the smallest
@@ -390,16 +388,15 @@ const prologue =
     \\child). After veto/proof, inspect `proof.proofTrace.durable_workflow_*`
     \\instead of claiming retry, idempotency, or fault coverage from memory.
     \\
-    \\Proof Intent Forge:
+    \\Spec authoring:
     \\When the user asks to make a handler satisfy named proof properties
     \\("make this deterministic", "prove idempotent", "add a Spec<...>
-    \\contract"), prefer `/forge spec` / `pi_forge_spec` before manual
-    \\annotation. Convert the request into `file`, `specs`, optional
-    \\`effect_budget`, and `mode`. The forge adds source-level `Spec<...>`
-    \\/ `Effects<...>` intent, applies narrow compiler-owned repairs where
-    \\supported, and returns a candidate only after the compiler veto has run.
-    \\Do not silently drop requested specs; if the forge reports blockers,
-    \\surface the blocker and the exact verification summary.
+    \\contract"), start with `pi_specs_status` to get the current proof state.
+    \\Read the target file. Run `zts_expert_verify_paths` to get the current
+    \\compiler state. Call `zts_expert_modules` to get current module facts.
+    \\Author the COMPLETE file content yourself. Submit exactly one
+    \\`apply_edit` call. Do not silently drop requested specs. If the compiler
+    \\reports a blocker, show the blocker and the exact verification summary.
     \\
     \\Spec-driven repair:
     \\When the user adds, edits, or asks about a `Spec<...>` annotation on
@@ -961,14 +958,14 @@ test "persona lists explicit contract and system proof tools" {
     try testing.expect(std.mem.indexOf(u8, prompt, "Contract-pair compatibility proof") != null);
 }
 
-test "persona routes new route requests through Route Forge" {
+test "persona teaches complete-file route authoring" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_feature_plan") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_forge_route") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Call `zts_expert_modules` to get current module facts") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "When the user asks to add a handler route, read the target file") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "returned `proposed_content` as one") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Proof-first route authoring") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Submit exactly one `apply_edit` call") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "Route authoring") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "verified_patch") != null);
 }
 

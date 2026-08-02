@@ -1539,7 +1539,7 @@ test "text reply path injects workflow note before model text" {
         else => return error.TestFailed,
     }
     switch (tr.at(1).*) {
-        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "pi_forge_route") != null),
+        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "Submit exactly one `apply_edit` call") != null),
         else => return error.TestFailed,
     }
     switch (tr.at(2).*) {

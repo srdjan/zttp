@@ -98,7 +98,7 @@ test "skills steer coding tasks through compiler-native expert tools" {
     try testing.expect(std.mem.indexOf(u8, fix.body, "/check") == null);
 
     const route = findByName("route-table") orelse return error.TestExpected;
-    try testing.expect(std.mem.indexOf(u8, route.body, "pi_forge_route") != null);
+    try testing.expect(std.mem.indexOf(u8, route.body, "Author the COMPLETE file content yourself") != null);
     try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") == null);
     try testing.expect(std.mem.indexOf(u8, route.body, "one `apply_edit` call") != null);
 

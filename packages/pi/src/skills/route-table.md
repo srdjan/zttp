@@ -3,12 +3,12 @@ name: route-table
 description: Add a `zttp:router` route table to an existing handler.
 ---
 Add routing to the handler using `zttp:router`:
-1. Prefer `pi_forge_route` for an added route. Convert the ask into `{ file, method, path, status? }` and let Route Forge produce a compiler-verified candidate.
-2. Submit the forge candidate's returned `proposed_content` as one `apply_edit` call; do not hand-copy the generated route diff. The host compiler veto and approval policy own the write.
-3. If Route Forge reports a typed blocker, read the target file, run `zts_expert_verify_paths`, and make the smallest manual route-table edit.
-4. When writing manually, import `routerMatch` from `zttp:router`, check the optional match with `if (match === undefined)`, and keep handler signatures explicit.
+1. Read the target file. Run `zts_expert_verify_paths`. Gather current module facts with `zts_expert_modules`.
+2. Author the COMPLETE file content yourself. Submit exactly one `apply_edit` call. The host compiler veto and approval policy own the write.
+3. Import `routerMatch` from `zttp:router`. Check the optional match with `if (match === undefined)`.
+4. Keep each handler signature explicit.
 
-Manual fallback shape:
+Route-table shape:
 ```ts
 import { routerMatch } from "zttp:router";
 

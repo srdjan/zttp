@@ -22,7 +22,7 @@ pub const cases = [_]EvalCase{
         .prompt = "Add a GET /users route",
         .expected_kind = .route_add,
         .expected_confidence = .high,
-        .note_must_contain = "pi_forge_route",
+        .note_must_contain = "Submit exactly one `apply_edit` call",
     },
     .{
         .name = "jwt-auth",
