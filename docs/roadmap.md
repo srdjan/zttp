@@ -373,9 +373,18 @@ three driveable properties to five; the counterexample solver already models bot
 Why: every intent that lowers and validates pulls a rejected program into the provable
 set with zero model tokens. That is convergence driven from the compiler side, and the
 `compiler_authored_apply` counter already measures it. 18 variants are declared in
-`packages/zts/src/repair_intent.zig`; 8 now reach a source edit through `applyIntent` in
-`packages/pi/src/tools/repair_apply.zig`, and the autoloop drives 5 properties rather
-than 3.
+`packages/zts/src/repair_intent.zig`; 13 now reach a source edit, and the autoloop
+drives 5 properties rather than 3.
+
+The count moved from 8 to 13 by wiring up rewrites that already existed. Five intents -
+`replace_ternary_with_if`, `name_const_above_template`, `lift_default_to_body`,
+`flatten_destructure`, `drop_unused_index_alias` - had builders in the canonicalizer
+reachable only through the normalize loop, which rewrites a whole file.
+`canonicalize.applyStatementIntent` asks the narrow question a repair client actually
+has: build this pass's rewrites, keep the one carrying this intent at this line, splice
+it. It refuses on two matches rather than guessing, because `Intent` carries no column,
+and on a span containing another rewrite, because that ordering takes the normalize loop
+several passes and a single apply has one.
 
 `drop_redundant_bool_compare` lowered first because its rewrite already existed, tested
 and deliberately conservative, in the normalizer - it was simply never wired into
@@ -408,15 +417,34 @@ repair claims no equivalence and never will: `add_trailing_return` exists to cha
 the program does on a path that previously fell off the end. Those rows are `.none` and
 ship advisory-only, which D3 blesses directly.
 
-`repair_available` now answers from the registry instead of a constant. Every row is
-`planned`, so every answer is still false - but false because the registry says so, and
-one row reaching `implemented` is what changes it. A `status` distinct from `method` is
-what keeps that honest: naming the right validator is not the same as having one.
+`repair_available` answers from the registry instead of a constant, and one row has
+reached `implemented`: `drop_redundant_bool_compare`, so ZTS620 is the first diagnostic
+on the wire to advertise an exact repair. A `status` distinct from `method` is what kept
+that honest while the rest waited: naming the right validator is not the same as having
+one, and the other seventeen rows still answer false.
+
+`repair_validator.validateApplication` is what discharges it, and it lives beside the
+registry rather than beside the rewrite on purpose. A validator that reuses the
+producer's own scanner cannot catch the producer drifting - it would re-derive the same
+wrong answer and agree with itself. This one re-locates the comparison independently,
+recomputes the law's rewrite from the original line, and accepts only a byte-for-byte
+match confined to the diagnostic's line.
+
+It is solver-free by decision. `semantics_check.runSmt` degrades to "skipped" when z3 is
+absent, so routing a discharge through the solver would make a published protocol field
+answer differently on a machine without z3. The SMT layer stays what it is: a
+design-time audit of the law catalog, not a per-application gate.
+
+The discharge is published next to the existing verification in
+`pi_apply_repair_plan`, which answers a different question. A candidate can introduce no
+new diagnostics and still not be the law's rewrite: `x === true` edited to `!x`
+type-checks exactly as well as `x` does and means the opposite.
 
 Observable: compiler-authored apply share rises on the item-2 corpus, and
-`repair_available: true` appears on the wire for a named, tested subset. The first half
-is now measurable against [convergence.md](convergence.md); the second waits on the
-validator decision above.
+`repair_available: true` appears on the wire for a named, tested subset. The second half
+is done. The first is measurable against [convergence.md](convergence.md) and has not
+moved yet - the eleven-case corpus contains no case whose first draft trips one of the
+five newly reachable rules.
 
 ### 5. The small-local-model run (small, once item 2 exists)
 
