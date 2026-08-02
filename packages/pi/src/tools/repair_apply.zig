@@ -1,12 +1,24 @@
 //! Shared deterministic application for compiler-native repair intents.
 //!
-//! Dispatch covers four line-local canonicalize refactors (`replace_let_with_const`,
-//! `canonicalize_for_of_const`, `replace_arrow_with_function`,
-//! `replace_export_arrow_with_function`). The fifth canonicalize refactor —
-//! `canonicalize_capability_key_alias` — needs cross-line scope analysis
-//! that lives in `tools/canonicalize.zig`, so the AST rewrite tool runs that
-//! one through `canonicalize.collect` directly rather than through this
-//! source-only `applyIntent`.
+//! Two dispatches, split by what the rewrite needs to see.
+//!
+//! `applyIntent` is source-only and line-local. It covers four canonicalize
+//! refactors (`replace_let_with_const`, `canonicalize_for_of_const`,
+//! `replace_arrow_with_function`, `replace_export_arrow_with_function`) plus
+//! the two insertion intents and the two span-local rewrites.
+//!
+//! `applyStatementIntent` covers the five whose construct spans more than the
+//! line it is reported on (`replace_ternary_with_if`,
+//! `name_const_above_template`, `lift_default_to_body`, `flatten_destructure`,
+//! `drop_unused_index_alias`). Those need a fresh analysis pass to derive the
+//! construct's byte span, so they take a path as well as source and run through
+//! `canonicalize.applyStatementIntent`. They are a separate entry point rather
+//! than a branch inside `applyIntent` because `applyIntent`'s contract - pure,
+//! source in and source out, no compiler run - is what several callers rely on.
+//!
+//! `canonicalize_capability_key_alias` is in neither: it needs cross-line scope
+//! analysis, so the AST rewrite tool runs it through `canonicalize.collect`
+//! directly.
 
 const std = @import("std");
 const canonicalize = @import("zts_cli").canonicalize;
@@ -38,6 +50,47 @@ pub const RepairKind = enum {
         return std.meta.stringToEnum(RepairKind, s);
     }
 };
+
+/// The intents whose construct spans more than the line the diagnostic reports,
+/// served by `applyStatementIntent`. Disjoint from `RepairKind` by construction:
+/// an intent belongs to exactly one apply path, and a caller that guesses wrong
+/// gets `UnsupportedRepairIntent` rather than a rewrite from the wrong family.
+pub const StatementKind = enum {
+    replace_ternary_with_if,
+    name_const_above_template,
+    lift_default_to_body,
+    flatten_destructure,
+    drop_unused_index_alias,
+
+    pub fn fromString(s: []const u8) ?StatementKind {
+        return std.meta.stringToEnum(StatementKind, s);
+    }
+
+    fn asIntent(self: StatementKind) canonicalize.RepairIntent {
+        return switch (self) {
+            .replace_ternary_with_if => .replace_ternary_with_if,
+            .name_const_above_template => .name_const_above_template,
+            .lift_default_to_body => .lift_default_to_body,
+            .flatten_destructure => .flatten_destructure,
+            .drop_unused_index_alias => .drop_unused_index_alias,
+        };
+    }
+};
+
+/// Realize one span-keyed intent at `line` against `source`, analyzed as
+/// `path`. The path is what the analysis attributes diagnostics to and what
+/// selects TypeScript stripping, so it must be the file the source came from
+/// (or the virtual path a caller is simulating it under), not a placeholder.
+pub fn applyStatementIntent(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    path: []const u8,
+    intent_kind: []const u8,
+    line: u32,
+) ![]u8 {
+    const kind = StatementKind.fromString(intent_kind) orelse return error.UnsupportedRepairIntent;
+    return canonicalize.applyStatementIntent(allocator, source, path, kind.asIntent(), line);
+}
 
 pub fn applyIntent(
     allocator: std.mem.Allocator,

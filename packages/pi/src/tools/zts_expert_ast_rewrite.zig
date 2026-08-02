@@ -32,7 +32,10 @@ pub const tool: registry_mod.ToolDef = .{
     \\rewrite. Supported canonicalize refactors:
     \\replace_let_with_const, canonicalize_for_of_const,
     \\replace_arrow_with_function, replace_export_arrow_with_function,
-    \\replace_compound_assign_with_explicit, canonicalize_capability_key_alias.
+    \\replace_compound_assign_with_explicit, drop_redundant_bool_compare,
+    \\canonicalize_capability_key_alias, replace_ternary_with_if,
+    \\name_const_above_template, lift_default_to_body, flatten_destructure,
+    \\drop_unused_index_alias.
     \\The tool never writes files; it returns the proposed content and an
     \\edit_simulate veto verdict.
     ,
@@ -49,7 +52,13 @@ const SupportedKind = enum {
     replace_arrow_with_function,
     replace_export_arrow_with_function,
     replace_compound_assign_with_explicit,
+    drop_redundant_bool_compare,
     canonicalize_capability_key_alias,
+    replace_ternary_with_if,
+    name_const_above_template,
+    lift_default_to_body,
+    flatten_destructure,
+    drop_unused_index_alias,
 
     fn fromIntent(intent: RepairIntent) ?SupportedKind {
         return switch (intent) {
@@ -58,7 +67,13 @@ const SupportedKind = enum {
             .replace_arrow_with_function => .replace_arrow_with_function,
             .replace_export_arrow_with_function => .replace_export_arrow_with_function,
             .replace_compound_assign_with_explicit => .replace_compound_assign_with_explicit,
+            .drop_redundant_bool_compare => .drop_redundant_bool_compare,
             .canonicalize_capability_key_alias => .canonicalize_capability_key_alias,
+            .replace_ternary_with_if => .replace_ternary_with_if,
+            .name_const_above_template => .name_const_above_template,
+            .lift_default_to_body => .lift_default_to_body,
+            .flatten_destructure => .flatten_destructure,
+            .drop_unused_index_alias => .drop_unused_index_alias,
             else => null,
         };
     }
@@ -67,8 +82,20 @@ const SupportedKind = enum {
         return @tagName(self);
     }
 
+    /// True when the rewrite needs a real path rather than a source snapshot:
+    /// the span-keyed family runs a fresh analysis pass to derive the
+    /// construct's byte range, and the capability alias needs file-level scope.
     fn requiresFile(self: SupportedKind) bool {
-        return self == .canonicalize_capability_key_alias;
+        return switch (self) {
+            .canonicalize_capability_key_alias,
+            .replace_ternary_with_if,
+            .name_const_above_template,
+            .lift_default_to_body,
+            .flatten_destructure,
+            .drop_unused_index_alias,
+            => true,
+            else => false,
+        };
     }
 };
 
@@ -118,7 +145,7 @@ fn execute(
             allocator,
             plan_id,
             intent_str,
-            "canonicalize_capability_key_alias requires the file to exist on disk (no source override supported)",
+            "this intent requires the file to exist on disk (no source override supported)",
         );
     }
 
@@ -183,12 +210,19 @@ fn produceProposed(
         .replace_arrow_with_function,
         .replace_export_arrow_with_function,
         .replace_compound_assign_with_explicit,
+        .drop_redundant_bool_compare,
         => try repair_apply.applyIntent(allocator, source, .{
             .plan_id = "",
             .intent_kind = kind.asString(),
             .line = line,
             .template = "",
         }),
+        .replace_ternary_with_if,
+        .name_const_above_template,
+        .lift_default_to_body,
+        .flatten_destructure,
+        .drop_unused_index_alias,
+        => try repair_apply.applyStatementIntent(allocator, source, absolute, kind.asString(), line),
         .canonicalize_capability_key_alias => try applyCapabilityAlias(allocator, absolute, source, line),
     };
 }
@@ -604,6 +638,64 @@ test "ast rewrite: canonicalize_capability_key_alias rewrites the alias line" {
         },
         else => return error.TestFailed,
     }
+}
+
+test "ast rewrite: replace_ternary_with_if lifts a chained ternary" {
+    // The span-keyed family. The construct runs past the line it is reported
+    // on, so this dispatch runs a fresh analysis pass to derive its byte range
+    // rather than rewriting the reported line in place.
+    const source =
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
+        \\  return Response.json({ n });
+        \\}
+    ;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeFixture(tmp.sub_path, source);
+    defer testing.allocator.free(path);
+
+    const input = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_ternary_with_if\",\"plan_id\":\"rp_g_tern\"}}",
+        .{path},
+    );
+    defer testing.allocator.free(input);
+    var result = try runExecute(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "match (") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "?") == null or
+        std.mem.indexOf(u8, result.llm_text, "when true:") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
+}
+
+test "ast rewrite: a span-keyed intent refuses a source override" {
+    // The rewrite derives its span from a fresh analysis pass, so a snapshot
+    // that disagrees with the file on disk would splice offsets computed
+    // against one text into another. Refuse rather than reconcile.
+    const source =
+        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
+        \\  return Response.json({ n });
+        \\}
+    ;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try writeFixture(tmp.sub_path, source);
+    defer testing.allocator.free(path);
+
+    const input = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_ternary_with_if\",\"source\":\"function handler() {{}}\"}}",
+        .{path},
+    );
+    defer testing.allocator.free(input);
+    var result = try runExecute(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "no source override supported") != null);
 }
 
 test "ast rewrite: unknown intent string returns typed failure" {

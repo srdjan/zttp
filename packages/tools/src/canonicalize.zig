@@ -8,7 +8,7 @@ const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const edit_simulate = @import("edit_simulate.zig");
 const writeJsonString = zts.handler_contract.writeJsonString;
-const RepairIntent = zts.repair_intent.RepairIntent;
+pub const RepairIntent = zts.repair_intent.RepairIntent;
 
 pub const Refactor = struct {
     kind: []const u8,
@@ -906,6 +906,67 @@ pub const StatementRewriteResult = struct {
         self.* = .{};
     }
 };
+
+/// Apply the one span-keyed rewrite that the requested intent asks for at
+/// `line`, returning fresh owned source.
+///
+/// The normalize loop drives `buildStatementRewrites` over a whole file and
+/// applies every non-overlapping rewrite per pass. A repair client asks a
+/// narrower question - "realize this one intent, at this one line" - and until
+/// this entry point existed it had no way to ask it: the five span-keyed
+/// intents were reachable only by normalizing the entire file, which changes
+/// far more than the diagnostic the client is answering.
+///
+/// Refuses rather than guesses in three cases. No matching rewrite means the
+/// construct is not one a provably-safe rewrite can be formed for, and it stays
+/// a flagged hard error. More than one match on the line means the intent does
+/// not name a unique construct - `Intent` carries no column, so there is
+/// nothing to disambiguate with. A rewrite that spans other rewrites is left
+/// alone, because splicing an outer construct while an inner one is still
+/// present is the ordering the normalize loop resolves over several passes and
+/// a single-intent apply has only one.
+pub fn applyStatementIntent(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    virtual_path: []const u8,
+    intent: RepairIntent,
+    line: u32,
+) ![]u8 {
+    var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, null, true, null, false);
+    defer check.deinit(allocator);
+
+    var stmt_result = StatementRewriteResult{};
+    defer stmt_result.deinit(allocator);
+    try buildStatementRewrites(allocator, source, check.json_diagnostics.items, &stmt_result);
+
+    var chosen: ?StatementRewrite = null;
+    for (stmt_result.rewrites.items) |rw| {
+        if (rw.intent != intent) continue;
+        if (offsetLine(source, rw.start_offset) != line) continue;
+        if (chosen != null) return error.UnsupportedRepairIntent;
+        chosen = rw;
+    }
+    const only = chosen orelse return error.UnsupportedRepairIntent;
+
+    for (stmt_result.rewrites.items) |other| {
+        if (other.start_offset == only.start_offset and other.end_offset == only.end_offset) continue;
+        const contains = only.start_offset <= other.start_offset and other.end_offset <= only.end_offset;
+        if (contains) return error.UnsupportedRepairIntent;
+    }
+
+    var one = [_]StatementRewrite{only};
+    return applyStatementRewrites(allocator, source, &one);
+}
+
+/// The 1-based line `offset` falls on.
+fn offsetLine(source: []const u8, offset: usize) u32 {
+    var line: u32 = 1;
+    var i: usize = 0;
+    while (i < offset and i < source.len) : (i += 1) {
+        if (source[i] == '\n') line += 1;
+    }
+    return line;
+}
 
 /// Translate the diagnostics from one analysis pass into span-keyed
 /// rewrites. The sibling of `buildRefactors` for the multi-line / convention
