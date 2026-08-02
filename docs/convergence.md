@@ -15,10 +15,21 @@ counted result over a frozen corpus, not an estimate.
 |---|---|---|---|---|---|---|---|---|
 | 2026-08-01 | `e4a13aee` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `37a115c262dc` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-01 | `847840a4-dirty` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `57269997` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
 two files.
+
+The third row is the same corpus and the same policy hash as the second, and a
+different build. Between them the flow checker stopped proving through three
+fail-opens - a call it could not enter, and two shapes of egress options object
+it could not read field by field - and gained the ability to walk a helper
+imported from a sibling file. None of that adds a rule, so the policy hash is
+identical and the commit column is what separates the rows. The rate held at
+90%: closing those holes cost no case in this corpus. That is the useful
+reading, and it is only available because the row was published rather than
+assumed.
 
 ## Reading the table
 
