@@ -41,9 +41,6 @@ const pi_goal_candidate_tool = @import("tools/pi_goal_candidate.zig");
 const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
 const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
 const ast_rewrite_tool = @import("tools/zts_expert_ast_rewrite.zig");
-const pi_feature_plan_tool = @import("tools/pi_feature_plan.zig");
-const pi_forge_route_tool = @import("tools/pi_forge_route.zig");
-const pi_forge_spec_tool = @import("tools/pi_forge_spec.zig");
 const pi_specs_status_tool = @import("tools/pi_specs_status.zig");
 const pi_witnesses_tool = @import("tools/pi_witnesses.zig");
 const pi_remember_fact_tool = @import("tools/pi_remember_fact.zig");
@@ -144,9 +141,6 @@ const repair_bundle = [_]ToolDef{
     pi_repair_plan_tool.tool,
     pi_apply_repair_plan_tool.tool,
     ast_rewrite_tool.tool,
-    pi_feature_plan_tool.tool,
-    pi_forge_route_tool.tool,
-    pi_forge_spec_tool.tool,
 };
 
 const memory_bundle = [_]ToolDef{
@@ -627,9 +621,6 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_repair_plan",
         "pi_apply_repair_plan",
         "zts_expert_ast_rewrite",
-        "pi_feature_plan",
-        "pi_forge_route",
-        "pi_forge_spec",
         "pi_specs_status",
         "pi_witnesses",
         "pi_remember_fact",

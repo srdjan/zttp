@@ -240,10 +240,6 @@ const prologue =
     \\  pi_apply_repair_plan        - dry-run one repair intent into proposed
     \\                                source and compiler-verify it before
     \\                                drafting the edit
-    \\  pi_forge_route              - deprecated with pi_forge_spec and
-    \\                                pi_feature_plan. Do not call them.
-    \\                                Author the complete file yourself and
-    \\                                submit one apply_edit
     \\  pi_specs_status             - read the active spec set the author
     \\                                declared on the handler return type and
     \\                                each spec's current discharge state
@@ -978,9 +974,9 @@ test "persona teaches complete-file route authoring" {
     try testing.expect(std.mem.indexOf(u8, prompt, "When the user asks to add a handler route, read the target file") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Submit exactly one `apply_edit` call") != null);
-    // Binds the pre-apply dry-run that forge used to guarantee via analyzePatch.
+    // Binds the pre-apply dry-run before the compiler veto applies an edit.
     try testing.expect(std.mem.indexOf(u8, prompt, "Dry-run the draft with `zts_expert_edit_simulate`") != null);
-    // Route-unique: the day-one spec set forge emitted on every conversion.
+    // Route-specific: the day-one spec set for every route conversion.
     try testing.expect(std.mem.indexOf(u8, prompt, "declare the\nauthor spec set") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "Route authoring") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "verified_patch") != null);

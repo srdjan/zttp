@@ -26,8 +26,6 @@ pub const command_table = [_]CommandRow{
     .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zts_expert_verify_paths", .takes_trailing_args = true },
     .{ .slash = null, .explicit = "verify-modules", .tool = "zts_expert_verify_modules", .takes_trailing_args = true },
     .{ .slash = "/check", .explicit = "check", .tool = "zts_check", .takes_trailing_args = true },
-    .{ .slash = "/feature", .explicit = null, .tool = "pi_feature_plan", .takes_trailing_args = true },
-    .{ .slash = "/forge", .explicit = null, .tool = "pi_forge_route", .takes_trailing_args = true },
     .{ .slash = "/specs", .explicit = null, .tool = "pi_specs_status", .takes_trailing_args = true },
     .{ .slash = "/witnesses", .explicit = null, .tool = "pi_witnesses", .takes_trailing_args = true },
     .{ .slash = "/build", .explicit = null, .tool = "zig_build_step", .takes_trailing_args = true },
@@ -36,12 +34,6 @@ pub const command_table = [_]CommandRow{
 
 pub fn lookup(argv: []const []const u8) ?LocalCommand {
     if (argv.len == 0) return null;
-
-    if (argv[0].len > 0 and argv[0][0] == '/' and std.mem.eql(u8, argv[0], "/forge")) {
-        if (argv.len > 1 and std.mem.eql(u8, argv[1], "spec")) {
-            return .{ .tool_name = "pi_forge_spec", .args = argv[1..] };
-        }
-    }
 
     if (argv[0].len > 0 and argv[0][0] == '/') {
         inline for (command_table) |row| {
@@ -184,22 +176,6 @@ test "lookup /rule forwards trailing args" {
     try testing.expectEqualStrings("zts_expert_describe_rule", cmd.tool_name);
     try testing.expectEqual(@as(usize, 1), cmd.args.len);
     try testing.expectEqualStrings("ZTS303", cmd.args[0]);
-}
-
-test "lookup /forge forwards route spec" {
-    const argv = [_][]const u8{ "/forge", "route", "file=handler.ts", "method=GET", "path=/health" };
-    const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("pi_forge_route", cmd.tool_name);
-    try testing.expectEqual(@as(usize, 4), cmd.args.len);
-    try testing.expectEqualStrings("route", cmd.args[0]);
-}
-
-test "lookup /forge spec routes to proof-intent forge" {
-    const argv = [_][]const u8{ "/forge", "spec", "file=handler.ts", "specs=deterministic" };
-    const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("pi_forge_spec", cmd.tool_name);
-    try testing.expectEqual(@as(usize, 3), cmd.args.len);
-    try testing.expectEqualStrings("spec", cmd.args[0]);
 }
 
 test "isQuit and isHelp recognize aliases" {

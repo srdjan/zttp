@@ -126,7 +126,6 @@ core:
 
 | Tool | Purpose |
 |---|---|
-| `pi_forge_route` | Synthesize and prove a route candidate without hand-writing the route first. |
 | `pi_repair_plan` | Convert verifier/property failures into typed repair intents. |
 | `pi_apply_repair_plan` | Dry-run one repair intent into verified proposed source; never writes. |
 | `pi_goal_candidate` | Compose repair planning and supported repair dry-runs in memory; returns verified `proposed_content` and `applied:false`; never writes. |

@@ -340,9 +340,6 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
     try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
     try w.writeAll("Studio:        /studio <handler.ts>   show browser proof workbench command\n");
-    try w.writeAll("Route Forge:   /feature route file=<handler.ts> method=<VERB> path=</path>\n");
-    try w.writeAll("               /forge route file=<handler.ts> method=<VERB> path=</path>\n");
-    try w.writeAll("Spec Forge:    /forge spec file=<handler.ts> specs=<spec[,spec...]>\n");
     try w.writeAll("Specs:         /specs <handler.ts>   show declared Spec<...> obligations\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
@@ -531,8 +528,6 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
             "  Session branching: /fork, /tree, --fork, --continue\n" ++
             "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
             "  Proof ledger mode: /ledger, /chat, /ledger export, zttp ledger replay/export\n" ++
-            "  Route Forge: /feature previews route plans, /forge proves route candidates\n" ++
-            "  Spec Forge: /forge spec annotates and proves handler Spec<...> intent\n" ++
             "  Author-declared specs: /specs reads Spec<...> obligations + discharge state\n" ++
             "  Skills catalog (/skill:<name>)\n" ++
             "  Informational commands: /model, /status, /settings, /hotkeys, /changelog\n",
@@ -1382,8 +1377,6 @@ test "help renders local command guidance" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.session_commands[1]) != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.view_commands[0]) != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, commands.ledger_commands[0]) != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/feature route") != null);
-            try testing.expect(std.mem.indexOf(u8, r.llm_text, "/forge route") != null);
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "/specs <handler.ts>") != null);
             // Leads with how-to guidance and gates the tool dump behind --tools.
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "How to use zttp expert") != null);
@@ -1411,7 +1404,7 @@ test "help --tools lists the registered tool names" {
     }
 }
 
-test "hotkeys and changelog mention Route Forge apply flow" {
+test "hotkeys and changelog report current guidance" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
@@ -1419,7 +1412,7 @@ test "hotkeys and changelog mention Route Forge apply flow" {
     try expectResult(&hotkeys, testing.allocator, "CLI REPL", true);
 
     var changelog = try dispatchLine(testing.allocator, &reg, "/changelog");
-    try expectResult(&changelog, testing.allocator, "Route Forge", true);
+    try expectResult(&changelog, testing.allocator, "Author-declared specs", true);
 }
 
 test "slash view commands route locally" {

@@ -350,6 +350,44 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     }
 }
 
+test "reconstructTranscript tolerates a retired UI payload kind" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    // Written plainly on purpose. This is the one place the retired kind still
+    // has to appear, because the fixture is a session recorded before it was
+    // removed, and someone grepping for why it survives should find this test.
+    const retired_kind = "forge_run";
+    const jsonl = try std.fmt.allocPrint(
+        allocator,
+        "{{\"v\":{d},\"k\":\"tool_result\",\"d\":{{\"tool_use_id\":\"toolu_legacy\",\"tool_name\":\"retired_source_tool\",\"ok\":true,\"llm_text\":\"legacy output\",\"ui_payload\":{{\"kind\":\"{s}\",\"run_id\":\"legacy-run\",\"file\":\"handler.ts\",\"feature_kind\":\"route\",\"method\":\"GET\",\"path\":\"/health\",\"handler_name\":\"handleHealth\",\"steps\":[],\"final_content\":\"export function handler() {{}}\",\"unified_diff\":\"\",\"success\":true,\"terminal_reason\":\"verified\",\"verification_summary\":\"0 new violations\",\"stats\":{{\"total\":0,\"new\":0,\"preexisting\":0}}}}}}}}\n",
+        .{ events.schema_version, retired_kind },
+    );
+    defer allocator.free(jsonl);
+    try zts.file_io.writeFile(allocator, path, jsonl);
+
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+
+    try testing.expectEqual(@as(usize, 1), tr.len());
+    switch (tr.at(0).*) {
+        .tool_result => |result| {
+            try testing.expect(result.ui_payload != null);
+            switch (result.ui_payload.?) {
+                .plain_text => |text| {
+                    try testing.expect(std.mem.indexOf(u8, text, retired_kind) != null);
+                },
+                else => return error.TestFailed,
+            }
+        },
+        else => return error.TestFailed,
+    }
+}
+
 test "reconstructTranscript skips turn_end records" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);

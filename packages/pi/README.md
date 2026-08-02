@@ -117,19 +117,6 @@ to the transcript with the compiler-native tool route to try first. This
 costs no model round-trip and does not authorize edits; every candidate
 still goes through the compiler veto.
 
-### Proof Intent Forge (`pi_forge_spec.zig`)
-
-`/forge spec` turns explicit proof intent into source-level
-`Spec<...>` and optional `Effects<...>` markers, then proves the candidate
-in memory. It reuses the `forge_run` payload used by Route Forge, so the
-REPL/RPC surfaces can inspect the generated source, diff, steps, and
-verification summary without a new payload.
-
-The v1 repair lane supports deterministic/idempotent handlers by wrapping
-`Date.now()` and `Math.random()` in `step(...)` from `zttp:durable`.
-Other unsupported structural repairs return typed blockers rather than
-writing speculative code.
-
 ### Goal candidates (`tools/pi_goal_candidate.zig`)
 
 `pi_goal_candidate` is a non-writing wrapper for supported deterministic
@@ -257,7 +244,6 @@ Slash commands in the interactive REPL:
 /skills /skill:<name>
 /templates /template:<name> [args...]
 /settings
-/forge spec file=<handler.ts> specs=<csv> [effects=<csv>]
 /hotkeys /changelog
 ```
 
