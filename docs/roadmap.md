@@ -303,7 +303,7 @@ closure, and a durable callback keeping determinism while still carrying a secre
 handler, the minted id with its `idempotent`, and the durable step in both its callback
 and its eager form.
 
-### 3. Typed holes (medium, decomposable)
+### 3. Typed holes (done, except the measurement)
 
 Two of three slices have landed. `hole()` exists as a builtin typed `never`, so a
 handler with a hole on one branch checks clean with both paths enumerated and its
@@ -342,23 +342,31 @@ persona instructs it to fill one hole per turn rather than regenerate the file. 
 this the data was reachable only inside a full `zts check --json` envelope that the tool
 description never mentioned, so the agent had no reason to look for it.
 
-What remains is the loop change itself: nothing yet *makes* a turn spend itself on one
-hole, so the mode is available rather than enforced. That is what the item's observable
-measures, and it cannot be claimed until a hole-mode session can be run against the
-corpus and compared with a whole-file session on the same model.
+The loop change has landed, and the thing it replaced was an instruction. Asking the
+agent to fill one hole per turn is not a mechanism: a turn that hands back a whole file
+emits from the model's full distribution whatever the persona said, and the veto is left
+to reject what came out - the subtractive loop holes exist to replace.
+
+`zts_expert_fill_hole` is the enforcement. Its input is one expression and one hole's
+coordinates, and the edit it produces replaces the bytes of that `hole()` call and
+nothing else. No argument can make it touch a second line, so "one hole per turn" stops
+being an instruction the model can decline and becomes the shape of the only edit
+available. The coordinate match is exact rather than nearest: a stale coordinate is the
+expected failure here, because filling one hole moves every later hole on the same line,
+and the useful answer is a refusal naming the frame to re-read.
 
 Why: this is the only item that changes the convergence mechanism rather than measuring
 or enforcing it. Today the loop is subtractive - the agent emits from its full
 distribution and the veto rejects. With holes the compiler constructs the frame, and the
 emittable set per step narrows to one typed expression in a known context. Set
-convergence stops being statistical and becomes structural. Ship the capability budget
-marked in the JSON as an over-approximation until item 7 lands.
+convergence stops being statistical and becomes structural.
 
 Observable: round-trips to first green fall for hole-mode sessions against whole-file
 sessions on the same model. The session ledger can already express that comparison, and
-[convergence.md](convergence.md) is where the comparison gets published. Not claimable
-until the turn mode ships - the builtin and the JSON describe the gap, but nothing yet
-changes how the agent spends a turn.
+[convergence.md](convergence.md) is where the comparison gets published. The turn mode
+ships; what remains is the measurement, which needs hole-mode sessions recorded against a
+live model. The frozen corpus cannot answer it - a cassette replay cannot produce turns
+that were never recorded.
 
 ### 4. Widen the mechanical repair lane (small to medium)
 
@@ -592,7 +600,7 @@ the module's crypto and clock capabilities. It is `a tightened export carries on
 it reaches` in `packages/zts/src/effect_inference.zig`, alongside one per tightened
 module.
 
-### 8. Unified repair vocabulary, then the deferred wire verbs (medium to large)
+### 8. Unified repair vocabulary, then the deferred wire verbs (`apply_repair` remains)
 
 Collapse the parallel repair vocabularies into the one the spec assumes, then ship
 `verify`, then `simulate_edit`, then `apply_repair`.
@@ -605,8 +613,43 @@ These become strategic the moment a second client exists - an editor, or the ite
 model run driven from outside the agent package. Ship `verify` first then, because a
 minimal external client needs verify and simulate and nothing else.
 
+The vocabulary is one enum. `Refactor` carried a free string where `StatementRewrite`
+carried a typed `RepairIntent`, and five of its names differed from the tag by more than
+spelling - `canonicalize_arrow_helper` against `replace_arrow_with_function` - which is
+what made it a second vocabulary rather than a rendering of the first. The
+string-to-intent mapper the normalize trace needed retires with it, and the confluence
+harness enumerates typed rows, so a new intent nobody pairs against is a visible gap in
+the same vocabulary the compiler emits. The v2 wire publishes `intent`, which mattered
+most: `canonicalize` already ships, so it had been emitting the producer-local string
+into a public protocol - the exact freezing this item exists to prevent. v1 keeps its
+five names, which D3 §6 freezes, and `legacyKind` is the only place they survive.
+
+`verify` shipped on a registry that already existed. The deferral read "needs the
+verifier discovery registry", and `proof_trace.property_info` is the closed set, with a
+comptime check tying it to `HandlerProperties`. `verifiers` derives from it, so a
+property added to the contract reaches `meta` and `verify` without an edit and the
+protocol can never advertise a name it would then refuse. Verdicts are projected out of
+`proofTrace` rather than recomputed: a verification surface is where two implementations
+disagreeing costs the most.
+
+`simulate_edit` shipped on the collapsed vocabulary, which is what its deferral was
+waiting on. A repair is the object `canonicalize` published, round-tripped unchanged.
+`original` is required rather than optional - it is the client's snapshot of the line it
+decided to change, and an absent snapshot would make the staleness check silently skip.
+
+`apply_repair` is what remains. It is the only one of the three that writes, and the
+equivalence-validator registry its deferral names now has one implemented row rather
+than none (item 4), so the precondition has moved but is not met: `apply_repair` should
+not write on the strength of a single graded intent.
+
 Observable: a client outside the agent package completes a propose, simulate, verify
-cycle over the wire with no in-process access.
+cycle over the wire with no in-process access. Met, as `an external client completes
+propose, simulate, verify over the wire` in `packages/tools/src/agent_protocol.zig`:
+three `respond` calls, each request carrying only what the previous response published,
+ending with an assertion that the file on disk never changed. Running it is what found
+the gap it now covers - `verify` read only files, so a client could simulate a repair and
+then only ask about the file it had not repaired. It takes an optional `content`, and the
+digest covers whatever was analyzed.
 
 ### Sequencing
 
@@ -616,8 +659,14 @@ item 2 provides a baseline to compare against. Item 5 runs the day item 2's live
 works. Item 7 follows item 1. Item 8 waits for a second client or for the vocabulary,
 whichever arrives first.
 
-Items 1, 2, 2a, 2b, 6, and 7 are done. What is open is the tail of item 3 (the turn loop
-itself), item 4, item 5, and item 8.
+Items 1, 2, 2a, 2b, 3, 6, and 7 are done. Item 4 has shipped both halves and item 8 all
+but `apply_repair`.
+
+Three things are open, and two of them are the same shape: item 3's comparison and item
+5's model row both need sessions recorded against a live model, which a cassette replay
+cannot produce. The frozen corpus is a ratchet over outcomes already recorded, not a way
+to measure a loop change or a model swap. The third is `apply_repair`, which waits on
+more than one graded validator row.
 
 ### Considered and refused
 
