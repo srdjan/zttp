@@ -440,6 +440,35 @@ pub const FlowChecker = struct {
         return error_count;
     }
 
+    /// Labels of the value a closure produces when called. Parameters are left
+    /// as they are: a caller that passes a labelled argument unions it in
+    /// separately, and a higher-order function supplying the argument itself
+    /// (the element in `map`) contributes the receiver's labels through the
+    /// same union. Recursion is bounded by the same summary stack the
+    /// user-function path uses.
+    fn closureResultLabels(self: *FlowChecker, node: NodeIndex) LabelSet {
+        const func = self.ir_view.getFunction(node) orelse return .{ .unknown = true };
+        if (self.summary_depth >= max_summary_depth) return .{ .unknown = true };
+        for (self.summary_stack[0..self.summary_depth]) |active| {
+            if (active == node) return LabelSet.empty;
+        }
+
+        self.summary_stack[self.summary_depth] = node;
+        self.summary_depth += 1;
+        defer self.summary_depth -= 1;
+
+        const body_tag = self.ir_view.getTag(func.body) orelse return .{ .unknown = true };
+        if (body_tag == .block or body_tag == .program or body_tag == .return_stmt) {
+            var collected = LabelSet.empty;
+            const saved = self.summary_returns;
+            self.summary_returns = &collected;
+            defer self.summary_returns = saved;
+            self.walkStmt(func.body);
+            return collected;
+        }
+        return self.inferLabels(func.body);
+    }
+
     /// Record the return labels of a function imported from another file,
     /// keyed by the local binding slot the import produced. Call before
     /// `check`; the labels come from `exportedReturnLabels` run over that file.
@@ -1342,6 +1371,15 @@ pub const FlowChecker = struct {
                 if (self.ir_view.getOptValue(node)) |expr| return self.inferLabels(expr);
                 return LabelSet.empty;
             },
+
+            // A closure passed as a value carries what calling it would
+            // produce. Without this arm `["a"].map(() => env("SECRET_KEY"))`
+            // unions an empty set for the callback and the secret rides out in
+            // the mapped array with no_secret_leakage still proven. A module
+            // export answers from its declared labels before any argument is
+            // unioned, so `step("k", () => Date.now())` is unaffected: the
+            // recorded-and-replayed read stays deterministic.
+            .arrow_function, .function_expr => return self.closureResultLabels(node),
 
             // exhaustive: the empty set here means "carries no label", and the
             // arms above cover every expression that can hold one - literals,
@@ -3908,6 +3946,21 @@ test "FlowChecker flags a credential in a hoisted egress options object" {
         \\}
     ;
     try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
+}
+
+test "FlowChecker flags a secret produced by a closure argument" {
+    // `inferLabels` had no arm for an arrow or function expression, so a
+    // closure passed to a higher-order function contributed nothing and the
+    // call's argument union came back empty - the positive claim that the
+    // value carries no label. The secret rides out in the mapped array.
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) {
+        \\  const keys = ["a", "b"].map(() => env("SECRET_KEY"));
+        \\  return Response.json({ keys: keys });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
 }
 
 test "FlowChecker flags a credential under a computed key in egress options" {
