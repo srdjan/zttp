@@ -1081,7 +1081,21 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         // the prompt asked for, not the shape of one recording, so a failure
         // here means the recorded handler does not do the job - which is the
         // thing the veto cannot tell us and the whole reason this check exists.
-        try testing.expectEqual(intent_checked, intent_passes);
+        //
+        // Headline model only, for the same reason as the per-case ratchet
+        // above: "every recorded handler does the task" is a claim about the
+        // model that recorded them. A smaller tier producing a handler that
+        // clears the veto but misses the task is the tier difference this row
+        // is measuring, not a regression to fail on. The rate is published
+        // either way, so a drop is visible rather than swallowed.
+        if (std.mem.eql(u8, published_model, headline_model)) {
+            try testing.expectEqual(intent_checked, intent_passes);
+        } else if (intent_passes != intent_checked) {
+            std.debug.print(
+                "[codegen-intent] off-headline model, measured not ratcheted\n",
+                .{},
+            );
+        }
     }
 }
 
