@@ -10,7 +10,7 @@ symptoms:
   - `no_secret_leakage` and `no_credential_leakage` both report PROVEN on a handler whose body contains `env("JWT_SECRET")`.
   - The analyzer emits zero diagnostics on the laundered handler, so nothing warns and nothing blocks.
 root_cause: security_issue
-resolution_type: documented
+resolution_type: code_fix
 severity: critical
 related_components:
   - flow_checker
@@ -127,14 +127,27 @@ is the convention it sits under.
 
 ## Status
 
-Documented, not fixed. The fix is that a parsing export propagates every input
-label except the one it is entitled to discharge: `user_input` becomes
-`validated`, and `secret` and `credential` pass through untouched. That applies
-to `validateJson`, `coerceJson`, and `decodeJson` alike, and to any export of
-that shape added later.
+Fixed the same day, in `flow_checker.zig`. An export that builds its return
+value out of its arguments discharges exactly one label, `user_input`, and every
+other label the argument carried survives it.
 
-Until then, a `no_secret_leakage` PROVEN on a handler that reads a secret and
-imports `zttp:validate` or `zttp:decode` is not evidence.
+Two call paths were laundering and both are closed. `inferCallLabels` handles a
+direct call; `trackResultBinding` handles `const r = validateJson(...); return
+r.value`, which is the shape the bug actually shipped in - fixing only the first
+would have left it open.
+
+The condition is the declared `validated` bit rather than a new binding field.
+That is exactly the set of exports whose output is derived from their input, so a
+parser added later inherits the propagation instead of having to remember to opt
+in - the failure mode that produced this bug in the first place.
+
+Six tests in `flow_checker.zig`, one per export in the class plus the discharge
+itself, so a regression names which export lost the propagation.
+
+The corpus ratchet flipped on the fix, which is the confirmation that matters:
+`jwt-auth` no longer converges through the validator. Re-recorded, the model
+tried it, was refused, and returned a confirmation envelope instead of the
+claims. See the twelfth row of [convergence.md](../../convergence.md).
 
 ## Related Issues
 
