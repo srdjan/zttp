@@ -2520,6 +2520,17 @@ The corpus MUST include:
 
 ## 15. Feature ledger
 
+> Reconciled against the engine on 2026-08-03, across all 29 "Add or complete"
+> entries and all 12 "Tighten" entries. Four entries had shipped and were still
+> listed as outstanding, and five restrictions were already enforced. A ledger
+> entry is a claim about what does not exist yet, so it rots in the one
+> direction nobody notices: silently, as the work lands.
+>
+> Two entries below are open design conflicts rather than unfinished work, and
+> are marked as such. Reconcile against engine code rather than against the
+> other documents: `docs/internals/agent-protocol-v2.md` was found stale in the
+> same pass, still listing three shipped operations as deferred.
+
 ### Keep
 
 - `const` plus necessary `let`
@@ -2528,22 +2539,46 @@ The corpus MUST include:
 - fixed records, arrays, tuples, and limited spread/destructuring
 - strict operators, optional chaining, and nullish coalescing
 - `if`, `match`, `assert`, snapshot-finite `for...of`
+- pure boolean conditional expressions, with impure arms rejected as ZTS612 and
+  chained forms as ZTS621, both carrying the `replace_ternary_with_if` repair
 - static named modules
 - aliases, unions, intersections, literals, readonly, optionals, nominal
   types, guards, utility types, and proof/effect capsules
 - TSX as pure elaboration
 - explicit capability modules and structured I/O
 - familiar TypeScript lexical conventions and human-readable block structure
+- a machine-readable idiom registry, published with a table hash and reachable
+  through `describe-rule --idioms`, so idiom is discoverable rather than
+  conventional; the rows themselves are still being filled in
+- a versioned agent protocol over `zts agent --stdin-json`: a closed
+  eleven-operation set spanning discovery, diagnostics, repair, and
+  verification, with schema-version negotiation, a frozen mismatch reply, and a
+  byte-determinism gate. Its `meta` payload still names ten deferred sections,
+  machine-readably rather than by omission
+- deterministic fixed-point normalization and edit simulation, bounded at 64
+  iterations and confluent, with idempotence asserted both by unit test and by
+  a corpus-wide byte gate; a residual leaves the file unwritten
+- property-specific proof grades over the tracked properties, each carrying the
+  evidence method that produced it
+- rejection of object methods, getters, and setters at the parser boundary
+- reusable arrows reported as named functions, with a typed repair
+- accepted recursion held distinct from proved termination: recursion runs, and
+  the totality and cost claims are downgraded rather than the program refused
+- the 10-node, 7-opcode symbolic semantics classified in code as a partial
+  slice, not as slice-wide law
+- targeted diagnostics for rejected TypeScript forms, each carrying an exact
+  alternative, with stable `restriction.<slug>` identifiers
 
 ### Add or complete
 
 - sound generic-function inference and instantiation
 - limited `extends` constraints
-- pure boolean conditional expressions
 - binding fields and type-test patterns in `match`
 - the closed narrowing rule list
 - decidable branch-choice and iteration-choice rules
-- trailing parameters with closed compile-time scalar defaults
+- trailing parameters with closed compile-time scalar defaults - the engine
+  currently rejects every parameter default as ZTS617, so this item reverses a
+  shipped restriction rather than filling an empty space
 - contractive recursive aliases
 - precise `Result<T, E>` with effect-row polymorphic combinators,
   `unwrapOr`, `orElse`, and `collectAll`
@@ -2553,38 +2588,45 @@ The corpus MUST include:
 - the completed array operation set and `push`
 - a total `responseText` constructor in the HTTP ABI
 - the ambient-name criterion and registry table
-- the machine-readable idiom table, so idiom is discoverable rather than
-  conventional
+- the remaining idiom rows and their rewrites: the registry mechanism ships and
+  is published with a hash, but 12 of 24 rows exist and only one carries a
+  wired rewrite, so the rest are advisory
 - an ordered `Result` consumption procedure with disjoint clauses
 - one `responseJson` result type at every call site
 - opaque typed `HtmlNode` and finite `HtmlChild`
-- explicit JSON `null`
+- explicit JSON `null` - OPEN CONFLICT, not unfinished work. The engine has
+  one absent-value sentinel by design: the parser rejects `null` and the JSON
+  codec decodes wire `null` to `undefined`. Satisfying this needs either a
+  second sentinel or a JSON-only opaque null, and either splits optional
+  narrowing into two lattices. Decide before scheduling
 - a typed, resource-bounded JSON codec
 - fully typed finite array operations
 - tuple-preserving `parallel` and tagged `race`
 - precise minimum HTTP, WebSocket, queue, and durable-workflow ABIs
 - snapshot semantics for every finite traversal
-- property-specific proof grades and an independent certificate verifier
-- a versioned agent discovery, diagnostics, repair, and verification protocol
+- an independent certificate verifier: the proof grades themselves ship, but
+  the verify path re-checks a signature and re-hashes a manifest, shares its
+  code with the producer, reconstructs no obligation, and runs no solver
 - stable rule, diagnostic, repair, and explanation-graph identifiers
-- deterministic fixed-point normalization and edit simulation
 - an agent conformance corpus with bounded convergence
 
 ### Tighten
 
-- reject object methods, getters, and setters at the parser boundary
-- treat reusable arrows as named functions
 - reserve `assert` for programmer invariants
-- use direct named calls instead of custom pipe syntax
-- reject ambient time, random, logging, and I/O
+- use direct named calls instead of custom pipe syntax - note the scope is
+  wider than one operator: `|>` is parser syntax, and `pipe()` and `guard()`
+  from `zttp:compose` are compile-time forms wearing a module's clothes, with
+  native implementations that never execute
+- reject ambient time, random, logging, and I/O - OPEN CONFLICT. The engine
+  admits these names deliberately and charges a property instead of refusing
+  the program: reading a clock is legitimate and costs `deterministic`. That is
+  a different model from rejection, not an unapplied restriction, and the two
+  should not both stand. One real gap either way: `performance.now` is absent
+  from the varying-read set, so it reads a clock and costs nothing
 - reject unchecked trapping operations at untrusted boundaries
 - make a closed profile registry the source of truth
 - identify ZTS as a distinct constrained language rather than imply TypeScript
   source compatibility
-- give common rejected TypeScript forms targeted diagnostics and exact
-  alternatives when safe
-- distinguish accepted recursion from proved termination
-- classify the existing 10-node and 7-opcode semantics as a partial slice
 - treat the removed signed receipt as historical, not shipped
 
 ### Keep excluded
