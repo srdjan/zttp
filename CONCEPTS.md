@@ -45,6 +45,8 @@ A point where a value is recorded on the first run and reproduced on later ones.
 ### Veto
 The compiler's refusal of a Handler that does not discharge its Proof profile. The Veto is the mechanism the project's central claim rests on: that the set of programs an agent writes converges on the set the compiler can prove.
 
+At edit time the Veto answers a narrower question than its name suggests. It counts the violations a draft introduces *relative to a baseline* - the prior content of the file - and passes when that count is zero. It is not a compare-and-swap against what is on disk, and it has no opinion on what the draft removes: deleting correct code introduces no violation. A caller that supplies an empty or absent baseline therefore gets a clean verdict from a working Veto, which is how a destructive edit once proved clean.
+
 ### First-draft veto-pass rate
 The share of prompts whose first generated attempt clears the Veto with no retries, counted over a frozen corpus. Retries are excluded deliberately — a rate counting them would measure a retry loop's persistence rather than the agent's aim.
 
@@ -53,4 +55,4 @@ A fingerprint of the compiler's rule set, recorded beside every published rate s
 
 ## Flagged ambiguities
 
-- An empty Data label set and an unknown provenance were once the same value. They are distinct: the first claims a value is clean, the second admits the analysis did not look.
+- A value meaning "nothing here" has twice been reused for "we could not look". They are distinct: the first is a positive claim, the second admits the check did not run. Both instances shipped a passing verdict. An empty Data label set once stood for unknown provenance, so a leaking Handler proved clean; an empty edit baseline once stood for an unreadable file, so a Veto proved a destructive edit clean. The remedy in both cases was an optional type rather than a degenerate value.
