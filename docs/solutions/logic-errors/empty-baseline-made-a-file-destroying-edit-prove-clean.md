@@ -241,4 +241,5 @@ Then ask the agent to add a route to each and check the file afterwards. Reasoni
 - [normalize-unions-without-dropping-members](normalize-unions-without-dropping-members.md) - the polarity rule underneath both: a bounded analysis may degrade quality but must never drop an obligation.
 - [a-proxy-signal-carried-a-proof-it-never-claimed](a-proxy-signal-carried-a-proof-it-never-claimed.md) - a signal used for a claim it did not make, the same substitution defect in a different form.
 - `packages/pi/src/veto.zig:7` and `packages/tools/src/edit_simulate.zig:100-129` - the contract this bug exploited: `ok = new_count == 0`, counted against `before`. Any change to the meaning of `before` has to be read against `packages/pi/src/loop.zig:849`, where a null (and only a null) triggers the disk-read fallback.
+- [a-gate-that-counts-nothing-still-reports-a-pass](../conventions/a-gate-that-counts-nothing-still-reports-a-pass.md) - the four gate weaknesses summarized here, stated as a repo-wide convention with the earlier recurrences and the two scripts that already implement the rule.
 - Commit `ab947d20` - the fix, with the twelve other findings from the same review pass.

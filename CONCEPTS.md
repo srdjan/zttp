@@ -53,6 +53,13 @@ The share of prompts whose first generated attempt clears the Veto with no retri
 ### Policy hash
 A fingerprint of the compiler's rule set, recorded beside every published rate so two measurements taken under different rules are never compared as though they were the same. It covers the rules and not the analysis behind them, so a change to what a rule concludes can leave it identical; the build a measurement came from is what distinguishes those.
 
+## Guarding the repo
+
+### Gate
+A build step that fails when a repo invariant is violated, as distinct from a test that checks a behavior. A Gate is usually bidirectional: it fails both when something is missing from an allowlist and when an allowlist row no longer matches anything, so the list cannot rot in either direction.
+
+A Gate must assert a floor on its own input before any count it reports means anything. A Gate whose corpus is empty, whose filter matches nothing, or whose build product has no consumer reports success while checking nothing, and is then cited afterwards as evidence. Deleting a Gate's input and confirming it turns red is the check that separates the two.
+
 ## Flagged ambiguities
 
 - A value meaning "nothing here" has twice been reused for "we could not look". They are distinct: the first is a positive claim, the second admits the check did not run. Both instances shipped a passing verdict. An empty Data label set once stood for unknown provenance, so a leaking Handler proved clean; an empty edit baseline once stood for an unreadable file, so a Veto proved a destructive edit clean. The remedy in both cases was an optional type rather than a degenerate value.

@@ -132,6 +132,7 @@ Keep the probe type-correct or the type checker rejects it before the flow check
 
 ## Related Issues
 
+- [empty-baseline-made-a-file-destroying-edit-prove-clean](../logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md) - the same conflation outside the compiler, one day later, in `packages/pi`: an empty edit baseline stood for an unreadable file, so the veto proved a destructive edit clean and the apply path overwrote it. Note what that means for the rule below - "Prefer `?T` over an empty value for not found" was already written here when that bug shipped. The rule did not travel across a package boundary, which is the argument for stating it as a repo-wide convention rather than a flow-checker lesson.
 - [normalize-unions-without-dropping-members](../logic-errors/normalize-unions-without-dropping-members.md) - the same polarity rule in `type_pool.zig`; cite it for the general principle rather than restating it
 - [sub-handler-contract-extraction-strict-profile](sub-handler-contract-extraction-strict-profile.md) - fail-closed discipline around the same compile pipeline
 - `scripts/check-proof-swallow.sh` - the standing gate for the sibling class (swallowed errors); this learning is its missing counterpart
