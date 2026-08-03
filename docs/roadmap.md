@@ -362,11 +362,21 @@ emittable set per step narrows to one typed expression in a known context. Set
 convergence stops being statistical and becomes structural.
 
 Observable: round-trips to first green fall for hole-mode sessions against whole-file
-sessions on the same model. The session ledger can already express that comparison, and
-[convergence.md](convergence.md) is where the comparison gets published. The turn mode
-ships; what remains is the measurement, which needs hole-mode sessions recorded against a
-live model. The frozen corpus cannot answer it - a cassette replay cannot produce turns
-that were never recorded.
+sessions on the same model. Measured on 2026-08-03 and published as the fourteenth row of
+[convergence.md](convergence.md): median 3 round-trips for the hole arm against 5 for
+whole-file, over four cases paired with the whole-file case of the same task. Every hole
+case also passed first draft with zero veto retries, which is the mechanism rather than
+the aim - a `fill_hole` edit cannot produce a whole-file rejection.
+
+Two caveats travel with the number. The hole arm is handed the frame, so part of the
+saving is work it was not asked to do; that is the mechanism, and it means the comparison
+is hole mode end to end against writing from scratch. And the arm seeds one hole per case
+because two fills in one turn do not compose - `zts_expert_fill_hole` proposes an edit and
+re-reads from disk each call, so the second runs against the original bytes. That is a
+live defect in the loop, written up in
+[two hole fills in one turn do not compose](solutions/logic-errors/two-hole-fills-in-one-turn-do-not-compose.md),
+and it is the next thing to fix here: multi-hole cases can join the comparison once fills
+compose.
 
 ### 4. Widen the mechanical repair lane (done)
 
@@ -687,12 +697,18 @@ item 2 provides a baseline to compare against. Item 5 runs the day item 2's live
 works. Item 7 follows item 1. Item 8 waits for a second client or for the vocabulary,
 whichever arrives first.
 
-Every item on this agenda has shipped. What is open is measurement, not construction,
-and both open measurements are the same shape: item 3's hole-mode comparison and item
-5's small-model row each need sessions recorded against a live model. A cassette replay
-is a ratchet over outcomes already recorded - it can prove a compiler change did not
-flip one, and cannot produce a turn nobody recorded. Neither is blocked on this
-repository.
+Every item on this agenda has shipped, and as of 2026-08-03 both open measurements are
+closed too. Item 5's small-model row and item 3's hole-mode comparison are published as
+the thirteenth and fourteenth rows of [convergence.md](convergence.md). Both needed
+sessions recorded against a live model, which is why they stayed open, and both needed a
+fix to the harness before they could be published honestly: the model column was printed
+from a compile-time constant rather than read from the cassettes, and the hole arm's
+first seeds carried a violation the differential veto could not see past.
+
+What that leaves open is not measurement either. It is the two defects the measuring
+turned up - hole fills that do not compose across a turn, and the recording variance that
+moved a case between two recordings of the same prompt - plus the standing note that four
+paired cases is a thin basis for the round-trip comparison.
 
 What the agenda leaves behind, for the next reader deciding where the gap still is: the
 provable set is true as far as the standing checks can see (item 1, and the two fail-open

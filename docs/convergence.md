@@ -245,6 +245,7 @@ policy hash - only the model differs, and the corpus column says so by staying
 |---|---|---|---|---|
 | Sonnet 4.6 | 93% (15/16) | 4 | 100% (10/10) | 16/16 |
 | Haiku 4.5 | 25% (4/16) | 3 | 90% (9/10) | 16/16 |
+| 2026-08-03 | `39449aff` | `83c9c0c040e8` | 20 | claude-sonnet-4-6 | `118885d3f647` | 95% (19/20) | 4 | 100% (14/14) |
 
 The headline gap is nearly four to one, and **reached-green is 16/16 for both**.
 The tiers differ in first-draft aim, not in whether they converge. That is the
@@ -271,6 +272,54 @@ Main holds the Sonnet cassettes, not these. A corpus recorded off-headline
 measures but does not gate, so leaving Haiku in place would quietly retire the
 regression check that protects the headline. This row is reproducible from its
 own commit, which is what the commit column is for.
+
+## The fourteenth row: hole mode against whole-file
+
+Roadmap item 3's measurement, which had been open since the turn mode shipped
+because a cassette replay cannot produce a turn nobody recorded. Four cases now
+pair with the whole-file case of the same task, so the task is held fixed and
+only the turn's starting state varies.
+
+| Arm | Median round-trips | n |
+|---|---|---|
+| whole-file | 5 | 16 |
+| holes | **3** | 4 |
+
+The prediction holds. Every hole case also passed first draft with zero veto
+retries, which is the mechanism rather than the model's aim: a `fill_hole` edit
+replaces the bytes of one `hole()` call, so it cannot produce the whole-file
+rejection the veto exists to catch. That is item 3's claim in one line - the
+emittable set per step narrows to one typed expression in a known context, and
+set convergence stops being statistical.
+
+The number is honest about what it includes. The hole arm is handed the frame -
+imports, branch structure, and the narrow `Spec<...>` - so part of the saving is
+work it was not asked to do. That is the mechanism, not a flaw, but it means
+this compares hole mode end to end against writing from scratch, not the model's
+aim against itself.
+
+Getting there took two corrections worth recording, because both were mistakes
+in the measurement rather than in the thing measured.
+
+The seeds first went in without the `Spec<...>` their finished form needs, so
+they checked with a ZTS500 already outstanding. The veto is differential: it asks
+whether an edit introduces a *new* violation. A baseline that already carries the
+violation hands that check a state it cannot see past, so filling a hole added
+nothing and three cases recorded a first-draft pass on programs that did not
+check clean. `fill_hole` can never touch a signature, so the agent could not have
+cleared it either. Only the intent checks caught it. That is the weak-baseline
+family one step along from
+[an empty baseline made a file-destroying edit prove clean](solutions/logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md):
+a differential check is only as strong as the state it differs against.
+
+And the arm seeds one hole per case, which is its own finding rather than a
+simplification. `zts_expert_fill_hole` proposes an edit and re-reads the file
+from disk on every call, so two fills in one turn do not compose - the second
+runs against the original bytes. The model diagnosed it mid-session, fell back to
+a whole-file `apply_edit`, and ended with the program still holed. Written up in
+[two hole fills in one turn do not compose](solutions/logic-errors/two-hole-fills-in-one-turn-do-not-compose.md).
+Measuring multi-hole cases would fold that loop defect into the round-trip number
+and report a bug as a cost.
 
 ## Reading the table
 
