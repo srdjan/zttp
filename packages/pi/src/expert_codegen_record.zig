@@ -213,7 +213,19 @@ const RecordCase = struct {
     /// intent-checked, which the summary reports separately rather than
     /// counting as a pass.
     intent: ?codegen.IntentCheck = null,
+    /// How the turn starts. `whole_file` hands the agent an empty workspace and
+    /// asks for a handler; `holes` seeds a skeleton whose response expressions
+    /// are `hole()` and asks for them to be filled one at a time.
+    ///
+    /// Roadmap item 3 predicts round-trips to first green fall for hole mode
+    /// against whole-file mode on the same model, and nothing could measure it:
+    /// the corpus held no hole-mode session, and a cassette replay cannot
+    /// produce a turn nobody recorded. The two modes are reported apart so the
+    /// comparison is a published number rather than an argument.
+    mode: Mode = .whole_file,
 };
+
+pub const Mode = enum { whole_file, holes };
 
 /// The headline model for the published convergence number.
 ///
@@ -246,6 +258,12 @@ pub fn corpusVersion() [64]u8 {
         // The pinned outcome is part of the corpus identity: flipping a case
         // from accepted-failure to expected-pass changes what the rate means.
         hasher.update(&[_]u8{@intFromBool(rc.expect_first_draft_pass)});
+        hasher.update("\x00");
+        // So is the turn mode. The same prompt against a holed skeleton and
+        // against an empty workspace are two different measurements, and a
+        // corpus version that could not tell them apart would let the split
+        // change under a stable hash.
+        hasher.update(&[_]u8{@intFromEnum(rc.mode)});
         hasher.update("\x00");
         // So is the intent spec: loosening what a case must do changes what a
         // published intent-pass rate is a rate of.
@@ -697,6 +715,217 @@ const record_corpus = [_]RecordCase{
         },
         .expect_first_draft_pass = true,
     },
+
+    // ---------------------------------------------------------------------
+    // Hole-mode arm. Roadmap item 3's measurement: round-trips to first green
+    // for a holed skeleton against the same task written from scratch.
+    //
+    // Each of these four pairs with the whole-file case of the same task name
+    // above, so the comparison holds the task fixed and varies only how the
+    // turn starts. The seeded skeleton carries the imports and the branch
+    // structure and leaves every response expression a `hole()`; the agent
+    // fills them with `zts_expert_fill_hole`, which can only replace the bytes
+    // of one hole call, so "one hole per turn" is the shape of the edit rather
+    // than an instruction.
+    //
+    // The confound is worth naming rather than hiding: the hole arm is handed
+    // the frame for free, so some of any round-trip saving is work it was not
+    // asked to do. That is the mechanism item 3 describes - the compiler
+    // constructs the frame and the emittable set per step narrows to one typed
+    // expression - not a flaw in the comparison, but it does mean the number
+    // measures the mechanism end to end rather than the model's aim alone.
+    //
+    // Every skeleton was checked before recording: each parses, enumerates both
+    // paths, and reports its holes with an `expectedType` and an `inScope`
+    // list. `hole()` is typed `never`, so a holed program still proves.
+    //
+    // Each seed carries the narrow `Spec<...>` its finished form needs, and the
+    // first recording of this arm is why. Without it the seeds check with a
+    // ZTS500 already outstanding, and that quietly broke the comparison in the
+    // hole arm's favour.
+    //
+    // The veto is differential - it asks whether an edit introduces a NEW
+    // violation against the file it started from. A seed that already fails a
+    // check hands that check a baseline it cannot see past, so filling a hole
+    // adds nothing and the veto passes on a program that does not check clean.
+    // `zts_expert_fill_hole` replaces the bytes of one `hole()` call and can
+    // never touch a signature, so the agent could not have cleared it either.
+    // All three non-trivial cases recorded a first-draft pass and then failed
+    // their intent check, which is what surfaced it.
+    //
+    // That is the weak-baseline family again, one level along from
+    // docs/solutions/logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md:
+    // there an empty baseline stood for an unreadable file, here a baseline
+    // carrying the violation stands for a program that does not hold it. A
+    // differential check is only as strong as the state it differs against, and
+    // seeding that state is the corpus author's job.
+    //
+    // So the seeds are clean apart from their holes, and the only work the arm
+    // measures is producing the right expression - which is the thing the
+    // comparison is about.
+    //
+    // One hole per case, for a second reason the first recordings surfaced.
+    // `zts_expert_fill_hole` proposes an edit and re-reads the file from disk
+    // on every call, so two fills in one turn do not compose: the second one
+    // runs against the original bytes, not against the result of the first. The
+    // model said so itself mid-session - "the fill_hole tool is working off the
+    // on-disk file (which still has hole 1 unfilled)" - and ended the turn with
+    // a hole still in the program. Written up separately; it is a defect in the
+    // loop, not in the corpus.
+    //
+    // Measuring a workflow the loop does not support would report that defect
+    // as a round-trip cost and confuse the two. The persona's rule is one hole
+    // per turn and the eval gives each case one turn, so one hole per case is
+    // what the arm can honestly measure. The multi-hole case belongs in the
+    // comparison once fills compose.
+    .{
+        .name = "health-holes",
+        .prompt = "handler.ts has a hole() where its response belongs. Fill it so the " ++
+            "handler responds to GET /health with Response.json({ ok: true }). Use " ++
+            "zts_expert_holes to read the frame and zts_expert_fill_hole to fill it.",
+        .seed_files = &.{
+            .{
+                .path = "handler.ts",
+                .bytes =
+                \\function handler(req: Request): Response & Spec<"deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\  return hole();
+                \\}
+                \\
+                ,
+            },
+        },
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"GET /health reports ok"}
+            \\{"type":"request","method":"GET","url":"/health","headers":{},"body":""}
+            \\{"type":"expect","status":200,"bodyContains":"\"ok\":true"}
+            \\
+            ,
+        },
+        .mode = .holes,
+        .expect_first_draft_pass = true,
+    },
+    .{
+        .name = "cache-counter-holes",
+        .prompt = "handler.ts reads the \"hits\" counter from the \"counters\" namespace and " ++
+            "has a hole() on each branch. Fill them so the handler returns the counter as " ++
+            "JSON under a \"hits\" key, treating a missing counter as \"0\". Use " ++
+            "zts_expert_holes for the frame and zts_expert_fill_hole to fill each one.",
+        .seed_files = &.{
+            .{
+                .path = "handler.ts",
+                .bytes =
+                \\import { cacheGet } from "zttp:cache";
+                \\
+                \\function handler(req: Request): Response & Spec<"retry_safe" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\  const hits = cacheGet("counters", "hits");
+                \\  if (hits === undefined) {
+                \\    return Response.json({ hits: "0" });
+                \\  }
+                \\  return hole();
+                \\}
+                \\
+                ,
+            },
+        },
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the stored counter reaches the response body"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"cache","fn":"cacheGet","args":["counters","hits"],"result":"41"}
+            \\{"type":"expect","status":200,"bodyContains":"41"}
+            \\
+            ,
+        },
+        .mode = .holes,
+        .expect_first_draft_pass = true,
+    },
+    .{
+        .name = "egress-options-holes",
+        .prompt = "handler.ts already calls the upstream with an init object and has a hole() " ++
+            "on each branch. Fill them so it returns the upstream JSON on success and a 502 " ++
+            "when the call fails. Use zts_expert_holes for the frame and " ++
+            "zts_expert_fill_hole to fill each one.",
+        .seed_files = &.{
+            .{
+                .path = "handler.ts",
+                .bytes =
+                \\import { fetch } from "zttp:fetch";
+                \\
+                \\function handler(req: Request): Response & Spec<"state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\  const res = fetch("https://api.example.com/v1/status", { method: "GET", headers: { accept: "application/json" } });
+                \\  if (!res.ok) {
+                \\    return Response.json({ error: "upstream" }, { status: 502 });
+                \\  }
+                \\  return hole();
+                \\}
+                \\
+                ,
+            },
+        },
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the upstream payload reaches the response body"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["https://api.example.com/v1/status"],"result":{"status":200,"body":"{\"state\":\"green\"}"}}
+            \\{"type":"expect","status":200,"bodyContains":"green"}
+            \\
+            ,
+        },
+        .mode = .holes,
+        .expect_first_draft_pass = true,
+    },
+    .{
+        .name = "sibling-helper-holes",
+        .prompt = "handler.ts imports displayName() and apiToken() from ./lib/settings.ts and " ++
+            "has a hole() on each branch. Fill them so the handler returns 503 when " ++
+            "apiToken() is undefined and otherwise Response.json({ name: displayName() }). " ++
+            "The token must never appear in the response. Use zts_expert_holes for the " ++
+            "frame and zts_expert_fill_hole to fill each one.",
+        .seed_files = &.{
+            .{
+                .path = "lib/settings.ts",
+                .bytes =
+                \\import { env } from "zttp:env";
+                \\
+                \\export function apiToken(): string | undefined {
+                \\  return env("API_TOKEN");
+                \\}
+                \\
+                \\export function displayName(): string {
+                \\  return env("APP_NAME") ?? "unnamed";
+                \\}
+                \\
+                ,
+            },
+            .{
+                .path = "handler.ts",
+                .bytes =
+                \\import { apiToken, displayName } from "./lib/settings.ts";
+                \\
+                \\function handler(req: Request): Response & Spec<"deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\  if (apiToken() === undefined) {
+                \\    return Response.json({ error: "unconfigured" }, { status: 503 });
+                \\  }
+                \\  return hole();
+                \\}
+                \\
+                ,
+            },
+        },
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the configured name crosses the file boundary and the token does not"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"env","fn":"env","args":["API_TOKEN"],"result":"tok-secret-value"}
+            \\{"type":"io","seq":1,"module":"env","fn":"env","args":["APP_NAME"],"result":"orders-api"}
+            \\{"type":"expect","status":200,"body":"{\"name\":\"orders-api\"}"}
+            \\
+            ,
+        },
+        .mode = .holes,
+        .expect_first_draft_pass = true,
+    },
 };
 
 // Record the real expert agent against the corpus and report the live baseline.
@@ -1066,6 +1295,48 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             summary.intent_checked,
         },
     );
+
+    // Roadmap item 3's comparison, reported apart from the headline because it
+    // is a different claim: not how often a first draft lands, but whether a
+    // constructed frame costs fewer round-trips than an empty workspace.
+    //
+    // Medians rather than means, for the reason the headline column already
+    // gives - one case that never converges must not set the number for the
+    // rest. Both arms assert a floor before their median is printed: a mode
+    // with no cases would otherwise report 0 and read as "free".
+    {
+        var whole_rt: std.ArrayList(u8) = .empty;
+        defer whole_rt.deinit(a);
+        var hole_rt: std.ArrayList(u8) = .empty;
+        defer hole_rt.deinit(a);
+        for (record_corpus, 0..) |rc, i| {
+            if (i >= results.items.len) break;
+            const rt = results.items[i].roundtrips;
+            switch (rc.mode) {
+                .whole_file => try whole_rt.append(a, rt),
+                .holes => try hole_rt.append(a, rt),
+            }
+        }
+        if (whole_rt.items.len == 0 or hole_rt.items.len == 0) {
+            std.debug.print(
+                "[codegen-holes] one arm is empty ({d} whole-file, {d} holes); the comparison" ++
+                    " cannot be published from a corpus that holds only one mode\n",
+                .{ whole_rt.items.len, hole_rt.items.len },
+            );
+            return error.HoleComparisonArmEmpty;
+        }
+        std.mem.sort(u8, whole_rt.items, {}, std.sort.asc(u8));
+        std.mem.sort(u8, hole_rt.items, {}, std.sort.asc(u8));
+        std.debug.print(
+            "[codegen-holes] median round-trips: whole_file={d} (n={d}), holes={d} (n={d})\n",
+            .{
+                whole_rt.items[whole_rt.items.len / 2],
+                whole_rt.items.len,
+                hole_rt.items[hole_rt.items.len / 2],
+                hole_rt.items.len,
+            },
+        );
+    }
 
     if (zttp_bin == null) {
         std.debug.print(
