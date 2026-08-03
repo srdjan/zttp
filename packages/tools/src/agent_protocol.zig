@@ -343,13 +343,13 @@ pub fn handleRequest(
     if (op == .normalize and boolField(input, "write")) {
         return writeErrorEnvelope(&json, op_name, identity, .{
             .code = .operation_not_implemented,
-            .message = "normalize does not write in schema version 2; apply the returned canonical_source through apply_repair (phase 6)",
+            .message = "normalize does not write in schema version 2; apply the returned canonical_source through apply_repair",
             .field = "input.write",
         });
     }
 
-    // Spec 4.8: one guard rule for every operation, run before any work. When
-    // `apply_repair` lands in phase 6, this ordering is what makes a stale
+    // Spec 4.8: one guard rule for every operation, run before any work. This
+    // ordering is what makes a stale
     // request write nothing.
     if (try checkExpected(arena.allocator(), root.get("expected"), identity)) |stale| {
         return writeErrorEnvelope(&json, op_name, identity, stale);

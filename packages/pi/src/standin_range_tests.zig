@@ -322,6 +322,17 @@ test "stand-in gate: generated paraphrases route to their own range entry" {
     try testing.expect(total >= 200);
     try testing.expectEqual(range.entries.len, prompt_grammar.in_range.len);
 
+    // Equal lengths plus a findById that resolves is not one-grammar-per-entry:
+    // two grammars sharing an id satisfy both while leaving a range entry with
+    // no generated coverage at all. Assert every entry is claimed exactly once.
+    for (range.entries) |entry| {
+        var claims: usize = 0;
+        for (prompt_grammar.in_range) |g| {
+            if (std.mem.eql(u8, g.id, entry.id)) claims += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), claims);
+    }
+
     var checked: usize = 0;
     var misroutes: usize = 0;
     for (prompt_grammar.in_range) |grammar| {
@@ -342,9 +353,15 @@ test "stand-in gate: generated paraphrases route to their own range entry" {
         }
     }
 
+    // Leads and tails carry no token `classify` searches for, so every
+    // lead-by-tail variant of a core is the same routing decision. Report the
+    // distinct decisions alongside the rendering count so the headline is not
+    // read as breadth the corpus does not have.
+    var decisions: usize = 0;
+    for (prompt_grammar.in_range) |g| decisions += g.cores.len;
     std.debug.print(
-        "[standin-gate] generated routing {d}/{d} correct; misroutes={d}\n",
-        .{ checked - misroutes, checked, misroutes },
+        "[standin-gate] generated routing {d}/{d} renderings correct over {d} distinct cores; misroutes={d}\n",
+        .{ checked - misroutes, checked, decisions, misroutes },
     );
     try testing.expectEqual(total, checked);
     try testing.expectEqual(@as(usize, 0), misroutes);
@@ -382,12 +399,20 @@ test "stand-in gate: generated out-of-range prompts never reach a playbook" {
                 .source = "function handler(req: Request): Response { return Response.json({ ok: true }); }\n",
             });
             if (std.mem.indexOf(u8, reply, "[standin-miss]") == null) false_fires += 1;
+            // The miss marker alone cannot fail here: renderResponse
+            // re-classifies and returns renderMiss for any kind outside the
+            // range table, so the counter above is structurally zero and the
+            // `hasPlaybook` guard is what carries this gate. Assert the reply
+            // is a usable refusal rather than merely a marker, which is the
+            // part that can actually regress.
+            try testing.expect(std.mem.indexOf(u8, reply, "supported range is") != null);
+            try testing.expect(std.mem.indexOf(u8, reply, "apply_edit") == null);
         }
     }
 
     std.debug.print(
-        "[standin-gate] generated false-fire {d}/{d}; required=0\n",
-        .{ false_fires, checked },
+        "[standin-gate] generated out-of-range {d} prompts, all refused; false-fire {d}\n",
+        .{ checked, false_fires },
     );
     try testing.expectEqual(total, checked);
     try testing.expectEqual(@as(usize, 0), false_fires);
@@ -408,15 +433,31 @@ test "stand-in gate: generated prompts stay disjoint from the frozen corpora" {
             while (i < grammar.count()) : (i += 1) {
                 const prompt = try prompt_grammar.generate(allocator, grammar, i);
                 checked += 1;
+                // Case-insensitive, and paraphrases count too: `classify`
+                // matches with `containsFold`, so a core that differs from a
+                // frozen prompt only in its first letter is the same routing
+                // decision the frozen corpus already makes.
                 for (range.entries) |entry| {
-                    try testing.expect(!std.mem.eql(u8, prompt, entry.canonical_prompt));
+                    try testing.expect(!eqlFold(prompt, entry.canonical_prompt));
+                    for (entry.paraphrases) |paraphrase| {
+                        try testing.expect(!eqlFold(prompt, paraphrase));
+                    }
                 }
                 for (range.negative_corpus) |negative| {
-                    try testing.expect(!std.mem.eql(u8, prompt, negative.prompt));
+                    try testing.expect(!eqlFold(prompt, negative.prompt));
                 }
             }
         }
     }
     try testing.expect(checked >= 300);
     std.debug.print("[standin-gate] disjointness {d} generated prompts\n", .{checked});
+}
+
+/// ASCII case-insensitive equality, matching how `classify` compares.
+fn eqlFold(a: []const u8, b: []const u8) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| {
+        if (std.ascii.toLower(x) != std.ascii.toLower(y)) return false;
+    }
+    return true;
 }

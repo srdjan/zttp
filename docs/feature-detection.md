@@ -207,7 +207,7 @@ Logical compound assignments require short-circuit semantics and are not support
 | Object method `{ go() { ... } }` | Hold an arrow function in the property: `{ go: () => ... }` |
 | Getter `{ get x() { ... } }` | Call an explicit function |
 | Setter `{ set x(v) { ... } }` | Call an explicit function |
-| Numeric key `{ 1: "a" }` | Use a string key, or a number-keyed `Dict` |
+| Numeric key `{ 1: "a" }` | Use a string key, or an array when the keys are dense indices |
 
 ### Object Built-in Methods
 

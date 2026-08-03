@@ -30,7 +30,7 @@ tags:
 
 A self-extracting Zttp artifact stores the capability policy it will enforce as section 4 of its appended payload. Loading checks the appended payload with CRC-32, while artifact creation writes a freshly computed checksum into the trailer (`packages/runtime/src/self_extract.zig:90-115`, `packages/runtime/src/self_extract.zig:173`). CRC detects accidental corruption, but an attacker who can edit the artifact can change section 4 and recompute the checksum.
 
-The Ed25519 JWS did not commit to those section-4 bytes. Two existing claims sounded related but represented different data: `policySha256` is the diagnostic rule-registry hash, and `capabilityHash` is the contract capability-matrix hash (`packages/runtime/src/attest/build_receipt.zig:72-81`). Neither covered the serialized env names, egress hosts, cache namespaces, or SQL query policy consumed by the deployed runtime.
+The Ed25519 JWS did not commit to those section-4 bytes. Two existing claims sounded related but represented different data: `policySha256` is the diagnostic rule-registry hash, and `capabilityHash` is the contract capability-matrix hash (`packages/runtime/src/attest/build_receipt.zig:80-98`). Neither covered the serialized env names, egress hosts, cache namespaces, or SQL query policy consumed by the deployed runtime.
 
 That left a gap between what the attestation vouched for and what the artifact enforced. An attacker could widen the embedded policy, recompute CRC-32, and preserve a valid `Zttp-Attest` envelope.
 
@@ -40,7 +40,7 @@ This was an artifact data-authenticity failure, not a weakness in Ed25519: integ
 
 - A modified self-extract payload could pass its checksum because the checksum was recomputable (`packages/runtime/src/self_extract.zig:103-115`).
 - The parsed section-4 policy is wired directly into `dev_capability_policy`, the enforcement source for the appended bytecode (`packages/runtime/src/runtime_cli.zig:706-721`). A successful mutation therefore changed live capability decisions rather than only metadata.
-- The attestation could still verify cryptographically because its existing policy- and capability-named claims described the analyzer registry and capability matrix, not section 4 (`packages/runtime/src/attest/build_receipt.zig:80-81`).
+- The attestation could still verify cryptographically because its existing policy- and capability-named claims described the analyzer registry and capability matrix, not section 4 (`packages/runtime/src/attest/build_receipt.zig:80, :95`).
 - Older receipts have no runtime-policy commitment. Treating absence as success for a deployed self-extract artifact would preserve the vulnerability.
 
 ## What Didn't Work
@@ -51,7 +51,7 @@ CRC-32 is appropriate as an accidental-corruption check, but it is not keyed and
 
 ### Reusing `policySha256` or `capabilityHash`
 
-Those claims have different meanings. `policySha256` comes from `rule_registry.policyHash()`, while `capabilityHash` comes from `contract.capabilities.hash` (`packages/runtime/src/attest/build_receipt.zig:80-81`). Reinterpreting either would blur established contracts and still would not bind the exact bytes used by runtime enforcement.
+Those claims have different meanings. `policySha256` comes from `rule_registry.policyHash()`, while `capabilityHash` comes from `contract.capabilities.hash` (`packages/runtime/src/attest/build_receipt.zig:80, :95`). Reinterpreting either would blur established contracts and still would not bind the exact bytes used by runtime enforcement.
 
 ### Re-deriving or independently re-serializing the policy
 
@@ -73,7 +73,7 @@ Verification remains able to parse older JWS payloads: if the field is absent, `
 
 The build path derives the runtime policy and serializes it before constructing the receipt. It hashes that byte slice with SHA-256, passes the lowercase hex digest to the receipt signer, and then passes the same `policy_section` slice to artifact creation (`packages/runtime/src/build_command.zig:558-583`, `packages/runtime/src/build_command.zig:586-597`). `serializePayload` writes that supplied slice directly as section 4 (`packages/runtime/src/self_extract.zig:277-284`).
 
-The receipt builder threads the digest into `Claims`. The dev/live-reload receipt path, which has no self-extract section 4, explicitly uses the all-zero sentinel (`packages/runtime/src/attest/build_receipt.zig:18-42`, `packages/runtime/src/attest/build_receipt.zig:45-61`, `packages/runtime/src/attest/build_receipt.zig:109-123`).
+The receipt builder threads the digest into `Claims`. The dev/live-reload receipt path, which has no self-extract section 4, explicitly uses the all-zero sentinel (`packages/runtime/src/attest/build_receipt.zig:18-42`, `packages/runtime/src/attest/build_receipt.zig:45-61`, `packages/runtime/src/attest/build_receipt.zig:120-134`).
 
 ### Hash raw section 4 before deserialization
 
@@ -138,8 +138,8 @@ Finally, validation occurs before runtime-pool initialization, so a bad artifact
 
 ## Related Issues
 
-- `policySha256` remains the diagnostic rule-registry commitment and must not be treated as a runtime allowlist commitment (`packages/runtime/src/attest/build_receipt.zig:80-81`).
-- `capabilityHash` remains the contract capability-matrix commitment and does not encode allowlist values (`packages/runtime/src/attest/build_receipt.zig:80-81`).
+- `policySha256` remains the diagnostic rule-registry commitment and must not be treated as a runtime allowlist commitment (`packages/runtime/src/attest/build_receipt.zig:80, :95`).
+- `capabilityHash` remains the contract capability-matrix commitment and does not encode allowlist values (`packages/runtime/src/attest/build_receipt.zig:80, :95`).
 - Dev/live reload intentionally has no section-4 commitment and continues to use the sentinel (`packages/runtime/src/attest/build_receipt.zig:45-61`).
 - [sub-handler-contract-extraction-strict-profile](sub-handler-contract-extraction-strict-profile.md) - the other end of a `RuntimePolicy`'s life. Both derive one through `contractToRuntimePolicy`: this record covers the deployed path, where the policy is serialized, hashed, signed, and embedded as section 4; that one covers in-process dispatch, where it is derived per sub-handler target and never leaves the process.
 - No external issue or pull-request reference was recorded for this solution.

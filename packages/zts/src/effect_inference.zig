@@ -565,7 +565,13 @@ pub const Analyzer = struct {
         const call = self.ir_view.getCall(node) orelse return;
 
         if (self.calleeObjectProperty(call.callee)) |op| {
-            if (self.durable_callback_depth == 0 and isNonDeterministic(op.object, op.property)) {
+            // The durable-step exemption holds only for reads the step records
+            // and replays. `performance.now` is not one, so it stays varying at
+            // any depth rather than being certified by an exemption whose
+            // premise it does not meet.
+            const exempt = self.durable_callback_depth > 0 and
+                !known_globals.isUnrecordableVaryingRead(op.object, op.property);
+            if (!exempt and isNonDeterministic(op.object, op.property)) {
                 row.deterministic = false;
                 row.pure = false;
             }
@@ -770,9 +776,29 @@ pub const Analyzer = struct {
 
     const ObjectProperty = struct { object: []const u8, property: []const u8 };
 
+    /// The receiver and property of a member call, but only when the receiver
+    /// is an undeclared global.
+    ///
+    /// This is the sole feeder of the varying-read check, and it has to apply
+    /// the same precondition as `flow_checker.isVaryingGlobalRead`, which
+    /// requires `binding.kind == .undeclared_global`. Without it the two halves
+    /// of one shared list disagree about what a receiver is: a helper taking a
+    /// parameter named `performance` or `Date` and calling `.now()` on it was
+    /// refused here while the flow checker correctly ignored it.
     fn calleeObjectProperty(self: *const Analyzer, callee: NodeIndex) ?ObjectProperty {
         if (self.ir_view.getTag(callee) != .member_access) return null;
         const member = self.ir_view.getMember(callee) orelse return null;
+        // Tag first: `getBinding` decodes binding fields out of the node's raw
+        // data, so calling it on a non-identifier receiver (`f().now()`,
+        // `obj[k].now()`) traps on an invalid enum rather than returning null.
+        if (self.ir_view.getTag(member.object) != .identifier) return null;
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        // `.global` and `.undeclared_global` are both the builtin; a parameter
+        // or local is neither. Accepting only `.undeclared_global` here
+        // silently stopped flagging a genuine builtin bound as `.global`, which
+        // the ratchet caught as a weakened proof. This matches
+        // `contract_builder`'s receiver test.
+        if (binding.kind != .global and binding.kind != .undeclared_global) return null;
         const object_name = self.identifierName(member.object) orelse return null;
         const property_name = self.resolveAtomName(member.property) orelse return null;
         return .{ .object = object_name, .property = property_name };

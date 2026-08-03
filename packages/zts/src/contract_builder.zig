@@ -12,6 +12,21 @@ const std = @import("std");
 const handler_contract = @import("handler_contract.zig");
 const contract_types = @import("contract_types.zig");
 const api_schema = @import("api_schema.zig");
+const known_globals = @import("known_globals.zig");
+
+/// Display form for a varying read, derived from the shared list so a new
+/// entry cannot reach the proof card without a snippet.
+fn snippetForVaryingRead(object_name: []const u8, property_name: []const u8) []const u8 {
+    inline for (known_globals.varying_reads) |read| {
+        if (std.mem.eql(u8, object_name, read.object) and
+            std.mem.eql(u8, property_name, read.property))
+        {
+            return read.object ++ "." ++ read.property ++ "()";
+        }
+    }
+    return "a varying global read";
+}
+
 const json_utils = @import("json_utils.zig");
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
@@ -1558,7 +1573,11 @@ pub const ContractBuilder = struct {
             }
 
             // Detect nondeterministic builtins: Date.now(), Math.random()
-            if (!self.has_nondeterministic_builtin and callee_tag == .member_access and !self.isInsideDurableStepCallback(idx)) {
+            // The durable-step exemption is applied per read below rather than
+            // here, because it only holds for reads a step records and
+            // replays. `performance.now` is not one, so skipping the whole
+            // check inside a step certified it.
+            if (!self.has_nondeterministic_builtin and callee_tag == .member_access) {
                 const member = self.ir_view.getMember(call.callee) orelse continue;
                 const obj_tag = self.ir_view.getTag(member.object) orelse continue;
                 if (obj_tag == .identifier) {
@@ -1566,9 +1585,22 @@ pub const ContractBuilder = struct {
                     if (binding.kind == .global or binding.kind == .undeclared_global) {
                         const obj_name = self.resolveAtomName(binding.name_atom) orelse continue;
                         const prop_name = self.resolveAtomName(member.property) orelse continue;
-                        const is_date_now = std.mem.eql(u8, obj_name, "Date") and std.mem.eql(u8, prop_name, "now");
-                        const is_math_random = std.mem.eql(u8, obj_name, "Math") and std.mem.eql(u8, prop_name, "random");
-                        if (is_date_now or is_math_random) {
+                        // Shares `known_globals.varying_reads` with the flow
+                        // checker and effect inference. This was a third
+                        // hand-copy of the same pair and was missed when the
+                        // other two were unified, so `performance.now()` lost
+                        // its proof-card location and the HUD printed the
+                        // deterministic failure with no line or snippet.
+                        // Order matters for cost, not just correctness. The
+                        // name check is two string compares; the durable-step
+                        // check walks ancestors, so asking it for every member
+                        // call in a handler is quadratic enough to trip the
+                        // runtime's handler and WebSocket timeouts. Only a read
+                        // that actually varies is worth that walk.
+                        if (!known_globals.isVaryingRead(obj_name, prop_name)) continue;
+                        const exempt = !known_globals.isUnrecordableVaryingRead(obj_name, prop_name) and
+                            self.isInsideDurableStepCallback(idx);
+                        if (!exempt) {
                             self.has_nondeterministic_builtin = true;
                             // Capture the first call site so the HUD can print
                             // "-deterministic at handler.ts:N: Date.now()".
@@ -1577,7 +1609,7 @@ pub const ContractBuilder = struct {
                                 self.nondeterministic_cause = .{
                                     .line = l.line,
                                     .column = l.column,
-                                    .snippet = if (is_date_now) "Date.now()" else "Math.random()",
+                                    .snippet = snippetForVaryingRead(obj_name, prop_name),
                                 };
                             }
                         }

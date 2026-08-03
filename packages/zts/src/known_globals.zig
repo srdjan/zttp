@@ -31,7 +31,6 @@ pub const names = [_][]const u8{
     "parseInt",
     "race",
     "range",
-    "performance",
     "renderToString",
     "resource",
 };
@@ -48,20 +47,46 @@ pub const names = [_][]const u8{
 /// A name missing here is a fail-open: the read costs nothing and the property
 /// is claimed anyway. Adding a runtime clock or entropy source means adding it
 /// here.
-pub const VaryingRead = struct { object: []const u8, property: []const u8 };
-
-pub const varying_reads = [_]VaryingRead{
-    .{ .object = "Date", .property = "now" },
-    .{ .object = "Math", .property = "random" },
-    .{ .object = "performance", .property = "now" },
+pub const VaryingRead = struct {
+    object: []const u8,
+    property: []const u8,
+    /// True when a `durable.step()` callback records this read and replays the
+    /// recorded value on recovery.
+    ///
+    /// The analyzers exempt a varying read inside a durable step, and that
+    /// exemption is only sound when the runtime actually records it.
+    /// `Date.now` and `Math.random` do, through `durable.replayNext` and
+    /// `durable.persistIO` plus `recorder.recordIO`. `performance.now`
+    /// (`builtins/date.zig`) does none of the three: it reads a live monotonic
+    /// clock every time. Exempting it would certify a workflow as
+    /// `deterministic` and `idempotent` that takes a different branch on
+    /// replay than the one it was proven to take.
+    recorded_in_durable_step: bool,
 };
 
-pub fn isVaryingRead(object_name: []const u8, property_name: []const u8) bool {
+pub const varying_reads = [_]VaryingRead{
+    .{ .object = "Date", .property = "now", .recorded_in_durable_step = true },
+    .{ .object = "Math", .property = "random", .recorded_in_durable_step = true },
+    .{ .object = "performance", .property = "now", .recorded_in_durable_step = false },
+};
+
+fn find(object_name: []const u8, property_name: []const u8) ?VaryingRead {
     for (varying_reads) |candidate| {
         if (std.mem.eql(u8, object_name, candidate.object) and
-            std.mem.eql(u8, property_name, candidate.property)) return true;
+            std.mem.eql(u8, property_name, candidate.property)) return candidate;
     }
-    return false;
+    return null;
+}
+
+pub fn isVaryingRead(object_name: []const u8, property_name: []const u8) bool {
+    return find(object_name, property_name) != null;
+}
+
+/// True when this read varies AND a durable step cannot record it, so the
+/// varying-read verdict must stand even inside a `durable.step()` callback.
+pub fn isUnrecordableVaryingRead(object_name: []const u8, property_name: []const u8) bool {
+    const read = find(object_name, property_name) orelse return false;
+    return !read.recorded_in_durable_step;
 }
 
 pub fn isKnownGlobalFunction(name: []const u8) bool {
@@ -95,12 +120,13 @@ test "every varying read is recognized, and performance.now is among them" {
     try testing.expect(isVaryingRead("Date", "now"));
     try testing.expect(isVaryingRead("Math", "random"));
 
-    // A varying read is a member call on a global namespace, so the namespace
-    // has to be callable-global too or the two lists disagree about the same
-    // expression.
-    for (varying_reads) |read| {
-        try testing.expect(isKnownGlobalFunction(read.object));
-    }
+    // `names` is deliberately NOT asserted to contain every varying-read
+    // receiver. The two lists answer different questions: `names` suppresses
+    // unknown-callee reports for bare identifier calls, and no consumer of it
+    // ever inspects a member call's receiver. Adding `performance` there
+    // changed nothing for varying reads and did let a bare `performance()`
+    // call - which TypeErrors at runtime - pass as a known global.
+    try testing.expect(!isKnownGlobalFunction("performance"));
 
     // Neither half of a pair matches on its own.
     try testing.expect(!isVaryingRead("performance", "mark"));

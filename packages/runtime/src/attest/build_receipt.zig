@@ -194,8 +194,11 @@ test "an all-zero capabilityHash means absent, and a present matrix never produc
     try std.testing.expect(!std.mem.allEqual(u8, &with_caps.hash, 0));
     try std.testing.expect(!std.mem.eql(u8, &no_caps.hash, &with_caps.hash));
 
-    // Only the absent case reaches the zero sentinel, and it does so because
-    // the receipt supplies it rather than because a hash produced it.
-    const absent = std.fmt.bytesToHex([_]u8{0} ** 32, .lower);
-    try std.testing.expectEqualStrings("0" ** 64, &absent);
+    // No assertion here on `bytesToHex` of a zero array: that is a property of
+    // std.fmt, not of this file, and it stayed green regardless of what the
+    // receipt did. What this test can honestly pin is the invariant the
+    // receipt's encoding depends on - that a present matrix never hashes to
+    // zero - which the assertions above cover. Pinning the emitted claim
+    // itself needs a signing key and a built contract, so it belongs with the
+    // envelope round-trip tests rather than here.
 }

@@ -110,7 +110,7 @@ Per-restriction rationale, one sentence each.
 - **compound assignment** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
 - **rest parameters** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
 - **chained conditional arms** - exact repair when constructible, else proposed refactor
-- **numeric record keys** - canonical simplicity; use a string key or a number-keyed `Dict`
+- **numeric record keys** - canonical simplicity; use a string key, or an array when the keys are dense indices
 - **multiple record spreads** - canonical simplicity; write explicit fields over one base
 - **fallback `assert`** - use `if` plus `return`
 - **interface** - language-simplicity choice

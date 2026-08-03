@@ -57,7 +57,7 @@ pub const in_range = [_]Grammar{
         .leads = &common_leads,
         .cores = &.{
             "explain what this handler does",
-            "explain the Response.json helper",
+            "explain how this file builds its reply",
             "what does this handler return",
             "how does this handler build its reply",
         },
@@ -138,7 +138,7 @@ pub const out_of_range = [_]Grammar{
         .kind = .auth_jwt,
         .leads = &common_leads,
         .cores = &.{
-            "protect this handler with bearer JWT auth",
+            "require a bearer token on every request",
             "verify the authorization token",
             "add jwt auth to the endpoint",
         },
@@ -149,7 +149,7 @@ pub const out_of_range = [_]Grammar{
         .kind = .sql_feature,
         .leads = &common_leads,
         .cores = &.{
-            "add a sqlite query for users",
+            "look the account up in the database",
             "select the rows from the database",
             "insert a record into the store",
         },
@@ -160,7 +160,7 @@ pub const out_of_range = [_]Grammar{
         .kind = .spec_goal,
         .leads = &common_leads,
         .cores = &.{
-            "prove this endpoint is injection_safe",
+            "prove the handler holds injection_safe",
             "make the handler deterministic",
             "add a proof capsule",
         },

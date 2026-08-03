@@ -520,9 +520,9 @@ pub const CapsuleFacts = struct {
 fn capsuleSuggestionFor(prop: CapsuleProperty) []const u8 {
     return switch (prop) {
         .total => "return a value on every path so the capsule's `total` property holds.",
-        .pure => "remove module calls and Date.now()/Math.random() so the helper stays pure.",
+        .pure => "remove module calls and clock or RNG reads so the helper stays pure.",
         .read_only => "remove writing module calls (zttp:cache / zttp:sql) and egress from the helper.",
-        .deterministic => "remove Date.now() / Math.random() from the helper.",
+        .deterministic => "remove the clock or RNG read (Date.now, Math.random, performance.now) from the helper.",
     };
 }
 
