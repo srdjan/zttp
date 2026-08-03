@@ -577,7 +577,7 @@ pub const HandlerProperties = struct {
     stateless: bool,
     /// Read-only OR all writes within durable steps. Safe for Lambda retry.
     retry_safe: bool,
-    /// No Date.now() or Math.random() usage.
+    /// No Date.now(), Math.random(), or performance.now() usage.
     deterministic: bool,
     /// Uses fetchSync (conservative write).
     has_egress: bool,

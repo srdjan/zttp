@@ -151,7 +151,7 @@ const property_info = [_]PropertyInfo{
     .{
         .name = "deterministic",
         .family = .structural,
-        .passing = "No Date.now() or Math.random() on any enumerated path: every run of a request is identical.",
+        .passing = "No Date.now(), Math.random(), or performance.now() on any enumerated path: every run of a request is identical.",
         .failing = generic_failing,
     },
     .{

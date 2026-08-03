@@ -104,7 +104,7 @@ pub fn isCauseOnly(name: []const u8) bool {
 /// the proof card never renders an anemic single-line failure.
 pub fn suggestionFor(name: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, name, "deterministic")) {
-        return "remove Date.now() / Math.random() or move the call inside a `durable.step`.";
+        return "remove Date.now() / Math.random() / performance.now() or move the call inside a `durable.step`.";
     }
     if (std.mem.eql(u8, name, "read_only")) {
         return "remove writing calls to zttp:cache / zttp:sql, or drop `read_only` from your Spec set.";

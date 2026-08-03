@@ -22,6 +22,7 @@ const builtin_modules = @import("builtin_modules.zig");
 const module_facts_mod = @import("module_facts.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
+const known_globals = @import("known_globals.zig");
 const counterexample = @import("counterexample.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 
@@ -2348,11 +2349,14 @@ pub const FlowChecker = struct {
         return std.mem.eql(u8, name, "renderToString");
     }
 
-    /// True for `Date.now()` and `Math.random()` - the two global reads whose
-    /// result differs between runs. The receiver must be an undeclared global,
-    /// so a user-defined `Date` shadowing the builtin does not pick up the
-    /// label. Same pair as `effect_inference.isNonDeterministic`, which answers
-    /// the per-function question these labels cannot reach.
+    /// True for a global read whose result differs between runs. The receiver
+    /// must be an undeclared global, so a user-defined `Date` shadowing the
+    /// builtin does not pick up the label.
+    ///
+    /// The set lives in `known_globals.varying_reads` because
+    /// `effect_inference.isNonDeterministic` needs the same one to answer the
+    /// per-function question these labels cannot reach. Both used to carry a
+    /// hand-copied pair, and both were missing `performance.now`.
     fn isVaryingGlobalRead(self: *const FlowChecker, callee: NodeIndex) bool {
         const member = self.ir_view.getMember(callee) orelse return false;
         if (self.ir_view.getTag(member.object) != .identifier) return false;
@@ -2360,9 +2364,7 @@ pub const FlowChecker = struct {
         if (binding.kind != .undeclared_global) return false;
         const object_name = self.resolveAtomName(binding.name_atom) orelse return false;
         const property_name = self.resolveAtomName(member.property) orelse return false;
-        if (std.mem.eql(u8, object_name, "Date") and std.mem.eql(u8, property_name, "now")) return true;
-        if (std.mem.eql(u8, object_name, "Math") and std.mem.eql(u8, property_name, "random")) return true;
-        return false;
+        return known_globals.isVaryingRead(object_name, property_name);
     }
 
     fn isReqProperty(self: *const FlowChecker, node: NodeIndex, expected_prop: []const u8) bool {

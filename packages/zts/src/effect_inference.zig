@@ -875,10 +875,12 @@ pub const Analyzer = struct {
     }
 };
 
+/// Shares `known_globals.varying_reads` with `flow_checker.isVaryingGlobalRead`
+/// rather than keeping a second copy. The two lists drifted apart once already:
+/// neither carried `performance.now`, so a handler reading that clock proved
+/// `deterministic`.
 fn isNonDeterministic(object_name: []const u8, property_name: []const u8) bool {
-    if (std.mem.eql(u8, object_name, "Date") and std.mem.eql(u8, property_name, "now")) return true;
-    if (std.mem.eql(u8, object_name, "Math") and std.mem.eql(u8, property_name, "random")) return true;
-    return false;
+    return known_globals.isVaryingRead(object_name, property_name);
 }
 
 // ---------------------------------------------------------------------------

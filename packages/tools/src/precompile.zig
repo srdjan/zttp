@@ -2802,7 +2802,7 @@ fn printPropertiesReport(contract: *const HandlerContract) void {
         .{ .name = "read_only", .value = props.read_only, .desc = "no state mutations via virtual modules" },
         .{ .name = "stateless", .value = props.stateless, .desc = "independent of mutable state" },
         .{ .name = "retry_safe", .value = props.retry_safe, .desc = "safe for Lambda auto-retry on timeout" },
-        .{ .name = "deterministic", .value = props.deterministic, .desc = "no Date.now() or Math.random()" },
+        .{ .name = "deterministic", .value = props.deterministic, .desc = "no Date.now(), Math.random(), or performance.now()" },
         .{ .name = "injection_safe", .value = props.injection_safe, .desc = "no unvalidated input in sinks" },
         .{ .name = "idempotent", .value = props.idempotent, .desc = "safe for at-least-once delivery" },
         .{ .name = "state_isolated", .value = props.state_isolated, .desc = "no cross-request data leakage" },

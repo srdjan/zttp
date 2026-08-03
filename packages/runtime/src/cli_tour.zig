@@ -28,7 +28,7 @@ pub const tour_text =
     \\
     \\    pure              no virtual-module calls
     \\    read_only         no state mutations
-    \\    deterministic     no Date.now() / Math.random()
+    \\    deterministic     no Date.now() / Math.random() / performance.now()
     \\    injection_safe    user input never reaches sensitive sinks
     \\
     \\  the starter declares `Spec<"deterministic" | "no_secret_leakage">` on
