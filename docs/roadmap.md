@@ -702,6 +702,14 @@ construction - six intents repair mechanically, and a turn can spend itself on o
 hole. The eleven-case corpus is now the binding constraint on all three legs, which is
 the honest next thing to grow.
 
+Growing it started on 2026-08-03: five cases are authored and validated against the
+analyzer, each standing on one fence the eleven could not feel, and none is recorded.
+Recording spends live model tokens and the key returns `InsufficientCredit`, so the
+corpus is sixteen cases and eleven cassettes, and the replay gate fails naming the five
+rather than publishing a number over what it has. That is now the same blocker as items
+3 and 5 rather than a separate one: all three are waiting on live model turns, not on
+this repository.
+
 ### Considered and refused
 
 Recorded so they are not proposed again:

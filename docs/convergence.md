@@ -118,6 +118,41 @@ that would have cost a veto retry now costs a simulate call instead. The intent
 column reads 100% again but over a corrected check - see the section below on
 `websocket-echo` - so it is not comparable to the 100% above it either.
 
+## The corpus has grown to sixteen, and has not been recorded
+
+Five cases were added on 2026-08-03, taking the corpus from eleven to sixteen.
+No row publishes them yet: recording spends live model tokens, and the key
+returns `InsufficientCredit`. Until that clears, the table above is the last
+word and the replay gate fails loudly, naming each missing cassette, rather
+than reporting sixteen while measuring eleven.
+
+Each new case stands on one fence the paragraph above says the original eleven
+could not feel. `log-timestamp` logs a clock read and returns a constant, which
+is the `deterministic` loosening in the fifth row; nothing in the eleven read a
+clock at all. `cache-counter` returns a value read from a store, which is the
+sixth row's tightening. `sibling-helper` puts the handler's helper in another
+file, so the cross-file label walk from the third row has something to stand on.
+`egress-options` sets a method and headers in the fetch init object, one of the
+shapes the flow checker could not read field by field. `parallel-secret` is
+pinned as a first-draft failure on the callback-into-module labels of the fifth
+row.
+
+Every design was checked against the analyzer before it was written down, so a
+case cannot fail for a harness reason and be read as a model failure:
+`log-timestamp` proves `deterministic` and `cache-counter` does not,
+`sibling-helper` trips ZTS400 through the import and is clean without it, and
+each io stub was confirmed load-bearing by giving it the wrong value and
+watching the assertion fail.
+
+`parallel-secret` is the one that cannot be passed at all, and the reason is the
+compiler rather than the model. The array `parallel()` returns unions every
+callback's labels and indexing does not narrow back, so returning the app name
+is refused for what a sibling callback read - written up in
+[a label union that never narrows refuses a clean program](solutions/logic-errors/a-label-union-that-never-narrows-refuses-a-clean-program.md).
+That is the useful kind of pinned case: it flips the day the indexing narrows,
+and a corpus that cannot see a fence move is the problem these five cases exist
+to fix.
+
 ## Reading the table
 
 **Corpus** is the first twelve characters of a hash over the whole corpus:
@@ -177,8 +212,16 @@ intercept it. Those cases are veto-checked but not intent-checked, which is why
 the intent column reads over 6 rather than over 11. Giving the test runner a
 durable backend would close it.
 
-One case is pinned as an accepted failure, and it is the reason the rate reads
-10/11 rather than 11/11. It used to be `validate-body`, whose first draft wrote
+Four of the five cases added on 2026-08-03 carry a spec, so the denominator
+becomes 10 of 16 once they record. `parallel-secret` is the sixth without one,
+for a different reason: it never converges to a handler, and a spec with nothing
+to run against reports `.failed`, which would read as a handler doing the wrong
+thing rather than one that never existed.
+
+One case is pinned as an accepted failure in the published rows, and it is the
+reason the rate reads 10/11 rather than 11/11. `parallel-secret` becomes a
+second pin when the corpus records, and it is a different kind: no draft can
+pass it, so it ranks a compiler imprecision rather than a teaching gap. It used to be `validate-body`, whose first draft wrote
 `result.value as Item` against a subset with no `as` (ZTS042). That draft is
 gone: the persona now tells the model to dry-run with `zts_expert_edit_simulate`
 before `apply_edit`, so it sees ZTS042 in simulation and never submits the

@@ -285,14 +285,25 @@ test "corpus version changes when a case changes" {
 // workflows). Each elicits realistic multi-roundtrip behaviour (explore then
 // edit) and records as step_0/step_1/...
 //
-// Six of the eleven carry an intent spec. The five durable and workflow cases
+// Ten of the sixteen carry an intent spec. The five durable and workflow cases
 // do not: executing them needs the durable store and queue the runtime stands
 // up, and `zttp test` has no offline story for either - `saga()` fails with
 // NativeFunctionError before any assertion runs, and an io stub does not
 // intercept it. Those cases stay veto-checked and report `.not_checked`, which
-// the summary counts apart from passes, so the published figure reads 6 of 11
-// covered instead of pretending to 11. Closing that gap means giving the test
+// the summary counts apart from passes, so the published figure reads 10 of 16
+// covered instead of pretending to 16. Closing that gap means giving the test
 // runner a durable backend, which is its own piece of work.
+//
+// `parallel-secret` is the sixth without a spec, for a different reason given
+// at the case.
+//
+// The last five cases were added because eleven could not separate nine
+// consecutive builds - every row read 90%, which was the corpus reporting its
+// own resolution rather than the compiler holding still. Each targets one fence
+// docs/convergence.md names as invisible to the original eleven: none of them
+// logged a timestamp, none returned a value read from a store, none wrote the
+// shapes the flow-checker fail-opens hid behind. A fence no case stands on
+// cannot move a number.
 const record_corpus = [_]RecordCase{
     .{
         .name = "health",
@@ -488,6 +499,160 @@ const record_corpus = [_]RecordCase{
         // agent declared it (then ZTS501 rejected it); the classifier now gates
         // declarable read_only on write-effect imports, so the agent is no
         // longer told to declare a property the import forbids.
+        .expect_first_draft_pass = true,
+    },
+    .{
+        // Fence: the `deterministic` loosening. The property moved from "was a
+        // varying value read" to "does one reach the response", so a handler
+        // that logs a clock read and returns a constant keeps it. No case in the
+        // original eleven read a clock at all, so that change was invisible
+        // here. Verified against the analyzer before recording: this shape
+        // proves `deterministic`.
+        //
+        // The intent spec asserts the body exactly rather than by substring. The
+        // whole point is that the timestamp stays out of it, and `bodyContains`
+        // would pass a handler that put the clock read in the response too -
+        // which is the failure this case exists to catch.
+        .name = "log-timestamp",
+        .prompt = "Create a handler in handler.ts that logs when it served the request, " ++
+            "including the current time from Date.now(), using logInfo from zttp:log. " ++
+            "The response body must be exactly Response.json({ ok: true }) - the " ++
+            "timestamp belongs in the log and must never appear in the response.",
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the timestamp stays out of the response body"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"expect","status":200,"body":"{\"ok\":true}"}
+            \\
+            ,
+        },
+        .expect_first_draft_pass = true,
+    },
+    .{
+        // Fence: a read from mutable module state is its own varying source,
+        // which no capability set can express. Before that rule the handler
+        // below proved `deterministic` while returning whatever the last write
+        // left in the store. The corpus had nothing that read a store into a
+        // response, so the tightening moved nothing.
+        //
+        // The prompt does not mention determinism or Spec. Noticing that a store
+        // read costs the default profile and narrowing the Spec accordingly is
+        // the model behaviour being measured; saying it in the prompt would
+        // measure instruction-following instead.
+        .name = "cache-counter",
+        .prompt = "Create a handler in handler.ts that reads the \"hits\" counter from the " ++
+            "\"counters\" namespace with cacheGet from zttp:cache and returns it as JSON " ++
+            "under a \"hits\" key. Treat a missing counter as \"0\".",
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the stored counter reaches the response body"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"cache","fn":"cacheGet","args":["counters","hits"],"result":"41"}
+            \\{"type":"expect","status":200,"bodyContains":"41"}
+            \\
+            ,
+        },
+        .expect_first_draft_pass = true,
+    },
+    .{
+        // Fence: labels crossing a module boundary through a caller's callback.
+        // `parallel([() => env("SECRET_KEY")])` used to prove clean, because a
+        // module export answers with its declared return labels and those cannot
+        // describe what a caller's callback produced. See
+        // docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md.
+        //
+        // Pinned as a first-draft failure, and unlike jwt-auth the cause is not
+        // the model. The fix over-approximates in the other direction: the array
+        // `parallel` returns carries the union of every callback's labels, and
+        // indexing does not narrow back, so returning `values[0]` - the app name
+        // - is refused for what `values[1]` read. Isolated before recording:
+        // direct `env` reads with the secret held in a local are clean, and two
+        // non-secret callbacks are clean, so it is specifically the result
+        // array. The polarity is the safe one, and it costs a legitimate
+        // program.
+        //
+        // That makes this the most useful kind of pinned case: it flips the day
+        // the indexing narrows, which is a fence the corpus can then see move.
+        // No intent spec - the case does not converge to a handler, and a spec
+        // with nothing to run against reports `.failed`, which would read as the
+        // handler doing the wrong thing rather than never existing.
+        .name = "parallel-secret",
+        .prompt = "Create a handler in handler.ts that reads the APP_NAME and API_SECRET " ++
+            "environment variables concurrently using parallel() from zttp:io. Return 503 " ++
+            "when API_SECRET is not set. Otherwise return Response.json with only the app " ++
+            "name - the secret must never appear in the response.",
+        .expect_first_draft_pass = false,
+    },
+    .{
+        // Fence: the shapes of egress options object the flow checker could not
+        // read field by field. `weather-egress` passes its query through the
+        // init object, but nothing in the corpus set a method and headers there.
+        //
+        // It also carries the intent spec `weather-egress` says cannot exist.
+        // That comment predates the fetch io stub: runtime_http.zig serves
+        // `{"module":"fetch","fn":"fetch"}` from the replay state, so the
+        // success path is assertable offline. Checked before recording - a stub
+        // with the wrong body fails the assertion, so it is load-bearing.
+        .name = "egress-options",
+        .prompt = "Create a handler in handler.ts that calls " ++
+            "https://api.example.com/v1/status with fetch from zttp:fetch, passing an init " ++
+            "object that sets the method to GET and an \"accept: application/json\" header. " ++
+            "Return the upstream JSON on success and a 502 when the upstream call fails.",
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the upstream payload reaches the response body"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["https://api.example.com/v1/status"],"result":{"status":200,"body":"{\"state\":\"green\"}"}}
+            \\{"type":"expect","status":200,"bodyContains":"green"}
+            \\
+            ,
+        },
+        .expect_first_draft_pass = true,
+    },
+    .{
+        // Fence: walking a helper imported from a sibling file. Every other case
+        // is a single file, so the cross-file label walk had nothing here to
+        // stand on. The seeded helper returns a secret from one export and a
+        // plain string from the other, so the walk has to distinguish them
+        // rather than tainting the module.
+        //
+        // Verified before recording: returning `apiToken()` trips ZTS400 through
+        // the import, and returning only `displayName()` is clean. The intent
+        // spec pins the body exactly, so a handler that also returns the token
+        // fails the check even in a build where the label walk does not.
+        .name = "sibling-helper",
+        .prompt = "The file lib/settings.ts already exists and exports displayName() and " ++
+            "apiToken(). Create a handler in handler.ts that imports both from " ++
+            "\"./lib/settings.ts\", returns 503 when apiToken() is undefined, and otherwise " ++
+            "returns Response.json({ name: displayName() }). The token must never appear " ++
+            "in the response.",
+        .seed_files = &.{
+            .{
+                .path = "lib/settings.ts",
+                .bytes =
+                \\import { env } from "zttp:env";
+                \\
+                \\export function apiToken(): string | undefined {
+                \\  return env("API_TOKEN");
+                \\}
+                \\
+                \\export function displayName(): string {
+                \\  return env("APP_NAME") ?? "unnamed";
+                \\}
+                \\
+                ,
+            },
+        },
+        .intent = .{
+            .tests_jsonl =
+            \\{"type":"test","name":"the configured name crosses the file boundary and the token does not"}
+            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"env","fn":"env","args":["API_TOKEN"],"result":"tok-secret-value"}
+            \\{"type":"io","seq":1,"module":"env","fn":"env","args":["APP_NAME"],"result":"orders-api"}
+            \\{"type":"expect","status":200,"body":"{\"name\":\"orders-api\"}"}
+            \\
+            ,
+        },
         .expect_first_draft_pass = true,
     },
 };
