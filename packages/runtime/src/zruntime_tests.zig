@@ -23,6 +23,14 @@ const workflow = @import("runtime_workflow.zig");
 const http = @import("runtime_http.zig");
 const natives = @import("runtime_natives.zig");
 
+// Force-reference so this root collects the attestation receipt's tests. A
+// container-level import that nothing else in the graph analyzes does not pull
+// its tests in, and a test that is never collected reports the same green as
+// one that passes.
+comptime {
+    _ = @import("attest/build_receipt.zig");
+}
+
 // Helpers in runtime_http.zig that the tests below call unqualified.
 const buildFetchUrl = http.buildFetchUrl;
 const buildServiceUrl = http.buildServiceUrl;

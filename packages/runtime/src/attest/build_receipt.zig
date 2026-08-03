@@ -78,9 +78,20 @@ fn buildJwsWithKey(
     const bytecode_sha_hex = std.fmt.bytesToHex(bytecode_sha, .lower);
 
     const policy_sha_hex = zts.rule_registry.policyHash();
-    // An all-zero hash is the established "not stamped" sentinel, so a
-    // contract that makes no capability statement reads the same here as one
-    // whose sandbox block predates the hash.
+    // All-zero means one thing here: the contract carries no capability
+    // statement at all. It is not also "present but unstamped", which is what
+    // an earlier comment claimed. Both producers stamp unconditionally
+    // (`contract_types.computeCapabilityMatrix` ends with a `capabilityHash`
+    // call), and the JSON parser recomputes when the field is absent or zero
+    // (`contract_json_parser.zig`), so a present matrix cannot reach here
+    // unstamped. An empty capability list is not zero either - it hashes to
+    // SHA-256 over no input.
+    //
+    // That distinction is what keeps this claim readable, and it is pinned by
+    // the test at the bottom of this file rather than left as prose. A signed
+    // claim whose absent case is indistinguishable from a real value is the
+    // same defect this repo has recorded twice under a different name; see
+    // docs/solutions/logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md.
     const capability_hash_hex = std.fmt.bytesToHex(
         if (contract.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
         .lower,
@@ -160,4 +171,31 @@ fn fillCsprng(buf: *[Ed25519.KeyPair.seed_length]u8) !void {
         if (n <= 0) return error.UrandomReadFailed;
         filled += @intCast(n);
     }
+}
+
+// The receipt uses an all-zero `capabilityHash` to mean "this contract makes no
+// capability statement". That reading is only sound while a contract which DOES
+// make one can never hash to zero, so pin both halves here rather than trusting
+// the comment at the call site.
+test "an all-zero capabilityHash means absent, and a present matrix never produces one" {
+    // An empty capability list is a statement, not the absence of one: it
+    // hashes over no input, which is SHA-256's empty digest, not zeros.
+    const empty_list_hash = zts.module_binding.capabilityHash(&.{});
+    try std.testing.expect(!std.mem.allEqual(u8, &empty_list_hash, 0));
+
+    // A matrix built the normal way is always stamped, including when no
+    // specifier maps to a capability.
+    const no_caps = zts.handler_contract.computeCapabilityMatrix(&.{});
+    try std.testing.expect(!std.mem.allEqual(u8, &no_caps.hash, 0));
+    try std.testing.expectEqual(@as(u8, 0), no_caps.len);
+
+    const with_caps = zts.handler_contract.computeCapabilityMatrix(&.{"zttp:crypto"});
+    try std.testing.expect(with_caps.len > 0);
+    try std.testing.expect(!std.mem.allEqual(u8, &with_caps.hash, 0));
+    try std.testing.expect(!std.mem.eql(u8, &no_caps.hash, &with_caps.hash));
+
+    // Only the absent case reaches the zero sentinel, and it does so because
+    // the receipt supplies it rather than because a hash produced it.
+    const absent = std.fmt.bytesToHex([_]u8{0} ** 32, .lower);
+    try std.testing.expectEqualStrings("0" ** 64, &absent);
 }
