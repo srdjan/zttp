@@ -313,6 +313,61 @@ while IFS= read -r feature; do
 done < <(sed -n 's/^ *\.v1_feature_name = "\(.*\)",$/\1/p' "$restrictions_registry")
 
 # ---------------------------------------------------------------------------
+# Host test root coverage.
+#
+# docs/internals/testing.md tables the host_test_roots entries in build.zig and
+# names itself stale whenever the two disagree. Nothing enforced that: the doc
+# said "Nine host test roots" while build.zig declared twenty-one, and
+# test-standin - the root the stand-in filter convention exists for - had no row
+# at all. That is the defect docs/solutions/conventions/
+# a-gate-that-counts-nothing-still-reports-a-pass.md describes, in a doc rather
+# than a gate: a count nothing ties to its source.
+# ---------------------------------------------------------------------------
+
+testing_doc="docs/internals/testing.md"
+build_file="build.zig"
+
+[[ -f "$testing_doc" ]] || fail "missing $testing_doc"
+[[ -f "$build_file" ]] || fail "missing $build_file"
+
+host_root_steps() {
+  awk '
+    /const host_test_roots = \[_\]HostTestRoot\{/ { in_table = 1; next }
+    in_table && /^ *\};/ { exit }
+    in_table && match($0, /\.step = "[^"]+"/) {
+      print substr($0, RSTART + 9, RLENGTH - 10)
+    }
+  ' "$build_file"
+}
+
+# wc, not `grep -c`: grep exits 1 on no match, and under `set -o pipefail` that
+# aborts the script before the floor below can name what went wrong.
+build_root_count=$(host_root_steps | wc -l | tr -d '[:space:]')
+
+# A renamed table or changed literal would leave the loop below with zero
+# iterations and a doc count of zero to match it.
+[[ "$build_root_count" -ge 15 ]] ||
+  fail "only $build_root_count host test roots parsed from $build_file; the table format changed"
+
+doc_root_count=$(
+  awk '
+    index($0, "host_test_roots") > 0 { in_section = 1; next }
+    in_section && /^## / { exit }
+    in_section && /^\| `test-/ { count += 1 }
+    END { print count + 0 }
+  ' "$testing_doc"
+)
+
+[[ "$doc_root_count" == "$build_root_count" ]] ||
+  fail "$testing_doc tables $doc_root_count host test roots, $build_file declares $build_root_count"
+
+while IFS= read -r step_name; do
+  [[ -n "$step_name" ]] || continue
+  grep -qF -- "\`$step_name\`" "$testing_doc" ||
+    fail "$testing_doc is missing the host test root step \`$step_name\`"
+done < <(host_root_steps)
+
+# ---------------------------------------------------------------------------
 # Prose bans.
 #
 # Each row is one accumulated one-off, as data rather than as another hand-

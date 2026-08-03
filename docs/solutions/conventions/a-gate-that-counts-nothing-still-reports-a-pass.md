@@ -102,4 +102,4 @@ The test to apply to any gate before trusting it: **delete its input and see whe
 - [normalize-unions-without-dropping-members](../logic-errors/normalize-unions-without-dropping-members.md) - the polarity rule underneath all of these
 - `scripts/check-runtime-purity.sh:42-51` and `scripts/check-docs-drift.sh:239` - the two places this rule was already implemented before it was written down
 - `docs/archive/plans/2026-07-30-004-item4-c1-plan.md` - findings 2 and 3, the prior recurrences that stayed in an archived plan
-- `docs/internals/testing.md` - maps which build step runs what; it does not yet state this rule, and is the natural place to reference it from
+- `docs/internals/testing.md` - maps which build step runs what, and states this rule in "Adding A Test Root". Its own host-root table was an instance: it said "Nine host test roots" against twenty-one in `build.zig` and omitted `test-standin` entirely, a count nothing tied to its source. `scripts/check-docs-drift.sh` now binds the two, with a floor on the parsed side

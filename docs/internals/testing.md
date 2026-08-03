@@ -17,8 +17,9 @@ Two runtime test roots:
 | (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `edge_server`, `studio`, `proof_adapter` |
 | `test-cli` | `cli_main_tests` (`cli_main.zig`) | `dev_cli` and its dependencies: deploy, pi_app wiring, `zts_cli` delegation |
 
-Twenty-one host test roots, declared in the `host_test_roots` table in
-`build.zig`:
+The host test roots, declared in the `host_test_roots` table in `build.zig`.
+`scripts/check-docs-drift.sh` binds this table to that one, so a root added
+there without a row here fails `zig build test-docs-drift`:
 
 | Step | Root |
 |---|---|
@@ -44,9 +45,10 @@ Twenty-one host test roots, declared in the `host_test_roots` table in
 | `test-cassette` | `packages/pi/src/cassette_tests.zig` |
 | `test-standin` | `packages/pi/src/standin_tests.zig` |
 
-`test-standin` compiles with its filters pinned to the literal `stand-in`, so a
-test in that root whose name omits the token never runs. A gate inside the root
-enforces the naming rule the filter depends on.
+`test-standin` compiles with its filters pinned to the literal `stand-in`
+(`build.zig:316`), so a test in that root whose name omits the token never runs.
+A gate in `packages/pi/src/standin_range_tests.zig` enforces the naming rule the
+filter depends on. See "Adding A Test Root" for the rule behind it.
 
 Two of those roots exist because of how modules are wired rather than because
 of what they test. `canonicalize.zig` and `zts_cli.zig` are reached only
@@ -135,3 +137,18 @@ proven needs a row in `scripts/proof-swallow.allow` giving the reason it cannot
 weaken a verdict, and a row nothing matches fails the same gate. A swallow
 there does not surface as a failure, it surfaces as a pass. Run `zig build
 test-proof-swallow`.
+
+A root that pins its own test filter needs a gate that enforces the naming rule
+the filter depends on. `test-standin` is the only one today: it filters on the
+literal `stand-in`, and `packages/pi/src/standin_range_tests.zig` reads both
+stand-in roots, rejects any column-zero `test "` declaration whose name omits
+the token, and asserts a floor on how many declarations it scanned.
+
+That floor is the general rule, and it applies to every gate here whose verdict
+depends on a collection, a filter, or a build edge the gate does not itself
+define: assert a floor on the input before any count taken over it means
+anything. A gate that checks nothing and a gate that finds nothing both exit 0,
+and the green one is then cited as evidence. See [a gate that counts nothing
+still reports a
+pass](../solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md)
+for the four shapes and the delete-its-input check.
