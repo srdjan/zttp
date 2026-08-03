@@ -308,3 +308,115 @@ test "stand-in gate: every test in the stand-in roots is reachable through the p
     try testing.expect(checked >= 15);
     std.debug.print("[standin-gate] filter reachability {d}/{d} test names\n", .{ checked, checked });
 }
+
+const prompt_grammar = @import("standin/prompt_grammar.zig");
+
+test "stand-in gate: generated paraphrases route to their own range entry" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Floor first: an empty grammar set would make every loop below iterate
+    // zero times and report a clean run over nothing.
+    const total = prompt_grammar.totalIn(&prompt_grammar.in_range);
+    try testing.expect(total >= 200);
+    try testing.expectEqual(range.entries.len, prompt_grammar.in_range.len);
+
+    var checked: usize = 0;
+    var misroutes: usize = 0;
+    for (prompt_grammar.in_range) |grammar| {
+        const entry = range.findById(grammar.id) orelse return error.MissingRangeEntry;
+        try testing.expectEqual(entry.kind, grammar.kind);
+        var i: usize = 0;
+        while (i < grammar.count()) : (i += 1) {
+            const prompt = try prompt_grammar.generate(allocator, grammar, i);
+            checked += 1;
+            const hint = expert_workflow.classify(prompt);
+            if (hint.kind != grammar.kind) {
+                misroutes += 1;
+                std.debug.print(
+                    "[standin-gate] misroute: \"{s}\" -> {s}, expected {s}\n",
+                    .{ prompt, @tagName(hint.kind), @tagName(grammar.kind) },
+                );
+            }
+        }
+    }
+
+    std.debug.print(
+        "[standin-gate] generated routing {d}/{d} correct; misroutes={d}\n",
+        .{ checked - misroutes, checked, misroutes },
+    );
+    try testing.expectEqual(total, checked);
+    try testing.expectEqual(@as(usize, 0), misroutes);
+}
+
+test "stand-in gate: generated out-of-range prompts never reach a playbook" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const total = prompt_grammar.totalIn(&prompt_grammar.out_of_range);
+    try testing.expect(total >= 100);
+
+    var checked: usize = 0;
+    var false_fires: usize = 0;
+    for (prompt_grammar.out_of_range) |grammar| {
+        // The kind must be one the stand-in has no playbook for, or this
+        // grammar is testing the wrong thing.
+        try testing.expect(!playbook.hasPlaybook(grammar.kind));
+        var i: usize = 0;
+        while (i < grammar.count()) : (i += 1) {
+            const prompt = try prompt_grammar.generate(allocator, grammar, i);
+            checked += 1;
+            const hint = expert_workflow.classify(prompt);
+            if (hint.kind != grammar.kind) {
+                std.debug.print(
+                    "[standin-gate] out-of-range prompt drifted: \"{s}\" -> {s}\n",
+                    .{ prompt, @tagName(hint.kind) },
+                );
+                return error.OutOfRangePromptDrifted;
+            }
+            const reply = try playbook.renderResponse(allocator, .{
+                .ask = prompt,
+                .step_index = 0,
+                .source = "function handler(req: Request): Response { return Response.json({ ok: true }); }\n",
+            });
+            if (std.mem.indexOf(u8, reply, "[standin-miss]") == null) false_fires += 1;
+        }
+    }
+
+    std.debug.print(
+        "[standin-gate] generated false-fire {d}/{d}; required=0\n",
+        .{ false_fires, checked },
+    );
+    try testing.expectEqual(total, checked);
+    try testing.expectEqual(@as(usize, 0), false_fires);
+}
+
+test "stand-in gate: generated prompts stay disjoint from the frozen corpora" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // A generated prompt that collides with a canonical range prompt or a
+    // pinned negative case would make the routing number partly a measurement
+    // of the corpus it is supposed to be independent of.
+    var checked: usize = 0;
+    for ([_][]const prompt_grammar.Grammar{ &prompt_grammar.in_range, &prompt_grammar.out_of_range }) |set| {
+        for (set) |grammar| {
+            var i: usize = 0;
+            while (i < grammar.count()) : (i += 1) {
+                const prompt = try prompt_grammar.generate(allocator, grammar, i);
+                checked += 1;
+                for (range.entries) |entry| {
+                    try testing.expect(!std.mem.eql(u8, prompt, entry.canonical_prompt));
+                }
+                for (range.negative_corpus) |negative| {
+                    try testing.expect(!std.mem.eql(u8, prompt, negative.prompt));
+                }
+            }
+        }
+    }
+    try testing.expect(checked >= 300);
+    std.debug.print("[standin-gate] disjointness {d} generated prompts\n", .{checked});
+}
