@@ -44,7 +44,7 @@ test "stand-in add-route playbook applies an edit through the real OpenAI agent 
         "function handler(req: Request): Response {\n    return Response.json({ old: true });\n}\n",
     );
 
-    var server = try server_mod.Server.init(allocator, 0, 3);
+    var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
     const endpoint = try server.url(allocator, "/v1/responses");
@@ -80,7 +80,7 @@ test "stand-in add-route playbook applies an edit through the real OpenAI agent 
             .turn_timeout_ms = 0,
         },
     );
-    try server.join();
+    try server.stop();
 
     try testing.expect(result.applied_edit);
     try testing.expect(result.first_draft_veto_pass);
@@ -99,7 +99,7 @@ test "stand-in miss returns its marker through the real loop and applies no edit
 
     var tmp = try IsolatedTmp.init(allocator, "standin-miss");
     defer tmp.cleanup(allocator);
-    var server = try server_mod.Server.init(allocator, 0, 1);
+    var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
     const endpoint = try server.url(allocator, "/v1/responses");
@@ -130,7 +130,7 @@ test "stand-in miss returns its marker through the real loop and applies no edit
             .turn_timeout_ms = 0,
         },
     );
-    try server.join();
+    try server.stop();
 
     try testing.expect(!result.applied_edit);
     try testing.expect(transcriptContains(&session.transcript, "[standin-miss]"));
@@ -158,6 +158,9 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    // Same reason as the non-socket gate: 0/0 is indistinguishable from a
+    // clean run, so the corpus must be known non-empty first.
+    try testing.expect(range.negative_corpus.len >= 4);
     var false_fires: usize = 0;
     for (range.negative_corpus, 0..) |negative, index| {
         const label = try std.fmt.allocPrint(allocator, "standin-negative-{d}", .{index});
@@ -166,7 +169,7 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
         const original = "function handler(req: Request): Response {\n    return Response.json({ ok: true });\n}\n";
         try tmp.writeFile(allocator, "handler.ts", original);
 
-        var server = try server_mod.Server.init(allocator, 0, 1);
+        var server = try server_mod.Server.init(allocator, 0, null);
         defer server.deinit();
         try server.start();
         const endpoint = try server.url(allocator, "/v1/responses");
@@ -202,7 +205,7 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
                 .turn_timeout_ms = 0,
             },
         );
-        try server.join();
+        try server.stop();
 
         const handler_path = try tmp.childPath(allocator, "handler.ts");
         const current = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
@@ -248,7 +251,8 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
     const cases = [_]DraftCase{
         .{
             .ask = "Create a handler in handler.ts that responds to GET /health with Response.json({ ok: true }).",
-            .step_index = 2,
+            // add-route dry-runs at 3 and applies at 4; both send the same bytes.
+            .step_index = 4,
             .source = normal_handler,
             .file = "handler.ts",
             .must_contain = "\"GET /health\": handleGetHealth",
@@ -532,7 +536,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         try tmp.writeFile(allocator, "handler.test.jsonl", original_tests);
     }
 
-    var server = try server_mod.Server.init(allocator, 0, playbookRequestCount(entry.kind));
+    var server = try server_mod.Server.init(allocator, 0, null);
     defer server.deinit();
     try server.start();
     const endpoint = try server.url(allocator, "/v1/responses");
@@ -568,7 +572,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
             .turn_timeout_ms = 0,
         },
     );
-    try server.join();
+    try server.stop();
 
     try testing.expectEqual(entry.kind, result.workflow_kind);
     try testing.expect(!transcriptContains(&session.transcript, "[standin-miss]"));
@@ -604,15 +608,6 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
             }
         },
     }
-}
-
-fn playbookRequestCount(kind: expert_workflow.TaskKind) usize {
-    return switch (kind) {
-        .route_add, .env_feature => 3,
-        .test_generation, .violation_fix => 4,
-        .review_explain => 2,
-        else => 1,
-    };
 }
 
 fn expectValidJsonLines(allocator: std.mem.Allocator, content: []const u8) !void {

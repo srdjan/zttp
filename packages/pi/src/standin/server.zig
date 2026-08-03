@@ -16,6 +16,9 @@ pub const Server = struct {
     thread: ?std.Thread = null,
     closed: bool = false,
     thread_error: std.atomic.Value(ErrorInt) = std.atomic.Value(ErrorInt).init(0),
+    /// Set before waking the accept loop so it returns instead of serving the
+    /// wake-up connection. Read by the loop, written by `deinit`.
+    stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -49,9 +52,19 @@ pub const Server = struct {
         try self.serveInner();
     }
 
-    pub fn join(self: *Server) !void {
+    /// Wake the accept loop, join the thread, and surface whatever it failed
+    /// with. Safe whether or not the loop finished on its own.
+    ///
+    /// This replaces a `join` that only worked when the caller had predicted
+    /// the exact number of requests a run would make. A prediction that came in
+    /// high left the loop blocked in `accept` while the caller blocked in
+    /// `join`, so drift between a playbook and the loop hung the suite instead
+    /// of failing it.
+    pub fn stop(self: *Server) !void {
         if (self.closed) return;
         if (self.thread) |thread| {
+            self.stopping.store(true, .release);
+            self.wakeAcceptLoop();
             thread.join();
             self.thread = null;
         }
@@ -60,14 +73,23 @@ pub const Server = struct {
         if (err_int != 0) return @errorFromInt(err_int);
     }
 
+    /// Shut down from any state, including with the accept loop still blocked.
+    ///
+    /// The thread is woken by connecting to our own port rather than by closing
+    /// the listener under it: `listener.deinit` invalidates the value the
+    /// blocked `accept` is reading, so closing first and joining second raced
+    /// the thread and turned an early return - a failed assertion running
+    /// `defer server.deinit()` before `join()` - into a hang or a panic.
     pub fn deinit(self: *Server) void {
         if (self.closed) return;
-        const io = self.io_backend.io();
-        self.listener.deinit(io);
         if (self.thread) |thread| {
+            self.stopping.store(true, .release);
+            self.wakeAcceptLoop();
             thread.join();
             self.thread = null;
         }
+        const io = self.io_backend.io();
+        self.listener.deinit(io);
         self.io_backend.deinit();
         self.closed = true;
         const err_int = self.thread_error.swap(0, .acq_rel);
@@ -90,10 +112,21 @@ pub const Server = struct {
         };
     }
 
+    /// Best-effort connect to our own listener so a blocked `accept` returns.
+    /// Any failure is ignored: the thread is being torn down either way, and a
+    /// wake-up that does not arrive is reported by the join that follows.
+    fn wakeAcceptLoop(self: *Server) void {
+        const io = self.io_backend.io();
+        const address = std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port) catch return;
+        var stream = address.connect(io, .{ .mode = .stream }) catch return;
+        stream.close(io);
+    }
+
     fn serveInner(self: *Server) !void {
         const io = self.io_backend.io();
         var served: usize = 0;
         while (self.max_requests == null or served < self.max_requests.?) {
+            if (self.stopping.load(.acquire)) return;
             var stream = while (true) {
                 break self.listener.accept(io) catch |err| switch (err) {
                     error.ConnectionAborted => continue,
@@ -101,10 +134,27 @@ pub const Server = struct {
                     else => return err,
                 };
             };
+            if (self.stopping.load(.acquire)) {
+                stream.close(io);
+                return;
+            }
             {
                 defer stream.close(io);
-                try serveConnection(self.allocator, &stream, io);
+                // One bad connection must not end the server. A port probe
+                // closes without sending and yields UnexpectedEof; a header
+                // line without a colon yields InvalidRequest. Propagating
+                // either killed the accept loop, so the dev server exited
+                // mid-session and an offline turn lost its author. Note the
+                // asymmetry this removes: parseHttpRequest's InvalidRequest
+                // was already answered with a 400.
+                serveConnection(self.allocator, &stream, io) catch |err| {
+                    std.log.warn("zttp-standin dropped a connection: {s}", .{@errorName(err)});
+                };
             }
+            // Counted even when the connection failed, so a client that always
+            // errors cannot spin here forever and a bounded run always
+            // terminates. A test that loses a request fails at its assertions
+            // rather than hanging in join().
             served += 1;
         }
     }

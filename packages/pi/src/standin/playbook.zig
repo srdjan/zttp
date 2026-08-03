@@ -60,15 +60,30 @@ fn renderRouteAdd(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
         },
-        1 => try renderToolCall(allocator, 1, "zts_expert_modules", "{}"),
-        2 => blk: {
+        1 => blk: {
+            const args = try renderVerifyPathsArgs(allocator, spec.file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 1, "zts_expert_verify_paths", args);
+        },
+        2 => try renderToolCall(allocator, 2, "zts_expert_modules", "{}"),
+        // Steps 3 and 4 are the pre-apply proof this migration's own persona
+        // rewrite made mandatory: "Author the COMPLETE file content yourself.
+        // Dry-run the draft with `zts_expert_edit_simulate` and resolve every
+        // new violation. Submit exactly one `apply_edit` call." The playbook
+        // went straight from facts to apply, so the offline path demonstrated
+        // the behavior the hosted path is measured for not doing. Both steps
+        // send identical bytes, so the simulate verdict is about the draft that
+        // actually lands.
+        3, 4 => blk: {
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "add-route");
             const handler_name = try routeHandlerName(allocator, spec.method, spec.path);
             defer allocator.free(handler_name);
-            const proposed = try synthesizeRoute(allocator, parsed.source, spec, handler_name);
+            const proposed = try synthesizeRoute(allocator, source, spec, handler_name);
             defer allocator.free(proposed);
-            const args = try renderApplyArgs(allocator, spec.file, proposed, parsed.source);
+            const args = try renderApplyArgs(allocator, spec.file, proposed, source);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 2, "apply_edit", args);
+            const tool = if (parsed.step_index == 3) "zts_expert_edit_simulate" else "apply_edit";
+            break :blk try renderToolCall(allocator, parsed.step_index, tool, args);
         },
         else => try renderText(
             allocator,
@@ -117,7 +132,9 @@ fn renderReviewExplain(allocator: std.mem.Allocator, parsed: request.ParsedReque
             break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
         } else try renderToolCall(allocator, 0, "zts_expert_modules", "{}"),
         else => if (is_review)
-            renderReviewText(allocator, parsed.source)
+            // Review answers in text and applies no edit, so an unreadable
+            // file costs an answer rather than a file.
+            renderReviewText(allocator, parsed.source orelse "")
         else
             renderText(
                 allocator,
@@ -166,12 +183,13 @@ fn renderEnvFeature(allocator: std.mem.Allocator, parsed: request.ParsedRequest)
             break :blk try renderToolCall(allocator, 1, "workspace_read_file", args);
         },
         2 => blk: {
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "add-env");
             const variable = findEnvName(parsed.ask) orelse "APP_NAME";
-            const transform = try synthesizeEnvFeature(allocator, parsed.source, variable);
+            const transform = try synthesizeEnvFeature(allocator, source, variable);
             break :blk switch (transform) {
                 .edit => |proposed| blk_edit: {
                     defer allocator.free(proposed);
-                    const args = try renderApplyArgs(allocator, file, proposed, parsed.source);
+                    const args = try renderApplyArgs(allocator, file, proposed, source);
                     defer allocator.free(args);
                     break :blk_edit try renderToolCall(allocator, 2, "apply_edit", args);
                 },
@@ -219,9 +237,10 @@ fn renderTestGeneration(allocator: std.mem.Allocator, parsed: request.ParsedRequ
             break :blk try renderToolCall(allocator, 2, "workspace_read_file", args);
         },
         3 => blk: {
-            const proposed = try synthesizeTestFile(allocator, parsed.source);
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "write-test");
+            const proposed = try synthesizeTestFile(allocator, source);
             defer allocator.free(proposed);
-            const args = try renderApplyArgs(allocator, test_file, proposed, parsed.source);
+            const args = try renderApplyArgs(allocator, test_file, proposed, source);
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 3, "apply_edit", args);
         },
@@ -251,11 +270,12 @@ fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedReques
             break :blk try renderToolCall(allocator, 2, "workspace_read_file", args);
         },
         3 => blk: {
-            const transform = try synthesizeViolationFix(allocator, parsed.source);
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fix");
+            const transform = try synthesizeViolationFix(allocator, source);
             break :blk switch (transform) {
                 .edit => |proposed| blk_edit: {
                     defer allocator.free(proposed);
-                    const args = try renderApplyArgs(allocator, file, proposed, parsed.source);
+                    const args = try renderApplyArgs(allocator, file, proposed, source);
                     defer allocator.free(args);
                     break :blk_edit try renderToolCall(allocator, 3, "apply_edit", args);
                 },
@@ -367,6 +387,20 @@ fn synthesizeViolationFix(allocator: std.mem.Allocator, source: []const u8) !Vio
     return .{ .edit = try out.toOwnedSlice(allocator) };
 }
 
+/// No read has produced usable bytes for the target file.
+///
+/// Refuse rather than author from "". `apply_edit` writes unconditionally -
+/// `before` is a veto baseline, not a compare-and-swap - so a stub built from
+/// nothing would replace whatever the user actually had, and an empty baseline
+/// means the draft proves clean on the way out.
+fn renderUnreadableSource(allocator: std.mem.Allocator, playbook_name: []const u8) ![]u8 {
+    return renderSourceMiss(
+        allocator,
+        playbook_name,
+        "the target file could not be read, because it is missing or larger than one tool result carries",
+    );
+}
+
 fn renderSourceMiss(allocator: std.mem.Allocator, playbook_name: []const u8, reason: []const u8) ![]u8 {
     const text = try std.fmt.allocPrint(
         allocator,
@@ -378,10 +412,116 @@ fn renderSourceMiss(allocator: std.mem.Allocator, playbook_name: []const u8, rea
     return renderText(allocator, text);
 }
 
+/// Index just past a run of source that must not be read as code: a quoted or
+/// templated literal, or a comment. Returns null when `i` does not start one.
+///
+/// Every brace scan below needs this. Counting raw braces treats a `}` inside
+/// `Response.json({ msg: "}" })` as a real close and cuts the handler at the
+/// wrong byte.
+fn skipNonCode(source: []const u8, i: usize) ?usize {
+    switch (source[i]) {
+        '"', '\'', '`' => {
+            const quote = source[i];
+            var j = i + 1;
+            while (j < source.len) : (j += 1) {
+                if (source[j] == '\\') {
+                    j += 1;
+                    continue;
+                }
+                if (source[j] == quote) return j + 1;
+            }
+            return source.len;
+        },
+        '/' => {
+            if (i + 1 >= source.len) return null;
+            if (source[i + 1] == '/') {
+                const nl = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse return source.len;
+                return nl;
+            }
+            if (source[i + 1] == '*') {
+                const close = std.mem.indexOfPos(u8, source, i + 2, "*/") orelse return source.len;
+                return close + 2;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
+/// Index of the `}` matching the `{` at `open`, skipping literals and comments.
+fn matchBrace(source: []const u8, open: usize) ?usize {
+    var depth: usize = 0;
+    var i = open;
+    while (i < source.len) {
+        if (skipNonCode(source, i)) |next| {
+            i = next;
+            continue;
+        }
+        switch (source[i]) {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+        i += 1;
+    }
+    return null;
+}
+
+/// Index of the `{` that opens `function handler`'s body.
+///
+/// Two things sit between the name and the body and both can contain a brace.
+/// The parameter list can be destructured (`function handler({ req }: Ctx)`),
+/// which is why the scan starts after the matching `)` rather than at the first
+/// `{`. The return annotation can be an object type
+/// (`function handler(req: Request): { ok: boolean } {`), which is why a brace
+/// whose match is followed by another brace is treated as the annotation and
+/// skipped. Splicing into either produced source that was not valid.
 fn findHandlerBodyOpen(source: []const u8) ?usize {
     const handler_start = std.mem.indexOf(u8, source, "function handler(") orelse return null;
-    const body_open = std.mem.indexOfScalarPos(u8, source, handler_start, '{') orelse return null;
-    return body_open;
+    const paren_open = handler_start + "function handler".len;
+
+    var depth: usize = 0;
+    var i = paren_open;
+    const paren_close = while (i < source.len) {
+        if (skipNonCode(source, i)) |next| {
+            i = next;
+            continue;
+        }
+        switch (source[i]) {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) break i;
+            },
+            else => {},
+        }
+        i += 1;
+    } else return null;
+
+    var candidate = blk: {
+        var j = paren_close + 1;
+        while (j < source.len) {
+            if (skipNonCode(source, j)) |next| {
+                j = next;
+                continue;
+            }
+            if (source[j] == '{') break :blk j;
+            j += 1;
+        }
+        return null;
+    };
+
+    // An object return type is a balanced brace group with the body's brace
+    // after it. A plain return type such as `: Response` has no such group.
+    if (matchBrace(source, candidate)) |close| {
+        var k = close + 1;
+        while (k < source.len and std.ascii.isWhitespace(source[k])) k += 1;
+        if (k < source.len and source[k] == '{') candidate = k;
+    }
+    return candidate;
 }
 
 fn hasUncheckedResultValue(source: []const u8) bool {
@@ -556,8 +696,13 @@ fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
 
 fn findFile(ask: []const u8) ?[]const u8 {
     if (findKeyValue(ask, "file")) |value| return value;
+    // `.` cannot be a separator here because it is inside every filename, so a
+    // name ending a sentence keeps its full stop and matched nothing. The
+    // playbook then silently retargeted handler.ts, editing a file the user had
+    // not named. Every other extractor already strips trailing punctuation.
     var words = std.mem.tokenizeAny(u8, ask, " \t\r\n`\"'(),;");
-    while (words.next()) |word| {
+    while (words.next()) |raw| {
+        const word = std.mem.trimEnd(u8, raw, ".!?");
         if (std.mem.endsWith(u8, word, ".ts") or std.mem.endsWith(u8, word, ".tsx") or
             std.mem.endsWith(u8, word, ".js") or std.mem.endsWith(u8, word, ".jsx"))
         {
@@ -606,7 +751,16 @@ fn findJsonlFile(ask: []const u8) ?[]const u8 {
     return null;
 }
 
+/// The environment variable the ask names.
+///
+/// Taking the first ALL-CAPS token read a bare acronym rather than the
+/// variable: "Read the API key from DATABASE_URL" answered API, and the
+/// generated handler then read the wrong variable while still passing the
+/// veto. An underscore is what actually distinguishes a variable name from an
+/// acronym in these asks, so a token carrying one wins outright; without one,
+/// the longest candidate beats a short acronym.
 fn findEnvName(ask: []const u8) ?[]const u8 {
+    var best: ?[]const u8 = null;
     var words = std.mem.tokenizeAny(u8, ask, " \t\r\n`\"'(),;:.");
     while (words.next()) |word| {
         if (word.len < 2 or !std.ascii.isUpper(word[0])) continue;
@@ -617,9 +771,11 @@ fn findEnvName(ask: []const u8) ?[]const u8 {
                 break;
             }
         }
-        if (valid) return word;
+        if (!valid) continue;
+        if (std.mem.indexOfScalar(u8, word, '_') != null) return word;
+        if (best == null or word.len > best.?.len) best = word;
     }
-    return null;
+    return best;
 }
 
 fn containsFold(haystack: []const u8, needle: []const u8) bool {
@@ -768,29 +924,19 @@ fn appendWithRouteEntry(
 
 fn stripFunctionHandlerAlloc(allocator: std.mem.Allocator, source: []const u8) !?[]u8 {
     const start = std.mem.indexOf(u8, source, "function handler(") orelse return null;
-    const open = std.mem.indexOfScalarPos(u8, source, start, '{') orelse return null;
-    var depth: usize = 0;
-    var i = open;
-    while (i < source.len) : (i += 1) {
-        switch (source[i]) {
-            '{' => depth += 1,
-            '}' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                if (depth == 0) {
-                    var end = i + 1;
-                    if (end < source.len and source[end] == '\n') end += 1;
-                    const out = try allocator.alloc(u8, source.len - (end - start));
-                    errdefer allocator.free(out);
-                    @memcpy(out[0..start], source[0..start]);
-                    @memcpy(out[start .. start + source.len - end], source[end..]);
-                    return out;
-                }
-            },
-            else => {},
-        }
-    }
-    return null;
+    // Shares findHandlerBodyOpen's parameter-list and return-type handling, and
+    // matchBrace's literal awareness. Counting raw braces from the first `{`
+    // closed early on a handler returning `Response.json({ msg: "}" })`.
+    const open = findHandlerBodyOpen(source) orelse return null;
+    const close = matchBrace(source, open) orelse return null;
+
+    var end = close + 1;
+    if (end < source.len and source[end] == '\n') end += 1;
+    const out = try allocator.alloc(u8, source.len - (end - start));
+    errdefer allocator.free(out);
+    @memcpy(out[0..start], source[0..start]);
+    @memcpy(out[start .. start + source.len - end], source[end..]);
+    return out;
 }
 
 fn renderReadArgs(allocator: std.mem.Allocator, file: []const u8) ![]u8 {
@@ -941,7 +1087,8 @@ test "stand-in natural add-route ask becomes the historical structured route spe
 test "stand-in add-route steps use tool cassette event names and apply_edit last" {
     const parsed: request.ParsedRequest = .{
         .ask = "Add a GET /health route to handler.ts",
-        .step_index = 2,
+        // The apply step; 3 is the mandated edit_simulate dry-run before it.
+        .step_index = 4,
         .source = "function handler(req: Request): Response { return Response.json({ old: true }); }\n",
     };
     const body = try renderResponse(testing.allocator, parsed);
@@ -949,4 +1096,40 @@ test "stand-in add-route steps use tool cassette event names and apply_edit last
     try testing.expect(std.mem.indexOf(u8, body, "event: response.function_call_arguments.delta") != null);
     try testing.expect(std.mem.indexOf(u8, body, "\"name\":\"apply_edit\"") != null);
     try testing.expect(std.mem.indexOf(u8, body, "data: [DONE]") != null);
+}
+
+test "stand-in handler body scan skips destructured parameters and object return types" {
+    // The first `{` here is a destructured parameter, not the body.
+    const destructured = "function handler({ req }: Ctx): Response {\n    return Response.json({ ok: true });\n}\n";
+    const destructured_open = findHandlerBodyOpen(destructured).?;
+    try testing.expectEqual(@as(u8, '{'), destructured[destructured_open]);
+    try testing.expect(std.mem.startsWith(u8, destructured[destructured_open..], "{\n    return"));
+
+    // Here the first `{` after the parameter list opens the return type.
+    const object_return = "function handler(req: Request): { ok: boolean } {\n    return { ok: true };\n}\n";
+    const object_open = findHandlerBodyOpen(object_return).?;
+    try testing.expect(std.mem.startsWith(u8, object_return[object_open..], "{\n    return"));
+}
+
+test "stand-in brace matching ignores braces inside literals and comments" {
+    const source = "function handler(req: Request): Response {\n    // a } in a comment\n    return Response.json({ msg: \"}\" });\n}\n";
+    const open = findHandlerBodyOpen(source).?;
+    const close = matchBrace(source, open).?;
+    // Raw counting closed at the brace inside the string literal and cut the
+    // handler mid-body; the real close is the last byte before the newline.
+    try testing.expectEqual(source.len - 2, close);
+
+    const stripped = (try stripFunctionHandlerAlloc(testing.allocator, source)).?;
+    defer testing.allocator.free(stripped);
+    try testing.expectEqualStrings("", stripped);
+}
+
+test "stand-in ask extraction prefers the named variable and tolerates end-of-sentence files" {
+    // A bare acronym must not beat the variable the user actually named.
+    try testing.expectEqualStrings("DATABASE_URL", findEnvName("Read the API key from DATABASE_URL").?);
+    try testing.expectEqualStrings("TIMEOUT", findEnvName("Read the TIMEOUT value").?);
+
+    // A filename ending a sentence keeps its full stop through tokenizing.
+    try testing.expectEqualStrings("api.ts", findFile("Add a GET /health route to api.ts.").?);
+    try testing.expectEqualStrings("api.ts", findFile("Add a GET /health route to api.ts").?);
 }

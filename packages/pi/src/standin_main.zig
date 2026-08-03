@@ -28,7 +28,7 @@ test "stand-in tool SSE survives the real parser, assembler, and apply-edit rema
 
     const body = try playbook.renderResponse(allocator, .{
         .ask = "Add a GET /health route to handler.ts",
-        .step_index = 2,
+        .step_index = 4,
         .source = "function handler(req: Request): Response { return Response.json({ old: true }); }\n",
     });
     const events = try sse_parser.parseAll(allocator, body);

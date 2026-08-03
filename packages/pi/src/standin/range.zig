@@ -5,7 +5,11 @@ const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const expert_workflow = @import("../expert_workflow.zig");
 
 pub const version = "step-4b-v1";
-pub const content_hash = "fdc716ea980438935d9d0d1478ba2d5847294fea4e36cc3331d7738f985e56de";
+// Covers the declared entries and the negative corpus. The corpus joined the
+// hash after review found it outside: emptying it changed no published number
+// while both false-fire gates silently fell to zero iterations. The declared
+// range itself did not change when this value did.
+pub const content_hash = "970a6c41daae4f2a94dc009d35fef4d210d9849c011344496063926d7b2fb316";
 
 pub const Action = enum {
     answer,
@@ -162,6 +166,17 @@ pub fn contentHash() [64]u8 {
         for (entry.paraphrases) |paraphrase| hashField(&hasher, paraphrase);
         hashField(&hasher, @tagName(entry.action));
         hashField(&hasher, entry.description);
+    }
+
+    // The negative corpus is part of what the range claims, not a detail beside
+    // it: it is the only thing asserting the range does not extend past its
+    // declared edge. Leaving it out of the hash meant emptying it changed no
+    // published number while both false-fire gates fell to zero iterations.
+    hashUsize(&hasher, negative_corpus.len);
+    for (negative_corpus) |negative| {
+        hashField(&hasher, negative.id);
+        hashField(&hasher, negative.prompt);
+        hashField(&hasher, @tagName(negative.expected_kind));
     }
 
     var digest: [32]u8 = undefined;

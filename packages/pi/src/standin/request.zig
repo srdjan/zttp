@@ -5,7 +5,16 @@ const std = @import("std");
 pub const ParsedRequest = struct {
     ask: []const u8,
     step_index: usize,
-    source: []const u8,
+    /// The target file's bytes, recovered from a read tool's output.
+    ///
+    /// Null means no read has succeeded yet, which is NOT the same as an empty
+    /// file. The loop caps a tool result at 32 KiB, so the output for a large
+    /// file is truncated and no longer parses as JSON, and a failed read
+    /// returns plain text with no `content` field. Both arrive here as null. A
+    /// playbook that authored from "" in those cases would rewrite the file
+    /// from nothing, and the veto would not object because an empty `before`
+    /// makes an empty baseline.
+    source: ?[]const u8 = null,
 };
 
 pub const ParseError = error{
@@ -24,8 +33,13 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
 
     var ask: ?[]const u8 = null;
     var step_index: usize = 0;
-    var source: []const u8 = "";
+    var source: ?[]const u8 = null;
 
+    // Everything here is scoped to the CURRENT turn, and a plain user message
+    // is what starts one. The transcript is cumulative, so counting across the
+    // whole array would carry the previous task's tool outputs into this one:
+    // a second ask in the same session would start past the end of its own
+    // playbook and answer the first ask's question.
     for (input_value.array.items) |item_value| {
         if (item_value != .object) return ParseError.InvalidRequest;
         const item = item_value.object;
@@ -41,9 +55,15 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
             }
         }
 
-        if (ask == null and isUserMessage(item)) {
+        if (isUserMessage(item)) {
             const text = try readInputText(item);
-            if (!std.mem.startsWith(u8, text, "[expert workflow]")) ask = text;
+            // The workflow note rides along as a second user message on the
+            // same turn, so it must not reset the turn it belongs to.
+            if (!std.mem.startsWith(u8, text, "[expert workflow]")) {
+                ask = text;
+                step_index = 0;
+                source = null;
+            }
         }
     }
 
@@ -105,5 +125,47 @@ test "stand-in request parsing recovers the ask, source, and stateless step inde
     const parsed = try parse(arena.allocator(), body);
     try testing.expectEqualStrings("Add a GET /health route to handler.ts", parsed.ask);
     try testing.expectEqual(@as(usize, 2), parsed.step_index);
-    try testing.expectEqualStrings("function handler() {}", parsed.source);
+    try testing.expectEqualStrings("function handler() {}", parsed.source.?);
+}
+
+test "stand-in request parsing scopes the turn to the latest ask" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // A completed add-route turn followed by a fresh ask. Counting across the
+    // whole transcript would report step 4 and answer the first question.
+    const body =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Add a GET /health route to handler.ts"}]},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-1","output":"[]"},
+        \\  {"type":"function_call_output","call_id":"call-2","output":"{\"ok\":true}"},
+        \\  {"role":"user","content":[{"type":"input_text","text":"Explain what this handler does"}]},
+        \\  {"role":"user","content":[{"type":"input_text","text":"[expert workflow] kind=review_explain"}]}
+        \\]}
+    ;
+
+    const parsed = try parse(arena.allocator(), body);
+    try testing.expectEqualStrings("Explain what this handler does", parsed.ask);
+    try testing.expectEqual(@as(usize, 0), parsed.step_index);
+    try testing.expect(parsed.source == null);
+}
+
+test "stand-in request parsing reports an unrecoverable read as null, not empty" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // What a >32 KiB file looks like after the loop truncates the tool result:
+    // no longer valid JSON, so no content can be recovered. Authoring from ""
+    // here would overwrite the user's file with a stub.
+    const body =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Add a GET /health route to handler.ts"}]},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function han ...[truncated 40000 bytes]"}
+        \\]}
+    ;
+
+    const parsed = try parse(arena.allocator(), body);
+    try testing.expectEqual(@as(usize, 1), parsed.step_index);
+    try testing.expect(parsed.source == null);
 }

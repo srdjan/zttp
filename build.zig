@@ -786,6 +786,10 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&module_boundary.step);
     test_step.dependOn(&proof_swallow.step);
     test_step.dependOn(&run_release_check_tests.step);
+    // `zttp-standin` is deliberately not installed, so nothing else forces it
+    // to compile and a break in that path would surface only when somebody ran
+    // the step by hand. Compile it here, without installing it.
+    test_step.dependOn(&standin_exe.step);
     // The docs drift and link gates run here, and only here: neither Run step is
     // cached, so `zig build test` always executes both scripts. CI and
     // scripts/verify.sh deliberately do not invoke test-docs-drift or

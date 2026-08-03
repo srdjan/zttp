@@ -127,6 +127,10 @@ test "stand-in gate: shared review kind keeps each entry behavior" {
 }
 
 test "stand-in gate: negative corpus stays outside the declared range" {
+    // A zero-length corpus makes every false-fire loop below iterate nothing
+    // and report 0/0, which reads exactly like a clean run. Assert the corpus
+    // has content before trusting any count taken over it.
+    try testing.expect(range.negative_corpus.len >= 4);
     for (range.negative_corpus) |negative| {
         const eval_case = findEvalCase(negative.id) orelse return error.MissingNegativeEvalCase;
         try testing.expectEqualStrings(eval_case.prompt, negative.prompt);
@@ -137,6 +141,7 @@ test "stand-in gate: negative corpus stays outside the declared range" {
 }
 
 test "stand-in gate: negative corpus dispatches to misses without edit instructions" {
+    try testing.expect(range.negative_corpus.len >= 4);
     var false_fires: usize = 0;
     for (range.negative_corpus) |negative| {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -172,11 +177,17 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
     const cases = [_]SequenceCase{
         .{ .entry_id = "explain", .tools = &.{"zts_expert_modules"} },
         .{ .entry_id = "review", .tools = &.{"workspace_read_file"} },
-        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_modules", "apply_edit" } },
+        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_modules", "zts_expert_edit_simulate", "apply_edit" } },
         .{ .entry_id = "add-env", .tools = &.{ "zts_expert_modules", "workspace_read_file", "apply_edit" } },
         .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file", "apply_edit" } },
         .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "apply_edit" } },
     };
+
+    // This is the only gate that checks tool ordering and the at-most-one-edit
+    // rule, and it drives a hand-written row list. Without this the seventh
+    // range entry would simply have no row and escape the check entirely,
+    // while the gate still reported success.
+    try testing.expectEqual(range.entries.len, cases.len);
 
     for (cases) |case| {
         const entry = range.findById(case.entry_id) orelse return error.MissingRangeEntry;
@@ -262,4 +273,38 @@ fn sequenceSource(entry_id: []const u8) []const u8 {
     \\{"type":"expect","status":200,"bodyContains":"ok"}
     \\
     ;
+}
+
+// The stand-in test roots are compiled with the test filter pinned to
+// "stand-in" (build.zig), so a test whose name omits that token is silently
+// skipped while every gate still reports success. Nothing enforced the naming
+// rule the filter depends on, so this reads both roots and does.
+test "stand-in gate: every test in the stand-in roots is reachable through the pinned filter" {
+    const sources = [_]struct { name: []const u8, text: []const u8 }{
+        .{ .name = "standin_tests.zig", .text = @embedFile("standin_tests.zig") },
+        .{ .name = "standin_range_tests.zig", .text = @embedFile("standin_range_tests.zig") },
+    };
+
+    var checked: usize = 0;
+    for (sources) |source| {
+        var lines = std.mem.splitScalar(u8, source.text, '\n');
+        while (lines.next()) |line| {
+            // Only declarations at column zero; a needle inside a string
+            // literal (such as the one on this line) is not a declaration.
+            if (!std.mem.startsWith(u8, line, "test \"")) continue;
+            checked += 1;
+            if (std.mem.indexOf(u8, line, "stand-in") == null) {
+                std.debug.print(
+                    "[standin-gate] {s}: test name omits \"stand-in\" and would never run: {s}\n",
+                    .{ source.name, line },
+                );
+                return error.TestNameEscapesPinnedFilter;
+            }
+        }
+    }
+
+    // Guards the guard: an @embedFile that silently resolved to nothing would
+    // otherwise make this pass while checking no declarations at all.
+    try testing.expect(checked >= 15);
+    std.debug.print("[standin-gate] filter reachability {d}/{d} test names\n", .{ checked, checked });
 }
