@@ -1,0 +1,23 @@
+{"v":1,"provider":"anthropic","scenario":"workflow-nested-dispatch-avoidance","stream":true,"model":"claude-sonnet-4-6"}
+{"sse":"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-6\",\"id\":\"msg_011CdfuCLdtP61WXg1Tyw4sD\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":408,\"cache_read_input_tokens\":45133,\"cache_creation\":{\"ephemeral_5m_input_tokens\":408,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":52,\"service_tier\":\"standard\",\"inference_geo\":\"us\"}}        }\n\n"}
+{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01AuVtzF49Lh48dLjcxMSG2f\",\"name\":\"zts_expert_search\",\"input\":{},\"caller\":{\"type\":\"direct\"}}           }\n\n"}
+{"sse":"event: ping\ndata: {\"type\": \"ping\"}\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}      }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\"\"} }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\": \\\"run w\"}         }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"orkflow ret\"}        }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"urn \"}         }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"unkn\"}             }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"own\\\"}\"}            }\n\n"}
+{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0          }\n\n"}
+{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_013ZwmhU4bVAcxhDbpyZaobw\",\"name\":\"zts_expert_search\",\"input\":{},\"caller\":{\"type\":\"direct\"}}}\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}            }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\"}    }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\\\": \\\"Spec\"}}\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" inte\"}            }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"rsect\"}         }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"ion return\"}            }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" type\\\"}\"}          }\n\n"}
+{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1       }\n\n"}
+{"sse":"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"stop_details\":null},\"usage\":{\"input_tokens\":1,\"cache_creation_input_tokens\":408,\"cache_read_input_tokens\":45133,\"output_tokens\":102}       }\n\n"}
+{"sse":"event: message_stop\ndata: {\"type\":\"message_stop\"               }\n\n"}

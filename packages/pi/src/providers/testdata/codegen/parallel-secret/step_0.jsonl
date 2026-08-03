@@ -1,15 +1,19 @@
-{"v":1,"provider":"anthropic","scenario":"parallel-secret","stream":true,"model":"claude-haiku-4-5-20251001"}
-{"sse":"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-haiku-4-5-20251001\",\"id\":\"msg_011Cdfy4MXTWaNSG1eBRY1TQ\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":436,\"cache_read_input_tokens\":31087,\"cache_creation\":{\"ephemeral_5m_input_tokens\":436,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":3,\"service_tier\":\"standard\",\"inference_geo\":\"not_available\"}}     }\n\n"}
-{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}        }\n\n"}
+{"v":1,"provider":"anthropic","scenario":"parallel-secret","stream":true,"model":"claude-sonnet-4-6"}
+{"sse":"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude-sonnet-4-6\",\"id\":\"msg_011Cdfua8o76EtcmpxUq9bRq\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"stop_reason\":null,\"stop_sequence\":null,\"stop_details\":null,\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":436,\"cache_read_input_tokens\":31088,\"cache_creation\":{\"ephemeral_5m_input_tokens\":436,\"ephemeral_1h_input_tokens\":0},\"output_tokens\":1,\"service_tier\":\"standard\",\"inference_geo\":\"us\"}}          }\n\n"}
+{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}           }\n\n"}
 {"sse":"event: ping\ndata: {\"type\": \"ping\"}\n\n"}
-{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I'll help\"}            }\n\n"}
-{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" you create a handler that safely reads environment variables concurrently while protecting secrets. Let me start by gathering the necessary information.\"}           }\n\n"}
-{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0         }\n\n"}
-{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01RmXoyTUPNCgu6Y1jJmHTxS\",\"name\":\"zts_expert_modules\",\"input\":{},\"caller\":{\"type\":\"direct\"}}              }\n\n"}
-{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}}\n\n"}
-{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1     }\n\n"}
-{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_013TrsfKN2twDmaysJHNtTYx\",\"name\":\"zts_expert_features\",\"input\":{},\"caller\":{\"type\":\"direct\"}}    }\n\n"}
-{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}            }\n\n"}
-{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2 }\n\n"}
-{"sse":"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"stop_details\":null},\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":436,\"cache_read_input_tokens\":31087,\"output_tokens\":90}             }\n\n"}
-{"sse":"event: message_stop\ndata: {\"type\":\"message_stop\"    }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"I\"}               }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"'ll start by gathering all the facts I need before writing a\"}    }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" single line of code.\"}             }\n\n"}
+{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0 }\n\n"}
+{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01SSq1WLJaPdzR3dLVZx67sp\",\"name\":\"zts_expert_modules\",\"input\":{},\"caller\":{\"type\":\"direct\"}}          }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}        }\n\n"}
+{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1 }\n\n"}
+{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_014WcCVq74FfkHgSdUCwyN3Y\",\"name\":\"zts_expert_features\",\"input\":{},\"caller\":{\"type\":\"direct\"}}  }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}      }\n\n"}
+{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":2      }\n\n"}
+{"sse":"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":3,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_01NqdRXkKD2bB7Rtuv8rBjAF\",\"name\":\"workspace_list_files\",\"input\":{},\"caller\":{\"type\":\"direct\"}}             }\n\n"}
+{"sse":"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":3,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"\"}  }\n\n"}
+{"sse":"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":3        }\n\n"}
+{"sse":"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\",\"stop_sequence\":null,\"stop_details\":null},\"usage\":{\"input_tokens\":2,\"cache_creation_input_tokens\":436,\"cache_read_input_tokens\":31088,\"output_tokens\":101}   }\n\n"}
+{"sse":"event: message_stop\ndata: {\"type\":\"message_stop\"            }\n\n"}
