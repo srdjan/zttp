@@ -25,6 +25,7 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-02 | `7ec8ba85` | `ed809ba50da1` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 4 | 100% (6/6) |
 | 2026-08-03 | `74d48add` | `3742860e78b2` | 16 | claude-sonnet-4-6 | `118885d3f647` | 87% (14/16) | 4 | 100% (10/10) |
 | 2026-08-03 | `aba46bee` | `d6b571835aa5` | 16 | claude-sonnet-4-6 | `118885d3f647` | 93% (15/16) | 4 | 100% (10/10) |
+| 2026-08-03 | `d984092c` | `d6b571835aa5` | 16 | claude-haiku-4-5-20251001 | `118885d3f647` | 25% (4/16) | 3 | 90% (9/10) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
@@ -233,6 +234,43 @@ regressions, and this one instead surfaced a live fail-open, because recording i
 put a capable model against the fence with an incentive to get around it and a
 transcript of what it tried. That is not what the corpus was built for and is
 arguably the strongest argument yet for growing it.
+
+## The thirteenth row: the small-model row, and what it separates
+
+Roadmap item 5, finally measurable. Same sixteen cases, same compiler, same
+policy hash - only the model differs, and the corpus column says so by staying
+`d6b571835aa5` across both.
+
+| Model | First-draft | Median | Intent | Reached green |
+|---|---|---|---|---|
+| Sonnet 4.6 | 93% (15/16) | 4 | 100% (10/10) | 16/16 |
+| Haiku 4.5 | 25% (4/16) | 3 | 90% (9/10) | 16/16 |
+
+The headline gap is nearly four to one, and **reached-green is 16/16 for both**.
+The tiers differ in first-draft aim, not in whether they converge. That is the
+retry loop doing exactly what it is for, and it is the first time this page has
+been able to say so with a number rather than an argument. It also sharpens what
+the headline is: a rate that counted retries would have reported these two models
+as identical.
+
+Median round-trips reads *lower* for Haiku, 3 against 4, which is not the small
+model being more efficient. Sonnet spends round-trips in `zts_expert_edit_simulate`
+before submitting - sixteen of them on `jwt-auth` alone - and those dry runs are
+why its first drafts land. Haiku submits sooner and takes a veto retry instead.
+Two different costs, and this column only sees one of them.
+
+Publishing this row needed two fixes first, both of which were quietly wrong in
+the same way. The model column was printed from a compile-time constant while
+`ZTTP_CODEGEN_MODEL` was advertised for exactly this purpose, so the run would
+have published a Haiku measurement under Sonnet's name. And both ratchets - the
+per-case pin and the intent assertion - would have fired on every tier
+difference, reporting a smaller model as a compiler regression. A pin records
+what one model did on one prompt, so it can only ratchet that model.
+
+Main holds the Sonnet cassettes, not these. A corpus recorded off-headline
+measures but does not gate, so leaving Haiku in place would quietly retire the
+regression check that protects the headline. This row is reproducible from its
+own commit, which is what the commit column is for.
 
 ## Reading the table
 
