@@ -215,6 +215,49 @@ pub fn openAiEndpointFromEnv() ?OpenAiEndpoint {
     return .{ .base_url = base_url, .model = envVar("ZTS_OPENAI_MODEL") };
 }
 
+/// Where a session built from the environment will send handler source.
+///
+/// A `zttp expert` turn puts source on the wire whenever the model reads a
+/// file, so a user is owed the destination before the first turn rather than
+/// after. This mirrors `initFromEnv`'s provider precedence in one place: a
+/// banner that re-derived it would eventually disagree with the session it
+/// describes, which is the drift this repo has already paid for twice.
+pub const Destination = union(enum) {
+    /// No key is set; the stub backend answers and nothing leaves the process.
+    offline,
+    anthropic,
+    openai_hosted,
+    /// `ZTS_OPENAI_BASE_URL` is set. Carries the value as given.
+    openai_custom: []const u8,
+
+    /// True when the destination is on this machine, so source never reaches a
+    /// third party. Host-form check only: it reports what the user configured,
+    /// not what DNS would resolve to.
+    pub fn isLocal(self: Destination) bool {
+        return switch (self) {
+            .offline => true,
+            .anthropic, .openai_hosted => false,
+            .openai_custom => |url| containsAny(url, &.{ "//127.0.0.1", "//localhost", "//[::1]", "//0.0.0.0" }),
+        };
+    }
+};
+
+pub fn destinationFromEnv() Destination {
+    if (envVar("ANTHROPIC_API_KEY") != null) return .anthropic;
+    if (envVar("OPENAI_API_KEY") != null) {
+        if (openAiEndpointFromEnv()) |ep| return .{ .openai_custom = ep.base_url };
+        return .openai_hosted;
+    }
+    return .offline;
+}
+
+fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (std.mem.indexOf(u8, haystack, needle) != null) return true;
+    }
+    return false;
+}
+
 pub const AgentSession = struct {
     transcript: Transcript = .{},
     backend: Backend = .{ .stub = .{} },
@@ -1610,4 +1653,67 @@ test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_no
     const current = expert_meta.compute().policy_hash;
     const stamped = post.policy_hash orelse return error.TestExpected;
     try testing.expectEqualStrings(current[0..], stamped);
+}
+
+test "destinationFromEnv mirrors initFromEnv's provider precedence" {
+    const allocator = testing.allocator;
+
+    // Anthropic wins when both keys are present, matching initFromEnv.
+    {
+        var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "k");
+        defer anth.restore(allocator);
+        var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "k");
+        defer oai.restore(allocator);
+        try testing.expect(destinationFromEnv() == .anthropic);
+    }
+
+    // OpenAI only, no override: the hosted endpoint.
+    {
+        var anth = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+        defer anth.restore(allocator);
+        var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "k");
+        defer oai.restore(allocator);
+        var base = try EnvOverride.unset(allocator, "ZTS_OPENAI_BASE_URL");
+        defer base.restore(allocator);
+        try testing.expect(destinationFromEnv() == .openai_hosted);
+    }
+
+    // No key at all: nothing leaves the process.
+    {
+        var anth = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+        defer anth.restore(allocator);
+        var oai = try EnvOverride.unset(allocator, "OPENAI_API_KEY");
+        defer oai.restore(allocator);
+        try testing.expect(destinationFromEnv() == .offline);
+        try testing.expect(destinationFromEnv().isLocal());
+    }
+}
+
+test "a loopback endpoint override is reported as local, a remote one is not" {
+    const allocator = testing.allocator;
+    var anth = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    defer anth.restore(allocator);
+    var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "k");
+    defer oai.restore(allocator);
+
+    const local_urls = [_][]const u8{
+        "http://127.0.0.1:11434/v1/responses",
+        "http://localhost:8080/v1/responses",
+        "http://[::1]:11434/v1/responses",
+    };
+    for (local_urls) |url| {
+        var base = try EnvOverride.set(allocator, "ZTS_OPENAI_BASE_URL", url);
+        defer base.restore(allocator);
+        const dest = destinationFromEnv();
+        try testing.expect(dest == .openai_custom);
+        try testing.expect(dest.isLocal());
+    }
+
+    // A proxy in front of a hosted provider is still off-machine, and the
+    // banner must not tell the user their source stays put.
+    var remote = try EnvOverride.set(allocator, "ZTS_OPENAI_BASE_URL", "https://proxy.example.com/v1/responses");
+    defer remote.restore(allocator);
+    const dest = destinationFromEnv();
+    try testing.expect(dest == .openai_custom);
+    try testing.expect(!dest.isLocal());
 }

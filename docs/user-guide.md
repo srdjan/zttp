@@ -412,6 +412,54 @@ Anthropic backend is the measured, supported path. The shipped OpenAI Responses
 API backend is experimental and unmeasured; its `gpt-4o-mini` default is not
 covered by the codegen quality ratchet.
 
+### What a turn sends
+
+Expert mode is a coding agent, so it reads your code to work on it, and what it
+reads goes to your model provider. Nothing is uploaded when the session starts:
+the first request carries your prompt, the agent persona, and the tool schemas.
+
+Source crosses the wire when the model calls a tool that returns it. Three do:
+`workspace_read_file` returns a file's contents, `workspace_search_text` returns
+matching lines, and `zts_expert_edit_simulate` and `apply_edit` carry a full
+proposed file - though that content is what the model just wrote. The compiler's
+veto verdict comes back as a tool result and can quote diagnostics with source
+spans.
+
+Each result is appended to the session transcript, and every subsequent request
+in that turn resends the whole transcript. So a file read once is sent again on
+each later round trip of the same turn. A single tool result is capped at 32 KiB
+before it enters the transcript; a larger file is truncated there.
+
+Files the model never asks for are never sent. There is no repository scan and
+no upfront upload, and the examples baked into the persona are this repository's
+own, not yours.
+
+The interactive banner states the destination before your first turn. To keep
+source on your machine, point `ZTS_OPENAI_BASE_URL` at a local server that
+speaks the OpenAI Responses shape:
+
+```bash
+export OPENAI_API_KEY=unused-by-a-local-server
+export ZTS_OPENAI_BASE_URL=http://127.0.0.1:11434/v1/responses
+export ZTS_OPENAI_MODEL=<the model your server serves>
+zttp expert
+```
+
+The banner reports a loopback endpoint as staying on this machine. A proxy in
+front of a hosted provider is still off-machine and is reported as such.
+
+### How a turn runs
+
+1. You state a goal in plain English.
+2. The agent gathers facts with read-only tools before proposing anything.
+3. It authors a complete file and dry-runs it through `zts_expert_edit_simulate`.
+4. The compiler veto counts violations the draft introduces relative to the
+   file's current contents. A draft that adds none passes; one that adds any is
+   rejected and the agent retries.
+5. On a pass you see a proof card and approve or reject. `--yes` approves every
+   verified edit; `--no-edit` blocks writes entirely.
+6. The host writes the file. The agent never writes to disk itself.
+
 ```bash
 zttp auth claude
 zttp auth openai                              # experimental provider

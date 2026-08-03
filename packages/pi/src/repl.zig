@@ -830,9 +830,38 @@ const expert_banner =
     "zttp expert: I propose compiler-verified edits to your handler. Every draft is\n" ++
     "checked by the analyzer and rejected if it fails, so you only approve edits that pass.\n" ++
     "\n" ++
-    "Each turn calls your model provider and consumes API credits.\n" ++
-    "\n" ++
-    "Try: add a GET /health route to src/handler.ts\n" ++
+    "Each turn calls your model provider and consumes API credits.\n";
+
+/// The destination line, printed under the banner before the first turn.
+///
+/// A coding agent has to read your code to work on it, so a turn puts handler
+/// source on the wire as soon as the model calls a read tool. That is worth
+/// stating once, up front, rather than leaving a user to infer it from a
+/// README bullet after the fact.
+fn writeDestination(allocator: std.mem.Allocator) void {
+    const dest = agent.destinationFromEnv();
+    const line = switch (dest) {
+        .offline => allocator.dupe(u8, "\nNo model key is set, so no handler source leaves this process.\n") catch return,
+        .anthropic => allocator.dupe(u8, "\nSource the model reads is sent to Anthropic. Files are sent only when the\nmodel reads them; nothing is uploaded up front.\n") catch return,
+        .openai_hosted => allocator.dupe(u8, "\nSource the model reads is sent to OpenAI. Files are sent only when the model\nreads them; nothing is uploaded up front.\n") catch return,
+        .openai_custom => |url| blk: {
+            const where = if (dest.isLocal())
+                "stays on this machine"
+            else
+                "is sent to that host";
+            break :blk std.fmt.allocPrint(
+                allocator,
+                "\nSource the model reads {s}: ZTS_OPENAI_BASE_URL points at {s}.\n",
+                .{ where, url },
+            ) catch return;
+        },
+    };
+    defer allocator.free(line);
+    _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+}
+
+const expert_banner_tail =
+    "\nTry: add a GET /health route to src/handler.ts\n" ++
     "Type a goal in plain English, 'help' for commands, or 'quit' to exit.\n";
 
 const expert_no_workspace_hint =
@@ -840,6 +869,8 @@ const expert_no_workspace_hint =
 
 fn writeBanner(allocator: std.mem.Allocator) void {
     _ = std.c.write(std.c.STDOUT_FILENO, expert_banner.ptr, expert_banner.len);
+    writeDestination(allocator);
+    _ = std.c.write(std.c.STDOUT_FILENO, expert_banner_tail.ptr, expert_banner_tail.len);
     if (!workspaceHasHandler(allocator)) {
         _ = std.c.write(std.c.STDOUT_FILENO, expert_no_workspace_hint.ptr, expert_no_workspace_hint.len);
     }
