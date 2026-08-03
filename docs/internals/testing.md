@@ -17,7 +17,8 @@ Two runtime test roots:
 | (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `edge_server`, `studio`, `proof_adapter` |
 | `test-cli` | `cli_main_tests` (`cli_main.zig`) | `dev_cli` and its dependencies: deploy, pi_app wiring, `zts_cli` delegation |
 
-Nine host test roots, declared in the `host_test_roots` table in `build.zig`:
+Twenty-one host test roots, declared in the `host_test_roots` table in
+`build.zig`:
 
 | Step | Root |
 |---|---|
@@ -28,8 +29,24 @@ Nine host test roots, declared in the `host_test_roots` table in `build.zig`:
 | `test-expert` | `packages/tools/src/expert.zig` |
 | `test-zts-cli` | `packages/tools/src/zts_cli.zig` |
 | `test-deploy-manifest` | `packages/tools/src/deploy_manifest.zig` |
+| `test-agent-identity` | `packages/tools/src/agent_identity.zig` |
+| `test-module-graph-record` | `packages/tools/src/module_graph_record.zig` |
+| `test-agent-protocol` | `packages/tools/src/agent_protocol.zig` |
+| `test-module-audit` | `packages/tools/src/module_audit.zig` |
+| `test-manifest-alignment` | `packages/tools/src/manifest_alignment.zig` |
+| `test-smt-solver` | `packages/tools/src/smt_solver.zig` |
+| `test-verify-paths-core` | `packages/tools/src/verify_paths_core.zig` |
+| `test-report` | `packages/tools/src/report.zig` |
+| `test-project-config` | `packages/tools/src/project_config.zig` |
+| `test-proof-quest-fixture` | `packages/tools/src/proof_quest_fixture.zig` |
+| `test-openapi-manifest` | `packages/tools/src/openapi_manifest.zig` |
 | `test-expert-app` | `packages/pi/src/tests.zig` |
 | `test-cassette` | `packages/pi/src/cassette_tests.zig` |
+| `test-standin` | `packages/pi/src/standin_tests.zig` |
+
+`test-standin` compiles with its filters pinned to the literal `stand-in`, so a
+test in that root whose name omits the token never runs. A gate inside the root
+enforces the naming rule the filter depends on.
 
 Two of those roots exist because of how modules are wired rather than because
 of what they test. `canonicalize.zig` and `zts_cli.zig` are reached only

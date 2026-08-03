@@ -1,8 +1,11 @@
 # Documentation
 
 These docs describe the current codebase. Release history lives in
-`CHANGELOG.md`, and [Roadmap](roadmap.md) is the only forward-looking document
-here. Finished plans live under [archive](archive/README.md).
+`CHANGELOG.md`, and [Roadmap](roadmap.md) is the only forward-looking list of
+work. [docs/plans/](plans/) holds design documents for named subsystems, each
+owning one area and stating what it unblocks; they are forward-looking too, but
+they are designs rather than a backlog. Finished plans live under
+[archive](archive/README.md).
 
 ## Start Here
 
@@ -18,6 +21,8 @@ here. Finished plans live under [archive](archive/README.md).
 - [Roadmap](roadmap.md) - supported platforms, current limitations, planned
   runtime work, the `zts-advanced-1` language program, and what remains of the
   reset.
+- [First Durable Workflow](tutorials/first-durable-workflow.md) - run the
+  durable workflow examples from a clean checkout and inspect replay state.
 - [Convergence](convergence.md) - the measured first-draft veto-pass rate over
   the frozen prompt corpus, with the corpus version and policy hash each figure
   was recorded against.
@@ -63,9 +68,22 @@ here. Finished plans live under [archive](archive/README.md).
   excludes, and why the zruntime suite is standalone.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.
+- [Agent Protocol v2](internals/agent-protocol-v2.md) - the
+  `zts agent --stdin-json` request and response envelope, its closed operation
+  set, and version negotiation.
 - [zts-advanced-1 Formal Spec](zts-formal-spec-northstar-advanced.md) - the
   north-star language specification the roadmap's language program implements.
   It describes the target profile, not today's compiler.
+
+## Solutions
+
+[docs/solutions/](solutions/) holds categorized records of past bugs and
+engineering problems, searchable by YAML frontmatter (`module`, `tags`,
+`problem_type`). Unlike the archive, these describe classes that recur, so they
+stay maintained.
+
+[Essay](essay.md) is the long-form argument for a machine-first language
+profile. It is opinion, not reference.
 
 ## Archive
 

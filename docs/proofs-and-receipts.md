@@ -63,7 +63,7 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped.
 |---|---|
 | `pure` | the handler calls no virtual modules: it is a pure function of the request |
 | `read_only` | every virtual-module call is read-classified: no state is mutated |
-| `deterministic` | no `Date.now()` or `Math.random()` on any path: every run is identical |
+| `deterministic` | no `Date.now()`, `Math.random()`, or `performance.now()` on any path: every run is identical |
 | `retry_safe` | read-only, or every write sits inside a durable step |
 | `idempotent` | deterministic and retry-safe: safe under at-least-once delivery |
 
@@ -193,8 +193,8 @@ For the `deterministic` property today:
 
 ```
 | Counterexample: -deterministic at src/handler.ts:14: Date.now()        |
-|   why: remove Date.now() / Math.random() or move the call inside       |
-|        a `durable.step`.                                               |
+|   why: remove Date.now() / Math.random() / performance.now() or move   |
+|        the call inside a `durable.step`.                               |
 |   [r] replay live   [s] pin as regression test   [a] ask expert to fix |
 ```
 

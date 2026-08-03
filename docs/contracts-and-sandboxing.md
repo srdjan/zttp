@@ -118,7 +118,7 @@ Handler Properties:
   ---    read_only       no state mutations via virtual modules
   ---    stateless       independent of mutable state
   ---    retry_safe      disabled when scope-managed cleanup or bare writes are present
-  PROVEN deterministic   no Date.now() or Math.random()
+  PROVEN deterministic   no Date.now(), Math.random(), or performance.now()
 ```
 
 Self-extracting binaries parse the embedded contract at startup:

@@ -115,8 +115,11 @@ exposing a binary publicly. Two boundaries are easy to miss:
   Terminate TLS at a reverse proxy and set the host explicitly before exposing a
   deployed binary to public traffic.
 - `expert` sends your handler source to the configured model provider
-  (Anthropic or OpenAI). Attestation is on by default and publishes a stable
-  per-user public-key fingerprint at `/.well-known/zttp-attest`.
+  (Anthropic or OpenAI). Setting `ZTS_OPENAI_BASE_URL` points it at any server
+  that speaks the OpenAI Responses shape, including one on loopback, in which
+  case the source never leaves the machine. Attestation is on by default and
+  publishes a stable per-user public-key fingerprint at
+  `/.well-known/zttp-attest`.
 
 ## Numbers
 
