@@ -1,5 +1,5 @@
 ---
-title: A label union that never narrows refuses a clean program
+title: A label union that never narrows refuses one shape, not the task
 date: 2026-08-03
 category: logic-errors
 module: packages/zts/src/flow_checker.zig (callback labels through zttp:io parallel)
@@ -9,6 +9,7 @@ symptoms:
   - Returning one element of a `parallel()` result trips ZTS400 for what a sibling callback read.
   - The same secret read through a direct `env` call, held in a local, and never returned is clean.
   - Two non-secret callbacks are clean, so the demotion is not "any parallel call taints everything".
+  - Reducing the secret to a boolean inside the callback is clean, because no label crosses the boundary.
 root_cause: logic_error
 resolution_type: documented
 severity: medium
@@ -27,7 +28,7 @@ applies_when:
   - "Writing a handler that reads a secret and a non-secret through one module call"
 ---
 
-# A label union that never narrows refuses a clean program
+# A label union that never narrows refuses one shape, not the task
 
 ## Context
 
@@ -86,18 +87,45 @@ the rule stated in
 A checker that narrowed here without evidence would be reintroducing the
 fail-open the union was built to close.
 
-The cost is that a legitimate program cannot be written: reading a secret and a
-non-secret through one `parallel` call and returning the non-secret. The
-workaround is to read them separately, which row 1 shows is clean.
+The cost is that one shape cannot be written: carrying a secret and a non-secret
+across the boundary in one `parallel` call and filtering afterwards.
+
+## The Workarounds, And Which One Is Better
+
+Reading the two values separately is clean, as row 1 shows. That is the obvious
+route and it gives up the concurrency.
+
+The better one keeps the `parallel` call and moves the filter inside the
+callback, so nothing carrying the label ever crosses:
+
+```ts
+function checkApiSecret(): Response {
+  const val = env("API_SECRET");
+  return Response.json({ present: val !== undefined });   // the raw value stops here
+}
+
+const results = parallel([readAppName, checkApiSecret]);
+// results[1] carries {present: bool}. No secret label, so no union to narrow.
+```
+
+This is not a trick played on the checker. The secret genuinely does not leave
+the callback, and the union is empty because there is nothing to union. The
+imprecision above is real, and it only bites code that carries a label across a
+boundary it did not need to cross.
+
+This document originally claimed no program could be written at all. That was
+wrong, and what corrected it was a recording: asked for exactly this task, the
+model produced the containment shape above and passed the veto on its first
+applied draft, after three `zts_expert_edit_simulate` dry runs.
 
 ## Where This Is Pinned
 
 `parallel-secret` in the codegen corpus
-(`packages/pi/src/expert_codegen_record.zig`) is pinned as a first-draft failure
-on exactly this shape. Unlike the corpus's other pinned failure, the cause is
-not the model: no draft can pass it. The case exists so the number moves the day
-element access narrows, which is the only kind of case a convergence corpus can
-use to see a fence move.
+(`packages/pi/src/expert_codegen_record.zig`) is the case. It is pinned as a
+first-draft *pass*, and what it measures is the containment: whether the model
+stops a label at the boundary rather than carrying it across and filtering after.
+A build where the union narrows would not change its verdict; a build where the
+model stopped finding the containment shape would.
 
 ## Related Issues
 

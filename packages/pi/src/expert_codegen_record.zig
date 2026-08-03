@@ -357,10 +357,23 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that requires a bearer JWT using zttp:auth " ++
             "with the secret from env JWT_SECRET, returns 401 when the token is missing or invalid, " ++
             "and otherwise returns the verified claims as JSON. Never use a fallback secret.",
+        // The env stub is what makes this check test its own name. Without it
+        // JWT_SECRET is unset in the workspace, so a handler that validates its
+        // configuration before it looks at the request answers 500 "server
+        // misconfigured" and the check reports a bearer-token failure that never
+        // happened. It passed for years only because the recorded handler
+        // happened to read the header first; the 2026-08-03 re-record produced
+        // one that checks the secret first, and the check failed on a handler
+        // that does return 401 for a missing token.
+        //
+        // Same correction as `websocket-echo` below, in the other direction:
+        // that one passed for a reason its name did not describe, this one
+        // failed for one. Neither was measuring what it claimed.
         .intent = .{
             .tests_jsonl =
             \\{"type":"test","name":"a request with no bearer token is unauthorized"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"io","seq":0,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-signing-secret"}
             \\{"type":"expect","status":401}
             \\
             ,
@@ -449,7 +462,18 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
             "durable step, then dispatch a notify child handler with workflow.call after the " ++
             "step completes. Keep the child dispatch outside the step callback.",
-        .expect_first_draft_pass = true,
+        // Flipped from true on the 2026-08-03 re-record. The previous cassette
+        // held a four-step session whose first draft passed; this one runs
+        // eighteen. The new first draft is a much larger program - it compiles a
+        // schema, decodes the body, and logs - and trips ZTS204 on a return type
+        // that does not match what it declared. It still reaches green.
+        //
+        // Nothing in the compiler moved: the same build replays the old cassette
+        // at a pass. This is the model drawing a different first draft between
+        // two recordings of the same prompt, which is worth having pinned rather
+        // than smoothed over - re-recording until the old outcome came back
+        // would be selecting the sample that flatters the rate.
+        .expect_first_draft_pass = false,
     },
     .{
         .name = "workflow-saga-compensation",
@@ -561,27 +585,35 @@ const record_corpus = [_]RecordCase{
         // describe what a caller's callback produced. See
         // docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md.
         //
-        // Pinned as a first-draft failure, and unlike jwt-auth the cause is not
-        // the model. The fix over-approximates in the other direction: the array
-        // `parallel` returns carries the union of every callback's labels, and
-        // indexing does not narrow back, so returning `values[0]` - the app name
-        // - is refused for what `values[1]` read. Isolated before recording:
-        // direct `env` reads with the secret held in a local are clean, and two
-        // non-secret callbacks are clean, so it is specifically the result
-        // array. The polarity is the safe one, and it costs a legitimate
-        // program.
+        // The result array `parallel` returns carries the union of every
+        // callback's labels and indexing does not narrow back, so returning
+        // `values[0]` is refused for what `values[1]` read. That much was
+        // measured before recording and holds: direct `env` reads with the
+        // secret in a local are clean, two non-secret callbacks are clean, so
+        // the union is specifically the result array. See
+        // docs/solutions/logic-errors/a-label-union-that-never-narrows-refuses-a-clean-program.md.
         //
-        // That makes this the most useful kind of pinned case: it flips the day
-        // the indexing narrows, which is a fence the corpus can then see move.
-        // No intent spec - the case does not converge to a handler, and a spec
-        // with nothing to run against reports `.failed`, which would read as the
-        // handler doing the wrong thing rather than never existing.
+        // The case was authored pinned to false on the reasoning that no draft
+        // could therefore pass. That reasoning was wrong and the recording is
+        // what showed it. The model reduced the secret to a boolean *inside* the
+        // callback - `checkApiSecret()` returns `{present: bool}`, never the raw
+        // value - so nothing carrying the secret label ever crosses the module
+        // boundary and there is no union to narrow. It passed first draft.
+        //
+        // So what this case measures is not the imprecision but the way around
+        // it: whether the model contains a secret at the boundary rather than
+        // carrying it across and filtering after. Three `edit_simulate` calls
+        // preceded the one `apply_edit`, which is where the shape was found.
+        //
+        // No intent spec: the response is a bare app name read from an env var,
+        // and asserting it would test the env stub rather than the containment
+        // this case is about. What matters here is the veto verdict.
         .name = "parallel-secret",
         .prompt = "Create a handler in handler.ts that reads the APP_NAME and API_SECRET " ++
             "environment variables concurrently using parallel() from zttp:io. Return 503 " ++
             "when API_SECRET is not set. Otherwise return Response.json with only the app " ++
             "name - the secret must never appear in the response.",
-        .expect_first_draft_pass = false,
+        .expect_first_draft_pass = true,
     },
     .{
         // Fence: the shapes of egress options object the flow checker could not
