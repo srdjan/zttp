@@ -70,7 +70,7 @@ freed, and owned non-unique strings are freed exactly as before. The standalone
 
 `packages/zts/src/context.zig` applies that operation in two passes:
 
-1. Scrub all six prototype roots and every entry in `builtin_objects`.
+1. Scrub every prototype root and every entry in `builtin_objects`.
 2. Free the prototype and builtin root objects only after every tracked slot is
    pointer-free.
 

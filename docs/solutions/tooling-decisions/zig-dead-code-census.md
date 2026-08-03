@@ -107,12 +107,16 @@ outer function. Anyone who wired it up would have hit a compile error on code
 that looked long-settled.
 
 The field-level census surfaced a second class: config knobs that silently do
-nothing. `ContextConfig.init_globals`, `ServerConfig.pool_metrics_every`
-(documented as "Log pool metrics every N requests"), three `GCConfig` tuning
-fields, and `PolicyInput.args_hash` are all declared, settable, and never
-read. `LocalPolicyChecker.check` consults `resource`, `action`, and
-`env.service` - a caller can pass an args hash and policy ignores it. These
-are worse than dead code: they are an API that lies to its caller.
+nothing. At the time of the run, `ContextConfig.init_globals`,
+`ServerConfig.pool_metrics_every` (documented as "Log pool metrics every N
+requests"), three `GCConfig` tuning fields, and `PolicyInput.args_hash` were
+all declared, settable, and never read - a caller could pass an args hash and
+policy would ignore it. These are worse than dead code: they are an API that
+lies to its caller.
+
+All five have since been removed, which is the census working as intended. The
+class is what to look for; the names are spent. Re-derive current examples by
+running the field-level census rather than reusing these.
 
 A third class is documented conventions nobody adopted. `rule_error.zig`
 declared `RuleError` with a module doc stating that four named subcommands
@@ -132,7 +136,7 @@ naming the set; three never imported it.
 | Rot hidden by lazy analysis | calls a symbol that does not exist | delete, commit as `fix` |
 | Wire or on-disk format | `BytecodeHeader.version_minor`, `BytecodeFlags.has_source_map` | keep, removal breaks the format |
 | Packed-struct bit | any field in a `packed struct(u8)` | keep or replace with `_reserved`, never just delete |
-| Public config field | `ContextConfig.init_globals` | report, removal is an API change |
+| Public config field | a declared, settable field no code reads | report, removal is an API change |
 | Documented deferral | `AtomTable.pruneUnused` | keep, a written decision parked it |
 
 ## Examples

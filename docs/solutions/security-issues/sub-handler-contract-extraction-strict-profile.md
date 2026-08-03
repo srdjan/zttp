@@ -48,14 +48,19 @@ var resolved = try zts.pipeline.resolve(
 );
 ```
 
-Only system sub-handler contract extraction opts out:
+The defaulted boundary that carries this is `ExtractContractOptions.strict` (`packages/zts/src/pipeline.zig:385`), and the sub-handler path is the contract-extraction caller that opts out (`packages/runtime/src/in_process_dispatch.zig:69-73`):
 
 ```zig
-var compiled = try precompile.compileHandler(self.allocator, source, entry, .{
-    .emit_contract = true,
+var contract = try zq.pipeline.extractContract(self.allocator, source, entry, .{
     .strict = false,
+    .version = zq.version.string,
+    .read_file = zq.file_io.readFileForModuleGraph,
 });
 ```
+
+Note where that call lives. Contract extraction does not go through `precompile` from the runtime at all: commit `58bc8449`, the same change this learning records, moved it into `zts.pipeline.extractContract` so that AOT compilation, deploy manifests, and test generation do not link into the deployed runtime - about 600KB in ReleaseFast. An earlier draft of this doc showed a `precompile.compileHandler` call here; that call never existed in this file, and the binary-size reason is the more useful half of the lesson.
+
+`in_process_dispatch.zig` is not the only runtime caller passing `.strict = false`. `packages/runtime/src/handler_instance.zig:1054-1060` does too, for a different stated reason: strict ZTS6xx is a build-time concern that precompile has already run. That opt-out entered the runtime in `da8fd528` (2026-05-19), before this learning was written.
 
 The `true` default preserves every existing caller. The sub-handler path still fails closed if parsing, boolean checking, type checking, contract extraction, or pool initialization fails; it skips only the canonical-profile diagnostics that were not previously part of that runtime path.
 
