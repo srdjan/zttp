@@ -1548,6 +1548,35 @@ pub const FlowChecker = struct {
         }
     }
 
+    /// Labels for a call to an export that builds its return value out of its
+    /// arguments: the parsing, decoding, and escaping family, which the
+    /// registry marks by declaring `validated`.
+    ///
+    /// The declared set on its own is a fail-open. `validateJson("s", x)`
+    /// answered `{validated}` and nothing more, so every other label the
+    /// argument carried was dropped, and a secret routed through it reached the
+    /// response with `no_secret_leakage` still PROVEN. The same held for
+    /// `coerceJson` and `decodeJson` - three exports across two modules, which
+    /// is what makes this a rule about a shape rather than a bug in one row.
+    ///
+    /// The rule: such an export discharges exactly one label, `user_input`,
+    /// because that is what validating a value means. Every other label the
+    /// input carried survives it. An escaped secret is still a secret and a
+    /// parsed credential is still a credential - the same reasoning the
+    /// `renderToString` arm below already applies to escaping.
+    fn parsedResultLabels(self: *FlowChecker, base: LabelSet, call_data: Node.CallExpr) LabelSet {
+        var labels = base;
+        for (0..call_data.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
+            labels = LabelSet.merge(labels, self.inferLabels(arg));
+        }
+        // Cleared after the union, not before: the argument is normally the
+        // thing carrying `user_input`, and clearing first would let the merge
+        // put it straight back.
+        labels.user_input = false;
+        return labels;
+    }
+
     /// Infer labels for a function call expression.
     fn inferCallLabels(self: *FlowChecker, call_data: Node.CallExpr) LabelSet {
         const callee_tag = self.ir_view.getTag(call_data.callee) orelse return LabelSet.empty;
@@ -1560,6 +1589,7 @@ pub const FlowChecker = struct {
                     const arg = self.ir_view.getListIndex(call_data.args_start, 0);
                     return self.refineEnvLabels(arg, base_labels);
                 }
+                if (base_labels.validated) return self.parsedResultLabels(base_labels, call_data);
                 return LabelSet.merge(base_labels, self.closureArgLabels(binding.slot, call_data));
             }
 
@@ -2496,7 +2526,12 @@ pub const FlowChecker = struct {
         // Only track if the function returns labels worth propagating (e.g., validated)
         if (return_labels.has(.validated)) {
             const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-            self.result_binding_labels.put(self.allocator, key, return_labels) catch self.markAllocationFailure();
+            // Refined the same way a direct call is, not stored as declared.
+            // `const r = validateJson("s", secret); return r.value;` is the
+            // shape the fail-open actually shipped in - fixing only
+            // `inferCallLabels` would leave this path laundering.
+            const refined = self.parsedResultLabels(return_labels, call_data);
+            self.result_binding_labels.put(self.allocator, key, refined) catch self.markAllocationFailure();
             // Remember the validator that cleared the taint so a defended path
             // can name it. `func` is borrowed from the module metadata table.
             if (self.module_fn_meta.get(callee_binding.slot)) |meta| {
@@ -4096,6 +4131,29 @@ fn runNoCredentialLeakage(allocator: std.mem.Allocator, source: []const u8) !boo
     return checker.getProperties().no_credential_leakage;
 }
 
+/// Shared harness: parse `source`, run the FlowChecker on its handler, and
+/// return whether input_validated was proven. The counterpart to the leakage
+/// harnesses above - it checks the label a validator is entitled to discharge
+/// rather than the ones it must not.
+fn runInputValidated(allocator: std.mem.Allocator, source: []const u8) !bool {
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    const handler_verifier = @import("handler_verifier.zig");
+    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+        return error.HandlerNotFound;
+
+    var checker = FlowChecker.init(allocator, ir_view, &atoms);
+    defer checker.deinit();
+    _ = try checker.check(handler_fn);
+    return checker.getProperties().input_validated;
+}
+
 test "FlowChecker flags a credential in a hoisted egress options object" {
     // Inline, the `headers` extractor sees the credential. Hoisted into a
     // binding the options object is no longer a literal, so the per-field
@@ -4745,6 +4803,101 @@ test "a compiled schema is not a varying source" {
         \\}
     ;
     try std.testing.expect(try runDeterministic(std.testing.allocator, source));
+}
+
+// A parsing export answers with its own declared labels, so for a long time it
+// dropped everything its argument carried. Any label laundered through one:
+// `env("JWT_SECRET")` routed through `validateJson` and returned in the body
+// proved `no_secret_leakage`. Found by a model, which wrote the shape
+// deliberately during a codegen recording and said in its own commentary that
+// it did so to clear the credential label. See
+// docs/solutions/security-issues/validate-json-strips-the-label-it-was-asked-to-check.md.
+//
+// The rule now: such an export discharges `user_input` and nothing else.
+
+test "validateJson does not launder a secret" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  schemaCompile("s", "{}");
+        \\  const r = validateJson("s", env("JWT_SECRET"));
+        \\  return Response.json({ v: r.value });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "coerceJson does not launder a secret" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { schemaCompile, coerceJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  schemaCompile("s", "{}");
+        \\  const r = coerceJson("s", env("JWT_SECRET"));
+        \\  return Response.json({ v: r.value });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "decodeJson does not launder a secret" {
+    // A second module, which is what makes this a rule about the shape of an
+    // export rather than a defect in one row of one registry.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { decodeJson } from "zttp:decode";
+        \\function handler(req) {
+        \\  const r = decodeJson(env("JWT_SECRET"), "");
+        \\  return Response.json({ v: r.value });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "escapeHtml does not launder a secret" {
+    // Escaping defends against injection. It does not make a secret public,
+    // which the renderToString arm already said and this family did not.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { escapeHtml } from "zttp:text";
+        \\function handler(req) {
+        \\  return Response.json({ v: escapeHtml(env("JWT_SECRET")) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "validateJson does not launder a credential" {
+    // The shape the model actually wrote: verified claims round-tripped
+    // through the validator to clear the `credential` label.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { parseBearer, jwtVerify } from "zttp:auth";
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  schemaCompile("claims", "{}");
+        \\  const result = jwtVerify(parseBearer(req.headers["authorization"]), env("JWT_SECRET"));
+        \\  const claims = validateJson("claims", JSON.stringify(result.value));
+        \\  return Response.json({ claims: claims.value });
+        \\}
+    ;
+    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, source));
+}
+
+test "a validator still discharges user input" {
+    // The discharge is the one label these exports are entitled to clear, and
+    // the fix must not take it away: this is the ordinary validation path, and
+    // demoting it would make every validated handler unprovable.
+    const source =
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  schemaCompile("user", "{}");
+        \\  const r = validateJson("user", req.body);
+        \\  return Response.json({ ok: r.value });
+        \\}
+    ;
+    try std.testing.expect(try runInputValidated(std.testing.allocator, source));
 }
 
 test "a clock read reaching the response costs determinism" {

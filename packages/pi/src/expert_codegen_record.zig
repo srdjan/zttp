@@ -378,17 +378,27 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // Was ZTS401 (credential in response). The recorded handler had
-        // evaded it by round-tripping the claims through
-        // JSON.stringify/JSON.parse, which the taint tracker used to treat as
-        // laundering the `credential` label. That laundering hole was closed
-        // (flow_checker now propagates labels through member/JSON calls), so
-        // returning the raw claims correctly flags ZTS401 again. The cassette's
-        // applied handler was hand-corrected to return a non-sensitive
-        // confirmation (`{ authenticated: true }`) instead of the raw claims;
-        // returning any claim field (even `result.value.sub`) stays credential
-        // labelled and would leak. Re-record from a live model to refresh.
-        .expect_first_draft_pass = false,
+        // This case has now caught the same laundering class twice, which is
+        // most of its value.
+        //
+        // First as JSON.stringify/JSON.parse round-tripping, closed by
+        // propagating labels through member and JSON calls. Then, on the
+        // 2026-08-03 recording, through `validateJson`: the model routed the
+        // claims through the validator and wrote in its own commentary that
+        // this cleared the credential label. It was right, and the veto passed.
+        // See docs/solutions/security-issues/validate-json-strips-the-label-it-was-asked-to-check.md.
+        //
+        // With that closed, this re-record is the first time the case reaches a
+        // safe handler without a hand correction. The model tried the validator
+        // route, was refused (the ZTS400 in the recorded gap field), and settled
+        // on returning a confirmation envelope rather than the claims - the same
+        // shape the previous cassette had to be hand-edited into. Sixteen
+        // round-trips, zero veto retries: it converged in simulation.
+        //
+        // Pin flips false to true because that is what was recorded. It is not
+        // a rate improvement to read as the model getting better; the fence
+        // moved under it.
+        .expect_first_draft_pass = true,
     },
     .{
         .name = "weather-egress",
