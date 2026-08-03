@@ -23,6 +23,7 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-02 | `631aabd6` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `9b7518ea` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
 | 2026-08-02 | `7ec8ba85` | `ed809ba50da1` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 4 | 100% (6/6) |
+| 2026-08-03 | `74d48add` | `3742860e78b2` | 16 | claude-sonnet-4-6 | `118885d3f647` | 87% (14/16) | 4 | 100% (10/10) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
@@ -118,7 +119,36 @@ that would have cost a veto retry now costs a simulate call instead. The intent
 column reads 100% again but over a corrected check - see the section below on
 `websocket-echo` - so it is not comparable to the 100% above it either.
 
-## The corpus grew to sixteen
+## The eleventh row: the corpus grew to sixteen
+
+The rate moved for the first time in eleven rows, 90% to 87%, and the policy
+hash did not. The compiler is the same build the tenth row was taken on. What
+changed is the corpus: five cases added, and all sixteen re-recorded rather than
+the eleven being held and five appended.
+
+The reading that matters is which cases moved it. **All five new cases passed
+first draft.** The two failures are both from the original eleven: `jwt-auth`,
+which is the tenth row's pin and still reaches green, and
+`workflow-nested-dispatch-avoidance`, which was a pass in the tenth row and is
+now a failure that does not reach green at all.
+
+Nothing in the compiler did that. The same build replays the *old*
+`workflow-nested-dispatch-avoidance` cassette at a pass. The old session was four
+steps; the new one is eighteen, its first draft is a far larger program - it
+compiles a schema, decodes the body, logs - and it trips ZTS204 on a declared
+return type. That is the model drawing a different first draft on two recordings
+of one prompt. It is pinned rather than re-rolled: recording until the old
+outcome came back would be selecting the sample that flatters the rate.
+
+So the honest summary of this row is that the corpus still has not seen a fence
+move. It has seen recording variance, and the 3-point drop is that variance
+rather than any of the five new fences biting. The new cases exist so that a
+*future* build which moves one of those fences becomes visible here; on this
+build the fences they stand on had already moved, several rows back.
+
+Intent is the column that genuinely improved: the denominator went from 6 to 10
+and the rate held at 100%. Four of the five new cases carry a spec, and one old
+spec was corrected - see `jwt-auth` below.
 
 Five cases were added on 2026-08-03, taking the corpus from eleven to sixteen.
 Each stands on one fence the paragraph above says the original eleven could not
@@ -153,6 +183,17 @@ case measures is the containment rather than the imprecision.
 Worth stating plainly, because it cuts against the reason the corpus was grown:
 a case authored from analysis rather than from a recording can encode the
 author's wrong conclusion, and here the recording is what caught it.
+
+`jwt-auth`'s intent spec was corrected in the same pass, and it had been wrong
+for ten rows. It asserts that a request with no bearer token is unauthorized,
+but stubbed no `JWT_SECRET`, so a handler that validates its configuration
+before reading the request answers 500 "server misconfigured" and the check
+records a bearer-token failure that never happened. It passed only because every
+recorded handler until now read the header first. This re-record produced one
+that checks the secret first, the check failed on a handler that does return 401
+for a missing token, and the spec gained the env stub. Same class as the
+`websocket-echo` correction below, opposite direction: that one passed for a
+reason its name did not describe, this one failed for one.
 
 ## Reading the table
 
