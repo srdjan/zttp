@@ -263,10 +263,23 @@ from a dirty tree that was committed immediately after, which is why the second
 carries the marker. Rows from here on are stamped by the script rather than
 reconstructed.
 
-**Model** is the product default, so the number describes what a user actually
-gets rather than a tier picked to flatter the result. It is derived from
-`request.default_model` rather than written down separately, so the two cannot
-drift.
+**Model** is which model produced the drafts, read out of the recorded
+cassettes' own headers rather than declared. It used to be printed from
+`request.default_model`, a compile-time constant, while `ZTTP_CODEGEN_MODEL` was
+advertised for recording "a second row against another tier" - the two together
+would publish a small-model measurement under the headline model's name, which
+is the one thing this column exists to prevent. Reading it from the artefact
+makes it measured. Two guards sit under it: the replay fails if the cassettes
+disagree with each other, so a half-re-recorded corpus cannot average two
+models into one row, and it fails if no cassette yields a model at all, so a
+header-format change cannot quietly restore the constant.
+
+The headline rows use the product default, so the number describes what a user
+actually gets rather than a tier picked to flatter the result. A row from
+another tier carries that tier in this column, and its per-case pins are
+measured rather than ratcheted - `expect_first_draft_pass` records what one
+model did, so it can only ratchet that model, and a smaller tier failing a case
+the headline passes is a tier difference rather than a compiler regression.
 
 **First-draft pass** is the headline. Retries are excluded on purpose: a rate
 that counted them would measure the retry loop's persistence, not the agent's

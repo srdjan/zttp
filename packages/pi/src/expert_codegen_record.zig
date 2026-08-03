@@ -819,6 +819,38 @@ test "record codegen baseline corpus (live, gated)" {
     );
 }
 
+/// The model a committed cassette was recorded against, read from the header
+/// line every recording writes (`{"v":1,...,"model":"..."}`).
+///
+/// The published model column used to be `headline_model`, a compile-time
+/// constant, while `ZTTP_CODEGEN_MODEL` was advertised for recording "a second
+/// row against another tier". Those two together publish a Haiku measurement
+/// under Sonnet's name, which is the one thing the column exists to prevent.
+/// Read it from the artefact instead, so the column is measured rather than
+/// asserted.
+fn cassetteModel(step_0: []const u8) ?[]const u8 {
+    const line_end = std.mem.indexOfScalar(u8, step_0, '\n') orelse step_0.len;
+    const header = step_0[0..line_end];
+    const needle = "\"model\":\"";
+    const start = std.mem.indexOf(u8, header, needle) orelse return null;
+    const rest = header[start + needle.len ..];
+    const end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
+    if (end == 0) return null;
+    return rest[0..end];
+}
+
+test "cassetteModel reads the recorded model from a cassette header" {
+    const header =
+        \\{"v":1,"provider":"anthropic","scenario":"health","stream":true,"model":"claude-haiku-4-5"}
+        \\{"sse":"event: message_start\n"}
+    ;
+    try testing.expectEqualStrings("claude-haiku-4-5", cassetteModel(header).?);
+    // A header without the field, and an empty value, are both "unknown"
+    // rather than a silent empty string that would publish as a blank column.
+    try testing.expect(cassetteModel("{\"v\":1}\n") == null);
+    try testing.expect(cassetteModel("{\"model\":\"\"}\n") == null);
+}
+
 // Offline ratchet: replay every committed cassette through the real veto and
 // require it still passes on the first draft. Runs in normal CI (no network, no
 // key): it reproduces the recorded baseline deterministically and fails if a
@@ -849,6 +881,11 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     defer missing.deinit(a);
     var stale: std.ArrayList([]const u8) = .empty;
     defer stale.deinit(a);
+    // The model every cassette agrees on. Null until the first one is read; a
+    // disagreement means the corpus is half re-recorded against another tier,
+    // which would publish one row averaging two models.
+    var corpus_model: ?[]const u8 = null;
+    var models_read: usize = 0;
     for (record_corpus) |rc| {
         const dir_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ codegen_dir, rc.name });
         // Read the cassette steps from the repo (absolute) BEFORE chdir. A real
@@ -859,6 +896,20 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         if (steps.len == 0) {
             try missing.append(a, rc.name);
             continue;
+        }
+
+        if (cassetteModel(steps[0])) |model| {
+            models_read += 1;
+            if (corpus_model) |seen| {
+                if (!std.mem.eql(u8, seen, model)) {
+                    std.debug.print(
+                        "[codegen-replay] {s} was recorded against {s}, but earlier cassettes say {s};" ++
+                            " a mixed-model corpus cannot publish one model column\n",
+                        .{ rc.name, model, seen },
+                    );
+                    return error.MixedModelCorpus;
+                }
+            } else corpus_model = model;
         }
 
         var tmp = try IsolatedTmp.init(a, "codegen-replay");
@@ -891,12 +942,28 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         };
         // Ratchet: replay must reproduce the recorded first-draft outcome
         // exactly. A regression flips a recorded pass to fail (or vice versa).
+        //
+        // Scoped to the headline model. `expect_first_draft_pass` records what
+        // one model did on one prompt, so it can only ratchet that model - a
+        // corpus recorded against a smaller tier legitimately fails cases the
+        // headline passes, and asserting the headline's pins against it would
+        // report a compiler regression that is really a tier difference. The
+        // rate is still measured and published for those runs; only the
+        // per-case assertion is held back, and the run says so rather than
+        // going quiet.
         if (result.first_draft_veto_pass != rc.expect_first_draft_pass) {
+            const on_headline = if (corpus_model) |m| std.mem.eql(u8, m, headline_model) else true;
             std.debug.print(
-                "[codegen-replay] {s}: expected first_draft_pass={} got {} (code {s})\n",
-                .{ rc.name, rc.expect_first_draft_pass, result.first_draft_veto_pass, codegen.firstZtsCode(&tr) orelse "-" },
+                "[codegen-replay] {s}: expected first_draft_pass={} got {} (code {s}){s}\n",
+                .{
+                    rc.name,
+                    rc.expect_first_draft_pass,
+                    result.first_draft_veto_pass,
+                    codegen.firstZtsCode(&tr) orelse "-",
+                    if (on_headline) "" else " - off-headline model, measured not ratcheted",
+                },
             );
-            return error.CassetteRatchetMismatch;
+            if (on_headline) return error.CassetteRatchetMismatch;
         }
         var case_intent: codegen.IntentOutcome = .not_checked;
 
@@ -959,6 +1026,21 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     }
     try testing.expectEqual(record_corpus.len, passes);
 
+    // Floor on the model read, before the column it feeds means anything. A
+    // header-format change would leave `corpus_model` null on every case and
+    // the column would silently fall back to the constant it used to assert -
+    // the same defect this replaced, reintroduced quietly. Require every
+    // replayed case to have yielded a model.
+    if (corpus_model == null or models_read != record_corpus.len) {
+        std.debug.print(
+            "[codegen-replay] read a model from {d}/{d} cassettes; the header format changed" ++
+                " and the published model column cannot be trusted\n",
+            .{ models_read, record_corpus.len },
+        );
+        return error.CassetteModelUnreadable;
+    }
+    const published_model = corpus_model.?;
+
     // The publishable record of this run, on one line so
     // scripts/update-convergence.sh can lift it without parsing the rest of the
     // test output. Emitted every run, including when intent checks were
@@ -974,7 +1056,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         .{
             version[0..],
             summary.total,
-            headline_model,
+            published_model,
             zts.rule_registry.policyHash()[0..],
             summary.firstDraftPassPercent(),
             summary.first_draft_passes,
