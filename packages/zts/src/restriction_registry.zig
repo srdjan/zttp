@@ -418,7 +418,7 @@ pub const entries = [_]RestrictionEntry{
         .feature = "numeric record keys",
         .boundary = "one keyed-collection model",
         .nature = .canonical_simplicity,
-        .note = "canonical simplicity; use a string key or a number-keyed `Dict`",
+        .note = "canonical simplicity; use a string key, or an array when the keys are dense indices",
         // Rejected at the key, not by a canonical ZTS6xx rule: a numeric key
         // parsed to the same string key as `{"1": ...}`, so no later pass
         // could tell the two spellings apart.

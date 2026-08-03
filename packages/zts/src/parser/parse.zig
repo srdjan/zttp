@@ -2480,7 +2480,7 @@ pub const Parser = struct {
                         // One keyed-collection model: a record has string keys.
                         // A numeric key parses to the same string key, so the
                         // two spellings would be indistinguishable downstream.
-                        self.errors.addErrorAt(.unsupported_feature, self.current, "numeric record keys are not supported; use a string key or a number-keyed Dict instead");
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "numeric record keys are not supported; use a string key, or an array when the keys are dense indices");
                         return error.ParseError;
                     } else if (self.check(.string_literal)) {
                         const key = self.current;

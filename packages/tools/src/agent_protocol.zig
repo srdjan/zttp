@@ -1329,8 +1329,8 @@ fn runVerify(
     // An optional `content` override is what closes the propose -> simulate ->
     // verify cycle without a write. `simulate_edit` hands back
     // `proposed_content`; without this a client could only verify the file it
-    // had not repaired yet, and would have to write the candidate to disk to
-    // ask about it - which is `apply_repair`'s job and still deferred.
+    // had not repaired yet, and would have to write the candidate to disk
+    // through `apply_repair` just to ask about it.
     //
     // The digest covers whatever was analyzed, so a verdict about supplied
     // bytes is never bound to the digest of bytes on disk that nobody checked.

@@ -77,13 +77,17 @@ sections this compiler does not yet generate.
 | `check` | implemented | `file` | |
 | `canonicalize` | implemented | `file`, `simulate` | |
 | `normalize` | implemented | `file`, `write` | `write: true` is refused |
-| `simulate_edit` | deferred | `file`, `repairs` | phase 6: needs the unified repair vocabulary |
-| `apply_repair` | deferred | `file`, `repairs` | phase 6: needs the equivalence-validator registry |
-| `verify` | deferred | `file`, `properties` | phase 6: needs the verifier discovery registry |
+| `simulate_edit` | implemented | `file`, `repairs` | |
+| `apply_repair` | implemented | `file`, `repairs` | |
+| `verify` | implemented | `file`, `properties`, `content` | `content` verifies supplied bytes without a write |
 
-A deferred operation answers `operation_not_implemented`, never
-`unknown_operation`: it is a named member of the spec's closed operation set, and
-saying otherwise would be false.
+Every operation in the closed set is implemented as of 2026-08-03. The
+`operation_not_implemented` code stays in the protocol because the set is closed
+and a future member may land deferred: such an operation answers
+`operation_not_implemented`, never `unknown_operation`, since it is a named
+member of the spec's set and saying otherwise would be false. Read the status
+column from `agent_protocol.zig` rather than from here - this table was stale for
+three operations until it was reconciled.
 
 ## Version negotiation
 

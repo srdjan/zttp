@@ -25,8 +25,9 @@
 //!                         when z3 is absent; the audit is fail-closed (ZTS758) when
 //!                         z3 is present but cannot evaluate the faithful model.
 //!
-//! ephemeral key) is emitted under the persistent attest identity by the runtime
-//! keyless `zts` binary prints the unsigned hash only.
+//! This slice emits no signed receipt. The two write-only signed receipts were
+//! removed; a fragment of their doc comment survived here, describing signing
+//! this file no longer does.
 
 const std = @import("std");
 const semantics = @import("semantics.zig");
@@ -41,7 +42,6 @@ const Opcode = semantics.Opcode;
 const Transition = semantics.Transition;
 const BinKind = semantics.BinKind;
 const UnKind = semantics.UnKind;
-const Ed25519 = std.crypto.sign.Ed25519;
 
 // ---------------------------------------------------------------------------
 // Symbolic executor: run a lowering against a stack of RPN denotations.
