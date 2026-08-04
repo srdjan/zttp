@@ -40,6 +40,18 @@ A kind of authority a function reaches for: reading the clock, drawing randomnes
 ### Replay boundary
 A point where a value is recorded on the first run and reproduced on later ones. Values crossing it stop varying between runs, so the marks that mean "differs per run" are cleared there — but marks about disclosure are not, because a secret that was recorded is still a secret when it is replayed.
 
+## Typing a handler
+
+### Narrowing
+The compiler's flow-sensitive refinement of a binding's type inside the region a test proves something about it, held apart from the declared type so it can be discarded without losing the declaration.
+
+The set of tests admitted as evidence is closed and small: a value compared against the absent-value sentinel, a `typeof` comparison, an array test, a discriminant field compared against a literal, a bare boolean discriminant read, and the negation or conjunction of those. A test outside the list installs nothing, because a refinement the compiler cannot re-derive is a claim rather than a proof. A Narrowing is killed when the binding is assigned, when a loop body may assign it, and when the branch that established it closes - the last because a refinement established under a condition says nothing about the path where that condition was false. Admission is decided on the form of a test and never on whether that test would refine this particular declared type, since an admitted test over a type with nothing to refine is still an admitted test.
+
+### Type predicate
+A declaration that a function's true return means its named parameter has a narrower type.
+
+The declaration is a claim, not a proof: it installs a Narrowing at its call sites only when the body is a single return of admitted tests over the named parameter. Any other body keeps the declaration, reports the refusal, and installs nothing - the half that matters, since a guard the compiler cannot check is a refinement the author asserted and nothing confirmed.
+
 ## Measuring the compiler
 
 ### Veto
@@ -76,6 +88,11 @@ A Gate must assert a floor on its own input before any count it reports means an
 The floor is necessary and not sufficient. A Gate holding a full input can still assert something weaker than its own name claims, so that runs in which the named behavior never happened satisfy it too. An assertion must name the value expected rather than the values excluded, since a difference from two wrong answers is satisfied by a third. A Gate is also only as good as the fixture beneath it: when two outcomes it is meant to separate write identical observable state, no assertion over that state can tell them apart.
 
 The probe that tests a Gate is itself code, and a probe that does not compile runs no check. Since a build that failed to compile and a Gate that passed both produce no failure message, a probe's verdict is read from the build's exit status rather than from its output.
+
+### Frozen signature corpus
+The generated type surface of every virtual-module export, used as a Gate's input so that adding an export adds a case by construction and the corpus cannot drift from what it describes.
+
+The corpus is generated rather than written, which is what makes its coverage a fact rather than a promise: a Gate over a hand-listed corpus can pass while an export nobody listed goes unchecked. Its assertions are that every member resolves, that none reaches the unknown type by fallback rather than by declaration, and that the whole surface hashes to a pinned value, so a change to any signature is visible in a diff instead of being absorbed silently.
 
 ## Flagged ambiguities
 
