@@ -34,7 +34,12 @@ echo ">> building zttp (the intent checks drive it)"
 zig build
 
 echo ">> replaying the codegen corpus"
-line="$(zig build test-expert-app 2>&1 | grep -m1 '^\[codegen-convergence\] ' || true)"
+# Not anchored to the line start: the replay prints this unindented on a pass
+# and indented under a failure header on a fail, and a compiler change that
+# moves the rate fails the ratchet first. An anchored match found the line only
+# when there was nothing new to publish.
+line="$(zig build test-expert-app 2>&1 | grep -m1 '\[codegen-convergence\] {' || true)"
+line="${line#"${line%%\[codegen-convergence\]*}"}"
 
 if [[ -z "$line" ]]; then
   echo "error: the replay emitted no [codegen-convergence] line" >&2

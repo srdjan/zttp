@@ -79,6 +79,33 @@ computed once per index.
 - **A1** deletes the `t_ref`/`t_generic_param` blanket-true at
   `type_pool.zig:1201-1202`. An unresolved name at an assignability site raises
   `unresolved_type_reference` (ZTS206).
+
+  **Measured and re-sequenced.** A1 was applied, the corpus was run, and it
+  fails: `jsx/jsx-ssr.tsx`, three workflow orchestrators, and
+  `patterns/infer-and-generics.ts`. Three separate things are missing, and none
+  of them is A1's own logic.
+
+  `Request` and `Response` are `t_ref` with no definition anywhere in
+  `TypeEnv`, so every handler's declared return type is an unresolved name.
+  `zttp:durable.run` is declared to return the coarse `unknown`, which under
+  sound rules is assignable to nothing, so `return run(...)` from a handler
+  fails the moment the target resolves to anything at all. And the generics
+  example fails for the third reason, which is that inference does not exist
+  yet.
+
+  A1 therefore lands with the ABI types and with inference, not before. The
+  deferral is recorded at the site in `type_pool.zig` naming what has to exist.
+  What did land here is the reporting half, `firstUnresolvedName`, so the site
+  that closes A1 can tell an unresolved name apart from a real mismatch.
+
+- **A1 side finding, fixed.** Running A1 exposed a live checker defect it had
+  been masking: a nested function with no signature of its own kept the
+  enclosing function's `current_return_type`, so an inner `return` was measured
+  against an outer contract. The convergence corpus had this pinned as a
+  first-draft failure - `workflow-nested-dispatch-avoidance`, where the model's
+  own next turn reads "ZTS204 on line 88, the `Response.json(...)` call inside
+  `run()`". Fixing it moves the offline replay from 95% (19/20) to 100% (20/20)
+  first-draft pass, and covers two more advertised rules.
 - **A2** adds an assumption set of `(source, target)` pairs with the coinductive
   re-entry rule, so recursive aliases terminate.
 - **A3** puts a readonly flag in `t_array`'s unused `TypeData.b`. `T[]` is

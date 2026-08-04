@@ -515,18 +515,26 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
             "durable step, then dispatch a notify child handler with workflow.call after the " ++
             "step completes. Keep the child dispatch outside the step callback.",
-        // Flipped from true on the 2026-08-03 re-record. The previous cassette
-        // held a four-step session whose first draft passed; this one runs
-        // eighteen. The new first draft is a much larger program - it compiles a
-        // schema, decodes the body, and logs - and trips ZTS204 on a return type
-        // that does not match what it declared. It still reaches green.
+        // Flipped to false on the 2026-08-03 re-record, and back to true on
+        // 2026-08-04 when the compiler defect that caused the failure was
+        // fixed. Both flips are worth keeping, because they say different
+        // things.
         //
-        // Nothing in the compiler moved: the same build replays the old cassette
-        // at a pass. This is the model drawing a different first draft between
-        // two recordings of the same prompt, which is worth having pinned rather
-        // than smoothed over - re-recording until the old outcome came back
-        // would be selecting the sample that flatters the rate.
-        .expect_first_draft_pass = false,
+        // The re-record was the model drawing a different first draft between
+        // two recordings of the same prompt: a much larger program that trips
+        // ZTS204. Re-recording until the old outcome came back would have been
+        // selecting the sample that flatters the rate, so the worse outcome was
+        // pinned.
+        //
+        // Reading what it tripped on is what found the defect. The cassette's
+        // next turn says it plainly - "ZTS204 on line 88, the Response.json(...)
+        // call inside run()" - and that return is inside the `run` callback, a
+        // nested arrow with no signature of its own. The checker left the
+        // enclosing handler's declared return type in place for it, so a
+        // correct inner return was measured against the outer contract. The
+        // draft was right and the compiler was wrong, and the round-trip the
+        // model spent working around it is the cost of that.
+        .expect_first_draft_pass = true,
     },
     .{
         .name = "workflow-saga-compensation",

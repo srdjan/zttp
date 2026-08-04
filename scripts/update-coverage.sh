@@ -25,7 +25,14 @@ json_out="docs/coverage.json"
 md_out="docs/coverage.md"
 
 echo ">> replaying the codegen corpus"
-line="$(zig build test-expert-app 2>&1 | grep -m1 '^\[proof-coverage\] ' || true)"
+# Not anchored to the line start, and the JSON brace is required. The replay
+# prints this line unindented when the test passes and indented under a failure
+# header when it does not - and "does not" is the whole reason to run this
+# script, since a stale page is what fails it. An anchored match worked only in
+# the case where regenerating was unnecessary. The brace is what keeps the
+# match off the neighbouring "docs/coverage.json is stale" advice line.
+line="$(zig build test-expert-app 2>&1 | grep -m1 '\[proof-coverage\] {' || true)"
+line="${line#"${line%%\[proof-coverage\]*}"}"
 
 if [[ -z "$line" ]]; then
   echo "error: the replay emitted no [proof-coverage] line" >&2
@@ -108,12 +115,16 @@ whatever moved it, and `git log docs/coverage.json` is the history.
 
 Tripped: {codes(tripped)}
 
-Four flow rules and one spec-discharge rule. That is a fair description of what
-these prompts ask for and a poor description of what the compiler proves, and it
-is the mechanical form of an argument [convergence.md](convergence.md) had been
-making in prose: a fence no case stands on cannot move a published number, and
-nine consecutive rows reading 90% over one corpus is what that looks like from
-outside.
+The list above is a fair description of what these prompts ask for and a poor
+description of what the compiler proves. It is the mechanical form of an
+argument [convergence.md](convergence.md) had been making in prose: a fence no
+case stands on cannot move a published number, and nine consecutive rows reading
+90% over one corpus is what that looks like from outside.
+
+The previous sentence here counted the tripped rules by family in prose, and it
+was wrong the first time the count moved. Nothing in this section restates a
+number the generator computes; the codes are printed, and a reader who wants the
+breakdown reads them.
 
 Untripped: {codes(untripped)}
 

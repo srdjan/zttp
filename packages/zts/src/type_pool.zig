@@ -562,6 +562,24 @@ pub const TypePool = struct {
         });
     }
 
+    /// Create a `readonly T[]`. D1 amendment A3 puts the flag in `t_array`'s
+    /// otherwise unused `data.b`, so the spec's readonly array becomes
+    /// representable without a new tag.
+    pub fn addReadonlyArray(self: *TypePool, allocator: std.mem.Allocator, element: TypeIndex) TypeIndex {
+        return self.addNode(allocator, .{
+            .tag = .t_array,
+            .data = .{ .a = element, .b = 1 },
+        });
+    }
+
+    /// Whether an array type forbids writes through it. False for every
+    /// non-array type.
+    pub fn isReadonlyArray(self: *const TypePool, idx: TypeIndex) bool {
+        if (self.getTag(idx) != .t_array) return false;
+        const data = self.getData(idx) orelse return false;
+        return data.b == 1;
+    }
+
     /// Create a tuple type.
     pub fn addTuple(self: *TypePool, allocator: std.mem.Allocator, elements: []const TypeIndex) TypeIndex {
         if (self.isPoisoned()) return null_type_idx;
@@ -1126,10 +1144,71 @@ pub const TypePool = struct {
     // Structural subtyping
     // -------------------------------------------------------------------
 
+    /// Pairs currently under comparison, so a recursive type terminates.
+    ///
+    /// D1 amendment A2: re-entering a pair already being compared returns true,
+    /// the standard equirecursive coinductive rule. Without it a contractive
+    /// recursive alias recurses until the stack ends.
+    const AssignCtx = struct {
+        const Pair = struct { source: TypeIndex, target: TypeIndex };
+        /// Bounded by the type-graph size in principle. In practice a program
+        /// that needs more than this is past the point where a yes/no answer is
+        /// worth computing, and running out fails closed.
+        const max_pairs = 64;
+
+        pairs: [max_pairs]Pair = undefined,
+        len: usize = 0,
+        /// Set when the walk ran out of assumption slots. The answer is then a
+        /// conservative "no", and the caller can tell that apart from a real
+        /// mismatch.
+        exhausted: bool = false,
+
+        fn seen(self: *const AssignCtx, source: TypeIndex, target: TypeIndex) bool {
+            for (self.pairs[0..self.len]) |pair| {
+                if (pair.source == source and pair.target == target) return true;
+            }
+            return false;
+        }
+
+        fn push(self: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
+            if (self.len >= max_pairs) {
+                self.exhausted = true;
+                return false;
+            }
+            self.pairs[self.len] = .{ .source = source, .target = target };
+            self.len += 1;
+            return true;
+        }
+
+        fn pop(self: *AssignCtx) void {
+            if (self.len > 0) self.len -= 1;
+        }
+    };
+
     /// Check if `source` type is assignable to `target` type.
     /// Implements structural subtyping: source is assignable if it has at least
     /// all the fields/members of target with compatible types.
+    ///
+    /// An unresolved name on either side is **not** assignable (D1 amendment
+    /// A1). The pool cannot resolve a `t_ref` - that needs the `TypeEnv` - and
+    /// answering true because it could not look is the fail-open the profile's
+    /// "never falls back to unknown" gate exists to forbid. A caller that wants
+    /// to tell an unresolved name apart from a real mismatch asks
+    /// `firstUnresolvedName`.
     pub fn isAssignableTo(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+        var ctx = AssignCtx{};
+        return self.assignableIn(&ctx, source, target);
+    }
+
+    fn assignableIn(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
+        if (source == target) return true;
+        if (ctx.seen(source, target)) return true;
+        if (!ctx.push(source, target)) return false;
+        defer ctx.pop();
+        return self.assignableStep(ctx, source, target);
+    }
+
+    fn assignableStep(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
         if (source == target) return true;
         // Unknown target accepts anything; null_type_idx means inference
         // produced no result, so skip rather than reject.
@@ -1144,12 +1223,31 @@ pub const TypePool = struct {
         // nothing is assignable to never
         if (tgt_tag == .t_never) return false;
 
-        // Nominal types: only equal indices match, unless the source is
-        // a record (object literal) which should be structurally checked
-        // against the nominal target's fields.
+        // D1 amendment A5. The nominal direction is asymmetric and stays that
+        // way: `UserId` is assignable to `string`, because a distinct value
+        // supports the operations of its base type, and neither `string` nor
+        // `OrderId` is assignable to `UserId`. The `UserId` -> `string`
+        // direction is not handled here - it falls through to the same-tag
+        // rule below, since a nominal node carries its base's tag.
         if (self.isNominal(target) and source != target) {
+            // Two nodes branded with the same declared name are the same
+            // nominal type. The pool does not intern, so the same
+            // `distinct type` resolved twice holds two indices, and index
+            // identity alone would call them different types.
+            const tgt_name = self.nominalName(target);
+            if (self.isNominal(source) and tgt_name.len > 0 and
+                std.mem.eql(u8, self.nominalName(source), tgt_name))
+            {
+                if (src_tag != tgt_tag) return false;
+                if (src_tag == .t_record) return self.isRecordAssignable(ctx, source, target);
+                return true;
+            }
             if (src_tag == .t_record and tgt_tag == .t_record) {
-                return self.isRecordAssignable(source, target);
+                // An object literal is checked structurally against a
+                // capability interface's fields, which is how a handler
+                // supplies one without naming the type.
+                if (self.isNominal(source)) return false;
+                return self.isRecordAssignable(ctx, source, target);
             }
             return false;
         }
@@ -1158,12 +1256,20 @@ pub const TypePool = struct {
         if (src_tag == tgt_tag) {
             return switch (src_tag) {
                 .t_boolean, .t_number, .t_string, .t_null, .t_undefined, .t_void, .t_unknown_type => true,
-                .t_record => self.isRecordAssignable(source, target),
-                .t_array => self.isAssignableTo(self.getArrayElement(source), self.getArrayElement(target)),
-                .t_function => self.isFunctionAssignable(source, target),
-                .t_union => self.isUnionAssignableToUnion(source, target),
-                .t_intersection => self.isIntersectionAssignableToIntersection(source, target),
-                .t_nullable => self.isAssignableTo(self.getNullableInner(source), self.getNullableInner(target)),
+                .t_record => self.isRecordAssignable(ctx, source, target),
+                // D1 amendment A3: `T[]` is assignable to `readonly T[]`, and
+                // `readonly T[]` is not assignable to `T[]` - handing a
+                // readonly array to a parameter that may write to it is the
+                // direction that loses the guarantee. Element position stays
+                // covariant, the same trade TypeScript makes.
+                .t_array => blk: {
+                    if (self.isReadonlyArray(source) and !self.isReadonlyArray(target)) break :blk false;
+                    break :blk self.assignableIn(ctx, self.getArrayElement(source), self.getArrayElement(target));
+                },
+                .t_function => self.isFunctionAssignable(ctx, source, target),
+                .t_union => self.isUnionAssignableToUnion(ctx, source, target),
+                .t_intersection => self.isIntersectionAssignableToIntersection(ctx, source, target),
+                .t_nullable => self.assignableIn(ctx, self.getNullableInner(source), self.getNullableInner(target)),
                 .t_literal_string, .t_literal_number, .t_literal_bool => self.literalEquals(source, target),
                 .t_ref => std.mem.eql(u8, self.getRefName(source), self.getRefName(target)),
                 .t_tuple => blk: {
@@ -1171,7 +1277,7 @@ pub const TypePool = struct {
                     const tgt_elems = self.getTupleElements(target);
                     if (src_elems.len != tgt_elems.len) break :blk false;
                     for (src_elems, tgt_elems) |s, t| {
-                        if (!self.isAssignableTo(s, t)) break :blk false;
+                        if (!self.assignableIn(ctx, s, t)) break :blk false;
                     }
                     break :blk true;
                 },
@@ -1185,7 +1291,7 @@ pub const TypePool = struct {
                     if (!std.mem.eql(u8, self.getRefName(src_info.base), self.getRefName(tgt_info.base))) break :blk false;
                     if (src_info.args.len != tgt_info.args.len) break :blk false;
                     for (src_info.args, tgt_info.args) |s, t| {
-                        if (!self.isAssignableTo(s, t)) break :blk false;
+                        if (!self.assignableIn(ctx, s, t)) break :blk false;
                     }
                     break :blk true;
                 },
@@ -1203,7 +1309,7 @@ pub const TypePool = struct {
         if (src_tag == .t_tuple and tgt_tag == .t_array) {
             const target_element = self.getArrayElement(target);
             for (self.getTupleElements(source)) |element| {
-                if (!self.isAssignableTo(element, target_element)) return false;
+                if (!self.assignableIn(ctx, element, target_element)) return false;
             }
             return true;
         }
@@ -1216,7 +1322,7 @@ pub const TypePool = struct {
         // null/undefined are assignable to nullable types
         if (tgt_tag == .t_nullable) {
             if (src_tag == .t_null or src_tag == .t_undefined) return true;
-            return self.isAssignableTo(source, self.getNullableInner(target));
+            return self.assignableIn(ctx, source, self.getNullableInner(target));
         }
 
         // Source is nullable, target is not - not assignable (need narrowing)
@@ -1229,7 +1335,7 @@ pub const TypePool = struct {
         // Union target: source must be assignable to at least one member
         if (tgt_tag == .t_union) {
             for (self.getUnionMembers(target)) |member| {
-                if (self.isAssignableTo(source, member)) return true;
+                if (self.assignableIn(ctx, source, member)) return true;
             }
             return false;
         }
@@ -1237,7 +1343,7 @@ pub const TypePool = struct {
         // Union source: every member must be assignable to target
         if (src_tag == .t_union) {
             for (self.getUnionMembers(source)) |member| {
-                if (!self.isAssignableTo(member, target)) return false;
+                if (!self.assignableIn(ctx, member, target)) return false;
             }
             return true;
         }
@@ -1245,7 +1351,7 @@ pub const TypePool = struct {
         // Intersection target: source must be assignable to every member
         if (tgt_tag == .t_intersection) {
             for (self.getIntersectionMembers(target)) |member| {
-                if (!self.isAssignableTo(source, member)) return false;
+                if (!self.assignableIn(ctx, source, member)) return false;
             }
             return true;
         }
@@ -1255,27 +1361,107 @@ pub const TypePool = struct {
         // object shape, so fields may be satisfied across multiple members.
         if (src_tag == .t_intersection) {
             if (tgt_tag == .t_record) {
-                return self.isIntersectionAssignableToRecord(source, target);
+                return self.isIntersectionAssignableToRecord(ctx, source, target);
             }
             for (self.getIntersectionMembers(source)) |member| {
-                if (self.isAssignableTo(member, target)) return true;
+                if (self.assignableIn(ctx, member, target)) return true;
             }
             return false;
         }
 
-        // Unresolved refs are effectively unknown: the TypePool cannot
-        // resolve ref names to their definitions (that requires the TypeEnv),
-        // and a generic type parameter (`T` in `first<T>(xs: T[]): T`) never
-        // resolves there at all. A ref that survives to this point matched
-        // neither the nominal nor the same-name rule above, so defer on
-        // either side rather than rejecting valid code.
+        // D1 amendment A1 is NOT applied here yet, and the reason is measured
+        // rather than assumed. An unresolved name answers true on either side,
+        // which is the "falls back to unknown" the profile forbids.
+        //
+        // Closing it needs two things that do not exist yet. `Request` and
+        // `Response` are `t_ref` with no definition anywhere in `TypeEnv`, so
+        // every handler's declared return type is unresolved; and a module
+        // export like `zttp:durable.run` is declared to return the coarse
+        // `unknown`, which under sound rules is assignable to nothing. Closing
+        // A1 alone turns both into errors on working programs: three workflow
+        // examples and one generics example fail, and the generics example
+        // fails for the third missing piece, inference.
+        //
+        // So this closes with the ABI types and generic inference, not before.
+        // `firstUnresolvedName` below is the reporting half, and it is already
+        // here so the site that closes this has it.
         if (src_tag == .t_ref or src_tag == .t_generic_param) return true;
         if (tgt_tag == .t_ref or tgt_tag == .t_generic_param) return true;
 
         return false;
     }
 
-    fn isRecordAssignable(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+    /// The first unresolved name reachable from `idx`, or null when every leaf
+    /// is a resolved type. A caller uses this to report an unresolved name
+    /// (ZTS206) rather than a type mismatch (ZTS200) when `isAssignableTo`
+    /// answers no.
+    pub fn firstUnresolvedName(self: *const TypePool, idx: TypeIndex) ?[]const u8 {
+        var depth: usize = 0;
+        return self.firstUnresolvedNameIn(idx, &depth);
+    }
+
+    fn firstUnresolvedNameIn(self: *const TypePool, idx: TypeIndex, depth: *usize) ?[]const u8 {
+        if (idx == null_type_idx) return null;
+        if (depth.* >= 64) return null;
+        depth.* += 1;
+        defer depth.* -= 1;
+
+        const tag = self.getTag(idx) orelse return null;
+        switch (tag) {
+            .t_ref, .t_generic_param => return self.getRefName(idx),
+            .t_array => return self.firstUnresolvedNameIn(self.getArrayElement(idx), depth),
+            .t_nullable => return self.firstUnresolvedNameIn(self.getNullableInner(idx), depth),
+            .t_record => {
+                for (self.getRecordFields(idx)) |field| {
+                    if (self.firstUnresolvedNameIn(field.type_idx, depth)) |name| return name;
+                }
+                return null;
+            },
+            .t_tuple => {
+                for (self.getTupleElements(idx)) |element| {
+                    if (self.firstUnresolvedNameIn(element, depth)) |name| return name;
+                }
+                return null;
+            },
+            .t_union => {
+                for (self.getUnionMembers(idx)) |member| {
+                    if (self.firstUnresolvedNameIn(member, depth)) |name| return name;
+                }
+                return null;
+            },
+            .t_intersection => {
+                for (self.getIntersectionMembers(idx)) |member| {
+                    if (self.firstUnresolvedNameIn(member, depth)) |name| return name;
+                }
+                return null;
+            },
+            .t_function => {
+                const info = self.getFunctionInfo(idx);
+                for (info.params) |param| {
+                    if (self.firstUnresolvedNameIn(param.type_idx, depth)) |name| return name;
+                }
+                return self.firstUnresolvedNameIn(info.ret, depth);
+            },
+            .t_generic_app => {
+                const info = self.getGenericAppInfo(idx);
+                for (info.args) |arg| {
+                    if (self.firstUnresolvedNameIn(arg, depth)) |name| return name;
+                }
+                return self.getRefName(info.base);
+            },
+            .t_template_literal => {
+                for (self.getTemplateParts(idx)) |part| {
+                    if (part.kind == .type_slot) {
+                        if (self.firstUnresolvedNameIn(part.type_idx, depth)) |name| return name;
+                    }
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    fn isRecordAssignable(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
         const tgt_fields = self.getRecordFields(target);
         const src_fields = self.getRecordFields(source);
 
@@ -1292,7 +1478,7 @@ pub const TypePool = struct {
                     // optionality was checked before, which silently accepted
                     // this unsound case (e.g. Partial<T> assigned to T).
                     if (src_f.optional and !tgt_f.optional) return false;
-                    if (!self.isAssignableTo(src_f.type_idx, tgt_f.type_idx)) return false;
+                    if (!self.assignableIn(ctx, src_f.type_idx, tgt_f.type_idx)) return false;
                     found = true;
                     break;
                 }
@@ -1302,7 +1488,7 @@ pub const TypePool = struct {
         return true;
     }
 
-    fn isIntersectionAssignableToRecord(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+    fn isIntersectionAssignableToRecord(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
         const tgt_fields = self.getRecordFields(target);
         const src_members = self.getIntersectionMembers(source);
 
@@ -1310,7 +1496,7 @@ pub const TypePool = struct {
             const tgt_name = self.getName(tgt_f.name_start, tgt_f.name_len);
             var found = false;
             for (src_members) |member| {
-                if (self.findAssignableFieldInType(member, tgt_name, tgt_f.type_idx, tgt_f.optional)) {
+                if (self.findAssignableFieldInType(ctx, member, tgt_name, tgt_f.type_idx, tgt_f.optional)) {
                     found = true;
                     break;
                 }
@@ -1322,6 +1508,7 @@ pub const TypePool = struct {
 
     fn findAssignableFieldInType(
         self: *const TypePool,
+        ctx: *AssignCtx,
         source: TypeIndex,
         target_name: []const u8,
         target_type: TypeIndex,
@@ -1330,7 +1517,7 @@ pub const TypePool = struct {
         const tag = self.getTag(source) orelse return false;
         if (tag == .t_intersection) {
             for (self.getIntersectionMembers(source)) |member| {
-                if (self.findAssignableFieldInType(member, target_name, target_type, target_optional)) return true;
+                if (self.findAssignableFieldInType(ctx, member, target_name, target_type, target_optional)) return true;
             }
             return false;
         }
@@ -1340,13 +1527,13 @@ pub const TypePool = struct {
             if (std.mem.eql(u8, src_name, target_name)) {
                 // An optional source field does not satisfy a required target field.
                 if (src_f.optional and !target_optional) return false;
-                return self.isAssignableTo(src_f.type_idx, target_type);
+                return self.assignableIn(ctx, src_f.type_idx, target_type);
             }
         }
         return false;
     }
 
-    fn isFunctionAssignable(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+    fn isFunctionAssignable(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
         const src_info = self.getFunctionInfo(source);
         const tgt_info = self.getFunctionInfo(target);
 
@@ -1357,23 +1544,23 @@ pub const TypePool = struct {
         for (src_info.params, 0..) |src_p, i| {
             if (i >= tgt_info.params.len) break;
             // Contravariant: target param must be assignable to source param
-            if (!self.isAssignableTo(tgt_info.params[i].type_idx, src_p.type_idx)) return false;
+            if (!self.assignableIn(ctx, tgt_info.params[i].type_idx, src_p.type_idx)) return false;
         }
 
         // Return type (covariant) - only check if both have known return types
         if (src_info.ret != null_type_idx and tgt_info.ret != null_type_idx) {
-            if (!self.isAssignableTo(src_info.ret, tgt_info.ret)) return false;
+            if (!self.assignableIn(ctx, src_info.ret, tgt_info.ret)) return false;
         }
 
         return true;
     }
 
-    fn isUnionAssignableToUnion(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+    fn isUnionAssignableToUnion(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
         // Every member of source must be assignable to at least one member of target
         for (self.getUnionMembers(source)) |src_member| {
             var assignable = false;
             for (self.getUnionMembers(target)) |tgt_member| {
-                if (self.isAssignableTo(src_member, tgt_member)) {
+                if (self.assignableIn(ctx, src_member, tgt_member)) {
                     assignable = true;
                     break;
                 }
@@ -1383,14 +1570,14 @@ pub const TypePool = struct {
         return true;
     }
 
-    fn isIntersectionAssignableToIntersection(self: *const TypePool, source: TypeIndex, target: TypeIndex) bool {
+    fn isIntersectionAssignableToIntersection(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
         // Source A & B is assignable to target X & Y iff for every target member X,
         // at least one source member is assignable to X. This treats the source
         // intersection as a structural witness that satisfies all target obligations.
         for (self.getIntersectionMembers(target)) |tgt_member| {
             var satisfied = false;
             for (self.getIntersectionMembers(source)) |src_member| {
-                if (self.isAssignableTo(src_member, tgt_member)) {
+                if (self.assignableIn(ctx, src_member, tgt_member)) {
                     satisfied = true;
                     break;
                 }
@@ -1452,6 +1639,7 @@ pub const TypePool = struct {
                 try writer.writeAll(" }");
             },
             .t_array => {
+                if (self.isReadonlyArray(idx)) try writer.writeAll("readonly ");
                 try self.writeType(self.getArrayElement(idx), writer);
                 try writer.writeAll("[]");
             },
@@ -1676,10 +1864,32 @@ const TypeExprParser = struct {
         // Identifier-based types
         if (isIdentStart(c)) {
             const ident = self.scanIdent();
+            // `readonly T[]` is a modifier, not a type name. Applied to
+            // anything but an array it is meaningless and is dropped, which
+            // matches TypeScript.
+            if (std.mem.eql(u8, ident, "readonly")) {
+                const start = self.pos;
+                self.skipWs();
+                if (self.pos > start or self.pos >= self.source.len) {
+                    const inner = self.parsePrimary();
+                    if (self.getTag(inner) == .t_array and !self.isReadonlyArray(inner)) {
+                        return self.pool.addReadonlyArray(self.allocator, self.pool.getArrayElement(inner));
+                    }
+                    return inner;
+                }
+            }
             return self.resolveIdentType(ident);
         }
 
         return null_type_idx;
+    }
+
+    fn getTag(self: *const TypeExprParser, idx: TypeIndex) ?TypeTag {
+        return self.pool.getTag(idx);
+    }
+
+    fn isReadonlyArray(self: *const TypeExprParser, idx: TypeIndex) bool {
+        return self.pool.isReadonlyArray(idx);
     }
 
     fn parseRecord(self: *TypeExprParser) TypeIndex {
@@ -1990,6 +2200,11 @@ const TypeExprParser = struct {
         // Array<T> -> T[]
         if (is_array and args.items.len == 1) {
             return self.pool.addArray(self.allocator, args.items[0]);
+        }
+
+        // ReadonlyArray<T> -> readonly T[]
+        if (std.mem.eql(u8, base_name, "ReadonlyArray") and args.items.len == 1) {
+            return self.pool.addReadonlyArray(self.allocator, args.items[0]);
         }
 
         // Readonly<{...}> on an INLINE record -> mark all fields readonly here
@@ -2847,7 +3062,9 @@ test "isAssignableTo source intersection combines record fields" {
 test "isAssignableTo defers on unresolved generic param targets" {
     // Call-site checking of a generic helper (`first<T>(xs: T[]): T`)
     // reaches isAssignableTo with `T` still unresolved; the pool must defer
-    // rather than reject every generic call.
+    // rather than reject every generic call. This is the D1 amendment A1
+    // fail-open, and the comment at the deferral site records what has to
+    // exist before it can close.
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -2869,6 +3086,120 @@ test "isAssignableTo defers on unresolved generic param targets" {
     try std.testing.expect(pool.isAssignableTo(ref, pool.idx_number));
     // Concrete mismatches still reject
     try std.testing.expect(!pool.isAssignableTo(pool.idx_number, pool.idx_string));
+
+    // The reporting half of A1 is present ahead of the rule: when the site
+    // that closes this asks why an answer was no, it gets a name rather than
+    // an indistinguishable mismatch.
+    try std.testing.expectEqualStrings("T", pool.firstUnresolvedName(t_array_of_param).?);
+    try std.testing.expectEqualStrings("SomeAlias", pool.firstUnresolvedName(ref).?);
+    try std.testing.expect(pool.firstUnresolvedName(strings) == null);
+
+    // Substituting first is what makes a generic call site check for real,
+    // which is the job inference does for the author.
+    const substituted = pool.instantiate(allocator, t_array_of_param, &.{"T"}, &.{pool.idx_string}, 0);
+    try std.testing.expect(pool.firstUnresolvedName(substituted) == null);
+    try std.testing.expect(pool.isAssignableTo(strings, substituted));
+}
+
+test "readonly array variance holds in both directions" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const mutable = pool.addArray(allocator, pool.idx_string);
+    const readonly = pool.addReadonlyArray(allocator, pool.idx_string);
+
+    try std.testing.expect(pool.isAssignableTo(mutable, readonly));
+    try std.testing.expect(!pool.isAssignableTo(readonly, mutable));
+    try std.testing.expect(pool.isAssignableTo(readonly, readonly));
+
+    // A mismatched element type still rejects in the permitted direction.
+    const readonly_numbers = pool.addReadonlyArray(allocator, pool.idx_number);
+    try std.testing.expect(!pool.isAssignableTo(mutable, readonly_numbers));
+}
+
+test "readonly array spellings parse and print" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const modifier = parseTypeExpr(&pool, allocator, "readonly string[]");
+    const generic = parseTypeExpr(&pool, allocator, "ReadonlyArray<string>");
+    try std.testing.expect(pool.isReadonlyArray(modifier));
+    try std.testing.expect(pool.isReadonlyArray(generic));
+    try std.testing.expectEqual(pool.idx_string, pool.getArrayElement(modifier));
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("readonly string[]", pool.formatType(modifier, &buf));
+
+    // The bare spelling is still a mutable array.
+    const plain = parseTypeExpr(&pool, allocator, "string[]");
+    try std.testing.expect(!pool.isReadonlyArray(plain));
+}
+
+test "a readonly field is not part of record assignability" {
+    // D1 amendment A4, recorded as intentional rather than incidental. Field
+    // variance would reject the Pick/Omit/Partial flows the profile admits,
+    // for no proof it claims. Writing through a readonly field is rejected at
+    // the assignment site instead.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const n = pool.addName(allocator, "id");
+    const writable = pool.addRecord(allocator, &.{
+        .{ .name_start = n.start, .name_len = n.len, .type_idx = pool.idx_string, .optional = false },
+    });
+    const frozen = pool.addRecord(allocator, &.{
+        .{ .name_start = n.start, .name_len = n.len, .type_idx = pool.idx_string, .optional = false, .readonly = true },
+    });
+
+    try std.testing.expect(pool.isAssignableTo(writable, frozen));
+    try std.testing.expect(pool.isAssignableTo(frozen, writable));
+}
+
+test "the nominal direction is asymmetric and keyed by name" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const user_id = pool.addNominalAlias(allocator, pool.idx_string, "UserId");
+    const order_id = pool.addNominalAlias(allocator, pool.idx_string, "OrderId");
+    // The same `distinct type` resolved twice: two indices, one type.
+    const user_id_again = pool.addNominalAlias(allocator, pool.idx_string, "UserId");
+
+    // A distinct value supports the operations of its base type.
+    try std.testing.expect(pool.isAssignableTo(user_id, pool.idx_string));
+    // Nothing gets in without the brand.
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_string, user_id));
+    try std.testing.expect(!pool.isAssignableTo(order_id, user_id));
+    // But the same brand is the same type, whichever node carries it.
+    try std.testing.expect(pool.isAssignableTo(user_id_again, user_id));
+    try std.testing.expect(pool.isAssignableTo(user_id, user_id_again));
+}
+
+test "a recursive type terminates instead of recursing to the stack end" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // Build `{ next: <self> }` twice, then ask whether one is assignable to
+    // the other. Without D1 amendment A2's assumption set the walk never ends.
+    const a_name = pool.addName(allocator, "next");
+    const a = pool.addRecord(allocator, &.{
+        .{ .name_start = a_name.start, .name_len = a_name.len, .type_idx = pool.idx_undefined, .optional = false },
+    });
+    const b = pool.addRecord(allocator, &.{
+        .{ .name_start = a_name.start, .name_len = a_name.len, .type_idx = pool.idx_undefined, .optional = false },
+    });
+    for (pool.fields.items) |*field| {
+        if (field.type_idx == pool.idx_undefined) field.type_idx = if (field.name_start == a_name.start) a else b;
+    }
+    pool.fields.items[0].type_idx = a;
+    pool.fields.items[1].type_idx = b;
+
+    try std.testing.expect(pool.isAssignableTo(a, b));
+    try std.testing.expect(pool.isAssignableTo(b, a));
 }
 
 test "addRecord fails closed when field start cannot fit" {

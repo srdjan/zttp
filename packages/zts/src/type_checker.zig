@@ -423,13 +423,18 @@ pub const TypeChecker = struct {
                 defer self.active_declared_types.items.len = active_start;
                 // Named declarations resolve signatures by binding identity.
                 const saved_return = self.current_return_type;
-                if (sig) |s| {
+                // A nested function has its own return contract. Leaving the
+                // enclosing one in place checked an inner `return` against an
+                // outer signature, which the unresolved-name fail-open used to
+                // hide by accepting every such comparison.
+                self.current_return_type = if (sig) |s|
                     // Proof markers (Spec/Proof/Effects capsules) are
                     // obligations for the verifier, not shapes the returned
                     // value can satisfy; compare returns against the value
                     // type only.
-                    self.current_return_type = self.env.stripProofMarkers(s.return_type);
-                }
+                    self.env.stripProofMarkers(s.return_type)
+                else
+                    null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
@@ -442,9 +447,14 @@ pub const TypeChecker = struct {
                 const loc = self.ir_view.getLoc(node);
                 const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
                 const saved_return = self.current_return_type;
-                if (sig) |s| {
-                    self.current_return_type = self.env.stripProofMarkers(s.return_type);
-                }
+                // A nested function has its own return contract. Leaving the
+                // enclosing one in place checked an inner `return` against an
+                // outer signature, which the unresolved-name fail-open used to
+                // hide by accepting every such comparison.
+                self.current_return_type = if (sig) |s|
+                    self.env.stripProofMarkers(s.return_type)
+                else
+                    null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
@@ -625,9 +635,14 @@ pub const TypeChecker = struct {
                 const loc = self.ir_view.getLoc(node);
                 const sig = if (loc) |l| self.env.getFnSigByLoc(l.line) else null;
                 const saved_return = self.current_return_type;
-                if (sig) |s| {
-                    self.current_return_type = self.env.stripProofMarkers(s.return_type);
-                }
+                // A nested function has its own return contract. Leaving the
+                // enclosing one in place checked an inner `return` against an
+                // outer signature, which the unresolved-name fail-open used to
+                // hide by accepting every such comparison.
+                self.current_return_type = if (sig) |s|
+                    self.env.stripProofMarkers(s.return_type)
+                else
+                    null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
