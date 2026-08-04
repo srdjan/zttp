@@ -69,7 +69,13 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    const source = zts.file_io.readFile(allocator, absolute, common.max_hole_handler_source_bytes) catch |err| {
+    // Read at the ordinary tool limit, not at the filler's source budget. That
+    // budget bounds what the *filler* can echo back; enforcing it on the read
+    // made a handler over ~15 KB fail with a bare `FileTooBig` and no way to
+    // list a single hole in it, and it made the filler's own
+    // `proposed_content_too_large` refusal unreachable, since the read had
+    // already rejected every source the refusal was written for.
+    const source = zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |err| {
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to read {s}: {s}\n",
@@ -91,33 +97,78 @@ fn renderFromSource(
     // not contain the zttp build graph.
     const system_path = try zts_cli.discoverProjectSystemPath(allocator, source_path);
     defer if (system_path) |path| allocator.free(path);
-    var check = try zts_cli.precompile.runCheckOnlyFromSource(
+    // Discovered, not null. Hard-coding null made `validateSqlContract` return
+    // `MissingSqlSchema` for every handler importing `zttp:sql`, and the error
+    // left the tool as a bare error string - so the one hole the model asked
+    // about never came back with a frame. The sibling filler discovers the
+    // same path through `edit_simulate`.
+    const sql_schema_path = zts_cli.edit_simulate.discoverProjectSqlSchemaPath(allocator, source_path);
+    defer if (sql_schema_path) |path| allocator.free(path);
+    // The analyzer's own failures are results, not Zig errors leaving the tool.
+    // `MissingSqlSchema` used to escape `execute` and reach the autoloop as an
+    // aborting error and the model as opaque text with no frames.
+    var check = zts_cli.precompile.runCheckOnlyFromSource(
         allocator,
         source,
         relative,
-        null,
+        sql_schema_path,
         true,
         system_path,
         false,
-    );
+    ) catch |err| {
+        return registry_mod.ToolResult.errFmt(
+            allocator,
+            name ++ ": cannot analyze {s}: {s}\n",
+            .{ relative, @errorName(err) },
+        );
+    };
     defer check.deinit(allocator);
 
-    const output = try allocator.alloc(u8, common.max_hole_tool_result_bytes);
-    defer allocator.free(output);
-    var writer = std.Io.Writer.fixed(output);
-    const ok = writeProjection(&writer, relative, &check) catch |err| switch (err) {
-        error.WriteFailed => return error.StreamTooLong,
+    // Grown, not a fixed 32 KB frame. Overflow used to become
+    // `error.StreamTooLong`, which escaped `execute` as a Zig error rather than
+    // a ToolResult: the autoloop aborted the run and the model got opaque text
+    // with no hole frames at all. The cap still applies, but it is applied to a
+    // complete projection - and when the full one does not fit, the holes are
+    // published without the diagnostics rather than nothing being published.
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const ok = writeProjection(&aw.writer, relative, &check, true) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
     };
+    if (aw.written().len <= common.max_hole_tool_result_bytes) {
+        return .{
+            .ok = ok,
+            .llm_text = try allocator.dupe(u8, aw.written()),
+        };
+    }
+
+    var trimmed: std.Io.Writer.Allocating = .init(allocator);
+    defer trimmed.deinit();
+    const trimmed_ok = writeProjection(&trimmed.writer, relative, &check, false) catch |err| switch (err) {
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    if (trimmed.written().len > common.max_hole_tool_result_bytes) {
+        return registry_mod.ToolResult.errFmt(
+            allocator,
+            name ++ ": {s} has more holes than one result can carry ({d} bytes over the {d}-byte limit); split the file\n",
+            .{ relative, trimmed.written().len - common.max_hole_tool_result_bytes, common.max_hole_tool_result_bytes },
+        );
+    }
     return .{
-        .ok = ok,
-        .llm_text = try allocator.dupe(u8, writer.buffered()),
+        .ok = trimmed_ok,
+        .llm_text = try allocator.dupe(u8, trimmed.written()),
     };
 }
 
+/// `with_diagnostics` false writes the same projection without the diagnostic
+/// array, which is the part that grows without bound. The holes and the `ok`
+/// verdict are unchanged, so a caller that gets the trimmed form still learns
+/// every gap and still learns the program did not check.
 fn writeProjection(
     writer: *std.Io.Writer,
     relative: []const u8,
     check: *zts_cli.precompile.CheckResult,
+    with_diagnostics: bool,
 ) std.Io.Writer.Error!bool {
     try writer.writeAll("{\"path\":");
     try zts.json_utils.writeJsonString(writer, relative);
@@ -127,7 +178,7 @@ fn writeProjection(
         try zts_cli.json_diagnostics.writeHolesJson(writer, contract.holes.items);
         if (check.totalErrors() > 0) {
             try writer.writeAll(",\"diagnostics\":[");
-            try writeDiagnosticsJson(writer, check);
+            if (with_diagnostics) try writeDiagnosticsJson(writer, check);
             try writer.writeAll("]}\n");
             return false;
         }
@@ -139,7 +190,7 @@ fn writeProjection(
     // the structured diagnostics and report a failed tool result so callers do
     // not mistake analysis failure for completion.
     try writer.writeAll(",\"holes\":null,\"diagnostics\":[");
-    try writeDiagnosticsJson(writer, check);
+    if (with_diagnostics) try writeDiagnosticsJson(writer, check);
     try writer.writeAll("]}\n");
     return false;
 }
@@ -245,4 +296,46 @@ test "tool description names the three facts a fill needs" {
         std.mem.indexOf(u8, tool.description, "type the expression") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "budget") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "Fill one hole per turn") != null);
+}
+
+test "in-process publisher answers a zttp:sql handler with a result, not a Zig error" {
+    // The publisher used to hard-code `sql_schema_path = null`, so
+    // `validateSqlContract` returned `MissingSqlSchema`, and with no catch the
+    // error left `execute` entirely: the autoloop aborted and the model got
+    // opaque text with no hole frames. The path is discovered now, and a
+    // failure that survives discovery is a ToolResult the caller can read.
+    const source =
+        \\import { sqlOne } from "zttp:sql";
+        \\function handler(req: Request): Response {
+        \\  return hole();
+        \\}
+    ;
+    var result = try renderFromSource(testing.allocator, source, "handler.ts", "handler.ts");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.llm_text.len > 0);
+}
+
+test "a projection too large for one result comes back trimmed, not as an error" {
+    // The projection went into a fixed 32 KB buffer and overflow became
+    // `error.StreamTooLong`, which escaped `execute` as a Zig error: the
+    // autoloop aborted the run and the model got opaque text. Overflow now
+    // drops the diagnostics - the unbounded part - and returns the frame.
+    var source: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer source.deinit();
+    try source.writer.writeAll("function handler(req: Request): Response {\n");
+    // Each line is one type mismatch whose message quotes the offending
+    // literal, so enough of them overflow the result limit on the
+    // diagnostics alone while staying under the local-variable ceiling.
+    const filler = "x" ** 400;
+    for (0..250) |i| {
+        try source.writer.print("  const v{d}: number = \"{s}\";\n", .{ i, filler });
+    }
+    try source.writer.writeAll("  return hole();\n}\n");
+
+    var result = try renderFromSource(testing.allocator, source.written(), "big.ts", "big.ts");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.llm_text.len <= common.max_hole_tool_result_bytes);
+    // The empty array is what proves the overflow path ran: the full
+    // projection for this source carries diagnostic objects here.
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[]") != null);
 }
