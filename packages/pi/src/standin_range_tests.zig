@@ -389,6 +389,8 @@ test "stand-in gate: every test in the stand-in roots is reachable through the p
         .{ .name = "standin/range.zig", .text = @embedFile("standin/range.zig") },
         .{ .name = "standin/prompt_grammar.zig", .text = @embedFile("standin/prompt_grammar.zig") },
         .{ .name = "standin/defect_seeds.zig", .text = @embedFile("standin/defect_seeds.zig") },
+        .{ .name = "standin/hole_seeds.zig", .text = @embedFile("standin/hole_seeds.zig") },
+        .{ .name = "standin/source_grammar.zig", .text = @embedFile("standin/source_grammar.zig") },
     };
 
     var checked: usize = 0;
@@ -657,6 +659,159 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
         "[standin-gate] veto classes {d}/{d} seeds reproduce their declaration\n",
         .{ defect_seeds.seeds.len, defect_seeds.seeds.len },
     );
+}
+
+const source_grammar = @import("standin/source_grammar.zig");
+
+// The synthesizers branch on facts they read off the source, and every branch has
+// been exercised by four hand-written fixtures. A synthesizer only ever seen
+// against the shapes somebody thought to write down is the blind spot the
+// file-destroying edit came from, and this crosses the branch conditions instead.
+//
+// The oracle is the real veto against the variant as baseline, which is how the
+// loop judges an edit: differential, so a variant that is itself dirty does not
+// make its synthesis look broken.
+test "stand-in gate: every generated route source keeps the synthesized draft veto-clean" {
+    try testing.expect(source_grammar.route_variants.len >= 16);
+
+    const spec: playbook.RouteSpec = .{
+        .file = "handler.ts",
+        .method = "GET",
+        .path = "/health",
+    };
+
+    var checked: usize = 0;
+    // Both polarities of every predicate, counted rather than assumed: a
+    // generator that collapsed to one value would still satisfy the floor above.
+    var router_true: usize = 0;
+    var routes_true: usize = 0;
+    var spec_true: usize = 0;
+    var alias_true: usize = 0;
+
+    for (source_grammar.route_variants) |variant| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const source = try source_grammar.renderRouteSource(allocator, variant);
+        const proposed = try playbook.synthesizeRoute(allocator, source, spec, "handleGetHealth");
+
+        var result = try veto.runVeto(allocator, .{
+            .file = "handler.ts",
+            .content = proposed,
+            .before = source,
+        });
+        defer result.deinit(allocator);
+
+        if (!result.outcome.ok or result.report.new != 0) {
+            std.debug.print(
+                "[standin-gate] route variant router={} routes={} spec={} alias={} synthesizes {d} new violations:\n{s}\n",
+                .{ variant.has_router, variant.has_routes, variant.has_spec_import, variant.has_guardrails_alias, result.report.new, proposed },
+            );
+            return error.SynthesizedRouteFailsVeto;
+        }
+
+        // And it must actually be the route that was asked for, not merely a
+        // file the compiler accepts. A synthesizer that returned the source
+        // unchanged would pass every assertion above.
+        try testing.expect(std.mem.indexOf(u8, proposed, "\"GET /health\": handleGetHealth") != null);
+        try testing.expect(std.mem.indexOf(u8, proposed, "function handleGetHealth") != null);
+
+        if (variant.has_router) router_true += 1;
+        if (variant.has_routes) routes_true += 1;
+        if (variant.has_spec_import) spec_true += 1;
+        if (variant.has_guardrails_alias) alias_true += 1;
+        checked += 1;
+    }
+
+    try testing.expectEqual(source_grammar.route_variants.len, checked);
+    const half = source_grammar.route_variants.len / 2;
+    try testing.expectEqual(half, router_true);
+    try testing.expectEqual(half, routes_true);
+    try testing.expectEqual(half, spec_true);
+    try testing.expectEqual(half, alias_true);
+    std.debug.print("[standin-gate] route variants {d}/{d} synthesize clean\n", .{ checked, checked });
+}
+
+test "stand-in gate: every generated env source gets the answer its shape implies" {
+    try testing.expect(source_grammar.env_variants.len >= 8);
+
+    var edits: usize = 0;
+    var existing: usize = 0;
+    var refused: usize = 0;
+
+    for (source_grammar.env_variants) |variant| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const allocator = arena.allocator();
+
+        const source = try source_grammar.renderEnvSource(allocator, variant);
+        const transform = try playbook.synthesizeEnvFeature(allocator, source, source_grammar.env_variable);
+
+        // The answer is decided by the shape, so the mapping is asserted rather
+        // than whatever came back being accepted. A source with no handler body
+        // must be refused; one already carrying the read must be reported as
+        // such; only the rest may be edited.
+        if (!variant.has_handler_body) {
+            try testing.expect(transform == .unsupported_handler);
+            refused += 1;
+            continue;
+        }
+        if (variant.has_existing_read) {
+            try testing.expect(transform == .existing_read);
+            existing += 1;
+            continue;
+        }
+
+        const proposed = switch (transform) {
+            .edit => |bytes| bytes,
+            else => {
+                std.debug.print(
+                    "[standin-gate] env variant import={} read={} body={} was refused, not edited\n",
+                    .{ variant.has_env_import, variant.has_existing_read, variant.has_handler_body },
+                );
+                return error.SynthesizedEnvRefused;
+            },
+        };
+
+        var result = try veto.runVeto(allocator, .{
+            .file = "handler.ts",
+            .content = proposed,
+            .before = source,
+        });
+        defer result.deinit(allocator);
+        if (!result.outcome.ok or result.report.new != 0) {
+            std.debug.print(
+                "[standin-gate] env variant import={} synthesizes {d} new violations:\n{s}\n",
+                .{ variant.has_env_import, result.report.new, proposed },
+            );
+            return error.SynthesizedEnvFailsVeto;
+        }
+
+        // Exactly one import, whether or not the source already had one. A
+        // second `import { env }` is the duplicate this branch exists to avoid.
+        try testing.expectEqual(@as(usize, 1), countOccurrences(proposed, "import { env } from \"zttp:env\";"));
+        try testing.expect(std.mem.indexOf(u8, proposed, "env(\"" ++ source_grammar.env_variable ++ "\")") != null);
+        edits += 1;
+    }
+
+    // Each arm reached, so a generator collapsing onto one shape is visible.
+    try testing.expect(edits >= 2);
+    try testing.expect(existing >= 2);
+    try testing.expect(refused >= 4);
+    std.debug.print(
+        "[standin-gate] env variants {d} edited, {d} already read, {d} refused\n",
+        .{ edits, existing, refused },
+    );
+}
+
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, i, needle)) |pos| : (i = pos + needle.len) {
+        n += 1;
+    }
+    return n;
 }
 
 const prompt_grammar = @import("standin/prompt_grammar.zig");

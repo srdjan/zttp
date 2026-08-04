@@ -486,14 +486,14 @@ fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedReques
     };
 }
 
-const EnvTransform = union(enum) {
+pub const EnvTransform = union(enum) {
     edit: []u8,
     unsupported_handler,
     conflicting_env_import,
     existing_read,
 };
 
-fn synthesizeEnvFeature(
+pub fn synthesizeEnvFeature(
     allocator: std.mem.Allocator,
     source: []const u8,
     variable: []const u8,
