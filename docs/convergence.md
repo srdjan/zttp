@@ -460,3 +460,53 @@ first-draft outcome, so the rate cannot drift without somebody noticing.
 The intent check shells out to the built `zttp test` rather than driving the
 engine directly, so it exercises the same runtime a user does instead of a
 second copy of it.
+
+Every replay also prints a `[proof-coverage]` line, published as
+[coverage.md](coverage.md), naming which of the compiler's advertised rules the
+corpus trips. The two are deliberately separate pages under separate markers,
+for the reason the next section gives.
+
+## Why an offline run cannot land a row here
+
+A row on this page is a measurement of a live model. There is a second, much
+cheaper offline substitute in this repo - the deterministic stand-in, a scripted
+responder that speaks the same wire shape - and every number it could produce
+about drafting would be the playbook grading its own work. Its drafts are
+authored by repo code to pass the same veto that judges them, so first-draft pass
+is pinned near 100% by construction; its round-trip count is the length of the
+script; and its intent pass is definitional, because the playbook writes the
+intended program literally.
+
+Four mechanisms keep such a number off this page, and none of them is a
+convention somebody has to remember:
+
+- The recorder refuses any session that is not a live Anthropic key, so a
+  stand-in session cannot be teed into a cassette at all.
+- The replay hard-fails unless every case yields a model name from its own
+  cassette header, so a row can never be published without cassettes behind it.
+- `scripts/check-convergence-emitter.sh` holds `[codegen-convergence]` and
+  `[proof-coverage]` to one producer and one publisher each, and forbids either
+  publisher from reading the other's marker. A second emitter is what would let
+  an offline summary be lifted into this table.
+- The offline case type carries no `expect_first_draft_pass` field. That field
+  records what one model did on one prompt, and giving a synthetic case somewhere
+  to write it is how a hand-reasoned claim about model behavior gets pinned with
+  no recording left to catch it - which is exactly what happened to
+  `parallel-secret`.
+
+## The pre-release protocol
+
+Model-behavior numbers come only from recordings, so recording is a release
+activity rather than a development one. Development runs against the stand-in;
+see [coverage.md](coverage.md) for which paths that reaches.
+
+A pre-release run is: re-record whatever cassettes the replay reports as stale,
+then one `bash scripts/update-convergence.sh`, then
+`bash scripts/update-coverage.sh` if the corpus or the registry moved. The stash
+machinery in the recorder means a failed live turn restores the previous cassette
+instead of leaving the case empty, so a partial run is recoverable.
+
+No re-rolling. A surprising outcome is pinned and explained, not re-recorded
+until it flatters - the `workflow-nested-dispatch-avoidance` row above is the
+precedent, and it is the reason that case is pinned as an accepted failure rather
+than quietly re-drawn.

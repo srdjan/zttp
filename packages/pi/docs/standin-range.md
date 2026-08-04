@@ -8,6 +8,8 @@ Range hash: `8ce1c203f6b57f18e8cf25b6429102eac622ff66c5c8ed1668f1b95fa78185aa`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
+This server is a scripted responder, not a model. Every draft it emits is authored by repo code to pass the same veto that judges it, so it can show that the harness runs correctly and can say nothing about what a model would draft. Convergence numbers come from recorded model turns only; see `docs/convergence.md`.
+
 ## `explain`
 
 - Task kind: `review_explain`

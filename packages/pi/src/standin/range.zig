@@ -312,7 +312,11 @@ pub fn renderDocument(allocator: std.mem.Allocator) ![]u8 {
     try writer.print("Range hash: `{s}`\n\n", .{hash});
     try writer.writeAll(
         "The deterministic playbook server supports the entries below. " ++
-            "Use `zig build zttp-standin -- --range` to print this document.\n\n",
+            "Use `zig build zttp-standin -- --range` to print this document.\n\n" ++
+            "This server is a scripted responder, not a model. Every draft it emits is authored " ++
+            "by repo code to pass the same veto that judges it, so it can show that the harness " ++
+            "runs correctly and can say nothing about what a model would draft. Convergence " ++
+            "numbers come from recorded model turns only; see `docs/convergence.md`.\n\n",
     );
 
     for (entries) |entry| {

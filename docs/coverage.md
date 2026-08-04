@@ -5,21 +5,36 @@
 What the offline suite proves, and what it does not.
 
 > The offline suite proves two things. The harness is faithful: the loop, the
-> veto, and the apply path execute correctly over every entry in the stand-in's
-> declared range. And the corpus is load-bearing: of the compiler's 72
-> advertised rules, 5 are tripped by at least one case. It proves
-> nothing about what a model will draft. First-draft pass rate, median
-> round-trips, and intent pass exist only as recordings of a live model, an
-> offline run is structurally unable to produce or update them, and any figure of
-> that shape that does not carry a cassette-derived model column is a defect in
+> veto, the apply path, the veto-retry path, salvage-on-reject, and the hole loop
+> execute correctly over every entry in the stand-in's declared range. And the
+> corpus is load-bearing: of the compiler's 72 advertised rules,
+> 5 are tripped by at least one case. It proves nothing about what a
+> model will draft. First-draft pass rate, median round-trips, and intent pass
+> exist only as recordings of a live model, an offline run is structurally unable
+> to produce or update them, and any figure of that shape that does not carry a
+> cassette-derived model column is a defect in
 > [convergence.md](convergence.md).
 
-Two paths are not in that first clause yet, and saying so is the point of
-writing it down. A rejected draft and the repair round-trip that follows it are
-reachable today only through a live model, because every stand-in draft is
-authored by repo code to pass the same veto that judges it. The hole loop is the
-same. Both are planned offline arms; until they land, this page claims the paths
+## What runs with no API key
+
+| Path | Offline | How |
+|---|---|---|
+| Loop, veto, apply | yes | every entry in the declared range, driven through the real server and the real loop |
+| Veto retry | yes | defect seeds whose bad draft the veto rejects and whose good draft lands on the retry |
+| Salvage-on-reject | yes | canonical-band seeds, asserted against the exact bytes normalizing the draft produces |
+| Hole fill | yes | a skeleton whose response expression is a hole, filled through the real `zts_expert_fill_hole` |
+| Compiler-authored repair lane | no | no seed produces a verified lane candidate yet, so the class carries no enum member |
+
+One path is still live-only, and saying so is the point of writing this down.
+The repair lane applies a compiler-authored fix with no model turn, and a
+declared class with no seeds would be a gate iterating nothing - the shape every
+other gate here exists to avoid. Until a seed exists, this page claims the paths
 it lists and no others.
+
+Two fills in one turn do not compose, which is pinned rather than worked around:
+`zts_expert_fill_hole` re-reads from disk on every call, so the second is
+computed against the original bytes and drops the first. The offline test asserts
+exactly that and goes red the day it is fixed.
 
 Recorded 2026-08-04 over corpus `83c9c0c040e8`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as
