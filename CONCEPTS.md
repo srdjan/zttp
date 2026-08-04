@@ -53,12 +53,24 @@ The share of prompts whose first generated attempt clears the Veto with no retri
 ### Policy hash
 A fingerprint of the compiler's rule set, recorded beside every published rate so two measurements taken under different rules are never compared as though they were the same. It covers the rules and not the analysis behind them, so a change to what a rule concludes can leave it identical; the build a measurement came from is what distinguishes those.
 
+### Cassette
+A recorded model turn, kept so the same session can be replayed later against the current compiler. Recording costs model access and replay does not, which is what makes a published rate both reproducible and free to re-check. A rate may come from no other source.
+
+### Stand-in
+A scripted responder that takes a live model's place on the wire, so the agent loop, the Veto, and the edit path can be exercised with no model access at all. It answers a declared range of asks and refuses everything outside it, and the refusal is the point: a range it silently outgrew would answer asks it cannot really handle.
+
+A Stand-in can show that the machinery runs correctly and can never measure an agent. Every draft it emits was written to pass the same Veto that judges it, so a First-draft veto-pass rate taken over one describes the script rather than a model.
+
 ## Guarding the repo
 
 ### Gate
 A build step that fails when a repo invariant is violated, as distinct from a test that checks a behavior. A Gate is usually bidirectional: it fails both when something is missing from an allowlist and when an allowlist row no longer matches anything, so the list cannot rot in either direction.
 
 A Gate must assert a floor on its own input before any count it reports means anything. A Gate whose corpus is empty, whose filter matches nothing, or whose build product has no consumer reports success while checking nothing, and is then cited afterwards as evidence. Deleting a Gate's input and confirming it turns red is the check that separates the two.
+
+The floor is necessary and not sufficient. A Gate holding a full input can still assert something weaker than its own name claims, so that runs in which the named behavior never happened satisfy it too. An assertion must name the value expected rather than the values excluded, since a difference from two wrong answers is satisfied by a third. A Gate is also only as good as the fixture beneath it: when two outcomes it is meant to separate write identical observable state, no assertion over that state can tell them apart.
+
+The probe that tests a Gate is itself code, and a probe that does not compile runs no check. Since a build that failed to compile and a Gate that passed both produce no failure message, a probe's verdict is read from the build's exit status rather than from its output.
 
 ## Flagged ambiguities
 

@@ -95,8 +95,11 @@ try testing.expectEqual(@as(usize, 0), false_fires);
 
 The test to apply to any gate before trusting it: **delete its input and see whether it still passes.** Empty the corpus, rename every marker, filter on a token no test carries, remove the only consumer of the build product. A gate that stays green through that is not measuring what its name says.
 
+Two amendments to that method, learned the day after this was written and covered in [difference is not the claim, and a probe that does not compile is not a probe](difference-is-not-the-claim-and-a-probe-must-compile.md). The probe must compile, or no test runs and the empty output reads exactly like a clean pass. And the probe's verdict comes from the build's exit code, never from a grep for a failure format, because a compile error and a passing run both produce no match. That document also covers the shape this rule does not reach: a gate holding a full input, with a floor asserted over it, whose assertion is still satisfied by runs in which the named behavior never happened.
+
 ## Related Issues
 
+- [difference-is-not-the-claim-and-a-probe-must-compile](difference-is-not-the-claim-and-a-probe-must-compile.md) - the same class over a degenerate assertion and a degenerate probe rather than a degenerate input, and the two amendments to this document's probe method
 - [empty-baseline-made-a-file-destroying-edit-prove-clean](../logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md) - the same fail-open one level down, and the defect these four gates did not catch
 - [empty-label-set-claimed-a-value-was-clean](../security-issues/empty-label-set-claimed-a-value-was-clean.md) - the compiler instance, whose Prevention section states the sibling rule: do not let a green gate stand in for a class it cannot see
 - [normalize-unions-without-dropping-members](../logic-errors/normalize-unions-without-dropping-members.md) - the polarity rule underneath all of these
