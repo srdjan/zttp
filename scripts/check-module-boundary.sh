@@ -108,7 +108,12 @@ used_pairs="$(
   done | sort -u
 )"
 
-allowed_pairs="$(sed 's/#.*$//' "$allow_file" | grep -v '^[[:space:]]*$' | sort -u || true)"
+# Trailing whitespace is stripped after the comment strip, matching
+# check-proof-swallow.sh. Without it a row written `pkg name # why` becomes
+# `pkg name ` and matches nothing, so the same row is reported as an unallowed
+# reach and as a stale allowlist entry at once. Loud, but it names the wrong two
+# problems.
+allowed_pairs="$(sed 's/#.*$//' "$allow_file" | sed 's/[[:space:]]*$//' | grep -v '^[[:space:]]*$' | sort -u || true)"
 
 new_reach="$(comm -23 <(printf '%s\n' "$used_pairs") <(printf '%s\n' "$allowed_pairs") || true)"
 if [[ -n "${new_reach//[[:space:]]/}" ]]; then
