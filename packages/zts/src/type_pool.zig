@@ -118,6 +118,11 @@ pub const TypeNode = struct {
     data: TypeData,
     /// For nominal types (capability interfaces), prevents structural forgery.
     nominal: bool = false,
+    /// The declared name of a `distinct type`. A nominal node copies its base
+    /// node's tag and data, so without the name two distinct types over the
+    /// same base differ only by pool index - and a canonical key computed from
+    /// tag and data alone would report them as one type.
+    nominal_name: NameRef = .{ .start = 0, .len = 0 },
 };
 
 // ---------------------------------------------------------------------------
@@ -134,6 +139,9 @@ pub const TypePool = struct {
     names: std.ArrayListUnmanaged(u8),
     /// Template literal type parts storage
     template_parts: std.ArrayListUnmanaged(TemplatePart),
+    /// Canonical type keys (`type_key.zig`): the pool's structural identity
+    /// function, computed on demand and owned until `deinit`.
+    key_memo: std.AutoHashMapUnmanaged(TypeIndex, []const u8),
     /// Operational failure is separate from `null_type_idx`, which remains a
     /// semantic absence sentinel. Once poisoned, the pool must be discarded.
     failure: ?TypePoolError = null,
@@ -156,6 +164,7 @@ pub const TypePool = struct {
             .members = .empty,
             .names = .empty,
             .template_parts = .empty,
+            .key_memo = .empty,
         };
         // Pre-allocate primitive types
         pool.idx_boolean = pool.addNode(allocator, .{ .tag = .t_boolean, .data = .{} });
@@ -176,6 +185,35 @@ pub const TypePool = struct {
         self.members.deinit(allocator);
         self.names.deinit(allocator);
         self.template_parts.deinit(allocator);
+        var keys = self.key_memo.valueIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        self.key_memo.deinit(allocator);
+    }
+
+    // -------------------------------------------------------------------
+    // Canonical key memo (see type_key.zig)
+    // -------------------------------------------------------------------
+
+    /// The memoized canonical key for `idx`, or null if it has not been
+    /// computed. `type_key.typeKey` is the only intended caller.
+    pub fn lookupTypeKey(self: *const TypePool, idx: TypeIndex) ?[]const u8 {
+        return self.key_memo.get(idx);
+    }
+
+    /// Store `key` for `idx` and return the pool-owned copy, which stays valid
+    /// until `deinit`. Each key is its own allocation rather than a slice into
+    /// a shared arena: a growing arena reallocates, and every key handed out
+    /// before that point would dangle.
+    pub fn storeTypeKey(
+        self: *TypePool,
+        allocator: std.mem.Allocator,
+        idx: TypeIndex,
+        key: []const u8,
+    ) std.mem.Allocator.Error![]const u8 {
+        const owned = try allocator.dupe(u8, key);
+        errdefer allocator.free(owned);
+        try self.key_memo.put(allocator, idx, owned);
+        return owned;
     }
 
     /// Reject any type/proof result produced after the pool failed to allocate
@@ -291,13 +329,46 @@ pub const TypePool = struct {
     /// Create a nominal (branded) alias of a base type. The resulting type is
     /// structurally identical but incompatible with other types via nominal flag.
     /// Returns the new nominal type index.
-    pub fn addNominalAlias(self: *TypePool, allocator: std.mem.Allocator, base: TypeIndex) TypeIndex {
+    pub fn addNominalAlias(self: *TypePool, allocator: std.mem.Allocator, base: TypeIndex, name: []const u8) TypeIndex {
         const base_node = if (base < self.nodes.items.len) self.nodes.items[base] else return null_type_idx;
+        const n = self.addName(allocator, name);
         return self.addNode(allocator, .{
             .tag = base_node.tag,
             .data = base_node.data,
             .nominal = true,
+            .nominal_name = n,
         });
+    }
+
+    /// Brand an existing node in place. Used for a capability interface, which
+    /// is resolved as a record first and only then found to be nominal.
+    pub fn markNominal(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex, name: []const u8) void {
+        if (idx == null_type_idx or idx >= self.nodes.items.len) return;
+        const n = self.addName(allocator, name);
+        self.nodes.items[idx].nominal = true;
+        self.nodes.items[idx].nominal_name = n;
+        // Branding changes this node's identity and the identity of every type
+        // built over it. Which keys embed it is not tracked, so the whole memo
+        // goes: a stale key is a wrong answer, and recomputing is only slower.
+        self.invalidateTypeKeys(allocator);
+    }
+
+    /// Drop every memoized canonical key. Call after any in-place edit to a
+    /// node, field, or member that a key could have been computed from.
+    pub fn invalidateTypeKeys(self: *TypePool, allocator: std.mem.Allocator) void {
+        var keys = self.key_memo.valueIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        self.key_memo.clearRetainingCapacity();
+    }
+
+    /// The declared name of a `distinct type`, or the empty string for a
+    /// non-nominal node. Two nominal nodes with different names are different
+    /// types even when their tag and data agree.
+    pub fn nominalName(self: *const TypePool, idx: TypeIndex) []const u8 {
+        if (idx == null_type_idx or idx >= self.nodes.items.len) return "";
+        const node = self.nodes.items[idx];
+        if (!node.nominal) return "";
+        return self.getName(node.nominal_name.start, node.nominal_name.len);
     }
 
     /// Unwrap a nominal type to its base primitive. For non-nominal types, returns unchanged.

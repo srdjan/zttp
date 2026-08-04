@@ -102,6 +102,7 @@ pub const property_diagnostics = @import("property_diagnostics.zig");
 pub const route_match = @import("route_match.zig");
 pub const type_map = @import("type_map.zig");
 pub const type_pool = @import("type_pool.zig");
+pub const type_key = @import("type_key.zig");
 pub const type_env = @import("type_env.zig");
 pub const service_types = @import("service_types.zig");
 pub const type_checker = @import("type_checker.zig");

@@ -437,7 +437,7 @@ pub const TypeEnv = struct {
         // Resolve the base type, then create a nominal alias.
         const base_idx = self.resolveType(type_text);
         if (base_idx == null_type_idx) return;
-        const nominal_idx = self.pool.addNominalAlias(self.allocator, base_idx);
+        const nominal_idx = self.pool.addNominalAlias(self.allocator, base_idx, name);
         if (nominal_idx == null_type_idx) return;
 
         const owned_name = self.internName(name);
@@ -463,7 +463,7 @@ pub const TypeEnv = struct {
                 }
             }
             if (all_functions and type_idx < self.pool.nodes.items.len) {
-                self.pool.nodes.items[type_idx].nominal = true;
+                self.pool.markNominal(self.allocator, type_idx, name);
             }
         }
 
