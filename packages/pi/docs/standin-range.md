@@ -2,9 +2,9 @@
 
 # Deterministic stand-in range
 
-Range version: `step-4b-v1`
+Range version: `step-5-v1`
 
-Range hash: `970a6c41daae4f2a94dc009d35fef4d210d9849c011344496063926d7b2fb316`
+Range hash: `ef932236ea71e84c5e08fc04960df989206db6c18f8edc3b5c0ebded1b7f8885`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -67,3 +67,14 @@ The deterministic playbook server supports the entries below. Use `zig build ztt
 - Example paraphrases:
   - Fix the ZTS300 compiler error
   - Repair this handler's compiler error
+
+## Reserved task kinds
+
+These kinds stay outside the range on purpose. They are what the negative corpus and the out-of-range grammars assert an absence against, so covering one would delete its own gate.
+
+- `unknown`
+- `handler_scaffold`
+- `spec_goal`
+- `workflow_authoring`
+- `sql_feature`
+- `auth_jwt`

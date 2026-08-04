@@ -4,12 +4,12 @@ const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const expert_workflow = @import("../expert_workflow.zig");
 
-pub const version = "step-4b-v1";
+pub const version = "step-5-v1";
 // Covers the declared entries and the negative corpus. The corpus joined the
 // hash after review found it outside: emptying it changed no published number
 // while both false-fire gates silently fell to zero iterations. The declared
 // range itself did not change when this value did.
-pub const content_hash = "970a6c41daae4f2a94dc009d35fef4d210d9849c011344496063926d7b2fb316";
+pub const content_hash = "ef932236ea71e84c5e08fc04960df989206db6c18f8edc3b5c0ebded1b7f8885";
 
 pub const Action = enum {
     answer,
@@ -147,6 +147,62 @@ pub fn hasKind(kind: expert_workflow.TaskKind) bool {
     return false;
 }
 
+pub const Coverage = enum {
+    covered,
+    reserved,
+};
+
+/// Whether a task kind may enter the declared range.
+///
+/// The negative corpus below and the out-of-range grammars in
+/// `prompt_grammar.zig` are pinned on kinds this switch calls reserved, and
+/// both false-fire gates assert an absence: `!hasKind(kind)` here and
+/// `!playbook.hasPlaybook(kind)` there. Covering a reserved kind deletes its
+/// own negative, and covering every one of them leaves both gates iterating
+/// nothing while still reporting a pass. The range therefore grows by adding a
+/// new task kind, or a new entry inside a covered one, and never by consuming a
+/// reserved one.
+///
+/// Exhaustive with no `else` prong, so a new `TaskKind` member is a compile
+/// error until somebody decides which side it belongs on.
+pub fn coverageOf(kind: expert_workflow.TaskKind) Coverage {
+    return switch (kind) {
+        .route_add,
+        .review_explain,
+        .env_feature,
+        .test_generation,
+        .violation_fix,
+        => .covered,
+
+        .unknown,
+        .handler_scaffold,
+        .spec_goal,
+        .workflow_authoring,
+        .sql_feature,
+        .auth_jwt,
+        => .reserved,
+    };
+}
+
+pub const covered_kinds = kindsWithCoverage(.covered);
+pub const reserved_kinds = kindsWithCoverage(.reserved);
+
+fn kindsWithCoverage(comptime want: Coverage) []const expert_workflow.TaskKind {
+    comptime {
+        const all = std.enums.values(expert_workflow.TaskKind);
+        var picked: [all.len]expert_workflow.TaskKind = undefined;
+        var count: usize = 0;
+        for (all) |kind| {
+            if (coverageOf(kind) == want) {
+                picked[count] = kind;
+                count += 1;
+            }
+        }
+        const frozen = picked[0..count].*;
+        return &frozen;
+    }
+}
+
 pub fn actionName(action: Action) []const u8 {
     return switch (action) {
         .answer => "text answer",
@@ -178,6 +234,13 @@ pub fn contentHash() [64]u8 {
         hashField(&hasher, negative.prompt);
         hashField(&hasher, @tagName(negative.expected_kind));
     }
+
+    // The reserved set is a claim about the range's edge for the same reason
+    // the negative corpus is, and it outlives any single negative: a kind moved
+    // from reserved to covered with no entry added yet changes nothing else the
+    // hash can see.
+    hashUsize(&hasher, reserved_kinds.len);
+    for (reserved_kinds) |kind| hashField(&hasher, @tagName(kind));
 
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
@@ -212,7 +275,7 @@ pub fn renderDocument(allocator: std.mem.Allocator) ![]u8 {
             "Use `zig build zttp-standin -- --range` to print this document.\n\n",
     );
 
-    for (entries, 0..) |entry, index| {
+    for (entries) |entry| {
         try writer.print("## `{s}`\n\n", .{entry.id});
         try writer.print("- Task kind: `{s}`\n", .{@tagName(entry.kind)});
         try writer.print("- Result: {s}\n", .{actionName(entry.action)});
@@ -222,7 +285,17 @@ pub fn renderDocument(allocator: std.mem.Allocator) ![]u8 {
         for (entry.paraphrases) |paraphrase| {
             try writer.print("  - {s}\n", .{paraphrase});
         }
-        if (index + 1 < entries.len) try writer.writeByte('\n');
+        try writer.writeByte('\n');
+    }
+
+    try writer.writeAll("## Reserved task kinds\n\n");
+    try writer.writeAll(
+        "These kinds stay outside the range on purpose. They are what the " ++
+            "negative corpus and the out-of-range grammars assert an absence against, " ++
+            "so covering one would delete its own gate.\n\n",
+    );
+    for (reserved_kinds) |kind| {
+        try writer.print("- `{s}`\n", .{@tagName(kind)});
     }
 
     return try buf.toOwnedSlice();

@@ -38,7 +38,81 @@ test "stand-in gate: prompt catalog and playbooks map both ways" {
     const review = range.findById("review") orelse return error.MissingRangeEntry;
     try testing.expectEqual(expert_workflow.TaskKind.review_explain, explain.kind);
     try testing.expectEqual(explain.kind, review.kind);
-    try testing.expectEqual(@as(usize, 5), playbook.kinds.len);
+
+    // Derived, not a hand-bumped literal. A literal here means "somebody edited
+    // a number" after a few rounds of growth; against the covered set it means
+    // the playbook and the coverage decision agree.
+    try testing.expectEqual(range.covered_kinds.len, playbook.kinds.len);
+    for (range.covered_kinds) |kind| {
+        try testing.expect(playbook.hasPlaybook(kind));
+    }
+}
+
+// The range's edge is what the false-fire gates measure, and every one of them
+// asserts an absence. Covering a reserved kind deletes the negative that stands
+// on it; covering all of them leaves the gates iterating nothing and reporting a
+// pass. This is the gate on the decision itself, so growth stays a choice rather
+// than a side effect of adding an entry.
+test "stand-in gate: every reserved kind stays outside the playbook and the range" {
+    // Floor first: an empty reserved set makes every loop below vacuous, and it
+    // is the state the range reaches by covering one kind at a time.
+    try testing.expect(range.reserved_kinds.len >= 6);
+
+    for (range.reserved_kinds) |kind| {
+        try testing.expectEqual(range.Coverage.reserved, range.coverageOf(kind));
+        try testing.expect(!range.hasKind(kind));
+        try testing.expect(!playbook.hasPlaybook(kind));
+    }
+
+    // Both directions, so a kind cannot fall out of both lists. The exhaustive
+    // switch already forces a decision per member; this proves the two derived
+    // slices partition what it decided.
+    const all = std.enums.values(expert_workflow.TaskKind);
+    try testing.expectEqual(all.len, range.covered_kinds.len + range.reserved_kinds.len);
+    for (all) |kind| {
+        const expected: range.Coverage = if (playbook.hasPlaybook(kind)) .covered else .reserved;
+        try testing.expectEqual(expected, range.coverageOf(kind));
+    }
+
+    std.debug.print(
+        "[standin-gate] coverage decision {d} covered, {d} reserved of {d} kinds\n",
+        .{ range.covered_kinds.len, range.reserved_kinds.len, all.len },
+    );
+}
+
+test "stand-in gate: every negative and out-of-range kind is reserved, and every reserved kind keeps a probe" {
+    try testing.expect(range.negative_corpus.len >= 4);
+    try testing.expect(prompt_grammar.out_of_range.len >= 4);
+
+    for (range.negative_corpus) |negative| {
+        try testing.expectEqual(range.Coverage.reserved, range.coverageOf(negative.expected_kind));
+    }
+    for (prompt_grammar.out_of_range) |grammar| {
+        try testing.expectEqual(range.Coverage.reserved, range.coverageOf(grammar.kind));
+    }
+
+    // The other direction, and the one that stops the negative side from
+    // thinning as the range grows: a reserved kind with nothing probing it is
+    // reserved in name only. `unknown` is exempt because it is the classifier's
+    // fallback rather than a shape somebody asks for.
+    var probed: usize = 0;
+    for (range.reserved_kinds) |kind| {
+        if (kind == .unknown) continue;
+        var claims: usize = 0;
+        for (prompt_grammar.out_of_range) |grammar| {
+            if (grammar.kind == kind) claims += 1;
+        }
+        if (claims == 0) {
+            std.debug.print(
+                "[standin-gate] reserved kind {s} has no out-of-range grammar probing it\n",
+                .{@tagName(kind)},
+            );
+            return error.ReservedKindUnprobed;
+        }
+        probed += 1;
+    }
+    try testing.expect(probed >= 5);
+    std.debug.print("[standin-gate] reserved probes {d}/{d} kinds\n", .{ probed, probed });
 }
 
 test "stand-in gate: range identity and generated document are current" {
