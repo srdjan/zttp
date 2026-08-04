@@ -27,6 +27,7 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-03 | `aba46bee` | `d6b571835aa5` | 16 | claude-sonnet-4-6 | `118885d3f647` | 93% (15/16) | 4 | 100% (10/10) |
 | 2026-08-03 | `d984092c` | `d6b571835aa5` | 16 | claude-haiku-4-5-20251001 | `118885d3f647` | 25% (4/16) | 3 | 90% (9/10) |
 | 2026-08-03 | `39449aff` | `83c9c0c040e8` | 20 | claude-sonnet-4-6 | `118885d3f647` | 95% (19/20) | 4 | 100% (14/14) |
+| 2026-08-04 | `4822d2e2` | `04d2e920b07f` | 20 | claude-sonnet-4-6 | `118885d3f647` | 100% (20/20) | 4 | 100% (14/14) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
@@ -326,6 +327,40 @@ The stand-in now runs a two-hole seed across two full offline turns: each turn
 publishes a fresh compiler frame, fills one exact site, and applies it before the
 next turn begins. The second frame therefore includes the first accepted fill,
 and the gate ends with both expressions composed and no holes left.
+
+## The fifteenth row: a compiler defect the corpus had already recorded
+
+100% (20/20) over the same twenty cases the row above measured at 95%, at the
+same policy hash. One case moved: `workflow-nested-dispatch-avoidance`, whose
+first draft used to be rejected and now is not.
+
+The compiler was wrong, not the draft. A function expression or arrow with no
+signature of its own inherited the enclosing function's declared return type, so
+a `return` inside a `run` callback was measured against the handler's contract
+rather than against nothing. That is what the pinned draft tripped, and the
+cassette says so in the model's own words on the next turn: "ZTS204 on line 88,
+the `Response.json(...)` call inside `run()`". The turn it then spent hoisting
+the result into a local binding was work the compiler invented.
+
+Two things about how this was found are worth keeping, because neither is the
+usual way a defect surfaces.
+
+The corpus had recorded it a day earlier and nobody had read it that way. The
+2026-08-03 re-record flipped this case to a failure, and the note written at the
+time attributed it to the model drawing a different draft - which was true, and
+stopped one step short. Pinning the worse outcome rather than re-rolling is what
+kept the evidence in the repository; the re-roll that would have restored 95%
+would also have deleted the only record of the bug.
+
+And it surfaced from an experiment that was then reverted. Closing D1's
+unresolved-name fail-open turned four working examples red, which is a
+re-sequencing signal rather than a green light - but one of the failures was
+this defect rather than a missing prerequisite. The fail-open had been hiding it
+for every handler, because a handler's declared `Response` is an unresolved name
+that accepts whatever it is compared against.
+
+Coverage moved with the rate: [coverage.md](coverage.md) goes from five of the
+compiler's seventy-two advertised rules tripped to seven.
 
 ## Reading the table
 
