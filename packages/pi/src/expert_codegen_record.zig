@@ -1133,6 +1133,90 @@ fn jsonCodeArray(a: std.mem.Allocator, set: *const codegen.CodeSet) ![]u8 {
     return try buf.toOwnedSlice(a);
 }
 
+/// Fail when `docs/coverage.json` no longer describes this run.
+///
+/// The page is generated from the line this replay prints, so a corpus that
+/// grew, a rule that was added, or a compiler change that moved what the corpus
+/// reaches all leave it stale - and a stale coverage page is worse than none,
+/// because it is cited as the current answer. Three fields are enough to catch
+/// every one of those: the corpus identity, the denominator, and the count.
+///
+/// A missing or unparseable file is a failure, never a skip. An absent page
+/// reads exactly like a page that agrees.
+fn assertCoveragePageCurrent(
+    a: std.mem.Allocator,
+    repo_root: []const u8,
+    version: []const u8,
+    tripped_count: usize,
+) !void {
+    const path = try std.fmt.allocPrint(a, "{s}/docs/coverage.json", .{repo_root});
+    const bytes = zts.file_io.readFile(a, path, 64 * 1024) catch |err| {
+        std.debug.print(
+            "[proof-coverage] cannot read docs/coverage.json ({s}); regenerate with" ++
+                " `bash scripts/update-coverage.sh`\n",
+            .{@errorName(err)},
+        );
+        return error.CoveragePageUnreadable;
+    };
+
+    const parsed = std.json.parseFromSlice(std.json.Value, a, bytes, .{}) catch |err| {
+        std.debug.print(
+            "[proof-coverage] docs/coverage.json does not parse ({s}); regenerate with" ++
+                " `bash scripts/update-coverage.sh`\n",
+            .{@errorName(err)},
+        );
+        return error.CoveragePageUnreadable;
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.CoveragePageUnreadable;
+
+    const published_version = parsed.value.object.get("corpusVersion") orelse return error.CoveragePageUnreadable;
+    const published_total = parsed.value.object.get("rulesTotal") orelse return error.CoveragePageUnreadable;
+    const published_tripped = parsed.value.object.get("rulesTripped") orelse return error.CoveragePageUnreadable;
+    if (published_version != .string or published_total != .integer or published_tripped != .integer) {
+        return error.CoveragePageUnreadable;
+    }
+
+    const total: i64 = @intCast(zts.rule_registry.all_rules.len);
+    const count: i64 = @intCast(tripped_count);
+    if (!std.mem.eql(u8, published_version.string, version) or
+        published_total.integer != total or
+        published_tripped.integer != count)
+    {
+        std.debug.print(
+            "[proof-coverage] docs/coverage.json is stale: it says corpus {s}, {d} of {d};" ++
+                " this run measured {s}, {d} of {d}. Regenerate with" ++
+                " `bash scripts/update-coverage.sh`\n",
+            .{
+                published_version.string[0..@min(12, published_version.string.len)],
+                published_tripped.integer,
+                published_total.integer,
+                version[0..@min(12, version.len)],
+                count,
+                total,
+            },
+        );
+        return error.CoveragePageStale;
+    }
+}
+
+/// The registry rules no case tripped, in registry order.
+fn jsonUntripped(a: std.mem.Allocator, tripped: *const codegen.CodeSet) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.append(a, '[');
+    var first = true;
+    for (zts.rule_registry.all_rules) |rule| {
+        if (tripped.contains(rule.code)) continue;
+        if (!first) try buf.append(a, ',');
+        first = false;
+        try buf.append(a, '"');
+        try buf.appendSlice(a, rule.code);
+        try buf.append(a, '"');
+    }
+    try buf.append(a, ']');
+    return try buf.toOwnedSlice(a);
+}
+
 test "codegen baseline replays at the committed first-draft pass rate" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -1390,14 +1474,19 @@ test "codegen baseline replays at the committed first-draft pass rate" {
 
         const tripped_sorted = try jsonCodeArray(a, &tripped);
         const off_sorted = try jsonCodeArray(a, &off_registry);
+        // The complement is carried on the line rather than left to be derived,
+        // so a reader of docs/coverage.json needs no copy of the registry to see
+        // what the corpus does not reach. It is also the half worth reading.
+        const untripped_sorted = try jsonUntripped(a, &tripped);
         std.debug.print(
             "[proof-coverage] {{\"corpusVersion\":\"{s}\",\"rulesTotal\":{d},\"rulesTripped\":{d}," ++
-                "\"tripped\":{s},\"offRegistry\":{s}}}\n",
+                "\"tripped\":{s},\"untripped\":{s},\"offRegistry\":{s}}}\n",
             .{
                 version[0..],
                 zts.rule_registry.all_rules.len,
                 tripped.count(),
                 tripped_sorted,
+                untripped_sorted,
                 off_sorted,
             },
         );
@@ -1428,6 +1517,18 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
         }
         if (lost > 0 and on_headline) return error.CoverageRatchetMismatch;
+
+        // The published page must be the page this run would write. Checked here
+        // rather than in a docs-drift script because the numbers are already in
+        // hand and re-deriving them anywhere else would be a second
+        // implementation to disagree with.
+        //
+        // Off-headline runs skip it: the tripped set is a property of the model's
+        // drafts, so a smaller tier legitimately writes a different page and must
+        // not be able to overwrite the committed one by failing here.
+        if (on_headline) {
+            try assertCoveragePageCurrent(a, repo_root, version[0..], tripped.count());
+        }
     }
 
     // Roadmap item 3's comparison, reported apart from the headline because it

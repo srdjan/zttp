@@ -26,6 +26,8 @@ they are designs rather than a backlog. Finished plans live under
 - [Convergence](convergence.md) - the measured first-draft veto-pass rate over
   the frozen prompt corpus, with the corpus version and policy hash each figure
   was recorded against.
+- [Coverage](coverage.md) - which of the compiler's advertised rules the corpus
+  actually trips, and what the offline suite does and does not prove.
 
 ## Reference
 
