@@ -303,13 +303,13 @@ test "corpus version changes when a case changes" {
 // workflows). Each elicits realistic multi-roundtrip behaviour (explore then
 // edit) and records as step_0/step_1/...
 //
-// Ten of the sixteen carry an intent spec. The five durable and workflow cases
-// do not: executing them needs the durable store and queue the runtime stands
-// up, and `zttp test` has no offline story for either - `saga()` fails with
-// NativeFunctionError before any assertion runs, and an io stub does not
+// Fourteen of the twenty carry an intent spec. The five durable and workflow
+// cases do not: executing them needs the durable store and queue the runtime
+// stands up, and `zttp test` has no offline story for either - `saga()` fails
+// with NativeFunctionError before any assertion runs, and an io stub does not
 // intercept it. Those cases stay veto-checked and report `.not_checked`, which
-// the summary counts apart from passes, so the published figure reads 10 of 16
-// covered instead of pretending to 16. Closing that gap means giving the test
+// the summary counts apart from passes, so the published figure reads 14 of 20
+// covered instead of pretending to 20. Closing that gap means giving the test
 // runner a durable backend, which is its own piece of work.
 //
 // `parallel-secret` is the sixth without a spec, for a different reason given

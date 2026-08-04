@@ -96,15 +96,29 @@ if ! grep -q '^| Recorded ' "$md_out" 2>/dev/null; then
   exit 1
 fi
 
-# Append below the last existing row of the table.
+# Append below the last row of the RESULTS table specifically.
+#
+# The page carries other tables - the model comparison, the hole-mode arms - and
+# they sit after the results table. Anchoring on the last `| ` line anywhere in
+# the file put the 20-case row at the end of the model-comparison table, where it
+# read as a third model. The anchor is the `| Recorded ` header, and the block is
+# the contiguous run of rows under it.
 python3 - "$md_out" "$row" <<'PY'
 import sys
 
 path, row = sys.argv[1], sys.argv[2]
 lines = open(path).read().splitlines()
 
-last = max(i for i, l in enumerate(lines) if l.startswith("| "))
-if lines[last].strip() == row.strip():
+header = next((i for i, l in enumerate(lines) if l.startswith("| Recorded ")), None)
+if header is None:
+    sys.exit("error: no results table header (`| Recorded `) in " + path)
+
+last = header + 1  # the |---|---| separator
+while last + 1 < len(lines) and lines[last + 1].startswith("| "):
+    last += 1
+
+block = [l.strip() for l in lines[header + 2 : last + 1]]
+if row.strip() in block:
     print(">> table already carries this row; left unchanged")
 else:
     lines.insert(last + 1, row)

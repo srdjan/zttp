@@ -26,6 +26,7 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-03 | `74d48add` | `3742860e78b2` | 16 | claude-sonnet-4-6 | `118885d3f647` | 87% (14/16) | 4 | 100% (10/10) |
 | 2026-08-03 | `aba46bee` | `d6b571835aa5` | 16 | claude-sonnet-4-6 | `118885d3f647` | 93% (15/16) | 4 | 100% (10/10) |
 | 2026-08-03 | `d984092c` | `d6b571835aa5` | 16 | claude-haiku-4-5-20251001 | `118885d3f647` | 25% (4/16) | 3 | 90% (9/10) |
+| 2026-08-03 | `39449aff` | `83c9c0c040e8` | 20 | claude-sonnet-4-6 | `118885d3f647` | 95% (19/20) | 4 | 100% (14/14) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
@@ -245,7 +246,6 @@ policy hash - only the model differs, and the corpus column says so by staying
 |---|---|---|---|---|
 | Sonnet 4.6 | 93% (15/16) | 4 | 100% (10/10) | 16/16 |
 | Haiku 4.5 | 25% (4/16) | 3 | 90% (9/10) | 16/16 |
-| 2026-08-03 | `39449aff` | `83c9c0c040e8` | 20 | claude-sonnet-4-6 | `118885d3f647` | 95% (19/20) | 4 | 100% (14/14) |
 
 The headline gap is nearly four to one, and **reached-green is 16/16 for both**.
 The tiers differ in first-draft aim, not in whether they converge. That is the
@@ -385,18 +385,17 @@ provable from converging on trivial.
 
 ## What is not measured yet
 
-Five of the eleven cases - the durable and workflow ones - carry no intent
+Five of the twenty cases - the durable and workflow ones - carry no intent
 spec. Executing them needs the durable store and queue the runtime stands up,
 and `zttp test` has no offline story for either: `saga()` fails with
 `NativeFunctionError` before any assertion runs, and an io stub does not
 intercept it. Those cases are veto-checked but not intent-checked, which is why
-the intent column reads over 6 rather than over 11. Giving the test runner a
+the intent column reads over 14 rather than over 20. Giving the test runner a
 durable backend would close it.
 
-Four of the five cases added on 2026-08-03 carry a spec, so the denominator is
-10 of 16. `parallel-secret` is the sixth without one: its response is a bare app
-name read from an env var, and asserting it would test the env stub rather than
-the boundary containment the case is about.
+`parallel-secret` is the sixth without one, for a different reason: its response
+is a bare app name read from an env var, and asserting it would test the env
+stub rather than the boundary containment the case is about.
 
 One case is pinned as an accepted failure. It used to be `validate-body`, whose first draft wrote
 `result.value as Item` against a subset with no `as` (ZTS042). That draft is
