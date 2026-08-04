@@ -68,6 +68,7 @@ pub const DiagnosticKind = enum {
     arg_type_mismatch, // argument type doesn't match parameter
     return_type_mismatch, // return value doesn't match declared return type
     non_exhaustive_match, // match is not provably exhaustive
+    invalid_type_predicate, // `v is T` whose body does not verify the claim
     ambiguous_type_argument, // a type parameter no argument position determines
     type_constraint_violation, // a type argument outside its `extends` bound
     type_argument_count_mismatch, // explicit type arguments, wrong count
@@ -141,6 +142,10 @@ pub const TypeChecker = struct {
     binding_resolution_failed: bool = false,
     /// Flow-sensitive narrowing: binding key -> narrowed TypeIndex
     narrowed: std.AutoHashMapUnmanaged(u64, TypeIndex),
+    /// Type predicates whose bodies were read and found to prove what they
+    /// claim, by function name. A declared predicate that is not in here
+    /// installs no narrowing anywhere.
+    admitted_predicates: std.StringHashMapUnmanaged(void),
     /// Undo log for `narrowed`, so a branch can restore every key it touched
     /// and not only the one its own guard installed.
     narrow_journal: std.ArrayListUnmanaged(NarrowJournalEntry),
@@ -175,6 +180,7 @@ pub const TypeChecker = struct {
             .active_declared_types = .empty,
             .narrowed = .empty,
             .narrow_journal = .empty,
+            .admitted_predicates = .empty,
             .allocation_failed = false,
         };
     }
@@ -197,11 +203,16 @@ pub const TypeChecker = struct {
         self.active_declared_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
         self.narrow_journal.deinit(self.allocator);
+        self.admitted_predicates.deinit(self.allocator);
     }
 
     /// Run the checker on the given root node. Returns the number of errors.
     pub fn check(self: *TypeChecker, root: NodeIndex) !u32 {
         try self.ensureHealthy();
+        // Before the main walk, so a call to a predicate declared later in the
+        // file still narrows. A predicate whose body is not an admitted test is
+        // rejected here and installs nothing anywhere.
+        self.admitTypePredicates(root, 0);
         self.walkStmt(root);
         if (self.bound_var_annotations != self.env.varAnnotationCount()) {
             self.binding_resolution_failed = true;
@@ -1576,9 +1587,10 @@ pub const TypeChecker = struct {
             if (self.extractBooleanDiscriminantGuard(condition, true)) |guard| return guard;
         }
 
-        // if (Array.isArray(x))
+        // if (Array.isArray(x)), or a call to an admitted type predicate
         if (tag == .call) {
             if (self.extractIsArrayGuard(condition)) |guard| return guard;
+            if (self.extractTypePredicateGuard(condition)) |guard| return guard;
         }
 
         // if (x !== undefined), if (x === undefined), or if (x.prop === "literal")
@@ -1773,6 +1785,216 @@ pub const TypeChecker = struct {
 
     fn mutuallyAssignable(self: *const TypeChecker, a: TypeIndex, b: TypeIndex) bool {
         return self.env.isAssignableTo(a, b) and self.env.isAssignableTo(b, a);
+    }
+
+    // -------------------------------------------------------------------
+    // Type predicates (`function isText(v: unknown): v is string`)
+    //
+    // The annotation is a claim, not a proof. A predicate installs a narrowing
+    // at its call sites only when its body is a single `return` of tests this
+    // checker can already verify - the closed narrowing list over the named
+    // parameter, combined with `&&`, `||`, and `!`. Any other body keeps the
+    // declaration and raises ZTS211, because a guard the compiler cannot check
+    // is a narrowing the author asserted and nothing confirmed.
+    // -------------------------------------------------------------------
+
+    /// Walk declarations looking for type predicates, admitting the ones whose
+    /// bodies check out and reporting the ones that do not.
+    fn admitTypePredicates(self: *TypeChecker, node: NodeIndex, depth: u8) void {
+        if (depth > 32) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.admitTypePredicates(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), depth + 1);
+                }
+            },
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.admitTypePredicates(export_decl.declaration, depth + 1);
+            },
+            .function_decl => self.admitOneTypePredicate(node),
+            // exhaustive: a type predicate is a named function declaration, so
+            // only the forms that can carry one are descended into. Anything
+            // else declares no predicate and needs no visit.
+            else => {},
+        }
+    }
+
+    fn admitOneTypePredicate(self: *TypeChecker, node: NodeIndex) void {
+        const decl = self.ir_view.getVarDecl(node) orelse return;
+        const func = self.ir_view.getFunction(decl.init) orelse return;
+        const fn_name = self.resolveAtomName(decl.binding.name_atom) orelse return;
+        const sig = self.env.getSourceFnSigByName(fn_name) orelse return;
+        const predicate = sig.type_predicate orelse return;
+        if (predicate.param_index >= func.params_count) return;
+
+        const param_idx = self.ir_view.getListIndex(func.params_start, predicate.param_index);
+        const param_binding = self.ir_view.paramBinding(param_idx) orelse return;
+
+        // The guard extractors read the parameter's declared type, so register
+        // the parameters for the length of the check and unwind after.
+        const active_start = self.active_declared_types.items.len;
+        defer self.active_declared_types.items.len = active_start;
+        self.registerParamTypes(func, sig);
+
+        if (self.predicateBodyProves(func.body, param_binding)) {
+            self.admitted_predicates.put(self.allocator, fn_name, {}) catch self.markAllocationFailure();
+            return;
+        }
+        self.addGenericDiagnostic(
+            .invalid_type_predicate,
+            node,
+            "type predicate '{s}' is not verified by its body",
+            .{fn_name},
+            "a type predicate is not verified by its body",
+            "Return one admitted narrowing test over the named parameter, combined with &&, || or !.",
+        );
+    }
+
+    /// True when the body is exactly `return <admitted test tree>`.
+    fn predicateBodyProves(self: *const TypeChecker, body: NodeIndex, param: ir.BindingRef) bool {
+        var statement = body;
+        if (self.ir_view.getTag(body) == .block) {
+            const block = self.ir_view.getBlock(body) orelse return false;
+            if (block.stmts_count != 1) return false;
+            statement = self.ir_view.getListIndex(block.stmts_start, 0);
+        }
+        if (self.ir_view.getTag(statement) != .return_stmt) return false;
+        const value = self.ir_view.getOptValue(statement) orelse return false;
+        return self.predicateTestProves(value, param, 0);
+    }
+
+    fn predicateTestProves(self: *const TypeChecker, node: NodeIndex, param: ir.BindingRef, depth: u8) bool {
+        if (depth > 16) return false;
+        const tag = self.ir_view.getTag(node) orelse return false;
+
+        if (tag == .binary_op) {
+            const bin = self.ir_view.getBinary(node) orelse return false;
+            if (bin.op == .and_op or bin.op == .or_op) {
+                return self.predicateTestProves(bin.left, param, depth + 1) and
+                    self.predicateTestProves(bin.right, param, depth + 1);
+            }
+        }
+        if (tag == .unary_op) {
+            const un = self.ir_view.getUnary(node) orelse return false;
+            if (un.op == .not) return self.predicateTestProves(un.operand, param, depth + 1);
+        }
+
+        // A leaf must be one of the tests in the closed narrowing list, over the
+        // parameter the predicate names. The check is on the form of the test,
+        // not on whether that test would narrow this particular declared type:
+        // `typeof x === "object"` over `x: unknown` narrows nothing today
+        // because `unknown` is not a union, and it is still exactly the test the
+        // predicate is allowed to be made of. A call to another function, a
+        // comparison between two other values, or a bare `true` is not.
+        return self.predicateLeafTestsParam(node, param);
+    }
+
+    fn predicateLeafTestsParam(self: *const TypeChecker, node: NodeIndex, param: ir.BindingRef) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        switch (tag) {
+            // `if (x)` - truthiness, and `if (x.ok)` - a bare discriminant read.
+            .identifier, .member_access => return self.operandNamesParam(node, param),
+            // `Array.isArray(x)`
+            .call => {
+                const call = self.ir_view.getCall(node) orelse return false;
+                if (call.args_count != 1) return false;
+                if (self.ir_view.getTag(call.callee) != .member_access) return false;
+                const callee = self.ir_view.getMember(call.callee) orelse return false;
+                if (self.ir_view.getTag(callee.object) != .identifier) return false;
+                const object_binding = self.ir_view.getBinding(callee.object) orelse return false;
+                const object_name = self.resolveAtomName(object_binding.name_atom) orelse return false;
+                if (!std.mem.eql(u8, object_name, "Array")) return false;
+                const method = self.resolveAtomName(callee.property) orelse return false;
+                if (!std.mem.eql(u8, method, "isArray")) return false;
+                const arg = self.ir_view.getListIndex(call.args_start, 0);
+                return self.operandNamesParam(arg, param);
+            },
+            // `typeof x === "..."`, `x === undefined`, `x.kind === "..."`, and
+            // the `!==` form of each.
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return false;
+                if (bin.op != .strict_eq and bin.op != .strict_neq) return false;
+                const left_names = self.operandNamesParam(bin.left, param);
+                const right_names = self.operandNamesParam(bin.right, param);
+                if (left_names == right_names) return false;
+                const other = if (left_names) bin.right else bin.left;
+                return self.isComparableLiteral(other);
+            },
+            // exhaustive: every other expression form is outside the closed
+            // narrowing list, so it cannot be part of a verified predicate.
+            else => return false,
+        }
+    }
+
+    /// True when the expression is the named parameter, `typeof` of it, or a
+    /// property read off it - the three ways an admitted test mentions its
+    /// subject.
+    fn operandNamesParam(self: *const TypeChecker, node: NodeIndex, param: ir.BindingRef) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        const target: NodeIndex = switch (tag) {
+            .identifier => node,
+            .member_access => blk: {
+                const member = self.ir_view.getMember(node) orelse return false;
+                break :blk member.object;
+            },
+            .unary_op => blk: {
+                const un = self.ir_view.getUnary(node) orelse return false;
+                if (un.op != .typeof_op) return false;
+                break :blk un.operand;
+            },
+            // exhaustive: nothing else denotes the parameter directly.
+            else => return false,
+        };
+        if (self.ir_view.getTag(target) != .identifier) return false;
+        const binding = self.ir_view.getBinding(target) orelse return false;
+        return bindingKey(binding) == bindingKey(param);
+    }
+
+    fn isComparableLiteral(self: *const TypeChecker, node: NodeIndex) bool {
+        return switch (self.ir_view.getTag(node) orelse return false) {
+            .lit_string, .lit_int, .lit_bool, .lit_undefined => true,
+            // exhaustive: an admitted test compares against a literal or the
+            // absent-value sentinel. Anything else is a value the compiler
+            // cannot enumerate, so the comparison proves nothing.
+            else => false,
+        };
+    }
+
+    /// The predicate a call installs, when the callee is an admitted one and
+    /// the narrowed argument is a plain identifier.
+    fn extractTypePredicateGuard(self: *const TypeChecker, call_node: NodeIndex) ?NarrowingGuard {
+        const call = self.ir_view.getCall(call_node) orelse return null;
+        if (self.ir_view.getTag(call.callee) != .identifier) return null;
+        const callee_binding = self.ir_view.getBinding(call.callee) orelse return null;
+        const fn_name = self.resolveAtomName(callee_binding.name_atom) orelse return null;
+        if (!self.admitted_predicates.contains(fn_name)) return null;
+
+        const sig = self.env.getSourceFnSigByName(fn_name) orelse return null;
+        const predicate = sig.type_predicate orelse return null;
+        if (predicate.param_index >= call.args_count) return null;
+
+        const arg = self.ir_view.getListIndex(call.args_start, predicate.param_index);
+        if (self.ir_view.getTag(arg) != .identifier) return null;
+        const binding = self.ir_view.getBinding(arg) orelse return null;
+        const key = bindingKey(binding);
+
+        // The else branch keeps whatever the narrowed type does not cover, and
+        // only a union says what that is.
+        const current = self.currentBindingType(binding) orelse null_type_idx;
+        const else_type = if (self.env.pool.getTag(current) == .t_union)
+            self.env.pool.excludeUnionMember(self.allocator, current, predicate.narrowed)
+        else
+            null_type_idx;
+
+        return .{
+            .key = key,
+            .narrowed_type = predicate.narrowed,
+            .negated = false,
+            .else_type = else_type,
+        };
     }
 
     /// `if (Array.isArray(x))`. Narrows to the union members that are arrays or
@@ -4669,6 +4891,159 @@ test "the same guard over a sixteen-member union is the control" {
         \\}
     ,
         0,
+        null,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Type predicates (D1 / plan task 6)
+// ---------------------------------------------------------------------------
+
+test "an admitted type predicate narrows at its call site" {
+    // The narrowed type is `string`, so assigning it to `number` is the error.
+    // Before the predicate was read, the binding stayed `string | number` and
+    // the same program reported the same count for the wrong reason - hence the
+    // companion test below, which pins that the un-narrowed type is different.
+    try checkTypedSource(
+        \\function isString(v: string | number): v is string {
+        \\    return typeof v === "string";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: string | number = 1;
+        \\    if (isString(raw)) {
+        \\        const s: string = raw;
+        \\        return Response.json({ s });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a predicate whose body calls a function installs no guard" {
+    // Two errors: the predicate itself (ZTS211), and the assignment that the
+    // missing narrowing leaves unproven. The second is what makes this test
+    // non-vacuous - it shows the guard really was withheld, not merely
+    // reported.
+    try checkTypedSource(
+        \\function helper(v: string | number): boolean {
+        \\    return typeof v === "string";
+        \\}
+        \\function isString(v: string | number): v is string {
+        \\    return helper(v);
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: string | number = 1;
+        \\    if (isString(raw)) {
+        \\        const s: string = raw;
+        \\        return Response.json({ s });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        2,
+        null,
+    );
+}
+
+test "a predicate that returns a bare literal proves nothing" {
+    try checkTypedSource(
+        \\function isString(v: string | number): v is string {
+        \\    return true;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: string | number = 1;
+        \\    if (isString(raw)) {
+        \\        const s: string = raw;
+        \\        return Response.json({ s });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        2,
+        null,
+    );
+}
+
+test "a predicate that tests a different parameter is refused" {
+    try checkTypedSource(
+        \\function isString(v: string | number, other: string | number): v is string {
+        \\    return typeof other === "string";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: string | number = 1;
+        \\    if (isString(raw, "x")) {
+        \\        return Response.json({ ok: true });
+        \\    }
+        \\    return Response.json({ ok: false });
+        \\}
+    ,
+        1,
+        null,
+    );
+}
+
+test "admitted tests combine with && and !" {
+    try checkTypedSource(
+        \\function isText(v: string | number | undefined): v is string {
+        \\    return v !== undefined && typeof v === "string";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: string | number | undefined = 1;
+        \\    if (isText(raw)) {
+        \\        const s: string = raw;
+        \\        return Response.json({ s });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a test over an unknown parameter is admitted on its form, not its effect" {
+    // `typeof x === "object"` narrows nothing when the declared type is
+    // `unknown`, because `unknown` is not a union - and it is still exactly the
+    // test a predicate is allowed to be made of. Checking admission by asking
+    // whether a narrowing came out rejected this shape, which is the one the
+    // corpus writes.
+    try checkTypedSource(
+        \\function isObject(x: unknown): x is object {
+        \\    return typeof x === "object";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: unknown = 1;
+        \\    if (isObject(raw)) {
+        \\        return Response.json({ ok: true });
+        \\    }
+        \\    return Response.json({ ok: false });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a test outside the closed list is refused" {
+    // `"status" in val` is not in the closed narrowing list, so the compiler
+    // cannot verify the claim the annotation makes. This is the shape the
+    // corpus trips ZTS211 on.
+    try checkTypedSource(
+        \\function isResponse(val: unknown): val is Response {
+        \\    return typeof val === "object" && "status" in val;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: unknown = 1;
+        \\    if (isResponse(raw)) {
+        \\        return Response.json({ ok: true });
+        \\    }
+        \\    return Response.json({ ok: false });
+        \\}
+    ,
+        1,
         null,
     );
 }

@@ -257,6 +257,24 @@ with `&&`, `||`, `!`. Any other body raises `invalid_type_predicate` (ZTS211).
 **Tests:** an admitted predicate narrows at the call site; a predicate whose
 body calls a function is rejected; no annotation installs an unverified guard.
 
+**Admission is on the form of the test, not on its effect.** The first version
+asked the narrowing extractors whether a leaf produced a guard, and that
+rejected `function isObject(x: unknown): x is object { return typeof x ===
+"object"; }` - the shape the corpus writes. `typeof x === "object"` narrows
+nothing when the declared type is `unknown`, because `unknown` is not a union,
+and it is still exactly the test a predicate is allowed to be made of. The leaf
+check is syntactic against the closed list over the named parameter.
+
+**The corpus trips this rule, and it costs a row.** One draft in
+`workflow-nested-dispatch-avoidance` writes `typeof val === "object" && val !==
+undefined && "status" in val`, and `in` is not in the closed narrowing list, so
+ZTS211 is right to refuse it. `zts check --json` reports the earliest failing
+phase, so that draft no longer reaches the strict checker and `docs/coverage.md`
+drops from seven tripped rules to six: ZTS601 was only ever felt on that draft.
+The count is regenerated in the same commit. ZTS601 is not in the coverage
+ratchet's baseline, so the loss is recorded rather than gated - and it is a
+description of one corpus draft, not of the rule.
+
 ### Task 7: the exit gate
 
 **Files:** a new test root or an added test in `packages/zts/src/type_key.zig`

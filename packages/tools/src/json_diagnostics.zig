@@ -139,6 +139,7 @@ fn typeCheckerCode(kind: type_checker.DiagnosticKind) []const u8 {
         .ambiguous_type_argument => "ZTS208",
         .type_constraint_violation => "ZTS209",
         .type_argument_count_mismatch => "ZTS210",
+        .invalid_type_predicate => "ZTS211",
     };
 }
 

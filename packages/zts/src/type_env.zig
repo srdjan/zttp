@@ -170,11 +170,58 @@ pub const FunctionSig = struct {
     /// instantiated before its arguments are checked.
     type_params: [MAX_TYPE_PARAMS]GenericParam = @splat(.{}),
     type_param_count: u8 = 0,
+    /// A declared type predicate (`function isText(v: unknown): v is string`):
+    /// which parameter it narrows and what it narrows that parameter to.
+    /// Absent on an ordinary function. The declaration alone installs nothing -
+    /// the checker admits the guard only after reading the body that claims it.
+    type_predicate: ?TypePredicate = null,
 
     pub fn typeParams(self: *const FunctionSig) []const GenericParam {
         return self.type_params[0..self.type_param_count];
     }
 };
+
+pub const TypePredicate = struct {
+    /// Position of the named parameter in the signature.
+    param_index: u8,
+    /// The type the parameter has when the predicate returns true.
+    narrowed: TypeIndex,
+};
+
+/// Parameter names of one signature, in declaration order.
+const ParamNames = struct {
+    names: [16][]const u8 = undefined,
+    count: u8 = 0,
+
+    fn append(self: *ParamNames, name: []const u8) void {
+        if (self.count >= self.names.len) return;
+        self.names[self.count] = name;
+        self.count += 1;
+    }
+
+    fn indexOf(self: *const ParamNames, name: []const u8) ?u8 {
+        for (0..self.count) |i| {
+            if (std.mem.eql(u8, self.names[i], name)) return @intCast(i);
+        }
+        return null;
+    }
+};
+
+/// Split `v is string` into the parameter it names and the type text.
+/// Returns null when the text is not a predicate.
+pub fn parseTypePredicate(text: []const u8) ?struct { param_name: []const u8, type_text: []const u8 } {
+    const marker = " is ";
+    const at = std.mem.indexOf(u8, text, marker) orelse return null;
+    const param_name = std.mem.trim(u8, text[0..at], " \t\n\r");
+    const type_text = std.mem.trim(u8, text[at + marker.len ..], " \t\n\r");
+    if (param_name.len == 0 or type_text.len == 0) return null;
+    // The parameter position is a plain identifier; anything else means the
+    // ` is ` came from inside a type rather than from a predicate.
+    for (param_name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '_' and c != '$') return null;
+    }
+    return .{ .param_name = param_name, .type_text = type_text };
+}
 
 // ---------------------------------------------------------------------------
 // Generic type alias (type Result<T> = ...)
@@ -550,6 +597,11 @@ pub const TypeEnv = struct {
         defer fn_params_by_line.deinit(self.allocator);
         var fn_names_by_line: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
         defer fn_names_by_line.deinit(self.allocator);
+        // Parameter names in declaration order, so a type predicate can say
+        // which parameter `v is string` names. Only the predicate reads these,
+        // so they stay local rather than growing `FunctionSig`.
+        var fn_param_names_by_line: std.AutoHashMapUnmanaged(u32, ParamNames) = .empty;
+        defer fn_param_names_by_line.deinit(self.allocator);
 
         for (tm.entries.items) |entry| {
             switch (entry.kind) {
@@ -569,6 +621,14 @@ pub const TypeEnv = struct {
                         gop.value_ptr.param_types[gop.value_ptr.param_count] = type_idx;
                         gop.value_ptr.param_count += 1;
                     }
+                    if (tm.getNameText(entry)) |param_name| {
+                        const names = fn_param_names_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                            self.markAllocationFailure();
+                            continue;
+                        };
+                        if (!names.found_existing) names.value_ptr.* = .{};
+                        names.value_ptr.append(self.internName(param_name));
+                    }
                 },
                 .return_annotation => {
                     const type_text = tm.getTypeText(entry);
@@ -586,6 +646,31 @@ pub const TypeEnv = struct {
                         const owned_name = self.internName(name);
                         fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch self.markAllocationFailure();
                     }
+                },
+                .type_guard_annotation => {
+                    // `v is string` is a return annotation that also declares a
+                    // narrowing. The function returns a boolean; the predicate
+                    // is recorded next to the signature and admitted later,
+                    // once the checker has read the body that claims it.
+                    const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch {
+                        self.markAllocationFailure();
+                        continue;
+                    };
+                    if (!gop.found_existing) {
+                        gop.value_ptr.* = .{};
+                    }
+                    gop.value_ptr.return_type = self.pool.idx_boolean;
+                    if (tm.getNameText(entry)) |name| {
+                        const owned_name = self.internName(name);
+                        fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch self.markAllocationFailure();
+                    }
+                    const parsed = parseTypePredicate(tm.getTypeText(entry)) orelse continue;
+                    const names = fn_param_names_by_line.get(entry.context_line) orelse continue;
+                    const index = names.indexOf(parsed.param_name) orelse continue;
+                    const generics = fn_generics_by_line.get(entry.context_line);
+                    const narrowed = self.resolveTypeInGenerics(parsed.type_text, generics);
+                    if (narrowed == null_type_idx) continue;
+                    gop.value_ptr.type_predicate = .{ .param_index = index, .narrowed = narrowed };
                 },
                 // exhaustive: mirror of the first pass. The kinds skipped here
                 // are the type-namespace ones already processed above.

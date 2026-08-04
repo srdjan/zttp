@@ -227,6 +227,7 @@ const type_checker_rules = [_]TypeCheckerRule{
     .{ .name = "ambiguous_type_argument", .code = "ZTS208", .description = "A generic call leaves a type parameter that no argument position determines; name it at the call site." },
     .{ .name = "type_constraint_violation", .code = "ZTS209", .description = "A type argument is outside the `extends` bound its type parameter declares." },
     .{ .name = "type_argument_count_mismatch", .code = "ZTS210", .description = "A call gives a different number of explicit type arguments than the signature declares type parameters." },
+    .{ .name = "invalid_type_predicate", .code = "ZTS211", .description = "A `value is T` predicate is not verified by its body; only a single return of admitted narrowing tests over the named parameter installs a guard." },
 };
 
 fn findTypeCheckerRule(query: []const u8) ?TypeCheckerRule {
