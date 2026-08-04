@@ -68,18 +68,52 @@ pub const MarkerExtraction = struct {
 // Generic scope
 // ---------------------------------------------------------------------------
 
+pub const MAX_TYPE_PARAMS = 8;
+
 pub const GenericScope = struct {
     /// Type parameter names mapped to their TypeIndex in the pool.
-    params: [8]struct { name: [32]u8, name_len: u8, idx: TypeIndex } = undefined,
+    params: [MAX_TYPE_PARAMS]struct {
+        name: [32]u8,
+        name_len: u8,
+        idx: TypeIndex,
+        /// The `extends` bound, or `null_type_idx` when the parameter is
+        /// unconstrained. Held next to the parameter so a later pass can check
+        /// an inferred or explicit argument against it.
+        constraint: TypeIndex,
+    } = undefined,
     count: u8 = 0,
 
     pub fn addParam(self: *GenericScope, name: []const u8, idx: TypeIndex) void {
-        if (self.count >= 8) return;
+        self.addConstrainedParam(name, idx, null_type_idx);
+    }
+
+    pub fn addConstrainedParam(
+        self: *GenericScope,
+        name: []const u8,
+        idx: TypeIndex,
+        constraint: TypeIndex,
+    ) void {
+        if (self.count >= MAX_TYPE_PARAMS) return;
         const len: u8 = @intCast(@min(name.len, 32));
         @memcpy(self.params[self.count].name[0..len], name[0..len]);
         self.params[self.count].name_len = len;
         self.params[self.count].idx = idx;
+        self.params[self.count].constraint = constraint;
         self.count += 1;
+    }
+
+    /// Attach a constraint to an already-added parameter. Constraints are
+    /// resolved after every parameter of the scope is in place, so that
+    /// `<T, U extends T>` sees `T`.
+    pub fn setConstraint(self: *GenericScope, name: []const u8, constraint: TypeIndex) void {
+        for (0..self.count) |i| {
+            if (self.params[i].name_len == name.len and
+                std.mem.eql(u8, self.params[i].name[0..self.params[i].name_len], name))
+            {
+                self.params[i].constraint = constraint;
+                return;
+            }
+        }
     }
 
     pub fn resolve(self: *const GenericScope, name: []const u8) ?TypeIndex {
@@ -92,6 +126,34 @@ pub const GenericScope = struct {
         }
         return null;
     }
+
+    pub fn constraintOf(self: *const GenericScope, name: []const u8) TypeIndex {
+        for (0..self.count) |i| {
+            if (self.params[i].name_len == name.len and
+                std.mem.eql(u8, self.params[i].name[0..self.params[i].name_len], name))
+            {
+                return self.params[i].constraint;
+            }
+        }
+        return null_type_idx;
+    }
+};
+
+/// One declared type parameter of a function signature.
+pub const GenericParam = struct {
+    /// Interned, so it outlives the TypeMap the signature was read from.
+    name: []const u8 = "",
+    /// The `t_generic_param` node the name resolves to inside the signature.
+    idx: TypeIndex = null_type_idx,
+    /// The `extends` bound, or `null_type_idx` when unconstrained.
+    constraint: TypeIndex = null_type_idx,
+};
+
+/// Explicit type arguments written at a call site (`first<string>(xs)`),
+/// already resolved to pool indices.
+pub const CallTypeArgs = struct {
+    args: [MAX_TYPE_PARAMS]TypeIndex = undefined,
+    count: u8 = 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -103,6 +165,15 @@ pub const FunctionSig = struct {
     param_count: u8 = 0,
     required_param_count: ?u8 = null,
     return_type: TypeIndex = null_type_idx,
+    /// Type parameters declared by this signature, in declaration order. Empty
+    /// for a monomorphic function. A call to a signature that has these is
+    /// instantiated before its arguments are checked.
+    type_params: [MAX_TYPE_PARAMS]GenericParam = @splat(.{}),
+    type_param_count: u8 = 0,
+
+    pub fn typeParams(self: *const FunctionSig) []const GenericParam {
+        return self.type_params[0..self.type_param_count];
+    }
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +185,82 @@ pub const GenericAlias = struct {
     param_count: u8 = 0,
     body: TypeIndex = null_type_idx,
 };
+
+// ---------------------------------------------------------------------------
+// Type-parameter lists
+// ---------------------------------------------------------------------------
+
+/// One entry of a declared type-parameter list.
+pub const TypeParamSpec = struct {
+    name: []const u8,
+    /// Text of the `extends` bound, empty when unconstrained.
+    constraint_text: []const u8 = "",
+};
+
+/// Split a declared type-parameter list into its entries.
+///
+/// The text arrives two ways: a function's list comes in without its angle
+/// brackets (`T extends string, U`), a type alias's comes in with them
+/// (`<T, U>`), so both are accepted. Splitting on every comma is wrong,
+/// because a constraint carries commas of its own inside `<>`, `{}`, `[]`, and
+/// `()` - a naive split cuts `U extends Record<string, number>` into two
+/// entries, and the second is a type name nothing resolves.
+///
+/// Returns the number of entries written to `out`.
+pub fn splitTypeParams(text: []const u8, out: []TypeParamSpec) usize {
+    var body = std.mem.trim(u8, text, " \t\n\r");
+    if (body.len >= 2 and body[0] == '<' and body[body.len - 1] == '>') {
+        body = std.mem.trim(u8, body[1 .. body.len - 1], " \t\n\r");
+    }
+    if (body.len == 0) return 0;
+
+    var count: usize = 0;
+    var depth: i32 = 0;
+    var piece_start: usize = 0;
+    var i: usize = 0;
+    while (i <= body.len) : (i += 1) {
+        const at_end = i == body.len;
+        const c = if (at_end) ',' else body[i];
+        switch (c) {
+            '<', '{', '[', '(' => depth += 1,
+            '>', '}', ']', ')' => depth -= 1,
+            // exhaustive: only the bracket pairs move the nesting depth. Every
+            // other byte, the separating comma included, is handled below.
+            else => {},
+        }
+        if (c != ',' or depth != 0) continue;
+        const piece = std.mem.trim(u8, body[piece_start..i], " \t\n\r");
+        piece_start = i + 1;
+        if (piece.len == 0) continue;
+        if (count >= out.len) break;
+        out[count] = parseTypeParamSpec(piece);
+        count += 1;
+    }
+    return count;
+}
+
+fn parseTypeParamSpec(piece: []const u8) TypeParamSpec {
+    // The name runs to the first separator. A default (`T = string`) is not in
+    // the admitted subset (spec 5.6 excludes it), so the name stops at `=` as
+    // well and whatever follows is left unread rather than resolved as a bound.
+    var name_end: usize = piece.len;
+    for (piece, 0..) |c, i| {
+        if (c == ' ' or c == '\t' or c == '\n' or c == '\r' or c == '=') {
+            name_end = i;
+            break;
+        }
+    }
+    const name = piece[0..name_end];
+    const rest = std.mem.trim(u8, piece[name_end..], " \t\n\r");
+    const kw = "extends";
+    if (rest.len > kw.len and std.mem.startsWith(u8, rest, kw)) {
+        const after = rest[kw.len];
+        if (after == ' ' or after == '\t' or after == '\n' or after == '\r') {
+            return .{ .name = name, .constraint_text = std.mem.trim(u8, rest[kw.len..], " \t\n\r") };
+        }
+    }
+    return .{ .name = name };
+}
 
 // ---------------------------------------------------------------------------
 // Type Environment
@@ -153,6 +300,9 @@ pub const TypeEnv = struct {
     source_fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
     /// Generic scope stack
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
+    /// Explicit call-site type arguments, keyed by the byte offset of the
+    /// call's `(` in the stripped source.
+    call_type_args: std.AutoHashMapUnmanaged(u32, CallTypeArgs),
 
     /// Stable storage for interned names used as hash-map keys.
     /// Keys must not move after insertion, so each name owns its own allocation.
@@ -181,6 +331,7 @@ pub const TypeEnv = struct {
             .fn_sigs_by_name = .empty,
             .source_fn_sigs_by_name = .empty,
             .generic_scopes = .empty,
+            .call_type_args = .empty,
             .name_storage = .empty,
         };
         env.registerBuiltins();
@@ -290,6 +441,7 @@ pub const TypeEnv = struct {
         self.fn_sigs_by_name.deinit(self.allocator);
         self.source_fn_sigs_by_name.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
+        self.call_type_args.deinit(self.allocator);
         for (self.name_storage.items) |name| {
             self.allocator.free(name);
         }
@@ -327,6 +479,40 @@ pub const TypeEnv = struct {
             }
         }
 
+        // Type parameters declared by a signature, keyed by the line the
+        // signature starts on - the same key its parameter and return
+        // annotations carry. Built before the annotations are resolved,
+        // because `xs: T[]` only resolves `T` to a type parameter while that
+        // parameter is in scope; without this the name falls through to an
+        // unresolved reference and nothing can be inferred from it later.
+        var fn_generics_by_line: std.AutoHashMapUnmanaged(u32, DeclaredGenerics) = .empty;
+        defer fn_generics_by_line.deinit(self.allocator);
+        for (tm.entries.items) |entry| {
+            if (entry.kind != .generic_params) continue;
+            const declared = self.declareGenerics(tm.getTypeText(entry));
+            if (declared.count == 0) continue;
+            fn_generics_by_line.put(self.allocator, entry.context_line, declared) catch self.markAllocationFailure();
+        }
+
+        // Explicit type arguments at call sites. Keyed by the byte offset of
+        // the call's `(`, which is one past the recorded `>`; the stripper
+        // blanks rather than deletes, so offsets in the stripped source the
+        // parser reads are the offsets recorded here.
+        for (tm.entries.items) |entry| {
+            if (entry.kind != .call_type_arguments) continue;
+            var args: CallTypeArgs = .{};
+            var it = std.mem.splitScalar(u8, tm.getTypeText(entry), ',');
+            while (it.next()) |raw| {
+                const arg_text = std.mem.trim(u8, raw, " \t\n\r");
+                if (arg_text.len == 0) continue;
+                if (args.count >= MAX_TYPE_PARAMS) break;
+                args.args[args.count] = self.resolveType(arg_text);
+                args.count += 1;
+            }
+            if (args.count == 0) continue;
+            self.call_type_args.put(self.allocator, entry.source_end + 1, args) catch self.markAllocationFailure();
+        }
+
         // Second pass: variable and function annotations
         // Group param and return annotations by context line to build function sigs
         var fn_params_by_line: std.AutoHashMapUnmanaged(u32, FunctionSig) = .empty;
@@ -346,7 +532,8 @@ pub const TypeEnv = struct {
                         gop.value_ptr.* = .{};
                     }
                     const type_text = tm.getTypeText(entry);
-                    const type_idx = self.resolveType(type_text);
+                    const generics = fn_generics_by_line.get(entry.context_line);
+                    const type_idx = self.resolveTypeInGenerics(type_text, generics);
                     if (gop.value_ptr.param_count < 16) {
                         gop.value_ptr.param_types[gop.value_ptr.param_count] = type_idx;
                         gop.value_ptr.param_count += 1;
@@ -354,7 +541,8 @@ pub const TypeEnv = struct {
                 },
                 .return_annotation => {
                     const type_text = tm.getTypeText(entry);
-                    const type_idx = self.resolveType(type_text);
+                    const generics = fn_generics_by_line.get(entry.context_line);
+                    const type_idx = self.resolveTypeInGenerics(type_text, generics);
                     const gop = fn_params_by_line.getOrPut(self.allocator, entry.context_line) catch {
                         self.markAllocationFailure();
                         continue;
@@ -377,12 +565,68 @@ pub const TypeEnv = struct {
         // Merge function signatures
         var iter = fn_params_by_line.iterator();
         while (iter.next()) |kv| {
+            if (fn_generics_by_line.get(kv.key_ptr.*)) |declared| {
+                kv.value_ptr.type_params = declared.params;
+                kv.value_ptr.type_param_count = declared.count;
+            }
             self.fn_signatures.put(self.allocator, kv.key_ptr.*, kv.value_ptr.*) catch self.markAllocationFailure();
             if (fn_names_by_line.get(kv.key_ptr.*)) |name| {
                 self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
                 self.source_fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
             }
         }
+    }
+
+    const DeclaredGenerics = struct {
+        params: [MAX_TYPE_PARAMS]GenericParam = @splat(.{}),
+        count: u8 = 0,
+    };
+
+    /// Resolve a declared type-parameter list into pool nodes plus bounds.
+    /// Constraints resolve with every parameter of the list already in scope,
+    /// so `<T, U extends T>` sees `T`.
+    fn declareGenerics(self: *TypeEnv, params_text: []const u8) DeclaredGenerics {
+        var specs: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
+        const spec_count = splitTypeParams(params_text, &specs);
+        if (spec_count == 0) return .{};
+
+        var declared: DeclaredGenerics = .{};
+        const depth_before = self.generic_scopes.items.len;
+        self.pushGenericScope();
+        if (self.generic_scopes.items.len == depth_before) return .{};
+        defer self.popGenericScope();
+        for (specs[0..spec_count]) |spec| {
+            if (spec.name.len == 0) continue;
+            declared.params[declared.count] = .{
+                .name = self.internName(spec.name),
+                .idx = self.addGenericParam(spec.name),
+            };
+            declared.count += 1;
+        }
+        for (specs[0..spec_count], 0..) |spec, i| {
+            if (i >= declared.count) break;
+            if (spec.constraint_text.len == 0) continue;
+            const constraint = self.resolveType(spec.constraint_text);
+            declared.params[i].constraint = constraint;
+            self.generic_scopes.items[self.generic_scopes.items.len - 1].setConstraint(spec.name, constraint);
+        }
+        return declared;
+    }
+
+    /// Resolve an annotation with a signature's type parameters in scope, so a
+    /// bare `T` reaches the parameter node rather than a same-named alias.
+    fn resolveTypeInGenerics(self: *TypeEnv, type_text: []const u8, generics: ?DeclaredGenerics) TypeIndex {
+        const declared = generics orelse return self.resolveType(type_text);
+        if (declared.count == 0) return self.resolveType(type_text);
+        const depth_before = self.generic_scopes.items.len;
+        self.pushGenericScope();
+        if (self.generic_scopes.items.len == depth_before) return self.resolveType(type_text);
+        defer self.popGenericScope();
+        const top = &self.generic_scopes.items[self.generic_scopes.items.len - 1];
+        for (declared.params[0..declared.count]) |param| {
+            top.addConstrainedParam(param.name, param.idx, param.constraint);
+        }
+        return self.resolveType(type_text);
     }
 
     fn processTypeAlias(
@@ -404,13 +648,18 @@ pub const TypeEnv = struct {
                 var alias = GenericAlias{};
                 self.pushGenericScope();
 
-                var it = std.mem.splitScalar(u8, params_text, ',');
-                while (it.next()) |raw_param| {
-                    const param_name = std.mem.trim(u8, raw_param, " \t\n\r");
-                    if (param_name.len == 0) continue;
+                // The stripper records an alias's list with its angle brackets
+                // still on (`<V>`), so splitting on commas alone made the one
+                // parameter name `<V>`, which no `t_ref` in the body ever
+                // matched: every generic alias resolved to its uninstantiated
+                // body and every argument checked against it was accepted.
+                var specs: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
+                const spec_count = splitTypeParams(params_text, &specs);
+                for (specs[0..spec_count]) |spec| {
+                    if (spec.name.len == 0) continue;
                     if (alias.param_count >= 8) break;
-                    _ = self.addGenericParam(param_name);
-                    alias.param_names[alias.param_count] = self.internName(param_name);
+                    _ = self.addGenericParam(spec.name);
+                    alias.param_names[alias.param_count] = self.internName(spec.name);
                     alias.param_count += 1;
                 }
 
@@ -785,6 +1034,11 @@ pub const TypeEnv = struct {
     /// Look up a function signature by source location.
     pub fn getFnSigByLoc(self: *const TypeEnv, line: u32) ?FunctionSig {
         return self.fn_signatures.get(line);
+    }
+
+    /// Explicit type arguments written at the call whose `(` sits at `offset`.
+    pub fn getCallTypeArgs(self: *const TypeEnv, offset: u32) ?CallTypeArgs {
+        return self.call_type_args.get(offset);
     }
 
     /// Walk a TypeIndex (typically a function return-type annotation),
@@ -2160,4 +2414,71 @@ test "TypeEnv leading-pipe union literal" {
     try std.testing.expect(names_idx != null);
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, pool.getTag(names_idx.?).?);
     try std.testing.expectEqual(@as(usize, 3), pool.getUnionMembers(names_idx.?).len);
+}
+
+test "splitTypeParams reads an alias list, which arrives with its angle brackets" {
+    // The stripper records a function's list without the brackets and an
+    // alias's with them. Splitting on commas alone made the alias's one
+    // parameter name `<V>`, which no `t_ref` in the body matched, so every
+    // generic alias resolved to its uninstantiated body.
+    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
+
+    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("<V>", &out));
+    try std.testing.expectEqualStrings("V", out[0].name);
+    try std.testing.expectEqualStrings("", out[0].constraint_text);
+
+    try std.testing.expectEqual(@as(usize, 2), splitTypeParams("T, U", &out));
+    try std.testing.expectEqualStrings("T", out[0].name);
+    try std.testing.expectEqualStrings("U", out[1].name);
+}
+
+test "splitTypeParams keeps a constraint that carries its own commas" {
+    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
+    const count = splitTypeParams("T, U extends Record<string, number>", &out);
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expectEqualStrings("T", out[0].name);
+    try std.testing.expectEqualStrings("U", out[1].name);
+    try std.testing.expectEqualStrings("Record<string, number>", out[1].constraint_text);
+}
+
+test "splitTypeParams reads an extends bound and stops a name at a default" {
+    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
+
+    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("T extends { id: string }", &out));
+    try std.testing.expectEqualStrings("T", out[0].name);
+    try std.testing.expectEqualStrings("{ id: string }", out[0].constraint_text);
+
+    // `extendsFoo` is a type name, not a bound.
+    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("Textends", &out));
+    try std.testing.expectEqualStrings("Textends", out[0].name);
+    try std.testing.expectEqualStrings("", out[0].constraint_text);
+
+    // Defaults are outside the admitted subset; the name still reads cleanly.
+    try std.testing.expectEqual(@as(usize, 1), splitTypeParams("T = string", &out));
+    try std.testing.expectEqualStrings("T", out[0].name);
+}
+
+test "a generic alias instantiates through the stripper's own recording" {
+    // End-to-end over the real TypeMap rather than a hand-built one: the
+    // hand-built tests passed while the pipeline was broken, because they
+    // wrote the parameter list the way the alias path wanted to read it.
+    const allocator = std.testing.allocator;
+    var strip_result = try @import("stripper.zig").strip(
+        allocator,
+        "type Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n",
+        .{},
+    );
+    defer strip_result.deinit();
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    const box = env.resolveType("Box<string>");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(box).?);
+    const fields = pool.getRecordFields(box);
+    try std.testing.expectEqual(@as(usize, 1), fields.len);
+    try std.testing.expectEqual(pool.idx_string, fields[0].type_idx);
 }

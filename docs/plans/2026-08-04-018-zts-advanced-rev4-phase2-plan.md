@@ -210,6 +210,42 @@ diagnoses rather than silently widening; a constraint violation diagnoses; an
 explicit type argument overrides inference; `type F<T> = (x: T) => T`
 substitutes.
 
+**Three facts measured while landing this.**
+
+**No generic alias had ever instantiated.** The stripper records a function's
+type-parameter list without its angle brackets and an alias's list with them, so
+splitting the alias list on commas produced the single parameter name `<V>`. No
+`t_ref` in the body ever matched that, `instantiate` substituted nothing, and
+`Box<string>` resolved to the uninstantiated body - where the unresolved `V`
+makes assignability blanket-true, so `const b: Box<string> = { v: 1 }` was
+accepted. The existing tests passed because they build the TypeMap by hand and
+wrote the list the way the reader wanted to read it; the pinned test now runs
+through the stripper's own recording. Splitting is depth-aware for the same
+reason a bound needs it: `U extends Record<string, number>` carries its own
+comma.
+
+**Explicit type arguments needed a kind of their own.** After stripping,
+`first<string>(xs)` and `<U>(x: U) => x` are the same thing: an unnamed balanced
+`<...>` blanked out and followed by `(`. Only the stripper can tell them apart,
+by whether the `<` follows an operand, and it already computes that answer to
+decide whether the span is a comparison. It records which one it saw. Binding
+the argument list to its call is then exact rather than positional: the stripper
+blanks rather than deletes, so byte offsets survive into the source the parser
+reads, and the call node's `(` sits one past the recorded `>`.
+
+**A signature's type parameters have to be in scope while its own annotations
+resolve.** `xs: T[]` is resolved by the type-expression parser, which knows
+nothing of the scope stack, so `T` arrives as a `t_ref` either way - but a bare
+`T` must reach the parameter node, and a same-named alias must not win. Both
+tags are therefore matched by name during unification, which is also how
+`TypePool.instantiate` substitutes.
+
+One limit recorded rather than fixed: a type argument written at a call *inside*
+a generic function (`return first<U>(xs)`) resolves without the enclosing
+function's parameters in scope, so `U` stays an unresolved name and the call
+neither instantiates nor diagnoses. That is the A1 fail-open, not a new one, and
+it closes with A1.
+
 ### Task 6: type-predicate validation
 
 **Files:** `type_checker.zig`, plus the parser if `value is T` is not admitted.

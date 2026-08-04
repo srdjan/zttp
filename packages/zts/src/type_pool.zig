@@ -772,6 +772,41 @@ pub const TypePool = struct {
                 if (!changed) return idx;
                 return self.addIntersection(allocator, new_members);
             },
+            .t_tuple => {
+                // Copy elements before the loop (shared members list may realloc).
+                const live = self.getTupleElements(idx);
+                const new_elems = allocator.alloc(TypeIndex, live.len) catch {
+                    return self.failIndex(error.OutOfMemory);
+                };
+                defer allocator.free(new_elems);
+                @memcpy(new_elems, live);
+                var changed = false;
+                for (new_elems) |*e| {
+                    const old = e.*;
+                    e.* = self.instantiate(allocator, old, param_names, param_types, depth + 1);
+                    if (e.* != old) changed = true;
+                }
+                if (!changed) return idx;
+                return self.addTuple(allocator, new_elems);
+            },
+            .t_function => {
+                // Copy params before the loop (shared params list may realloc).
+                const info = self.getFunctionInfo(idx);
+                const new_params = allocator.alloc(FuncParam, info.params.len) catch {
+                    return self.failIndex(error.OutOfMemory);
+                };
+                defer allocator.free(new_params);
+                @memcpy(new_params, info.params);
+                var changed = false;
+                for (new_params) |*p| {
+                    const old = p.type_idx;
+                    p.type_idx = self.instantiate(allocator, old, param_names, param_types, depth + 1);
+                    if (p.type_idx != old) changed = true;
+                }
+                const new_ret = self.instantiate(allocator, info.ret, param_names, param_types, depth + 1);
+                if (!changed and new_ret == info.ret) return idx;
+                return self.addFunctionWithReturn(allocator, new_params, new_ret);
+            },
             .t_nullable => {
                 const inner = self.getNullableInner(idx);
                 const new_inner = self.instantiate(allocator, inner, param_names, param_types, depth + 1);
@@ -3426,4 +3461,43 @@ test "parseTypeExpr keeps template literal parts wider than sixteen parts" {
     const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
     try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 36), pool.getTemplateParts(idx).len);
+}
+
+test "instantiate substitutes through a function type" {
+    // `type F<T> = (x: T) => T`. Without the `t_function` case the body came
+    // back with `T` still in both positions, so a call through the alias
+    // checked against a type variable and accepted anything.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    const x_name = pool.addName(allocator, "x");
+    const body = pool.addFunctionWithReturn(allocator, &.{
+        .{ .name_start = x_name.start, .name_len = x_name.len, .type_idx = t_param, .optional = false },
+    }, t_param);
+
+    const instantiated = pool.instantiate(allocator, body, &.{"T"}, &.{pool.idx_string}, 0);
+    try std.testing.expectEqual(TypeTag.t_function, pool.getTag(instantiated).?);
+    const info = pool.getFunctionInfo(instantiated);
+    try std.testing.expectEqual(@as(usize, 1), info.params.len);
+    try std.testing.expectEqual(pool.idx_string, info.params[0].type_idx);
+    try std.testing.expectEqual(pool.idx_string, info.ret);
+}
+
+test "instantiate substitutes every element of a tuple" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    const tuple = pool.addTuple(allocator, &.{ t_param, pool.idx_number, t_param });
+
+    const instantiated = pool.instantiate(allocator, tuple, &.{"T"}, &.{pool.idx_boolean}, 0);
+    try std.testing.expectEqual(TypeTag.t_tuple, pool.getTag(instantiated).?);
+    const elements = pool.getTupleElements(instantiated);
+    try std.testing.expectEqual(@as(usize, 3), elements.len);
+    try std.testing.expectEqual(pool.idx_boolean, elements[0]);
+    try std.testing.expectEqual(pool.idx_number, elements[1]);
+    try std.testing.expectEqual(pool.idx_boolean, elements[2]);
 }

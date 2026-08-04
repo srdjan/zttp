@@ -68,6 +68,9 @@ pub const DiagnosticKind = enum {
     arg_type_mismatch, // argument type doesn't match parameter
     return_type_mismatch, // return value doesn't match declared return type
     non_exhaustive_match, // match is not provably exhaustive
+    ambiguous_type_argument, // a type parameter no argument position determines
+    type_constraint_violation, // a type argument outside its `extends` bound
+    type_argument_count_mismatch, // explicit type arguments, wrong count
 };
 
 pub const Diagnostic = struct {
@@ -2145,7 +2148,7 @@ pub const TypeChecker = struct {
         if (self.boundCallableMetadata(binding)) |metadata| {
             return switch (metadata) {
                 .unavailable => null_type_idx,
-                .signature => |sig| sig.return_type,
+                .signature => |sig| self.instantiatedReturnType(node, sig, call),
             };
         }
         const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
@@ -2181,7 +2184,22 @@ pub const TypeChecker = struct {
             }
         }
         const sig = self.env.getFnSigByName(name) orelse return null_type_idx;
-        return sig.return_type;
+        return self.instantiatedReturnType(node, sig, call);
+    }
+
+    /// The return type of one call to `sig`, with this call's type arguments
+    /// substituted. A signature that declares no type parameters, and a call
+    /// whose parameters could not all be bound, return the declared type
+    /// unchanged - the refusal is reported by `checkCallArgs`, and inferring
+    /// `unknown` here would turn one diagnostic into a cascade.
+    fn instantiatedReturnType(
+        self: *const TypeChecker,
+        node: NodeIndex,
+        sig: type_env_mod.FunctionSig,
+        call: Node.CallExpr,
+    ) TypeIndex {
+        if (sig.type_param_count == 0) return sig.return_type;
+        return self.substitute(self.instantiateSignature(node, sig, call), sig.return_type);
     }
 
     fn inferMatchType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
@@ -2421,6 +2439,396 @@ pub const TypeChecker = struct {
     }
 
     // -------------------------------------------------------------------
+    // Generic instantiation
+    //
+    // One pass, argument-driven, no return-type propagation (D1 section 4).
+    // A call to a generic signature binds every type parameter here, and the
+    // bindings are then substituted into the parameter types before the
+    // arguments are checked and into the return type before it is inferred.
+    // A parameter no argument position determines is an error, not a silent
+    // widening to `unknown`.
+    // -------------------------------------------------------------------
+
+    const MAX_TYPE_PARAMS = type_env_mod.MAX_TYPE_PARAMS;
+
+    const TypeBindings = struct {
+        names: [MAX_TYPE_PARAMS][]const u8 = @splat(""),
+        types: [MAX_TYPE_PARAMS]TypeIndex = @splat(null_type_idx),
+        count: u8 = 0,
+
+        fn indexOf(self: *const TypeBindings, name: []const u8) ?usize {
+            for (0..self.count) |i| {
+                if (std.mem.eql(u8, self.names[i], name)) return i;
+            }
+            return null;
+        }
+    };
+
+    const Instantiation = union(enum) {
+        /// The signature is monomorphic; nothing to substitute.
+        none,
+        ok: TypeBindings,
+        arity: struct { expected: u8, got: u8 },
+        ambiguous: []const u8,
+        violated: struct { name: []const u8, arg: TypeIndex, constraint: TypeIndex },
+    };
+
+    /// Explicit type arguments written at this call, if any. Keyed by the byte
+    /// offset of the call's `(`, which is what the stripper recorded one past
+    /// the closing `>`.
+    fn explicitTypeArgs(self: *const TypeChecker, node: NodeIndex) ?type_env_mod.CallTypeArgs {
+        const loc = self.ir_view.getLoc(node) orelse return null;
+        return self.env.getCallTypeArgs(loc.offset);
+    }
+
+    /// Bind every type parameter of `sig` for this call. Pure: it reports what
+    /// it found and leaves the diagnostics to the caller, so the same answer
+    /// serves both the argument check and the return-type inference.
+    fn instantiateSignature(
+        self: *const TypeChecker,
+        node: NodeIndex,
+        sig: type_env_mod.FunctionSig,
+        call: Node.CallExpr,
+    ) Instantiation {
+        const type_params = sig.typeParams();
+        if (type_params.len == 0) return .none;
+
+        var bindings: TypeBindings = .{};
+        for (type_params) |param| {
+            bindings.names[bindings.count] = param.name;
+            bindings.count += 1;
+        }
+
+        if (self.explicitTypeArgs(node)) |explicit| {
+            // Explicit arguments skip inference entirely (D1 section 4).
+            if (explicit.count != type_params.len) {
+                return .{ .arity = .{ .expected = @intCast(type_params.len), .got = explicit.count } };
+            }
+            for (0..bindings.count) |i| bindings.types[i] = explicit.args[i];
+        } else {
+            var i: u8 = 0;
+            while (i < sig.param_count and i < call.args_count) : (i += 1) {
+                const arg_idx = self.ir_view.getListIndex(call.args_start, i);
+                const arg_type = self.inferType(arg_idx);
+                if (arg_type == null_type_idx) continue;
+                self.unify(type_params, sig.param_types[i], arg_type, &bindings, 0);
+            }
+            for (0..bindings.count) |bi| {
+                if (bindings.types[bi] == null_type_idx) return .{ .ambiguous = bindings.names[bi] };
+            }
+        }
+
+        for (type_params, 0..) |param, pi| {
+            if (param.constraint == null_type_idx) continue;
+            const arg = bindings.types[pi];
+            if (arg == null_type_idx) continue;
+            if (!self.env.isAssignableTo(arg, param.constraint)) {
+                return .{ .violated = .{ .name = param.name, .arg = arg, .constraint = param.constraint } };
+            }
+        }
+
+        return .{ .ok = bindings };
+    }
+
+    /// The declared type parameter `pattern` names, or null when `pattern` is
+    /// not a type-parameter reference. A parameter annotation reaches the pool
+    /// two ways - a bare `T` resolves to the `t_generic_param` node in scope,
+    /// while a `T` nested in `T[]` stays a `t_ref` the type-expression parser
+    /// built - so both tags are matched by name, which is also how
+    /// `TypePool.instantiate` substitutes.
+    fn typeParamNameOf(
+        self: *const TypeChecker,
+        type_params: []const type_env_mod.GenericParam,
+        pattern: TypeIndex,
+    ) ?[]const u8 {
+        const tag = self.env.pool.getTag(pattern) orelse return null;
+        if (tag != .t_generic_param and tag != .t_ref) return null;
+        const name = self.env.pool.getRefName(pattern);
+        if (name.len == 0) return null;
+        for (type_params) |param| {
+            if (std.mem.eql(u8, param.name, name)) return param.name;
+        }
+        return null;
+    }
+
+    fn constraintFor(
+        type_params: []const type_env_mod.GenericParam,
+        name: []const u8,
+    ) TypeIndex {
+        for (type_params) |param| {
+            if (std.mem.eql(u8, param.name, name)) return param.constraint;
+        }
+        return null_type_idx;
+    }
+
+    /// Walk a parameter type and the argument type it was given side by side,
+    /// binding each type parameter the walk reaches.
+    fn unify(
+        self: *const TypeChecker,
+        type_params: []const type_env_mod.GenericParam,
+        pattern: TypeIndex,
+        actual: TypeIndex,
+        bindings: *TypeBindings,
+        depth: u8,
+    ) void {
+        if (depth > 8) return;
+        if (pattern == null_type_idx or actual == null_type_idx) return;
+        const pool = self.env.pool;
+
+        if (self.typeParamNameOf(type_params, pattern)) |name| {
+            self.bindTypeParam(type_params, name, actual, bindings);
+            return;
+        }
+
+        const pattern_tag = pool.getTag(pattern) orelse return;
+        const actual_tag = pool.getTag(actual) orelse return;
+
+        switch (pattern_tag) {
+            .t_record => {
+                if (actual_tag != .t_record) return;
+                // Fields present in the pattern only: a field the argument
+                // carries and the parameter does not says nothing about any
+                // type parameter.
+                const pattern_fields = pool.getRecordFields(pattern);
+                var i: usize = 0;
+                while (i < pattern_fields.len) : (i += 1) {
+                    // Re-read each iteration: a nested unify can add to the
+                    // pool's shared fields list and move the slice.
+                    const live = pool.getRecordFields(pattern);
+                    if (i >= live.len) break;
+                    const field = live[i];
+                    const field_name = pool.getName(field.name_start, field.name_len);
+                    const actual_field = pool.lookupRecordField(actual, field_name) orelse continue;
+                    self.unify(type_params, field.type_idx, actual_field.type_idx, bindings, depth + 1);
+                }
+            },
+            .t_array => {
+                const elem = pool.getArrayElement(pattern);
+                if (actual_tag == .t_array) {
+                    self.unify(type_params, elem, pool.getArrayElement(actual), bindings, depth + 1);
+                } else if (actual_tag == .t_tuple) {
+                    // `["a", "b"]` types as a tuple of literals, so `T[]` sees
+                    // each element and the joins in `bindTypeParam` produce
+                    // one element type for T.
+                    var i: usize = 0;
+                    while (true) : (i += 1) {
+                        const live = pool.getTupleElements(actual);
+                        if (i >= live.len) break;
+                        self.unify(type_params, elem, live[i], bindings, depth + 1);
+                    }
+                }
+            },
+            .t_tuple => {
+                if (actual_tag == .t_tuple) {
+                    var i: usize = 0;
+                    while (true) : (i += 1) {
+                        const p_live = pool.getTupleElements(pattern);
+                        const a_live = pool.getTupleElements(actual);
+                        if (i >= p_live.len or i >= a_live.len) break;
+                        self.unify(type_params, p_live[i], a_live[i], bindings, depth + 1);
+                    }
+                } else if (actual_tag == .t_array) {
+                    const actual_elem = pool.getArrayElement(actual);
+                    var i: usize = 0;
+                    while (true) : (i += 1) {
+                        const p_live = pool.getTupleElements(pattern);
+                        if (i >= p_live.len) break;
+                        self.unify(type_params, p_live[i], actual_elem, bindings, depth + 1);
+                    }
+                }
+            },
+            .t_function => {
+                if (actual_tag != .t_function) return;
+                var i: usize = 0;
+                while (true) : (i += 1) {
+                    const p_info = pool.getFunctionInfo(pattern);
+                    const a_info = pool.getFunctionInfo(actual);
+                    if (i >= p_info.params.len or i >= a_info.params.len) break;
+                    self.unify(type_params, p_info.params[i].type_idx, a_info.params[i].type_idx, bindings, depth + 1);
+                }
+                self.unify(
+                    type_params,
+                    pool.getFunctionInfo(pattern).ret,
+                    pool.getFunctionInfo(actual).ret,
+                    bindings,
+                    depth + 1,
+                );
+            },
+            .t_nullable => {
+                const inner = pool.getNullableInner(pattern);
+                const actual_inner = if (actual_tag == .t_nullable) pool.getNullableInner(actual) else actual;
+                self.unify(type_params, inner, actual_inner, bindings, depth + 1);
+            },
+            .t_union => {
+                // D1 section 4: a union pattern with exactly one type-parameter
+                // member binds it to the whole argument. `x: T | undefined`
+                // given `string | undefined` binds T to `string | undefined`,
+                // which is what the declaration asked about.
+                var generic_member: ?[]const u8 = null;
+                var generic_count: usize = 0;
+                const members = pool.getUnionMembers(pattern);
+                for (members) |member| {
+                    if (self.typeParamNameOf(type_params, member)) |name| {
+                        generic_member = name;
+                        generic_count += 1;
+                    }
+                }
+                if (generic_count == 1) {
+                    self.bindTypeParam(type_params, generic_member.?, actual, bindings);
+                    return;
+                }
+                if (actual_tag != .t_union) return;
+                var i: usize = 0;
+                while (true) : (i += 1) {
+                    const p_live = pool.getUnionMembers(pattern);
+                    const a_live = pool.getUnionMembers(actual);
+                    if (i >= p_live.len or i >= a_live.len) break;
+                    self.unify(type_params, p_live[i], a_live[i], bindings, depth + 1);
+                }
+            },
+            .t_intersection => {
+                if (actual_tag != .t_intersection) return;
+                var i: usize = 0;
+                while (true) : (i += 1) {
+                    const p_live = pool.getIntersectionMembers(pattern);
+                    const a_live = pool.getIntersectionMembers(actual);
+                    if (i >= p_live.len or i >= a_live.len) break;
+                    self.unify(type_params, p_live[i], a_live[i], bindings, depth + 1);
+                }
+            },
+            .t_generic_app => {
+                if (actual_tag != .t_generic_app) return;
+                var i: usize = 0;
+                while (true) : (i += 1) {
+                    const p_live = pool.getGenericAppInfo(pattern).args;
+                    const a_live = pool.getGenericAppInfo(actual).args;
+                    if (i >= p_live.len or i >= a_live.len) break;
+                    self.unify(type_params, p_live[i], a_live[i], bindings, depth + 1);
+                }
+            },
+            // exhaustive: every remaining tag is a leaf the walk cannot
+            // decompose, so it contributes no binding. Assignability checks it
+            // after substitution.
+            else => {},
+        }
+    }
+
+    /// Bind, or join with what a previous argument position already bound.
+    fn bindTypeParam(
+        self: *const TypeChecker,
+        type_params: []const type_env_mod.GenericParam,
+        name: []const u8,
+        actual: TypeIndex,
+        bindings: *TypeBindings,
+    ) void {
+        const slot = bindings.indexOf(name) orelse return;
+        const contribution = self.widenForBinding(constraintFor(type_params, name), actual);
+        const existing = bindings.types[slot];
+        bindings.types[slot] = if (existing == null_type_idx)
+            contribution
+        else
+            self.joinTypes(existing, contribution);
+    }
+
+    /// A literal argument binds its base type, so `first(["a"])` returns
+    /// `string` rather than `"a"`. The exception is a constraint the base type
+    /// does not satisfy - `T extends "a" | "b"` is asking for the literal, and
+    /// widening it would make every call violate its own bound.
+    fn widenForBinding(self: *const TypeChecker, constraint: TypeIndex, actual: TypeIndex) TypeIndex {
+        const widened = self.env.pool.widenLiteral(actual);
+        if (widened == actual) return actual;
+        if (constraint != null_type_idx and !self.env.isAssignableTo(widened, constraint)) {
+            return actual;
+        }
+        return widened;
+    }
+
+    /// Substitute the bindings into a type. Returns the type unchanged when the
+    /// call is not generic.
+    fn substitute(self: *const TypeChecker, inst: Instantiation, idx: TypeIndex) TypeIndex {
+        const bindings = switch (inst) {
+            .ok => |b| b,
+            // exhaustive: `.none` is a monomorphic signature and the three
+            // refusals were already reported. Each has no bindings to apply,
+            // so the type is returned as declared.
+            else => return idx,
+        };
+        if (bindings.count == 0 or idx == null_type_idx) return idx;
+        return self.env.pool.instantiate(
+            self.env.allocator,
+            idx,
+            bindings.names[0..bindings.count],
+            bindings.types[0..bindings.count],
+            0,
+        );
+    }
+
+    /// Report whatever `instantiateSignature` refused, and return the bindings
+    /// when it accepted. A refusal returns `.none`, so the argument check that
+    /// follows compares against the uninstantiated parameter types rather than
+    /// stacking a second diagnostic on the first.
+    fn reportInstantiation(self: *TypeChecker, node: NodeIndex, inst: Instantiation) Instantiation {
+        switch (inst) {
+            .none, .ok => return inst,
+            .arity => |a| self.addGenericDiagnostic(
+                .type_argument_count_mismatch,
+                node,
+                "wrong number of type arguments: expected {d}, got {d}",
+                .{ a.expected, a.got },
+                "wrong number of type arguments",
+                "Give one type argument for each declared type parameter.",
+            ),
+            .ambiguous => |name| self.addGenericDiagnostic(
+                .ambiguous_type_argument,
+                node,
+                "no argument determines type parameter '{s}'",
+                .{name},
+                "a type parameter is not determined by any argument",
+                "Name the type argument at the call site.",
+            ),
+            .violated => |v| {
+                var arg_buf: [128]u8 = undefined;
+                var constraint_buf: [128]u8 = undefined;
+                self.addGenericDiagnostic(
+                    .type_constraint_violation,
+                    node,
+                    "type argument {s} for '{s}' does not satisfy constraint {s}",
+                    .{
+                        self.env.pool.formatType(v.arg, &arg_buf),
+                        v.name,
+                        self.env.pool.formatType(v.constraint, &constraint_buf),
+                    },
+                    "a type argument does not satisfy its constraint",
+                    null,
+                );
+            },
+        }
+        return .none;
+    }
+
+    /// Message ownership matches `addArgCountMismatch`: the formatted text is
+    /// owned when it was allocated, and the static fallback never is.
+    fn addGenericDiagnostic(
+        self: *TypeChecker,
+        kind: DiagnosticKind,
+        node: NodeIndex,
+        comptime fmt: []const u8,
+        args: anytype,
+        fallback: []const u8,
+        help: ?[]const u8,
+    ) void {
+        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch fallback;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = kind,
+            .node = node,
+            .message = msg,
+            .help = help,
+            .allocated = msg.ptr != fallback.ptr,
+        });
+    }
+
+    // -------------------------------------------------------------------
     // Call argument checking
     // -------------------------------------------------------------------
 
@@ -2532,14 +2940,20 @@ pub const TypeChecker = struct {
             return;
         }
 
+        // Bind the type parameters before the arguments are compared, so every
+        // instantiation is checked against its substituted parameter types
+        // rather than against a type variable that accepts anything.
+        const inst = self.reportInstantiation(node, self.instantiateSignature(node, sig, call));
+
         // Check argument types
         var i: u8 = 0;
         while (i < sig.param_count and i < call.args_count) : (i += 1) {
             const arg_idx = self.ir_view.getListIndex(call.args_start, i);
             const arg_type = self.inferType(arg_idx);
-            if (arg_type != null_type_idx and sig.param_types[i] != null_type_idx) {
-                if (!self.env.isAssignableTo(arg_type, sig.param_types[i])) {
-                    self.addArgTypeMismatch(arg_idx, sig.param_types[i], arg_type);
+            const param_type = self.substitute(inst, sig.param_types[i]);
+            if (arg_type != null_type_idx and param_type != null_type_idx) {
+                if (!self.env.isAssignableTo(arg_type, param_type)) {
+                    self.addArgTypeMismatch(arg_idx, param_type, arg_type);
                 }
             }
         }
@@ -3749,4 +4163,222 @@ test "TypeChecker: toReversed type-checks clean" {
         \\const nums = [3, 1, 2];
         \\const rev = nums.toReversed();
     , 0, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Generic instantiation (D1 section 4)
+// ---------------------------------------------------------------------------
+
+/// Type the call to `callee` in `source` and render the result into `buf`.
+/// The rendering is returned rather than the `TypeIndex` because the pool dies
+/// with this function, so an index would dangle.
+fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8 {
+    const allocator = std.testing.allocator;
+
+    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer checker.deinit();
+    _ = try checker.check(root);
+
+    var node: NodeIndex = 0;
+    while (node < ir_view.nodeCount()) : (node += 1) {
+        if (ir_view.getTag(node) != .call) continue;
+        const call = ir_view.getCall(node) orelse continue;
+        if (ir_view.getTag(call.callee) != .identifier) continue;
+        const binding = ir_view.getBinding(call.callee) orelse continue;
+        const name = checker.resolveAtomName(binding.name_atom) orelse continue;
+        if (!std.mem.eql(u8, name, callee)) continue;
+        return pool.formatType(checker.inferType(node), buf);
+    }
+    return error.NoSuchCallInSource;
+}
+
+const generic_first_decl =
+    \\function first<T>(xs: T[]): T | undefined {
+    \\    for (const x of xs) { return x; }
+    \\    return undefined;
+    \\}
+    \\
+;
+
+test "a literal argument binds the type parameter to its base type" {
+    var buf: [128]u8 = undefined;
+    // `["a"]` types as `"a"[]`, so binding T to the element verbatim would make
+    // the call return `"a" | undefined` and every other string a mismatch.
+    const rendered = try formatCallType(
+        generic_first_decl ++
+            \\function handler(req: Request): Response {
+            \\    const head = first(["a"]);
+            \\    return Response.json({ head });
+            \\}
+        ,
+        "first",
+        &buf,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "string") != null);
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "\"a\"") == null);
+}
+
+test "an inferred type argument is checked against the annotation it flows into" {
+    // The positive control for the test above: with no inference this call
+    // typed as an unresolved `T` and every annotation accepted it.
+    try checkTypedSource(
+        generic_first_decl ++
+            \\function handler(req: Request): Response {
+            \\    const head: number | undefined = first(["a"]);
+            \\    return Response.json({ head });
+            \\}
+        ,
+        1,
+        null,
+    );
+}
+
+test "an inferred type argument that matches its annotation raises nothing" {
+    try checkTypedSource(
+        generic_first_decl ++
+            \\function handler(req: Request): Response {
+            \\    const head: string | undefined = first(["a"]);
+            \\    return Response.json({ head });
+            \\}
+        ,
+        0,
+        null,
+    );
+}
+
+test "an explicit type argument overrides inference" {
+    var buf: [128]u8 = undefined;
+    const rendered = try formatCallType(
+        generic_first_decl ++
+            \\function handler(req: Request): Response {
+            \\    const head = first<number>([]);
+            \\    return Response.json({ head });
+            \\}
+        ,
+        "first",
+        &buf,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, rendered, "number") != null);
+}
+
+test "a type parameter no argument determines is refused, not widened" {
+    try checkTypedSource(
+        \\function make<T>(n: number): T | undefined {
+        \\    return undefined;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v = make(1);
+        \\    return Response.json({ v });
+        \\}
+    ,
+        1,
+        null,
+    );
+}
+
+test "naming the type argument answers the ambiguity" {
+    try checkTypedSource(
+        \\function make<T>(n: number): T | undefined {
+        \\    return undefined;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v = make<string>(1);
+        \\    return Response.json({ v });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a type argument outside its constraint is refused" {
+    try checkTypedSource(
+        \\function idOf<T extends { id: string }>(v: T): string {
+        \\    return v.id;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const s = idOf({ name: "no id" });
+        \\    return Response.json({ s });
+        \\}
+    ,
+        1,
+        null,
+    );
+}
+
+test "a type argument inside its constraint is accepted" {
+    try checkTypedSource(
+        \\function idOf<T extends { id: string }>(v: T): string {
+        \\    return v.id;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const s = idOf({ id: "u1" });
+        \\    return Response.json({ s });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "explicit type arguments of the wrong count are refused" {
+    try checkTypedSource(
+        generic_first_decl ++
+            \\function handler(req: Request): Response {
+            \\    const head = first<string, number>(["a"]);
+            \\    return Response.json({ head });
+            \\}
+        ,
+        1,
+        null,
+    );
+}
+
+test "every instantiation re-checks its value arguments" {
+    // `first<string>` fixes the parameter at `string[]`, so a number array is
+    // a mismatch that the uninstantiated `T[]` accepted.
+    try checkTypedSource(
+        generic_first_decl ++
+            \\function handler(req: Request): Response {
+            \\    const head = first<string>([1]);
+            \\    return Response.json({ head });
+            \\}
+        ,
+        1,
+        null,
+    );
+}
+
+test "a constraint that accepts literals keeps the literal it was given" {
+    // Widening `"get"` to `string` would put the argument outside the bound the
+    // call satisfies, so the literal survives and the call is clean.
+    try checkTypedSource(
+        \\function pick<T extends "get" | "put">(m: T): T {
+        \\    return m;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const m = pick("get");
+        \\    return Response.json({ m });
+        \\}
+    ,
+        0,
+        null,
+    );
 }

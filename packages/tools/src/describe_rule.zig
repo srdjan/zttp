@@ -224,6 +224,9 @@ const type_checker_rules = [_]TypeCheckerRule{
     .{ .name = "arg_type_mismatch", .code = "ZTS203", .description = "A call argument's type does not match the parameter type in the callee's signature." },
     .{ .name = "return_type_mismatch", .code = "ZTS204", .description = "A returned value's type does not match the function's declared return type." },
     .{ .name = "non_exhaustive_match", .code = "ZTS205", .description = "A match expression does not cover every possible case of the matched value." },
+    .{ .name = "ambiguous_type_argument", .code = "ZTS208", .description = "A generic call leaves a type parameter that no argument position determines; name it at the call site." },
+    .{ .name = "type_constraint_violation", .code = "ZTS209", .description = "A type argument is outside the `extends` bound its type parameter declares." },
+    .{ .name = "type_argument_count_mismatch", .code = "ZTS210", .description = "A call gives a different number of explicit type arguments than the signature declares type parameters." },
 };
 
 fn findTypeCheckerRule(query: []const u8) ?TypeCheckerRule {

@@ -134,6 +134,11 @@ fn typeCheckerCode(kind: type_checker.DiagnosticKind) []const u8 {
         .arg_type_mismatch => "ZTS203",
         .return_type_mismatch => "ZTS204",
         .non_exhaustive_match => "ZTS205",
+        // ZTS206 is reserved for `unresolved_type_reference` (amendment A1),
+        // and ZTS207 was `union_too_wide`, which task 3 measured away.
+        .ambiguous_type_argument => "ZTS208",
+        .type_constraint_violation => "ZTS209",
+        .type_argument_count_mismatch => "ZTS210",
     };
 }
 

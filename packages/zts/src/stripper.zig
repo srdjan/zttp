@@ -1648,6 +1648,15 @@ const Stripper = struct {
         }
 
         // Check if this is a comparison operator
+        //
+        // The answer also decides which kind is recorded below. A `<` that
+        // follows an operand is a type-argument list applied to that operand;
+        // a `<` that follows anything else opens a declaration's type
+        // parameters. After stripping the two are the same span of blanks
+        // followed by `(`, so the distinction has to be recorded here or it is
+        // lost - and the checker needs it to tell `first<string>(xs)` (bind T
+        // to string) from `<U>(x: U) => x` (declare U).
+        var is_call_type_arguments = false;
         if (self.looksLikeComparison()) {
             // Explicit type arguments on a call (`f<number>(x)`) also sit
             // right after an expression. Per the TypeScript disambiguation
@@ -1655,6 +1664,7 @@ const Stripper = struct {
             // directly on `(` is a type-argument list, not a comparison; only
             // then fall through to the strip below.
             if (!self.looksLikeCallTypeArguments()) return false;
+            is_call_type_arguments = true;
         }
 
         // Try to parse as generic params. The probe below advances pos via
@@ -1682,7 +1692,11 @@ const Stripper = struct {
             const next = self.source[self.pos];
             if (next == '(' or next == '{') {
                 // Record generic params (content inside angle brackets)
-                self.recordTypeAnnotation(.generic_params, start + 1, self.pos - 1, 0, 0);
+                const kind: TypeMapKind = if (is_call_type_arguments)
+                    .call_type_arguments
+                else
+                    .generic_params;
+                self.recordTypeAnnotation(kind, start + 1, self.pos - 1, 0, 0);
                 // Looks like generic function - blank the params
                 self.blankSpan(start, self.pos);
                 return true;

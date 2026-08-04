@@ -30,6 +30,12 @@ pub const TypeMapKind = enum(u8) {
     type_guard_annotation,
     /// `function f<T, U>(...)` or `type Foo<T> = ...` - generic parameters
     generic_params,
+    /// `first<string>(xs)` - explicit type arguments at a call site.
+    /// Distinct from `generic_params` because the two are otherwise
+    /// indistinguishable once stripped: both are an unnamed balanced `<...>`
+    /// followed by `(`. Only the stripper can tell them apart, by whether the
+    /// `<` follows an operand, so it records which one it saw.
+    call_type_arguments,
 };
 
 /// A single recorded type annotation.
