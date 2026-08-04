@@ -77,9 +77,14 @@ pub const seeds = [_]DefectSeed{
         .code = "ZTS604",
         .class = .salvaged,
         .seed_source = clean_total,
+        // The value differs from the baseline on purpose. A draft that is the
+        // baseline plus one canonical slip canonicalizes back to the baseline
+        // exactly, and then "salvage rewrote the draft" and "the draft was
+        // discarded and the baseline rewritten" produce identical bytes on disk
+        // and no gate can tell them apart.
         .bad_draft =
         \\function handler(req: Request): Response & Spec<"deterministic"> {
-        \\  let total = 1;
+        \\  let total = 5;
         \\  return Response.json({ total });
         \\}
         \\
@@ -98,10 +103,12 @@ pub const seeds = [_]DefectSeed{
         .code = "ZTS613",
         .class = .salvaged,
         .seed_source = clean_reassigned,
+        // Likewise: `+= 7` canonicalizes to `total = total + 7`, which the
+        // baseline's `+ 2` does not match.
         .bad_draft =
         \\function handler(req: Request): Response & Spec<"deterministic"> {
         \\  let total = 1;
-        \\  total += 2;
+        \\  total += 7;
         \\  return Response.json({ total });
         \\}
         \\

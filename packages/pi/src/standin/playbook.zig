@@ -3,6 +3,7 @@
 const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const expert_workflow = @import("../expert_workflow.zig");
+const defect_seeds = @import("defect_seeds.zig");
 const range = @import("range.zig");
 const request = @import("request.zig");
 
@@ -251,8 +252,80 @@ fn renderTestGeneration(allocator: std.mem.Allocator, parsed: request.ParsedRequ
     };
 }
 
+/// The seeded arm: submit a draft the veto is meant to reject, then repair it.
+///
+/// Steps 0 through 2 are the ordinary facts-first sequence, so the arm differs
+/// from the plain fix playbook only in what it submits. Step 3 is the defect.
+/// Step 4 exists solely for the rejection path, and is guarded on
+/// `rejected_drafts` rather than on the step index: a salvaged draft also
+/// advances the index by one, having been normalized and applied, and repairing
+/// an edit that already landed would overwrite it.
+///
+/// The source must be the seed's own bytes. Without that check an ask naming a
+/// seeded code would make the stand-in fire a scripted defect at whatever file
+/// happened to be open, which is the same class of mistake as authoring from an
+/// empty baseline.
+fn renderSeededViolationFix(
+    allocator: std.mem.Allocator,
+    parsed: request.ParsedRequest,
+    seed: *const defect_seeds.DefectSeed,
+    file: []const u8,
+) ![]u8 {
+    return switch (parsed.step_index) {
+        0 => blk: {
+            const args = try renderVerifyPathsArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 0, "zts_expert_verify_paths", args);
+        },
+        1 => blk: {
+            const args = try renderReadArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 1, "pi_repair_plan", args);
+        },
+        2 => blk: {
+            const args = try renderReadArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 2, "workspace_read_file", args);
+        },
+        3 => blk: {
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fix");
+            if (!std.mem.eql(u8, source, seed.seed_source)) {
+                break :blk try renderSourceMiss(
+                    allocator,
+                    "violation-fix",
+                    "the ask names a seeded diagnostic but the file is not that seed's source",
+                );
+            }
+            const args = try renderApplyArgs(allocator, file, seed.bad_draft, source);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 3, "apply_edit", args);
+        },
+        4 => blk: {
+            if (parsed.rejected_drafts == 0) {
+                break :blk try renderText(
+                    allocator,
+                    "The seeded draft was not rejected, so there is nothing to repair.",
+                );
+            }
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fix");
+            // The rejected bytes were never written, so the baseline is still
+            // the seed source the read recovered.
+            const args = try renderApplyArgs(allocator, file, seed.good_draft, source);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 4, "apply_edit", args);
+        },
+        else => try renderText(
+            allocator,
+            "The seeded violation-fix arm is complete. No further step is available.",
+        ),
+    };
+}
+
 fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
     const file = findFile(parsed.ask) orelse "handler.ts";
+    if (defect_seeds.findByAsk(parsed.ask)) |seed| {
+        return renderSeededViolationFix(allocator, parsed, seed, file);
+    }
     return switch (parsed.step_index) {
         0 => blk: {
             const args = try renderVerifyPathsArgs(allocator, file);

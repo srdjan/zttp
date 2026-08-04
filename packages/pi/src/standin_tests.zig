@@ -14,6 +14,7 @@ const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const transcript_mod = @import("transcript.zig");
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwd_support = @import("test_support/cwd.zig");
+const defect_seeds = @import("standin/defect_seeds.zig");
 const playbook = @import("standin/playbook.zig");
 const request = @import("standin/request.zig");
 const range = @import("standin/range.zig");
@@ -90,6 +91,194 @@ test "stand-in add-route playbook applies an edit through the real OpenAI agent 
     const content = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
     try testing.expect(std.mem.indexOf(u8, content, "\"GET /health\": handleGetHealth") != null);
     try testing.expect(std.mem.indexOf(u8, content, "function handleGetHealth") != null);
+}
+
+/// Drive one defect seed through the real server, the real loop, and the real
+/// veto in its own workspace, and hand back the turn result plus the bytes on
+/// disk afterwards.
+fn runSeedArm(
+    allocator: std.mem.Allocator,
+    seed: *const defect_seeds.DefectSeed,
+) !struct { result: loop.TurnResult, on_disk: []u8 } {
+    var tmp = try IsolatedTmp.init(allocator, "standin-seed");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts", seed.seed_source);
+
+    var server = try server_mod.Server.init(allocator, 0, null);
+    defer server.deinit();
+    try server.start();
+    const endpoint = try server.url(allocator, "/v1/responses");
+
+    var registry = try app.buildRegistry(allocator);
+    defer registry.deinit(allocator);
+    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const system_prompt = try expert_persona.buildSystemPrompt(allocator);
+    var session = try agent.AgentSession.initOpenAI(
+        allocator,
+        "unused-loopback-key",
+        system_prompt,
+        tools_json,
+        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+    );
+    defer session.deinit(allocator);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer restoreCwd(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+
+    const result = try loop.runTurnWith(
+        allocator,
+        session.modelClient(),
+        &registry,
+        &session.transcript,
+        seed.ask,
+        .{
+            .workspace_root = tmp.abs_path,
+            // The retry arm needs at least two, and this is the only place in
+            // the stand-in suite that spends a second attempt.
+            .max_attempts = 3,
+            .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
+            .replay_mode = false,
+            .turn_timeout_ms = 0,
+        },
+    );
+    try server.stop();
+
+    const handler_path = try tmp.childPath(allocator, "handler.ts");
+    const on_disk = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+    return .{ .result = result, .on_disk = on_disk };
+}
+
+// The rejection half of the loop, offline for the first time. Every stand-in
+// draft before this was authored to pass the same veto that judges it, so a
+// failed tool result, the retry nudge, and the second draft that follows were
+// reachable only by spending live model turns.
+//
+// The negative observables carry these gates. `applied_edit` alone is satisfied
+// by a first draft that simply passed, which is precisely the arm not running.
+test "stand-in seeded arm: a rejected draft is repaired on the retry round trip" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var checked: usize = 0;
+    for (&defect_seeds.seeds) |*seed| {
+        if (seed.class != .model_retry) continue;
+        checked += 1;
+
+        const run = try runSeedArm(allocator, seed);
+        try testing.expect(!run.result.first_draft_veto_pass);
+        try testing.expectEqual(@as(u32, 1), run.result.veto_retry_count);
+        try testing.expect(run.result.applied_edit);
+        try testing.expectEqualStrings(seed.good_draft, run.on_disk);
+    }
+
+    // Floor: a class emptied upstream would leave this loop iterating nothing
+    // and reporting a clean run over no rejection at all.
+    try testing.expect(checked >= 2);
+    std.debug.print("[standin-gate] seeded retry arm {d}/{d} seeds\n", .{ checked, checked });
+}
+
+// Salvage is the other half, and it is a different claim: the draft is rejected
+// by the checker and rescued by normalization, so the model never sees a
+// rejection and the turn still counts as a first-draft pass. Asserting
+// `veto_retry_count == 0` is what separates the two arms; without it a seed that
+// quietly started being retried would pass here.
+test "stand-in seeded arm: a canonical slip is salvaged without a retry" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var checked: usize = 0;
+    for (&defect_seeds.seeds) |*seed| {
+        if (seed.class != .salvaged) continue;
+        checked += 1;
+
+        const run = try runSeedArm(allocator, seed);
+        try testing.expect(run.result.first_draft_veto_pass);
+        try testing.expectEqual(@as(u32, 0), run.result.veto_retry_count);
+        try testing.expect(run.result.applied_edit);
+
+        // The exact claim, not "different from these bytes". A gate asserting
+        // only difference passes when the arm submits a clean draft and no
+        // salvage happens at all - which is the opposite of what it reports, and
+        // is what the probe found. The bytes on disk must be precisely what
+        // normalizing the bad draft produces.
+        var normalized = try veto.runVeto(allocator, .{
+            .file = "handler.ts",
+            .content = seed.bad_draft,
+            .before = seed.seed_source,
+        });
+        defer normalized.deinit(allocator);
+        const canonical = normalized.report.normalized_content orelse {
+            std.debug.print("[standin-gate] seed {s}: nothing was normalized\n", .{seed.id});
+            return error.SeedNotSalvaged;
+        };
+        try testing.expectEqualStrings(canonical, run.on_disk);
+        try testing.expect(!std.mem.eql(u8, run.on_disk, seed.bad_draft));
+    }
+
+    try testing.expect(checked >= 2);
+    std.debug.print("[standin-gate] seeded salvage arm {d}/{d} seeds\n", .{ checked, checked });
+}
+
+// The arm fires on the code named in the ask, so it must refuse when the file is
+// not the seed's own. Otherwise an ask mentioning ZTS604 would make the stand-in
+// overwrite whatever handler happened to be there with a seed's defect.
+test "stand-in seeded arm: a foreign source gets a miss, not a scripted defect" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const seed = defect_seeds.findById("let-binding") orelse return error.MissingSeed;
+    const foreign = "function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const other = 7;\n  return Response.json({ other });\n}\n";
+
+    var tmp = try IsolatedTmp.init(allocator, "standin-seed-foreign");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts", foreign);
+
+    var server = try server_mod.Server.init(allocator, 0, null);
+    defer server.deinit();
+    try server.start();
+    const endpoint = try server.url(allocator, "/v1/responses");
+
+    var registry = try app.buildRegistry(allocator);
+    defer registry.deinit(allocator);
+    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const system_prompt = try expert_persona.buildSystemPrompt(allocator);
+    var session = try agent.AgentSession.initOpenAI(
+        allocator,
+        "unused-loopback-key",
+        system_prompt,
+        tools_json,
+        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+    );
+    defer session.deinit(allocator);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer restoreCwd(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+
+    const result = try loop.runTurnWith(
+        allocator,
+        session.modelClient(),
+        &registry,
+        &session.transcript,
+        seed.ask,
+        .{
+            .workspace_root = tmp.abs_path,
+            .max_attempts = 3,
+            .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
+            .replay_mode = false,
+            .turn_timeout_ms = 0,
+        },
+    );
+    try server.stop();
+
+    try testing.expect(!result.applied_edit);
+    const handler_path = try tmp.childPath(allocator, "handler.ts");
+    const on_disk = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+    try testing.expectEqualStrings(foreign, on_disk);
 }
 
 test "stand-in miss returns its marker through the real loop and applies no edit" {
