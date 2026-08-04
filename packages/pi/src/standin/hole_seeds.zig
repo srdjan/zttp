@@ -3,16 +3,9 @@
 //! The hole loop is the constructive half of convergence: with a whole file in
 //! play the emittable set is every program the model might write and the fence
 //! rejects, while a hole fixes the program apart from one expression in a known
-//! context. Exercising that loop has cost live model turns, because the tool
-//! that enforces it is only reachable through an agent that chooses to call it.
-//!
-//! Note what the arm does NOT use. `zts_expert_holes` publishes the frame, and
-//! it shells out to `zig build cli -- check`, which cannot run inside the
-//! isolated tmp workspace these tests use. The arm therefore locates a hole by
-//! the same exact six-byte match `zts_expert_fill_hole` enforces on the
-//! coordinates it is handed, and calls only the fill tool, which is in-process.
-//! That means the arm proves the fill mechanism and the apply path, and says
-//! nothing about the frame publisher.
+//! context. The stand-in drives the same publisher, fill tool, apply boundary,
+//! and next-turn re-analysis as the live agent, without asking a model to choose
+//! the expression.
 
 const std = @import("std");
 
@@ -31,8 +24,8 @@ pub const HoleSeed = struct {
     /// an actual scan; a seed edited from two holes to one would otherwise
     /// quietly stop testing what its name says.
     holes: usize,
-    /// One expression per hole, in source order. The arm spends its turn on the
-    /// first; the composition pin needs the second.
+    /// One expression per hole, in source order. The arm applies one per turn,
+    /// then re-reads and republishes the remaining frame on the next turn.
     expressions: []const []const u8,
     ask: []const u8,
 };
@@ -52,9 +45,8 @@ pub const seeds = [_]HoleSeed{
         .ask = "Fill the remaining hole in handler.ts",
     },
     .{
-        // Two holes on separate lines, for the composition pin. One fill per
-        // turn is the documented shape of this loop, and this seed is what makes
-        // the reason observable offline instead of only in a solution note.
+        // Two holes on separate lines so the gate proves that one-fill turns
+        // compose after each accepted proposal is written.
         .id = "two-holes",
         .source =
         \\function handler(req: Request): Response & Spec<"deterministic"> {
@@ -66,19 +58,24 @@ pub const seeds = [_]HoleSeed{
         ,
         .holes = 2,
         .expressions = &.{ "\"count\"", "Response.json({ label, total })" },
-        .ask = "Fill the remaining hole in handler.ts",
+        .ask = "Fill both remaining holes in handler.ts",
     },
 };
 
-/// The seed an ask selects.
-///
-/// Every seed shares the canonical ask today, so this returns the first. It
-/// exists as a function rather than an index so the arm has one place to grow a
-/// real selector when the seeds stop sharing a prompt.
-pub fn findByAsk(ask: []const u8) ?*const HoleSeed {
-    if (seeds.len == 0) return null;
-    _ = ask;
-    return &seeds[0];
+/// The unique seed whose next expression accepts `source` as an exact reachable
+/// state. A foreign, stale, or ambiguous source returns null.
+pub fn findBySource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+) !?*const HoleSeed {
+    var selected: ?*const HoleSeed = null;
+    for (&seeds) |*seed| {
+        if (try nextExpressionForSource(allocator, seed, source)) |_| {
+            if (selected != null) return null;
+            selected = seed;
+        }
+    }
+    return selected;
 }
 
 pub fn findById(id: []const u8) ?*const HoleSeed {
@@ -88,28 +85,6 @@ pub fn findById(id: []const u8) ?*const HoleSeed {
     return null;
 }
 
-/// 1-based line and column of the first hole in `source`, or null when there is
-/// none.
-///
-/// The same coordinate convention `zts_expert_fill_hole` decodes, computed the
-/// same way, because the tool refuses anything that does not land exactly on
-/// the six bytes. A stale coordinate is the expected failure in this loop and
-/// the useful answer to it is a refusal, so there is no nearest-match fallback
-/// on either side.
-pub fn firstHole(source: []const u8) ?struct { line: u32, column: u32 } {
-    const at = std.mem.indexOf(u8, source, hole_call) orelse return null;
-    var line: u32 = 1;
-    var line_start: usize = 0;
-    var i: usize = 0;
-    while (i < at) : (i += 1) {
-        if (source[i] == '\n') {
-            line += 1;
-            line_start = i + 1;
-        }
-    }
-    return .{ .line = line, .column = @intCast(at - line_start + 1) };
-}
-
 pub fn countHoles(source: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
@@ -117,4 +92,41 @@ pub fn countHoles(source: []const u8) usize {
         n += 1;
     }
     return n;
+}
+
+/// The next declared expression when `source` is an exact state reachable by
+/// applying this seed's earlier expressions one at a time. A foreign or stale
+/// source returns null instead of receiving a scripted edit.
+pub fn nextExpressionForSource(
+    allocator: std.mem.Allocator,
+    seed: *const HoleSeed,
+    source: []const u8,
+) !?[]const u8 {
+    const remaining = countHoles(source);
+    if (remaining == 0 or remaining > seed.holes) return null;
+    const filled = seed.holes - remaining;
+    if (filled >= seed.expressions.len) return null;
+
+    var expected = try allocator.dupe(u8, seed.source);
+    defer allocator.free(expected);
+    for (seed.expressions[0..filled]) |expression| {
+        const next = try replaceFirstHole(allocator, expected, expression);
+        allocator.free(expected);
+        expected = next;
+    }
+    if (!std.mem.eql(u8, source, expected)) return null;
+    return seed.expressions[filled];
+}
+
+fn replaceFirstHole(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    expression: []const u8,
+) ![]u8 {
+    const at = std.mem.indexOf(u8, source, hole_call) orelse return error.NoHole;
+    return std.mem.concat(allocator, u8, &.{
+        source[0..at],
+        expression,
+        source[at + hole_call.len ..],
+    });
 }

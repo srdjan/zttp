@@ -5,6 +5,37 @@ const json_writer = @import("../providers/anthropic/json_writer.zig");
 
 pub const default_output_limit: usize = 256 * 1024;
 
+/// Largest result body the expert loop can retain in the next model turn.
+/// Keep hole-tool output below this cap so a published frame always leads to a
+/// fill result whose complete proposed content reaches the model.
+pub const max_hole_tool_result_bytes: usize = 32 * 1024;
+
+/// The source limit shared by the hole publisher and filler. It reserves room
+/// for a replacement expression, ordinary result metadata, and JSON escaping
+/// of both the original source and the proposed content. The fill tool also
+/// checks the final serialized result because verification detail is variable.
+const max_hole_result_metadata_bytes: usize = 1024;
+const max_json_string_expansion: usize = 2;
+const min_hole_expression_bytes: usize = 256;
+const max_hole_serialized_content_bytes =
+    (max_hole_tool_result_bytes - max_hole_result_metadata_bytes) / max_json_string_expansion;
+pub const max_hole_handler_source_bytes: usize =
+    max_hole_serialized_content_bytes - min_hole_expression_bytes;
+
+/// The largest expression that can replace a hole in `source_len` bytes while
+/// keeping the full proposed-content result inside `max_hole_tool_result_bytes`.
+/// This deliberately treats the source as remaining intact, which is stricter
+/// than the six-byte `hole()` replacement and keeps the boundary simple.
+pub fn maxHoleExpressionBytes(source_len: usize) usize {
+    if (source_len >= max_hole_serialized_content_bytes) return 0;
+    return max_hole_serialized_content_bytes - source_len;
+}
+
+pub fn holeReplacementFitsOutput(source_len: usize, expression_len: usize) bool {
+    return source_len <= max_hole_handler_source_bytes and
+        expression_len <= maxHoleExpressionBytes(source_len);
+}
+
 pub const CommandOutcome = struct {
     ok: bool,
     exit_code: ?u8,
@@ -273,6 +304,12 @@ pub fn commandOutcomeToToolResult(
 
 const testing = std.testing;
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+
+test "hole publisher source cap leaves a fillable proposed-content boundary" {
+    try testing.expect(holeReplacementFitsOutput(max_hole_handler_source_bytes, min_hole_expression_bytes));
+    try testing.expect(!holeReplacementFitsOutput(max_hole_handler_source_bytes, min_hole_expression_bytes + 1));
+    try testing.expect(!holeReplacementFitsOutput(max_hole_serialized_content_bytes, 0));
+}
 
 fn createSymlinkAbsolute(
     allocator: std.mem.Allocator,

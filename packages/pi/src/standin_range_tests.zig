@@ -247,11 +247,10 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
     const SequenceCase = struct {
         entry_id: []const u8,
         tools: []const []const u8,
-        /// Tool output the arm consumes, for a playbook whose next step depends
-        /// on a result rather than only on the step index. Null for every
-        /// playbook that counts round-trips, which is all of them but the hole
-        /// arm.
-        last_output: ?[]const u8 = null,
+        /// Last tool output visible at each step. Empty for playbooks that only
+        /// count round-trips; the hole arm consumes both publisher and fill
+        /// results.
+        outputs: []const ?[]const u8 = &.{},
     };
     const cases = [_]SequenceCase{
         .{ .entry_id = "explain", .tools = &.{"zts_expert_modules"} },
@@ -262,10 +261,13 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
         .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "apply_edit" } },
         .{
             .entry_id = "fill-hole",
-            .tools = &.{ "workspace_read_file", "zts_expert_fill_hole", "apply_edit" },
-            .last_output =
-            \\{"ok":true,"applied":false,"path":"handler.ts","line":3,"column":10,"expression":"Response.json({ total })","proposed_content":"function handler(req: Request): Response {\n  return Response.json({ total });\n}\n"}
-            ,
+            .tools = &.{ "workspace_read_file", "zts_expert_holes", "zts_expert_fill_hole", "apply_edit" },
+            .outputs = &.{
+                null,
+                null,
+                "{\"path\":\"handler.ts\",\"holes\":[{\"function\":\"handler\",\"line\":3,\"column\":10}]}",
+                "{\"ok\":true,\"applied\":false,\"path\":\"handler.ts\",\"line\":3,\"column\":10,\"expression\":\"Response.json({ total })\",\"proposed_content\":\"function handler(req: Request): Response & Spec<\\\"deterministic\\\"> {\\n  const total = 1;\\n  return Response.json({ total });\\n}\\n\"}",
+            },
         },
     };
 
@@ -286,7 +288,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
                 .ask = entry.canonical_prompt,
                 .step_index = step_index,
                 .source = sequenceSource(entry.id),
-                .last_output = case.last_output,
+                .last_output = if (step_index < case.outputs.len) case.outputs[step_index] else null,
             });
             const events = try sse_parser.parseAll(allocator, body);
             const outcome = try response_assembler.assemble(allocator, events);
@@ -483,6 +485,7 @@ test "stand-in gate: continuation prefixes match the messages the loop authors" 
 
 const defect_seeds = @import("standin/defect_seeds.zig");
 const hole_seeds = @import("standin/hole_seeds.zig");
+const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
 const veto = @import("veto.zig");
 const zts = @import("zts");
 const edit_simulate = @import("zts_cli").edit_simulate;
@@ -650,6 +653,42 @@ test "stand-in gate: every defect seed reproduces its declared veto class throug
                         .{ seed.id, bad.outcome.ok, bad.report.new, bad.report.normalized_content != null },
                     );
                     return error.DefectSeedNotRejected;
+                }
+            },
+            .compiler_repair => {
+                if (bad.outcome.ok or bad.report.new == 0 or bad.report.normalized_content != null) {
+                    std.debug.print(
+                        "[standin-gate] seed {s} declares compiler_repair: ok={} new={d} normalized={}\n",
+                        .{ seed.id, bad.outcome.ok, bad.report.new, bad.report.normalized_content != null },
+                    );
+                    return error.DefectSeedNotRejected;
+                }
+
+                var candidate = try pi_goal_candidate.candidateFromSource(
+                    testing.allocator,
+                    seed.bad_draft,
+                    "handler.ts",
+                    &.{},
+                    4,
+                );
+                defer candidate.deinit(testing.allocator);
+                if (!candidate.verified()) {
+                    std.debug.print(
+                        "[standin-gate] seed {s} declares compiler_repair: candidate reason={s}\n",
+                        .{ seed.id, candidate.reason },
+                    );
+                    return error.DefectSeedNotCompilerRepairable;
+                }
+                try testing.expectEqualStrings(seed.good_draft, candidate.proposed_content.?);
+
+                var repaired = try veto.runVeto(testing.allocator, .{
+                    .file = "handler.ts",
+                    .content = candidate.proposed_content.?,
+                    .before = seed.seed_source,
+                });
+                defer repaired.deinit(testing.allocator);
+                if (!repaired.outcome.ok or repaired.report.new != 0) {
+                    return error.CompilerRepairCandidateFailsBindingVeto;
                 }
             },
         }

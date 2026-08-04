@@ -875,7 +875,9 @@ pub const ContractBuilder = struct {
             if (!self.isHoleCallee(call.callee)) continue;
 
             const owner = self.enclosingFunctionName(analyzer, idx);
-            const loc = self.ir_view.getLoc(idx) orelse ir.SourceLocation{ .line = 0, .column = 0, .offset = 0 };
+            // The call node is located at `(`. The fill tool replaces the full
+            // `hole()` expression and therefore needs the callee's start.
+            const loc = self.ir_view.getLoc(call.callee) orelse ir.SourceLocation{ .line = 0, .column = 0, .offset = 0 };
 
             var type_buf: [256]u8 = undefined;
             const expected = self.expectedTypeForHole(owner, &type_buf);

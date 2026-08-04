@@ -436,14 +436,9 @@ fn identifierName(
     const tag = ir_view.getTag(node) orelse return null;
     if (tag != .identifier) return null;
     const binding = ir_view.getBinding(node) orelse return null;
-    // Only global/undeclared-global bindings encode an atom index in `.slot`.
-    // For .local/.argument/.upvalue the slot is a scope-slot index, so passing
-    // it to atoms.getName would map a small slot (0,1,2,...) onto an unrelated
-    // predefined atom (null/true/false/undefined). Return null so the concrete
-    // repair template falls back to its generic placeholder instead of an
-    // unrelated keyword.
-    if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-    return atoms.getName(@enumFromInt(binding.slot));
+    // `slot` identifies storage for locals, arguments, and upvalues. The parser
+    // keeps the source-level identifier in `name_atom` for every binding kind.
+    return atoms.getName(@enumFromInt(binding.name_atom));
 }
 
 fn hasRequestedFlowDiagnostics(
@@ -519,6 +514,23 @@ test "planFromSource plans repairs from an in-memory draft" {
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"plans\":[{") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (!result.ok)") != null);
+}
+
+test "planFromSource preserves a local optional binding name in its repair" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const appName = env("APP_NAME");
+        \\  return Response.json({ appName });
+        \\}
+    ;
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{}, false);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (appName === undefined)") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (value === undefined)") == null);
 }
 
 test "tool description names repair plan authority boundary" {

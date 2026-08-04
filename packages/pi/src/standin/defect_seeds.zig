@@ -1,10 +1,9 @@
 //! Handler drafts that deliberately fail the veto, and the fix for each.
 //!
-//! Every stand-in draft today is authored by repo code to pass the same veto
-//! that judges it, so the whole rejection half of the loop - the failed tool
-//! result, the retry nudge, salvage-on-reject, the compiler-authored repair lane
-//! - is reachable only through a live model. These seeds are what let the
-//! stand-in reach it offline.
+//! The ordinary stand-in drafts are authored to pass the same veto that judges
+//! them. These seeds deliberately do the opposite so the failed tool result,
+//! retry nudge, salvage-on-reject, and compiler-authored repair lane are all
+//! reachable without a model.
 //!
 //! A seed declares which of those outcomes its bad draft produces. The
 //! declaration is not trusted: the gate in `standin_range_tests.zig` derives the
@@ -30,6 +29,9 @@ pub const VetoClass = enum {
     /// Neither salvage nor the repair lane applies, so the draft is bounced and
     /// the model redrafts. This is the arm that exercises the retry path.
     model_retry,
+    /// The compiler-native repair lane authors a verified candidate and the
+    /// loop applies it without asking the model for another draft.
+    compiler_repair,
 };
 
 pub const DefectSeed = struct {
@@ -67,6 +69,29 @@ const clean_reassigned =
     \\  let total = 1;
     \\  total = total + 2;
     \\  return Response.json({ total });
+    \\}
+    \\
+;
+
+const clean_checked_result =
+    \\import { validateJson } from "zttp:validate";
+    \\
+    \\function handler(req: Request): Response & Spec<"deterministic"> {
+    \\  const result = validateJson("item", req.body);
+    \\  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
+    \\  const data = result.value;
+    \\  return Response.json({ data });
+    \\}
+    \\
+;
+
+const clean_checked_optional =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Response & Spec<"deterministic"> {
+    \\  const appName = env("APP_NAME");
+    \\  if (appName === undefined) return Response.json({ error: "missing value" }, { status: 400 });
+    \\  return Response.json({ appName });
     \\}
     \\
 ;
@@ -165,6 +190,41 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS304 compiler error in handler.ts",
+    },
+    .{
+        .id = "unchecked-result",
+        .code = "ZTS303",
+        .class = .compiler_repair,
+        .seed_source = clean_checked_result,
+        .bad_draft =
+        \\import { validateJson } from "zttp:validate";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const result = validateJson("item", req.body);
+        \\  const data = result.value;
+        \\  return Response.json({ data });
+        \\}
+        \\
+        ,
+        .good_draft = clean_checked_result,
+        .ask = "Fix the ZTS303 compiler error in handler.ts",
+    },
+    .{
+        .id = "unchecked-optional",
+        .code = "ZTS308",
+        .class = .compiler_repair,
+        .seed_source = clean_checked_optional,
+        .bad_draft =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const appName = env("APP_NAME");
+        \\  return Response.json({ appName });
+        \\}
+        \\
+        ,
+        .good_draft = clean_checked_optional,
+        .ask = "Fix the ZTS308 compiler error in handler.ts",
     },
 };
 

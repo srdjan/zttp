@@ -10,7 +10,7 @@ symptoms:
   - The second fill's coordinates resolve against the original bytes, not against the first fill's result.
   - The agent falls back to `apply_edit` with a whole file, which is the loop holes exist to replace.
 root_cause: logic_error
-resolution_type: documented
+resolution_type: code_fix
 severity: medium
 related_components:
   - typed_holes
@@ -76,26 +76,26 @@ Roadmap item 3 predicts round-trips fall for hole-mode sessions. Measuring that
 over multi-hole cases would fold this defect into the number and report a loop
 bug as a round-trip cost.
 
-So the hole arm of the codegen corpus seeds exactly one hole per case, and says
-so. That matches what the loop supports today - the persona's rule is one hole
-per turn, and the eval gives each case one turn. Multi-hole cases belong in the
-comparison once fills compose.
+The recorded comparison remains single-hole because it measures the historical
+live sessions. Offline development now carries a two-hole seed through two full
+turns and proves that both expressions compose.
 
-## Fix Direction
+## Resolution
 
-Not fixed. The options, in rough order of size:
+The loop keeps the proposal-shaped tool and its approval boundary. It applies
+exactly one fill per turn, then starts the next turn by reading the newly written
+file and publishing a fresh compiler frame. The second fill therefore resolves
+against the accepted first fill rather than against a pending snapshot.
 
-- Have the tool apply its edit rather than propose it, so the next call reads
-  the new bytes. Changes the approval model - the edit becomes a write.
-- Keep it proposal-shaped but thread the proposed content through the turn, so a
-  second fill resolves against the pending state rather than disk.
-- Accept one fill per turn and make the loop carry a holed program to the next
-  turn, which is the shape the persona already describes and the eval harness
-  does not provide.
+`zts_expert_holes` now calls the production analyzer in-process, so that fresh
+frame works inside an isolated handler workspace without a local `build.zig`.
+The publisher and `zts_expert_fill_hole` also share the same coordinate
+definition: the 1-based start of the `hole()` callee. Previously the publisher
+reported the opening parenthesis and the fill tool refused that location.
 
-Whichever is chosen, the tool should refuse a second fill in a turn it cannot
-compose, rather than silently editing the wrong bytes. A refusal naming the
-reason is the behaviour the coordinate-staleness path already has.
+The regression gate runs the real loopback server, agent loop, publisher, fill
+tool, veto, approval, and apply path twice. After turn one exactly one hole
+remains. After turn two no holes remain and both seeded expressions are on disk.
 
 ## Related Issues
 

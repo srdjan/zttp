@@ -583,7 +583,7 @@ fn writeSpecAndCapsulesJson(
 /// Empty for a finished program. Published unconditionally rather than behind
 /// a flag: an empty array costs a pair of brackets, and a consumer that has to
 /// ask for the information twice is a consumer that will forget to.
-fn writeHolesJson(writer: anytype, items: anytype) !void {
+pub fn writeHolesJson(writer: anytype, items: anytype) !void {
     try writer.writeByte('[');
     for (items, 0..) |hole, i| {
         if (i > 0) try writer.writeByte(',');

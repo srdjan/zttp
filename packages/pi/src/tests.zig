@@ -10,6 +10,8 @@ comptime {
     _ = @import("tools/zts_expert_describe_rule.zig");
     _ = @import("tools/zts_expert_search.zig");
     _ = @import("tools/zts_expert_edit_simulate.zig");
+    _ = @import("tools/zts_expert_holes.zig");
+    _ = @import("tools/zts_expert_fill_hole.zig");
     _ = @import("tools/zts_expert_review_patch.zig");
     _ = @import("tools/zts_expert_prove_patch.zig");
     _ = @import("tools/zts_expert_system_proof.zig");

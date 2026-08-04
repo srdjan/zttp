@@ -321,6 +321,12 @@ a whole-file `apply_edit`, and ended with the program still holed. Written up in
 Measuring multi-hole cases would fold that loop defect into the round-trip number
 and report a bug as a cost.
 
+That loop defect was closed on 2026-08-04 without changing this historical row.
+The stand-in now runs a two-hole seed across two full offline turns: each turn
+publishes a fresh compiler frame, fills one exact site, and applies it before the
+next turn begins. The second frame therefore includes the first accepted fill,
+and the gate ends with both expressions composed and no holes left.
+
 ## Reading the table
 
 **Corpus** is the first twelve characters of a hash over the whole corpus:
@@ -471,17 +477,18 @@ for the reason the next section gives.
 A row on this page is a measurement of a live model. There is a second, much
 cheaper offline substitute in this repo - the deterministic stand-in, a scripted
 responder that speaks the same wire shape - and every number it could produce
-about drafting would be the playbook grading its own work. Its drafts are
-authored by repo code to pass the same veto that judges them, so first-draft pass
-is pinned near 100% by construction; its round-trip count is the length of the
-script; and its intent pass is definitional, because the playbook writes the
+about drafting would be the playbook grading its own work. Its drafts and defect
+seeds are authored by repo code to produce declared veto outcomes, so its
+first-draft result is scripted; its round-trip count is the length of the
+playbook; and its intent pass is definitional because the playbook writes the
 intended program literally.
 
 Four mechanisms keep such a number off this page, and none of them is a
 convention somebody has to remember:
 
-- The recorder refuses any session that is not a live Anthropic key, so a
-  stand-in session cannot be teed into a cassette at all.
+- The corpus recorder refuses any session that is not a live Anthropic key, so
+  a stand-in session cannot become model-measurement input. A separate loopback
+  smoke test exercises transport capture and replay without publishing a row.
 - The replay hard-fails unless every case yields a model name from its own
   cassette header, so a row can never be published without cassettes behind it.
 - `scripts/check-convergence-emitter.sh` holds `[codegen-convergence]` and

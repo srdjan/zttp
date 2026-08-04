@@ -329,7 +329,7 @@ fn appendEditToolResult(
 /// (a full-file read, a long diagnostic blob) otherwise inflates the input token
 /// count of every subsequent roundtrip in the turn. Beyond the cap the body is
 /// truncated with a marker telling the model to re-read a specific range.
-const transcript_tool_result_cap: usize = 32 * 1024;
+const transcript_tool_result_cap = tools_common.max_hole_tool_result_bytes;
 
 /// Cap a tool result body before it enters the transcript. Small results pass
 /// through unchanged (returned as-is, no copy); an oversized one is truncated on

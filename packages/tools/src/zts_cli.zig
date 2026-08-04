@@ -509,7 +509,9 @@ fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
     return error.NoProjectConfig;
 }
 
-fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
+/// Resolve the system config exactly as `zts check` does for a handler path.
+/// In-process analyzer clients use this rather than re-parsing `zttp.json`.
+pub fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();

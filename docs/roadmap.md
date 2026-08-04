@@ -303,9 +303,9 @@ closure, and a durable callback keeping determinism while still carrying a secre
 handler, the minted id with its `idempotent`, and the durable step in both its callback
 and its eager form.
 
-### 3. Typed holes (done, except the measurement)
+### 3. Typed holes (done)
 
-Two of three slices have landed. `hole()` exists as a builtin typed `never`, so a
+All three slices have landed. `hole()` exists as a builtin typed `never`, so a
 handler with a hole on one branch checks clean with both paths enumerated and its
 properties proven; reaching one answers 501 rather than the 500 a real fault produces,
 in all three response paths. `zts check --json` publishes a `holes` array carrying each
@@ -337,10 +337,12 @@ A binding whose type no annotation reaches reads `unknown` rather than a guess. 
 type is worse than an absent one: it is the difference between an agent asking and an
 agent confidently writing an expression that cannot compile.
 
-The third slice has started. `zts_expert_holes` gives the agent that whole frame, and the
-persona instructs it to fill one hole per turn rather than regenerate the file. Before
-this the data was reachable only inside a full `zts check --json` envelope that the tool
-description never mentioned, so the agent had no reason to look for it.
+The third slice has landed. `zts_expert_holes` gives the agent that whole frame, and the
+persona instructs it to fill one hole per turn rather than regenerate the file. The tool
+calls the production analyzer in-process, so it works in an isolated handler workspace
+without depending on the repository build graph. Before this the data was reachable only
+inside a full `zts check --json` envelope that the tool description never mentioned, so
+the agent had no reason to look for it.
 
 The loop change has landed, and the thing it replaced was an instruction. Asking the
 agent to fill one hole per turn is not a mechanism: a turn that hands back a whole file
@@ -368,15 +370,17 @@ whole-file, over four cases paired with the whole-file case of the same task. Ev
 case also passed first draft with zero veto retries, which is the mechanism rather than
 the aim - a `fill_hole` edit cannot produce a whole-file rejection.
 
-Two caveats travel with the number. The hole arm is handed the frame, so part of the
+Two caveats travelled with the number. The hole arm is handed the frame, so part of the
 saving is work it was not asked to do; that is the mechanism, and it means the comparison
-is hole mode end to end against writing from scratch. And the arm seeds one hole per case
-because two fills in one turn do not compose - `zts_expert_fill_hole` proposes an edit and
-re-reads from disk each call, so the second runs against the original bytes. That is a
-live defect in the loop, written up in
+is hole mode end to end against writing from scratch. The recorded arm also seeds one hole
+per case because two proposed fills in one turn did not compose when the measurement was
+taken. That defect is fixed by carrying one accepted fill to the next turn, publishing a
+fresh compiler frame, and filling the next site against the bytes now on disk. The offline
+stand-in proves the two-turn composition over a two-hole seed through the real server,
+publisher, fill tool, veto, and apply path. The history and resolution are in
 [two hole fills in one turn do not compose](solutions/logic-errors/two-hole-fills-in-one-turn-do-not-compose.md),
-and it is the next thing to fix here: multi-hole cases can join the comparison once fills
-compose.
+so future live comparisons can add multi-hole cases without folding that loop defect into
+their round-trip number.
 
 ### 4. Widen the mechanical repair lane (done)
 
@@ -705,26 +709,27 @@ fix to the harness before they could be published honestly: the model column was
 from a compile-time constant rather than read from the cassettes, and the hole arm's
 first seeds carried a violation the differential veto could not see past.
 
-What that leaves open is not measurement either. It is the two defects the measuring
-turned up - hole fills that do not compose across a turn, and the recording variance that
-moved a case between two recordings of the same prompt - plus the standing note that four
-paired cases is a thin basis for the round-trip comparison.
+What that leaves open is not measurement either. The hole-fill composition defect is now
+closed offline. Recording variance between two runs of the same prompt remains a property
+of the model measurement, and four paired cases remain a thin basis for the round-trip
+comparison.
 
 What the agenda leaves behind, for the next reader deciding where the gap still is: the
 provable set is true as far as the standing checks can see (item 1, and the two fail-open
 classes written up in `docs/solutions/`), the gap is published and dated
 ([convergence.md](convergence.md)), and the mechanisms moved from rejection toward
 construction - six intents repair mechanically, and a turn can spend itself on one typed
-hole. The eleven-case corpus is now the binding constraint on all three legs, which is
+hole. The sixteen-case corpus is now the binding constraint on all three legs, which is
 the honest next thing to grow.
 
-Growing it started on 2026-08-03: five cases are authored and validated against the
-analyzer, each standing on one fence the eleven could not feel, and none is recorded.
-Recording spends live model tokens and the key returns `InsufficientCredit`, so the
-corpus is sixteen cases and eleven cassettes, and the replay gate fails naming the five
-rather than publishing a number over what it has. That is now the same blocker as items
-3 and 5 rather than a separate one: all three are waiting on live model turns, not on
-this repository.
+The 2026-08-03 `InsufficientCredit` failure exposed a separate design problem: routine
+development of the recorder, veto outcomes, compiler repair, and hole loop could not reach
+their production paths without model turns. Those paths are now exercised offline. A
+loopback Anthropic response traverses the production record tee and replay client; defect
+seeds cover retry, salvage, and compiler-authored repair; and hole seeds cover the
+in-process publisher plus multi-turn composition. Live model access is required only to
+create an empirical cassette or publish a model-behavior row, not to develop or verify
+the machinery around it.
 
 ### Considered and refused
 

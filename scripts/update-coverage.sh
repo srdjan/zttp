@@ -68,9 +68,9 @@ out = f"""<!-- Generated file. Do not edit. Run `bash scripts/update-coverage.sh
 
 What the offline suite proves, and what it does not.
 
-> The offline suite proves two things. The harness is faithful: the loop, the
-> veto, the apply path, the veto-retry path, salvage-on-reject, and the hole loop
-> execute correctly over every entry in the stand-in's declared range. And the
+> The offline suite proves two things. The harness is faithful: recorder capture
+> and replay, the loop, veto, apply, retry, salvage, compiler repair, and the
+> hole loop execute correctly over their declared fixtures. And the
 > corpus is load-bearing: of the compiler's {total} advertised rules,
 > {len(tripped)} are tripped by at least one case. It proves nothing about what a
 > model will draft. First-draft pass rate, median round-trips, and intent pass
@@ -83,22 +83,18 @@ What the offline suite proves, and what it does not.
 
 | Path | Offline | How |
 |---|---|---|
+| Recorder transport and replay | yes | a loopback Anthropic SSE response passes through the production record tee, disk cassette, loader, and replay client |
 | Loop, veto, apply | yes | every entry in the declared range, driven through the real server and the real loop |
 | Veto retry | yes | defect seeds whose bad draft the veto rejects and whose good draft lands on the retry |
 | Salvage-on-reject | yes | canonical-band seeds, asserted against the exact bytes normalizing the draft produces |
-| Hole fill | yes | a skeleton whose response expression is a hole, filled through the real `zts_expert_fill_hole` |
-| Compiler-authored repair lane | no | no seed produces a verified lane candidate yet, so the class carries no enum member |
+| Compiler-authored repair lane | yes | two repairable defect seeds land a verified compiler candidate with no model retry |
+| Hole publisher and fill | yes | the in-process compiler publishes the frame, then `zts_expert_fill_hole` proposes one exact-site replacement |
+| Multi-turn hole loop | yes | a two-hole seed applies one fill per turn, republishes the changed frame, and finishes with both fills composed |
 
-One path is still live-only, and saying so is the point of writing this down.
-The repair lane applies a compiler-authored fix with no model turn, and a
-declared class with no seeds would be a gate iterating nothing - the shape every
-other gate here exists to avoid. Until a seed exists, this page claims the paths
-it lists and no others.
-
-Two fills in one turn do not compose, which is pinned rather than worked around:
-`zts_expert_fill_hole` re-reads from disk on every call, so the second is
-computed against the original bytes and drops the first. The offline test asserts
-exactly that and goes red the day it is fixed.
+Only model behavior stays live-only. Creating a new empirical cassette and
+publishing first-draft, intent, or round-trip measurements still requires the
+named model. Developing and verifying the harness, veto, salvage, repair, and
+hole-loop machinery does not.
 
 Recorded {d["recorded"]} over corpus `{d["corpusVersion"][:12]}`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as

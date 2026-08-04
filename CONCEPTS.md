@@ -62,9 +62,9 @@ State belongs to the Turn rather than to the session. The loop also writes to th
 A recorded model Turn, kept so the same session can be replayed later against the current compiler. Recording costs model access and replay does not, which is what makes a published rate both reproducible and free to re-check. A rate may come from no other source.
 
 ### Stand-in
-A scripted responder that takes a live model's place on the wire, so the agent loop, the Veto, and the edit path can be exercised with no model access at all. It answers a declared range of asks and refuses everything outside it, and the refusal is the point: a range it silently outgrew would answer asks it cannot really handle.
+A scripted responder that replaces only a live model's choice on the wire while preserving the production boundaries and state transitions around it, so the surrounding agent machinery can be exercised with no model access at all. It answers a declared range of asks and refuses everything outside it, and the refusal is the point: a range it silently outgrew would answer asks it cannot really handle.
 
-A Stand-in can show that the machinery runs correctly and can never measure an agent. Every draft it emits was written to pass the same Veto that judges it, so a First-draft veto-pass rate taken over one describes the script rather than a model.
+A Stand-in can show that the machinery runs correctly and can never measure an agent. Its drafts and defect seeds are written to produce declared outcomes through the same Veto, so a First-draft veto-pass rate taken over one describes the script rather than a model.
 
 ## Guarding the repo
 

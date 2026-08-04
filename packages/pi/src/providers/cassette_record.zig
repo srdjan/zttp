@@ -349,7 +349,9 @@ test "writeCassette + loadCassetteFromPath: full disk round-trip" {
 
 const TestErrorInt = u16;
 
-const LocalHttpServer = struct {
+/// One-response loopback server shared by provider and recorder integration
+/// tests. It deliberately knows nothing about either provider's wire format.
+pub const LocalHttpServer = struct {
     allocator: std.mem.Allocator,
     io_backend: std.Io.Threaded,
     listener: std.Io.net.Server,
@@ -360,7 +362,7 @@ const LocalHttpServer = struct {
     closed: bool = false,
     thread_error: std.atomic.Value(TestErrorInt) = std.atomic.Value(TestErrorInt).init(0),
 
-    fn init(
+    pub fn init(
         allocator: std.mem.Allocator,
         response_body: []const u8,
         response_content_type: []const u8,
@@ -379,15 +381,15 @@ const LocalHttpServer = struct {
         };
     }
 
-    fn start(self: *LocalHttpServer) !void {
+    pub fn start(self: *LocalHttpServer) !void {
         self.thread = try std.Thread.spawn(.{}, run, .{self});
     }
 
-    fn url(self: *const LocalHttpServer, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    pub fn url(self: *const LocalHttpServer, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ self.port, path });
     }
 
-    fn join(self: *LocalHttpServer) !void {
+    pub fn join(self: *LocalHttpServer) !void {
         if (self.closed) return;
         self.closed = true;
         if (self.thread) |thread| {

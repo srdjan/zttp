@@ -324,15 +324,9 @@ fn renderSeededViolationFix(
     };
 }
 
-/// The hole arm: read the file, fill one hole through the real tool, apply what
-/// it returns.
-///
-/// It does not call `zts_expert_holes`, which publishes the frame and shells out
-/// to `zig build cli -- check` - that cannot run inside the isolated tmp
-/// workspace the gates use. The coordinates come from the same exact six-byte
-/// match `zts_expert_fill_hole` enforces on whatever it is handed, so the arm
-/// exercises the fill mechanism and the apply path and claims nothing about the
-/// publisher.
+/// The hole arm: read the file, publish its compiler frame, fill one hole
+/// through the real tool, then apply what the tool returns. A later turn starts
+/// from the newly written file and repeats the same sequence for the next hole.
 ///
 /// Step 2 is the first place the stand-in consumes a tool RESULT rather than
 /// counting round-trips. It parses the output itself and refuses anything it
@@ -340,7 +334,6 @@ fn renderSeededViolationFix(
 /// and an empty one are indistinguishable to a playbook that assumes.
 fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
     const file = findFile(parsed.ask) orelse "handler.ts";
-    const seed = hole_seeds.findByAsk(parsed.ask);
 
     return switch (parsed.step_index) {
         0 => blk: {
@@ -349,22 +342,38 @@ fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
         },
         1 => blk: {
-            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fill-hole");
-            const at = hole_seeds.firstHole(source) orelse break :blk try renderSourceMiss(
-                allocator,
-                "fill-hole",
-                "the supplied source carries no `hole()` to fill",
-            );
-            const expression = if (seed) |s| s.expressions[0] else break :blk try renderSourceMiss(
-                allocator,
-                "fill-hole",
-                "no seeded expression is declared for this ask",
-            );
-            const args = try renderFillHoleArgs(allocator, file, at.line, at.column, expression);
+            const args = try renderReadArgs(allocator, file);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 1, "zts_expert_fill_hole", args);
+            break :blk try renderToolCall(allocator, 1, "zts_expert_holes", args);
         },
         2 => blk: {
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fill-hole");
+            const output = parsed.last_output orelse break :blk try renderSourceMiss(
+                allocator,
+                "fill-hole",
+                "the hole publisher returned nothing to fill",
+            );
+            const at = readFirstHoleSite(allocator, output) orelse break :blk try renderSourceMiss(
+                allocator,
+                "fill-hole",
+                "the hole publisher returned no readable frame",
+            );
+            const selected = try hole_seeds.findBySource(allocator, source) orelse break :blk try renderSourceMiss(
+                allocator,
+                "fill-hole",
+                "the supplied source is not a reachable state of one hole seed",
+            );
+            const expression = try hole_seeds.nextExpressionForSource(allocator, selected, source) orelse
+                break :blk try renderSourceMiss(
+                    allocator,
+                    "fill-hole",
+                    "the supplied source is not a reachable state of the selected hole seed",
+                );
+            const args = try renderFillHoleArgs(allocator, file, at.line, at.column, expression);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 2, "zts_expert_fill_hole", args);
+        },
+        3 => blk: {
             const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fill-hole");
             const output = parsed.last_output orelse break :blk try renderSourceMiss(
                 allocator,
@@ -379,28 +388,34 @@ fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             );
             defer allocator.free(content);
 
-            // One fill per turn is the shape of this loop, not a preference. The
-            // tool re-reads from disk on every call, so a second fill in the same
-            // turn is computed against the original bytes and drops the first -
-            // see docs/solutions/logic-errors/two-hole-fills-in-one-turn-do-not-compose.md.
-            // Applying content that still carries a hole would hide that.
-            if (hole_seeds.countHoles(content) > 0) {
-                break :blk try renderSourceMiss(
-                    allocator,
-                    "fill-hole",
-                    "the proposed content still carries a hole; fills do not compose in one turn, so ask again for the remaining hole",
-                );
-            }
-
             const args = try renderApplyArgs(allocator, file, content, source);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 2, "apply_edit", args);
+            break :blk try renderToolCall(allocator, 3, "apply_edit", args);
         },
         else => try renderText(
             allocator,
             "The deterministic fill-hole playbook is complete. No further step is available.",
         ),
     };
+}
+
+const HoleSite = struct { line: u32, column: u32 };
+
+fn readFirstHoleSite(allocator: std.mem.Allocator, output: []const u8) ?HoleSite {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, output, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+    const holes = parsed.value.object.get("holes") orelse return null;
+    if (holes != .array or holes.array.items.len == 0) return null;
+    const first = holes.array.items[0];
+    if (first != .object) return null;
+    const line = first.object.get("line") orelse return null;
+    const column = first.object.get("column") orelse return null;
+    if (line != .integer or column != .integer) return null;
+    const line_number = std.math.cast(u32, line.integer) orelse return null;
+    const column_number = std.math.cast(u32, column.integer) orelse return null;
+    if (line_number == 0 or column_number == 0) return null;
+    return .{ .line = line_number, .column = column_number };
 }
 
 /// `proposed_content` from a `zts_expert_fill_hole` result, or null when the

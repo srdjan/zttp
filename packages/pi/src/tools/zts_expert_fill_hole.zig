@@ -111,10 +111,21 @@ fn execute(
     const absolute = try common.resolveInsideWorkspace(allocator, root, path);
     defer allocator.free(absolute);
 
-    const source = zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
+    const source = zts.file_io.readFile(allocator, absolute, common.max_hole_handler_source_bytes) catch |e| {
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": failed to read {s}: {s}\n", .{ absolute, @errorName(e) });
     };
     defer allocator.free(source);
+
+    if (!common.holeReplacementFitsOutput(source.len, expression.len)) {
+        return try refusal(
+            allocator,
+            path,
+            line,
+            column,
+            "proposed_content_too_large",
+            "the replacement would exceed the full proposed-content result limit; use a smaller expression",
+        );
+    }
 
     const offset = holeOffsetAt(source, line, column) orelse {
         return try refusal(
@@ -206,6 +217,17 @@ fn buildResult(allocator: std.mem.Allocator, args: BuildArgs) !registry_mod.Tool
 
     const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
+    if (llm_text.len > common.max_hole_tool_result_bytes) {
+        allocator.free(llm_text);
+        return refusal(
+            allocator,
+            args.path,
+            args.line,
+            args.column,
+            "proposed_content_too_large",
+            "the complete verified proposal exceeds the tool-result limit; use a smaller expression or handler",
+        );
+    }
 
     const summary = try std.fmt.allocPrint(
         allocator,
@@ -292,6 +314,13 @@ test "holeOffsetAt picks the named hole when a line carries two" {
     try testing.expect(first != second);
     try testing.expectEqualStrings("hole()", source[first .. first + 6]);
     try testing.expectEqualStrings("hole()", source[second .. second + 6]);
+}
+
+test "fill uses the publisher's shared proposed-content boundary" {
+    const source_len = common.max_hole_handler_source_bytes;
+    const allowed = common.maxHoleExpressionBytes(source_len);
+    try testing.expect(common.holeReplacementFitsOutput(source_len, allowed));
+    try testing.expect(!common.holeReplacementFitsOutput(source_len, allowed + 1));
 }
 
 test "execute fills the named hole and leaves the rest of the file alone" {

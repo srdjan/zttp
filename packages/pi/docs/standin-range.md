@@ -2,13 +2,13 @@
 
 # Deterministic stand-in range
 
-Range version: `step-6-v1`
+Range version: `step-6-v2`
 
-Range hash: `8ce1c203f6b57f18e8cf25b6429102eac622ff66c5c8ed1668f1b95fa78185aa`
+Range hash: `db31c251dc652ad03473e0d94d13b513328027607ccd97c0edaa667b03c67c59`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
-This server is a scripted responder, not a model. Every draft it emits is authored by repo code to pass the same veto that judges it, so it can show that the harness runs correctly and can say nothing about what a model would draft. Convergence numbers come from recorded model turns only; see `docs/convergence.md`.
+This server is a scripted responder, not a model. Its drafts and defect seeds are authored by repo code to produce declared outcomes through the same veto and repair loop, so it can show that the harness runs correctly and can say nothing about what a model would draft. Convergence numbers come from recorded model turns only; see `docs/convergence.md`.
 
 ## `explain`
 
@@ -74,7 +74,7 @@ This server is a scripted responder, not a model. Every draft it emits is author
 
 - Task kind: `hole_fill`
 - Result: workspace edit
-- Behavior: Locate one typed hole, fill it through `zts_expert_fill_hole`, and apply what the tool returns.
+- Behavior: Read the compiler's typed-hole frame, fill one site through `zts_expert_fill_hole`, and apply what the tool returns.
 - Canonical prompt: Fill the remaining hole in handler.ts
 - Example paraphrases:
   - Fill the hole on line 3 of handler.ts
@@ -101,10 +101,12 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `compound-assign` | `ZTS613` | salvaged |
 | `var-binding` | `ZTS001` | model_retry |
 | `dead-code` | `ZTS304` | model_retry |
+| `unchecked-result` | `ZTS303` | compiler_repair |
+| `unchecked-optional` | `ZTS308` | compiler_repair |
 
 ## Hole seeds
 
-Skeletons whose response expressions are holes. The arm reads the file, fills one hole through the real `zts_expert_fill_hole`, and applies what the tool returns. It does not call `zts_expert_holes`, which publishes the frame and shells out to a build command that cannot run in an isolated workspace, so the arm proves the fill mechanism and says nothing about the publisher.
+Skeletons whose response expressions are holes. The arm reads the file, publishes the frame through the real in-process `zts_expert_holes`, fills one site through `zts_expert_fill_hole`, and applies what the tool returns. Multi-hole seeds repeat that sequence on the next turn, so each accepted proposal becomes the next frame's baseline.
 
 | Seed | Holes |
 |---|---|

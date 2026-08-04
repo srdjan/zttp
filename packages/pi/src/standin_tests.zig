@@ -16,7 +16,6 @@ const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwd_support = @import("test_support/cwd.zig");
 const defect_seeds = @import("standin/defect_seeds.zig");
 const hole_seeds = @import("standin/hole_seeds.zig");
-const fill_hole_tool = @import("tools/zts_expert_fill_hole.zig");
 const playbook = @import("standin/playbook.zig");
 const request = @import("standin/request.zig");
 const range = @import("standin/range.zig");
@@ -181,6 +180,32 @@ test "stand-in seeded arm: a rejected draft is repaired on the retry round trip"
     std.debug.print("[standin-gate] seeded retry arm {d}/{d} seeds\n", .{ checked, checked });
 }
 
+test "stand-in seeded arm: compiler repair lands without a model retry" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var checked: usize = 0;
+    for (&defect_seeds.seeds) |*seed| {
+        if (seed.class != .compiler_repair) continue;
+        checked += 1;
+
+        const run = try runSeedArm(allocator, seed);
+        try testing.expect(!run.result.first_draft_veto_pass);
+        try testing.expect(run.result.compiler_authored_apply);
+        try testing.expectEqual(@as(u32, 0), run.result.veto_retry_count);
+        // Four loopback wire turns gather facts and submit the bad draft. The
+        // compiler repair lands immediately after that rejection, with no fifth
+        // turn asking a model to redraft it.
+        try testing.expectEqual(@as(u8, 4), run.result.roundtrips);
+        try testing.expect(run.result.applied_edit);
+        try testing.expectEqualStrings(seed.good_draft, run.on_disk);
+    }
+
+    try testing.expect(checked >= 2);
+    std.debug.print("[standin-gate] compiler repair arm {d}/{d} seeds\n", .{ checked, checked });
+}
+
 // Salvage is the other half, and it is a different claim: the draft is rejected
 // by the checker and rescued by normalization, so the model never sees a
 // rejection and the turn still counts as a first-draft pass. Asserting
@@ -291,87 +316,129 @@ test "stand-in hole seeds declare the holes their sources carry" {
     for (hole_seeds.seeds) |seed| {
         try testing.expectEqual(seed.holes, hole_seeds.countHoles(seed.source));
         try testing.expectEqual(seed.holes, seed.expressions.len);
+        const first_expression = try hole_seeds.nextExpressionForSource(testing.allocator, &seed, seed.source);
+        try testing.expectEqualStrings(seed.expressions[0], first_expression.?);
+        const selected = try hole_seeds.findBySource(testing.allocator, seed.source) orelse
+            return error.HoleSeedSourceSelectsNothing;
+        try testing.expectEqualStrings(seed.id, selected.id);
         try testing.expectEqual(
             expert_workflow.TaskKind.hole_fill,
             expert_workflow.classify(seed.ask).kind,
         );
         if (seed.holes >= 2) with_two += 1;
     }
-    // The composition pin below needs a multi-hole seed to exist at all.
+    // The multi-turn composition gate below needs a multi-hole seed to exist.
     try testing.expect(with_two >= 1);
+
+    const single = hole_seeds.findById("single-hole") orelse return error.MissingHoleSeed;
+    const foreign =
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const other = 9;
+        \\  return hole();
+        \\}
+    ;
+    try testing.expect(try hole_seeds.nextExpressionForSource(testing.allocator, single, foreign) == null);
+    try testing.expect(try hole_seeds.findBySource(testing.allocator, foreign) == null);
 }
 
-// Pins a live defect: `zts_expert_fill_hole` proposes an edit and re-reads the
-// file from disk on every call, so two fills in one turn do not compose - the
-// second is computed against the original bytes and drops the first. Written up
-// in docs/solutions/logic-errors/two-hole-fills-in-one-turn-do-not-compose.md,
-// and it is why the hole arm of the convergence corpus seeds one hole per case
-// and why the round-trip comparison rests on four paired cases.
-//
-// This test goes RED the day fills compose, which is the point: it is the
-// ready-made failing test for whichever fix direction is chosen, and it is
-// flipped together with that fix rather than deleted.
-test "stand-in hole arm: two fills in one turn do not compose (pinned live defect)" {
+test "stand-in hole arm: two one-fill turns compose through publisher and apply" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     const seed = hole_seeds.findById("two-holes") orelse return error.MissingHoleSeed;
-
+    const entry = range.findById("fill-hole") orelse return error.MissingRangeEntry;
+    try testing.expectEqual(@as(usize, 2), entry.paraphrases.len);
     var tmp = try IsolatedTmp.init(allocator, "standin-hole-compose");
     defer tmp.cleanup(allocator);
     try tmp.writeFile(allocator, "handler.ts", seed.source);
+
+    var server = try server_mod.Server.init(allocator, 0, null);
+    defer server.deinit();
+    try server.start();
+    const endpoint = try server.url(allocator, "/v1/responses");
+
+    var registry = try app.buildRegistry(allocator);
+    defer registry.deinit(allocator);
+    const tools_json = try buildOpenAIToolsJson(allocator, &registry);
+    const system_prompt = try expert_persona.buildSystemPrompt(allocator);
+    var session = try agent.AgentSession.initOpenAI(
+        allocator,
+        "unused-loopback-key",
+        system_prompt,
+        tools_json,
+        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+    );
+    defer session.deinit(allocator);
 
     const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
     defer restoreCwd(saved_cwd);
     try std.Io.Threaded.chdir(tmp.abs_path);
 
-    // Fill the first hole. Nothing is written: the tool returns the proposed
-    // bytes and the verdict, and the caller decides.
-    const first = try fillHoleAt(allocator, seed.source, seed.expressions[0]);
-    try testing.expect(std.mem.indexOf(u8, first, seed.expressions[0]) != null);
-    try testing.expectEqual(@as(usize, 1), hole_seeds.countHoles(first));
+    const options: loop.RunOptions = .{
+        .workspace_root = tmp.abs_path,
+        .max_attempts = 1,
+        .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
+        .replay_mode = false,
+        .turn_timeout_ms = 0,
+    };
+    const first = try loop.runTurnWith(
+        allocator,
+        session.modelClient(),
+        &registry,
+        &session.transcript,
+        entry.paraphrases[0],
+        options,
+    );
+    try testing.expect(first.applied_edit);
+    try testing.expectEqual(@as(u8, 4), first.roundtrips);
 
-    // Now the second hole, at the coordinates it has in the proposal. Composing
-    // would mean this returns bytes carrying both expressions.
-    const second = try fillHoleAt(allocator, first, seed.expressions[1]);
+    const handler_path = try tmp.childPath(allocator, "handler.ts");
+    const after_first = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+    try testing.expectEqual(@as(usize, 1), hole_seeds.countHoles(after_first));
+    try testing.expect(std.mem.indexOf(u8, after_first, seed.expressions[0]) != null);
 
-    // It does not. The tool re-read the original file, so the first fill is gone
-    // and one hole remains where the first expression should be.
-    try testing.expectEqual(@as(usize, 1), hole_seeds.countHoles(second));
-    try testing.expect(std.mem.indexOf(u8, second, seed.expressions[1]) != null);
-    try testing.expect(std.mem.indexOf(u8, second, seed.expressions[0]) == null);
-    std.debug.print("[standin-gate] hole fills do not compose in one turn (pinned)\n", .{});
-}
+    const second = try loop.runTurnWith(
+        allocator,
+        session.modelClient(),
+        &registry,
+        &session.transcript,
+        entry.paraphrases[1],
+        options,
+    );
+    try server.stop();
+    try testing.expect(second.applied_edit);
+    try testing.expectEqual(@as(u8, 4), second.roundtrips);
 
-/// Call the real `zts_expert_fill_hole` for the first hole in `frame`, and hand
-/// back the content it proposes.
-///
-/// `frame` is what the caller believes the file to be, and the coordinates come
-/// from it. That is exactly the situation a second fill in one turn is in, and
-/// it is why the tool reading from disk instead is observable at all.
-fn fillHoleAt(allocator: std.mem.Allocator, frame: []const u8, expression: []const u8) ![]u8 {
-    const at = hole_seeds.firstHole(frame) orelse return error.NoHoleInFrame;
+    const after_second = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
+    try testing.expectEqual(@as(usize, 0), hole_seeds.countHoles(after_second));
+    for (seed.expressions) |expression| {
+        try testing.expect(std.mem.indexOf(u8, after_second, expression) != null);
+    }
+    try testing.expectEqual(@as(usize, 2), transcriptToolResultCount(&session.transcript, "zts_expert_holes"));
 
-    // Escaped rather than interpolated: an expression is arbitrary source, and
-    // a string literal like `"count"` carries the quotes that would end the
-    // JSON field early.
-    var arg_buf = TextBuffer.init(allocator);
-    defer arg_buf.deinit();
-    const w = arg_buf.writer();
-    try w.print("{{\"path\":\"handler.ts\",\"line\":{d},\"column\":{d},\"expression\":", .{ at.line, at.column });
-    try zts.json_utils.writeJsonString(w, expression);
-    try w.writeAll("}");
-    const args = try arg_buf.toOwnedSlice();
-    var result = try fill_hole_tool.tool.execute(allocator, &.{args});
-    defer result.deinit(allocator);
-
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.llm_text, .{});
-    defer parsed.deinit();
-    if (parsed.value != .object) return error.FillHoleResultUnreadable;
-    const content = parsed.value.object.get("proposed_content") orelse return error.FillHoleResultUnreadable;
-    if (content != .string) return error.FillHoleResultUnreadable;
-    return allocator.dupe(u8, content.string);
+    // The second publisher result must describe the file after the first fill,
+    // not replay the original two-hole frame. Its remaining hole is the return
+    // expression on line 4, and the first fill makes `label` available as an
+    // unannotated binding there.
+    const second_frame = transcriptToolResultAt(&session.transcript, "zts_expert_holes", 1) orelse
+        return error.MissingSecondHoleFrame;
+    var parsed_frame = try std.json.parseFromSlice(std.json.Value, allocator, second_frame, .{});
+    defer parsed_frame.deinit();
+    if (parsed_frame.value != .object) return error.InvalidSecondHoleFrame;
+    const holes = parsed_frame.value.object.get("holes") orelse return error.MissingSecondHoleFrameHoles;
+    if (holes != .array) return error.InvalidSecondHoleFrameHoles;
+    try testing.expectEqual(@as(usize, 1), holes.array.items.len);
+    const hole = holes.array.items[0];
+    if (hole != .object) return error.InvalidSecondHoleFrameHole;
+    const line = hole.object.get("line") orelse return error.MissingSecondHoleFrameLine;
+    const column = hole.object.get("column") orelse return error.MissingSecondHoleFrameColumn;
+    if (line != .integer or column != .integer) return error.InvalidSecondHoleFrameCoordinates;
+    try testing.expectEqual(@as(i64, 4), line.integer);
+    try testing.expectEqual(@as(i64, 10), column.integer);
+    try testing.expectEqualStrings("unknown", holeFrameBindingType(hole.object, "label") orelse
+        return error.MissingPostFillLabelBinding);
+    std.debug.print("[standin-gate] two hole fills compose across two offline turns\n", .{});
 }
 
 test "stand-in miss returns its marker through the real loop and applies no edit" {
@@ -860,7 +927,16 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
     try server.stop();
 
     try testing.expectEqual(entry.kind, result.workflow_kind);
-    try testing.expect(!transcriptContains(&session.transcript, "[standin-miss]"));
+    if (transcriptContains(&session.transcript, "[standin-miss]")) {
+        for (session.transcript.entries.items) |transcript_entry| {
+            switch (transcript_entry) {
+                .model_text => |value| std.debug.print("[standin-debug] model {s}\n", .{value}),
+                .tool_result => |value| std.debug.print("[standin-debug] tool {s}: {s}\n", .{ value.tool_name, value.llm_text }),
+                else => {},
+            }
+        }
+        return error.StandinRangeMiss;
+    }
 
     const handler_path = try tmp.childPath(allocator, "handler.ts");
     const handler = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
@@ -946,6 +1022,57 @@ fn transcriptContains(transcript: *const transcript_mod.Transcript, needle: []co
         }
     }
     return false;
+}
+
+fn transcriptToolResultCount(
+    transcript: *const transcript_mod.Transcript,
+    tool_name: []const u8,
+) usize {
+    var count: usize = 0;
+    for (transcript.entries.items) |entry| {
+        switch (entry) {
+            .tool_result => |result| {
+                if (std.mem.eql(u8, result.tool_name, tool_name)) count += 1;
+            },
+            else => {},
+        }
+    }
+    return count;
+}
+
+fn transcriptToolResultAt(
+    transcript: *const transcript_mod.Transcript,
+    tool_name: []const u8,
+    ordinal: usize,
+) ?[]const u8 {
+    var found: usize = 0;
+    for (transcript.entries.items) |entry| {
+        switch (entry) {
+            .tool_result => |result| {
+                if (!std.mem.eql(u8, result.tool_name, tool_name)) continue;
+                if (found == ordinal) return result.llm_text;
+                found += 1;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+fn holeFrameBindingType(
+    hole: std.json.ObjectMap,
+    name: []const u8,
+) ?[]const u8 {
+    const in_scope = hole.get("inScope") orelse return null;
+    if (in_scope != .array) return null;
+    for (in_scope.array.items) |binding| {
+        if (binding != .object) continue;
+        const binding_name = binding.object.get("name") orelse continue;
+        const binding_type = binding.object.get("type") orelse continue;
+        if (binding_name != .string or binding_type != .string) continue;
+        if (std.mem.eql(u8, binding_name.string, name)) return binding_type.string;
+    }
+    return null;
 }
 
 fn restoreCwd(path: []const u8) void {

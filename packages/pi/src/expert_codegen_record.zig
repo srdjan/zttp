@@ -1,18 +1,16 @@
-//! expert_codegen_record - live baseline recorder for the codegen eval.
+//! expert_codegen_record - baseline recorder and offline recorder smoke test.
 //!
-//! Recording spends real tokens, so everything here is gated behind
-//! `ZTTP_CODEGEN_RECORD=1` and a live ANTHROPIC_API_KEY; without both, every
-//! test skips and the default `zig build test-expert-app` never touches the
-//! network. The recorder drives real expert turns (full persona + tool
-//! registry) through the live Anthropic client, which tees each roundtrip's SSE
-//! body to a per-case cassette. Those cassettes are then committed and replayed
-//! deterministically (free) by the offline eval. Recorded once, replayed
-//! forever.
+//! Corpus recording spends real tokens and stays gated behind
+//! `ZTTP_CODEGEN_RECORD=1` plus a live ANTHROPIC_API_KEY. Its transport,
+//! capture, disk, and replay path is exercised separately against a loopback
+//! Anthropic response, so harness development needs neither a key nor credit.
+//! Live cassettes remain the only source for model-behavior measurements.
 
 const std = @import("std");
 const zts = @import("zts");
 const anthropic = @import("providers/anthropic/client.zig");
 const cassette_client = @import("providers/cassette_client.zig");
+const cassette_record = @import("providers/cassette_record.zig");
 const transcript_mod = @import("transcript.zig");
 const loop = @import("loop.zig");
 const app = @import("app.zig");
@@ -161,41 +159,68 @@ fn recordingRequested() bool {
     return std.mem.eql(u8, flag, "1");
 }
 
-// Smoke test: prove the live record-tee writes a cassette that replays to the
-// same reply, with a single cheap call, before spending tokens on the full
-// corpus. Skipped unless ZTTP_CODEGEN_RECORD=1 and a key is present.
-test "record-tee captures a faithful anthropic cassette (live, gated)" {
-    const allocator = testing.allocator;
-    if (!recordingRequested()) return error.SkipZigTest;
-    const key = envValue("ANTHROPIC_API_KEY") orelse return error.SkipZigTest;
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
+// Smoke test: prove the production Anthropic record tee writes a cassette that
+// replays to the same reply. The wire response is loopback-local so harness
+// changes never need provider credit merely to reach capture and replay.
+test "record-tee captures a faithful anthropic cassette offline" {
+    // Both provider parsers intentionally use leaky arena JSON parsing because
+    // one model turn owns the entire result. Match that production lifetime.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const a = arena.allocator();
+    const allocator = arena.allocator();
+    const response_body =
+        "event: message_start\n" ++
+        "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":1}}}\n\n" ++
+        "event: content_block_start\n" ++
+        "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" ++
+        "event: content_block_delta\n" ++
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"OK\"}}\n\n" ++
+        "event: content_block_stop\n" ++
+        "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" ++
+        "event: message_delta\n" ++
+        "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" ++
+        "event: message_stop\n" ++
+        "data: {\"type\":\"message_stop\"}\n\n";
+
+    var server = try cassette_record.LocalHttpServer.init(allocator, response_body, "text/event-stream");
+    try server.start();
+    errdefer server.join() catch {};
+    const endpoint = try server.url(allocator, "/v1/messages");
+    defer allocator.free(endpoint);
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const record_root = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
+    defer allocator.free(record_root);
 
     var client = anthropic.Client.init(.{
-        .api_key = key,
+        .api_key = "unused-loopback-key",
         .system_prompt = "You are a terse assistant. Reply with exactly one word.",
+        .model = "deterministic-recorder-smoke",
+        .base_url = endpoint,
     });
-    client.enableRecording(cassette_root, "_smoke");
+    client.enableRecording(record_root, "_smoke");
 
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(allocator);
     try tr.append(allocator, .{ .user_text = "Say OK." });
 
-    const live = client.sendTurn(a, &tr, null) catch |err| {
-        std.debug.print("[codegen-smoke] sendTurn failed: {s}\n", .{@errorName(err)});
-        return err;
-    };
+    const live = try client.sendTurn(allocator, &tr, null);
+    try server.join();
 
     // Replay the just-written cassette and confirm it round-trips to a reply.
-    const path = cassette_root ++ "/_smoke/step_0.jsonl";
-    const cassette = try cassette_client.loadCassetteFromPath(a, path);
-    const replayed = try cassette_client.replay(a, cassette);
+    const path = try std.fmt.allocPrint(allocator, "{s}/_smoke/step_0.jsonl", .{record_root});
+    defer allocator.free(path);
+    const cassette = try cassette_client.loadCassetteFromPath(allocator, path);
+    const replayed = try cassette_client.replay(allocator, cassette);
 
     const live_kind = std.meta.activeTag(live.reply.response);
     const replay_kind = std.meta.activeTag(replayed.reply.response);
     try testing.expectEqual(live_kind, replay_kind);
+    switch (replayed.reply.response) {
+        .final_text => |text| try testing.expectEqualStrings("OK", text),
+        else => return error.ExpectedFinalText,
+    }
     std.debug.print("[codegen-smoke] live and replay agree: {s}\n", .{@tagName(replay_kind)});
 }
 
