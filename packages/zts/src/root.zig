@@ -194,6 +194,10 @@ pub const TypePoolError = type_pool.TypePoolError;
 pub const TypeIndex = type_pool.TypeIndex;
 pub const null_type_idx = type_pool.null_type_idx;
 pub const parseTypeExpr = type_pool.parseTypeExpr;
+/// Structural identity of a type, for a consumer that needs to say two types
+/// are the same without holding a pool index. The frozen-signature gate pins
+/// every virtual-module export by this digest.
+pub const typeDigest = type_key.typeDigest;
 pub const TypeEnv = type_env.TypeEnv;
 pub const TypeChecker = type_checker.TypeChecker;
 pub const StrictChecker = strict_checker.StrictChecker;

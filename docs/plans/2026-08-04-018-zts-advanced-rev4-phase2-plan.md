@@ -293,6 +293,25 @@ corpus fails rather than reporting a pass over nothing.
 
 **Tests:** the floor; per-export digest stability; the no-`unknown` assertion.
 
+**Measured: 24 modules, 90 exports, and one name that does not resolve.** Every
+emitted signature type parses, and none falls back to `unknown` - `.unknown` is
+a kind a binding declares, and the gate separates the declared spelling from the
+parser giving up. One shape carries an unresolved name: `Record<string,
+unknown>`, which `.object` and `.optional_object` emit. The pool has no
+index-signature type, so the application stays over an unresolved base, which
+assignability answers true for in both directions until A1 lands. The gate pins
+the unresolved set by exact membership rather than tolerating a count, so a
+second such name fails it.
+
+`typeDigest` joined the curated surface at the bottom of `root.zig` rather than
+widening `scripts/module-boundary.allow`, since a consumer that needs structural
+identity without holding a pool index is exactly what that surface is for.
+
+The gate was perturbed to prove it is not vacuous: changing one `ReturnKind`
+spelling fails the pin, and pointing one at an undeclared name fails the
+resolution assertion. Both were checked through `zig build test` by exit status,
+not by reading its output.
+
 ---
 
 ## Risks

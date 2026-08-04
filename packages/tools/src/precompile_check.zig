@@ -679,3 +679,165 @@ fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
         .result => "{ ok: boolean; value?: unknown; error?: string; errors?: unknown }",
     };
 }
+
+// ---------------------------------------------------------------------------
+// Frozen signature corpus (phase 2 exit gate)
+//
+// The corpus is the `.d.ts` surface `generateTypeDefs` writes from
+// `builtin_modules.all`, so it covers every virtual-module export by
+// construction and cannot drift from the bindings: adding an export adds a row
+// here in the same commit that adds the binding.
+// ---------------------------------------------------------------------------
+
+/// Every signature member of every export, as the emitter spells it.
+fn forEachSignatureType(
+    comptime Ctx: type,
+    ctx: *Ctx,
+    visit: fn (*Ctx, module: []const u8, export_name: []const u8, position: usize, text: []const u8) anyerror!void,
+) !usize {
+    var count: usize = 0;
+    for (zts.builtin_modules.all) |binding| {
+        for (binding.exports) |func| {
+            for (func.param_types, 0..) |pt, i| {
+                try visit(ctx, binding.specifier, func.name, i, returnKindToTs(pt));
+                count += 1;
+            }
+            try visit(ctx, binding.specifier, func.name, func.param_types.len, returnKindToTs(func.returns));
+            count += 1;
+        }
+    }
+    return count;
+}
+
+/// Digest every signature member into one rolling hash. Two runs of this over
+/// an unchanged binding set must agree, and any signature change moves it - so
+/// the pin below is what makes such a change visible in the diff rather than
+/// silent.
+fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32]u8 {
+    var pool = zts.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    const Ctx = struct {
+        pool: *zts.TypePool,
+        allocator: std.mem.Allocator,
+        hasher: *std.crypto.hash.sha2.Sha256,
+        /// Duped: `firstUnresolvedName` points into the pool's name storage,
+        /// which the next `parseTypeExpr` may reallocate, so keeping the slice
+        /// as a hash key crashes on the next compare.
+        unresolved: std.ArrayListUnmanaged([]u8) = .empty,
+        fallback_unknown: usize = 0,
+        unparsed: usize = 0,
+    };
+    var ctx: Ctx = .{ .pool = &pool, .allocator = allocator, .hasher = &hasher };
+    defer {
+        for (ctx.unresolved.items) |name| allocator.free(name);
+        ctx.unresolved.deinit(allocator);
+    }
+
+    const visit = struct {
+        fn f(c: *Ctx, module: []const u8, export_name: []const u8, position: usize, text: []const u8) anyerror!void {
+            const idx = zts.parseTypeExpr(c.pool, c.allocator, text);
+            if (idx == zts.null_type_idx) {
+                c.unparsed += 1;
+                return;
+            }
+            // `unknown` is a type a binding may declare. `unknown` arrived at
+            // any other way is the parser giving up, and a signature that gives
+            // up is the fallback this gate exists to refuse.
+            if (c.pool.getTag(idx) == .t_unknown_type and !std.mem.eql(u8, text, "unknown")) {
+                c.fallback_unknown += 1;
+            }
+            if (c.pool.firstUnresolvedName(idx)) |name| {
+                var known = false;
+                for (c.unresolved.items) |seen| {
+                    if (std.mem.eql(u8, seen, name)) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) try c.unresolved.append(c.allocator, try c.allocator.dupe(u8, name));
+            }
+            const digest = try zts.typeDigest(c.pool, c.allocator, idx);
+            c.hasher.update(module);
+            c.hasher.update(export_name);
+            c.hasher.update(std.mem.asBytes(&position));
+            c.hasher.update(&digest);
+        }
+    }.f;
+
+    out_members.* = try forEachSignatureType(Ctx, &ctx, visit);
+    try std.testing.expectEqual(@as(usize, 0), ctx.unparsed);
+    try std.testing.expectEqual(@as(usize, 0), ctx.fallback_unknown);
+
+    // One name in the corpus does not resolve: `Record`, which `.object` and
+    // `.optional_object` emit as `Record<string, unknown>`. The pool has no
+    // index-signature type, so the application stays over an unresolved base -
+    // which assignability answers true for, in both directions, until D1
+    // amendment A1 lands. It is pinned by exact set rather than tolerated: a
+    // second unresolved name appearing in the surface fails here.
+    try std.testing.expectEqual(@as(usize, 1), ctx.unresolved.items.len);
+    try std.testing.expectEqualStrings("Record", ctx.unresolved.items[0]);
+
+    var out: [32]u8 = undefined;
+    hasher.final(&out);
+    return out;
+}
+
+/// The committed digest of the whole signature surface. Regenerate deliberately:
+/// a diff here is a change to what every handler sees from `zttp:*`.
+const frozen_signature_digest = "c9abdb0068429a465c1e9abdd77f7bea2bc9312abd52a29d44fa0fd9d878c094";
+
+test "frozen signature corpus: the gate has an input before it has a verdict" {
+    // The floor. A corpus that is empty, or an emitter that writes nothing,
+    // satisfies every assertion below over nothing at all - and then gets cited
+    // as evidence that every export types.
+    try std.testing.expect(zts.builtin_modules.all.len > 0);
+
+    var exports: usize = 0;
+    for (zts.builtin_modules.all) |binding| exports += binding.exports.len;
+    try std.testing.expect(exports > 0);
+
+    const allocator = std.testing.allocator;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    generateTypeDefs(&aw.writer);
+    const emitted = aw.written();
+    try std.testing.expect(emitted.len > 0);
+
+    // Coverage, not mere presence: one `declare module` per module and one
+    // `export function` per export, so an emitter that silently dropped a
+    // module fails here rather than shrinking the corpus in silence.
+    try std.testing.expectEqual(zts.builtin_modules.all.len, std.mem.count(u8, emitted, "declare module \""));
+    try std.testing.expectEqual(exports, std.mem.count(u8, emitted, "  export function "));
+    for (zts.builtin_modules.all) |binding| {
+        try std.testing.expect(std.mem.indexOf(u8, emitted, binding.specifier) != null);
+    }
+}
+
+test "frozen signature corpus: every export types, with no fallback to unknown" {
+    const allocator = std.testing.allocator;
+    var members: usize = 0;
+    _ = try signatureCorpusDigest(allocator, &members);
+    // The floor again, on the unit this test actually iterates: a member count
+    // of zero would pass the assertions inside for the same empty reason.
+    try std.testing.expect(members > 0);
+}
+
+test "frozen signature corpus: digests are stable and match the committed pin" {
+    const allocator = std.testing.allocator;
+    var first_members: usize = 0;
+    var second_members: usize = 0;
+    const first = try signatureCorpusDigest(allocator, &first_members);
+    const second = try signatureCorpusDigest(allocator, &second_members);
+    try std.testing.expectEqual(first_members, second_members);
+    try std.testing.expectEqualSlices(u8, &first, &second);
+
+    var hex: [64]u8 = undefined;
+    const digits = "0123456789abcdef";
+    for (first, 0..) |byte, i| {
+        hex[i * 2] = digits[byte >> 4];
+        hex[i * 2 + 1] = digits[byte & 0x0f];
+    }
+    try std.testing.expectEqualStrings(frozen_signature_digest, &hex);
+}
