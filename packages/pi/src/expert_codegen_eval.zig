@@ -365,6 +365,86 @@ pub fn countFailingCode(results: []const CaseResult, code: []const u8) usize {
     return n;
 }
 
+/// A set of diagnostic codes, in first-seen order. Registry codes are the
+/// registry's own comptime literals and are stored as-is; off-registry codes
+/// point into transcript text and are duped on insert.
+pub const CodeSet = std.StringArrayHashMapUnmanaged(void);
+
+/// Every registry rule a turn's transcript reports, and every diagnostic code
+/// it reports that the registry does not carry.
+///
+/// `firstZtsCode` answers the gap histogram's question - which rule did this
+/// case trip first. This answers the coverage question: which rules does the
+/// corpus exercise at all. A fence no case stands on cannot move a published
+/// number, and nine consecutive rows reading 90% over one corpus is what that
+/// looks like from outside. Nothing joined the corpus to the registry before
+/// this, so the argument was made in prose, per row.
+///
+/// Codes are matched as whole tokens against `all_rules` rather than by a
+/// prefix pattern: the registry carries `ZTS`, `POL`, and `PROP` codes, and a
+/// pattern guessing at their shapes would quietly drop a family. The second scan
+/// is the honest complement. `ZTS042` (stripper) and `ZTS204` (type checker) are
+/// real diagnostics this corpus trips that no registry entry carries, so the
+/// policy hash cannot see them and neither could a count taken over `all_rules`
+/// alone.
+pub fn collectCodes(
+    allocator: std.mem.Allocator,
+    tr: *const transcript_mod.Transcript,
+    registry_hits: *CodeSet,
+    off_registry: *CodeSet,
+) !void {
+    for (tr.entries.items) |entry| {
+        const text: []const u8 = switch (entry) {
+            .diagnostic_box => |b| b.llm_text,
+            .tool_result => |t| if (isViolationTool(t.tool_name)) t.llm_text else continue,
+            else => continue,
+        };
+
+        for (zts.rule_registry.all_rules) |rule| {
+            if (containsCodeToken(text, rule.code)) {
+                // The key is the registry's own literal, so it outlives any
+                // transcript and needs no dupe.
+                _ = try registry_hits.getOrPut(allocator, rule.code);
+            }
+        }
+
+        var i: usize = 0;
+        while (std.mem.indexOfPos(u8, text, i, "ZTS")) |pos| {
+            var end = pos + 3;
+            while (end < text.len and std.ascii.isDigit(text[end])) end += 1;
+            i = pos + 3;
+            if (end == pos + 3) continue;
+            const code = text[pos..end];
+            // ZTS000 is the synthesized "no violations" marker, not a rule.
+            if (std.mem.eql(u8, code, "ZTS000")) continue;
+            if (registryCarriesCode(code)) continue;
+            const gop = try off_registry.getOrPut(allocator, code);
+            if (!gop.found_existing) gop.key_ptr.* = try allocator.dupe(u8, code);
+        }
+    }
+}
+
+fn registryCarriesCode(code: []const u8) bool {
+    for (zts.rule_registry.all_rules) |rule| {
+        if (std.mem.eql(u8, rule.code, code)) return true;
+    }
+    return false;
+}
+
+/// Substring match with both boundaries checked. Without it `ZTS30` matches
+/// inside `ZTS300` and `POL1` inside `POL10`, so a rule would be reported as
+/// tripped by a diagnostic for a different one.
+fn containsCodeToken(text: []const u8, code: []const u8) bool {
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, text, i, code)) |pos| {
+        i = pos + code.len;
+        const opens = pos == 0 or !std.ascii.isAlphanumeric(text[pos - 1]);
+        const closes = i >= text.len or !std.ascii.isAlphanumeric(text[i]);
+        if (opens and closes) return true;
+    }
+    return false;
+}
+
 pub fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
     for (tr.entries.items) |entry| {
         const text: []const u8 = switch (entry) {
@@ -543,4 +623,49 @@ test "summarize aggregates pass rate and failing-code histogram" {
     try testing.expectEqual(@as(usize, 50), s.firstDraftPassPercent());
     try testing.expectEqual(@as(usize, 1), countFailingCode(&results, "ZTS303"));
     try testing.expectEqual(@as(usize, 0), countFailingCode(&results, "ZTS999"));
+}
+
+test "code collection matches whole tokens, not prefixes" {
+    // The case this exists for: a diagnostic for ZTS300 must not be counted as
+    // coverage of a shorter code that is its prefix, or the corpus reports
+    // exercising rules nothing exercised.
+    try testing.expect(containsCodeToken("error ZTS300: bad", "ZTS300"));
+    try testing.expect(!containsCodeToken("error ZTS300: bad", "ZTS30"));
+    try testing.expect(!containsCodeToken("error XZTS300", "ZTS300"));
+    try testing.expect(containsCodeToken("ZTS300", "ZTS300"));
+    try testing.expect(containsCodeToken("see POL001 and POL0012", "POL001"));
+    try testing.expect(!containsCodeToken("POL0012 only", "POL001"));
+}
+
+test "code collection separates registry rules from codes the registry cannot see" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+
+    // ZTS042 is the stripper's; no `all_rules` entry carries it, which is the
+    // blind spot the second list exists to name. ZTS000 is the "no violations"
+    // marker and belongs to neither.
+    try tr.append(testing.allocator, .{ .diagnostic_box = .{
+        .llm_text = "ZTS300 unhandled path; ZTS042 unsupported cast; ZTS000 clean",
+    } });
+
+    var hits: CodeSet = .empty;
+    defer hits.deinit(testing.allocator);
+    var off: CodeSet = .empty;
+    defer {
+        for (off.keys()) |key| testing.allocator.free(key);
+        off.deinit(testing.allocator);
+    }
+
+    try collectCodes(testing.allocator, &tr, &hits, &off);
+
+    try testing.expect(hits.contains("ZTS300"));
+    try testing.expect(!hits.contains("ZTS042"));
+    try testing.expect(off.contains("ZTS042"));
+    try testing.expect(!off.contains("ZTS000"));
+    try testing.expect(!off.contains("ZTS300"));
+
+    // A second turn reporting the same code must not double-count it: the
+    // published figure is how many distinct rules the corpus reaches.
+    try collectCodes(testing.allocator, &tr, &hits, &off);
+    try testing.expectEqual(@as(usize, 1), off.count());
 }

@@ -68,11 +68,32 @@ grep -q -F "\"$marker " "$expected_producer" ||
 grep -q -F "$marker" "$expected_consumer" ||
   fail "$expected_consumer no longer reads the marker"
 
-# The offline coverage artifact publishes under its own marker. The consumer
-# must never read it: an offline run has no model column to carry.
+# The offline coverage artifact publishes under its own marker, and gets the
+# same treatment: one producer, and never read by the row publisher. A coverage
+# line is a fact about the corpus and the compiler, and an offline run has no
+# model column to carry.
+offline_hits=$(
+  git ls-files -z |
+    xargs -0 grep -l -F -e "$offline_marker" -- 2>/dev/null |
+    grep -v -x -F "$self" |
+    LC_ALL=C sort
+)
+
+[[ -n "$offline_hits" ]] || fail "no file carries $offline_marker; the search found nothing to check"
+
+offline_count=$(printf '%s\n' "$offline_hits" | grep -c .)
+if [[ "$offline_count" -ne 1 ]]; then
+  printf 'convergence emitter: expected exactly 1 file carrying %s, found %s:\n' "$offline_marker" "$offline_count" >&2
+  printf '%s\n' "$offline_hits" | sed 's/^/  /' >&2
+  fail "a second coverage emitter would publish a second answer to the same question"
+fi
+
+[[ "$offline_hits" == "$expected_producer" ]] ||
+  fail "expected $offline_marker producer $expected_producer, found $offline_hits"
+
 if grep -q -F "$offline_marker" "$expected_consumer" 2>/dev/null; then
   fail "$expected_consumer reads the offline marker $offline_marker"
 fi
 
-printf 'convergence emitter OK: %s produced by %s, read by %s\n' \
-  "$marker" "$expected_producer" "$expected_consumer"
+printf 'convergence emitter OK: %s produced by %s, read by %s; %s produced by %s, read by nothing\n' \
+  "$marker" "$expected_producer" "$expected_consumer" "$offline_marker" "$expected_producer"

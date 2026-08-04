@@ -1086,6 +1086,53 @@ test "cassetteModel reads the recorded model from a cassette header" {
 // compiler/policy change would make a previously-clean recorded edit regress.
 // Uses an arena over the page allocator (the replay executes the full tool +
 // veto stack; this is a fidelity check, not a leak test).
+/// Registry rules at least one corpus case trips, as measured on the headline
+/// model and committed here.
+///
+/// The ratchet is one-directional by design: a corpus that grows trips more and
+/// nothing here complains, while a corpus that stops standing on a fence fails
+/// and names it. Losing coverage is how nine rows came to read 90% while six
+/// tightenings landed underneath them, and it is invisible to every other gate
+/// on this file - the per-case pin only sees a flipped verdict, never a fence
+/// that stopped being felt.
+///
+/// Five of seventy-two, measured 2026-08-04. That is the finding, not a failure:
+/// the corpus was grown to separate builds the headline could not, and it does
+/// that on five rules. Four flow rules and one spec-discharge rule, which is a
+/// fair description of what these prompts ask for and a poor description of what
+/// the compiler proves.
+const coverage_baseline = [_][]const u8{
+    "ZTS400",
+    "ZTS401",
+    "ZTS407",
+    "ZTS500",
+    "ZTS502",
+};
+
+/// Sorted JSON array of a code set, for a line git can diff.
+///
+/// No escaping: registry codes are comptime literals and scanned codes match
+/// `ZTS` plus digits, so every key is alphanumeric by construction.
+fn jsonCodeArray(a: std.mem.Allocator, set: *const codegen.CodeSet) ![]u8 {
+    const codes = try a.dupe([]const u8, set.keys());
+    std.mem.sort([]const u8, codes, {}, struct {
+        fn less(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.less);
+
+    var buf: std.ArrayList(u8) = .empty;
+    try buf.append(a, '[');
+    for (codes, 0..) |code, i| {
+        if (i > 0) try buf.append(a, ',');
+        try buf.append(a, '"');
+        try buf.appendSlice(a, code);
+        try buf.append(a, '"');
+    }
+    try buf.append(a, ']');
+    return try buf.toOwnedSlice(a);
+}
+
 test "codegen baseline replays at the committed first-draft pass rate" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -1115,6 +1162,14 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     // which would publish one row averaging two models.
     var corpus_model: ?[]const u8 = null;
     var models_read: usize = 0;
+    // Which fences the corpus actually stands on, accumulated across cases.
+    // Published under its own marker: this is a fact about the corpus and the
+    // compiler, not a measurement of a model, and the two must never be lifted
+    // into the same table.
+    var tripped: codegen.CodeSet = .empty;
+    defer tripped.deinit(a);
+    var off_registry: codegen.CodeSet = .empty;
+    defer off_registry.deinit(a);
     for (record_corpus) |rc| {
         const dir_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ codegen_dir, rc.name });
         // Read the cassette steps from the repo (absolute) BEFORE chdir. A real
@@ -1169,6 +1224,8 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
             continue;
         };
+        try codegen.collectCodes(a, &tr, &tripped, &off_registry);
+
         // Ratchet: replay must reproduce the recorded first-draft outcome
         // exactly. A regression flips a recorded pass to fail (or vice versa).
         //
@@ -1295,6 +1352,83 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             summary.intent_checked,
         },
     );
+
+    // What the corpus covers, published apart from the headline and under its
+    // own marker.
+    //
+    // The headline says how often a first draft lands. It cannot say whether the
+    // corpus stands on the fences that moved, and for nine consecutive rows over
+    // one corpus it did not: every row read 90% across six tightenings and one
+    // loosening, and the page argued in prose, per row, that no case could feel
+    // them. Both sets are closed and comptime-derivable, and `policyHash()` was
+    // already imported here, so the join was one import away the whole time.
+    //
+    // `offRegistry` is the honest half. `all_rules` does not carry the parser,
+    // stripper, bool-checker, or type-checker codes, so a count taken over it
+    // alone would report a corpus as covering less than it does and would hide
+    // that the policy hash cannot see those diagnostics at all.
+    {
+        // Floor on the denominator before the ratio means anything: a registry
+        // that failed to assemble would publish "0 of 0" as a finished
+        // measurement.
+        if (zts.rule_registry.all_rules.len < 35) {
+            std.debug.print(
+                "[proof-coverage] the rule registry carries {d} rules; the denominator is not credible\n",
+                .{zts.rule_registry.all_rules.len},
+            );
+            return error.RuleRegistryTooSmall;
+        }
+        // Floor on the collector. Zero tripped rules over a corpus this size is
+        // a scan that stopped working, not a finding about the corpus.
+        if (tripped.count() == 0) {
+            std.debug.print(
+                "[proof-coverage] no case tripped any registry rule; the collector reads no diagnostics\n",
+                .{},
+            );
+            return error.CoverageCollectorEmpty;
+        }
+
+        const tripped_sorted = try jsonCodeArray(a, &tripped);
+        const off_sorted = try jsonCodeArray(a, &off_registry);
+        std.debug.print(
+            "[proof-coverage] {{\"corpusVersion\":\"{s}\",\"rulesTotal\":{d},\"rulesTripped\":{d}," ++
+                "\"tripped\":{s},\"offRegistry\":{s}}}\n",
+            .{
+                version[0..],
+                zts.rule_registry.all_rules.len,
+                tripped.count(),
+                tripped_sorted,
+                off_sorted,
+            },
+        );
+
+        // Floor on the baseline itself. An emptied list makes the loop below
+        // iterate nothing and report a clean ratchet over no claim at all, which
+        // is the shape this repo has been bitten by four times.
+        if (coverage_baseline.len < 5) {
+            std.debug.print(
+                "[proof-coverage] the committed baseline names {d} rules; it cannot ratchet anything\n",
+                .{coverage_baseline.len},
+            );
+            return error.CoverageBaselineEmpty;
+        }
+
+        // Ratchet, headline-model only for the same reason the per-case pin is:
+        // a smaller tier legitimately draws different drafts and trips a
+        // different set, and asserting the headline's baseline against it would
+        // report a tier difference as lost coverage.
+        const on_headline = std.mem.eql(u8, published_model, headline_model);
+        var lost: usize = 0;
+        for (coverage_baseline) |code| {
+            if (tripped.contains(code)) continue;
+            lost += 1;
+            std.debug.print(
+                "[proof-coverage] {s} was tripped by the baseline corpus and is not tripped now{s}\n",
+                .{ code, if (on_headline) "" else " - off-headline model, measured not ratcheted" },
+            );
+        }
+        if (lost > 0 and on_headline) return error.CoverageRatchetMismatch;
+    }
 
     // Roadmap item 3's comparison, reported apart from the headline because it
     // is a different claim: not how often a first draft lands, but whether a
