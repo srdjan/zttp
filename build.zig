@@ -388,6 +388,10 @@ pub fn build(b: *std.Build) void {
     const proof_swallow_step = b.step("test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
     proof_swallow_step.dependOn(&proof_swallow.step);
 
+    const convergence_emitter = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-convergence-emitter.sh" });
+    const convergence_emitter_step = b.step("test-convergence-emitter", "Check the convergence marker has one producer and one consumer");
+    convergence_emitter_step.dependOn(&convergence_emitter.step);
+
     const docs_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-docs-drift.sh" });
     const docs_drift_step = b.step("test-docs-drift", "Check docs against current registry and build paths");
     docs_drift_step.dependOn(&docs_drift.step);
@@ -796,6 +800,7 @@ pub fn build(b: *std.Build) void {
     // test-doc-links a second time.
     test_step.dependOn(&docs_drift.step);
     test_step.dependOn(&doc_links.step);
+    test_step.dependOn(&convergence_emitter.step);
     test_step.dependOn(&run_module_governance.step);
     test_step.dependOn(&run_zts_tests.step);
     test_step.dependOn(&run_sdk_tests.step);
