@@ -1992,10 +1992,15 @@ const Stripper = struct {
             .kind = kind,
             .source_start = @intCast(type_start),
             .source_end = @intCast(type_end),
-            // Parameters and return types belong to their signature, not to
-            // the line they were typed on; every other kind is positional.
+            // Parameters, return types, and the type-parameter list belong to
+            // their signature, not to the line they were typed on; every other
+            // kind is positional. A list wrapped across lines is recorded after
+            // `skipBalancedAngles` moved the counter to the closing `>`, so
+            // keying it on that line filed the signature's generics under a key
+            // none of its annotations shared, and the signature read as
+            // monomorphic.
             .context_line = switch (kind) {
-                .param_annotation, .return_annotation => self.signature_line orelse self.line,
+                .param_annotation, .return_annotation, .generic_params => self.signature_line orelse self.line,
                 else => self.line,
             },
             .context_col = self.col,
@@ -2266,6 +2271,16 @@ const Stripper = struct {
         return null;
     }
 
+    /// True when the `>` at the current position is the tail of an arrow
+    /// (`=>`) rather than a closing angle bracket. A function type is a legal
+    /// `extends` bound, and counting its arrow as a closer ended the
+    /// type-parameter list early: `<T extends (s: string) => number>` was
+    /// blanked up to the arrow and left `number>(` in the output, which does
+    /// not parse.
+    fn isArrowGreaterThan(self: *const Self) bool {
+        return self.pos > 0 and self.source[self.pos - 1] == '=';
+    }
+
     fn skipBalancedAngles(self: *Self) bool {
         if (self.pos >= self.source.len or self.source[self.pos] != '<') return false;
 
@@ -2297,7 +2312,7 @@ const Stripper = struct {
 
             if (c == '<') {
                 depth += 1;
-            } else if (c == '>') {
+            } else if (c == '>' and !self.isArrowGreaterThan()) {
                 depth -= 1;
             } else if (c == '(' or c == '[' or c == '{') {
                 // These must be balanced within the generic

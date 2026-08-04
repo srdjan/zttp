@@ -432,12 +432,38 @@ pub const TypePool = struct {
     /// An **unresolved name** still answers true in either direction while D1
     /// amendment A1 is deferred, so `string | SomeAlias` would collapse to
     /// whichever member happened to be compared second.
+    ///
+    /// A **structural** member - record, array, tuple, or function - is never
+    /// dropped either, and for the same reason as the intersection. Between two
+    /// records assignability is width subtyping, so the *wider* record is the
+    /// assignable one: in `{ id: string } | { id: string; error: string }` the
+    /// second member is assignable to the first, and dropping it deletes the
+    /// error variant from the declared type. `zts check --json` then publishes
+    /// one object schema instead of two, and `r.error` on a value the author
+    /// declared reports "property does not exist" on a correct program. Arrays,
+    /// tuples, and functions carry the same variance and lose the same way.
+    /// What subsumption is for is a member that adds nothing - a literal
+    /// beside its own base type - and that still collapses.
     fn unionMemberSubsumes(self: *const TypePool, wider: TypeIndex, narrower: TypeIndex) bool {
         if (self.getTag(narrower) == .t_intersection) return false;
+        if (self.isStructural(narrower)) return false;
         if (self.isNominal(narrower)) return false;
         if (self.firstUnresolvedName(wider) != null) return false;
         if (self.firstUnresolvedName(narrower) != null) return false;
         return self.isAssignableTo(narrower, wider);
+    }
+
+    /// A type whose assignability to another of its kind is width or variance
+    /// subtyping rather than "describes no additional value".
+    fn isStructural(self: *const TypePool, idx: TypeIndex) bool {
+        const tag = self.getTag(idx) orelse return false;
+        return switch (tag) {
+            .t_record, .t_array, .t_tuple, .t_function => true,
+            // exhaustive: every other tag is a scalar, a literal, `unknown`, or
+            // a composite the caller already excluded, and for those
+            // assignability answers the question the join is asking.
+            else => false,
+        };
     }
 
     /// Create a union type from members, normalized per D1 section 3.
@@ -736,7 +762,16 @@ pub const TypePool = struct {
                 const elem = self.getArrayElement(idx);
                 const new_elem = self.instantiate(allocator, elem, param_names, param_types, depth + 1);
                 if (new_elem == elem) return idx;
-                return self.addArray(allocator, new_elem);
+                // `addArray` writes `data.b = 0`, which is the readonly flag.
+                // Rebuilding through it made `Frozen<T> = ReadonlyArray<T>`
+                // instantiate to a mutable array, so a value the author
+                // declared read-only was accepted by a parameter that may
+                // write through it - the A3 guarantee held for the direct
+                // spelling and not through any generic alias.
+                return if (self.isReadonlyArray(idx))
+                    self.addReadonlyArray(allocator, new_elem)
+                else
+                    self.addArray(allocator, new_elem);
             },
             .t_union => {
                 // Copy members before the loop (shared members list may realloc).
@@ -1953,6 +1988,17 @@ const TypeExprParser = struct {
                     const inner = self.parsePrimary();
                     if (self.getTag(inner) == .t_array and !self.isReadonlyArray(inner)) {
                         return self.pool.addReadonlyArray(self.allocator, self.pool.getArrayElement(inner));
+                    }
+                    // A named type is still a `t_ref` here: this parser has no
+                    // alias map, so `readonly Items` where `type Items =
+                    // string[]` never saw an array and dropped the modifier
+                    // with no diagnostic, handing a declared read-only value to
+                    // a mutating parameter. Defer to `TypeEnv`, which resolves
+                    // the name - the same deferral `Readonly<NamedAlias>`
+                    // already uses.
+                    if (self.getTag(inner) == .t_ref or self.getTag(inner) == .t_generic_app) {
+                        const base = self.pool.addRef(self.allocator, "Readonly");
+                        return self.pool.addGenericApp(self.allocator, base, &.{inner});
                     }
                     return inner;
                 }
@@ -3500,4 +3546,50 @@ test "instantiate substitutes every element of a tuple" {
     try std.testing.expectEqual(pool.idx_boolean, elements[0]);
     try std.testing.expectEqual(pool.idx_number, elements[1]);
     try std.testing.expectEqual(pool.idx_boolean, elements[2]);
+}
+
+test "a union keeps the wider of two records" {
+    // Step 5 dropped any member assignable to another, and between records
+    // assignability is width subtyping - so the member carrying the extra
+    // field is the assignable one, and dropping it deleted the variant the
+    // author declared. `zts check --json` then published one object schema
+    // where the source has two.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const narrow = parseTypeExpr(&pool, allocator, "{ id: string }");
+    const wide = parseTypeExpr(&pool, allocator, "{ id: string; error: string }");
+    const joined = pool.addUnion(allocator, &.{ narrow, wide });
+
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(joined).?);
+    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(joined).len);
+
+    // The control: a literal beside its own base still collapses, which is what
+    // subsumption is for.
+    const collapsed = pool.addUnion(allocator, &.{ pool.idx_string, parseTypeExpr(&pool, allocator, "\"a\"") });
+    try std.testing.expectEqual(pool.idx_string, collapsed);
+}
+
+test "instantiate keeps the readonly flag on an array" {
+    // `addArray` writes `data.b = 0`, which is the flag, so rebuilding through
+    // it made `Frozen<T> = ReadonlyArray<T>` instantiate to a mutable array and
+    // the A3 guarantee held only for the direct spelling.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const t_param = pool.addGenericParam(allocator, "T");
+    const frozen = pool.addReadonlyArray(allocator, t_param);
+    const instantiated = pool.instantiate(allocator, frozen, &.{"T"}, &.{pool.idx_string}, 0);
+
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(instantiated).?);
+    try std.testing.expectEqual(pool.idx_string, pool.getArrayElement(instantiated));
+    try std.testing.expect(pool.isReadonlyArray(instantiated));
+    try std.testing.expect(!pool.isAssignableTo(instantiated, pool.addArray(allocator, pool.idx_string)));
+
+    // The control: a mutable array instantiates to a mutable array.
+    const plain = pool.addArray(allocator, t_param);
+    const plain_out = pool.instantiate(allocator, plain, &.{"T"}, &.{pool.idx_string}, 0);
+    try std.testing.expect(!pool.isReadonlyArray(plain_out));
 }

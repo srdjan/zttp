@@ -208,6 +208,28 @@ pub const TypeParamSpec = struct {
 ///
 /// Returns the number of entries written to `out`.
 pub fn splitTypeParams(text: []const u8, out: []TypeParamSpec) usize {
+    var pieces: [MAX_TYPE_PARAMS][]const u8 = undefined;
+    const piece_count = splitTopLevelCommas(text, &pieces);
+    for (pieces[0..piece_count], 0..) |piece, i| {
+        if (i >= out.len) return out.len;
+        out[i] = parseTypeParamSpec(piece);
+    }
+    return @min(piece_count, out.len);
+}
+
+/// Split a type-argument or type-parameter list on the commas that separate
+/// its entries, ignoring the commas nested inside `<>`, `{}`, `[]`, and `()`.
+/// A naive split cuts `Record<string, number>` in half and leaves two type
+/// names nothing resolves.
+///
+/// A `>` closes only while a `<` is open. The `>` of an arrow type is not a
+/// closer, and counting it as one drove the depth negative and discarded the
+/// whole list - so `T extends (s: string) => number` produced no entries at
+/// all, and the signature silently lost every type parameter it declared.
+///
+/// The surrounding angle brackets of an alias's list (`<T, U>`) are stripped
+/// first; a function's list arrives without them.
+pub fn splitTopLevelCommas(text: []const u8, out: [][]const u8) usize {
     var body = std.mem.trim(u8, text, " \t\n\r");
     if (body.len >= 2 and body[0] == '<' and body[body.len - 1] == '>') {
         body = std.mem.trim(u8, body[1 .. body.len - 1], " \t\n\r");
@@ -215,25 +237,32 @@ pub fn splitTypeParams(text: []const u8, out: []TypeParamSpec) usize {
     if (body.len == 0) return 0;
 
     var count: usize = 0;
-    var depth: i32 = 0;
+    var angle: u32 = 0;
+    var bracket: u32 = 0;
     var piece_start: usize = 0;
     var i: usize = 0;
     while (i <= body.len) : (i += 1) {
         const at_end = i == body.len;
         const c = if (at_end) ',' else body[i];
         switch (c) {
-            '<', '{', '[', '(' => depth += 1,
-            '>', '}', ']', ')' => depth -= 1,
+            '<' => angle += 1,
+            '>' => if (angle > 0) {
+                angle -= 1;
+            },
+            '{', '[', '(' => bracket += 1,
+            '}', ']', ')' => if (bracket > 0) {
+                bracket -= 1;
+            },
             // exhaustive: only the bracket pairs move the nesting depth. Every
             // other byte, the separating comma included, is handled below.
             else => {},
         }
-        if (c != ',' or depth != 0) continue;
+        if (c != ',' or angle != 0 or bracket != 0) continue;
         const piece = std.mem.trim(u8, body[piece_start..i], " \t\n\r");
         piece_start = i + 1;
         if (piece.len == 0) continue;
         if (count >= out.len) break;
-        out[count] = parseTypeParamSpec(piece);
+        out[count] = piece;
         count += 1;
     }
     return count;
@@ -501,11 +530,13 @@ pub const TypeEnv = struct {
         for (tm.entries.items) |entry| {
             if (entry.kind != .call_type_arguments) continue;
             var args: CallTypeArgs = .{};
-            var it = std.mem.splitScalar(u8, tm.getTypeText(entry), ',');
-            while (it.next()) |raw| {
-                const arg_text = std.mem.trim(u8, raw, " \t\n\r");
-                if (arg_text.len == 0) continue;
-                if (args.count >= MAX_TYPE_PARAMS) break;
+            // Depth-aware for the same reason the declaration side is: a single
+            // type argument carries its own commas, and splitting on all of them
+            // made `make<Record<string, number>>(1)` read as two arguments and
+            // refused a correct call for the wrong arity.
+            var arg_texts: [MAX_TYPE_PARAMS][]const u8 = undefined;
+            const arg_count = splitTopLevelCommas(tm.getTypeText(entry), &arg_texts);
+            for (arg_texts[0..arg_count]) |arg_text| {
                 args.args[args.count] = self.resolveType(arg_text);
                 args.count += 1;
             }
@@ -807,6 +838,28 @@ pub const TypeEnv = struct {
                     var raw_args: [8]TypeIndex = undefined;
                     const uargc = @min(info.args.len, raw_args.len);
                     @memcpy(raw_args[0..uargc], info.args[0..uargc]);
+
+                    // `Readonly<T>` is the one utility whose source need not be
+                    // a record: an array source is `readonly T[]`, which is how
+                    // the `readonly Items` spelling reaches an alias at all -
+                    // the type-expression parser has no alias map and defers the
+                    // modifier here. Resolving the name to nothing would leave
+                    // an unresolved application, which assignability fail-opens
+                    // on, so an unrecognized source resolves to itself rather
+                    // than staying wrapped.
+                    if (kind == .readonly) {
+                        const resolved = self.resolveRef(self.tryInstantiateGenericApp(raw_args[0]));
+                        if (resolved == null_type_idx) return idx;
+                        if (self.pool.getTag(resolved) == .t_array) {
+                            if (self.pool.isReadonlyArray(resolved)) return resolved;
+                            return self.pool.addReadonlyArray(self.allocator, self.pool.getArrayElement(resolved));
+                        }
+                        if (self.pool.getTag(resolved) == .t_record) {
+                            return self.pool.makeReadonly(self.allocator, resolved);
+                        }
+                        return resolved;
+                    }
+
                     const src = self.resolveRefToRecord(self.tryInstantiateGenericApp(raw_args[0]));
                     if (src == null_type_idx) return idx;
                     // Resolve the keys argument through the alias map too, so
@@ -2481,4 +2534,97 @@ test "a generic alias instantiates through the stripper's own recording" {
     const fields = pool.getRecordFields(box);
     try std.testing.expectEqual(@as(usize, 1), fields.len);
     try std.testing.expectEqual(pool.idx_string, fields[0].type_idx);
+}
+
+test "splitTypeParams keeps a list whose bound is a function type" {
+    // The `>` of `=>` was counted as a closing angle bracket, which drove the
+    // depth negative and emitted no entries at all - so the signature lost
+    // every type parameter and its bound went unchecked.
+    var out: [MAX_TYPE_PARAMS]TypeParamSpec = undefined;
+
+    const one = splitTypeParams("T extends (s: string) => number", &out);
+    try std.testing.expectEqual(@as(usize, 1), one);
+    try std.testing.expectEqualStrings("T", out[0].name);
+    try std.testing.expectEqualStrings("(s: string) => number", out[0].constraint_text);
+
+    const two = splitTypeParams("T extends (s: string) => number, U", &out);
+    try std.testing.expectEqual(@as(usize, 2), two);
+    try std.testing.expectEqualStrings("U", out[1].name);
+}
+
+test "a type-parameter list wrapped across lines still reaches its signature" {
+    // The stripper records the list after `skipBalancedAngles` has moved its
+    // line counter to the closing `>`, while the parameter and return
+    // annotations are keyed to the line the signature starts on. Keyed apart,
+    // the signature read as monomorphic and its bound was never checked.
+    const allocator = std.testing.allocator;
+    var strip_result = try @import("stripper.zig").strip(
+        allocator,
+        "function pick<\n  T,\n  U extends { id: string }\n>(a: T, b: U): T {\n  return a;\n}\n",
+        .{},
+    );
+    defer strip_result.deinit();
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    const sig = env.getFnSigByName("pick") orelse return error.MissingSig;
+    try std.testing.expectEqual(@as(u8, 2), sig.type_param_count);
+    try std.testing.expectEqualStrings("T", sig.type_params[0].name);
+    try std.testing.expectEqualStrings("U", sig.type_params[1].name);
+    try std.testing.expect(sig.type_params[1].constraint != null_type_idx);
+}
+
+test "an explicit type argument carrying a comma is one argument" {
+    // `make<Record<string, number>>(1)` split on every comma read as two
+    // arguments and the call was refused for the wrong arity.
+    const allocator = std.testing.allocator;
+    var strip_result = try @import("stripper.zig").strip(
+        allocator,
+        "function make<T>(n: number): T {\n  return hole();\n}\nconst v = make<Record<string, number>>(1);\n",
+        .{},
+    );
+    defer strip_result.deinit();
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var it = env.call_type_args.iterator();
+    var seen: usize = 0;
+    while (it.next()) |entry| {
+        try std.testing.expectEqual(@as(u8, 1), entry.value_ptr.count);
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), seen);
+}
+
+test "readonly on an array alias survives to the resolved type" {
+    // The type-expression parser has no alias map, so the name is still a
+    // `t_ref` when the modifier is read and the modifier was dropped: a
+    // declared read-only value was accepted by a mutating parameter.
+    const allocator = std.testing.allocator;
+    var strip_result = try @import("stripper.zig").strip(
+        allocator,
+        "type Items = string[];\nconst f: readonly Items = [\"a\"];\n",
+        .{},
+    );
+    defer strip_result.deinit();
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    const resolved = env.resolveType("readonly Items");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_array, pool.getTag(resolved).?);
+    try std.testing.expect(pool.isReadonlyArray(resolved));
+    // The control: without the modifier the same alias stays mutable.
+    try std.testing.expect(!pool.isReadonlyArray(env.resolveType("Items")));
 }
