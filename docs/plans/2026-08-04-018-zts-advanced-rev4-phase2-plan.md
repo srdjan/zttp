@@ -123,12 +123,34 @@ is assignable to its base and the base is not assignable back.
 **Files:** `type_pool.zig`, `type_checker.zig`.
 
 Step 2 of the join switches from index equality to `structurallyEqual`.
-`addUnion`'s dedup becomes `normalizeUnion` with D1 section 3's seven steps.
-Overflow past `MAX_UNION_MEMBERS` stops storing a lossy raw sequence and raises
-`union_too_wide` (ZTS207). The `D1-interim` comment on `joinTypes` is deleted.
+`addUnion`'s dedup becomes D1 section 3's seven steps. The `D1-interim` comment
+on `joinTypes` is deleted.
 
 **Tests:** one per join step; `never` elimination; member coalescing; strict
-subsumption; first-appearance display order; overflow diagnoses.
+subsumption; first-appearance display order.
+
+**Two corrections to D1, both measured.**
+
+D1 asked for overflow past sixteen members to fail closed with a
+`union_too_wide` diagnostic, on the grounds that the raw fallback stores a type
+whose key is not canonical. The premise is right and the cap is wrong: sixteen
+was the width of a stack scratch buffer, never a language limit, and the corpus
+already pins wider unions as supported - `parseTypeExpr keeps unions wider than
+thirty two members` and `TypeChecker tracks schema enum members beyond 32
+values` are existing tests, because a schema enum is routinely wider than
+sixteen. Normalizing on the heap removes the buffer and with it the reason for
+the cap, so there is no `union_too_wide` and no ZTS207. The only remaining bound
+is what the node's u16 member count can address.
+
+Step 5, dropping a member assignable to another member, cannot be applied to
+every member. `Effects<string, "env">` resolves to
+`string & { __zttp_effect__: ... }`, which is assignable to plain `string`, so
+in `Effects<string, "env"> | string` the marker branch is dropped and the result
+reads as though the author declared no capability ceiling - the same fail-open
+an existing test (`a marker on one union branch reports non_literal, not an
+empty set`) was written to catch. Subsumption therefore never drops an
+intersection member, a nominal member, or a member reaching an unresolved name.
+Each exclusion is a case where assignability is not the question being asked.
 
 ### Task 4: narrowing - kill rules, `typeof`, negation, bare discriminant
 

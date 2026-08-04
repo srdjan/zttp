@@ -10,6 +10,7 @@
 //! - Display formatting for diagnostics
 
 const std = @import("std");
+const type_key = @import("type_key.zig");
 
 // ---------------------------------------------------------------------------
 // Type indices
@@ -397,86 +398,129 @@ pub const TypePool = struct {
         });
     }
 
-    const UnionMemberScan = struct {
-        deduped: [16]TypeIndex = undefined,
-        deduped_count: usize = 0,
-        flattened_count: usize = 0,
-        dedup_overflow: bool = false,
-    };
-
-    fn scanUnionMembers(
+    fn flattenUnionInto(
         self: *const TypePool,
+        allocator: std.mem.Allocator,
         union_members: []const TypeIndex,
-        scan: *UnionMemberScan,
-    ) bool {
+        out: *std.ArrayListUnmanaged(TypeIndex),
+        depth: u8,
+    ) std.mem.Allocator.Error!void {
+        if (depth > 16) return;
         for (union_members) |member| {
             if (self.getTag(member) == .t_union) {
-                if (!self.scanUnionMembers(self.getUnionMembers(member), scan)) return false;
+                try self.flattenUnionInto(allocator, self.getUnionMembers(member), out, depth + 1);
                 continue;
             }
-
-            scan.flattened_count = std.math.add(usize, scan.flattened_count, 1) catch return false;
-            if (scan.dedup_overflow) continue;
-            if (std.mem.findScalar(TypeIndex, scan.deduped[0..scan.deduped_count], member) != null) continue;
-            if (scan.deduped_count == scan.deduped.len) {
-                scan.dedup_overflow = true;
-                continue;
-            }
-            scan.deduped[scan.deduped_count] = member;
-            scan.deduped_count += 1;
-        }
-        return true;
-    }
-
-    fn appendFlattenedUnionMembersAssumeCapacity(self: *TypePool, union_members: []const TypeIndex) void {
-        for (union_members) |member| {
-            if (self.getTag(member) == .t_union) {
-                self.appendFlattenedUnionMembersAssumeCapacity(self.getUnionMembers(member));
-            } else {
-                self.members.appendAssumeCapacity(member);
-            }
+            try out.append(allocator, member);
         }
     }
 
-    /// Create a union type from members. A sole member is returned unchanged.
-    /// With multiple inputs, nested unions are flattened. Exact-index duplicates
-    /// collapse while the sixteen-member distinct scratch buffer suffices; on
-    /// overflow, the raw flattened sequence is retained losslessly.
+    /// Whether one union member subsumes another, for the purpose of dropping
+    /// the narrower one. Three members are never dropped, and each exclusion is
+    /// a case where assignability is not the question being asked.
+    ///
+    /// An **intersection** is a value shape plus obligations, and it is
+    /// assignable to any of its own members. `Effects<string, "env">` resolves
+    /// to `string & { __zttp_effect__: ... }`, so in
+    /// `Effects<string, "env"> | string` the marker branch is assignable to the
+    /// plain one - and dropping it deletes a declared capability ceiling,
+    /// leaving a type that reads as though the author declared nothing.
+    ///
+    /// A **nominal** member carries a brand that its base does not, which is
+    /// the whole point of a `distinct type`.
+    ///
+    /// An **unresolved name** still answers true in either direction while D1
+    /// amendment A1 is deferred, so `string | SomeAlias` would collapse to
+    /// whichever member happened to be compared second.
+    fn unionMemberSubsumes(self: *const TypePool, wider: TypeIndex, narrower: TypeIndex) bool {
+        if (self.getTag(narrower) == .t_intersection) return false;
+        if (self.isNominal(narrower)) return false;
+        if (self.firstUnresolvedName(wider) != null) return false;
+        if (self.firstUnresolvedName(narrower) != null) return false;
+        return self.isAssignableTo(narrower, wider);
+    }
+
+    /// Create a union type from members, normalized per D1 section 3.
+    ///
+    ///   1. flatten nested unions
+    ///   2. drop `never` members
+    ///   3. dedup by canonical key, not by pool index
+    ///   4. coalesce mutually assignable members to the first written
+    ///   5. drop a member strictly assignable to another member
+    ///   6. keep survivors in first-appearance order
+    ///   7. one survivor is that type; zero is `never`
+    ///
+    /// Step 3 is why the canonical key exists: the pool does not intern, so
+    /// index equality left two separately built `{ id: string }` records as two
+    /// members of one union.
+    ///
+    /// There is no member cap. D1 section 3 asked for one - fail closed past
+    /// sixteen, because storing the members raw produces a type whose key is
+    /// not canonical - and the corpus says the premise was wrong. Sixteen was
+    /// the width of a scratch buffer, never a language limit, and a schema enum
+    /// is routinely wider: `parseTypeExpr keeps unions wider than thirty two
+    /// members` and `TypeChecker tracks schema enum members beyond 32 values`
+    /// are both existing tests. Normalizing on the heap removes the buffer and
+    /// with it the reason for the cap, so every survivor is deduped by key and
+    /// the only remaining bound is what the node's u16 count can address.
     pub fn addUnion(self: *TypePool, allocator: std.mem.Allocator, union_members: []const TypeIndex) TypeIndex {
         if (self.isPoisoned()) return null_type_idx;
         if (union_members.len == 1) return union_members[0];
 
-        var scan: UnionMemberScan = .{};
-        if (!self.scanUnionMembers(union_members, &scan)) {
-            return self.failIndex(error.TypePoolCapacityExceeded);
-        }
-        if (!scan.dedup_overflow) {
-            if (scan.deduped_count == 1) return scan.deduped[0];
+        var flat: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer flat.deinit(allocator);
+        self.flattenUnionInto(allocator, union_members, &flat, 0) catch return self.failIndex(error.OutOfMemory);
 
-            const start = self.members.items.len;
-            if (!fitsU16Range(start, scan.deduped_count)) {
-                return self.failIndex(error.TypePoolCapacityExceeded);
+        var survivors: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer survivors.deinit(allocator);
+
+        // Steps 2 and 3.
+        for (flat.items) |member| {
+            if (member == null_type_idx) continue;
+            if (member == self.idx_never) continue;
+            var duplicate = false;
+            for (survivors.items) |kept| {
+                if (type_key.structurallyEqual(self, allocator, kept, member)) {
+                    duplicate = true;
+                    break;
+                }
             }
-            self.members.appendSlice(allocator, scan.deduped[0..scan.deduped_count]) catch return self.failIndex(error.OutOfMemory);
-            return self.addNode(allocator, .{
-                .tag = .t_union,
-                .data = .{ .a = @intCast(start), .b = @intCast(scan.deduped_count) },
-            });
+            if (duplicate) continue;
+            survivors.append(allocator, member) catch return self.failIndex(error.OutOfMemory);
         }
 
-        // More than sixteen distinct members cannot be deduplicated in the
-        // bounded scratch buffer. Fall back to the raw flattened sequence so
-        // no source-union member is silently dropped: every member must remain
-        // assignable to the target for isAssignableTo to accept the union.
+        // Steps 4 and 5, over the deduped list so the pairwise pass is bounded.
+        // A member is dropped when another member subsumes it; when two subsume
+        // each other, the earlier one stays, which is what "the first written"
+        // means.
+        var kept_count: usize = 0;
+        outer: for (survivors.items, 0..) |member, i| {
+            for (survivors.items, 0..) |other, j| {
+                if (i == j) continue;
+                if (!self.unionMemberSubsumes(other, member)) continue;
+                if (self.unionMemberSubsumes(member, other) and j > i) continue;
+                continue :outer;
+            }
+            survivors.items[kept_count] = member;
+            kept_count += 1;
+        }
+        survivors.items.len = kept_count;
+
+        // Step 7.
+        if (survivors.items.len == 0) return self.idx_never;
+        if (survivors.items.len == 1) return survivors.items[0];
+
+        // Step 6: first-appearance order is display order. The canonical key
+        // sorts members, so identity is order-free while the printed type reads
+        // the way the author wrote it.
         const start = self.members.items.len;
-        if (!fitsU16Range(start, scan.flattened_count)) {
+        if (!fitsU16Range(start, survivors.items.len)) {
             return self.failIndex(error.TypePoolCapacityExceeded);
         }
-        self.members.ensureUnusedCapacity(allocator, scan.flattened_count) catch return self.failIndex(error.OutOfMemory);
-        self.appendFlattenedUnionMembersAssumeCapacity(union_members);
+        self.members.appendSlice(allocator, survivors.items) catch return self.failIndex(error.OutOfMemory);
         return self.addNode(allocator, .{
             .tag = .t_union,
-            .data = .{ .a = @intCast(start), .b = @intCast(scan.flattened_count) },
+            .data = .{ .a = @intCast(start), .b = @intCast(survivors.items.len) },
         });
     }
 
@@ -2431,7 +2475,12 @@ test "addUnion overflow fallback keeps every flattened member" {
     try std.testing.expectEqualSlices(TypeIndex, distinct[0..], pool.getUnionMembers(wide));
 }
 
-test "addUnion applies capacity guard after flattening" {
+test "addUnion dedups a wide input by canonical key" {
+    // This test used to assert the opposite: that a union too wide for the
+    // sixteen-slot dedup buffer kept every flattened member, duplicates and
+    // all, because dropping one would have dropped an obligation. Normalizing
+    // on the heap removes the buffer, so the duplicates are gone by
+    // construction and nothing is dropped that was not already there.
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -2441,17 +2490,36 @@ test "addUnion applies capacity guard after flattening" {
         member.* = pool.addLiteralNumber(allocator, @intCast(i));
     }
 
-    const max_member_count = std.math.maxInt(u16);
-    const wide_members = try allocator.alloc(TypeIndex, max_member_count);
+    const wide_members = try allocator.alloc(TypeIndex, std.math.maxInt(u16));
     defer allocator.free(wide_members);
     for (wide_members, 0..) |*member, i| {
         member.* = distinct[i % distinct.len];
     }
 
     const wide = pool.addUnion(allocator, wide_members);
-    try std.testing.expectEqual(@as(usize, max_member_count), pool.getUnionMembers(wide).len);
+    try std.testing.expectEqual(@as(usize, distinct.len), pool.getUnionMembers(wide).len);
+    // Every distinct literal survived; only the repeats went.
+    for (distinct) |member| {
+        try std.testing.expect(std.mem.findScalar(TypeIndex, pool.getUnionMembers(wide), member) != null);
+    }
 
-    const overflow = pool.addUnion(allocator, &.{ wide, pool.idx_boolean });
+    // Two separately built literals of the same value are one member now, which
+    // index equality could not see.
+    const seven_again = pool.addLiteralNumber(allocator, 7);
+    const still_wide = pool.addUnion(allocator, &.{ wide, seven_again });
+    try std.testing.expectEqual(@as(usize, distinct.len), pool.getUnionMembers(still_wide).len);
+}
+
+test "addUnion applies capacity guard after normalizing" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // Push the shared members arena past what a u16 start offset can address,
+    // so the guard has something to catch.
+    try pool.members.resize(allocator, @as(usize, std.math.maxInt(u16)) + 1);
+
+    const overflow = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_boolean });
     try std.testing.expectEqual(null_type_idx, overflow);
     try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }

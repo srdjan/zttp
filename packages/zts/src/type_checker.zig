@@ -20,6 +20,7 @@ const json_utils = @import("json_utils.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const type_pool_mod = @import("type_pool.zig");
+const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
 const service_types_mod = @import("service_types.zig");
 const bool_checker_mod = @import("bool_checker.zig");
@@ -37,6 +38,9 @@ const TypeEnv = type_env_mod.TypeEnv;
 const ServiceTypeContext = service_types_mod.ServiceTypeContext;
 
 /// Max union members tracked during type inference (member access, return types, etc.).
+/// The width of this file's stack scratch buffers when collecting branch types
+/// before a join. It is not a limit on how wide a union may be: `addUnion`
+/// normalizes on the heap and a schema enum is routinely wider than this.
 const MAX_UNION_MEMBERS = 16;
 
 pub const TypeCheckerError = type_pool_mod.TypePoolError || error{UnresolvedTypeBinding};
@@ -1204,13 +1208,11 @@ pub const TypeChecker = struct {
     /// The deterministic join of spec 5.4, steps 1-5. It types `?:`, and
     /// anything else that has to pick one type for two branches.
     ///
-    /// D1-interim: step 2's "syntactically identical" is index equality and
-    /// steps 3-4 use `type_pool.isAssignableTo` in both directions. The type
-    /// pool does not intern, so index equality is narrower than the canonical
-    /// type identity D1 specifies - two structurally identical types can hold
-    /// different indices. Step 3 covers that gap for now, since such a pair is
-    /// mutually assignable and resolves to the `whenTrue` branch either way.
-    /// Replace the relation when D1 lands; the join's shape does not change.
+    /// Step 2 asks for the canonical type identity from `type_key.zig`, not
+    /// index equality: the pool does not intern, so two structurally identical
+    /// records hold different indices, and index equality would fall through to
+    /// step 3 and produce the right answer only by accident - and the wrong one
+    /// as soon as a field is optional on one side.
     pub fn joinTypes(self: *const TypeChecker, when_true: TypeIndex, when_false: TypeIndex) TypeIndex {
         const pool = self.env.pool;
 
@@ -1224,8 +1226,8 @@ pub const TypeChecker = struct {
         if (when_true == pool.idx_never) return when_false;
         if (when_false == pool.idx_never) return when_true;
 
-        // 2. Syntactically identical.
-        if (when_true == when_false) return when_true;
+        // 2. Structurally identical.
+        if (type_key.structurallyEqual(pool, self.allocator, when_true, when_false)) return when_true;
 
         const true_to_false = pool.isAssignableTo(when_true, when_false);
         const false_to_true = pool.isAssignableTo(when_false, when_true);
@@ -2452,6 +2454,105 @@ test "ternary join: never on one side is removed" {
     try std.testing.expectEqual(pool.idx_number, checker.joinTypes(pool.idx_never, pool.idx_number));
     try std.testing.expectEqual(pool.idx_number, checker.joinTypes(pool.idx_number, pool.idx_never));
     try std.testing.expectEqual(pool.idx_never, checker.joinTypes(pool.idx_never, pool.idx_never));
+}
+
+fn recordWithStringField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8) TypeIndex {
+    const n = pool.addName(allocator, name);
+    return pool.addRecord(allocator, &.{
+        .{ .name_start = n.start, .name_len = n.len, .type_idx = pool.idx_string, .optional = false },
+    });
+}
+
+test "the join asks for structural identity, not the same pool index" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    var node_list = ir.NodeList.init(allocator);
+    defer node_list.deinit();
+    var constants = ir.ConstantPool.init(allocator);
+    defer constants.deinit();
+    const view = ir.IrView.fromNodeList(&node_list, &constants);
+
+    var checker = TypeChecker.init(allocator, view, null, &env, null);
+    defer checker.deinit();
+
+    // Step 2. Two branches that each build `{ id: string }` hold different
+    // indices, so the old rule fell through to step 3 and reached the same
+    // answer by mutual assignability. It is step 2 that answers now, which is
+    // what keeps the answer right when one side's field is optional.
+    const left = recordWithStringField(&pool, allocator, "id");
+    const right = recordWithStringField(&pool, allocator, "id");
+    try std.testing.expect(left != right);
+    try std.testing.expectEqual(left, checker.joinTypes(left, right));
+
+    // Step 5: two types with nothing in common become the normalized union.
+    const joined = checker.joinTypes(pool.idx_string, pool.idx_number);
+    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(joined).len);
+
+    // Step 4: the receiving type wins when only one direction is assignable.
+    const literal = pool.addLiteralString(allocator, "GET");
+    try std.testing.expectEqual(pool.idx_string, checker.joinTypes(literal, pool.idx_string));
+    try std.testing.expectEqual(pool.idx_string, checker.joinTypes(pool.idx_string, literal));
+}
+
+test "union normalization drops never, dedups by key, and subsumes" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // Step 2: `never` contributes no value and leaves.
+    const with_never = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_never, pool.idx_number });
+    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(with_never).len);
+    try std.testing.expectEqual(pool.idx_string, pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_never }));
+    try std.testing.expectEqual(pool.idx_never, pool.addUnion(allocator, &.{ pool.idx_never, pool.idx_never }));
+
+    // Step 3: structurally identical members at different indices are one
+    // member. Index equality kept both.
+    const a = recordWithStringField(&pool, allocator, "id");
+    const b = recordWithStringField(&pool, allocator, "id");
+    try std.testing.expectEqual(a, pool.addUnion(allocator, &.{ a, b }));
+
+    // Step 5: `"GET" | string` is `string`, and order does not change that.
+    const literal = pool.addLiteralString(allocator, "GET");
+    try std.testing.expectEqual(pool.idx_string, pool.addUnion(allocator, &.{ literal, pool.idx_string }));
+    try std.testing.expectEqual(pool.idx_string, pool.addUnion(allocator, &.{ pool.idx_string, literal }));
+
+    // Step 6: survivors keep the order they were written in, which is what a
+    // reader sees. Identity is order-free because the key sorts.
+    const written = pool.addUnion(allocator, &.{ pool.idx_number, pool.idx_string });
+    const members = pool.getUnionMembers(written);
+    try std.testing.expectEqual(pool.idx_number, members[0]);
+    try std.testing.expectEqual(pool.idx_string, members[1]);
+
+    // Two literals of the same base do not subsume each other.
+    const post = pool.addLiteralString(allocator, "POST");
+    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(pool.addUnion(allocator, &.{ literal, post })).len);
+}
+
+test "normalization does not drop a branded or obligation-carrying member" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // A `distinct type` is assignable to its base, but the union of the two is
+    // not the base: the brand is what a nominal type is for.
+    const user_id = pool.addNominalAlias(allocator, pool.idx_string, "UserId");
+    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(pool.addUnion(allocator, &.{ user_id, pool.idx_string })).len);
+
+    // An intersection is a value shape plus obligations, and it is assignable
+    // to its own members. `Effects<string, "env"> | string` resolves to that
+    // shape, and dropping the marker branch would leave a type reading as
+    // though the author declared no capability ceiling at all.
+    const marker_name = pool.addName(allocator, "__zttp_effect__");
+    const marker = pool.addRecord(allocator, &.{
+        .{ .name_start = marker_name.start, .name_len = marker_name.len, .type_idx = pool.idx_string, .optional = false },
+    });
+    const carried = pool.addIntersection(allocator, &.{ pool.idx_string, marker });
+    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(pool.addUnion(allocator, &.{ carried, pool.idx_string })).len);
 }
 
 fn checkTypedSourceWithServiceContext(
