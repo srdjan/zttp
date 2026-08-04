@@ -4,13 +4,14 @@ const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const expert_workflow = @import("../expert_workflow.zig");
 const defect_seeds = @import("defect_seeds.zig");
+const hole_seeds = @import("hole_seeds.zig");
 
-pub const version = "step-5-v2";
+pub const version = "step-6-v1";
 // Covers the declared entries and the negative corpus. The corpus joined the
 // hash after review found it outside: emptying it changed no published number
 // while both false-fire gates silently fell to zero iterations. The declared
 // range itself did not change when this value did.
-pub const content_hash = "f2b6ca8a61a937691dba1efcba9e8301ef02661a1c644f17bc895d0bcc524bdb";
+pub const content_hash = "8ce1c203f6b57f18e8cf25b6429102eac622ff66c5c8ed1668f1b95fa78185aa";
 
 pub const Action = enum {
     answer,
@@ -93,6 +94,17 @@ pub const entries = [_]Entry{
         .action = .edit,
         .description = "Inspect the violation and repair facts, then propose one complete handler edit.",
     },
+    .{
+        .id = "fill-hole",
+        .kind = .hole_fill,
+        .canonical_prompt = "Fill the remaining hole in handler.ts",
+        .paraphrases = &.{
+            "Fill the hole on line 3 of handler.ts",
+            "Replace the hole() in handler.ts with an expression",
+        },
+        .action = .edit,
+        .description = "Locate one typed hole, fill it through `zts_expert_fill_hole`, and apply what the tool returns.",
+    },
 };
 
 pub const NegativeCase = struct {
@@ -173,6 +185,7 @@ pub fn coverageOf(kind: expert_workflow.TaskKind) Coverage {
         .env_feature,
         .test_generation,
         .violation_fix,
+        .hole_fill,
         => .covered,
 
         .unknown,
@@ -259,6 +272,16 @@ pub fn contentHash() [64]u8 {
         hashField(&hasher, seed.ask);
     }
 
+    hashUsize(&hasher, hole_seeds.seeds.len);
+    for (hole_seeds.seeds) |seed| {
+        hashField(&hasher, seed.id);
+        hashUsize(&hasher, seed.holes);
+        hashField(&hasher, seed.source);
+        hashUsize(&hasher, seed.expressions.len);
+        for (seed.expressions) |expression| hashField(&hasher, expression);
+        hashField(&hasher, seed.ask);
+    }
+
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
@@ -325,6 +348,19 @@ pub fn renderDocument(allocator: std.mem.Allocator) ![]u8 {
     try writer.writeAll("| Seed | Code | Outcome |\n|---|---|---|\n");
     for (defect_seeds.seeds) |seed| {
         try writer.print("| `{s}` | `{s}` | {s} |\n", .{ seed.id, seed.code, @tagName(seed.class) });
+    }
+
+    try writer.writeAll("\n## Hole seeds\n\n");
+    try writer.writeAll(
+        "Skeletons whose response expressions are holes. The arm reads the file, fills one hole " ++
+            "through the real `zts_expert_fill_hole`, and applies what the tool returns. It does not " ++
+            "call `zts_expert_holes`, which publishes the frame and shells out to a build command that " ++
+            "cannot run in an isolated workspace, so the arm proves the fill mechanism and says nothing " ++
+            "about the publisher.\n\n",
+    );
+    try writer.writeAll("| Seed | Holes |\n|---|---|\n");
+    for (hole_seeds.seeds) |seed| {
+        try writer.print("| `{s}` | {d} |\n", .{ seed.id, seed.holes });
     }
 
     return try buf.toOwnedSlice();

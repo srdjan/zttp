@@ -247,6 +247,11 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
     const SequenceCase = struct {
         entry_id: []const u8,
         tools: []const []const u8,
+        /// Tool output the arm consumes, for a playbook whose next step depends
+        /// on a result rather than only on the step index. Null for every
+        /// playbook that counts round-trips, which is all of them but the hole
+        /// arm.
+        last_output: ?[]const u8 = null,
     };
     const cases = [_]SequenceCase{
         .{ .entry_id = "explain", .tools = &.{"zts_expert_modules"} },
@@ -255,6 +260,13 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
         .{ .entry_id = "add-env", .tools = &.{ "zts_expert_modules", "workspace_read_file", "apply_edit" } },
         .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file", "apply_edit" } },
         .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "apply_edit" } },
+        .{
+            .entry_id = "fill-hole",
+            .tools = &.{ "workspace_read_file", "zts_expert_fill_hole", "apply_edit" },
+            .last_output =
+            \\{"ok":true,"applied":false,"path":"handler.ts","line":3,"column":10,"expression":"Response.json({ total })","proposed_content":"function handler(req: Request): Response {\n  return Response.json({ total });\n}\n"}
+            ,
+        },
     };
 
     // This is the only gate that checks tool ordering and the at-most-one-edit
@@ -274,6 +286,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
                 .ask = entry.canonical_prompt,
                 .step_index = step_index,
                 .source = sequenceSource(entry.id),
+                .last_output = case.last_output,
             });
             const events = try sse_parser.parseAll(allocator, body);
             const outcome = try response_assembler.assemble(allocator, events);
@@ -323,6 +336,10 @@ fn findEvalCase(name: []const u8) ?*const expert_eval.EvalCase {
 }
 
 fn sequenceSource(entry_id: []const u8) []const u8 {
+    if (std.mem.eql(u8, entry_id, "fill-hole")) {
+        const seed = hole_seeds.findById("single-hole") orelse unreachable;
+        return seed.source;
+    }
     if (std.mem.eql(u8, entry_id, "add-env")) {
         return "function handler(req: Request): Response { return Response.json({ ok: true }); }\n";
     }
@@ -463,6 +480,7 @@ test "stand-in gate: continuation prefixes match the messages the loop authors" 
 }
 
 const defect_seeds = @import("standin/defect_seeds.zig");
+const hole_seeds = @import("standin/hole_seeds.zig");
 const veto = @import("veto.zig");
 const zts = @import("zts");
 const edit_simulate = @import("zts_cli").edit_simulate;

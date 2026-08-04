@@ -25,6 +25,7 @@ const embedded_sources = [_][]const u8{
     @embedFile("add-env.md"),
     @embedFile("write-test.md"),
     @embedFile("fix.md"),
+    @embedFile("fill-hole.md"),
 };
 
 pub const catalog: [embedded_sources.len]Template = build: {
@@ -59,6 +60,7 @@ test "catalog has exactly the expected entries, in order" {
         "add-env",
         "write-test",
         "fix",
+        "fill-hole",
     };
     try testing.expectEqual(expected.len, catalog.len);
     for (expected, 0..) |name, i| {

@@ -2,9 +2,9 @@
 
 # Deterministic stand-in range
 
-Range version: `step-5-v2`
+Range version: `step-6-v1`
 
-Range hash: `f2b6ca8a61a937691dba1efcba9e8301ef02661a1c644f17bc895d0bcc524bdb`
+Range hash: `8ce1c203f6b57f18e8cf25b6429102eac622ff66c5c8ed1668f1b95fa78185aa`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -68,6 +68,16 @@ The deterministic playbook server supports the entries below. Use `zig build ztt
   - Fix the ZTS300 compiler error
   - Repair this handler's compiler error
 
+## `fill-hole`
+
+- Task kind: `hole_fill`
+- Result: workspace edit
+- Behavior: Locate one typed hole, fill it through `zts_expert_fill_hole`, and apply what the tool returns.
+- Canonical prompt: Fill the remaining hole in handler.ts
+- Example paraphrases:
+  - Fill the hole on line 3 of handler.ts
+  - Replace the hole() in handler.ts with an expression
+
 ## Reserved task kinds
 
 These kinds stay outside the range on purpose. They are what the negative corpus and the out-of-range grammars assert an absence against, so covering one would delete its own gate.
@@ -89,3 +99,12 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 | `compound-assign` | `ZTS613` | salvaged |
 | `var-binding` | `ZTS001` | model_retry |
 | `dead-code` | `ZTS304` | model_retry |
+
+## Hole seeds
+
+Skeletons whose response expressions are holes. The arm reads the file, fills one hole through the real `zts_expert_fill_hole`, and applies what the tool returns. It does not call `zts_expert_holes`, which publishes the frame and shells out to a build command that cannot run in an isolated workspace, so the arm proves the fill mechanism and says nothing about the publisher.
+
+| Seed | Holes |
+|---|---|
+| `single-hole` | 1 |
+| `two-holes` | 2 |

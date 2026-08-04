@@ -4,6 +4,7 @@ const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const expert_workflow = @import("../expert_workflow.zig");
 const defect_seeds = @import("defect_seeds.zig");
+const hole_seeds = @import("hole_seeds.zig");
 const range = @import("range.zig");
 const request = @import("request.zig");
 
@@ -16,6 +17,7 @@ pub const kinds = [_]expert_workflow.TaskKind{
     .env_feature,
     .test_generation,
     .violation_fix,
+    .hole_fill,
 };
 
 pub const RouteSpec = struct {
@@ -40,6 +42,7 @@ pub fn renderResponse(
         .env_feature => renderEnvFeature(allocator, parsed),
         .test_generation => renderTestGeneration(allocator, parsed),
         .violation_fix => renderViolationFix(allocator, parsed),
+        .hole_fill => renderHoleFill(allocator, parsed),
         else => renderMiss(allocator, parsed.ask),
     };
 }
@@ -319,6 +322,118 @@ fn renderSeededViolationFix(
             "The seeded violation-fix arm is complete. No further step is available.",
         ),
     };
+}
+
+/// The hole arm: read the file, fill one hole through the real tool, apply what
+/// it returns.
+///
+/// It does not call `zts_expert_holes`, which publishes the frame and shells out
+/// to `zig build cli -- check` - that cannot run inside the isolated tmp
+/// workspace the gates use. The coordinates come from the same exact six-byte
+/// match `zts_expert_fill_hole` enforces on whatever it is handed, so the arm
+/// exercises the fill mechanism and the apply path and claims nothing about the
+/// publisher.
+///
+/// Step 2 is the first place the stand-in consumes a tool RESULT rather than
+/// counting round-trips. It parses the output itself and refuses anything it
+/// cannot read, for the same reason the file read does: an unparseable result
+/// and an empty one are indistinguishable to a playbook that assumes.
+fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
+    const file = findFile(parsed.ask) orelse "handler.ts";
+    const seed = hole_seeds.findByAsk(parsed.ask);
+
+    return switch (parsed.step_index) {
+        0 => blk: {
+            const args = try renderReadArgs(allocator, file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
+        },
+        1 => blk: {
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fill-hole");
+            const at = hole_seeds.firstHole(source) orelse break :blk try renderSourceMiss(
+                allocator,
+                "fill-hole",
+                "the supplied source carries no `hole()` to fill",
+            );
+            const expression = if (seed) |s| s.expressions[0] else break :blk try renderSourceMiss(
+                allocator,
+                "fill-hole",
+                "no seeded expression is declared for this ask",
+            );
+            const args = try renderFillHoleArgs(allocator, file, at.line, at.column, expression);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 1, "zts_expert_fill_hole", args);
+        },
+        2 => blk: {
+            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fill-hole");
+            const output = parsed.last_output orelse break :blk try renderSourceMiss(
+                allocator,
+                "fill-hole",
+                "the fill tool returned nothing to apply",
+            );
+            const proposed = readProposedContent(allocator, output) catch null;
+            const content = proposed orelse break :blk try renderSourceMiss(
+                allocator,
+                "fill-hole",
+                "the fill tool did not report ok with proposed content",
+            );
+            defer allocator.free(content);
+
+            // One fill per turn is the shape of this loop, not a preference. The
+            // tool re-reads from disk on every call, so a second fill in the same
+            // turn is computed against the original bytes and drops the first -
+            // see docs/solutions/logic-errors/two-hole-fills-in-one-turn-do-not-compose.md.
+            // Applying content that still carries a hole would hide that.
+            if (hole_seeds.countHoles(content) > 0) {
+                break :blk try renderSourceMiss(
+                    allocator,
+                    "fill-hole",
+                    "the proposed content still carries a hole; fills do not compose in one turn, so ask again for the remaining hole",
+                );
+            }
+
+            const args = try renderApplyArgs(allocator, file, content, source);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 2, "apply_edit", args);
+        },
+        else => try renderText(
+            allocator,
+            "The deterministic fill-hole playbook is complete. No further step is available.",
+        ),
+    };
+}
+
+/// `proposed_content` from a `zts_expert_fill_hole` result, or null when the
+/// tool did not report `ok` or the output does not parse. Caller frees.
+fn readProposedContent(allocator: std.mem.Allocator, output: []const u8) !?[]u8 {
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, output, .{}) catch return null;
+    defer parsed.deinit();
+    if (parsed.value != .object) return null;
+
+    const ok = parsed.value.object.get("ok") orelse return null;
+    if (ok != .bool or !ok.bool) return null;
+
+    const content = parsed.value.object.get("proposed_content") orelse return null;
+    if (content != .string) return null;
+    return try allocator.dupe(u8, content.string);
+}
+
+fn renderFillHoleArgs(
+    allocator: std.mem.Allocator,
+    file: []const u8,
+    line: u32,
+    column: u32,
+    expression: []const u8,
+) ![]u8 {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const writer = buf.writer();
+    try writer.writeAll("{\"path\":");
+    try writeJsonString(writer, file);
+    try writer.print(",\"line\":{d},\"column\":{d},\"expression\":", .{ line, column });
+    try writeJsonString(writer, expression);
+    try writer.writeAll("}");
+    return try buf.toOwnedSlice();
 }
 
 fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {

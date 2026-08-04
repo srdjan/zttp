@@ -24,6 +24,7 @@ pub const TaskKind = enum {
     env_feature,
     test_generation,
     review_explain,
+    hole_fill,
 };
 
 pub const Confidence = enum {
@@ -84,6 +85,13 @@ pub fn classify(user_text: []const u8) WorkflowHint {
         containsAny(user_text, &.{ "fix", "repair", "clean", "resolve" }))
     {
         return .{ .kind = .violation_fix, .confidence = .high };
+    }
+
+    // Narrow by necessity: `whole` contains `hole`, so a bare "hole" needle
+    // routes "rewrite the whole file" here. Every needle below carries enough
+    // context that the substring cannot appear inside `whole`.
+    if (containsAny(user_text, &.{ "hole()", "typed hole", "fill the hole", "remaining hole", "unfilled hole" })) {
+        return .{ .kind = .hole_fill, .confidence = .high };
     }
 
     if (isWorkflowAuthoring(user_text)) {
@@ -170,6 +178,9 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         ,
         .review_explain =>
         \\Do not edit unless the user asks for a change. Use live rule/module tools for ZigTS facts and cite compiler diagnostics or proof output rather than relying on memory.
+        ,
+        .hole_fill =>
+        \\Read the frame with `zts_expert_holes` and spend the turn on one hole. Call `zts_expert_fill_hole` with that hole's line, column, and one expression; the frame is the whole specification of it, and rewriting the file throws the frame away. Commit the returned `proposed_content` only when the tool reports `ok`.
         ,
         .unknown => "",
     };
@@ -406,6 +417,20 @@ test "explanation gate keeps use-phrased workflow review out of authoring" {
 test "classify JWT auth before env secrets" {
     const hint = classify("add bearer JWT auth using JWT_SECRET");
     try testing.expectEqual(TaskKind.auth_jwt, hint.kind);
+}
+
+test "hole routing does not fire on the word whole" {
+    // `whole` contains `hole`, so a bare needle would send every "rewrite the
+    // whole file" ask into the hole arm. The needles carry enough context that
+    // the substring cannot appear inside `whole`, and this is what holds them to
+    // it.
+    try testing.expectEqual(TaskKind.hole_fill, classify("Fill the remaining hole in handler.ts").kind);
+    try testing.expectEqual(TaskKind.hole_fill, classify("fill the hole on line 3").kind);
+    try testing.expectEqual(TaskKind.hole_fill, classify("Replace the hole() with an expression").kind);
+
+    try testing.expect(classify("Rewrite the whole file").kind != .hole_fill);
+    try testing.expect(classify("Author the whole handler yourself").kind != .hole_fill);
+    try testing.expect(classify("Explain the whole thing").kind != .hole_fill);
 }
 
 test "unknown prompt does not inject a note" {

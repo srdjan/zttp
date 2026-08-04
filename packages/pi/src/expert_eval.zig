@@ -60,6 +60,13 @@ pub const cases = [_]EvalCase{
         .note_must_contain = "pi_repair_plan",
     },
     .{
+        .name = "hole-fill",
+        .prompt = "Fill the remaining hole in handler.ts",
+        .expected_kind = .hole_fill,
+        .expected_confidence = .high,
+        .note_must_contain = "zts_expert_fill_hole",
+    },
+    .{
         .name = "env-secret",
         .prompt = "Add the STRIPE_SECRET env var",
         .expected_kind = .env_feature,

@@ -15,6 +15,8 @@ const transcript_mod = @import("transcript.zig");
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwd_support = @import("test_support/cwd.zig");
 const defect_seeds = @import("standin/defect_seeds.zig");
+const hole_seeds = @import("standin/hole_seeds.zig");
+const fill_hole_tool = @import("tools/zts_expert_fill_hole.zig");
 const playbook = @import("standin/playbook.zig");
 const request = @import("standin/request.zig");
 const range = @import("standin/range.zig");
@@ -279,6 +281,97 @@ test "stand-in seeded arm: a foreign source gets a miss, not a scripted defect" 
     const handler_path = try tmp.childPath(allocator, "handler.ts");
     const on_disk = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024);
     try testing.expectEqualStrings(foreign, on_disk);
+}
+
+// The seed table has to describe the sources it carries, or a seed edited from
+// two holes to one keeps its name and quietly stops testing what the name says.
+test "stand-in hole seeds declare the holes their sources carry" {
+    try testing.expect(hole_seeds.seeds.len >= 2);
+    var with_two: usize = 0;
+    for (hole_seeds.seeds) |seed| {
+        try testing.expectEqual(seed.holes, hole_seeds.countHoles(seed.source));
+        try testing.expectEqual(seed.holes, seed.expressions.len);
+        try testing.expectEqual(
+            expert_workflow.TaskKind.hole_fill,
+            expert_workflow.classify(seed.ask).kind,
+        );
+        if (seed.holes >= 2) with_two += 1;
+    }
+    // The composition pin below needs a multi-hole seed to exist at all.
+    try testing.expect(with_two >= 1);
+}
+
+// Pins a live defect: `zts_expert_fill_hole` proposes an edit and re-reads the
+// file from disk on every call, so two fills in one turn do not compose - the
+// second is computed against the original bytes and drops the first. Written up
+// in docs/solutions/logic-errors/two-hole-fills-in-one-turn-do-not-compose.md,
+// and it is why the hole arm of the convergence corpus seeds one hole per case
+// and why the round-trip comparison rests on four paired cases.
+//
+// This test goes RED the day fills compose, which is the point: it is the
+// ready-made failing test for whichever fix direction is chosen, and it is
+// flipped together with that fix rather than deleted.
+test "stand-in hole arm: two fills in one turn do not compose (pinned live defect)" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const seed = hole_seeds.findById("two-holes") orelse return error.MissingHoleSeed;
+
+    var tmp = try IsolatedTmp.init(allocator, "standin-hole-compose");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts", seed.source);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer restoreCwd(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+
+    // Fill the first hole. Nothing is written: the tool returns the proposed
+    // bytes and the verdict, and the caller decides.
+    const first = try fillHoleAt(allocator, seed.source, seed.expressions[0]);
+    try testing.expect(std.mem.indexOf(u8, first, seed.expressions[0]) != null);
+    try testing.expectEqual(@as(usize, 1), hole_seeds.countHoles(first));
+
+    // Now the second hole, at the coordinates it has in the proposal. Composing
+    // would mean this returns bytes carrying both expressions.
+    const second = try fillHoleAt(allocator, first, seed.expressions[1]);
+
+    // It does not. The tool re-read the original file, so the first fill is gone
+    // and one hole remains where the first expression should be.
+    try testing.expectEqual(@as(usize, 1), hole_seeds.countHoles(second));
+    try testing.expect(std.mem.indexOf(u8, second, seed.expressions[1]) != null);
+    try testing.expect(std.mem.indexOf(u8, second, seed.expressions[0]) == null);
+    std.debug.print("[standin-gate] hole fills do not compose in one turn (pinned)\n", .{});
+}
+
+/// Call the real `zts_expert_fill_hole` for the first hole in `frame`, and hand
+/// back the content it proposes.
+///
+/// `frame` is what the caller believes the file to be, and the coordinates come
+/// from it. That is exactly the situation a second fill in one turn is in, and
+/// it is why the tool reading from disk instead is observable at all.
+fn fillHoleAt(allocator: std.mem.Allocator, frame: []const u8, expression: []const u8) ![]u8 {
+    const at = hole_seeds.firstHole(frame) orelse return error.NoHoleInFrame;
+
+    // Escaped rather than interpolated: an expression is arbitrary source, and
+    // a string literal like `"count"` carries the quotes that would end the
+    // JSON field early.
+    var arg_buf = TextBuffer.init(allocator);
+    defer arg_buf.deinit();
+    const w = arg_buf.writer();
+    try w.print("{{\"path\":\"handler.ts\",\"line\":{d},\"column\":{d},\"expression\":", .{ at.line, at.column });
+    try zts.json_utils.writeJsonString(w, expression);
+    try w.writeAll("}");
+    const args = try arg_buf.toOwnedSlice();
+    var result = try fill_hole_tool.tool.execute(allocator, &.{args});
+    defer result.deinit(allocator);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.FillHoleResultUnreadable;
+    const content = parsed.value.object.get("proposed_content") orelse return error.FillHoleResultUnreadable;
+    if (content != .string) return error.FillHoleResultUnreadable;
+    return allocator.dupe(u8, content.string);
 }
 
 test "stand-in miss returns its marker through the real loop and applies no edit" {
@@ -701,6 +794,9 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
     defer tmp.cleanup(allocator);
 
     const original_handler = switch (entry.kind) {
+        // The hole arm needs a hole to fill, and the seed is the same source the
+        // dedicated arm tests use, so the two cannot describe different files.
+        .hole_fill => (hole_seeds.findById("single-hole") orelse return error.MissingHoleSeed).source,
         .violation_fix =>
         \\import { validateJson } from "zttp:validate";
         \\
@@ -792,6 +888,10 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
             } else if (std.mem.eql(u8, entry.id, "fix")) {
                 try testing.expect(std.mem.indexOf(u8, handler, "if (!result.ok)") != null);
                 try testing.expect(std.mem.indexOf(u8, handler, "result.error") != null);
+            } else if (std.mem.eql(u8, entry.id, "fill-hole")) {
+                const seed = hole_seeds.findById("single-hole") orelse return error.MissingHoleSeed;
+                try testing.expect(std.mem.indexOf(u8, handler, seed.expressions[0]) != null);
+                try testing.expectEqual(@as(usize, 0), hole_seeds.countHoles(handler));
             } else {
                 return error.UncheckedRangeEntry;
             }

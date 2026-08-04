@@ -58,7 +58,7 @@ test "stand-in miss SSE survives the real parser and assembler" {
     switch (outcome.reply.response) {
         .final_text => |text| try std.testing.expectEqualStrings(
             "[standin-miss] The deterministic playbook server understood the ask as: \"Protect this handler with bearer JWT auth\". " ++
-                "The supported range is explain, review, add-route, add-env, write-test, and fix. " ++
+                "The supported range is explain, review, add-route, add-env, write-test, fix, and fill-hole. " ++
                 "Run `zig build zttp-standin -- --range` to inspect it. Use a hosted model, or point " ++
                 "ZTS_OPENAI_BASE_URL at a real local model.",
             text,

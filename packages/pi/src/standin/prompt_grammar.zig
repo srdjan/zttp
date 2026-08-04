@@ -123,6 +123,26 @@ pub const in_range = [_]Grammar{
         },
         .tails = &file_tails,
     },
+    .{
+        // Every core carries a needle that cannot appear inside `whole`, which
+        // is the trap this kind has: a bare "hole" routes "rewrite the whole
+        // file" here. `hole_fill` is checked after `violation_fix`, so no core
+        // may pair a fix verb with a diagnostic word either.
+        .id = "fill-hole",
+        .kind = .hole_fill,
+        .leads = &common_leads,
+        .cores = &.{
+            "fill the hole",
+            // Not "fill the remaining hole": with the empty lead and the
+            // handler.ts tail that renders the canonical prompt exactly, and the
+            // routing number would then be partly a measurement of the frozen
+            // corpus it is supposed to be independent of.
+            "fill the remaining typed hole",
+            "replace the hole() with an expression",
+            "write the expression for the typed hole",
+        },
+        .tails = &file_tails,
+    },
 };
 
 /// Out-of-range grammars. Every generated prompt classifies to a kind the
