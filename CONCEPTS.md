@@ -53,8 +53,13 @@ The share of prompts whose first generated attempt clears the Veto with no retri
 ### Policy hash
 A fingerprint of the compiler's rule set, recorded beside every published rate so two measurements taken under different rules are never compared as though they were the same. It covers the rules and not the analysis behind them, so a change to what a rule concludes can leave it identical; the build a measurement came from is what distinguishes those.
 
+### Turn
+One ask and everything the agent does to answer it: the model round-trips, the tool calls, the drafts, and the Veto's verdict on each. A Turn is the unit a rate is measured over and the unit a Cassette records.
+
+State belongs to the Turn rather than to the session. The loop also writes to the Turn itself - a nudge after a refused draft, a compiler-authored repair - and those messages are part of the Turn they interrupt. Anything reconstructing a Turn from the wire must tell them from the next ask, which the transport does not help with: a control message the loop sends itself and a message from the user arrive in the same shape.
+
 ### Cassette
-A recorded model turn, kept so the same session can be replayed later against the current compiler. Recording costs model access and replay does not, which is what makes a published rate both reproducible and free to re-check. A rate may come from no other source.
+A recorded model Turn, kept so the same session can be replayed later against the current compiler. Recording costs model access and replay does not, which is what makes a published rate both reproducible and free to re-check. A rate may come from no other source.
 
 ### Stand-in
 A scripted responder that takes a live model's place on the wire, so the agent loop, the Veto, and the edit path can be exercised with no model access at all. It answers a declared range of asks and refuses everything outside it, and the refusal is the point: a range it silently outgrew would answer asks it cannot really handle.
