@@ -3,13 +3,14 @@
 const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const expert_workflow = @import("../expert_workflow.zig");
+const defect_seeds = @import("defect_seeds.zig");
 
-pub const version = "step-5-v1";
+pub const version = "step-5-v2";
 // Covers the declared entries and the negative corpus. The corpus joined the
 // hash after review found it outside: emptying it changed no published number
 // while both false-fire gates silently fell to zero iterations. The declared
 // range itself did not change when this value did.
-pub const content_hash = "ef932236ea71e84c5e08fc04960df989206db6c18f8edc3b5c0ebded1b7f8885";
+pub const content_hash = "c7792f5ab05e47dcc4ad94e35d947860dc34951deb4b7c49c26f2760ae3a3847";
 
 pub const Action = enum {
     answer,
@@ -242,6 +243,22 @@ pub fn contentHash() [64]u8 {
     hashUsize(&hasher, reserved_kinds.len);
     for (reserved_kinds) |kind| hashField(&hasher, @tagName(kind));
 
+    // The defect seeds are the only drafts the stand-in emits that the veto is
+    // meant to reject, so they are part of what the range claims and not a
+    // detail beside it. Their sources are hashed too: a seed edited until it no
+    // longer introduces its own code would otherwise change the arm's behavior
+    // while the published identity held still.
+    hashUsize(&hasher, defect_seeds.seeds.len);
+    for (defect_seeds.seeds) |seed| {
+        hashField(&hasher, seed.id);
+        hashField(&hasher, seed.code);
+        hashField(&hasher, @tagName(seed.class));
+        hashField(&hasher, seed.seed_source);
+        hashField(&hasher, seed.bad_draft);
+        hashField(&hasher, seed.good_draft);
+        hashField(&hasher, seed.ask);
+    }
+
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return std.fmt.bytesToHex(digest, .lower);
@@ -296,6 +313,18 @@ pub fn renderDocument(allocator: std.mem.Allocator) ![]u8 {
     );
     for (reserved_kinds) |kind| {
         try writer.print("- `{s}`\n", .{@tagName(kind)});
+    }
+
+    try writer.writeAll("\n## Defect seeds\n\n");
+    try writer.writeAll(
+        "Drafts the stand-in emits expecting the veto to reject them, so the rejection " ++
+            "half of the loop is reachable with no live model. Each seed declares what the " ++
+            "loop does with its bad draft; the declaration is re-derived by running the real " ++
+            "veto, never trusted.\n\n",
+    );
+    try writer.writeAll("| Seed | Code | Outcome |\n|---|---|---|\n");
+    for (defect_seeds.seeds) |seed| {
+        try writer.print("| `{s}` | `{s}` | {s} |\n", .{ seed.id, seed.code, @tagName(seed.class) });
     }
 
     return try buf.toOwnedSlice();

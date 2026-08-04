@@ -2,9 +2,9 @@
 
 # Deterministic stand-in range
 
-Range version: `step-5-v1`
+Range version: `step-5-v2`
 
-Range hash: `ef932236ea71e84c5e08fc04960df989206db6c18f8edc3b5c0ebded1b7f8885`
+Range hash: `c7792f5ab05e47dcc4ad94e35d947860dc34951deb4b7c49c26f2760ae3a3847`
 
 The deterministic playbook server supports the entries below. Use `zig build zttp-standin -- --range` to print this document.
 
@@ -78,3 +78,14 @@ These kinds stay outside the range on purpose. They are what the negative corpus
 - `workflow_authoring`
 - `sql_feature`
 - `auth_jwt`
+
+## Defect seeds
+
+Drafts the stand-in emits expecting the veto to reject them, so the rejection half of the loop is reachable with no live model. Each seed declares what the loop does with its bad draft; the declaration is re-derived by running the real veto, never trusted.
+
+| Seed | Code | Outcome |
+|---|---|---|
+| `let-binding` | `ZTS604` | salvaged |
+| `compound-assign` | `ZTS613` | salvaged |
+| `var-binding` | `ZTS001` | model_retry |
+| `dead-code` | `ZTS304` | model_retry |

@@ -354,9 +354,24 @@ fn sequenceSource(entry_id: []const u8) []const u8 {
 // skipped while every gate still reports success. Nothing enforced the naming
 // rule the filter depends on, so this reads both roots and does.
 test "stand-in gate: every test in the stand-in roots is reachable through the pinned filter" {
+    // Every module compiled into the root, not only the two roots themselves.
+    // The filter is applied to the whole test binary, so a test in
+    // `standin/playbook.zig` named without the needle is skipped just as
+    // silently - and those modules carry a third of the tests here.
+    //
+    // The residual gap is a new file: a module added under `standin/` and not
+    // listed escapes this, and comptime cannot read a directory to close it.
+    // The floor below is what makes the omission visible as the count stops
+    // tracking the suite.
     const sources = [_]struct { name: []const u8, text: []const u8 }{
         .{ .name = "standin_tests.zig", .text = @embedFile("standin_tests.zig") },
         .{ .name = "standin_range_tests.zig", .text = @embedFile("standin_range_tests.zig") },
+        .{ .name = "standin/playbook.zig", .text = @embedFile("standin/playbook.zig") },
+        .{ .name = "standin/request.zig", .text = @embedFile("standin/request.zig") },
+        .{ .name = "standin/server.zig", .text = @embedFile("standin/server.zig") },
+        .{ .name = "standin/range.zig", .text = @embedFile("standin/range.zig") },
+        .{ .name = "standin/prompt_grammar.zig", .text = @embedFile("standin/prompt_grammar.zig") },
+        .{ .name = "standin/defect_seeds.zig", .text = @embedFile("standin/defect_seeds.zig") },
     };
 
     var checked: usize = 0;
@@ -379,8 +394,11 @@ test "stand-in gate: every test in the stand-in roots is reachable through the p
 
     // Guards the guard: an @embedFile that silently resolved to nothing would
     // otherwise make this pass while checking no declarations at all.
-    try testing.expect(checked >= 15);
-    std.debug.print("[standin-gate] filter reachability {d}/{d} test names\n", .{ checked, checked });
+    try testing.expect(checked >= 30);
+    std.debug.print(
+        "[standin-gate] filter reachability {d}/{d} test names over {d} sources\n",
+        .{ checked, checked, sources.len },
+    );
 }
 
 const loop = @import("loop.zig");
@@ -441,6 +459,185 @@ test "stand-in gate: continuation prefixes match the messages the loop authors" 
     std.debug.print(
         "[standin-gate] continuation prefixes {d}/{d} agree with their authors\n",
         .{ authored.len, authored.len },
+    );
+}
+
+const defect_seeds = @import("standin/defect_seeds.zig");
+const veto = @import("veto.zig");
+const zts = @import("zts");
+const edit_simulate = @import("zts_cli").edit_simulate;
+
+test "stand-in gate: defect seeds are well formed and select by their own code" {
+    // Floors first. Both loops below are per-seed and per-class, so an emptied
+    // table reports agreement over nothing.
+    try testing.expect(defect_seeds.seeds.len >= 4);
+    inline for (comptime std.enums.values(defect_seeds.VetoClass)) |class| {
+        const n = defect_seeds.countOfClass(class);
+        if (n < 2) {
+            std.debug.print(
+                "[standin-gate] veto class {s} has {d} seeds; a class with fewer than two" ++
+                    " cannot show the behavior is the class rather than the seed\n",
+                .{ @tagName(class), n },
+            );
+            return error.VetoClassUnderseeded;
+        }
+    }
+
+    var in_registry: usize = 0;
+    for (defect_seeds.seeds) |seed| {
+        // Each ask must reach the fix playbook, or the arm never starts.
+        try testing.expectEqual(
+            expert_workflow.TaskKind.violation_fix,
+            expert_workflow.classify(seed.ask).kind,
+        );
+
+        // And must select its own seed, not a neighbour's.
+        const selected = defect_seeds.findByAsk(seed.ask) orelse return error.SeedAskSelectsNothing;
+        try testing.expectEqualStrings(seed.id, selected.id);
+
+        var duplicates: usize = 0;
+        for (defect_seeds.seeds) |other| {
+            if (std.mem.eql(u8, other.code, seed.code)) duplicates += 1;
+        }
+        try testing.expectEqual(@as(usize, 1), duplicates);
+
+        for (zts.rule_registry.all_rules) |rule| {
+            if (std.mem.eql(u8, rule.code, seed.code)) {
+                in_registry += 1;
+                break;
+            }
+        }
+    }
+
+    // Not a requirement, a report. The parser, stripper, and type-checker
+    // families carry no registry row and are where the non-salvageable
+    // rejections live, so demanding registry membership would exclude exactly
+    // the seeds the retry arm needs. One inside is enough to say the seeds are
+    // not wholly outside what the policy hash covers.
+    try testing.expect(in_registry >= 1);
+    std.debug.print(
+        "[standin-gate] defect seeds {d}; {d} carry a registry code, {d} do not\n",
+        .{ defect_seeds.seeds.len, in_registry, defect_seeds.seeds.len - in_registry },
+    );
+}
+
+test "stand-in gate: every defect seed reproduces its declared veto class through the real veto" {
+    for (defect_seeds.seeds) |seed| {
+        // The seed must be clean. The veto is differential (`ok` is
+        // `new_count == 0`), so a seed already carrying its own defect makes the
+        // defect pre-existing, the bad draft passes, and the arm tests nothing
+        // while reporting a clean run. This is the assertion that stops it.
+        {
+            var clean = try veto.runVeto(testing.allocator, .{
+                .file = "handler.ts",
+                .content = seed.seed_source,
+                .before = null,
+            });
+            defer clean.deinit(testing.allocator);
+            // `ok` alone is too weak: salvage-on-reject normalizes a
+            // canonical-band defect and reports a pass, so a baseline carrying
+            // `let total = 1` would satisfy it while being exactly the
+            // pre-existing defect this check exists to refuse. A clean baseline
+            // is one nothing had to rewrite.
+            if (!clean.outcome.ok or clean.report.normalized_content != null) {
+                std.debug.print(
+                    "[standin-gate] seed {s}: its baseline is not veto-clean (ok={} new={d} normalized={})\n",
+                    .{ seed.id, clean.outcome.ok, clean.report.new, clean.report.normalized_content != null },
+                );
+                return error.DefectSeedBaselineDirty;
+            }
+        }
+
+        // The good draft must land, whatever the class. A salvage seed never
+        // reaches it in the arm, and leaving it unchecked is how a class change
+        // ships a broken second draft.
+        {
+            var good = try veto.runVeto(testing.allocator, .{
+                .file = "handler.ts",
+                .content = seed.good_draft,
+                .before = seed.seed_source,
+            });
+            defer good.deinit(testing.allocator);
+            if (!good.outcome.ok or good.report.new != 0) {
+                std.debug.print(
+                    "[standin-gate] seed {s}: its good draft does not pass ({d} new violations)\n",
+                    .{ seed.id, good.report.new },
+                );
+                return error.DefectSeedGoodDraftFails;
+            }
+        }
+
+        // What the bad draft introduces, read before the veto decides what to do
+        // about it. The veto's own text cannot answer this for a salvaged seed:
+        // normalization clears the diagnostic, so the code never appears in a
+        // result that reads as a pass. Asking the simulator directly keeps the
+        // claim "this draft introduces exactly this code" independent of the
+        // outcome, which is the half the class switch below then checks.
+        {
+            var raw = try edit_simulate.simulate(testing.allocator, .{
+                .file = "handler.ts",
+                .content = seed.bad_draft,
+                .before = seed.seed_source,
+            });
+            defer raw.deinit(testing.allocator);
+
+            var introduced = false;
+            for (raw.violations.items) |v| {
+                if (v.introduced_by_patch and std.mem.eql(u8, v.code, seed.code)) introduced = true;
+            }
+            if (!introduced or raw.new_count == 0) {
+                std.debug.print(
+                    "[standin-gate] seed {s}: its bad draft does not introduce {s} ({d} new):\n",
+                    .{ seed.id, seed.code, raw.new_count },
+                );
+                for (raw.violations.items) |v| {
+                    std.debug.print("    {s} new={} {s}\n", .{ v.code, v.introduced_by_patch, v.message });
+                }
+                return error.DefectSeedCodeNotObserved;
+            }
+        }
+
+        // The bad draft, measured against the seed as baseline: this is what the
+        // arm actually submits.
+        var bad = try veto.runVeto(testing.allocator, .{
+            .file = "handler.ts",
+            .content = seed.bad_draft,
+            .before = seed.seed_source,
+        });
+        defer bad.deinit(testing.allocator);
+
+        switch (seed.class) {
+            // Salvage is a positive claim, so it needs positive evidence rather
+            // than the absence of a rejection: normalization must have produced
+            // different bytes and named the rewrite it applied.
+            .salvaged => {
+                if (!bad.outcome.ok or bad.report.normalized_content == null or bad.report.rewrite_trace.len == 0) {
+                    std.debug.print(
+                        "[standin-gate] seed {s} declares salvaged: ok={} normalized={} rewrites={d}\n",
+                        .{ seed.id, bad.outcome.ok, bad.report.normalized_content != null, bad.report.rewrite_trace.len },
+                    );
+                    return error.DefectSeedNotSalvaged;
+                }
+                try testing.expect(!std.mem.eql(u8, bad.report.normalized_content.?, seed.bad_draft));
+            },
+            // And a rejection must actually be one, with nothing salvaged behind
+            // it. A seed that quietly starts being salvaged would otherwise make
+            // the retry arm pass while never retrying.
+            .model_retry => {
+                if (bad.outcome.ok or bad.report.new == 0 or bad.report.normalized_content != null) {
+                    std.debug.print(
+                        "[standin-gate] seed {s} declares model_retry: ok={} new={d} normalized={}\n",
+                        .{ seed.id, bad.outcome.ok, bad.report.new, bad.report.normalized_content != null },
+                    );
+                    return error.DefectSeedNotRejected;
+                }
+            },
+        }
+    }
+
+    std.debug.print(
+        "[standin-gate] veto classes {d}/{d} seeds reproduce their declaration\n",
+        .{ defect_seeds.seeds.len, defect_seeds.seeds.len },
     );
 }
 
