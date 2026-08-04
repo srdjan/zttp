@@ -161,9 +161,38 @@ Kill rules 1 through 6 from D1 section 5, the `NarrowingGuard.key` sentinel fix,
 admitted test, bare boolean discriminant reads, and narrowing in the `else`
 branch. `isDict` and `isBytes` wait for phases 4 and 5 with their types.
 
-**Tests:** one per kill rule; `if (!r.ok) return;` extracts the ok branch;
-scope-0 slot-0 narrows; the two systems do not contradict each other on a
-shared corpus.
+**Tests:** one per kill rule, each with its positive control; `if (!r.ok)`
+extracts the ok branch.
+
+**Two facts D1's table did not record, both load-bearing.**
+
+The narrowing store was never split. D1's ground truth said it was, because
+`narrowed` exists - but only the `match` path wrote to it. Every `if` and
+`assert` guard overwrote `binding_types` and restored it afterwards, which is
+exactly the arrangement D1 said made a narrowing impossible to kill without
+losing the declaration. The split is done here rather than assumed.
+
+Narrowing over a **function parameter** never worked at all, for any test in
+the closed list. A parameter is registered in `param_types` and in the
+environment; the guard extractors read `binding_types`, which holds `const` and
+`let` declarations only, so every guard over a parameter silently installed
+nothing. `if (v === undefined) return;` over a parameter - the most common
+guard shape there is - narrowed nothing. The extractors now use `inferType`'s
+own fallback chain.
+
+That second fact is why the first three tests written for this task were
+vacuous: with no narrowing at all, a program that should report one error
+reports one error. Each kill-rule test now pins its positive control first.
+
+**A defect this found in itself.** The bare-discriminant guard asked for the
+member whose discriminant is `false` when the condition is `if (r.ok)`, which
+selects the wrong arm. Neither the aliased-union test nor a `validateJson`
+handler shows it - a union of named refs does not resolve to records, so no
+guard installs and the test passes whichever way the flag is set. The offline
+corpus caught it: `workflow-nested-dispatch-avoidance` reported four
+`property does not exist` diagnostics that were not there before, and
+`docs/coverage.json` failed on the drift. The pinned test now uses inline
+record members, the shape that actually selects a member.
 
 ### Task 5: generic constraints, inference, checked instantiation
 

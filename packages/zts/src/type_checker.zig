@@ -247,6 +247,125 @@ pub const TypeChecker = struct {
     // Statement walking
     // -------------------------------------------------------------------
 
+    // -------------------------------------------------------------------
+    // Flow-sensitive narrowing store (D1 section 5)
+    //
+    // `binding_types` is the declared or inferred type of a binding.
+    // `narrowed` is the flow overlay, and killing a narrowing means dropping
+    // the overlay entry rather than losing the declaration.
+    // -------------------------------------------------------------------
+
+    /// The type a binding has at this point in the walk: the narrowing if one
+    /// is installed, the declared type otherwise.
+    ///
+    /// The fallback chain is `inferType`'s, and it has to be. A guard extractor
+    /// that read only `binding_types` saw `const` and `let` declarations and
+    /// nothing else - a function parameter is registered in `param_types` and
+    /// in the environment, so no guard over a parameter ever installed. Every
+    /// narrowing test in the profile's closed list is written over a parameter
+    /// at least as often as over a local.
+    fn currentBindingType(self: *const TypeChecker, binding: ir.BindingRef) ?TypeIndex {
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        if (self.narrowed.get(key)) |t| return t;
+        if (self.binding_types.get(key)) |t| return t;
+        const declared = self.declaredTypeForBinding(binding);
+        return if (declared == null_type_idx) null else declared;
+    }
+
+    fn putNarrowed(self: *TypeChecker, key: u32, narrowed_type: TypeIndex) void {
+        self.narrowed.put(self.allocator, key, narrowed_type) catch self.markAllocationFailure();
+    }
+
+    fn restoreNarrowed(self: *TypeChecker, key: u32, saved: ?TypeIndex) void {
+        if (saved) |s| {
+            self.putNarrowed(key, s);
+        } else {
+            _ = self.narrowed.remove(key);
+        }
+    }
+
+    /// Kill rule 1. Any assignment to a binding drops its narrowing: the guard
+    /// that installed it described the old value. Nothing killed these before,
+    /// so a guard installed by an early return survived a later reassignment.
+    fn killNarrowing(self: *TypeChecker, key: u32) void {
+        _ = self.narrowed.remove(key);
+    }
+
+    /// Kill rule 5. Drop every narrowing whose binding lives in `scope_id`.
+    fn killNarrowingsInScope(self: *TypeChecker, scope_id: ir.ScopeId) void {
+        const prefix = @as(u32, scope_id) << 16;
+        var it = self.narrowed.iterator();
+        var doomed: [32]u32 = undefined;
+        var count: usize = 0;
+        while (it.next()) |entry| {
+            if ((entry.key_ptr.* & 0xFFFF0000) != prefix) continue;
+            if (count == doomed.len) break;
+            doomed[count] = entry.key_ptr.*;
+            count += 1;
+        }
+        for (doomed[0..count]) |key| _ = self.narrowed.remove(key);
+        // More than the buffer holds is rare and the remainder is dropped on
+        // the next pass over the same scope; a leftover entry can only make a
+        // later binding read as narrower than it is, so sweep until empty.
+        if (count == doomed.len) self.killNarrowingsInScope(scope_id);
+    }
+
+    /// Kill rule 4, the entry half. A narrowing established before a loop only
+    /// survives the body if the body never assigns the binding, because the
+    /// back edge re-enters with whatever the last iteration left.
+    ///
+    /// The walk is structural over the statement shapes the subset admits. A
+    /// shape it does not reach costs precision, never soundness: the set this
+    /// kills only ever grows, and a narrowing it fails to kill is caught by
+    /// nothing, which is why the listed shapes are the ones that can hold an
+    /// assignment.
+    fn killNarrowingsAssignedIn(self: *TypeChecker, node: NodeIndex, depth: u8) void {
+        if (node == null_node or depth > 32) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .assignment => {
+                const asgn = self.ir_view.getAssignment(node) orelse return;
+                if (self.ir_view.getTag(asgn.target) == .identifier) {
+                    if (self.ir_view.getBinding(asgn.target)) |binding| {
+                        self.killNarrowing(packBindingKey(binding.scope_id, binding.slot));
+                    }
+                }
+                self.killNarrowingsAssignedIn(asgn.value, depth + 1);
+            },
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.killNarrowingsAssignedIn(
+                        self.ir_view.getListIndex(block.stmts_start, @intCast(i)),
+                        depth + 1,
+                    );
+                }
+            },
+            .if_stmt => {
+                const if_s = self.ir_view.getIfStmt(node) orelse return;
+                self.killNarrowingsAssignedIn(if_s.condition, depth + 1);
+                self.killNarrowingsAssignedIn(if_s.then_branch, depth + 1);
+                self.killNarrowingsAssignedIn(if_s.else_branch, depth + 1);
+            },
+            .expr_stmt, .return_stmt => {
+                if (self.ir_view.getOptValue(node)) |value| {
+                    self.killNarrowingsAssignedIn(value, depth + 1);
+                }
+            },
+            .for_of_stmt, .for_in_stmt => {
+                const fi = self.ir_view.getForIter(node) orelse return;
+                self.killNarrowingsAssignedIn(fi.iterable, depth + 1);
+                self.killNarrowingsAssignedIn(fi.body, depth + 1);
+            },
+            // exhaustive: the listed shapes are the ones that can contain an
+            // assignment in this subset. A tag not reached here contributes no
+            // kill, which costs precision and never soundness: the set this
+            // function kills only ever grows, and over-killing a narrowing widens
+            // a binding back to its declared type.
+            else => {},
+        }
+    }
+
     fn walkStmt(self: *TypeChecker, node: NodeIndex) void {
         if (self.allocation_failed) return;
         self.env.pool.ensureHealthy() catch return;
@@ -262,6 +381,11 @@ pub const TypeChecker = struct {
                     const stmt_idx = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
                     self.walkStmt(stmt_idx);
                 }
+                // Kill rule 5. A narrowing of a binding declared in this scope
+                // has nothing left to describe once the scope closes, and the
+                // key it occupies is (scope, slot) - so leaving it behind would
+                // hand it to whatever occupies that slot next.
+                self.killNarrowingsInScope(block.scope_id);
             },
 
             .var_decl => {
@@ -316,23 +440,28 @@ pub const TypeChecker = struct {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
                 self.walkExpr(if_s.condition);
 
-                // Narrow nullable types in then-branch when condition is a
-                // simple guard: if (x), if (!x), if (x !== undefined).
+                // Narrow in both branches when the condition is an admitted
+                // guard: if (x), if (!x), if (x !== undefined), a discriminant
+                // test. The narrowing lives in the flow overlay, never in
+                // `binding_types` - that map is the declared type, and
+                // overwriting it is what made a narrowing impossible to kill
+                // without losing the declaration.
                 const narrow = self.extractNarrowingGuard(if_s.condition);
-                if (narrow.key != 0 and narrow.narrowed_type != null_type_idx) {
-                    const saved = self.binding_types.get(narrow.key);
-                    // Only narrow to the non-null type in the then-branch when the
-                    // condition is non-negated (i.e. `if (x)` not `if (!x)`).
-                    // A negated guard means the then-branch runs when x is falsy,
-                    // so we must not install the non-null narrowing there.
-                    if (!narrow.negated) {
-                        self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch self.markAllocationFailure();
-                    }
+                if (narrow.key != null and narrow.narrowed_type != null_type_idx) {
+                    const key = narrow.key.?;
+                    const saved = self.narrowed.get(key);
+
+                    // A negated guard means the then-branch runs when the test
+                    // failed, so the narrowed type belongs to the else branch.
+                    if (!narrow.negated) self.putNarrowed(key, narrow.narrowed_type);
                     self.walkStmt(if_s.then_branch);
-                    if (saved) |s| {
-                        self.binding_types.put(self.allocator, narrow.key, s) catch self.markAllocationFailure();
-                    } else {
-                        _ = self.binding_types.remove(narrow.key);
+                    self.restoreNarrowed(key, saved);
+
+                    if (if_s.else_branch != null_node) {
+                        const else_narrowed = if (narrow.negated) narrow.narrowed_type else narrow.else_type;
+                        if (else_narrowed != null_type_idx) self.putNarrowed(key, else_narrowed);
+                        self.walkStmt(if_s.else_branch);
+                        self.restoreNarrowed(key, saved);
                     }
 
                     // Forward narrowing after early return:
@@ -340,17 +469,14 @@ pub const TypeChecker = struct {
                     // if (x.kind === "err") { return; } narrows x to excluded union
                     if (if_s.else_branch == null_node and self.branchAlwaysReturns(if_s.then_branch)) {
                         if (narrow.negated) {
-                            self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch self.markAllocationFailure();
+                            self.putNarrowed(key, narrow.narrowed_type);
                         } else if (narrow.else_type != null_type_idx) {
-                            self.binding_types.put(self.allocator, narrow.key, narrow.else_type) catch self.markAllocationFailure();
+                            self.putNarrowed(key, narrow.else_type);
                         }
                     }
                 } else {
                     self.walkStmt(if_s.then_branch);
-                }
-
-                if (if_s.else_branch != null_node) {
-                    self.walkStmt(if_s.else_branch);
+                    if (if_s.else_branch != null_node) self.walkStmt(if_s.else_branch);
                 }
             },
 
@@ -382,8 +508,10 @@ pub const TypeChecker = struct {
                     self.walkExpr(assert.error_expr);
                 }
                 const narrow = self.extractNarrowingGuard(assert.condition);
-                if (narrow.key != 0 and narrow.narrowed_type != null_type_idx and !narrow.negated) {
-                    self.binding_types.put(self.allocator, narrow.key, narrow.narrowed_type) catch self.markAllocationFailure();
+                if (narrow.key) |key| {
+                    if (narrow.narrowed_type != null_type_idx and !narrow.negated) {
+                        self.putNarrowed(key, narrow.narrowed_type);
+                    }
                 }
             },
 
@@ -396,7 +524,23 @@ pub const TypeChecker = struct {
             .for_of_stmt, .for_in_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
                 self.walkExpr(fi.iterable);
+                // Kill rule 4. A narrowing established before the loop is only
+                // valid inside it if the body never reassigns the binding, and
+                // a narrowing established inside the body does not survive the
+                // back edge.
+                self.killNarrowingsAssignedIn(fi.body, 0);
+                var before = self.narrowed.clone(self.allocator) catch {
+                    self.markAllocationFailure();
+                    self.walkStmt(fi.body);
+                    return;
+                };
+                defer before.deinit(self.allocator);
                 self.walkStmt(fi.body);
+                self.narrowed.clearRetainingCapacity();
+                var it = before.iterator();
+                while (it.next()) |entry| {
+                    self.putNarrowed(entry.key_ptr.*, entry.value_ptr.*);
+                }
             },
 
             .switch_stmt => {
@@ -554,6 +698,9 @@ pub const TypeChecker = struct {
                 if (target_tag == .identifier) {
                     const binding = self.ir_view.getBinding(asgn.target) orelse return;
                     const key = packBindingKey(binding.scope_id, binding.slot);
+                    // Kill rule 1: the guard that installed the narrowing
+                    // described the value being overwritten.
+                    self.killNarrowing(key);
                     if (self.binding_types.get(key)) |declared| {
                         if (asgn.op == null) {
                             const val_type = self.inferType(asgn.value);
@@ -1313,7 +1460,10 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     const NarrowingGuard = struct {
-        key: u32 = 0,
+        /// Absent means the condition installed no guard. This used to be a `0`
+        /// sentinel, which made the binding at scope 0 slot 0 the one binding
+        /// in the program that could never narrow.
+        key: ?u32 = null,
         narrowed_type: TypeIndex = null_type_idx,
         negated: bool = false,
         /// For discriminated unions: the type to install after the then-branch
@@ -1330,6 +1480,22 @@ pub const TypeChecker = struct {
         if (tag == .identifier) {
             const r = self.resolveNullableBinding(condition) orelse return .{};
             return .{ .key = r.key, .narrowed_type = r.inner, .negated = false };
+        }
+
+        // if (r.ok) - a bare boolean discriminant read. The `Result` idiom is
+        // written this way as often as it is written `r.ok === true`, and only
+        // the second form narrowed.
+        if (tag == .member_access) {
+            // `if (r.ok)` runs its then-branch when the field is true, so the
+            // member being selected is the one whose discriminant is `true`.
+            // The `!` form is handled by the negation wrapper below, which
+            // swaps the two sides rather than asking for a different member.
+            if (self.extractBooleanDiscriminantGuard(condition, true)) |guard| return guard;
+        }
+
+        // if (Array.isArray(x))
+        if (tag == .call) {
+            if (self.extractIsArrayGuard(condition)) |guard| return guard;
         }
 
         // if (x !== undefined), if (x === undefined), or if (x.prop === "literal")
@@ -1353,6 +1519,12 @@ pub const TypeChecker = struct {
                 };
             }
 
+            // Pattern: typeof x === "string". This test lived only in
+            // `bool_checker`'s coarse `ExprType` lattice, so the profile's
+            // closed narrowing list had an entry the authoritative system
+            // could not answer.
+            if (self.extractTypeofGuard(bin)) |guard| return guard;
+
             // Pattern: x.prop === <literal> (discriminated union narrowing)
             const lhs_is_literal = lhs_tag == .lit_string or lhs_tag == .lit_int or lhs_tag == .lit_bool;
             const rhs_is_literal = rhs_tag == .lit_string or rhs_tag == .lit_int or rhs_tag == .lit_bool;
@@ -1367,17 +1539,205 @@ pub const TypeChecker = struct {
             }
         }
 
-        // if (!x) - negated truthiness guard
+        // `!` of any admitted test. `if (!r.ok) return;` is the shape the
+        // Result idiom depends on, and before this only `!x` on a nullable
+        // binding was recognized.
         if (tag == .unary_op) {
             const un = self.ir_view.getUnary(condition) orelse return .{};
             if (un.op != .not) return .{};
-            const inner_tag = self.ir_view.getTag(un.operand) orelse return .{};
-            if (inner_tag != .identifier) return .{};
-            const r = self.resolveNullableBinding(un.operand) orelse return .{};
-            return .{ .key = r.key, .narrowed_type = r.inner, .negated = true };
+            var inner = self.extractNarrowingGuard(un.operand);
+            if (inner.key == null) return .{};
+            inner.negated = !inner.negated;
+            // The two sides swap with the sense of the test, so a discriminant
+            // guard keeps describing the branch it actually applies to.
+            const then_type = inner.narrowed_type;
+            if (inner.else_type != null_type_idx) {
+                inner.narrowed_type = inner.else_type;
+                inner.else_type = then_type;
+                inner.negated = !inner.negated;
+            }
+            return inner;
         }
 
         return .{};
+    }
+
+    /// `typeof x === "string"` and its `!==` form, over a binding whose type is
+    /// a union. Members matching the named primitive stay in the then branch,
+    /// the rest go to the else branch.
+    fn extractTypeofGuard(self: *const TypeChecker, bin: anytype) ?NarrowingGuard {
+        const lhs_tag = self.ir_view.getTag(bin.left) orelse return null;
+        const rhs_tag = self.ir_view.getTag(bin.right) orelse return null;
+
+        const typeof_node, const literal_node = if (lhs_tag == .unary_op and rhs_tag == .lit_string)
+            .{ bin.left, bin.right }
+        else if (rhs_tag == .unary_op and lhs_tag == .lit_string)
+            .{ bin.right, bin.left }
+        else
+            return null;
+
+        const un = self.ir_view.getUnary(typeof_node) orelse return null;
+        if (un.op != .typeof_op) return null;
+        if (self.ir_view.getTag(un.operand) != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(un.operand) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const current = self.currentBindingType(binding) orelse return null;
+
+        const wanted = self.getLiteralString(literal_node) orelse return null;
+        const pool = self.env.pool;
+
+        var matched: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+        var rest: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+        var matched_count: usize = 0;
+        var rest_count: usize = 0;
+
+        const members = if (pool.getTag(current) == .t_union)
+            pool.getUnionMembers(current)
+        else
+            &[_]TypeIndex{current};
+
+        for (members) |candidate| {
+            const hit = typeofNameOf(pool, candidate);
+            const is_match = hit != null and std.mem.eql(u8, hit.?, wanted);
+            if (is_match) {
+                if (matched_count == matched.len) return null;
+                matched[matched_count] = candidate;
+                matched_count += 1;
+            } else {
+                if (rest_count == rest.len) return null;
+                rest[rest_count] = candidate;
+                rest_count += 1;
+            }
+        }
+        if (matched_count == 0 or rest_count == 0) return null;
+
+        return .{
+            .key = key,
+            .narrowed_type = pool.addUnion(self.allocator, matched[0..matched_count]),
+            .negated = bin.op == .strict_neq,
+            .else_type = pool.addUnion(self.allocator, rest[0..rest_count]),
+        };
+    }
+
+    /// What `typeof` answers for a type, or null when the type has no single
+    /// answer. A union member with no answer never matches, which keeps it on
+    /// the else side rather than silently joining the narrowed branch.
+    fn typeofNameOf(pool: *const TypePool, idx: TypeIndex) ?[]const u8 {
+        return switch (pool.getTag(idx) orelse return null) {
+            .t_string, .t_literal_string, .t_template_literal => "string",
+            .t_number, .t_literal_number => "number",
+            .t_boolean, .t_literal_bool => "boolean",
+            .t_undefined, .t_void => "undefined",
+            .t_function => "function",
+            .t_record, .t_array, .t_tuple, .t_null => "object",
+            // exhaustive: the remaining tags have no single `typeof` answer - a
+            // generic parameter, an unresolved ref, an intersection, and a template
+            // literal each stand for more than one runtime shape. Answering null
+            // keeps such a member on the else side of the test, which is the
+            // direction that cannot claim a narrowing the test did not prove.
+            else => null,
+        };
+    }
+
+    /// `if (r.ok)` over a union discriminated by a boolean field. Reuses the
+    /// literal-discriminant machinery with the literal supplied rather than
+    /// parsed, since there is no literal node to read.
+    fn extractBooleanDiscriminantGuard(
+        self: *const TypeChecker,
+        member_node: NodeIndex,
+        expect: bool,
+    ) ?NarrowingGuard {
+        const member = self.ir_view.getMember(member_node) orelse return null;
+        if (self.ir_view.getTag(member.object) != .identifier) return null;
+
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const current = self.currentBindingType(binding) orelse return null;
+        if (self.env.pool.getTag(current) != .t_union) return null;
+
+        const prop_name = self.resolveAtomName(member.property) orelse return null;
+        const wanted = self.env.pool.addLiteralBool(self.allocator, expect);
+
+        for (self.env.pool.getUnionMembers(current)) |candidate| {
+            const field = self.env.pool.lookupRecordField(candidate, prop_name) orelse continue;
+            if (!self.env.isAssignableTo(field.type_idx, wanted)) continue;
+            if (!self.env.isAssignableTo(wanted, field.type_idx)) continue;
+            return .{
+                .key = key,
+                .narrowed_type = candidate,
+                .negated = false,
+                .else_type = self.env.pool.excludeUnionMember(self.allocator, current, candidate),
+            };
+        }
+        return null;
+    }
+
+    /// `if (Array.isArray(x))`. Narrows to the union members that are arrays or
+    /// tuples; when no member is, the guard is not installed rather than
+    /// narrowing to `never`.
+    fn extractIsArrayGuard(self: *const TypeChecker, call_node: NodeIndex) ?NarrowingGuard {
+        const call = self.ir_view.getCall(call_node) orelse return null;
+        if (call.args_count != 1) return null;
+        if (self.ir_view.getTag(call.callee) != .member_access) return null;
+
+        const callee = self.ir_view.getMember(call.callee) orelse return null;
+        if (self.ir_view.getTag(callee.object) != .identifier) return null;
+        const object_binding = self.ir_view.getBinding(callee.object) orelse return null;
+        const object_name = self.resolveAtomName(object_binding.name_atom) orelse return null;
+        if (!std.mem.eql(u8, object_name, "Array")) return null;
+        // A shadowed `Array` is a different value. A declared binding has a
+        // tracked type; the global does not.
+        if (self.binding_types.get(packBindingKey(object_binding.scope_id, object_binding.slot)) != null) return null;
+        const method = self.resolveAtomName(callee.property) orelse return null;
+        if (!std.mem.eql(u8, method, "isArray")) return null;
+
+        const arg = self.ir_view.getListIndex(call.args_start, 0);
+        if (self.ir_view.getTag(arg) != .identifier) return null;
+        const binding = self.ir_view.getBinding(arg) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const current = self.currentBindingType(binding) orelse return null;
+
+        const pool = self.env.pool;
+        switch (pool.getTag(current) orelse return null) {
+            .t_array, .t_tuple => return .{ .key = key, .narrowed_type = current, .negated = false },
+            .t_union => {
+                var arrays: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                var others: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                var array_count: usize = 0;
+                var other_count: usize = 0;
+                for (pool.getUnionMembers(current)) |candidate| {
+                    const is_array = switch (pool.getTag(candidate) orelse continue) {
+                        .t_array, .t_tuple => true,
+                        else => false,
+                    };
+                    if (is_array) {
+                        if (array_count == arrays.len) return null;
+                        arrays[array_count] = candidate;
+                        array_count += 1;
+                    } else {
+                        if (other_count == others.len) return null;
+                        others[other_count] = candidate;
+                        other_count += 1;
+                    }
+                }
+                if (array_count == 0) return null;
+                return .{
+                    .key = key,
+                    .narrowed_type = pool.addUnion(self.allocator, arrays[0..array_count]),
+                    .negated = false,
+                    .else_type = if (other_count == 0)
+                        null_type_idx
+                    else
+                        pool.addUnion(self.allocator, others[0..other_count]),
+                };
+            },
+            // exhaustive: `Array.isArray` can only narrow a type that has an array
+            // somewhere in it. A record, a primitive, or a function is never an
+            // array, so the honest answer is no guard rather than a narrowing to
+            // `never` that would make the branch unreachable by construction.
+            else => return null,
+        }
     }
 
     const NullableBinding = struct { key: u32, inner: TypeIndex };
@@ -1387,10 +1747,39 @@ pub const TypeChecker = struct {
     fn resolveNullableBinding(self: *const TypeChecker, ident_node: NodeIndex) ?NullableBinding {
         const binding = self.ir_view.getBinding(ident_node) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
-        const current = self.binding_types.get(key) orelse return null;
-        const current_tag = self.env.pool.getTag(current) orelse return null;
-        if (current_tag != .t_nullable) return null;
-        return .{ .key = key, .inner = self.env.pool.getNullableInner(current) };
+        const current = self.currentBindingType(binding) orelse return null;
+        const pool = self.env.pool;
+        switch (pool.getTag(current) orelse return null) {
+            .t_nullable => return .{ .key = key, .inner = pool.getNullableInner(current) },
+            // `string | undefined` written out is the same type as `string?`
+            // and narrows the same way. Only the `t_nullable` spelling was
+            // recognized, so every author who wrote the union form got no
+            // narrowing at all - including from `if (v === undefined) return;`,
+            // the most common guard in the corpus.
+            .t_union => {
+                const members = pool.getUnionMembers(current);
+                var kept: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                var kept_count: usize = 0;
+                var saw_absent = false;
+                for (members) |member| {
+                    const tag = pool.getTag(member) orelse continue;
+                    if (tag == .t_undefined or tag == .t_null) {
+                        saw_absent = true;
+                        continue;
+                    }
+                    if (kept_count == kept.len) return null;
+                    kept[kept_count] = member;
+                    kept_count += 1;
+                }
+                if (!saw_absent or kept_count == 0) return null;
+                return .{ .key = key, .inner = pool.addUnion(self.allocator, kept[0..kept_count]) };
+            },
+            // exhaustive: only `T?` and a union carrying `undefined` or `null`
+            // describe a value that may be absent. Every other tag is a type that
+            // is always present, so an absence guard over it narrows nothing and
+            // installing one would claim a removal that never happened.
+            else => return null,
+        }
     }
 
     /// Extract a discriminated union narrowing guard from x.prop === <literal>.
@@ -1408,7 +1797,7 @@ pub const TypeChecker = struct {
 
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
-        const current = self.binding_types.get(key) orelse return null;
+        const current = self.currentBindingType(binding) orelse return null;
         if (self.env.pool.getTag(current) != .t_union) return null;
 
         const prop_name = self.resolveAtomName(member.property) orelse return null;
@@ -2461,6 +2850,128 @@ fn recordWithStringField(pool: *TypePool, allocator: std.mem.Allocator, name: []
     return pool.addRecord(allocator, &.{
         .{ .name_start = n.start, .name_len = n.len, .type_idx = pool.idx_string, .optional = false },
     });
+}
+
+test "narrowing: a bare boolean discriminant read, and its negation" {
+    // The Result idiom is written `if (!r.ok) return ...` at least as often as
+    // it is written `r.ok === false`, and only the second form narrowed.
+    //
+    // The union members are written inline rather than as two named aliases.
+    // That is not a style choice: a union of named refs does not resolve to
+    // records here, so no field lookup finds a discriminant and no guard
+    // installs - a version of this test written with aliases passes whether
+    // the guard is right, wrong, or absent. This shape selects the wrong
+    // member if the guard asks for the `false` arm, and both accesses below
+    // then report a missing property.
+    try checkTypedSource(
+        \\function pick(r: { ok: true; value: string } | { ok: false; error: string }): string {
+        \\  if (!r.ok) {
+        \\    return r.error;
+        \\  }
+        \\  return r.value;
+        \\}
+    , 0, null);
+    try checkTypedSource(
+        \\function pick(r: { ok: true; value: string } | { ok: false; error: string }): string {
+        \\  if (r.ok) {
+        \\    return r.value;
+        \\  }
+        \\  return r.error;
+        \\}
+    , 0, null);
+}
+
+test "narrowing: typeof reaches the authoritative system" {
+    try checkTypedSource(
+        \\function label(v: string | number): string {
+        \\  if (typeof v === "string") {
+        \\    return v;
+        \\  }
+        \\  return "n";
+        \\}
+    , 0, null);
+}
+
+test "narrowing: Array.isArray" {
+    try checkTypedSource(
+        \\function first(v: string | string[]): string {
+        \\  if (Array.isArray(v)) {
+        \\    return v[0];
+        \\  }
+        \\  return v;
+        \\}
+    , 0, null);
+}
+
+test "narrowing: the else branch narrows too" {
+    try checkTypedSource(
+        \\function orDefault(v: string | undefined): string {
+        \\  if (v === undefined) {
+        \\    return "d";
+        \\  } else {
+        \\    return v;
+        \\  }
+        \\}
+    , 0, null);
+}
+
+test "narrowing: an assignment kills the narrowing it invalidates" {
+    // Kill rule 1. Nothing killed a narrowing before, so the guard installed by
+    // the early return survived the reassignment and `v` still read as
+    // `string`.
+    //
+    // The control comes first, and it is what makes the second assertion mean
+    // something: with no narrowing at all, both programs report one error and
+    // the pair below would pass while checking nothing.
+    try checkTypedSource(
+        \\function kept(v: string | undefined): string {
+        \\  if (v === undefined) {
+        \\    return "d";
+        \\  }
+        \\  return v;
+        \\}
+    , 0, null);
+    try checkTypedSource(
+        \\function reassigned(v: string | undefined, w: string | undefined): string {
+        \\  if (v === undefined) {
+        \\    return "d";
+        \\  }
+        \\  v = w;
+        \\  return v;
+        \\}
+    , 1, null);
+}
+
+test "narrowing: a loop body that reassigns kills the narrowing at entry" {
+    // Kill rule 4. The read happens before the assignment in source order, so
+    // only the entry half of the rule can catch it: the back edge re-enters
+    // with whatever the last iteration left.
+    //
+    // Control first: a loop that does not assign keeps the narrowing, so the
+    // second assertion is about the assignment rather than about loops.
+    try checkTypedSource(
+        \\function readOnly(xs: string[], v: string | undefined): string {
+        \\  if (v === undefined) {
+        \\    return "d";
+        \\  }
+        \\  for (const x of xs) {
+        \\    const y: string = v;
+        \\  }
+        \\  return "ok";
+        \\}
+    , 0, null);
+    try checkTypedSource(
+        \\function looped(xs: string[], v: string | undefined): string {
+        \\  if (v === undefined) {
+        \\    return "d";
+        \\  }
+        \\  for (const x of xs) {
+        \\    const y: string = v;
+        \\    v = undefined;
+        \\  }
+        \\  return "ok";
+        \\}
+    , 1, null);
 }
 
 test "the join asks for structural identity, not the same pool index" {
