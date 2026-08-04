@@ -52,6 +52,14 @@ A declaration that a function's true return means its named parameter has a narr
 
 The declaration is a claim, not a proof: it installs a Narrowing at its call sites only when the body is a single return of admitted tests over the named parameter. Any other body keeps the declaration, reports the refusal, and installs nothing - the half that matters, since a guard the compiler cannot check is a refinement the author asserted and nothing confirmed.
 
+### Union normalization
+The rewriting every union goes through as it is constructed, so that any two ways of spelling the same union yield the same member sequence: nested unions are flattened, the empty type is dropped, structurally identical members collapse to one, and a member describing no value another member already describes is dropped. One surviving member is that type rather than a union of one; no survivor is the empty type.
+
+Normalization may lose canonical quality and must never lose a member. Every member of a union on the source side of an assignability check is a separate obligation, so a member dropped by a bounded or simplifying path turns a rejection into an acceptance. Constructing a union from a single existing union returns that same union unchanged, which is the identity contract callers build on.
+
+### Canonical key
+A structural fingerprint of a type, used to decide whether two separately built types are the same type. The type store does not intern, so two identical record shapes constructed at different moments occupy different positions in it; identity by position would read them as two distinct members of one union, and the key is what makes them one. It answers sameness of shape, never assignability between shapes.
+
 ## Measuring the compiler
 
 ### Veto
