@@ -15,12 +15,57 @@ pub const ParsedRequest = struct {
     /// from nothing, and the veto would not object because an empty `before`
     /// makes an empty baseline.
     source: ?[]const u8 = null,
+    /// Raw `output` string of the LAST function_call_output in the current turn.
+    ///
+    /// Null before any tool result. The same recovery caveat as `source`
+    /// applies, and for the same reason: a truncated or failed tool arrives here
+    /// as text that does not parse, and a playbook that authored from it would
+    /// be writing from nothing. Read it through a real JSON parse and refuse on
+    /// anything unexpected.
+    last_output: ?[]const u8 = null,
+    /// Function-call outputs in this turn carrying the loop's veto rejection
+    /// preamble. Separates "past the apply step because the edit landed" from
+    /// "past it because the compiler bounced it", which the step index alone
+    /// cannot express since both advance it by one.
+    rejected_drafts: usize = 0,
 };
 
 pub const ParseError = error{
     InvalidRequest,
     MissingAsk,
 };
+
+/// User-role items the loop appends DURING a turn, which must not be mistaken
+/// for the start of a new one.
+///
+/// Both the veto retry nudge and the compiler-authored repair note reach the
+/// wire as `{"role":"user"}` - `extra_user_text` is a user message and a
+/// `system_note` is serialized as one - so the shape that distinguishes them
+/// from an ask is their opening text and nothing else. Until this table had
+/// three rows, a rejected draft reset `ask`, `step_index`, and `source`, and the
+/// playbook restarted from step 0 against the retry nudge as its ask. Nothing
+/// noticed because no stand-in draft has ever failed the veto.
+///
+/// Duplicated from the authors rather than imported: pulling `loop.zig` in here
+/// would drag the whole agent into the stand-in executable. A gate asserts the
+/// two copies agree, in both directions, the way the negative corpus is held
+/// against `expert_eval.cases`.
+pub const continuation_prefixes = [_][]const u8{
+    "[expert workflow]",
+    "Your previous edit failed compiler verification",
+    "Compiler-authored repair for your last edit",
+};
+
+/// Opening words of the tool result the loop writes when the veto rejects a
+/// draft. Held against `loop.veto_reject_preamble` by the same gate.
+pub const veto_reject_preamble = "The compiler rejected this edit.";
+
+fn isContinuation(text: []const u8) bool {
+    for (continuation_prefixes) |prefix| {
+        if (std.mem.startsWith(u8, text, prefix)) return true;
+    }
+    return false;
+}
 
 pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
     const root_value = std.json.parseFromSliceLeaky(std.json.Value, arena, body, .{}) catch |err| switch (err) {
@@ -34,6 +79,8 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
     var ask: ?[]const u8 = null;
     var step_index: usize = 0;
     var source: ?[]const u8 = null;
+    var last_output: ?[]const u8 = null;
+    var rejected_drafts: usize = 0;
 
     // Everything here is scoped to the CURRENT turn, and a plain user message
     // is what starts one. The transcript is cumulative, so counting across the
@@ -51,18 +98,25 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
                 if (item.get("output")) |output_value| {
                     if (output_value != .string) return ParseError.InvalidRequest;
                     if (try readSource(arena, output_value.string)) |content| source = content;
+                    last_output = output_value.string;
+                    if (std.mem.startsWith(u8, output_value.string, veto_reject_preamble)) {
+                        rejected_drafts += 1;
+                    }
                 }
             }
         }
 
         if (isUserMessage(item)) {
             const text = try readInputText(item);
-            // The workflow note rides along as a second user message on the
-            // same turn, so it must not reset the turn it belongs to.
-            if (!std.mem.startsWith(u8, text, "[expert workflow]")) {
+            // The workflow note and the loop's retry messages ride along as
+            // further user messages on the same turn, so none of them may reset
+            // the turn they belong to.
+            if (!isContinuation(text)) {
                 ask = text;
                 step_index = 0;
                 source = null;
+                last_output = null;
+                rejected_drafts = 0;
             }
         }
     }
@@ -71,6 +125,8 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
         .ask = ask orelse return ParseError.MissingAsk,
         .step_index = step_index,
         .source = source,
+        .last_output = last_output,
+        .rejected_drafts = rejected_drafts,
     };
 }
 
@@ -168,4 +224,83 @@ test "stand-in request parsing reports an unrecoverable read as null, not empty"
     const parsed = try parse(arena.allocator(), body);
     try testing.expectEqual(@as(usize, 1), parsed.step_index);
     try testing.expect(parsed.source == null);
+}
+
+test "stand-in request parsing keeps the turn through a veto rejection and its retry notice" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // What the wire looks like after a draft is bounced: the failed apply lands
+    // as a function_call_output, and the loop's nudge follows as a user message.
+    // Treating that nudge as a new ask restarts the playbook at step 0 with the
+    // nudge as its ask, which is what happened before the prefix table existed.
+    const body =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Fix the ZTS300 compiler error in handler.ts"}]},
+        \\  {"role":"user","content":[{"type":"input_text","text":"[expert workflow] kind=violation_fix"}]},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-1","output":"The compiler rejected this edit. Fix every flagged violation below:\n\nZTS300"},
+        \\  {"role":"user","content":[{"type":"input_text","text":"Your previous edit failed compiler verification (attempt 1/5). Emit a new, complete edit."}]}
+        \\]}
+    ;
+
+    const parsed = try parse(arena.allocator(), body);
+    try testing.expectEqualStrings("Fix the ZTS300 compiler error in handler.ts", parsed.ask);
+    try testing.expectEqual(@as(usize, 2), parsed.step_index);
+    try testing.expectEqualStrings("function handler() {}", parsed.source.?);
+    try testing.expectEqual(@as(usize, 1), parsed.rejected_drafts);
+}
+
+test "stand-in request parsing keeps the turn through a compiler-authored repair note" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const body =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Fix the ZTS604 compiler error in handler.ts"}]},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"role":"user","content":[{"type":"input_text","text":"Compiler-authored repair for your last edit. Apply these changes verbatim."}]}
+        \\]}
+    ;
+
+    const parsed = try parse(arena.allocator(), body);
+    try testing.expectEqualStrings("Fix the ZTS604 compiler error in handler.ts", parsed.ask);
+    try testing.expectEqual(@as(usize, 1), parsed.step_index);
+    try testing.expectEqual(@as(usize, 0), parsed.rejected_drafts);
+}
+
+test "stand-in request parsing recovers the last tool output verbatim" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    // The hole arm needs the coordinates a tool returned, which `source` cannot
+    // carry: it holds only the `content` field of a read. The last output is the
+    // raw string, so a playbook parses it itself and refuses what it cannot read.
+    const body =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Fill the remaining hole in handler.ts"}]},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-1","output":"{\"ok\":true,\"proposed_content\":\"return Response.json({});\"}"}
+        \\]}
+    ;
+
+    const parsed = try parse(arena.allocator(), body);
+    try testing.expectEqualStrings(
+        "{\"ok\":true,\"proposed_content\":\"return Response.json({});\"}",
+        parsed.last_output.?,
+    );
+    // The read still wins for `source`: a later output with no `content` field
+    // must not erase the file the playbook is editing.
+    try testing.expectEqualStrings("function handler() {}", parsed.source.?);
+
+    // And a fresh ask clears it, for the same reason it clears the step index.
+    const second =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Fill the remaining hole in handler.ts"}]},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true}"},
+        \\  {"role":"user","content":[{"type":"input_text","text":"Explain what this handler does"}]}
+        \\]}
+    ;
+    const parsed2 = try parse(arena.allocator(), second);
+    try testing.expect(parsed2.last_output == null);
 }

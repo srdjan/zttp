@@ -7,6 +7,11 @@
 
 const std = @import("std");
 
+/// Opening token of the workflow system note. It reaches the provider as a
+/// user-role item, so anything reconstructing turn state from the wire needs it
+/// to tell a mid-turn note from the start of a new ask.
+pub const workflow_note_prefix = "[expert workflow]";
+
 pub const TaskKind = enum {
     unknown,
     route_add,
@@ -129,7 +134,7 @@ pub fn renderSystemNote(
     const route = workflowRoute(hint.kind);
     return try std.fmt.allocPrint(
         allocator,
-        "[expert workflow] kind={s} confidence={s}\n{s}\n",
+        workflow_note_prefix ++ " kind={s} confidence={s}\n{s}\n",
         .{ taskKindName(hint.kind), confidenceName(hint.confidence), route },
     );
 }

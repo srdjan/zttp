@@ -383,6 +383,67 @@ test "stand-in gate: every test in the stand-in roots is reachable through the p
     std.debug.print("[standin-gate] filter reachability {d}/{d} test names\n", .{ checked, checked });
 }
 
+const loop = @import("loop.zig");
+const standin_request = @import("standin/request.zig");
+
+// The stand-in reconstructs turn state from the request body, and every mid-turn
+// message the loop authors reaches the wire as a user-role item. So the only
+// thing telling a continuation from a new ask is its opening text, and the
+// stand-in cannot import `loop.zig` to read it - that would drag the whole agent
+// into the stand-in executable. It keeps copies, and this holds them to the
+// authors in both directions.
+//
+// One direction alone is not enough. Equal contents with a missing row passes a
+// subset check, and a row the loop no longer writes passes a superset check
+// while the stand-in skips a message that never arrives.
+test "stand-in gate: continuation prefixes match the messages the loop authors" {
+    const authored = [_][]const u8{
+        expert_workflow.workflow_note_prefix,
+        loop.veto_retry_prefix,
+        loop.compiler_repair_prefix,
+    };
+
+    // Floor first: an emptied table would make both loops below iterate nothing
+    // and report agreement between two empty sets, which is the state that
+    // reintroduces the turn reset.
+    try testing.expect(standin_request.continuation_prefixes.len >= 3);
+    try testing.expectEqual(authored.len, standin_request.continuation_prefixes.len);
+
+    for (authored) |prefix| {
+        var claims: usize = 0;
+        for (standin_request.continuation_prefixes) |copy| {
+            if (std.mem.eql(u8, copy, prefix)) claims += 1;
+        }
+        if (claims != 1) {
+            std.debug.print(
+                "[standin-gate] the loop authors \"{s}\" and the stand-in skips it {d} times\n",
+                .{ prefix, claims },
+            );
+            return error.ContinuationPrefixDrifted;
+        }
+    }
+
+    for (standin_request.continuation_prefixes) |copy| {
+        var claims: usize = 0;
+        for (authored) |prefix| {
+            if (std.mem.eql(u8, copy, prefix)) claims += 1;
+        }
+        if (claims != 1) {
+            std.debug.print(
+                "[standin-gate] the stand-in skips \"{s}\", which nothing authors\n",
+                .{copy},
+            );
+            return error.ContinuationPrefixDrifted;
+        }
+    }
+
+    try testing.expectEqualStrings(loop.veto_reject_preamble, standin_request.veto_reject_preamble);
+    std.debug.print(
+        "[standin-gate] continuation prefixes {d}/{d} agree with their authors\n",
+        .{ authored.len, authored.len },
+    );
+}
+
 const prompt_grammar = @import("standin/prompt_grammar.zig");
 
 test "stand-in gate: generated paraphrases route to their own range entry" {

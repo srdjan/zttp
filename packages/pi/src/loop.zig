@@ -239,6 +239,24 @@ pub const RunOptions = struct {
 /// applied. Sourced here so the REPL `/settings` display cannot drift from it.
 pub const interactive_max_attempts: u8 = 5;
 
+/// The mid-turn messages this loop authors, exported so a reader of the wire can
+/// recognize them.
+///
+/// Both reach the provider as user-role items - `extra_user_text` is a user
+/// message and a `system_note` is serialized as one - so anything reconstructing
+/// turn state from the request body sees them as ordinary user text. Something
+/// that treats a user message as the start of a new ask will silently restart
+/// mid-turn on every retry, which is exactly what the deterministic stand-in did
+/// until these were named.
+pub const veto_retry_prefix = "Your previous edit failed compiler verification";
+pub const compiler_repair_prefix = "Compiler-authored repair for your last edit";
+
+/// Opening words of the tool result the loop writes when the veto rejects a
+/// draft. Unlike the two above this is a `function_call_output` body, not a user
+/// message, which is what makes it usable to tell "past the apply step because
+/// the edit landed" from "past it because the compiler bounced it".
+pub const veto_reject_preamble = "The compiler rejected this edit.";
+
 /// Upper bound on repairs the in-process auto-repair lane chains onto one
 /// failed draft before producing a candidate. Matches pi_goal_candidate's
 /// max_repairs cap; a draft needing more distinct fixes than this falls back to
@@ -446,7 +464,7 @@ pub fn runTurnWith(
                 // the substantive repair context is persisted, not re-sent.
                 const prompt = try std.fmt.allocPrint(
                     ta,
-                    "Your previous edit failed compiler verification (attempt {d}/{d}). " ++
+                    veto_retry_prefix ++ " (attempt {d}/{d}). " ++
                         "Emit a new, complete edit that fixes every flagged violation " ++
                         "without re-introducing one you already fixed in an earlier attempt.",
                     .{ payload.attempt, payload.max_attempts },
@@ -529,7 +547,7 @@ pub fn runTurnWith(
                         "";
                     const body = try std.fmt.allocPrint(
                         ta,
-                        "The compiler rejected this edit. Fix every flagged violation below:\n\n{s}{s}",
+                        veto_reject_preamble ++ " Fix every flagged violation below:\n\n{s}{s}",
                         .{ veto_result.outcome.llm_text, sql_hint },
                     );
                     try appendEditToolResult(allocator, transcript, edit_call_id, false, body);
@@ -618,7 +636,7 @@ pub fn runTurnWith(
                     auto_repair_block = null;
                     const note = try std.fmt.allocPrint(
                         ta,
-                        "Compiler-authored repair for your last edit. Apply these changes verbatim, then fix any remaining flagged violations:\n\n{s}",
+                        compiler_repair_prefix ++ ". Apply these changes verbatim, then fix any remaining flagged violations:\n\n{s}",
                         .{block},
                     );
                     try transcript.append(allocator, .{ .system_note = note });
@@ -1247,7 +1265,7 @@ const CannedClient = struct {
         for (transcript.entries.items) |entry| {
             switch (entry) {
                 .system_note => |body| {
-                    if (std.mem.indexOf(u8, body, "[expert workflow]") != null) {
+                    if (std.mem.indexOf(u8, body, expert_workflow.workflow_note_prefix) != null) {
                         self.saw_workflow_note = true;
                     }
                 },
