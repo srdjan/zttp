@@ -3356,8 +3356,12 @@ test "comptime with types" {
     const source = "const x: number = comptime(1 + 2);";
     const result = try strip(std.testing.allocator, source, .{ .enable_comptime = true });
     defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, ": number") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "3") != null);
+    try std.testing.expectEqual(source.len, result.code.len);
+    try std.testing.expectEqualStrings("const x", result.code[0..7]);
+    for (result.code[7..15]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
+    try std.testing.expectEqualStrings(" = 3", result.code[15..19]);
+    for (result.code[19 .. result.code.len - 1]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
+    try std.testing.expectEqual(@as(u8, ';'), result.code[result.code.len - 1]);
 }
 
 test "comptime identifier without parens passes through" {
@@ -3370,35 +3374,51 @@ test "comptime identifier without parens passes through" {
 test "comptime strip matrix preserves delimiters literal bytes and source offsets" {
     const cases = [_]struct {
         source: []const u8,
-        expected_fragment: []const u8,
+        expected_literal: []const u8,
     }{
         .{
             .source = "const value = comptime(1 + 2);",
-            .expected_fragment = "const value = 3",
+            .expected_literal = "3",
         },
         .{
             .source = "const value = comptime(\"right)paren\");",
-            .expected_fragment = "const value = \"right)paren\"",
+            .expected_literal = "\"right)paren\"",
         },
         .{
             .source = "const value = comptime(Math.max(1, (2 + 3)));",
-            .expected_fragment = "const value = 5",
+            .expected_literal = "5",
         },
         .{
-            .source = "const first = comptime(1);\nconst second = comptime(\"ok\");",
-            .expected_fragment = "const second = \"ok\"",
+            .source = "const value = comptime([1, true, null]);",
+            .expected_literal = "[1,true,null]",
+        },
+        .{
+            .source = "const value = comptime({ a: 1, b: \"x\" });",
+            .expected_literal = "({a:1,b:\"x\"})",
+        },
+        .{
+            .source = "const value = comptime(1 / 0);",
+            .expected_literal = "Infinity",
+        },
+        .{
+            .source = "const value = comptime(hash(\"test\"));\nconst next = 4;",
+            .expected_literal = "\"afd071e5\"",
         },
     };
 
     for (cases) |case| {
         const result = try strip(std.testing.allocator, case.source, .{ .enable_comptime = true });
         defer @constCast(&result).deinit();
+
+        const replacement_start = std.mem.indexOf(u8, case.source, "comptime").?;
+        const replacement_end = std.mem.lastIndexOf(u8, case.source, ");").? + 1;
+        const literal_end = replacement_start + case.expected_literal.len;
+
         try std.testing.expectEqual(case.source.len, result.code.len);
-        try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime") == null);
-        try std.testing.expect(std.mem.indexOf(u8, result.code, case.expected_fragment) != null);
-        for (case.source, 0..) |byte, index| {
-            if (byte == '\n') try std.testing.expectEqual(byte, result.code[index]);
-        }
+        try std.testing.expectEqualStrings(case.source[0..replacement_start], result.code[0..replacement_start]);
+        try std.testing.expectEqualStrings(case.expected_literal, result.code[replacement_start..literal_end]);
+        for (result.code[literal_end..replacement_end]) |byte| try std.testing.expectEqual(@as(u8, ' '), byte);
+        try std.testing.expectEqualStrings(case.source[replacement_end..], result.code[replacement_end..]);
     }
 }
 
