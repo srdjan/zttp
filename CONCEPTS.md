@@ -7,6 +7,11 @@ Shared domain vocabulary for this project — entities, named processes, and sta
 ### Handler
 The single function a deployed program exposes, taking a request and returning a response. It is the unit the compiler proves: properties, capabilities, and declared obligations are all stated about a Handler, and helpers it calls are judged by what they contribute to it.
 
+### Handler Contract
+The compiler-produced record of a Handler's discovered routes, effects, Capabilities, API shape, proof results, and integrity hashes. It is the shared boundary carried from analysis into serialization, attestation, runtime policy, and system linking.
+
+A decoded Handler Contract is input claimed by its serialized source, not a fresh proof created by decoding. Consumers must preserve that distinction when using its fields for verification or authority.
+
 ### Property
 A fact the compiler either proves about a Handler or declines to prove — that it leaks no secret, that it answers the same way on every run, that it is safe to retry. A Property is never partially held: it is proven, or it is not, and an unproven Property is reported rather than assumed false-and-forgotten.
 

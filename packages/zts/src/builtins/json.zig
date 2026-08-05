@@ -96,8 +96,7 @@ inline fn skipJsonWhitespace(text: []const u8, pos: *usize) void {
 /// frame (parseJsonValueAt -> parseJsonObject/Array -> parseJsonValueAt), and
 /// JSON.parse / zttp:decodeJson both run on attacker-controlled request
 /// bodies, so an unbounded recursion is a worker-crash DoS that no `catch` can
-/// recover (it is a SIGSEGV, not a Zig error). Matches contract_json_parser's
-/// max_skip_depth.
+/// recover (it is a SIGSEGV, not a Zig error).
 const MAX_JSON_DEPTH: u16 = 512;
 
 /// Parse a JSON value from text

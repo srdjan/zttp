@@ -1,6 +1,6 @@
 # Code quality rebase plan
 
-Status: proposed, not approved for implementation
+Status: approved for implementation
 
 Date: 2026-08-04
 

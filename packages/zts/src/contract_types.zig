@@ -775,7 +775,7 @@ test "Bound.worstCaseAt evaluates linear at a body limit" {
 }
 
 pub const RateLimitInfo = struct {
-    namespace: []const u8, // aliases into cache.namespaces (not separately owned)
+    namespace: []const u8,
     dynamic: bool,
 };
 
@@ -1758,6 +1758,9 @@ pub const HandlerContract = struct {
     aot: ?AotInfo,
     fault_coverage: ?FaultCoverageInfo = null,
     rate_limiting: ?RateLimitInfo = null,
+    /// Set only when a decoded rate-limit namespace does not also appear in
+    /// `cache.namespaces`. Transient and not serialized independently.
+    owned_rate_limit_namespace: ?[]const u8 = null,
     properties: ?HandlerProperties = null,
     /// Author-declared intent assertions. Null when the handler module
     /// has no `export const intent` literal. See `IntentInfo` for shape.
@@ -1882,6 +1885,7 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.cache.namespaces.deinit(allocator);
+        if (self.owned_rate_limit_namespace) |namespace| allocator.free(namespace);
         self.sql.deinit(allocator);
         self.durable.deinit(allocator);
         self.scope.deinit(allocator);

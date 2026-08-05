@@ -14,12 +14,12 @@ const std = @import("std");
 const handler_contract = @import("handler_contract.zig");
 const route_match = @import("route_match.zig");
 const json_utils = @import("json_utils.zig");
+const json_wire = @import("json_wire.zig");
 
 const HandlerContract = handler_contract.HandlerContract;
 const BehaviorPath = handler_contract.BehaviorPath;
 const Bound = handler_contract.Bound;
 const BoundClass = handler_contract.BoundClass;
-const JsonParser = handler_contract.JsonParser;
 
 // -------------------------------------------------------------------------
 // Types
@@ -1389,11 +1389,24 @@ fn formatStatusList(allocator: std.mem.Allocator, statuses: []const u16) ![]cons
 // System config parsing
 // -------------------------------------------------------------------------
 
+const SystemHandlerWire = struct {
+    name: ?json_wire.String = null,
+    path: ?json_wire.String = null,
+    baseUrl: ?json_wire.String = null,
+};
+
+const SystemConfigWire = struct {
+    version: json_wire.Unsigned(u32) = .{ .value = null },
+    entry: ?json_wire.String = null,
+    handlers: []const SystemHandlerWire = &.{},
+};
+
 pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !SystemConfig {
+    var parsed = try json_wire.parse(SystemConfigWire, allocator, json_bytes);
+    defer parsed.deinit();
+
     var entries: std.ArrayList(SystemConfig.HandlerEntry) = .empty;
-    var entry_name: ?[]const u8 = null;
     errdefer {
-        if (entry_name) |e| allocator.free(e);
         for (entries.items) |entry| {
             allocator.free(entry.name);
             allocator.free(entry.path);
@@ -1402,93 +1415,37 @@ pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !
         entries.deinit(allocator);
     }
 
-    var parser = JsonParser.init(json_bytes);
-
-    parser.skipWhitespace();
-    if (!parser.consume('{')) return error.InvalidJson;
-
-    var version: u32 = 1;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') break;
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "version")) {
-            version = parser.readU32() orelse 1;
-        } else if (std.mem.eql(u8, key, "entry")) {
-            if (parser.readString()) |e| {
-                if (entry_name) |old| allocator.free(old);
-                entry_name = try allocator.dupe(u8, e);
-            }
-        } else if (std.mem.eql(u8, key, "handlers")) {
-            if (!parser.consume('[')) return error.InvalidJson;
-
-            while (true) {
-                parser.skipWhitespace();
-                if (parser.peek() == ']') {
-                    _ = parser.advance();
-                    break;
-                }
-                if (parser.peek() == ',') _ = parser.advance();
-                parser.skipWhitespace();
-
-                if (!parser.consume('{')) return error.InvalidJson;
-
-                var name: ?[]const u8 = null;
-                var path: ?[]const u8 = null;
-                var base_url: ?[]const u8 = null;
-
-                while (true) {
-                    parser.skipWhitespace();
-                    if (parser.peek() == '}') {
-                        _ = parser.advance();
-                        break;
-                    }
-                    if (parser.peek() == ',') _ = parser.advance();
-                    parser.skipWhitespace();
-
-                    const obj_key = parser.readString() orelse return error.InvalidJson;
-                    parser.skipWhitespace();
-                    if (!parser.consume(':')) return error.InvalidJson;
-
-                    if (std.mem.eql(u8, obj_key, "name")) {
-                        name = parser.readString();
-                    } else if (std.mem.eql(u8, obj_key, "path")) {
-                        path = parser.readString();
-                    } else if (std.mem.eql(u8, obj_key, "baseUrl")) {
-                        base_url = parser.readString();
-                    } else {
-                        parser.skipValue();
-                    }
-                }
-
-                // Fail closed: a handler entry missing name/path (e.g. a
-                // misspelled key) must error rather than be silently dropped,
-                // which would weaken the cross-handler proofs without any
-                // signal. baseUrl is optional: only zttp:service's real-HTTP
-                // resolution and raw fetchSync egress matching consume it.
-                if (name == null or path == null) {
-                    return error.InvalidJson;
-                }
-                try entries.append(allocator, .{
-                    .name = try allocator.dupe(u8, name.?),
-                    .path = try allocator.dupe(u8, path.?),
-                    .base_url = if (base_url) |b| try allocator.dupe(u8, b) else null,
-                });
-            }
-        } else {
-            parser.skipValue();
-        }
+    try entries.ensureTotalCapacity(allocator, parsed.value.handlers.len);
+    for (parsed.value.handlers) |wire| {
+        const name_wire = wire.name orelse return error.InvalidJson;
+        const path_wire = wire.path orelse return error.InvalidJson;
+        const name = try allocator.dupe(u8, name_wire.bytes);
+        errdefer allocator.free(name);
+        const path = try allocator.dupe(u8, path_wire.bytes);
+        errdefer allocator.free(path);
+        const base_url = try handler_contract.dupeOptionalString(
+            allocator,
+            if (wire.baseUrl) |value| value.bytes else null,
+        );
+        errdefer if (base_url) |value| allocator.free(value);
+        entries.appendAssumeCapacity(.{
+            .name = name,
+            .path = path,
+            .base_url = base_url,
+        });
     }
 
+    const entry = try handler_contract.dupeOptionalString(
+        allocator,
+        if (parsed.value.entry) |value| value.bytes else null,
+    );
+    errdefer if (entry) |value| allocator.free(value);
     const handlers = try entries.toOwnedSlice(allocator);
-    return .{ .version = version, .entry = entry_name, .handlers = handlers };
+    return .{
+        .version = parsed.value.version.value orelse 1,
+        .entry = entry,
+        .handlers = handlers,
+    };
 }
 
 // -------------------------------------------------------------------------
@@ -1906,6 +1863,63 @@ test "parseSystemConfig: baseUrl and entry are optional" {
     try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
     try std.testing.expectEqual(@as(?[]const u8, null), config.handlers[0].base_url);
     try std.testing.expectEqual(@as(?[]const u8, null), config.handlers[1].base_url);
+}
+
+test "parseSystemConfig preserves duplicate unknown trailing and raw-key behavior" {
+    const json =
+        \\{
+        \\  "future": {"nested": [true]},
+        \\  "version": 99999999999999999999,
+        \\  "entr\u0079": "ignored",
+        \\  "entry": "first",
+        \\  "entry": "second",
+        \\  "handlers": [{"name":"gateway","path":"gateway.ts"}],
+        \\  "handlers": [{"name":"users","path":"users.ts"}]
+        \\} trailing
+    ;
+    var config = try parseSystemConfig(std.testing.allocator, json);
+    defer config.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), config.version);
+    try std.testing.expectEqualStrings("second", config.entry orelse unreachable);
+    try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
+    try std.testing.expectEqualStrings("gateway", config.handlers[0].name);
+    try std.testing.expectEqualStrings("users", config.handlers[1].name);
+}
+
+test "parseSystemConfig rejects escaped required handler keys" {
+    try std.testing.expectError(
+        error.InvalidJson,
+        parseSystemConfig(
+            std.testing.allocator,
+            "{\"handlers\":[{\"na\\u006de\":\"gateway\",\"path\":\"gateway.ts\"}]}",
+        ),
+    );
+}
+
+fn parseSystemConfigAllocationFixture(
+    allocator: std.mem.Allocator,
+    json: []const u8,
+) !void {
+    var config = try parseSystemConfig(allocator, json);
+    defer config.deinit(allocator);
+}
+
+test "parseSystemConfig cleans every allocation failure" {
+    const json =
+        \\{
+        \\  "entry": "gateway",
+        \\  "handlers": [
+        \\    {"name":"gateway","path":"gateway.ts","baseUrl":"https://gateway.internal"},
+        \\    {"name":"users","path":"users.ts"}
+        \\  ]
+        \\}
+    ;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        parseSystemConfigAllocationFixture,
+        .{json},
+    );
 }
 
 test "linkSystem: linked and external" {

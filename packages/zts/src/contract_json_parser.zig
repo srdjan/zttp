@@ -1,961 +1,618 @@
-//! JSON deserializer for `HandlerContract`. Wire-format owner alongside
-//! contract_json_writer.zig — round-trip is verified by tests in
-//! handler_contract.zig. Extracted from handler_contract.zig as the second
-//! step of the split. parseFromJson + JsonParser + the per-section parsing
-//! helpers (~1850 lines) live here; the original file keeps a re-export so
-//! `handler_contract.parseFromJson` and `handler_contract.JsonParser` still
-//! resolve for external callers (prove.zig, prove_upgrade.zig,
-//! system_linker.zig).
+//! Typed JSON deserializer for HandlerContract.
+//!
+//! std.json owns syntax parsing. ContractWire describes the accepted wire
+//! shape, and the projection functions below build the independently owned
+//! domain graph.
 
 const std = @import("std");
+const contract_types = @import("contract_types.zig");
 const handler_contract = @import("handler_contract.zig");
+const json_wire = @import("json_wire.zig");
 const module_binding = @import("module_binding.zig");
 const trace = @import("trace.zig");
 
 const HandlerContract = handler_contract.HandlerContract;
-const HandlerProperties = handler_contract.HandlerProperties;
+const RouteInfo = handler_contract.RouteInfo;
 const ServiceCallInfo = handler_contract.ServiceCallInfo;
-const ApiInfo = handler_contract.ApiInfo;
-const ApiAuthInfo = handler_contract.ApiAuthInfo;
+const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 const ApiRouteInfo = handler_contract.ApiRouteInfo;
 const ApiParamInfo = handler_contract.ApiParamInfo;
 const ApiBodyInfo = handler_contract.ApiBodyInfo;
 const ApiResponseInfo = handler_contract.ApiResponseInfo;
-const ApiSchemaInfo = handler_contract.ApiSchemaInfo;
-const ApiRequestInfo = handler_contract.ApiRequestInfo;
 const SchemaSpec = handler_contract.SchemaSpec;
-const FaultCoverageInfo = handler_contract.FaultCoverageInfo;
-const RateLimitInfo = handler_contract.RateLimitInfo;
-const IntentInfo = handler_contract.IntentInfo;
-const IntentAssertion = handler_contract.IntentAssertion;
-const IntentExpectedHeader = handler_contract.IntentExpectedHeader;
-const SagaCallInfo = handler_contract.SagaCallInfo;
-const SagaStep = handler_contract.SagaStep;
+const SpecDiagnostic = contract_types.SpecDiagnostic;
 const PathCondition = handler_contract.PathCondition;
 const PathIoCall = handler_contract.PathIoCall;
-const BehaviorPath = handler_contract.BehaviorPath;
 const Bound = handler_contract.Bound;
 const BoundProvenance = handler_contract.BoundProvenance;
-const CostEntry = handler_contract.CostEntry;
 const CostEnvelope = handler_contract.CostEnvelope;
-const DurableWorkflow = handler_contract.DurableWorkflow;
-const DurableWorkflowNode = handler_contract.DurableWorkflowNode;
-const DurableWorkflowEdge = handler_contract.DurableWorkflowEdge;
-const DurableWorkflowNodeKind = handler_contract.DurableWorkflowNodeKind;
-const DurableWorkflowProofLevel = handler_contract.DurableWorkflowProofLevel;
-const DurableWorkflowProperties = handler_contract.DurableWorkflowProperties;
-const RouteInfo = handler_contract.RouteInfo;
-const SqlQueryInfo = handler_contract.SqlQueryInfo;
-const VerificationInfo = handler_contract.VerificationInfo;
-const AotInfo = handler_contract.AotInfo;
 const CapabilityMatrix = handler_contract.CapabilityMatrix;
-const contract_types = @import("contract_types.zig");
-const WorkflowCallInfo = contract_types.WorkflowCallInfo;
-const SpecDiagnostic = contract_types.SpecDiagnostic;
 const ModuleCapability = module_binding.ModuleCapability;
-const capabilityHash = module_binding.capabilityHash;
 const capability_count = module_binding.capability_count;
 
-const emptyApiInfo = handler_contract.emptyApiInfo;
-const emptySqlInfo = handler_contract.emptySqlInfo;
-const dupeOptionalString = handler_contract.dupeOptionalString;
+const WireString = json_wire.String;
+const RawJson = json_wire.RawValue;
+const WireU16 = json_wire.Unsigned(u16);
+const WireU32 = json_wire.Unsigned(u32);
 
-fn containsRequestBodySchemaRef(items: []const ApiBodyInfo, needle: []const u8) bool {
-    for (items) |item| {
-        if (item.schema.schemaRef()) |schema_ref| {
-            if (std.mem.eql(u8, schema_ref, needle)) return true;
-        }
+const HandlerWire = struct {
+    path: WireString = .{ .bytes = "" },
+    line: WireU32 = .{ .value = null },
+    column: WireU32 = .{ .value = null },
+};
+
+const RouteWire = struct {
+    pattern: WireString = .{ .bytes = "" },
+    type: WireString = .{ .bytes = "exact" },
+    field: WireString = .{ .bytes = "path" },
+    status: WireU16 = .{ .value = null },
+    contentType: WireString = .{ .bytes = "application/json" },
+    aot: bool = false,
+};
+
+const DynamicWire = struct {
+    literal: []const WireString = &.{},
+    dynamic: bool = false,
+};
+
+const EgressWire = struct {
+    hosts: []const WireString = &.{},
+    urls: []const WireString = &.{},
+    dynamic: bool = false,
+};
+
+const ExtensionCategoryWire = struct {
+    literals: []const WireString = &.{},
+    dynamic: bool = false,
+};
+
+const ExtensionCategoryMap = json_wire.RawArrayHashMap(ExtensionCategoryWire);
+
+const ExtensionWire = struct {
+    egressHosts: []const WireString = &.{},
+    egressDynamic: bool = false,
+    categories: ExtensionCategoryMap = .{},
+    contractSection: ?WireString = null,
+};
+
+const ExtensionMap = json_wire.RawArrayHashMap(ExtensionWire);
+
+const ServiceCallWire = struct {
+    service: WireString = .{ .bytes = "" },
+    route: WireString = .{ .bytes = "" },
+    dynamic: bool = false,
+    pathParams: []const WireString = &.{},
+    pathParamsDynamic: bool = false,
+    queryKeys: []const WireString = &.{},
+    queryDynamic: bool = false,
+    headerKeys: []const WireString = &.{},
+    headerDynamic: bool = false,
+    hasBody: bool = false,
+    bodyDynamic: bool = false,
+};
+
+const WorkflowCallWire = struct {
+    target: WireString = .{ .bytes = "" },
+    route: WireString = .{ .bytes = "" },
+    dynamic: bool = false,
+};
+
+const AffordanceWire = struct {
+    rel: WireString = .{ .bytes = "" },
+    method: WireString = .{ .bytes = "GET" },
+    href: WireString = .{ .bytes = "" },
+    templated: bool = false,
+    dynamic: bool = false,
+};
+
+const SqlQueryWire = struct {
+    name: WireString = .{ .bytes = "" },
+    statement: WireString = .{ .bytes = "" },
+    operation: WireString = .{ .bytes = "" },
+    tables: []const WireString = &.{},
+};
+
+const SqlWire = struct {
+    backend: WireString = .{ .bytes = "sqlite" },
+    queries: []const SqlQueryWire = &.{},
+    dynamic: bool = false,
+};
+
+const DurableWorkflowPropertiesWire = struct {
+    retrySafe: bool = false,
+    idempotent: bool = false,
+    faultCovered: bool = false,
+    reasons: []const WireString = &.{},
+};
+
+const DurableWorkflowNodeWire = struct {
+    id: WireString = .{ .bytes = "" },
+    kind: WireString = .{ .bytes = "branch" },
+    label: WireString = .{ .bytes = "" },
+    detail: ?WireString = null,
+    status: ?WireU16 = null,
+};
+
+const DurableWorkflowEdgeWire = struct {
+    from: WireString = .{ .bytes = "" },
+    to: WireString = .{ .bytes = "" },
+    condition: ?WireString = null,
+};
+
+const DurableWorkflowWire = struct {
+    workflowId: ?WireString = null,
+    proofLevel: WireString = .{ .bytes = "none" },
+    properties: DurableWorkflowPropertiesWire = .{},
+    nodes: []const DurableWorkflowNodeWire = &.{},
+    edges: []const DurableWorkflowEdgeWire = &.{},
+};
+
+const DurableWire = struct {
+    used: bool = false,
+    keys: DynamicWire = .{},
+    steps: []const WireString = &.{},
+    timers: bool = false,
+    signals: DynamicWire = .{},
+    producerKeys: DynamicWire = .{},
+    workflow: json_wire.MergedOptional(DurableWorkflowWire) = .{},
+};
+
+const ScopeWire = struct {
+    used: bool = false,
+    names: []const WireString = &.{},
+    dynamic: bool = false,
+    maxDepth: WireU32 = .{ .value = null },
+};
+
+const ApiSchemaWire = struct {
+    name: WireString = .{ .bytes = "" },
+    schema: RawJson = .{ .bytes = "{}" },
+};
+
+const ApiRequestsWire = struct {
+    schemaRefs: []const WireString = &.{},
+    dynamic: bool = false,
+};
+
+const ApiAuthWire = struct {
+    bearer: bool = false,
+    jwt: bool = false,
+};
+
+const ApiParamWire = struct {
+    name: WireString = .{ .bytes = "" },
+    location: WireString = .{ .bytes = "path" },
+    required: bool = false,
+    schema: RawJson = .{ .bytes = "{\"type\":\"string\"}" },
+};
+
+const ApiBodyWire = struct {
+    contentType: ?WireString = null,
+    schemaRef: ?WireString = null,
+    schema: ?RawJson = null,
+    dynamic: bool = false,
+};
+
+const ApiResponseWire = struct {
+    status: ?WireU16 = null,
+    contentType: ?WireString = null,
+    schemaRef: ?WireString = null,
+    schema: ?RawJson = null,
+    dynamic: bool = false,
+};
+
+const ApiRouteWire = struct {
+    method: WireString = .{ .bytes = "" },
+    path: WireString = .{ .bytes = "" },
+    requestSchemaRefs: []const WireString = &.{},
+    requestSchemaDynamic: bool = false,
+    requiresBearer: bool = false,
+    requiresJwt: bool = false,
+    pathParams: []const ApiParamWire = &.{},
+    queryParams: []const ApiParamWire = &.{},
+    headerParams: []const ApiParamWire = &.{},
+    queryParamsDynamic: bool = false,
+    headerParamsDynamic: bool = false,
+    requestBodies: []const ApiBodyWire = &.{},
+    requestBodiesDynamic: bool = false,
+    responses: []const ApiResponseWire = &.{},
+    responsesDynamic: bool = false,
+    responseStatus: ?WireU16 = null,
+    responseContentType: ?WireString = null,
+    responseSchemaRef: ?WireString = null,
+    responseSchema: ?RawJson = null,
+    responseSchemaDynamic: bool = false,
+};
+
+const ApiWire = struct {
+    schemas: []const ApiSchemaWire = &.{},
+    requests: ApiRequestsWire = .{},
+    auth: ApiAuthWire = .{},
+    routes: []const ApiRouteWire = &.{},
+    schemasDynamic: bool = false,
+    routesDynamic: bool = false,
+};
+
+const VerificationWire = struct {
+    exhaustiveReturns: bool = false,
+    resultsSafe: bool = false,
+    unreachableCode: bool = false,
+    bytecodeVerified: bool = false,
+};
+
+const WebSocketWire = struct {
+    onOpen: bool = false,
+    onMessage: bool = false,
+    onClose: bool = false,
+    onError: bool = false,
+};
+
+const FaultCoverageWire = struct {
+    totalFailable: WireU32 = .{ .value = null },
+    covered: WireU32 = .{ .value = null },
+    warnings: WireU32 = .{ .value = null },
+};
+
+const RateLimitWire = struct {
+    namespace: WireString = .{ .bytes = "" },
+    dynamic: bool = true,
+};
+
+const PropertiesWire = struct {
+    pure: bool = false,
+    readOnly: bool = false,
+    stateless: bool = false,
+    retrySafe: bool = false,
+    deterministic: bool = false,
+    hasEgress: bool = false,
+    noSecretLeakage: bool = false,
+    noCredentialLeakage: bool = false,
+    inputValidated: bool = false,
+    piiContained: bool = false,
+    idempotent: bool = false,
+    maxIoDepth: ?WireU32 = null,
+    injectionSafe: bool = false,
+    stateIsolated: bool = false,
+    faultCovered: bool = false,
+    resultSafe: bool = false,
+    optionalSafe: bool = false,
+    postOnly: bool = false,
+    canonical: bool = false,
+    costBounded: bool = false,
+};
+
+const SpecDiagnosticWire = struct {
+    kind: ?WireString = null,
+    code: ?WireString = null,
+    specName: ?WireString = null,
+    incompatibleModule: ?WireString = null,
+    suggestion: ?WireString = null,
+    function: ?WireString = null,
+};
+
+const SandboxWire = struct {
+    capabilities: json_wire.AppendedNonNull(WireString) = .{},
+    capabilityHash: json_wire.OptionalNonNull(WireString) = .{},
+    policyHash: json_wire.OptionalNonNull(WireString) = .{},
+    wasmPolicyHash: json_wire.OptionalNonNull(WireString) = .{},
+    artifactSha256: json_wire.OptionalNonNull(WireString) = .{},
+};
+
+fn combineSandboxWire(previous: *SandboxWire, next: SandboxWire) void {
+    if (next.capabilities.value != null) {
+        previous.capabilities = next.capabilities;
+        previous.capabilityHash = next.capabilityHash;
     }
-    return false;
+    if (next.policyHash.value != null) previous.policyHash = next.policyHash;
+    if (next.wasmPolicyHash.value != null) previous.wasmPolicyHash = next.wasmPolicyHash;
+    if (next.artifactSha256.value != null) previous.artifactSha256 = next.artifactSha256;
 }
 
-/// Parse a HandlerContract from a JSON byte string.
-/// All strings in the returned contract are owned (duped via allocator).
-/// The caller owns the returned contract and must call deinit().
-pub fn parseFromJson(allocator: std.mem.Allocator, json_bytes: []const u8) !HandlerContract {
-    var contract = HandlerContract{
-        .handler = .{ .path = &.{}, .line = 0, .column = 0 },
-        .routes = .empty,
-        .modules = .empty,
-        .functions = .empty,
-        .env = .{ .literal = .empty, .dynamic = false },
-        .egress = .{ .hosts = .empty, .dynamic = false },
-        .service_calls = .empty,
-        .cache = .{ .namespaces = .empty, .dynamic = false },
-        .sql = emptySqlInfo(),
-        .durable = .{
-            .used = false,
-            .keys = .{ .literal = .empty, .dynamic = false },
-            .steps = .empty,
-        },
-        .scope = .{
-            .used = false,
-            .names = .empty,
-            .dynamic = false,
-            .max_depth = 0,
-        },
-        .api = emptyApiInfo(),
-        .verification = null,
-        .aot = null,
-    };
+const BehaviorConditionWire = struct {
+    kind: WireString = .{ .bytes = "io_ok" },
+    module: ?WireString = null,
+    func: ?WireString = null,
+    value: ?WireString = null,
+};
+
+const BehaviorIoWire = struct {
+    module: WireString = .{ .bytes = "" },
+    func: WireString = .{ .bytes = "" },
+    args: ?WireString = null,
+};
+
+const BehaviorWire = struct {
+    method: WireString = .{ .bytes = "" },
+    pattern: WireString = .{ .bytes = "" },
+    status: WireU16 = .{ .value = null },
+    ioDepth: WireU32 = .{ .value = null },
+    failurePath: bool = false,
+    conditions: []const BehaviorConditionWire = &.{},
+    ioSequence: []const BehaviorIoWire = &.{},
+};
+
+const IntentHeaderWire = struct {
+    name: WireString = .{ .bytes = "" },
+    value: WireString = .{ .bytes = "" },
+};
+
+const IntentAssertionWire = struct {
+    name: WireString = .{ .bytes = "" },
+    method: WireString = .{ .bytes = "" },
+    path: WireString = .{ .bytes = "" },
+    requestBodyJson: ?WireString = null,
+    expectedStatus: ?WireU16 = null,
+    expectedBodyJson: ?WireString = null,
+    expectedHeaders: []const IntentHeaderWire = &.{},
+    sourceLine: WireU32 = .{ .value = null },
+    sourceColumn: WireU32 = .{ .value = null },
+};
+
+const IntentWire = struct {
+    dynamic: bool = false,
+    assertions: []const IntentAssertionWire = &.{},
+};
+
+const SagaStepWire = struct {
+    name: WireString = .{ .bytes = "" },
+    hasCompensate: bool = false,
+};
+
+const SagaWire = struct {
+    dynamic: bool = false,
+    steps: []const SagaStepWire = &.{},
+    sourceLine: WireU32 = .{ .value = null },
+    sourceColumn: WireU32 = .{ .value = null },
+};
+
+const ProvenanceWire = struct {
+    line: WireU32 = .{ .value = null },
+    column: WireU32 = .{ .value = null },
+    desc: WireString = .{ .bytes = "" },
+};
+
+const BoundWire = struct {
+    class: ?WireString = null,
+    value: WireU32 = .{ .value = null },
+    coefficient: WireU32 = .{ .value = null },
+    base: WireU32 = .{ .value = null },
+    source: ?ProvenanceWire = null,
+};
+
+const CostEntryWire = struct {
+    module: ?WireString = null,
+    bound: ?BoundWire = null,
+};
+
+const CostEnvelopeWire = struct {
+    exhaustive: bool = true,
+    total: BoundWire = .{ .class = .{ .bytes = "constant" } },
+    perModule: []const CostEntryWire = &.{},
+};
+
+const ContractWire = struct {
+    version: WireU32 = .{ .value = null },
+    handler: HandlerWire = .{},
+    routes: []const RouteWire = &.{},
+    modules: []const WireString = &.{},
+    env: DynamicWire = .{},
+    egress: EgressWire = .{},
+    serviceCalls: []const ServiceCallWire = &.{},
+    workflowCalls: []const WorkflowCallWire = &.{},
+    affordances: []const AffordanceWire = &.{},
+    affordancesDynamic: bool = false,
+    cache: struct {
+        namespaces: []const WireString = &.{},
+        dynamic: bool = false,
+    } = .{},
+    sql: SqlWire = .{},
+    durable: DurableWire = .{},
+    scope: ScopeWire = .{},
+    api: ApiWire = .{},
+    verification: ?VerificationWire = null,
+    websocket: ?WebSocketWire = null,
+    faultCoverage: ?FaultCoverageWire = null,
+    rateLimiting: ?RateLimitWire = null,
+    properties: ?PropertiesWire = null,
+    declaredSpecs: []const WireString = &.{},
+    specDiagnostics: json_wire.AppendedOptional(SpecDiagnosticWire) = .{},
+    sandbox: json_wire.FoldedOptional(SandboxWire, combineSandboxWire) = .{},
+    intent: ?IntentWire = null,
+    sagas: []const SagaWire = &.{},
+    behaviors: json_wire.AppendedOptional(BehaviorWire) = .{},
+    behaviorsExhaustive: bool = false,
+    costEnvelope: ?CostEnvelopeWire = null,
+    extensions: ExtensionMap = .{},
+};
+
+/// Parse a HandlerContract from JSON into an independently owned domain graph.
+pub fn parseFromJson(
+    allocator: std.mem.Allocator,
+    json_bytes: []const u8,
+) !HandlerContract {
+    var parsed = try json_wire.parse(ContractWire, allocator, json_bytes);
+    defer parsed.deinit();
+    return projectContract(allocator, &parsed.value);
+}
+
+fn projectContract(
+    allocator: std.mem.Allocator,
+    wire: *const ContractWire,
+) !HandlerContract {
+    var contract = handler_contract.emptyContract(try dupeWireString(allocator, wire.handler.path));
+    contract.handler.line = wire.handler.line.value orelse 0;
+    contract.handler.column = wire.handler.column.value orelse 0;
+    contract.version = wire.version.value orelse contract.version;
     errdefer contract.deinit(allocator);
 
-    var parser = JsonParser.init(json_bytes);
-
-    // Expect opening {
-    parser.skipWhitespace();
-    if (!parser.consume('{')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-        parser.skipWhitespace();
-
-        if (std.mem.eql(u8, key, "handler")) {
-            try parseHandlerLoc(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "version")) {
-            contract.version = parser.readU32() orelse contract.version;
-        } else if (std.mem.eql(u8, key, "routes")) {
-            try parseRoutes(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "modules")) {
-            // The writer emits this list; without a branch here it was
-            // silently dropped, so a write-then-read round trip lost every
-            // module. The runtime derives the live capability matrix from
-            // this list, so an empty one makes verifyCapabilityMatrix
-            // compare a real stored hash against the empty-set hash.
-            try parseStringArray(&parser, allocator, &contract.modules);
-        } else if (std.mem.eql(u8, key, "env")) {
-            try parseDynamicSection(&parser, allocator, "literal", &contract.env.literal, &contract.env.dynamic);
-        } else if (std.mem.eql(u8, key, "egress")) {
-            try parseEgressSection(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "serviceCalls")) {
-            try parseServiceCalls(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "workflowCalls")) {
-            try parseWorkflowCalls(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "affordances")) {
-            try parseAffordances(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "affordancesDynamic")) {
-            contract.affordances_dynamic = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "cache")) {
-            try parseDynamicSection(&parser, allocator, "namespaces", &contract.cache.namespaces, &contract.cache.dynamic);
-        } else if (std.mem.eql(u8, key, "sql")) {
-            try parseSqlSection(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "durable")) {
-            try parseDurableSection(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "scope")) {
-            try parseScopeSection(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "api")) {
-            try parseApiSection(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "verification")) {
-            try parseVerification(&parser, &contract);
-        } else if (std.mem.eql(u8, key, "websocket")) {
-            contract.websocket = try parseWebSocketSection(&parser);
-        } else if (std.mem.eql(u8, key, "faultCoverage")) {
-            contract.fault_coverage = try parseFaultCoverage(&parser);
-        } else if (std.mem.eql(u8, key, "rateLimiting")) {
-            parser.skipWhitespace();
-            if (parser.readNull()) {
-                contract.rate_limiting = null;
-            } else {
-                contract.rate_limiting = try parseRateLimiting(&parser);
-            }
-        } else if (std.mem.eql(u8, key, "properties")) {
-            contract.properties = try parseProperties(&parser);
-        } else if (std.mem.eql(u8, key, "declaredSpecs")) {
-            try parseStringArray(&parser, allocator, &contract.declared_specs);
-        } else if (std.mem.eql(u8, key, "specDiagnostics")) {
-            try parseSpecDiagnostics(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "sandbox")) {
-            try parseSandbox(&parser, &contract);
-        } else if (std.mem.eql(u8, key, "intent")) {
-            parser.skipWhitespace();
-            if (parser.readNull()) {
-                contract.intent = null;
-            } else {
-                contract.intent = try parseIntent(&parser, allocator);
-            }
-        } else if (std.mem.eql(u8, key, "sagas")) {
-            try parseSagas(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "behaviors")) {
-            try parseBehaviors(&parser, allocator, &contract);
-        } else if (std.mem.eql(u8, key, "behaviorsExhaustive")) {
-            contract.behaviors_exhaustive = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "costEnvelope")) {
-            contract.cost_envelope = try parseCostEnvelope(&parser, allocator);
-        } else if (std.mem.eql(u8, key, "extensions")) {
-            try parseExtensions(&parser, allocator, &contract);
-        } else {
-            // Skip unknown fields
-            parser.skipValue();
-        }
-    }
+    contract.routes = try projectRoutes(allocator, wire.routes);
+    contract.modules = try projectStringList(allocator, wire.modules);
+    contract.env.literal = try projectStringList(allocator, wire.env.literal);
+    contract.env.dynamic = wire.env.dynamic;
+    contract.egress.hosts = try projectStringList(allocator, wire.egress.hosts);
+    contract.egress.urls = try projectStringList(allocator, wire.egress.urls);
+    contract.egress.dynamic = wire.egress.dynamic;
+    try projectServiceCalls(allocator, wire.serviceCalls, &contract);
+    try projectWorkflowCalls(allocator, wire.workflowCalls, &contract);
+    try projectAffordances(allocator, wire.affordances, &contract);
+    contract.affordances_dynamic = wire.affordancesDynamic;
+    contract.cache.namespaces = try projectStringList(allocator, wire.cache.namespaces);
+    contract.cache.dynamic = wire.cache.dynamic;
+    try projectSql(allocator, &wire.sql, &contract);
+    try projectDurable(allocator, &wire.durable, &contract);
+    try projectScope(allocator, &wire.scope, &contract);
+    try projectApi(allocator, &wire.api, &contract);
+    projectVerification(wire.verification, &contract);
+    projectWebSocket(wire.websocket, &contract);
+    projectFaultCoverage(wire.faultCoverage, &contract);
+    projectProperties(wire.properties, &contract);
+    contract.declared_specs = try projectStringList(allocator, wire.declaredSpecs);
+    try projectSpecDiagnostics(allocator, wire.specDiagnostics.value, &contract);
+    try projectSandbox(wire.sandbox.value, &contract);
+    try projectIntent(allocator, wire.intent, &contract);
+    try projectSagas(allocator, wire.sagas, &contract);
+    try projectBehaviors(allocator, wire.behaviors.value, &contract);
+    contract.behaviors_exhaustive = wire.behaviorsExhaustive;
+    contract.cost_envelope = try projectCostEnvelope(allocator, wire.costEnvelope);
+    try projectExtensions(allocator, &wire.extensions, &contract);
+    try projectRateLimit(allocator, wire.rateLimiting, &contract);
 
     return contract;
 }
 
-pub const JsonParser = struct {
-    data: []const u8,
-    pos: usize = 0,
-    /// Current object/array nesting depth while skipping values. Bounds the
-    /// mutual recursion of skipValue/skipObject/skipArray so adversarial deep
-    /// nesting in untrusted contract JSON cannot overflow the native stack.
-    depth: u16 = 0,
+fn dupeWireString(allocator: std.mem.Allocator, wire: WireString) ![]const u8 {
+    return allocator.dupe(u8, wire.bytes);
+}
 
-    /// Maximum object/array nesting accepted by the value-skipper.
-    const max_skip_depth: u16 = 512;
+fn dupeOptionalWireString(
+    allocator: std.mem.Allocator,
+    wire: ?WireString,
+) !?[]const u8 {
+    return handler_contract.dupeOptionalString(
+        allocator,
+        if (wire) |value| value.bytes else null,
+    );
+}
 
-    pub fn init(data: []const u8) JsonParser {
-        return .{ .data = data };
-    }
-
-    pub fn peek(self: *JsonParser) u8 {
-        if (self.pos >= self.data.len) return 0;
-        return self.data[self.pos];
-    }
-
-    pub fn advance(self: *JsonParser) u8 {
-        if (self.pos >= self.data.len) return 0;
-        const c = self.data[self.pos];
-        self.pos += 1;
-        return c;
-    }
-
-    pub fn consume(self: *JsonParser, expected: u8) bool {
-        self.skipWhitespace();
-        if (self.pos < self.data.len and self.data[self.pos] == expected) {
-            self.pos += 1;
-            return true;
-        }
-        return false;
-    }
-
-    pub fn skipWhitespace(self: *JsonParser) void {
-        while (self.pos < self.data.len) {
-            switch (self.data[self.pos]) {
-                ' ', '\t', '\n', '\r' => self.pos += 1,
-                else => break,
-            }
-        }
-    }
-
-    /// Read a JSON string value (including quotes). Returns the unquoted content.
-    /// The returned slice points into the source data (zero-copy for non-escaped strings).
-    pub fn readString(self: *JsonParser) ?[]const u8 {
-        self.skipWhitespace();
-        if (self.pos >= self.data.len or self.data[self.pos] != '"') return null;
-        self.pos += 1; // skip opening quote
-        const start = self.pos;
-        while (self.pos < self.data.len and self.data[self.pos] != '"') {
-            if (self.data[self.pos] == '\\') {
-                self.pos += 1; // skip escaped char
-            }
-            if (self.pos < self.data.len) self.pos += 1;
-        }
-        const end = self.pos;
-        if (self.pos < self.data.len) self.pos += 1; // skip closing quote
-        return self.data[start..end];
-    }
-
-    /// Read a JSON number as u32.
-    pub fn readU32(self: *JsonParser) ?u32 {
-        self.skipWhitespace();
-        var val: u32 = 0;
-        var found = false;
-        var overflow = false;
-        while (self.pos < self.data.len and self.data[self.pos] >= '0' and self.data[self.pos] <= '9') {
-            // Consume every digit so `pos` stays consistent, but flag overflow
-            // (a 20-digit number must not wrap or panic on untrusted input).
-            if (!overflow) {
-                const mul = @mulWithOverflow(val, 10);
-                const add = @addWithOverflow(mul[0], @as(u32, self.data[self.pos] - '0'));
-                if (mul[1] != 0 or add[1] != 0) {
-                    overflow = true;
-                } else {
-                    val = add[0];
-                }
-            }
-            self.pos += 1;
-            found = true;
-        }
-        if (!found or overflow) return null;
-        return val;
-    }
-
-    /// Read a JSON number as u16.
-    fn readU16(self: *JsonParser) ?u16 {
-        const val = self.readU32() orelse return null;
-        if (val > std.math.maxInt(u16)) return null;
-        return @intCast(val);
-    }
-
-    /// Read a JSON boolean.
-    fn readBool(self: *JsonParser) ?bool {
-        self.skipWhitespace();
-        if (self.pos + 4 <= self.data.len and std.mem.eql(u8, self.data[self.pos..][0..4], "true")) {
-            self.pos += 4;
-            return true;
-        }
-        if (self.pos + 5 <= self.data.len and std.mem.eql(u8, self.data[self.pos..][0..5], "false")) {
-            self.pos += 5;
-            return false;
-        }
-        return null;
-    }
-
-    /// Skip "null" literal.
-    fn readNull(self: *JsonParser) bool {
-        self.skipWhitespace();
-        if (self.pos + 4 <= self.data.len and std.mem.eql(u8, self.data[self.pos..][0..4], "null")) {
-            self.pos += 4;
-            return true;
-        }
-        return false;
-    }
-
-    /// Skip any JSON value (string, number, bool, null, object, array).
-    pub fn skipValue(self: *JsonParser) void {
-        self.skipWhitespace();
-        if (self.pos >= self.data.len) return;
-        if (self.depth >= max_skip_depth) {
-            // Too deeply nested: abandon parsing by consuming the rest of the
-            // input. Every enclosing skipObject/skipArray loop is bounded by
-            // `pos < data.len`, so this unwinds the recursion without overflow.
-            self.pos = self.data.len;
-            return;
-        }
-        switch (self.data[self.pos]) {
-            '"' => _ = self.readString(),
-            '{' => {
-                self.depth += 1;
-                self.skipObject();
-                self.depth -= 1;
-            },
-            '[' => {
-                self.depth += 1;
-                self.skipArray();
-                self.depth -= 1;
-            },
-            't', 'f' => _ = self.readBool(),
-            'n' => _ = self.readNull(),
-            else => {
-                // number or unknown - skip digits/signs
-                while (self.pos < self.data.len) {
-                    switch (self.data[self.pos]) {
-                        '0'...'9', '-', '.', 'e', 'E', '+' => self.pos += 1,
-                        else => break,
-                    }
-                }
-            },
-        }
-    }
-
-    fn readRawValue(self: *JsonParser) ?[]const u8 {
-        self.skipWhitespace();
-        const start = self.pos;
-        self.skipValue();
-        const end = self.pos;
-        if (end < start) return null;
-        return self.data[start..end];
-    }
-
-    fn skipObject(self: *JsonParser) void {
-        if (!self.consume('{')) return;
-        while (self.pos < self.data.len and self.data[self.pos] != '}') {
-            const iter_start = self.pos;
-            if (self.data[self.pos] == ',') {
-                self.pos += 1;
-                continue;
-            }
-            self.skipWhitespace();
-            _ = self.readString(); // key
-            self.skipWhitespace();
-            _ = self.consume(':');
-            self.skipValue(); // value (handles nested objects/arrays)
-            self.skipWhitespace();
-            // Zero-progress guard: an unconsumable token (e.g. a bare identifier
-            // where a key/value is expected) leaves pos unchanged and would spin
-            // forever. Fail closed by jumping to EOF so every enclosing skip loop
-            // unwinds and the outer parse surfaces error.InvalidJson.
-            if (self.pos == iter_start) {
-                self.pos = self.data.len;
-                return;
-            }
-        }
-        if (self.pos < self.data.len) self.pos += 1; // skip }
-    }
-
-    fn skipArray(self: *JsonParser) void {
-        if (!self.consume('[')) return;
-        self.skipWhitespace();
-        while (self.pos < self.data.len and self.data[self.pos] != ']') {
-            const iter_start = self.pos;
-            if (self.data[self.pos] == ',') {
-                self.pos += 1;
-                self.skipWhitespace();
-                continue;
-            }
-            self.skipValue(); // handles nested objects/arrays
-            self.skipWhitespace();
-            // Zero-progress guard (see skipObject): bail to EOF on a token that
-            // skipValue cannot consume rather than spinning forever.
-            if (self.pos == iter_start) {
-                self.pos = self.data.len;
-                return;
-            }
-        }
-        if (self.pos < self.data.len) self.pos += 1; // skip ]
-    }
+const OwnedStringPair = struct {
+    first: []const u8,
+    second: []const u8,
 };
 
-fn parseHandlerLoc(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
+const OwnedStringTriple = struct {
+    first: []const u8,
+    second: []const u8,
+    third: []const u8,
+};
 
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "path")) {
-            const path = parser.readString() orelse return error.InvalidJson;
-            contract.handler.path = try allocator.dupe(u8, path);
-        } else if (std.mem.eql(u8, key, "line")) {
-            contract.handler.line = parser.readU32() orelse 0;
-        } else if (std.mem.eql(u8, key, "column")) {
-            contract.handler.column = parser.readU32() orelse 0;
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseRoutes(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var pattern: []const u8 = "";
-        var route_type: []const u8 = "exact";
-        var field: []const u8 = "path";
-        var status: u16 = 200;
-        var content_type: []const u8 = "application/json";
-        var aot: bool = false;
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "pattern")) {
-                pattern = parser.readString() orelse "";
-            } else if (std.mem.eql(u8, key, "type")) {
-                route_type = parser.readString() orelse "exact";
-            } else if (std.mem.eql(u8, key, "field")) {
-                field = parser.readString() orelse "path";
-            } else if (std.mem.eql(u8, key, "status")) {
-                status = parser.readU16() orelse 200;
-            } else if (std.mem.eql(u8, key, "contentType")) {
-                content_type = parser.readString() orelse "application/json";
-            } else if (std.mem.eql(u8, key, "aot")) {
-                aot = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try contract.routes.append(allocator, .{
-            .pattern = try allocator.dupe(u8, pattern),
-            .route_type = toStaticRouteType(route_type),
-            .field = toStaticField(field),
-            .status = status,
-            .content_type = toStaticContentType(content_type),
-            .aot = aot,
-        });
-    }
-}
-
-/// Parse a JSON object with a string-array field and a "dynamic" boolean.
-/// Used for env, egress, and cache sections which share the same structure.
-fn parseDynamicSection(
-    parser: *JsonParser,
+fn dupeWireStringPair(
     allocator: std.mem.Allocator,
-    list_key: []const u8,
+    first: WireString,
+    second: WireString,
+) !OwnedStringPair {
+    const owned_first = try dupeWireString(allocator, first);
+    errdefer allocator.free(owned_first);
+    return .{
+        .first = owned_first,
+        .second = try dupeWireString(allocator, second),
+    };
+}
+
+fn dupeWireStringTriple(
+    allocator: std.mem.Allocator,
+    first: WireString,
+    second: WireString,
+    third: WireString,
+) !OwnedStringTriple {
+    const pair = try dupeWireStringPair(allocator, first, second);
+    errdefer {
+        allocator.free(pair.first);
+        allocator.free(pair.second);
+    }
+    return .{
+        .first = pair.first,
+        .second = pair.second,
+        .third = try dupeWireString(allocator, third),
+    };
+}
+
+fn projectStringList(
+    allocator: std.mem.Allocator,
+    wire: []const WireString,
+) !std.ArrayList([]const u8) {
+    var result: std.ArrayList([]const u8) = .empty;
+    errdefer deinitStringList(allocator, &result);
+    try result.ensureTotalCapacity(allocator, wire.len);
+    for (wire) |value| {
+        const owned = try dupeWireString(allocator, value);
+        errdefer allocator.free(owned);
+        result.appendAssumeCapacity(owned);
+    }
+    return result;
+}
+
+fn deinitStringList(
+    allocator: std.mem.Allocator,
     list: *std.ArrayList([]const u8),
-    dynamic: *bool,
-) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, list_key)) {
-            try parseStringArray(parser, allocator, list);
-        } else if (std.mem.eql(u8, key, "dynamic")) {
-            dynamic.* = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
-    }
+) void {
+    for (list.items) |value| allocator.free(value);
+    list.deinit(allocator);
 }
 
-/// Parse the `extensions` object: a map of specifier -> ExtensionContract.
-/// Tolerates malformed entries by skipping them (best-effort recovery; the
-/// writer is the source of truth).
-fn parseExtensions(
-    parser: *JsonParser,
+fn projectRoutes(
     allocator: std.mem.Allocator,
+    wire: []const RouteWire,
+) !std.ArrayList(RouteInfo) {
+    var result: std.ArrayList(RouteInfo) = .empty;
+    errdefer {
+        for (result.items) |route| allocator.free(route.pattern);
+        result.deinit(allocator);
+    }
+    try result.ensureTotalCapacity(allocator, wire.len);
+    for (wire) |route| {
+        const pattern = try dupeWireString(allocator, route.pattern);
+        errdefer allocator.free(pattern);
+        result.appendAssumeCapacity(.{
+            .pattern = pattern,
+            .route_type = toStaticRouteType(route.type.bytes),
+            .field = toStaticField(route.field.bytes),
+            .status = route.status.value orelse 200,
+            .content_type = toStaticContentType(route.contentType.bytes),
+            .aot = route.aot,
+        });
+    }
+    return result;
+}
+
+fn projectServiceCalls(
+    allocator: std.mem.Allocator,
+    wires: []const ServiceCallWire,
     contract: *HandlerContract,
 ) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const specifier = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-        parser.skipWhitespace();
-
-        var ext = contract_types.ExtensionContract{};
-        errdefer ext.deinit(allocator);
-        try parseExtensionContractBody(parser, allocator, &ext);
-
-        const key_dup = try allocator.dupe(u8, specifier);
-        errdefer allocator.free(key_dup);
-        const gop = try contract.extensions.getOrPut(allocator, key_dup);
-        if (gop.found_existing) {
-            allocator.free(key_dup);
-            gop.value_ptr.deinit(allocator);
-        }
-        gop.value_ptr.* = ext;
+    try contract.service_calls.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const owned = try dupeWireStringPair(allocator, wire.service, wire.route);
+        var call = ServiceCallInfo{
+            .service = owned.first,
+            .route_pattern = owned.second,
+        };
+        errdefer call.deinit(allocator);
+        call.dynamic = wire.dynamic;
+        call.path_params = try projectKnownList(allocator, wire.pathParams, wire.pathParamsDynamic);
+        call.query_keys = try projectKnownList(allocator, wire.queryKeys, wire.queryDynamic);
+        call.header_keys = try projectKnownList(allocator, wire.headerKeys, wire.headerDynamic);
+        call.body = pickBodySpec(wire.hasBody, wire.bodyDynamic);
+        contract.service_calls.appendAssumeCapacity(call);
     }
 }
 
-fn parseExtensionContractBody(
-    parser: *JsonParser,
+fn projectKnownList(
     allocator: std.mem.Allocator,
-    ext: *contract_types.ExtensionContract,
-) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "egressHosts")) {
-            try parseStringArray(parser, allocator, &ext.egress_hosts);
-        } else if (std.mem.eql(u8, key, "egressDynamic")) {
-            ext.egress_dynamic = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "categories")) {
-            try parseExtensionCategoriesMap(parser, allocator, ext);
-        } else if (std.mem.eql(u8, key, "contractSection")) {
-            const raw = parser.readString() orelse return error.InvalidJson;
-            ext.contract_section = try allocator.dupe(u8, raw);
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseExtensionCategoriesMap(
-    parser: *JsonParser,
-    allocator: std.mem.Allocator,
-    ext: *contract_types.ExtensionContract,
-) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const tag = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-        parser.skipWhitespace();
-
-        var bucket = contract_types.ExtensionCategoryBucket{};
-        errdefer bucket.deinit(allocator);
-        if (!parser.consume('{')) return error.InvalidJson;
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const bucket_key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-            if (std.mem.eql(u8, bucket_key, "literals")) {
-                try parseStringArray(parser, allocator, &bucket.literals);
-            } else if (std.mem.eql(u8, bucket_key, "dynamic")) {
-                bucket.dynamic = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        const tag_dup = try allocator.dupe(u8, tag);
-        errdefer allocator.free(tag_dup);
-        const gop = try ext.categories.getOrPut(allocator, tag_dup);
-        if (gop.found_existing) {
-            allocator.free(tag_dup);
-            gop.value_ptr.deinit(allocator);
-        }
-        gop.value_ptr.* = bucket;
-    }
-}
-
-fn parseEgressSection(
-    parser: *JsonParser,
-    allocator: std.mem.Allocator,
-    contract: *HandlerContract,
-) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "hosts")) {
-            try parseStringArray(parser, allocator, &contract.egress.hosts);
-        } else if (std.mem.eql(u8, key, "urls")) {
-            try parseStringArray(parser, allocator, &contract.egress.urls);
-        } else if (std.mem.eql(u8, key, "dynamic")) {
-            contract.egress.dynamic = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseServiceCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var service: []const u8 = try allocator.dupe(u8, "");
-        var route_pattern: []const u8 = try allocator.dupe(u8, "");
-        var dynamic_flag = false;
-        var path_params: std.ArrayList([]const u8) = .empty;
-        var path_params_dynamic = false;
-        var query_keys: std.ArrayList([]const u8) = .empty;
-        var query_dynamic_flag = false;
-        var header_keys: std.ArrayList([]const u8) = .empty;
-        var header_dynamic_flag = false;
-        var has_body = false;
-        var body_dynamic = false;
-        errdefer {
-            allocator.free(service);
-            allocator.free(route_pattern);
-            for (path_params.items) |s| allocator.free(s);
-            path_params.deinit(allocator);
-            for (query_keys.items) |s| allocator.free(s);
-            query_keys.deinit(allocator);
-            for (header_keys.items) |s| allocator.free(s);
-            header_keys.deinit(allocator);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "service")) {
-                allocator.free(service);
-                service = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "route")) {
-                allocator.free(route_pattern);
-                route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "dynamic")) {
-                dynamic_flag = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "pathParams")) {
-                try parseStringArray(parser, allocator, &path_params);
-            } else if (std.mem.eql(u8, key, "pathParamsDynamic")) {
-                path_params_dynamic = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "queryKeys")) {
-                try parseStringArray(parser, allocator, &query_keys);
-            } else if (std.mem.eql(u8, key, "queryDynamic")) {
-                query_dynamic_flag = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "headerKeys")) {
-                try parseStringArray(parser, allocator, &header_keys);
-            } else if (std.mem.eql(u8, key, "headerDynamic")) {
-                header_dynamic_flag = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "hasBody")) {
-                has_body = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "bodyDynamic")) {
-                body_dynamic = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try contract.service_calls.append(allocator, .{
-            .service = service,
-            .route_pattern = route_pattern,
-            .dynamic = dynamic_flag,
-            .path_params = pickKnownList(allocator, &path_params, path_params_dynamic),
-            .query_keys = pickKnownList(allocator, &query_keys, query_dynamic_flag),
-            .header_keys = pickKnownList(allocator, &header_keys, header_dynamic_flag),
-            .body = pickBodySpec(has_body, body_dynamic),
-        });
-        // Successful append moves ownership; null the locals so errdefer above
-        // is a no-op.
-        service = "";
-        route_pattern = "";
-        path_params = .empty;
-        query_keys = .empty;
-        header_keys = .empty;
-    }
-}
-
-fn parseWorkflowCalls(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var target: []const u8 = try allocator.dupe(u8, "");
-        var route_pattern: []const u8 = try allocator.dupe(u8, "");
-        var dynamic_flag = false;
-        errdefer {
-            allocator.free(target);
-            allocator.free(route_pattern);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "target")) {
-                allocator.free(target);
-                target = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "route")) {
-                allocator.free(route_pattern);
-                route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "dynamic")) {
-                dynamic_flag = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try contract.workflow_calls.append(allocator, WorkflowCallInfo{
-            .target = target,
-            .route_pattern = route_pattern,
-            .dynamic = dynamic_flag,
-        });
-        target = "";
-        route_pattern = "";
-    }
-}
-
-fn parseAffordances(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var rel: []const u8 = try allocator.dupe(u8, "");
-        var method: []const u8 = try allocator.dupe(u8, "GET");
-        var href: []const u8 = try allocator.dupe(u8, "");
-        var templated = false;
-        var dynamic_flag = false;
-        errdefer {
-            allocator.free(rel);
-            allocator.free(method);
-            allocator.free(href);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "rel")) {
-                allocator.free(rel);
-                rel = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "method")) {
-                allocator.free(method);
-                method = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "href")) {
-                allocator.free(href);
-                href = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "templated")) {
-                templated = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "dynamic")) {
-                dynamic_flag = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try contract.affordances.append(allocator, .{
-            .rel = rel,
-            .method = method,
-            .href = href,
-            .templated = templated,
-            .dynamic = dynamic_flag,
-        });
-        // Successful append moves ownership; null the locals so errdefer is a no-op.
-        rel = "";
-        method = "";
-        href = "";
-    }
-}
-
-/// Discriminate accumulator into a KnownList. When the dynamic flag is set we
-/// drop any partially-enumerated keys, since the linker treats `.dynamic` as
-/// "cannot prove" and ignores partial state anyway.
-fn pickKnownList(
-    allocator: std.mem.Allocator,
-    items: *std.ArrayList([]const u8),
-    is_dynamic: bool,
-) ServiceCallInfo.KnownList {
-    if (is_dynamic) {
-        for (items.items) |s| allocator.free(s);
-        items.deinit(allocator);
-        items.* = .empty;
-        return .dynamic;
-    }
-    const taken = items.*;
-    items.* = .empty;
-    return .{ .complete = taken };
+    wire: []const WireString,
+    dynamic: bool,
+) !ServiceCallInfo.KnownList {
+    if (dynamic) return .dynamic;
+    return .{ .complete = try projectStringList(allocator, wire) };
 }
 
 fn pickBodySpec(has_body: bool, body_dynamic: bool) ServiceCallInfo.BodySpec {
@@ -964,1299 +621,759 @@ fn pickBodySpec(has_body: bool, body_dynamic: bool) ServiceCallInfo.BodySpec {
     return .none;
 }
 
-fn parseSqlSection(
-    parser: *JsonParser,
+fn projectWorkflowCalls(
     allocator: std.mem.Allocator,
+    wires: []const WorkflowCallWire,
     contract: *HandlerContract,
 ) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "backend")) {
-            _ = parser.readString() orelse "sqlite";
-        } else if (std.mem.eql(u8, key, "queries")) {
-            try parseSqlQueries(parser, allocator, &contract.sql.queries);
-        } else if (std.mem.eql(u8, key, "dynamic")) {
-            contract.sql.dynamic = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
+    try contract.workflow_calls.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const owned = try dupeWireStringPair(allocator, wire.target, wire.route);
+        var call = WorkflowCallInfo{
+            .target = owned.first,
+            .route_pattern = owned.second,
+            .dynamic = wire.dynamic,
+        };
+        errdefer call.deinit(allocator);
+        contract.workflow_calls.appendAssumeCapacity(call);
     }
 }
 
-fn parseSqlQueries(
-    parser: *JsonParser,
+fn projectAffordances(
     allocator: std.mem.Allocator,
-    list: *std.ArrayList(SqlQueryInfo),
+    wires: []const AffordanceWire,
+    contract: *HandlerContract,
 ) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
+    try contract.affordances.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const owned = try dupeWireStringTriple(allocator, wire.rel, wire.method, wire.href);
+        var affordance = contract_types.EmittedAffordance{
+            .rel = owned.first,
+            .method = owned.second,
+            .href = owned.third,
+            .templated = wire.templated,
+            .dynamic = wire.dynamic,
+        };
+        errdefer affordance.deinit(allocator);
+        contract.affordances.appendAssumeCapacity(affordance);
+    }
+}
 
-        var query = SqlQueryInfo{
-            .name = try allocator.dupe(u8, ""),
-            .statement = try allocator.dupe(u8, ""),
-            .operation = "",
+fn projectSql(
+    allocator: std.mem.Allocator,
+    wire: *const SqlWire,
+    contract: *HandlerContract,
+) !void {
+    contract.sql.dynamic = wire.dynamic;
+    try contract.sql.queries.ensureTotalCapacity(allocator, wire.queries.len);
+    for (wire.queries) |query_wire| {
+        const owned = try dupeWireStringPair(allocator, query_wire.name, query_wire.statement);
+        var query = contract_types.SqlQueryInfo{
+            .name = owned.first,
+            .statement = owned.second,
+            .operation = parseOwnedStaticOperation(query_wire.operation.bytes),
             .tables = .empty,
         };
         errdefer query.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "name")) {
-                allocator.free(query.name);
-                query.name = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "statement")) {
-                allocator.free(query.statement);
-                query.statement = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "operation")) {
-                query.operation = parseOwnedStaticOperation(parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "tables")) {
-                try parseStringArray(parser, allocator, &query.tables);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        // statement is now read back above when present; the prior unconditional
-        // reset here is what made `prove` see a changed query body as equivalent.
-        try list.append(allocator, query);
+        query.tables = try projectStringList(allocator, query_wire.tables);
+        contract.sql.queries.appendAssumeCapacity(query);
     }
 }
 
-fn parseOwnedStaticOperation(raw: []const u8) []const u8 {
-    if (std.mem.eql(u8, raw, "select")) return "select";
-    if (std.mem.eql(u8, raw, "insert")) return "insert";
-    if (std.mem.eql(u8, raw, "update")) return "update";
-    if (std.mem.eql(u8, raw, "delete")) return "delete";
-    return "";
-}
-
-fn parseDurableSection(
-    parser: *JsonParser,
+fn projectDurable(
     allocator: std.mem.Allocator,
+    wire: *const DurableWire,
     contract: *HandlerContract,
 ) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "used")) {
-            contract.durable.used = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "keys")) {
-            try parseDynamicSection(
-                parser,
-                allocator,
-                "literal",
-                &contract.durable.keys.literal,
-                &contract.durable.keys.dynamic,
-            );
-        } else if (std.mem.eql(u8, key, "steps")) {
-            try parseStringArray(parser, allocator, &contract.durable.steps);
-        } else if (std.mem.eql(u8, key, "timers")) {
-            contract.durable.timers = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "signals")) {
-            try parseDynamicSection(
-                parser,
-                allocator,
-                "literal",
-                &contract.durable.signals.literal,
-                &contract.durable.signals.dynamic,
-            );
-        } else if (std.mem.eql(u8, key, "producerKeys")) {
-            try parseDynamicSection(
-                parser,
-                allocator,
-                "literal",
-                &contract.durable.producer_keys.literal,
-                &contract.durable.producer_keys.dynamic,
-            );
-        } else if (std.mem.eql(u8, key, "workflow")) {
-            try parseDurableWorkflow(parser, allocator, &contract.durable.workflow);
-        } else {
-            parser.skipValue();
-        }
+    contract.durable.used = wire.used;
+    contract.durable.keys.literal = try projectStringList(allocator, wire.keys.literal);
+    contract.durable.keys.dynamic = wire.keys.dynamic;
+    contract.durable.steps = try projectStringList(allocator, wire.steps);
+    contract.durable.timers = wire.timers;
+    contract.durable.signals.literal = try projectStringList(allocator, wire.signals.literal);
+    contract.durable.signals.dynamic = wire.signals.dynamic;
+    contract.durable.producer_keys.literal = try projectStringList(allocator, wire.producerKeys.literal);
+    contract.durable.producer_keys.dynamic = wire.producerKeys.dynamic;
+    if (wire.workflow.value) |workflow| {
+        contract.durable.workflow.workflow_id = try dupeOptionalWireString(allocator, workflow.workflowId);
+        contract.durable.workflow.proof_level = contract_types.DurableWorkflowProofLevel.fromString(workflow.proofLevel.bytes);
+        contract.durable.workflow.properties.retry_safe = workflow.properties.retrySafe;
+        contract.durable.workflow.properties.idempotent = workflow.properties.idempotent;
+        contract.durable.workflow.properties.fault_covered = workflow.properties.faultCovered;
+        contract.durable.workflow.properties.reasons = try projectStringList(allocator, workflow.properties.reasons);
+        try projectDurableNodes(allocator, workflow.nodes, &contract.durable.workflow);
+        try projectDurableEdges(allocator, workflow.edges, &contract.durable.workflow);
     }
 }
 
-fn parseScopeSection(
-    parser: *JsonParser,
+fn projectDurableNodes(
     allocator: std.mem.Allocator,
-    contract: *HandlerContract,
+    wires: []const DurableWorkflowNodeWire,
+    workflow: *contract_types.DurableWorkflow,
 ) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "used")) {
-            contract.scope.used = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "names")) {
-            try parseStringArray(parser, allocator, &contract.scope.names);
-        } else if (std.mem.eql(u8, key, "dynamic")) {
-            contract.scope.dynamic = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "maxDepth")) {
-            contract.scope.max_depth = parser.readU32() orelse 0;
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseDurableWorkflow(
-    parser: *JsonParser,
-    allocator: std.mem.Allocator,
-    workflow: *DurableWorkflow,
-) !void {
-    if (parser.readNull()) return;
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "workflowId")) {
-            if (workflow.workflow_id) |existing| allocator.free(existing);
-            workflow.workflow_id = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-        } else if (std.mem.eql(u8, key, "proofLevel")) {
-            workflow.proof_level = DurableWorkflowProofLevel.fromString(parser.readString() orelse "none");
-        } else if (std.mem.eql(u8, key, "properties")) {
-            try parseDurableWorkflowProperties(parser, allocator, &workflow.properties);
-        } else if (std.mem.eql(u8, key, "nodes")) {
-            try parseDurableWorkflowNodes(parser, allocator, &workflow.nodes);
-        } else if (std.mem.eql(u8, key, "edges")) {
-            try parseDurableWorkflowEdges(parser, allocator, &workflow.edges);
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseDurableWorkflowProperties(
-    parser: *JsonParser,
-    allocator: std.mem.Allocator,
-    properties: *DurableWorkflowProperties,
-) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "retrySafe")) {
-            properties.retry_safe = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "idempotent")) {
-            properties.idempotent = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "faultCovered")) {
-            properties.fault_covered = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "reasons")) {
-            try parseStringArray(parser, allocator, &properties.reasons);
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseDurableWorkflowNodes(
-    parser: *JsonParser,
-    allocator: std.mem.Allocator,
-    list: *std.ArrayList(DurableWorkflowNode),
-) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var node = DurableWorkflowNode{
-            .id = try allocator.dupe(u8, ""),
-            .kind = .branch,
-            .label = try allocator.dupe(u8, ""),
+    try workflow.nodes.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const owned = try dupeWireStringPair(allocator, wire.id, wire.label);
+        var node = contract_types.DurableWorkflowNode{
+            .id = owned.first,
+            .kind = contract_types.DurableWorkflowNodeKind.fromString(wire.kind.bytes),
+            .label = owned.second,
+            .detail = null,
+            .status = null,
         };
         errdefer node.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "id")) {
-                allocator.free(node.id);
-                node.id = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "kind")) {
-                node.kind = DurableWorkflowNodeKind.fromString(parser.readString() orelse "branch");
-            } else if (std.mem.eql(u8, key, "label")) {
-                allocator.free(node.label);
-                node.label = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "detail")) {
-                if (node.detail) |detail| allocator.free(detail);
-                node.detail = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "status")) {
-                node.status = if (parser.readNull()) null else parser.readU16() orelse return error.InvalidJson;
-            } else {
-                parser.skipValue();
-            }
+        node.detail = try dupeOptionalWireString(allocator, wire.detail);
+        if (wire.status) |status| {
+            node.status = status.value orelse return error.InvalidJson;
         }
-
-        try list.append(allocator, node);
+        workflow.nodes.appendAssumeCapacity(node);
     }
 }
 
-fn parseDurableWorkflowEdges(
-    parser: *JsonParser,
+fn projectDurableEdges(
     allocator: std.mem.Allocator,
-    list: *std.ArrayList(DurableWorkflowEdge),
+    wires: []const DurableWorkflowEdgeWire,
+    workflow: *contract_types.DurableWorkflow,
 ) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var edge = DurableWorkflowEdge{
-            .from = try allocator.dupe(u8, ""),
-            .to = try allocator.dupe(u8, ""),
+    try workflow.edges.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const owned = try dupeWireStringPair(allocator, wire.from, wire.to);
+        var edge = contract_types.DurableWorkflowEdge{
+            .from = owned.first,
+            .to = owned.second,
+            .condition = null,
         };
         errdefer edge.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "from")) {
-                allocator.free(edge.from);
-                edge.from = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "to")) {
-                allocator.free(edge.to);
-                edge.to = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "condition")) {
-                if (edge.condition) |condition| allocator.free(condition);
-                edge.condition = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try list.append(allocator, edge);
+        edge.condition = try dupeOptionalWireString(allocator, wire.condition);
+        workflow.edges.appendAssumeCapacity(edge);
     }
 }
 
-fn parseApiSection(
-    parser: *JsonParser,
+fn projectScope(
     allocator: std.mem.Allocator,
+    wire: *const ScopeWire,
     contract: *HandlerContract,
 ) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "schemas")) {
-            try parseApiSchemas(parser, allocator, &contract.api.schemas);
-        } else if (std.mem.eql(u8, key, "requests")) {
-            try parseApiRequests(parser, allocator, &contract.api.requests);
-        } else if (std.mem.eql(u8, key, "auth")) {
-            try parseApiAuth(parser, &contract.api.auth);
-        } else if (std.mem.eql(u8, key, "routes")) {
-            try parseApiRoutes(parser, allocator, &contract.api.routes);
-        } else if (std.mem.eql(u8, key, "schemasDynamic")) {
-            contract.api.schemas_dynamic = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "routesDynamic")) {
-            contract.api.routes_dynamic = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
-    }
+    contract.scope.used = wire.used;
+    contract.scope.names = try projectStringList(allocator, wire.names);
+    contract.scope.dynamic = wire.dynamic;
+    contract.scope.max_depth = wire.maxDepth.value orelse 0;
 }
 
-fn parseApiSchemas(
-    parser: *JsonParser,
+fn projectApi(
     allocator: std.mem.Allocator,
-    list: *std.ArrayList(ApiSchemaInfo),
+    wire: *const ApiWire,
+    contract: *HandlerContract,
 ) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var schema = ApiSchemaInfo{
-            .name = try allocator.dupe(u8, ""),
-            .schema_json = try allocator.dupe(u8, "{}"),
-        };
-        errdefer {
-            allocator.free(schema.name);
-            allocator.free(schema.schema_json);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "name")) {
-                allocator.free(schema.name);
-                schema.name = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "schema")) {
-                const raw = parser.readRawValue() orelse return error.InvalidJson;
-                allocator.free(schema.schema_json);
-                schema.schema_json = try allocator.dupe(u8, raw);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try list.append(allocator, schema);
+    try contract.api.schemas.ensureTotalCapacity(allocator, wire.schemas.len);
+    for (wire.schemas) |schema_wire| {
+        const name = try dupeWireString(allocator, schema_wire.name);
+        errdefer allocator.free(name);
+        const schema = try allocator.dupe(u8, schema_wire.schema.bytes);
+        errdefer allocator.free(schema);
+        contract.api.schemas.appendAssumeCapacity(.{
+            .name = name,
+            .schema_json = schema,
+        });
     }
+    contract.api.requests.schema_refs = try projectStringList(allocator, wire.requests.schemaRefs);
+    contract.api.requests.dynamic = wire.requests.dynamic;
+    contract.api.auth = .{
+        .bearer = wire.auth.bearer,
+        .jwt = wire.auth.jwt,
+    };
+    contract.api.schemas_dynamic = wire.schemasDynamic;
+    contract.api.routes_dynamic = wire.routesDynamic;
+    try projectApiRoutes(allocator, wire.routes, &contract.api.routes);
 }
 
-fn parseApiRequests(
-    parser: *JsonParser,
+fn projectApiRoutes(
     allocator: std.mem.Allocator,
-    requests: *ApiRequestInfo,
+    wires: []const ApiRouteWire,
+    routes: *std.ArrayList(ApiRouteInfo),
 ) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "schemaRefs")) {
-            try parseStringArray(parser, allocator, &requests.schema_refs);
-        } else if (std.mem.eql(u8, key, "dynamic")) {
-            requests.dynamic = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseApiAuth(parser: *JsonParser, auth: *ApiAuthInfo) !void {
-    if (!parser.consume('{')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "bearer")) {
-            auth.bearer = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "jwt")) {
-            auth.jwt = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
-    }
-}
-
-fn parseApiRoutes(
-    parser: *JsonParser,
-    allocator: std.mem.Allocator,
-    list: *std.ArrayList(ApiRouteInfo),
-) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
+    try routes.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const owned = try dupeWireStringPair(allocator, wire.method, wire.path);
         var route = ApiRouteInfo{
-            .method = try allocator.dupe(u8, ""),
-            .path = try allocator.dupe(u8, ""),
+            .method = owned.first,
+            .path = owned.second,
             .request_schema_refs = .empty,
-            .request_schema_dynamic = false,
-            .requires_bearer = false,
-            .requires_jwt = false,
+            .request_schema_dynamic = wire.requestSchemaDynamic,
+            .requires_bearer = wire.requiresBearer,
+            .requires_jwt = wire.requiresJwt,
         };
         errdefer route.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "method")) {
-                allocator.free(route.method);
-                route.method = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "path")) {
-                allocator.free(route.path);
-                route.path = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "requestSchemaRefs")) {
-                try parseStringArray(parser, allocator, &route.request_schema_refs);
-            } else if (std.mem.eql(u8, key, "requestSchemaDynamic")) {
-                route.request_schema_dynamic = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "requiresBearer")) {
-                route.requires_bearer = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "requiresJwt")) {
-                route.requires_jwt = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "pathParams")) {
-                try parseApiParams(parser, allocator, &route.path_params);
-            } else if (std.mem.eql(u8, key, "queryParams")) {
-                try parseApiParams(parser, allocator, &route.query_params);
-            } else if (std.mem.eql(u8, key, "headerParams")) {
-                try parseApiParams(parser, allocator, &route.header_params);
-            } else if (std.mem.eql(u8, key, "queryParamsDynamic")) {
-                route.query_params_dynamic = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "headerParamsDynamic")) {
-                route.header_params_dynamic = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "requestBodies")) {
-                try parseApiBodies(parser, allocator, &route.request_bodies);
-            } else if (std.mem.eql(u8, key, "requestBodiesDynamic")) {
-                route.request_bodies_dynamic = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "responses")) {
-                try parseApiResponses(parser, allocator, &route.responses);
-            } else if (std.mem.eql(u8, key, "responsesDynamic")) {
-                route.responses_dynamic = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "responseStatus")) {
-                route.response_status = if (parser.readNull()) null else (parser.readU16() orelse null);
-            } else if (std.mem.eql(u8, key, "responseContentType")) {
-                route.response_content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "responseSchemaRef")) {
-                route.response_schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "responseSchema")) {
-                if (!parser.readNull()) {
-                    const raw = parser.readRawValue() orelse return error.InvalidJson;
-                    route.response_schema_json = try allocator.dupe(u8, raw);
-                }
-            } else if (std.mem.eql(u8, key, "responseSchemaDynamic")) {
-                route.response_schema_dynamic = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
+        route.request_schema_refs = try projectStringList(allocator, wire.requestSchemaRefs);
+        route.path_params = try projectApiParams(allocator, wire.pathParams);
+        route.query_params = try projectApiParams(allocator, wire.queryParams);
+        route.header_params = try projectApiParams(allocator, wire.headerParams);
+        route.query_params_dynamic = wire.queryParamsDynamic;
+        route.header_params_dynamic = wire.headerParamsDynamic;
+        route.request_bodies = try projectApiBodies(allocator, wire.requestBodies);
+        route.request_bodies_dynamic = wire.requestBodiesDynamic;
+        route.responses = try projectApiResponses(allocator, wire.responses);
+        route.responses_dynamic = wire.responsesDynamic;
+        route.response_status = if (wire.responseStatus) |status| status.value else null;
+        route.response_content_type = try dupeOptionalWireString(allocator, wire.responseContentType);
+        route.response_schema_ref = try dupeOptionalWireString(allocator, wire.responseSchemaRef);
+        route.response_schema_json = if (wire.responseSchema) |schema|
+            try allocator.dupe(u8, schema.bytes)
+        else
+            null;
+        route.response_schema_dynamic = wire.responseSchemaDynamic;
         try backfillApiRouteCollections(allocator, &route);
-        try list.append(allocator, route);
+        routes.appendAssumeCapacity(route);
     }
 }
 
-fn parseApiParams(
-    parser: *JsonParser,
+fn projectApiParams(
     allocator: std.mem.Allocator,
-    list: *std.ArrayList(ApiParamInfo),
-) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
+    wires: []const ApiParamWire,
+) !std.ArrayList(ApiParamInfo) {
+    var result: std.ArrayList(ApiParamInfo) = .empty;
+    errdefer {
+        for (result.items) |*param| param.deinit(allocator);
+        result.deinit(allocator);
+    }
+    try result.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        const name = try dupeWireString(allocator, wire.name);
+        const schema_json = allocator.dupe(u8, wire.schema.bytes) catch |err| {
+            allocator.free(name);
+            return err;
+        };
         var param = ApiParamInfo{
-            .name = try allocator.dupe(u8, ""),
-            .location = "path",
-            .required = false,
-            .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+            .name = name,
+            .location = toStaticParamLocation(wire.location.bytes),
+            .required = wire.required,
+            .schema_json = schema_json,
         };
         errdefer param.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "name")) {
-                allocator.free(param.name);
-                param.name = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "location")) {
-                const raw = parser.readString() orelse "path";
-                param.location = if (std.mem.eql(u8, raw, "query"))
-                    "query"
-                else if (std.mem.eql(u8, raw, "header"))
-                    "header"
-                else
-                    "path";
-            } else if (std.mem.eql(u8, key, "required")) {
-                param.required = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "schema")) {
-                const raw = parser.readRawValue() orelse return error.InvalidJson;
-                allocator.free(param.schema_json);
-                param.schema_json = try allocator.dupe(u8, raw);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try list.append(allocator, param);
+        result.appendAssumeCapacity(param);
     }
+    return result;
 }
 
-fn parseApiBodies(
-    parser: *JsonParser,
+fn projectApiBodies(
     allocator: std.mem.Allocator,
-    list: *std.ArrayList(ApiBodyInfo),
-) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var content_type: ?[]const u8 = null;
-        var schema_ref: ?[]const u8 = null;
-        var schema_json: ?[]const u8 = null;
-        var is_dynamic = false;
-        errdefer {
-            if (content_type) |s| allocator.free(s);
-            if (schema_ref) |s| allocator.free(s);
-            if (schema_json) |s| allocator.free(s);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "contentType")) {
-                content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "schemaRef")) {
-                schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "schema")) {
-                if (!parser.readNull()) {
-                    const raw = parser.readRawValue() orelse return error.InvalidJson;
-                    schema_json = try allocator.dupe(u8, raw);
-                }
-            } else if (std.mem.eql(u8, key, "dynamic")) {
-                is_dynamic = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        const schema = pickSchemaSpec(allocator, &schema_ref, &schema_json, is_dynamic);
-
-        try list.append(allocator, .{
-            .content_type = content_type,
-            .schema = schema,
-        });
-        content_type = null;
+    wires: []const ApiBodyWire,
+) !std.ArrayList(ApiBodyInfo) {
+    var result: std.ArrayList(ApiBodyInfo) = .empty;
+    errdefer {
+        for (result.items) |*body| body.deinit(allocator);
+        result.deinit(allocator);
     }
+    try result.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        var body = ApiBodyInfo{
+            .content_type = try dupeOptionalWireString(allocator, wire.contentType),
+            .schema = .none,
+        };
+        errdefer body.deinit(allocator);
+        body.schema = try projectSchemaSpec(allocator, wire.schemaRef, wire.schema, wire.dynamic);
+        result.appendAssumeCapacity(body);
+    }
+    return result;
 }
 
-/// Discriminate accumulator into a SchemaSpec with precedence dynamic >
-/// inline_json > ref > none. Older contracts may have populated more than one
-/// schema field; we keep the strongest and free the rest, then null the
-/// accumulator slots so the caller's errdefer doesn't double-free.
-fn pickSchemaSpec(
+fn projectApiResponses(
     allocator: std.mem.Allocator,
-    schema_ref: *?[]const u8,
-    schema_json: *?[]const u8,
-    is_dynamic: bool,
-) SchemaSpec {
-    if (is_dynamic) {
-        if (schema_ref.*) |s| allocator.free(s);
-        if (schema_json.*) |s| allocator.free(s);
-        schema_ref.* = null;
-        schema_json.* = null;
-        return .dynamic;
+    wires: []const ApiResponseWire,
+) !std.ArrayList(ApiResponseInfo) {
+    var result: std.ArrayList(ApiResponseInfo) = .empty;
+    errdefer {
+        for (result.items) |*response| response.deinit(allocator);
+        result.deinit(allocator);
     }
-    if (schema_json.*) |s| {
-        if (schema_ref.*) |r| allocator.free(r);
-        schema_ref.* = null;
-        schema_json.* = null;
-        return .{ .inline_json = s };
+    try result.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        var response = ApiResponseInfo{
+            .status = if (wire.status) |status| status.value else null,
+            .content_type = try dupeOptionalWireString(allocator, wire.contentType),
+            .schema = .none,
+        };
+        errdefer response.deinit(allocator);
+        response.schema = try projectSchemaSpec(allocator, wire.schemaRef, wire.schema, wire.dynamic);
+        result.appendAssumeCapacity(response);
     }
-    if (schema_ref.*) |s| {
-        schema_ref.* = null;
-        return .{ .ref = s };
-    }
+    return result;
+}
+
+fn projectSchemaSpec(
+    allocator: std.mem.Allocator,
+    schema_ref: ?WireString,
+    schema_json: ?RawJson,
+    dynamic: bool,
+) !SchemaSpec {
+    if (dynamic) return .dynamic;
+    if (schema_json) |schema| return .{ .inline_json = try allocator.dupe(u8, schema.bytes) };
+    if (schema_ref) |reference| return .{ .ref = try dupeWireString(allocator, reference) };
     return .none;
 }
 
-fn parseApiResponses(
-    parser: *JsonParser,
+fn backfillApiRouteCollections(
     allocator: std.mem.Allocator,
-    list: *std.ArrayList(ApiResponseInfo),
+    route: *ApiRouteInfo,
 ) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var status: ?u16 = null;
-        var content_type: ?[]const u8 = null;
-        var schema_ref: ?[]const u8 = null;
-        var schema_json: ?[]const u8 = null;
-        var is_dynamic = false;
-        errdefer {
-            if (content_type) |s| allocator.free(s);
-            if (schema_ref) |s| allocator.free(s);
-            if (schema_json) |s| allocator.free(s);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "status")) {
-                status = if (parser.readNull()) null else (parser.readU16() orelse null);
-            } else if (std.mem.eql(u8, key, "contentType")) {
-                content_type = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "schemaRef")) {
-                schema_ref = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "schema")) {
-                if (!parser.readNull()) {
-                    const raw = parser.readRawValue() orelse return error.InvalidJson;
-                    schema_json = try allocator.dupe(u8, raw);
-                }
-            } else if (std.mem.eql(u8, key, "dynamic")) {
-                is_dynamic = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        const schema = pickSchemaSpec(allocator, &schema_ref, &schema_json, is_dynamic);
-
-        try list.append(allocator, .{
-            .status = status,
-            .content_type = content_type,
-            .schema = schema,
-        });
-        content_type = null;
-    }
-}
-
-fn backfillApiRouteCollections(allocator: std.mem.Allocator, route: *ApiRouteInfo) !void {
     if (route.request_bodies.items.len == 0) {
         route.request_bodies_dynamic = route.request_bodies_dynamic or route.request_schema_dynamic;
         for (route.request_schema_refs.items) |schema_ref| {
             if (containsRequestBodySchemaRef(route.request_bodies.items, schema_ref)) continue;
-            try route.request_bodies.append(allocator, .{
+            var body = ApiBodyInfo{
                 .content_type = try allocator.dupe(u8, "application/json"),
-                .schema = .{ .ref = try allocator.dupe(u8, schema_ref) },
-            });
+                .schema = .none,
+            };
+            errdefer body.deinit(allocator);
+            body.schema = .{ .ref = try allocator.dupe(u8, schema_ref) };
+            try route.request_bodies.append(allocator, body);
         }
     }
-
-    // Backfill from legacy scalar response fields when no collection entries exist.
-    // These scalar fields are kept for backward compatibility with older contract.json consumers.
     if (route.responses.items.len == 0 and
-        (route.response_status != null or route.response_content_type != null or route.response_schema_ref != null or route.response_schema_json != null or route.response_schema_dynamic))
+        (route.response_status != null or
+            route.response_content_type != null or
+            route.response_schema_ref != null or
+            route.response_schema_json != null or
+            route.response_schema_dynamic))
     {
-        try route.responses.append(allocator, .{
+        var response = ApiResponseInfo{
             .status = route.response_status,
-            .content_type = try dupeOptionalString(allocator, route.response_content_type),
-            .schema = try schemaSpecFromLegacyFields(
-                allocator,
-                route.response_schema_ref,
-                route.response_schema_json,
-                route.response_schema_dynamic,
-            ),
-        });
+            .content_type = if (route.response_content_type) |value|
+                try allocator.dupe(u8, value)
+            else
+                null,
+            .schema = .none,
+        };
+        errdefer response.deinit(allocator);
+        response.schema = try schemaSpecFromLegacyFields(
+            allocator,
+            route.response_schema_ref,
+            route.response_schema_json,
+            route.response_schema_dynamic,
+        );
+        try route.responses.append(allocator, response);
         route.responses_dynamic = route.responses_dynamic or route.response_schema_dynamic;
     }
 }
 
-/// Mirror legacy scalar route response fields into a SchemaSpec, preserving
-/// precedence dynamic > inline_json > ref > none and duplicating owned bytes
-/// since the legacy fields stay alive on the route.
+fn containsRequestBodySchemaRef(
+    items: []const ApiBodyInfo,
+    needle: []const u8,
+) bool {
+    for (items) |item| {
+        const schema_ref = item.schema.schemaRef() orelse continue;
+        if (std.mem.eql(u8, schema_ref, needle)) return true;
+    }
+    return false;
+}
+
 fn schemaSpecFromLegacyFields(
     allocator: std.mem.Allocator,
     schema_ref: ?[]const u8,
     schema_json: ?[]const u8,
-    is_dynamic: bool,
+    dynamic: bool,
 ) !SchemaSpec {
-    if (is_dynamic) return .dynamic;
-    if (schema_json) |s| return .{ .inline_json = try allocator.dupe(u8, s) };
-    if (schema_ref) |s| return .{ .ref = try allocator.dupe(u8, s) };
+    if (dynamic) return .dynamic;
+    if (schema_json) |schema| return .{ .inline_json = try allocator.dupe(u8, schema) };
+    if (schema_ref) |reference| return .{ .ref = try allocator.dupe(u8, reference) };
     return .none;
 }
 
-fn parseVerification(parser: *JsonParser, contract: *HandlerContract) !void {
-    parser.skipWhitespace();
-    if (parser.readNull()) {
-        contract.verification = null;
-        return;
-    }
-
-    if (!parser.consume('{')) return error.InvalidJson;
-    var info = VerificationInfo{
-        .exhaustive_returns = false,
-        .results_safe = false,
-        .unreachable_code = false,
-        .bytecode_verified = false,
-    };
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "exhaustiveReturns")) {
-            info.exhaustive_returns = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "resultsSafe")) {
-            info.results_safe = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "unreachableCode")) {
-            info.unreachable_code = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "bytecodeVerified")) {
-            info.bytecode_verified = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
-    }
-
-    contract.verification = info;
+fn projectVerification(
+    wire: ?VerificationWire,
+    contract: *HandlerContract,
+) void {
+    contract.verification = if (wire) |value| .{
+        .exhaustive_returns = value.exhaustiveReturns,
+        .results_safe = value.resultsSafe,
+        .unreachable_code = value.unreachableCode,
+        .bytecode_verified = value.bytecodeVerified,
+    } else null;
 }
 
-fn parseProperties(parser: *JsonParser) !?HandlerProperties {
-    parser.skipWhitespace();
-    if (parser.readNull()) return null;
+fn projectWebSocket(
+    wire: ?WebSocketWire,
+    contract: *HandlerContract,
+) void {
+    contract.websocket = if (wire) |value| .{
+        .on_open = value.onOpen,
+        .on_message = value.onMessage,
+        .on_close = value.onClose,
+        .on_error = value.onError,
+    } else .{};
+}
 
-    if (!parser.consume('{')) return error.InvalidJson;
-    // Baseline every field to "not asserted". HandlerProperties defaults the
-    // six flow and isolation fields to true, which is the right default for
-    // the analyzer that computes them but the wrong one for a parser reading
-    // a wire document: a key the document omits was never proven. Relying on
-    // the type's defaults here would read a partial `properties` block as
-    // proving no_secret_leakage, no_credential_leakage, input_validated,
-    // pii_contained, injection_safe, and state_isolated.
-    var props = HandlerProperties{
-        .pure = false,
-        .read_only = false,
-        .stateless = false,
-        .retry_safe = false,
-        .deterministic = false,
-        .has_egress = false,
-        .no_secret_leakage = false,
-        .no_credential_leakage = false,
-        .input_validated = false,
-        .pii_contained = false,
-        .injection_safe = false,
-        .state_isolated = false,
-    };
+fn projectFaultCoverage(
+    wire: ?FaultCoverageWire,
+    contract: *HandlerContract,
+) void {
+    contract.fault_coverage = if (wire) |value| .{
+        .total_failable = value.totalFailable.value orelse 0,
+        .covered = value.covered.value orelse 0,
+        .warnings = value.warnings.value orelse 0,
+    } else null;
+}
 
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
+fn projectProperties(
+    wire: ?PropertiesWire,
+    contract: *HandlerContract,
+) void {
+    contract.properties = if (wire) |value| .{
+        .pure = value.pure,
+        .read_only = value.readOnly,
+        .stateless = value.stateless,
+        .retry_safe = value.retrySafe,
+        .deterministic = value.deterministic,
+        .has_egress = value.hasEgress,
+        .no_secret_leakage = value.noSecretLeakage,
+        .no_credential_leakage = value.noCredentialLeakage,
+        .input_validated = value.inputValidated,
+        .pii_contained = value.piiContained,
+        .idempotent = value.idempotent,
+        .max_io_depth = if (value.maxIoDepth) |depth| depth.value else null,
+        .injection_safe = value.injectionSafe,
+        .state_isolated = value.stateIsolated,
+        .fault_covered = value.faultCovered,
+        .result_safe = value.resultSafe,
+        .optional_safe = value.optionalSafe,
+        .post_only = value.postOnly,
+        .canonical = value.canonical,
+        .cost_bounded = value.costBounded,
+    } else null;
+}
+
+fn projectSpecDiagnostics(
+    allocator: std.mem.Allocator,
+    wires: ?[]const SpecDiagnosticWire,
+    contract: *HandlerContract,
+) !void {
+    const values = wires orelse return;
+    try contract.spec_diagnostics.ensureTotalCapacity(allocator, values.len);
+    for (values) |wire| {
+        var kind: ?SpecDiagnostic.Kind = null;
+        if (wire.kind) |raw| {
+            kind = specDiagnosticKindFromString(raw.bytes) orelse return error.InvalidJson;
         }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
+        if (wire.code) |raw| {
+            kind = specDiagnosticKindFromCode(raw.bytes) orelse kind;
+        }
+        const spec_name = wire.specName orelse return error.InvalidJson;
+        var diagnostic = SpecDiagnostic{
+            .kind = kind orelse return error.InvalidJson,
+            .spec_name = try dupeWireString(allocator, spec_name),
+            .incompatible_module = null,
+            .suggestion = null,
+            .function = null,
+        };
+        errdefer diagnostic.deinit(allocator);
+        diagnostic.incompatible_module = try dupeOptionalWireString(allocator, wire.incompatibleModule);
+        diagnostic.suggestion = try dupeOptionalWireString(allocator, wire.suggestion);
+        diagnostic.function = try dupeOptionalWireString(allocator, wire.function);
+        contract.spec_diagnostics.appendAssumeCapacity(diagnostic);
+    }
+}
 
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "pure")) {
-            props.pure = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "readOnly")) {
-            props.read_only = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "stateless")) {
-            props.stateless = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "retrySafe")) {
-            props.retry_safe = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "deterministic")) {
-            props.deterministic = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "hasEgress")) {
-            props.has_egress = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "noSecretLeakage")) {
-            props.no_secret_leakage = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "noCredentialLeakage")) {
-            props.no_credential_leakage = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "inputValidated")) {
-            props.input_validated = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "piiContained")) {
-            props.pii_contained = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "injectionSafe")) {
-            props.injection_safe = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "idempotent")) {
-            props.idempotent = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "stateIsolated")) {
-            props.state_isolated = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "maxIoDepth")) {
-            if (parser.readNull()) {
-                props.max_io_depth = null;
-            } else {
-                props.max_io_depth = parser.readU32();
+fn projectSandbox(
+    wire: ?SandboxWire,
+    contract: *HandlerContract,
+) !void {
+    const sandbox = wire orelse return;
+    if (sandbox.capabilities.value) |names| {
+        var seen = [_]bool{false} ** capability_count;
+        for (names) |name| {
+            const capability = std.meta.stringToEnum(ModuleCapability, name.bytes) orelse continue;
+            seen[@intFromEnum(capability)] = true;
+        }
+        var matrix: CapabilityMatrix = .{};
+        for (std.enums.values(ModuleCapability)) |capability| {
+            if (seen[@intFromEnum(capability)]) {
+                matrix.items[matrix.len] = capability;
+                matrix.len += 1;
             }
-        } else if (std.mem.eql(u8, key, "faultCovered")) {
-            props.fault_covered = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "resultSafe")) {
-            props.result_safe = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "optionalSafe")) {
-            props.optional_safe = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "postOnly")) {
-            props.post_only = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "canonical")) {
-            props.canonical = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "costBounded")) {
-            props.cost_bounded = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
         }
+        var have_hash = false;
+        if (sandbox.capabilityHash.value) |hash| {
+            have_hash = try parseOptionalHash(&matrix.hash, hash.bytes);
+        }
+        if (!have_hash or std.mem.allEqual(u8, &matrix.hash, 0)) {
+            matrix.hash = module_binding.capabilityHash(matrix.slice());
+        }
+        contract.capabilities = matrix;
     }
-
-    return props;
+    if (sandbox.policyHash.value) |hash| _ = try parseOptionalHash(&contract.policy_hash, hash.bytes);
+    if (sandbox.wasmPolicyHash.value) |hash| _ = try parseOptionalHash(&contract.wasm_policy_hash, hash.bytes);
+    if (sandbox.artifactSha256.value) |hash| _ = try parseOptionalHash(&contract.artifact_sha256, hash.bytes);
 }
 
-fn parseCostEnvelope(parser: *JsonParser, allocator: std.mem.Allocator) !?CostEnvelope {
-    parser.skipWhitespace();
-    if (parser.readNull()) return null;
-    if (!parser.consume('{')) return error.InvalidJson;
+fn parseOptionalHash(target: *[32]u8, raw: []const u8) !bool {
+    if (raw.len != 64) return false;
+    _ = std.fmt.hexToBytes(target, raw) catch return error.InvalidJson;
+    return true;
+}
 
-    var envelope = CostEnvelope{};
-    errdefer envelope.deinit(allocator);
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
+fn projectIntent(
+    allocator: std.mem.Allocator,
+    wire: ?IntentWire,
+    contract: *HandlerContract,
+) !void {
+    const value = wire orelse return;
+    var intent = contract_types.IntentInfo{ .dynamic = value.dynamic };
+    errdefer intent.deinit(allocator);
+    try intent.assertions.ensureTotalCapacity(allocator, value.assertions.len);
+    for (value.assertions) |assertion_wire| {
+        const owned = try dupeWireStringTriple(
+            allocator,
+            assertion_wire.name,
+            assertion_wire.method,
+            assertion_wire.path,
+        );
+        var assertion = contract_types.IntentAssertion{
+            .name = owned.first,
+            .method = owned.second,
+            .path = owned.third,
+        };
+        errdefer assertion.deinit(allocator);
+        if (assertion_wire.requestBodyJson) |body| {
+            assertion.request_body_json = try trace.unescapeJson(allocator, body.bytes);
         }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "exhaustive")) {
-            envelope.exhaustive = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "total")) {
-            const total = try parseBound(parser, allocator);
-            envelope.total.deinitOwned(allocator);
-            envelope.total = total;
-        } else if (std.mem.eql(u8, key, "perModule")) {
-            try parseCostEntries(parser, allocator, &envelope.entries);
-        } else {
-            parser.skipValue();
+        assertion.expected_status = if (assertion_wire.expectedStatus) |status| status.value else null;
+        if (assertion_wire.expectedBodyJson) |body| {
+            assertion.expected_body_json = try trace.unescapeJson(allocator, body.bytes);
         }
+        try assertion.expected_headers.ensureTotalCapacity(allocator, assertion_wire.expectedHeaders.len);
+        for (assertion_wire.expectedHeaders) |header_wire| {
+            const header_owned = try dupeWireStringPair(allocator, header_wire.name, header_wire.value);
+            var header = contract_types.IntentExpectedHeader{
+                .name = header_owned.first,
+                .value = header_owned.second,
+            };
+            errdefer header.deinit(allocator);
+            assertion.expected_headers.appendAssumeCapacity(header);
+        }
+        assertion.source_line = assertion_wire.sourceLine.value orelse 0;
+        assertion.source_column = assertion_wire.sourceColumn.value orelse 0;
+        intent.assertions.appendAssumeCapacity(assertion);
     }
+    contract.intent = intent;
+}
 
+fn projectSagas(
+    allocator: std.mem.Allocator,
+    wires: []const SagaWire,
+    contract: *HandlerContract,
+) !void {
+    try contract.sagas.ensureTotalCapacity(allocator, wires.len);
+    for (wires) |wire| {
+        var saga = contract_types.SagaCallInfo{
+            .dynamic = wire.dynamic,
+            .source_line = wire.sourceLine.value orelse 0,
+            .source_column = wire.sourceColumn.value orelse 0,
+        };
+        errdefer saga.deinit(allocator);
+        try saga.steps.ensureTotalCapacity(allocator, wire.steps.len);
+        for (wire.steps) |step_wire| {
+            const name = try dupeWireString(allocator, step_wire.name);
+            errdefer allocator.free(name);
+            saga.steps.appendAssumeCapacity(.{
+                .name = name,
+                .has_compensate = step_wire.hasCompensate,
+            });
+        }
+        contract.sagas.appendAssumeCapacity(saga);
+    }
+}
+
+fn projectBehaviors(
+    allocator: std.mem.Allocator,
+    wires: ?[]const BehaviorWire,
+    contract: *HandlerContract,
+) !void {
+    const values = wires orelse return;
+    try contract.behaviors.ensureTotalCapacity(allocator, values.len);
+    for (values) |wire| {
+        const owned = try dupeWireStringPair(allocator, wire.method, wire.pattern);
+        var behavior = contract_types.BehaviorPath{
+            .route_method = owned.first,
+            .route_pattern = owned.second,
+            .conditions = .empty,
+            .io_sequence = .empty,
+            .response_status = wire.status.value orelse 0,
+            .io_depth = wire.ioDepth.value orelse 0,
+            .is_failure_path = wire.failurePath,
+        };
+        errdefer behavior.deinit(allocator);
+        try behavior.conditions.ensureTotalCapacity(allocator, wire.conditions.len);
+        for (wire.conditions) |condition_wire| {
+            var condition = PathCondition{
+                .kind = std.meta.stringToEnum(PathCondition.Kind, condition_wire.kind.bytes) orelse .io_ok,
+            };
+            errdefer condition.deinit(allocator);
+            condition.module = try dupeOptionalWireString(allocator, condition_wire.module);
+            condition.func = try dupeOptionalWireString(allocator, condition_wire.func);
+            condition.value = try dupeOptionalWireString(allocator, condition_wire.value);
+            behavior.conditions.appendAssumeCapacity(condition);
+        }
+        try behavior.io_sequence.ensureTotalCapacity(allocator, wire.ioSequence.len);
+        for (wire.ioSequence) |io_wire| {
+            const io_owned = try dupeWireStringPair(allocator, io_wire.module, io_wire.func);
+            var io_call = PathIoCall{
+                .module = io_owned.first,
+                .func = io_owned.second,
+                .arg_signature = null,
+            };
+            errdefer io_call.deinit(allocator);
+            io_call.arg_signature = try dupeOptionalWireString(allocator, io_wire.args);
+            behavior.io_sequence.appendAssumeCapacity(io_call);
+        }
+        contract.behaviors.appendAssumeCapacity(behavior);
+    }
+}
+
+fn projectCostEnvelope(
+    allocator: std.mem.Allocator,
+    wire: ?CostEnvelopeWire,
+) !?CostEnvelope {
+    const value = wire orelse return null;
+    var envelope = CostEnvelope{
+        .total = try projectBound(allocator, &value.total),
+        .exhaustive = value.exhaustive,
+    };
+    errdefer envelope.deinit(allocator);
+    try envelope.entries.ensureTotalCapacity(allocator, value.perModule.len);
+    for (value.perModule) |entry_wire| {
+        const module = entry_wire.module orelse return error.InvalidJson;
+        const owned_module = try dupeWireString(allocator, module);
+        errdefer allocator.free(owned_module);
+        const bound = if (entry_wire.bound) |bound_wire|
+            try projectBound(allocator, &bound_wire)
+        else
+            Bound{ .constant = 0 };
+        envelope.entries.appendAssumeCapacity(.{
+            .module = owned_module,
+            .bound = bound,
+        });
+    }
     return envelope;
 }
 
-fn parseCostEntries(
-    parser: *JsonParser,
+fn projectBound(
     allocator: std.mem.Allocator,
-    entries: *std.ArrayList(CostEntry),
-) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-
-        if (!parser.consume('{')) return error.InvalidJson;
-        var module: ?[]const u8 = null;
-        var bound: ?Bound = null;
-        errdefer {
-            if (module) |m| allocator.free(m);
-            if (bound) |*b| b.deinitOwned(allocator);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "module")) {
-                if (module) |m| allocator.free(m);
-                module = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "bound")) {
-                if (bound) |*b| b.deinitOwned(allocator);
-                bound = try parseBound(parser, allocator);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        const owned_module = module orelse return error.InvalidJson;
-        const owned_bound: Bound = bound orelse .{ .constant = 0 };
-        try entries.append(allocator, .{
-            .module = owned_module,
-            .bound = owned_bound,
-        });
-        module = null;
-        bound = null;
+    wire: *const BoundWire,
+) !Bound {
+    const class = wire.class orelse return error.InvalidJson;
+    if (std.mem.eql(u8, class.bytes, "constant")) {
+        return .{ .constant = wire.value.value orelse 0 };
     }
-}
-
-fn parseBound(parser: *JsonParser, allocator: std.mem.Allocator) !Bound {
-    parser.skipWhitespace();
-    if (!parser.consume('{')) return error.InvalidJson;
-
-    var class: ?[]const u8 = null;
-    var value: ?u32 = null;
-    var coefficient: ?u32 = null;
-    var base: u32 = 0;
-    var source: ?BoundProvenance = null;
-    errdefer {
-        if (source) |p| allocator.free(p.desc);
-    }
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "class")) {
-            class = parser.readString() orelse return error.InvalidJson;
-        } else if (std.mem.eql(u8, key, "value")) {
-            value = parser.readU32();
-        } else if (std.mem.eql(u8, key, "coefficient")) {
-            coefficient = parser.readU32();
-        } else if (std.mem.eql(u8, key, "base")) {
-            base = parser.readU32() orelse 0;
-        } else if (std.mem.eql(u8, key, "source")) {
-            if (source) |p| allocator.free(p.desc);
-            source = try parseBoundProvenance(parser, allocator);
-        } else {
-            parser.skipValue();
-        }
-    }
-
-    const class_name = class orelse return error.InvalidJson;
-    if (std.mem.eql(u8, class_name, "constant")) {
-        if (source) |p| allocator.free(p.desc);
-        return .{ .constant = value orelse 0 };
-    }
-    if (std.mem.eql(u8, class_name, "linear")) {
+    if (std.mem.eql(u8, class.bytes, "linear")) {
+        const source = wire.source orelse return error.InvalidJson;
         return .{ .linear = .{
-            .coefficient = coefficient orelse return error.InvalidJson,
-            .base = base,
-            .source = source orelse return error.InvalidJson,
+            .coefficient = wire.coefficient.value orelse return error.InvalidJson,
+            .base = wire.base.value orelse 0,
+            .source = try projectProvenance(allocator, &source),
         } };
     }
-    if (std.mem.eql(u8, class_name, "unbounded")) {
-        return .{ .unbounded = source orelse return error.InvalidJson };
+    if (std.mem.eql(u8, class.bytes, "unbounded")) {
+        const source = wire.source orelse return error.InvalidJson;
+        return .{ .unbounded = try projectProvenance(allocator, &source) };
     }
     return error.InvalidJson;
 }
 
-fn parseBoundProvenance(parser: *JsonParser, allocator: std.mem.Allocator) !BoundProvenance {
-    parser.skipWhitespace();
-    if (!parser.consume('{')) return error.InvalidJson;
-
-    var provenance = BoundProvenance{
-        .line = 0,
-        .column = 0,
-        .desc = try allocator.dupe(u8, ""),
+fn projectProvenance(
+    allocator: std.mem.Allocator,
+    wire: *const ProvenanceWire,
+) !BoundProvenance {
+    return .{
+        .line = wire.line.value orelse 0,
+        .column = wire.column.value orelse 0,
+        .desc = try dupeWireString(allocator, wire.desc),
     };
-    errdefer allocator.free(provenance.desc);
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "line")) {
-            provenance.line = parser.readU32() orelse 0;
-        } else if (std.mem.eql(u8, key, "column")) {
-            provenance.column = parser.readU32() orelse 0;
-        } else if (std.mem.eql(u8, key, "desc")) {
-            allocator.free(provenance.desc);
-            provenance.desc = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-        } else {
-            parser.skipValue();
-        }
-    }
-
-    return provenance;
 }
 
-fn parseSpecDiagnostics(
-    parser: *JsonParser,
+fn projectExtensions(
     allocator: std.mem.Allocator,
+    wires: *const ExtensionMap,
     contract: *HandlerContract,
 ) !void {
-    parser.skipWhitespace();
-    if (parser.readNull()) return;
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
+    for (wires.entries) |entry| {
+        const key = try dupeWireString(allocator, entry.key);
+        errdefer allocator.free(key);
+        var extension = contract_types.ExtensionContract{
+            .egress_hosts = try projectStringList(allocator, entry.value.egressHosts),
+            .egress_dynamic = entry.value.egressDynamic,
+            .contract_section = null,
+        };
+        errdefer extension.deinit(allocator);
+        extension.contract_section = if (entry.value.contractSection) |section|
+            try allocator.dupe(u8, section.bytes)
+        else
+            null;
+        for (entry.value.categories.entries) |category| {
+            const category_key = try dupeWireString(allocator, category.key);
+            errdefer allocator.free(category_key);
+            var bucket = contract_types.ExtensionCategoryBucket{
+                .literals = try projectStringList(allocator, category.value.literals),
+                .dynamic = category.value.dynamic,
+            };
+            errdefer bucket.deinit(allocator);
+            try extension.categories.put(allocator, category_key, bucket);
         }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var kind: ?SpecDiagnostic.Kind = null;
-        var spec_name: ?[]const u8 = null;
-        var incompatible_module: ?[]const u8 = null;
-        var suggestion: ?[]const u8 = null;
-        var function: ?[]const u8 = null;
-        errdefer {
-            if (spec_name) |s| allocator.free(s);
-            if (incompatible_module) |s| allocator.free(s);
-            if (suggestion) |s| allocator.free(s);
-            if (function) |s| allocator.free(s);
-        }
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "kind")) {
-                const value = parser.readString() orelse return error.InvalidJson;
-                kind = specDiagnosticKindFromString(value) orelse return error.InvalidJson;
-            } else if (std.mem.eql(u8, key, "code")) {
-                const value = parser.readString() orelse return error.InvalidJson;
-                kind = specDiagnosticKindFromCode(value) orelse kind;
-            } else if (std.mem.eql(u8, key, "specName")) {
-                spec_name = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "incompatibleModule")) {
-                incompatible_module = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "suggestion")) {
-                suggestion = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "function")) {
-                function = if (parser.readNull()) null else try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        const owned_name = spec_name orelse return error.InvalidJson;
-        const owned_kind = kind orelse return error.InvalidJson;
-        try contract.spec_diagnostics.append(allocator, .{
-            .kind = owned_kind,
-            .spec_name = owned_name,
-            .incompatible_module = incompatible_module,
-            .suggestion = suggestion,
-            .function = function,
-        });
-        spec_name = null;
-        incompatible_module = null;
-        suggestion = null;
-        function = null;
+        try contract.extensions.put(allocator, key, extension);
     }
+}
+
+fn projectRateLimit(
+    allocator: std.mem.Allocator,
+    wire: ?RateLimitWire,
+    contract: *HandlerContract,
+) !void {
+    const value = wire orelse return;
+    for (contract.cache.namespaces.items) |namespace| {
+        if (std.mem.eql(u8, namespace, value.namespace.bytes)) {
+            contract.rate_limiting = .{
+                .namespace = namespace,
+                .dynamic = value.dynamic,
+            };
+            return;
+        }
+    }
+    const namespace = try dupeWireString(allocator, value.namespace);
+    contract.owned_rate_limit_namespace = namespace;
+    contract.rate_limiting = .{
+        .namespace = namespace,
+        .dynamic = value.dynamic,
+    };
+}
+
+fn toStaticRouteType(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "exact")) return "exact";
+    if (std.mem.eql(u8, value, "prefix")) return "prefix";
+    return "unknown";
+}
+
+fn toStaticField(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "url")) return "url";
+    return "path";
+}
+
+fn toStaticContentType(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "text/plain; charset=utf-8")) return "text/plain; charset=utf-8";
+    if (std.mem.eql(u8, value, "text/html; charset=utf-8")) return "text/html; charset=utf-8";
+    return "application/json";
+}
+
+fn toStaticParamLocation(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "query")) return "query";
+    if (std.mem.eql(u8, value, "header")) return "header";
+    return "path";
+}
+
+fn parseOwnedStaticOperation(value: []const u8) []const u8 {
+    if (std.mem.eql(u8, value, "select")) return "select";
+    if (std.mem.eql(u8, value, "insert")) return "insert";
+    if (std.mem.eql(u8, value, "update")) return "update";
+    if (std.mem.eql(u8, value, "delete")) return "delete";
+    return "";
 }
 
 fn specDiagnosticKindFromString(value: []const u8) ?SpecDiagnostic.Kind {
@@ -2276,686 +1393,13 @@ fn specDiagnosticKindFromCode(value: []const u8) ?SpecDiagnostic.Kind {
     return null;
 }
 
-fn parseSandbox(parser: *JsonParser, contract: *HandlerContract) !void {
-    parser.skipWhitespace();
-    if (parser.readNull()) return;
-    if (!parser.consume('{')) return error.InvalidJson;
-
-    var seen = [_]bool{false} ** module_binding.capability_count;
-    var matrix: CapabilityMatrix = .{};
-    var have_cap_hash = false;
-    // A sandbox block that omits `capabilities` makes no capability
-    // statement. Leave contract.capabilities null in that case, so
-    // verifyCapabilityMatrix skips rather than comparing against an
-    // invented empty matrix.
-    var have_capabilities = false;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-        parser.skipWhitespace();
-
-        if (std.mem.eql(u8, key, "capabilities")) {
-            have_capabilities = true;
-            if (!parser.consume('[')) return error.InvalidJson;
-            while (true) {
-                parser.skipWhitespace();
-                if (parser.peek() == ']') {
-                    _ = parser.advance();
-                    break;
-                }
-                if (parser.peek() == ',') _ = parser.advance();
-                parser.skipWhitespace();
-                const name = parser.readString() orelse return error.InvalidJson;
-                const cap = std.meta.stringToEnum(module_binding.ModuleCapability, name) orelse continue;
-                seen[@intFromEnum(cap)] = true;
-            }
-        } else if (std.mem.eql(u8, key, "capabilityHash")) {
-            const hex = parser.readString() orelse return error.InvalidJson;
-            if (hex.len == 64) {
-                _ = std.fmt.hexToBytes(&matrix.hash, hex) catch return error.InvalidJson;
-                have_cap_hash = true;
-            }
-        } else if (std.mem.eql(u8, key, "policyHash")) {
-            const hex = parser.readString() orelse return error.InvalidJson;
-            if (hex.len == 64) {
-                _ = std.fmt.hexToBytes(&contract.policy_hash, hex) catch return error.InvalidJson;
-            }
-        } else if (std.mem.eql(u8, key, "wasmPolicyHash")) {
-            const hex = parser.readString() orelse return error.InvalidJson;
-            if (hex.len == 64) {
-                _ = std.fmt.hexToBytes(&contract.wasm_policy_hash, hex) catch return error.InvalidJson;
-            }
-        } else if (std.mem.eql(u8, key, "artifactSha256")) {
-            const hex = parser.readString() orelse return error.InvalidJson;
-            if (hex.len == 64) {
-                _ = std.fmt.hexToBytes(&contract.artifact_sha256, hex) catch return error.InvalidJson;
-            }
-        } else {
-            parser.skipValue();
-        }
-    }
-
-    for (std.enums.values(module_binding.ModuleCapability)) |c| {
-        if (seen[@intFromEnum(c)]) {
-            matrix.items[matrix.len] = c;
-            matrix.len += 1;
-        }
-    }
-    if (!have_cap_hash or std.mem.allEqual(u8, &matrix.hash, 0)) {
-        // An absent hash and an all-zero hash both mean "not stamped". The
-        // runtime's hand-written reader used the same rule; keeping it here
-        // stops a zero-hash contract from failing verifyCapabilityMatrix
-        // against a live matrix that hashes to a real value.
-        matrix.hash = module_binding.capabilityHash(matrix.slice());
-    }
-    if (have_capabilities) contract.capabilities = matrix;
-}
-
-fn parseBehaviors(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
-    parser.skipWhitespace();
-    if (parser.readNull()) return;
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var path = BehaviorPath{
-            .route_method = &.{},
-            .route_pattern = &.{},
-            .conditions = .empty,
-            .io_sequence = .empty,
-            .response_status = 0,
-            .io_depth = 0,
-            .is_failure_path = false,
-        };
-        errdefer path.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "method")) {
-                path.route_method = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "pattern")) {
-                path.route_pattern = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "status")) {
-                // Range-checked: a status > 65535 must not panic the @intCast.
-                path.response_status = parser.readU16() orelse 0;
-            } else if (std.mem.eql(u8, key, "ioDepth")) {
-                path.io_depth = parser.readU32() orelse 0;
-            } else if (std.mem.eql(u8, key, "failurePath")) {
-                path.is_failure_path = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "conditions")) {
-                try parseBehaviorConditions(parser, allocator, &path.conditions);
-            } else if (std.mem.eql(u8, key, "ioSequence")) {
-                try parseBehaviorIoSequence(parser, allocator, &path.io_sequence);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try contract.behaviors.append(allocator, path);
-    }
-}
-
-fn parseBehaviorConditions(parser: *JsonParser, allocator: std.mem.Allocator, conditions: *std.ArrayList(PathCondition)) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var cond = PathCondition{ .kind = .io_ok };
-        errdefer cond.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "kind")) {
-                const kind_str = parser.readString() orelse return error.InvalidJson;
-                cond.kind = std.meta.stringToEnum(PathCondition.Kind, kind_str) orelse .io_ok;
-            } else if (std.mem.eql(u8, key, "module")) {
-                cond.module = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "func")) {
-                cond.func = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "value")) {
-                cond.value = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try conditions.append(allocator, cond);
-    }
-}
-
-fn parseBehaviorIoSequence(parser: *JsonParser, allocator: std.mem.Allocator, io_seq: *std.ArrayList(PathIoCall)) !void {
-    parser.skipWhitespace();
-    if (!parser.consume('[')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-
-        if (!parser.consume('{')) return error.InvalidJson;
-
-        var io_call = PathIoCall{ .module = &.{}, .func = &.{} };
-        errdefer io_call.deinit(allocator);
-
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "module")) {
-                io_call.module = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "func")) {
-                io_call.func = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-            } else if (std.mem.eql(u8, key, "args")) {
-                // Optional arg signature for canonicalization. Older contracts
-                // without this key leave arg_signature null.
-                parser.skipWhitespace();
-                if (parser.readNull()) {
-                    io_call.arg_signature = null;
-                } else {
-                    io_call.arg_signature = try allocator.dupe(u8, parser.readString() orelse return error.InvalidJson);
-                }
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try io_seq.append(allocator, io_call);
-    }
-}
-
-fn parseWebSocketSection(parser: *JsonParser) !contract_types.WebSocketInfo {
-    parser.skipWhitespace();
-    var info = contract_types.WebSocketInfo{};
-    if (parser.readNull()) return info;
-    if (!parser.consume('{')) return error.InvalidJson;
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "onOpen")) {
-            info.on_open = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "onMessage")) {
-            info.on_message = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "onClose")) {
-            info.on_close = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "onError")) {
-            info.on_error = parser.readBool() orelse false;
-        } else {
-            parser.skipValue();
-        }
-    }
-
-    return info;
-}
-
-fn parseFaultCoverage(parser: *JsonParser) !?FaultCoverageInfo {
-    parser.skipWhitespace();
-    if (parser.readNull()) return null;
-
-    if (!parser.consume('{')) return error.InvalidJson;
-    var info = FaultCoverageInfo{
-        .total_failable = 0,
-        .covered = 0,
-        .warnings = 0,
-    };
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "totalFailable")) {
-            info.total_failable = parser.readU32() orelse 0;
-        } else if (std.mem.eql(u8, key, "covered")) {
-            info.covered = parser.readU32() orelse 0;
-        } else if (std.mem.eql(u8, key, "warnings")) {
-            info.warnings = parser.readU32() orelse 0;
-        } else {
-            parser.skipValue();
-        }
-    }
-
-    return info;
-}
-
-fn parseIntent(parser: *JsonParser, allocator: std.mem.Allocator) !IntentInfo {
-    if (!parser.consume('{')) return error.InvalidJson;
-    var info = IntentInfo{};
-    errdefer info.deinit(allocator);
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "dynamic")) {
-            info.dynamic = parser.readBool() orelse false;
-        } else if (std.mem.eql(u8, key, "assertions")) {
-            try parseIntentAssertions(parser, allocator, &info);
-        } else {
-            parser.skipValue();
-        }
-    }
-    return info;
-}
-
-fn parseIntentAssertions(parser: *JsonParser, allocator: std.mem.Allocator, info: *IntentInfo) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        var assertion = IntentAssertion{
-            .name = try allocator.dupe(u8, ""),
-            .method = try allocator.dupe(u8, ""),
-            .path = try allocator.dupe(u8, ""),
-        };
-        errdefer assertion.deinit(allocator);
-
-        if (!parser.consume('{')) return error.InvalidJson;
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "name")) {
-                allocator.free(assertion.name);
-                assertion.name = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "method")) {
-                allocator.free(assertion.method);
-                assertion.method = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "path")) {
-                allocator.free(assertion.path);
-                assertion.path = try allocator.dupe(u8, parser.readString() orelse "");
-            } else if (std.mem.eql(u8, key, "requestBodyJson")) {
-                parser.skipWhitespace();
-                if (parser.readNull()) {
-                    assertion.request_body_json = null;
-                } else {
-                    assertion.request_body_json = try trace.unescapeJson(allocator, parser.readString() orelse "");
-                }
-            } else if (std.mem.eql(u8, key, "expectedStatus")) {
-                parser.skipWhitespace();
-                if (parser.readNull()) {
-                    assertion.expected_status = null;
-                } else {
-                    assertion.expected_status = parser.readU16() orelse null;
-                }
-            } else if (std.mem.eql(u8, key, "expectedBodyJson")) {
-                parser.skipWhitespace();
-                if (parser.readNull()) {
-                    assertion.expected_body_json = null;
-                } else {
-                    assertion.expected_body_json = try trace.unescapeJson(allocator, parser.readString() orelse "");
-                }
-            } else if (std.mem.eql(u8, key, "expectedHeaders")) {
-                try parseIntentHeaders(parser, allocator, &assertion);
-            } else if (std.mem.eql(u8, key, "sourceLine")) {
-                assertion.source_line = parser.readU32() orelse 0;
-            } else if (std.mem.eql(u8, key, "sourceColumn")) {
-                assertion.source_column = parser.readU32() orelse 0;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        try info.assertions.append(allocator, assertion);
-    }
-}
-
-fn parseIntentHeaders(parser: *JsonParser, allocator: std.mem.Allocator, assertion: *IntentAssertion) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        if (!parser.consume('{')) return error.InvalidJson;
-        var name_buf: []const u8 = "";
-        var value_buf: []const u8 = "";
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-            if (std.mem.eql(u8, key, "name")) {
-                name_buf = parser.readString() orelse "";
-            } else if (std.mem.eql(u8, key, "value")) {
-                value_buf = parser.readString() orelse "";
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        var header = IntentExpectedHeader{
-            .name = try allocator.dupe(u8, name_buf),
-            .value = try allocator.dupe(u8, value_buf),
-        };
-        errdefer header.deinit(allocator);
-        try assertion.expected_headers.append(allocator, header);
-    }
-}
-
-fn parseSagas(parser: *JsonParser, allocator: std.mem.Allocator, contract: *HandlerContract) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        var info = SagaCallInfo{};
-        errdefer info.deinit(allocator);
-
-        if (!parser.consume('{')) return error.InvalidJson;
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-
-            if (std.mem.eql(u8, key, "dynamic")) {
-                info.dynamic = parser.readBool() orelse false;
-            } else if (std.mem.eql(u8, key, "steps")) {
-                try parseSagaSteps(parser, allocator, &info);
-            } else if (std.mem.eql(u8, key, "sourceLine")) {
-                info.source_line = parser.readU32() orelse 0;
-            } else if (std.mem.eql(u8, key, "sourceColumn")) {
-                info.source_column = parser.readU32() orelse 0;
-            } else {
-                // "compensationProven" is derived (SagaCallInfo.compensationProven())
-                // and any other unknown key skips here.
-                parser.skipValue();
-            }
-        }
-
-        try contract.sagas.append(allocator, info);
-    }
-}
-
-fn parseSagaSteps(parser: *JsonParser, allocator: std.mem.Allocator, info: *SagaCallInfo) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        var name_buf: []const u8 = "";
-        var has_compensate = false;
-
-        if (!parser.consume('{')) return error.InvalidJson;
-        while (true) {
-            parser.skipWhitespace();
-            if (parser.peek() == '}') {
-                _ = parser.advance();
-                break;
-            }
-            if (parser.peek() == ',') _ = parser.advance();
-            parser.skipWhitespace();
-            const key = parser.readString() orelse return error.InvalidJson;
-            parser.skipWhitespace();
-            if (!parser.consume(':')) return error.InvalidJson;
-            if (std.mem.eql(u8, key, "name")) {
-                name_buf = parser.readString() orelse "";
-            } else if (std.mem.eql(u8, key, "hasCompensate")) {
-                has_compensate = parser.readBool() orelse false;
-            } else {
-                parser.skipValue();
-            }
-        }
-
-        var step = SagaStep{
-            .name = try allocator.dupe(u8, name_buf),
-            .has_compensate = has_compensate,
-        };
-        errdefer step.deinit(allocator);
-        try info.steps.append(allocator, step);
-    }
-}
-
-fn parseRateLimiting(parser: *JsonParser) !RateLimitInfo {
-    if (!parser.consume('{')) return error.InvalidJson;
-    var info = RateLimitInfo{ .namespace = "", .dynamic = true };
-
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == '}') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const key = parser.readString() orelse return error.InvalidJson;
-        parser.skipWhitespace();
-        if (!parser.consume(':')) return error.InvalidJson;
-
-        if (std.mem.eql(u8, key, "namespace")) {
-            info.namespace = parser.readString() orelse "";
-        } else if (std.mem.eql(u8, key, "dynamic")) {
-            info.dynamic = parser.readBool() orelse true;
-        } else {
-            parser.skipValue();
-        }
-    }
-    return info;
-}
-
-/// Map parsed route_type strings to static literals so they outlive the JSON source.
-fn toStaticRouteType(s: []const u8) []const u8 {
-    if (std.mem.eql(u8, s, "exact")) return "exact";
-    if (std.mem.eql(u8, s, "prefix")) return "prefix";
-    return "unknown";
-}
-
-fn toStaticField(s: []const u8) []const u8 {
-    if (std.mem.eql(u8, s, "path")) return "path";
-    if (std.mem.eql(u8, s, "url")) return "url";
-    return "path";
-}
-
-fn toStaticContentType(s: []const u8) []const u8 {
-    if (std.mem.eql(u8, s, "application/json")) return "application/json";
-    if (std.mem.eql(u8, s, "text/plain; charset=utf-8")) return "text/plain; charset=utf-8";
-    if (std.mem.eql(u8, s, "text/html; charset=utf-8")) return "text/html; charset=utf-8";
-    return "application/json";
-}
-
-fn parseStringArray(parser: *JsonParser, allocator: std.mem.Allocator, list: *std.ArrayList([]const u8)) !void {
-    if (!parser.consume('[')) return error.InvalidJson;
-    while (true) {
-        parser.skipWhitespace();
-        if (parser.peek() == ']') {
-            _ = parser.advance();
-            break;
-        }
-        if (parser.peek() == ',') _ = parser.advance();
-        parser.skipWhitespace();
-
-        const val = parser.readString() orelse return error.InvalidJson;
-        // Stage the dupe so a failing append does not leak it. Ownership
-        // transfers to the list only on a successful append; the caller's
-        // errdefer walks the list.
-        const duped = try allocator.dupe(u8, val);
-        errdefer allocator.free(duped);
-        try list.append(allocator, duped);
-    }
-}
-
-test "JsonParser.readU32 rejects an overflowing number instead of wrapping" {
-    var p = JsonParser.init("99999999999999999999"); // 20 digits, > maxInt(u32)
-    try std.testing.expect(p.readU32() == null);
-    // The whole number is consumed so the parser position stays consistent.
-    try std.testing.expectEqual(@as(usize, 20), p.pos);
-}
-
-test "JsonParser.readU16 rejects a number above the u16 range" {
-    var p = JsonParser.init("99999999");
-    try std.testing.expect(p.readU16() == null);
-}
-
-test "JsonParser.skipValue bounds recursion on deeply nested input" {
-    const allocator = std.testing.allocator;
-    // Far deeper than max_skip_depth: this would overflow the native stack via
-    // skipValue/skipArray mutual recursion without the depth cap.
-    const n = 5000;
-    const buf = try allocator.alloc(u8, n);
-    defer allocator.free(buf);
-    @memset(buf, '[');
-
-    var p = JsonParser.init(buf);
-    p.skipValue(); // must return, not crash
-    // On hitting the cap the skipper abandons the rest of the input.
-    try std.testing.expectEqual(buf.len, p.pos);
-}
-
 test "parseFromJson surfaces InvalidJson on adversarial deep nesting" {
     const allocator = std.testing.allocator;
     const n = 4000;
-    const buf = try allocator.alloc(u8, n);
-    defer allocator.free(buf);
-    @memset(buf, '[');
-
-    try std.testing.expectError(error.InvalidJson, parseFromJson(allocator, buf));
+    const buffer = try allocator.alloc(u8, n);
+    defer allocator.free(buffer);
+    @memset(buffer, '[');
+    try std.testing.expectError(error.InvalidJson, parseFromJson(allocator, buffer));
 }
 
 test "parseFromJson compatibility matrix preserves unknown fields and enum fallbacks" {
@@ -2988,10 +1432,8 @@ test "parseFromJson compatibility matrix preserves unknown fields and enum fallb
         \\  }]}
         \\}
     ;
-
     var contract = try parseFromJson(allocator, json);
     defer contract.deinit(allocator);
-
     try std.testing.expectEqual(@as(u32, 23), contract.version);
     try std.testing.expectEqualStrings("handler\\n.ts", contract.handler.path);
     try std.testing.expectEqual(@as(u32, 7), contract.handler.line);
@@ -3021,20 +1463,45 @@ test "parseFromJson compatibility matrix preserves legacy API response backfill"
         \\  }]}
         \\}
     ;
-
     var contract = try parseFromJson(allocator, json);
     defer contract.deinit(allocator);
-
-    try std.testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
     const route = contract.api.routes.items[0];
     try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
     try std.testing.expectEqual(@as(?u16, 204), route.responses.items[0].status);
-    try std.testing.expectEqualStrings("text/plain", route.responses.items[0].content_type.?);
-    try std.testing.expectEqualStrings("LegacyResponse", route.responses.items[0].schema.schemaRef().?);
+    try std.testing.expectEqualStrings("text/plain", route.responses.items[0].content_type orelse unreachable);
+    try std.testing.expectEqualStrings("LegacyResponse", route.responses.items[0].schema.schemaRef() orelse unreachable);
+}
+
+test "parseFromJson legacy request backfill deduplicates schema refs" {
+    const json =
+        \\{"api":{"routes":[{
+        \\  "method":"POST",
+        \\  "path":"/legacy",
+        \\  "requestSchemaRefs":["LegacyBody","LegacyBody"]
+        \\}]}}
+    ;
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+    const route = contract.api.routes.items[0];
+    try std.testing.expectEqual(@as(usize, 1), route.request_bodies.items.len);
+    try std.testing.expectEqualStrings("LegacyBody", route.request_bodies.items[0].schema.schemaRef() orelse unreachable);
+}
+
+test "parseFromJson preserves escaped extension map keys" {
+    const json =
+        \\{"extensions":{
+        \\  "a":{"egressDynamic":true},
+        \\  "\u0061":{"categories":{"\u0062":{"dynamic":true}}}
+        \\}}
+    ;
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), contract.extensions.count());
+    try std.testing.expect((contract.extensions.get("a") orelse unreachable).egress_dynamic);
+    try std.testing.expect((contract.extensions.get("\\u0061") orelse unreachable).categories.contains("\\u0062"));
 }
 
 test "parseFromJson compatibility matrix preserves duplicate trailing and overflow behavior" {
-    const allocator = std.testing.allocator;
     const cases = [_]struct {
         json: []const u8,
         version: u32,
@@ -3042,16 +1509,143 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
         .{ .json = "{\"version\":99999999999999999999}", .version = 17 },
     };
-
     for (cases) |case| {
-        var contract = try parseFromJson(allocator, case.json);
-        defer contract.deinit(allocator);
+        var contract = try parseFromJson(std.testing.allocator, case.json);
+        defer contract.deinit(std.testing.allocator);
         try std.testing.expectEqual(case.version, contract.version);
     }
 }
 
-test "parseFromJson malformed structure matrix fails closed" {
+test "parseFromJson keeps raw structural keys and appends repeated collections" {
+    const json =
+        \\{
+        \\  "versi\u006fn": 99,
+        \\  "modules": ["zttp:env"],
+        \\  "modules": ["zttp:cache"],
+        \\  "cache": {"dynamic": true},
+        \\  "cache": {"namespaces": ["sessions"]},
+        \\  "properties": {"noSecretLeakag\u0065": true}
+        \\}
+    ;
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 17), contract.version);
+    try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
+    try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
+    try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);
+    try std.testing.expect(contract.cache.dynamic);
+    try std.testing.expectEqualStrings("sessions", contract.cache.namespaces.items[0]);
+    try std.testing.expect(!(contract.properties orelse unreachable).no_secret_leakage);
+}
+
+test "parseFromJson accumulates repeated optional contract sections" {
+    const json =
+        \\{
+        \\  "sandbox": {"capabilities": ["clock"]},
+        \\  "sandbox": null,
+        \\  "sandbox": {"policyHash": "1111111111111111111111111111111111111111111111111111111111111111"},
+        \\  "durable": {"workflow": {"workflowId": "workflow.ts:handler"}},
+        \\  "durable": {"workflow": null},
+        \\  "durable": {"workflow": {"proofLevel": "complete"}},
+        \\  "behaviors": [{"method": "GET", "pattern": "/first"}],
+        \\  "behaviors": null,
+        \\  "behaviors": [{"method": "POST", "pattern": "/second"}]
+        \\}
+    ;
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+
+    const capabilities = contract.capabilities orelse unreachable;
+    try std.testing.expect(capabilities.has(.clock));
+    try std.testing.expectEqual(@as(u8, 0x11), contract.policy_hash[0]);
+    try std.testing.expectEqualStrings("workflow.ts:handler", contract.durable.workflow.workflow_id orelse unreachable);
+    try std.testing.expectEqual(contract_types.DurableWorkflowProofLevel.complete, contract.durable.workflow.proof_level);
+    try std.testing.expectEqual(@as(usize, 2), contract.behaviors.items.len);
+    try std.testing.expectEqualStrings("/first", contract.behaviors.items[0].route_pattern);
+    try std.testing.expectEqualStrings("/second", contract.behaviors.items[1].route_pattern);
+}
+
+test "parseFromJson keeps capability hashes scoped to one sandbox object" {
+    const supplied_hash = "1111111111111111111111111111111111111111111111111111111111111111";
+    const cases = [_][]const u8{
+        "{\"sandbox\":{\"capabilities\":[\"clock\"]},\"sandbox\":{\"capabilityHash\":\"" ++ supplied_hash ++ "\"}}",
+        "{\"sandbox\":{\"capabilityHash\":\"" ++ supplied_hash ++ "\"},\"sandbox\":{\"capabilities\":[\"clock\"]}}",
+        "{\"sandbox\":{\"capabilities\":[\"clock\"],\"capabilityHash\":\"" ++ supplied_hash ++ "\"},\"sandbox\":{\"capabilities\":[\"clock\"]}}",
+    };
+    const expected_hash = module_binding.capabilityHash(&.{.clock});
+    for (cases) |json| {
+        var contract = try parseFromJson(std.testing.allocator, json);
+        defer contract.deinit(std.testing.allocator);
+        const capabilities = contract.capabilities orelse unreachable;
+        try std.testing.expect(capabilities.has(.clock));
+        try std.testing.expectEqualSlices(u8, &expected_hash, &capabilities.hash);
+    }
+
+    var same_object = try parseFromJson(
+        std.testing.allocator,
+        "{\"sandbox\":{\"capabilities\":[\"clock\"],\"capabilityHash\":\"" ++ supplied_hash ++ "\"}}",
+    );
+    defer same_object.deinit(std.testing.allocator);
+    try std.testing.expect(std.mem.allEqual(u8, &(same_object.capabilities orelse unreachable).hash, 0x11));
+
+    var repeated_capabilities = try parseFromJson(
+        std.testing.allocator,
+        "{\"sandbox\":{\"capabilities\":[\"clock\"],\"capabilities\":[\"crypto\"]}}",
+    );
+    defer repeated_capabilities.deinit(std.testing.allocator);
+    const matrix = repeated_capabilities.capabilities orelse unreachable;
+    try std.testing.expect(matrix.has(.clock));
+    try std.testing.expect(matrix.has(.crypto));
+}
+
+test "parseFromJson rejects explicit null sandbox proof fields" {
+    const cases = [_][]const u8{
+        "{\"sandbox\":{\"capabilities\":null}}",
+        "{\"sandbox\":{\"capabilityHash\":null}}",
+        "{\"sandbox\":{\"policyHash\":null}}",
+        "{\"sandbox\":{\"wasmPolicyHash\":null}}",
+        "{\"sandbox\":{\"artifactSha256\":null}}",
+    };
+    for (cases) |json| {
+        try std.testing.expectError(error.InvalidJson, parseFromJson(std.testing.allocator, json));
+    }
+}
+
+test "parseFromJson rate limit metadata does not grant cache access" {
+    const json =
+        \\{"rateLimiting":{"namespace":"login-attempts","dynamic":false}}
+    ;
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), contract.cache.namespaces.items.len);
+    const rate_limit = contract.rate_limiting orelse unreachable;
+    try std.testing.expectEqualStrings("login-attempts", rate_limit.namespace);
+    try std.testing.expect(!rate_limit.dynamic);
+}
+
+test "parseFromJson owns projected strings raw JSON and extension keys" {
     const allocator = std.testing.allocator;
+    const source = try allocator.dupe(u8,
+        \\{
+        \\  "handler": {"path": "owned.ts"},
+        \\  "api": {"schemas": [{"name": "Thing", "schema": {"type":"string"}}]},
+        \\  "extensions": {"owned-extension": {"contractSection": "proof"}}
+        \\}
+    );
+    var contract = try parseFromJson(allocator, source);
+    @memset(source, 'x');
+    allocator.free(source);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqualStrings("owned.ts", contract.handler.path);
+    try std.testing.expectEqualStrings("{\"type\":\"string\"}", contract.api.schemas.items[0].schema_json);
+    const extension = contract.extensions.get("owned-extension") orelse unreachable;
+    try std.testing.expectEqualStrings("proof", extension.contract_section orelse unreachable);
+}
+
+test "parseFromJson malformed structure matrix fails closed" {
     const cases = [_][]const u8{
         "[]",
         "{\"modules\":[1]}",
@@ -3059,8 +1653,41 @@ test "parseFromJson malformed structure matrix fails closed" {
         "{\"api\":{\"routes\":[1]}}",
         "{\"handler\":{\"path\":\"unterminated",
     };
-
     for (cases) |json| {
-        try std.testing.expectError(error.InvalidJson, parseFromJson(allocator, json));
+        try std.testing.expectError(error.InvalidJson, parseFromJson(std.testing.allocator, json));
     }
+}
+
+fn parseAllocationFixture(
+    allocator: std.mem.Allocator,
+    json: []const u8,
+) !void {
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+}
+
+test "parseFromJson cleans every allocation failure" {
+    const json =
+        \\{
+        \\  "handler": {"path": "handler.ts"},
+        \\  "modules": ["zttp:env"],
+        \\  "env": {"literal": ["SECRET"], "dynamic": false},
+        \\  "extensions": {"x\\u002dy": {"categories": {"audit": {"literals": ["read"]}}}},
+        \\  "api": {"routes": [{
+        \\    "method": "POST",
+        \\    "path": "/items",
+        \\    "queryParams": [{"name": "page", "schema": {"type": "integer"}}],
+        \\    "requestSchemaRefs": ["ItemInput"],
+        \\    "responseStatus": 201,
+        \\    "responseContentType": "application/json",
+        \\    "responseSchemaRef": "Item"
+        \\  }]},
+        \\  "rateLimiting": {"namespace": "login-attempts", "dynamic": false}
+        \\}
+    ;
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        parseAllocationFixture,
+        .{json},
+    );
 }
