@@ -51,7 +51,7 @@ pub fn installState(
     runtime_ptr: *anyopaque,
     call_fn: ServiceCallFn,
 ) !void {
-    const token = mb.pushActiveModuleContext(service_module.binding.specifier, binding.required_capabilities);
+    const token = mb.pushActiveModuleContext(ctx, service_module.binding.specifier, binding.required_capabilities);
     defer mb.popActiveModuleContext(token);
 
     if (ctx.getModuleState(service_module.ServiceState, MODULE_STATE_SLOT)) |existing| {

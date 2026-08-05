@@ -830,7 +830,7 @@ fn fetchSyncResult(rt: *HandlerInstance, args: []const zq.JSValue) !zq.JSValue {
         return createFetchErrorResponse(rt, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
 
-    if (zq.modules.io.parallel_collector) |collector| {
+    if (rt.ctx.parallel_collection.active) |collector| {
         return collectFetchForParallel(rt, collector, args);
     }
 

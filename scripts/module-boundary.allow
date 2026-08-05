@@ -29,7 +29,6 @@ runtime handler_contract
 runtime handler_policy
 runtime heap
 runtime http
-runtime interpreter
 runtime json_utils
 runtime module_binding
 runtime module_manifest

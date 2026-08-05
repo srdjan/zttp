@@ -6,13 +6,13 @@ Read this end-to-end before adding a new virtual module.
 
 ## The capability enum
 
-`ModuleCapability` is declared in [`packages/zts/src/module_binding.zig`](../../packages/zts/src/module_binding.zig). Eleven variants exist today:
+`ModuleCapability` is declared in [`packages/zts/src/module_authorization.zig`](../../packages/zts/src/module_authorization.zig) and re-exported through `module_binding`. Eleven variants exist today:
 
 | Capability | Gates |
 |---|---|
 | `env` | Reading process environment variables (used by sandbox policy checks, not by the module's own config). |
 | `clock` | Real wall-clock and monotonic time (`std.time.timestamp`, `std.time.milliTimestamp`, monotonic counters). |
-| `random` | OS-seeded cryptographically weak randomness (UUID generation, nanoid, jitter). |
+| `random` | Hosted OS-seeded cryptographically secure randomness (UUID generation, nanoid, jitter). |
 | `crypto` | Cryptographic primitives (HMAC, hash functions, constant-time comparison, JWT sign/verify). |
 | `stderr` | Writing to the process stderr stream for diagnostic output. |
 | `runtime_callback` | Invoking the host runtime back into JS (scope lifecycle hooks, durable oplog replay, I/O dispatch, service routing). |
@@ -36,20 +36,22 @@ Every module declares a `ModuleBinding` with three relevant fields:
 
 Two cooperating helpers in `module_binding.zig` turn the declaration into an enforcement contract:
 
-1. **`wrapNativeFnWithCapabilities(user_fn, specifier, required_capabilities)`** is a comptime wrapper that the resolver ([`packages/zts/src/modules/internal/resolver.zig`](../../packages/zts/src/modules/internal/resolver.zig)) applies automatically to every exported function of a module whose `required_capabilities` list is non-empty. The wrapper pushes an `ActiveModuleContext` onto a thread-local slot before calling the user function and pops it on exit. Modules with an empty capability list skip the wrapper entirely at compile time, so there is zero runtime overhead for capability-free modules (`zttp:text`, `zttp:compose`, etc.).
+1. **`wrapNativeFnWithCapabilities(user_fn, specifier, required_capabilities)`** is a comptime wrapper that the resolver ([`packages/zts/src/modules/internal/resolver.zig`](../../packages/zts/src/modules/internal/resolver.zig)) applies automatically to native exports whose module declares capabilities. The wrapper pushes an `ActiveModuleScope` onto the receiving `Context` before calling the user function and restores the previous scope on exit. Capability-free native exports skip the wrapper. SDK `ModuleFn` exports remain wrapped even with an empty capability list because module identity also governs state-slot access.
 
-2. **`requireCapability(handle, capability)`** is the call-site check. Inside a module implementation, any operation that touches the guarded resource calls `requireCapability(handle, .clock)` (or the read-only sibling `hasCapability`). The check inspects the thread-local `active_module_context` and returns `error.MissingModuleCapability` if the capability is not present. Because the wrapper is applied by the resolver, an implementation that calls a guarded helper without the declaration in its binding will panic in the build-time `test-capability-audit` pass before reaching runtime.
+2. **`requireCapability(handle, capability)`** is the call-site check. Inside a module implementation, any operation that touches the guarded resource calls `requireCapability(handle, .clock)` (or the read-only sibling `hasCapability`). The opaque handle resolves to the same `Context`, and the check reads that Context's active scope. It returns `error.MissingModuleCapability` when the capability is absent. Because the wrapper is applied by the resolver, an implementation that calls a guarded helper without the declaration in its binding will panic in the build-time `test-capability-audit` pass before reaching runtime.
 
-The thread-local state (`threadlocal var active_module_context` at `module_binding.zig:54`) is the exact reason capability enforcement composes correctly with the `HandlerPool`: each worker thread carries its own context stack, no locks needed, and nested module calls (A calls B) save and restore via the `ActiveModuleToken` returned from `pushActiveModuleContext`.
+Each `Context` owns its authorization scope. Nested calls save and restore the previous scope with the `ActiveModuleToken` returned from `pushActiveModuleContext`, while two contexts alternating on one worker thread remain isolated. If a panic skips wrapper cleanup, the runtime quarantines that Context and `Context.deinit` clears its scope before module-state destructors run.
 
 Modules that also need manual pushes (for example, when a helper runs before the wrapped entry point) import the binding helpers directly:
 
 ```zig
-const token = mb.pushActiveModuleContext(binding.specifier, binding.required_capabilities);
+const token = mb.pushActiveModuleContext(ctx, binding.specifier, binding.required_capabilities);
 defer mb.popActiveModuleContext(token);
 ```
 
-This pattern is visible in `id.zig`, `env.zig`, `sql.zig`, `service.zig`, `cache.zig`, `ratelimit.zig`, `auth.zig`, `io.zig`, and `scope.zig`.
+Production code uses this pattern for service-state installation before the wrapped entry point. Most module calls rely on the resolver-installed wrapper.
+
+The extension SDK and runtime bridge are revision-locked. Native extensions must rebuild against the `zttp-sdk` revision that matches their target runtime. Handle-bound crypto operations use distinct symbol names, so an extension that references either changed operation fails at link time instead of calling through an incompatible native ABI.
 
 ## Module inventory
 
@@ -116,7 +118,7 @@ Follow these steps, in order:
 
 1. **Declare the `ModuleBinding`** in your new `modules/foo.zig` with `specifier`, `effect` (`.read`, `.write`, or `.none`), and `required_capabilities`. Capability list must be exact - list nothing you do not call, and list everything you do call.
 2. **Wire the exports** into `modules/root.zig` so the resolver picks them up.
-3. **Call guarded helpers only through `module_binding` wrappers.** If you need a direct call inside a helper function, push and pop the active context manually (see the patterns referenced above).
+3. **Call guarded helpers only through `module_binding` wrappers.** If you need a direct call inside a helper function, push and pop the active scope on its Context manually (see the pattern above).
 4. **Run the audits**: `zig build test-capability-audit test-module-governance` must pass.
 5. **Run the full test matrix**: `zig build test test-zts test-zruntime`.
 6. **Add a fixture** under `tests/validate/` and, if the module has a handler-visible surface, an example under `examples/` with a `.test.jsonl` wired into `scripts/test-examples.sh`.
@@ -126,7 +128,8 @@ If the module needs a capability not yet in the enum, you are extending the gove
 
 ## Cross references
 
-- [`packages/zts/src/module_binding.zig`](../../packages/zts/src/module_binding.zig) - enum, wrappers, thread-local context, `requireCapability`.
+- [`packages/zts/src/module_authorization.zig`](../../packages/zts/src/module_authorization.zig) - cycle-neutral capability and active-scope vocabulary.
+- [`packages/zts/src/module_binding.zig`](../../packages/zts/src/module_binding.zig) - public re-exports for wrappers, Context-owned scope, and `requireCapability`.
 - [`packages/zts/src/modules/internal/resolver.zig`](../../packages/zts/src/modules/internal/resolver.zig) - where `wrapNativeFnWithCapabilities` is applied per exported function.
 - [`SECURITY.md`](../../SECURITY.md) - reporting and scope.
 - [`docs/verification.md`](../verification.md) - the handler-level verification pass that lives alongside capability enforcement.

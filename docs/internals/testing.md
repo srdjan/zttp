@@ -61,7 +61,8 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-proof-swallow`, `test-module-governance`, `test-runtime-purity`,
 `test-contract-golden`, `test-expert-golden`, `test-docs-drift`,
-`test-doc-links`.
+`test-doc-links`, `test-production-branch-metric`,
+`test-comptime-cli-matrix`, `test-generic-intersection-cli-matrix`.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh` and
@@ -76,11 +77,14 @@ import their measurement noise into the gate, so `bench-check` stays separate.
 
 ## What `zig build test` Excludes
 
-Two build steps:
+Three build steps:
 
 - **`test-zruntime`**, the `zruntime_tests.zig` root. See the next section.
+- **`test-module-scope-panic`**, a focused executable that proves authorization
+  isolation and teardown across the real non-local panic recovery mechanism.
 - **`test-panic-isolation`**, an end-to-end script that needs the installed
   `zttp` binary, so it depends on the install step rather than on a test root.
+  This step also depends on `test-module-scope-panic`.
 
 Everything driven by a shell script rather than a build step is also outside
 it: `smoke-v1`, `scripts/test-examples.sh`,
@@ -109,6 +113,23 @@ fold it in by importing it; it needs its own step either way.
 Both `scripts/verify.sh` and the CI test job run `zig build test -j1` on macOS
 and plain `zig build test` elsewhere. The serialization is for the same
 teardown instability that keeps the zruntime root standalone.
+
+## Source Coverage Is Unavailable
+
+The repository and CI use Zig 0.16.0. Its normal `zig test` path does not
+provide source line or branch coverage instrumentation. `zig test --help`
+exposes PC instrumentation only through `-ffuzz`, which measures fuzzing
+inputs rather than ordinary test execution. The local LLVM report tools cannot
+produce coverage without instrumented binaries and raw profiles, and the
+repository has no profile producer or coverage artifacts to feed them.
+
+Do not infer source coverage from test counts or from
+[`docs/coverage.md`](../coverage.md), which measures expert replay diagnostics.
+Until Zig supplies a stable producer for normal test binaries, a high-risk
+change to the contract decoder, compile-time evaluator, server lifecycle, or
+verifier must instead add an explicit behavior matrix and demonstrate that the
+matrix fails under a deliberate mutation of each changed decision family.
+Reassess this limitation when the pinned Zig toolchain changes.
 
 ## Running One Test
 

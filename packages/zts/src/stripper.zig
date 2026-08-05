@@ -3367,6 +3367,48 @@ test "comptime identifier without parens passes through" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const comptime = 5;") != null);
 }
 
+test "comptime strip matrix preserves delimiters literal bytes and source offsets" {
+    const cases = [_]struct {
+        source: []const u8,
+        expected_fragment: []const u8,
+    }{
+        .{
+            .source = "const value = comptime(1 + 2);",
+            .expected_fragment = "const value = 3",
+        },
+        .{
+            .source = "const value = comptime(\"right)paren\");",
+            .expected_fragment = "const value = \"right)paren\"",
+        },
+        .{
+            .source = "const value = comptime(Math.max(1, (2 + 3)));",
+            .expected_fragment = "const value = 5",
+        },
+        .{
+            .source = "const first = comptime(1);\nconst second = comptime(\"ok\");",
+            .expected_fragment = "const second = \"ok\"",
+        },
+    };
+
+    for (cases) |case| {
+        const result = try strip(std.testing.allocator, case.source, .{ .enable_comptime = true });
+        defer @constCast(&result).deinit();
+        try std.testing.expectEqual(case.source.len, result.code.len);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, "comptime") == null);
+        try std.testing.expect(std.mem.indexOf(u8, result.code, case.expected_fragment) != null);
+        for (case.source, 0..) |byte, index| {
+            if (byte == '\n') try std.testing.expectEqual(byte, result.code[index]);
+        }
+    }
+}
+
+test "comptime strip matrix exposes its current unregistered reject identity" {
+    try std.testing.expectError(
+        StripError.ComptimeEvaluationFailed,
+        strip(std.testing.allocator, "const nonce = comptime(Math.random());", .{ .enable_comptime = true }),
+    );
+}
+
 // ============================================================================
 // Type Annotation and TypeMap Tests
 // ============================================================================

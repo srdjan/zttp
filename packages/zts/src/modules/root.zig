@@ -5,8 +5,8 @@
 //! implementations with zero JS interpretation overhead.
 //!
 //! Most bindings live in `zttp-modules`. Files below are those
-//! that need zts-internal access (install shims, GC roots, runtime
-//! threadlocals) and stay on this side of the peer-package boundary.
+//! that need zts-internal access (install shims, GC roots, runtime state) and
+//! stay on this side of the peer-package boundary.
 
 pub const resolver = @import("internal/resolver.zig");
 pub const util = @import("internal/util.zig");

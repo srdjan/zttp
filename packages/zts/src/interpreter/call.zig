@@ -55,7 +55,7 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
         //
         // Sandbox invariant: every BuiltinId enumerated below must be a pure
         // function with zero required capabilities. Bypassing the wrapper
-        // skips the threadlocal active-module-context push that backs
+        // skips the Context-owned active-module-scope push that backs
         // requireActiveCapability, so any builtin that consults a capability
         // (clock, crypto, random, env, filesystem, network, stderr, etc.) must
         // stay on the .none branch which calls the wrapped native_data.func.

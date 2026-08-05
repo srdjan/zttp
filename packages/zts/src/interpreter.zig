@@ -34,8 +34,6 @@ pub const PolymorphicInlineCache = ic.PolymorphicInlineCache;
 pub const IC_CACHE_SIZE = ic.IC_CACHE_SIZE;
 const getPicMegaRecoveryWindow = ic.getPicMegaRecoveryWindow;
 
-pub threadlocal var current_interpreter: ?*Interpreter = null;
-
 /// Interpreter state
 const saved_state_mod = @import("interpreter/saved_state.zig");
 

@@ -4,6 +4,7 @@ const internal = @import("module_binding.zig");
 const object = @import("object.zig");
 const value = @import("value.zig");
 const context = @import("context.zig");
+const gc = @import("gc.zig");
 
 pub const ModuleBinding = internal.ModuleBinding;
 
@@ -202,7 +203,8 @@ fn wrapToNativeFn(
 ) object.NativeFn {
     return struct {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
-            const prev = internal.pushActiveModuleContext(specifier, required_capabilities);
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            const prev = internal.pushActiveModuleContext(ctx, specifier, required_capabilities);
             defer internal.popActiveModuleContext(prev);
 
             const sdk_args: []const sdk.JSValue = @ptrCast(args);
@@ -238,4 +240,42 @@ test "adaptModuleBinding preserves required capabilities" {
     try std.testing.expectEqual(@as(usize, 2), adapted.required_capabilities.len);
     try std.testing.expectEqual(internal.ModuleCapability.clock, adapted.required_capabilities[0]);
     try std.testing.expectEqual(internal.ModuleCapability.runtime_callback, adapted.required_capabilities[1]);
+}
+
+test "adapted SDK module invocation reads authorization from its Context" {
+    const Observed = struct {
+        var clock: bool = false;
+        var random: bool = false;
+    };
+    Observed.clock = false;
+    Observed.random = false;
+
+    const binding = sdk.ModuleBinding{
+        .specifier = "zttp-ext:authorization-test",
+        .name = "authorization-test",
+        .required_capabilities = &.{.clock},
+        .exports = &.{.{
+            .name = "observe",
+            .module_func = struct {
+                fn f(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                    Observed.clock = sdk.hasCapability(handle, .clock);
+                    Observed.random = sdk.hasCapability(handle, .random);
+                    return sdk.JSValue.undefined_val;
+                }
+            }.f,
+            .arg_count = 0,
+        }},
+    };
+    const adapted = comptime adaptModuleBinding(binding);
+
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    _ = try adapted.exports[0].func.?(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expect(Observed.clock);
+    try std.testing.expect(!Observed.random);
+    try std.testing.expect(ctx.active_module_scope == null);
 }

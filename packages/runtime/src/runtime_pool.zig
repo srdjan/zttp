@@ -790,8 +790,8 @@ pub const HandlerPool = struct {
 
     /// Run one handler invocation under panic recovery and the per-request
     /// deadline. MUST remain noinline and minimal: after the second setjmp return,
-    /// only `frame` (address-taken) and thread-local state are valid; `rt` must
-    /// not be touched on the panic path.
+    /// only `frame` (address-taken) remains valid; `rt` must not be touched on
+    /// the panic path.
     noinline fn callHandlerGuarded(
         self: *Self,
         rt: *HandlerInstance,
@@ -802,7 +802,6 @@ pub const HandlerPool = struct {
         var frame: panic_recovery.Frame = undefined;
         if (panic_recovery.setjmpFn(&frame.jb) != 0) {
             // Handler panicked. Defers in the skipped zruntime frames did NOT run.
-            handler_instance.clearThreadStateAfterPanic();
             std.log.err("handler panicked (isolated): {s}", .{frame.message()});
             return error.HandlerPanicked;
         }

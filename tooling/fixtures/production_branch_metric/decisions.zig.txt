@@ -1,0 +1,26 @@
+fn classify(value: ?u8, enabled: bool) !u8 {
+    if (enabled and value != null) {
+        return value.?;
+    } else {
+        return 0;
+    }
+}
+
+fn paths(items: []const u8, fallback: ?u8) !u8 {
+    for (items) |item| {
+        if (item == 1) return item;
+    }
+    const selected = fallback orelse 2;
+    return switch (selected) {
+        2, 3 => 4,
+        else => error.Unsupported,
+    };
+}
+
+test "excluded fixture paths" {
+    if (true) {
+        return;
+    } else {
+        return;
+    }
+}

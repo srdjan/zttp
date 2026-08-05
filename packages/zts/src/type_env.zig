@@ -992,17 +992,19 @@ pub const TypeEnv = struct {
                 // slice into the pool's shared members list, which a nested
                 // instantiation may reallocate (UAF / garbage TypeIndex).
                 const live = self.pool.getIntersectionMembers(idx);
-                var members: [16]TypeIndex = undefined;
-                const count = @min(live.len, 16);
-                @memcpy(members[0..count], live[0..count]);
-                var new_members: [16]TypeIndex = undefined;
+                const new_members = self.allocator.dupe(TypeIndex, live) catch {
+                    if (self.pool.failure == null) self.pool.failure = error.OutOfMemory;
+                    return null_type_idx;
+                };
+                defer self.allocator.free(new_members);
                 var changed = false;
-                for (members[0..count], 0..) |m, i| {
-                    new_members[i] = self.tryInstantiateGenericApp(m);
-                    if (new_members[i] != m) changed = true;
+                for (new_members) |*member| {
+                    const m = member.*;
+                    member.* = self.tryInstantiateGenericApp(m);
+                    if (member.* != m) changed = true;
                 }
                 if (!changed) return idx;
-                return self.pool.addIntersection(self.allocator, new_members[0..count]);
+                return self.pool.addIntersection(self.allocator, new_members);
             },
             .t_union => {
                 // Copy members before the loop (see t_intersection above).
@@ -1463,6 +1465,28 @@ fn packBindingNameKey(scope_id: u16, name_atom: u16) u32 {
 // Tests
 // ---------------------------------------------------------------------------
 
+fn installTestBoxGenericAlias(env: *TypeEnv) !void {
+    const allocator = env.allocator;
+    const pool = env.pool;
+
+    env.pushGenericScope();
+    _ = env.addGenericParam("T");
+    const value_name = pool.addName(allocator, "value");
+    const body = pool.addRecord(allocator, &.{.{
+        .name_start = value_name.start,
+        .name_len = value_name.len,
+        .type_idx = env.resolveType("T"),
+        .optional = false,
+    }});
+    env.popGenericScope();
+
+    try env.generic_aliases.put(allocator, env.internName("Box"), .{
+        .param_names = .{ env.internName("T"), undefined, undefined, undefined, undefined, undefined, undefined, undefined },
+        .param_count = 1,
+        .body = body,
+    });
+}
+
 test "TypeEnv basic type alias resolution" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
@@ -1780,22 +1804,7 @@ test "TypeEnv resolveType instantiates generic alias inline" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Manually register a generic alias: type Box<T> = { value: T }
-    env.pushGenericScope();
-    const t_param = env.addGenericParam("T");
-    _ = t_param;
-    const val_n = pool.addName(allocator, "value");
-    const body = pool.addRecord(allocator, &.{
-        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = env.resolveType("T"), .optional = false },
-    });
-    env.popGenericScope();
-
-    const owned = env.internName("Box");
-    env.generic_aliases.put(allocator, owned, .{
-        .param_names = .{ env.internName("T"), undefined, undefined, undefined, undefined, undefined, undefined, undefined },
-        .param_count = 1,
-        .body = body,
-    }) catch {};
+    try installTestBoxGenericAlias(&env);
 
     // resolveType("Box<number>") should instantiate to { value: number }
     const resolved = env.resolveType("Box<number>");
@@ -1813,22 +1822,7 @@ test "TypeEnv instantiates every member of a normalized union wider than scratch
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Manually register: type Box<T> = { value: T }.
-    env.pushGenericScope();
-    _ = env.addGenericParam("T");
-    const value_name = pool.addName(allocator, "value");
-    const body = pool.addRecord(allocator, &.{.{
-        .name_start = value_name.start,
-        .name_len = value_name.len,
-        .type_idx = env.resolveType("T"),
-        .optional = false,
-    }});
-    env.popGenericScope();
-    env.generic_aliases.put(allocator, env.internName("Box"), .{
-        .param_names = .{ env.internName("T"), undefined, undefined, undefined, undefined, undefined, undefined, undefined },
-        .param_count = 1,
-        .body = body,
-    }) catch unreachable;
+    try installTestBoxGenericAlias(&env);
 
     // The first Box forces the union to be rebuilt. The second Box and m33 are
     // beyond the former 32-member buffer, so this also covers late generic
@@ -1872,6 +1866,78 @@ test "TypeEnv instantiates every member of a normalized union wider than scratch
     try std.testing.expect(saw_last_literal);
     try std.testing.expect(saw_string_box);
     try std.testing.expect(saw_number_box);
+}
+
+test "TypeEnv preserves and instantiates all 17 intersection members" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    try installTestBoxGenericAlias(&env);
+
+    // Both generic applications must instantiate, and every literal obligation
+    // between them must remain in the intersection.
+    const resolved = env.resolveType(
+        \\Box<string> &
+        \\ "m01" & "m02" & "m03" & "m04" & "m05" &
+        \\ "m06" & "m07" & "m08" & "m09" & "m10" &
+        \\ "m11" & "m12" & "m13" & "m14" & "m15" &
+        \\ Box<number>
+    );
+
+    try pool.ensureHealthy();
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(resolved).?);
+    const members = pool.getIntersectionMembers(resolved);
+    try std.testing.expectEqual(@as(usize, 17), members.len);
+
+    var literal_count: usize = 0;
+    var saw_last_literal = false;
+    var saw_string_box = false;
+    var saw_number_box = false;
+    for (members) |member| {
+        switch (pool.getTag(member).?) {
+            .t_literal_string => {
+                literal_count += 1;
+                if (std.mem.eql(u8, pool.getLiteralStringValue(member).?, "m15")) {
+                    saw_last_literal = true;
+                }
+            },
+            .t_record => {
+                const fields = pool.getRecordFields(member);
+                try std.testing.expectEqual(@as(usize, 1), fields.len);
+                if (fields[0].type_idx == pool.idx_string) saw_string_box = true;
+                if (fields[0].type_idx == pool.idx_number) saw_number_box = true;
+            },
+            else => return error.UnexpectedIntersectionMember,
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 15), literal_count);
+    try std.testing.expect(saw_last_literal);
+    try std.testing.expect(saw_string_box);
+    try std.testing.expect(saw_number_box);
+}
+
+test "TypeEnv reports intersection snapshot allocation failure" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const intersection = type_pool_mod.parseTypeExpr(&pool, allocator, "string & number");
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(intersection).?);
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    env.allocator = failing.allocator();
+    const resolved = env.tryInstantiateGenericApp(intersection);
+    env.allocator = allocator;
+
+    try std.testing.expectEqual(null_type_idx, resolved);
+    try std.testing.expectError(error.OutOfMemory, pool.ensureHealthy());
 }
 
 test "TypeEnv intersection alias type AB = A & B" {

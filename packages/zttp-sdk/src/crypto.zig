@@ -8,12 +8,12 @@ const ModuleCapabilityError = binding.ModuleCapabilityError;
 pub const Sha256Digest = [32]u8;
 pub const HmacSha256Mac = [32]u8;
 
-extern fn zttpSdkSha256(data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool;
-extern fn zttpSdkHmacSha256(data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
+extern fn zttpSdkSha256WithHandle(handle: *ModuleHandle, data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool;
+extern fn zttpSdkHmacSha256WithHandle(handle: *ModuleHandle, data_ptr: [*]const u8, data_len: usize, key_ptr: [*]const u8, key_len: usize, out: [*]u8) bool;
 
 pub fn sha256(handle: *ModuleHandle, data: []const u8, out: *Sha256Digest) ModuleCapabilityError!void {
     try capability.requireCapability(handle, .crypto);
-    if (!zttpSdkSha256(data.ptr, data.len, out)) return error.MissingModuleCapability;
+    if (!zttpSdkSha256WithHandle(handle, data.ptr, data.len, out)) return error.MissingModuleCapability;
 }
 
 pub fn hmacSha256(
@@ -23,5 +23,5 @@ pub fn hmacSha256(
     out: *HmacSha256Mac,
 ) ModuleCapabilityError!void {
     try capability.requireCapability(handle, .crypto);
-    if (!zttpSdkHmacSha256(data.ptr, data.len, key.ptr, key.len, out)) return error.MissingModuleCapability;
+    if (!zttpSdkHmacSha256WithHandle(handle, data.ptr, data.len, key.ptr, key.len, out)) return error.MissingModuleCapability;
 }

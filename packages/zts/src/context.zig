@@ -1,6 +1,6 @@
 //! JavaScript execution context
 //!
-//! Thread-local context with stack, atoms, and global state.
+//! Explicit execution context with stack, atoms, and runtime-owned state.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -17,6 +17,8 @@ const builtins = @import("builtins/root.zig");
 const bytecode = @import("bytecode.zig");
 const handler_policy = @import("handler_policy.zig");
 const modules = @import("modules/root.zig");
+const module_authorization = @import("module_authorization.zig");
+const parallel_collection = @import("parallel_collection.zig");
 
 pub const cost_meter = @import("cost_meter.zig");
 
@@ -209,6 +211,12 @@ pub const Context = struct {
     /// Per-module persistent state (caches, registries).
     /// Indexed by module_slots.Slot ordinal. Null when module has no state.
     module_state: [MAX_MODULE_STATE_SLOTS]?ModuleStateEntry,
+    /// Authorization scope for the native module call executing in this
+    /// Context. Nested wrappers restore the previous borrowed scope.
+    active_module_scope: ?module_authorization.ActiveModuleScope,
+    /// Structured I/O collector installed by parallel/race while their
+    /// thunks execute. The Context owns the stack, not the worker thread.
+    parallel_collection: parallel_collection.State,
     /// Embedded capability policy for precompiled handlers.
     capability_policy: handler_policy.RuntimePolicy,
     /// Per-request virtual-module call counters, reset by the runtime after
@@ -251,9 +259,6 @@ pub const Context = struct {
         const hidden_class_pool = try object.HiddenClassPool.init(allocator);
         errdefer hidden_class_pool.deinit();
 
-        // Clear global JSON shape cache to avoid stale references from previous contexts
-        builtins.clearJsonShapeCache();
-
         // Create global object using pool-based class
         const global_obj = try object.JSObject.create(allocator, hidden_class_pool.getEmptyClass(), null, hidden_class_pool);
         errdefer global_obj.destroy(allocator);
@@ -294,6 +299,8 @@ pub const Context = struct {
             .small_int_cache = small_int_cache,
             .literal_shapes = .empty,
             .module_state = .{null} ** MAX_MODULE_STATE_SLOTS,
+            .active_module_scope = null,
+            .parallel_collection = .{},
             .capability_policy = .{},
             .cost_meter = .{},
             .sdk_file_allowlist = .{},
@@ -543,6 +550,12 @@ pub const Context = struct {
     }
 
     pub fn deinit(self: *Context) void {
+        // A panic may have skipped a native wrapper's restore defer. Clear the
+        // quarantined Context before module-state destructors run so teardown
+        // cannot inherit authority from the failed call.
+        self.active_module_scope = null;
+        self.parallel_collection.clear();
+
         // Clean up per-module state (caches, registries) before destroying objects
         for (&self.module_state) |*slot| {
             if (slot.*) |entry| {
@@ -894,6 +907,64 @@ pub const Context = struct {
         self.sp -= n;
     }
 };
+
+test "Context deinit clears module authorization before module state cleanup" {
+    const State = struct {
+        context: *Context,
+        scope_was_clear: bool = false,
+
+        fn deinit(ptr: *anyopaque, _: std.mem.Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.scope_was_clear = self.context.active_module_scope == null;
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+
+    const context = try Context.init(allocator, &gc_state, .{});
+    var state = State{ .context = context };
+    context.active_module_scope = .{
+        .specifier = "zttp:panic-quarantine",
+        .required_capabilities = &.{.random},
+    };
+    context.setModuleState(0, &state, State.deinit);
+
+    context.deinit();
+    try std.testing.expect(state.scope_was_clear);
+}
+
+test "Context deinit clears parallel collector before module state cleanup" {
+    const State = struct {
+        context: *Context,
+        collector_was_clear: bool = false,
+
+        fn deinit(ptr: *anyopaque, _: std.mem.Allocator) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.collector_was_clear = self.context.parallel_collection.active == null;
+        }
+    };
+
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+
+    const context = try Context.init(allocator, &gc_state, .{});
+    var descriptors: [1]parallel_collection.FetchDescriptor = undefined;
+    var collector = parallel_collection.ParallelCollector{
+        .descriptors = &descriptors,
+        .count = 0,
+        .allocator = allocator,
+        .capacity = 1,
+    };
+    var state = State{ .context = context };
+    context.parallel_collection.active = &collector;
+    context.setModuleState(0, &state, State.deinit);
+
+    context.deinit();
+    try std.testing.expect(state.collector_was_clear);
+}
 
 /// Re-export: the table itself lives in atom_table.zig, which the parser and
 /// the analyzers import directly so they do not pull in the runtime Context.

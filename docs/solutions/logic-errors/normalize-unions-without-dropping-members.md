@@ -1,14 +1,16 @@
 ---
 title: Normalize unions without dropping members
 date: 2026-07-16
+last_updated: 2026-08-05
 category: logic-errors
-module: ZigTS TypePool union construction and generic instantiation
+module: ZigTS TypePool union construction and TypeEnv generic instantiation
 problem_type: logic_error
 component: tooling
 symptoms:
   - A union-typed logical operand was falsely rejected by an equivalent flat-union annotation.
   - Nested and direct associative union constructions retained different member shapes.
   - A wide union caller could silently discard members beyond its fixed scratch buffer.
+  - A wide generic intersection could drop a trailing constraint and make zttp check accept an invalid value.
 root_cause: logic_error
 resolution_type: code_fix
 severity: high
@@ -21,6 +23,8 @@ tags:
   - assignability
   - bounded-buffer
   - generic-instantiation
+  - intersection
+  - soundness
 ---
 
 # Normalize unions without dropping members
@@ -28,7 +32,8 @@ tags:
 The mechanism this document records was replaced on 2026-08-04. The rule it
 states was not. Read the Problem, What Didn't Work, and Prevention sections as
 current; read the Solution section as the shipped fix of 2026-07-16, and see
-"What replaced the mechanism" for where the rule lives in the code today.
+"What replaced the mechanism" and "Intersection instantiation closed the
+remaining gap" for where the rule lives in the code today.
 
 ## Problem
 
@@ -63,6 +68,13 @@ drop every trailing member. The wide regression now verifies all 35 members,
 including a literal and a generic application beyond the old boundary
 (`packages/zts/src/type_env.zig:1808`).
 
+The same defect remained in the sibling intersection arm. A user-facing
+17-member parameter type began with `Box<string>` and ended with
+`{ required17: string }`. Instantiating the early generic rebuilt only the first
+16 members, so `zttp check` accepted a call that omitted `required17`. The
+rejecting fixture records that source shape at
+`packages/tools/tests/fixtures/generic-intersection/reject_member_17.ts:3`.
+
 ## What Didn't Work
 
 - Constructing a two-member union only in `inferBinaryType` was insufficient
@@ -78,6 +90,13 @@ including a literal and a generic application beyond the old boundary
   turn a rejection into an acceptance.
 - Copying only a fixed prefix in TypeEnv was not a safe fallback. Once any early
   generic changed, rebuilding from that prefix changed the represented type.
+- Broad generic-instantiation tests and the full repository gate did not prove
+  wide intersection soundness. The missing probe needed both a transformation
+  before the fixed boundary and a semantically required constraint after it
+  (session history).
+- A representation-only regression could prove that 17 members survived while
+  missing a later checker regression. The public contract also needs a valid
+  contrast, a rejecting exit status, and the exact stable diagnostic.
 
 ## Solution as shipped on 2026-07-16
 
@@ -110,7 +129,7 @@ member changes (`packages/zts/src/type_env.zig:1010`). Copying first also keeps
 the input stable if recursive instantiation grows the pool's shared member list.
 Allocation failure poisons a healthy pool with `OutOfMemory`, while preserving
 any earlier failure, rather than returning a healthy-looking partial type
-(`packages/zts/src/type_env.zig:1011`). This half of the fix is unchanged.
+(`packages/zts/src/type_env.zig:1011`).
 
 ## Why This Works
 
@@ -155,10 +174,13 @@ Three claims in the section above are therefore historical, not current:
   language limit, and a schema enum is routinely wider. Normalizing on the heap
   removed the buffer and with it the reason for a cap
   (`packages/zts/src/type_pool.zig:483`).
-- **The lossy raw fallback is gone**, because dedup can no longer overflow.
-  Nothing is dropped that was not a duplicate. The test that used to assert the
-  fallback now asserts the opposite and records the inversion in its own comment
-  (`packages/zts/src/type_pool.zig:2559`).
+- **The raw overflow fallback is gone**, because heap-backed structural dedup no
+  longer needs a fixed-capacity branch. The former fallback preserved every raw
+  leaf, including duplicates; the replacement's wide-dedup regression removes
+  duplicate occurrences without imposing a width ceiling
+  (`packages/zts/src/type_pool.zig:2559`). D1's separate `never` and strict
+  subsumption steps still remove members proven redundant by their own rules
+  (`packages/zts/src/type_pool.zig:471`).
 - **Exact index equality is no longer the dedup rule.** Two separately built
   `{ id: string }` records were two members of one union under index equality;
   the canonical key sees them as one.
@@ -170,19 +192,50 @@ guard's partition moved to the heap because bailing out past sixteen left
 exactly the wide enums `addUnion` was changed to represent unnarrowable
 (`packages/zts/src/type_checker.zig:2081`).
 
-The rule survives in code at the sibling constructor. `addIntersection` still
-keeps a 16-entry dedup buffer and still takes the lossless raw path past it,
-because a dropped target-intersection member is a dropped constraint and an
+The rule also survives in code at the sibling constructor. `addIntersection`
+still keeps a 16-entry dedup buffer and still takes the lossless raw path past
+it, because a dropped target-intersection member is a dropped constraint and an
 unsound accept in `isAssignableTo` (`packages/zts/src/type_pool.zig:556` and
-`packages/zts/src/type_pool.zig:564`). That is the surviving in-code instance of
-the polarity this document names.
+`packages/zts/src/type_pool.zig:564`). That is the surviving in-code instance
+of the polarity this document names.
 
-One place the audit did not reach: TypeEnv's `t_intersection` instantiation arm
-still copies at most sixteen members and rebuilds from that prefix
-(`packages/zts/src/type_env.zig:996`), which is the shape of the TypeEnv defect
-this document records, in the arm that was fixed only for unions. No test drives
-a wider intersection through instantiation, so whether that prefix is reachable
-is unmeasured rather than known safe.
+## Intersection instantiation closed the remaining gap
+
+The earlier audit correctly identified TypeEnv's `t_intersection` arm as an
+unmeasured fixed-prefix rebuild. A real `zttp check` fixture then confirmed the
+path was reachable and unsound: omitting the seventeenth required member exited
+successfully before the repair.
+
+The arm now duplicates the complete live member slice into allocator-owned
+storage before recursive instantiation (`packages/zts/src/type_env.zig:990`).
+That copy provides two invariants:
+
+- Every input constraint participates in the rebuild. If no member changes, the
+  original `TypeIndex` is preserved; otherwise `addIntersection` receives the
+  complete transformed slice (`packages/zts/src/type_env.zig:1000`).
+- Recursive instantiation cannot invalidate the loop input by growing the
+  TypePool's shared member storage. The temporary copy remains stable until it
+  is freed (`packages/zts/src/type_env.zig:991`).
+
+If the snapshot allocation fails, the method returns `null_type_idx` and marks
+a previously healthy pool with `OutOfMemory`, without overwriting an earlier
+failure (`packages/zts/src/type_env.zig:995`). It never returns a partial or
+healthy-looking intersection.
+
+The regression contract covers the failure at four boundaries:
+
+- The unit test instantiates both generic endpoints of a 17-member intersection
+  and asserts that all 15 literal constraints, including the last one, survive
+  (`packages/zts/src/type_env.zig:1871`).
+- A failing allocator isolates snapshot allocation and requires both
+  `null_type_idx` and an observable `OutOfMemory` pool failure
+  (`packages/zts/src/type_env.zig:1923`).
+- The real CLI matrix accepts the complete value and rejects the value missing
+  member 17 with exit 1 and an exact `ZTS203` JSON golden (`build.zig:708`). The
+  aggregate `test` step depends on that matrix (`build.zig:839`).
+- A mutation that restored the 16-member prefix made both the unit regression
+  and the rejecting CLI case fail. That proves the gates are sensitive to the
+  original truncation rather than merely exercising nearby code.
 
 ## Prevention
 
@@ -199,7 +252,8 @@ is unmeasured rather than known safe.
   (`packages/zts/src/type_pool.zig:2594`).
 - Audit downstream member-copy buffers whenever a shared constructor starts
   producing wider canonical nodes. The TypeEnv regression places required data
-  and a generic beyond the former boundary (`packages/zts/src/type_env.zig:1808`).
+  and generic applications across the former boundary
+  (`packages/zts/src/type_env.zig:1871`).
   Removing a cap at the constructor does not remove the caps its consumers were
   written against: the checker's narrowing partition
   (`packages/zts/src/type_checker.zig:4860`, with its sixteen-member control at
@@ -208,6 +262,13 @@ is unmeasured rather than known safe.
 - Keep the inference-level annotation regression alongside pool-level tests so
   representation bugs remain visible as user-facing checker failures
   (`packages/zts/src/type_checker.zig:4297`).
+- For wide transformations, place a member that forces rebuilding before the
+  former boundary and an independently required obligation after it. Pair the
+  rejecting fixture with a valid contrast so blanket rejection cannot satisfy
+  the gate (`packages/tools/tests/fixtures/generic-intersection/accept_all_17.ts:3`).
+- Snapshot pool-owned member slices before recursive work that may allocate into
+  the same pool, and test snapshot allocation failure separately. Cardinality
+  and storage lifetime are distinct correctness obligations.
 
 ## Related Issues
 

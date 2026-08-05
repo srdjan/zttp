@@ -152,12 +152,12 @@ pub export fn zttpSdkGetAllocator(_: *sdk.ModuleHandle) *const std.mem.Allocator
     return &test_allocator;
 }
 
-pub export fn zttpSdkSha256(data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool {
+pub export fn zttpSdkSha256WithHandle(_: *sdk.ModuleHandle, data_ptr: [*]const u8, data_len: usize, out: [*]u8) bool {
     std.crypto.hash.sha2.Sha256.hash(data_ptr[0..data_len], out[0..32], .{});
     return true;
 }
 
-pub export fn zttpSdkHmacSha256(_: [*]const u8, _: usize, _: [*]const u8, _: usize, out: [*]u8) bool {
+pub export fn zttpSdkHmacSha256WithHandle(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, _: [*]const u8, _: usize, out: [*]u8) bool {
     @memset(out[0..32], 0);
     return true;
 }

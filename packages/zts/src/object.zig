@@ -930,7 +930,22 @@ pub const HiddenClassIndex = enum(u32) {
 /// Pooled hidden class storage using MultiArrayList pattern
 /// All hidden classes share a single pool for memory efficiency and serialization
 pub const HiddenClassPool = struct {
+    pub const JSON_SHAPE_MAX_PROPS = 16;
+    const JSON_SHAPE_CACHE_SIZE = 64;
+
+    const JSONShapeCacheEntry = struct {
+        hash: u64 = 0,
+        prop_count: u8 = 0,
+        atoms: [JSON_SHAPE_MAX_PROPS]Atom = undefined,
+        class_idx: HiddenClassIndex = .none,
+        valid: bool = false,
+    };
+
     allocator: std.mem.Allocator,
+
+    /// JSON object shapes contain pool-local HiddenClassIndex values, so the
+    /// cache must have the same owner and lifetime as the pool.
+    json_shape_cache: [JSON_SHAPE_CACHE_SIZE]JSONShapeCacheEntry,
 
     /// Core data stored as structure-of-arrays for cache efficiency
     /// Each array index corresponds to a HiddenClassIndex
@@ -965,6 +980,7 @@ pub const HiddenClassPool = struct {
 
         pool.* = .{
             .allocator = allocator,
+            .json_shape_cache = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE,
             .property_counts = .empty,
             .properties_starts = .empty,
             .prototype_indices = .empty,
@@ -1004,6 +1020,42 @@ pub const HiddenClassPool = struct {
         self.sorted_starts.deinit(self.allocator);
         self.transition_map.deinit(self.allocator);
         self.allocator.destroy(self);
+    }
+
+    fn hashJsonShape(atoms: []const Atom) u64 {
+        var hash: u64 = 0xcbf29ce484222325;
+        for (atoms) |atom| {
+            hash ^= @intFromEnum(atom);
+            hash *%= 0x100000001b3;
+        }
+        return hash;
+    }
+
+    pub fn lookupJsonShape(self: *const HiddenClassPool, atoms: []const Atom) ?HiddenClassIndex {
+        if (atoms.len == 0 or atoms.len > JSON_SHAPE_MAX_PROPS) return null;
+
+        const hash = hashJsonShape(atoms);
+        const idx: usize = @intCast(hash % JSON_SHAPE_CACHE_SIZE);
+        const entry = &self.json_shape_cache[idx];
+        if (!entry.valid or entry.hash != hash or entry.prop_count != atoms.len) return null;
+
+        for (atoms, 0..) |atom, i| {
+            if (entry.atoms[i] != atom) return null;
+        }
+        return entry.class_idx;
+    }
+
+    pub fn cacheJsonShape(self: *HiddenClassPool, atoms: []const Atom, class_idx: HiddenClassIndex) void {
+        if (atoms.len == 0 or atoms.len > JSON_SHAPE_MAX_PROPS) return;
+
+        const hash = hashJsonShape(atoms);
+        const idx: usize = @intCast(hash % JSON_SHAPE_CACHE_SIZE);
+        const entry = &self.json_shape_cache[idx];
+        entry.hash = hash;
+        entry.prop_count = @intCast(atoms.len);
+        for (atoms, 0..) |atom, i| entry.atoms[i] = atom;
+        entry.class_idx = class_idx;
+        entry.valid = true;
     }
 
     /// Allocate a new hidden class with given property count

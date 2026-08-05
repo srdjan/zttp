@@ -188,10 +188,10 @@ fn isFetchExport(comptime binding: mb.ModuleBinding, comptime func_binding: mb.F
 }
 
 fn wrappedExportFn(comptime binding: mb.ModuleBinding, comptime func_binding: mb.FunctionBinding) object.NativeFn {
-    // Both branches install the active-module context so `sdk.requireCapability`
+    // Both branches install the active module scope so `sdk.requireCapability`
     // sees the binding's declared `required_capabilities`. Skipping the wrap on
     // the `module_func` path would silently leave every sandbox SDK call with
-    // an empty active context — that was the gap from Wave 1B/2D P0 #3 in the
+    // an empty active scope. That was the gap from Wave 1B/2D P0 #3 in the
     // 2026-05-23 review.
     if (func_binding.func) |native_fn| {
         if (binding.required_capabilities.len == 0) return native_fn;
@@ -233,16 +233,16 @@ test "validateImports reports first missing export" {
 }
 
 // ---------------------------------------------------------------------------
-// wrappedExportFn — capability propagation on the module_func path.
+// wrappedExportFn - capability propagation on the module_func path.
 //
 // Wave 1B/2D P0 #3 (2026-05-23 review) flagged that this branch previously
 // short-circuited through `getNativeFn()`, which wraps with empty
 // `required_capabilities`. Any sandbox module declaring caps would then run
-// with an empty active-module context, so every `sdk.requireCapability` call
-// — including the ones inside `sdk.hmacSha256`, `sdk.fillRandom`, and the
-// JWT verifier — would refuse the operation. The test below pins the fixed
+// with an empty active module scope, so every `sdk.requireCapability` call,
+// including the ones inside `sdk.hmacSha256`, `sdk.fillRandom`, and the
+// JWT verifier, would refuse the operation. The test below pins the fixed
 // shape: a `module_func` binding with `.crypto` declared in its parent
-// `ModuleBinding` must observe `.crypto` in the active context.
+// `ModuleBinding` must observe `.crypto` in the active scope.
 // ---------------------------------------------------------------------------
 
 const value = @import("../../value.zig");
@@ -255,12 +255,11 @@ test "wrappedExportFn propagates required_capabilities through module_func" {
     defer ctx.deinit();
 
     const probe = struct {
-        fn run(_: *mb.ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
-            // Asserts execute against the active context installed by the
+        fn run(handle: *mb.ModuleHandle, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
+            // Asserts execute against the active scope installed by the
             // resolver's wrapper, not the test's outer scope.
-            const fake_handle: *mb.ModuleHandle = @ptrFromInt(0x1);
-            if (!mb.hasCapability(fake_handle, .crypto)) return error.MissingCrypto;
-            if (mb.hasCapability(fake_handle, .clock)) return error.UnexpectedClock;
+            if (!mb.hasCapability(handle, .crypto)) return error.MissingCrypto;
+            if (mb.hasCapability(handle, .clock)) return error.UnexpectedClock;
             return value.JSValue.true_val;
         }
     }.run;

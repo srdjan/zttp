@@ -14,13 +14,13 @@ severity: medium
 tags: [zts, bytecode-cache, ownership, teardown, allocator-failure, memory-leak]
 ---
 
-> **Path note.** `packages/runtime/src/zruntime.zig` was split after this record was written: production `HandlerInstance` code moved to `packages/runtime/src/handler_instance.zig`, and the test root was renamed to `packages/runtime/src/zruntime_tests.zig`. Line numbers throughout were refreshed on 2026-08-03; `context.zig` and `object.zig` had also moved substantially (JIT removal, generator removal, HTTP-cache and AtomTable extraction), so the original citations had come to land on unrelated code. Every mechanism described below was re-verified against the current tree at that time and is unchanged.
+> **Path note.** `packages/runtime/src/zruntime.zig` was split after this record was written: production `HandlerInstance` code moved to `packages/runtime/src/handler_instance.zig`, and the test root was renamed to `packages/runtime/src/zruntime_tests.zig`. Line numbers throughout were refreshed on 2026-08-03; `context.zig` and `object.zig` had also moved substantially (JIT removal, generator removal, HTTP-cache and AtomTable extraction), so the original citations had come to land on unrelated code. The `context.zig` anchors were refreshed again on 2026-08-05 after Context-owned module authorization was inserted. Every mechanism described below was re-verified against the current tree and is unchanged.
 
 # Cached Bytecode Teardown Leaked Roots on Allocator Failure
 
 ## Problem
 
-Cached bytecode is deserialized into a heap-owned function tree, verified, and transferred into `Context` before execution (`packages/runtime/src/handler_instance.zig:1208`, `packages/runtime/src/handler_instance.zig:1228`, `packages/runtime/src/handler_instance.zig:1240`). Nested bytecode nodes can then also be reachable through runtime function objects: the context separately tracks function objects and deserialized roots, and its ownership comments identify cached function objects as borrowers (`packages/zts/src/context.zig:193`, `packages/zts/src/context.zig:200`).
+Cached bytecode is deserialized into a heap-owned function tree, verified, and transferred into `Context` before execution (`packages/runtime/src/handler_instance.zig:1208`, `packages/runtime/src/handler_instance.zig:1228`, `packages/runtime/src/handler_instance.zig:1240`). Nested bytecode nodes can then also be reachable through runtime function objects: the context separately tracks function objects and deserialized roots, and its ownership comments identify cached function objects as borrowers (`packages/zts/src/context.zig:193`, `packages/zts/src/context.zig:194-201`).
 
 The old teardown shape created an initially empty `FunctionBytecodeSeen` map during `Context.deinit` and populated it while destroying objects and roots. That made cleanup depend on a fresh allocation. `destroyFunctionBytecode` still shows the critical failure behavior: its `getOrPut` catches allocation failure and returns before freeing the function tree (`packages/zts/src/object.zig:1480`). Under allocator pressure, a cached deserialized root could therefore be skipped and leaked.
 
@@ -40,24 +40,24 @@ An earlier broad review classified allocator-related `catch` forms as intentiona
 
 ## Solution
 
-`Context` now stores both the owned cached roots and a registry containing every bytecode node reachable from those roots (`packages/zts/src/context.zig:200`). `takeBytecodeRoot` treats ownership transfer as a small transaction:
+`Context` now stores both the owned cached roots and a registry containing every bytecode node reachable from those roots (`packages/zts/src/context.zig:194-201`). `takeBytecodeRoot` treats ownership transfer as a small transaction:
 
-1. Ignore a root already owned by this context (`packages/zts/src/context.zig:387`).
-2. Recursively count unregistered nested bytecode nodes through bytecode constants (`packages/zts/src/context.zig:398`).
-3. Reserve capacity in both the root list and registry before changing ownership state (`packages/zts/src/context.zig:392`).
-4. Register the complete tree with `putAssumeCapacity`, then append the root with `appendAssumeCapacity` (`packages/zts/src/context.zig:416`, `packages/zts/src/context.zig:394`).
+1. Ignore a root already owned by this context (`packages/zts/src/context.zig:393`).
+2. Recursively count unregistered nested bytecode nodes through bytecode constants (`packages/zts/src/context.zig:395-398`, `packages/zts/src/context.zig:406-416`).
+3. Reserve capacity in both the root list and registry before changing ownership state (`packages/zts/src/context.zig:399-400`).
+4. Register the complete tree with `putAssumeCapacity`, then append the root with `appendAssumeCapacity` (`packages/zts/src/context.zig:402-403`, `packages/zts/src/context.zig:419-427`).
 
 The runtime calls this transfer after cached bytecode verification and before executing the deserialized function (`packages/runtime/src/handler_instance.zig:1228`, `packages/runtime/src/handler_instance.zig:1240`). If reservation fails, `bytecode_transferred` remains false and the deserialization result retains cleanup responsibility (`packages/runtime/src/handler_instance.zig:1214`).
 
-During teardown, tracked function-object cleanup receives the pre-populated registry. Cached wrappers find their bytecode already present and therefore borrow it, while source-compiled function objects retain the existing tracked destruction behavior (`packages/zts/src/context.zig:554`). The context then destroys each cached root without a seen-set and deinitializes the ownership metadata (`packages/zts/src/context.zig:567`).
+During teardown, tracked function-object cleanup receives the pre-populated registry. Cached wrappers find their bytecode already present and therefore borrow it, while source-compiled function objects retain the existing tracked destruction behavior (`packages/zts/src/context.zig:564-571`). The context then destroys each cached root without a seen-set and deinitializes the ownership metadata (`packages/zts/src/context.zig:573-580`).
 
 ## Why This Works
 
-All allocations needed to identify cached ownership happen before the context accepts the root. Once ownership transfers, every node in that cached tree is already registered, so wrapper cleanup does not need to grow the registry for cached nodes (`packages/zts/src/context.zig:387`).
+All allocations needed to identify cached ownership happen before the context accepts the root. Once ownership transfers, every node in that cached tree is already registered, so wrapper cleanup does not need to grow the registry for cached nodes (`packages/zts/src/context.zig:392-427`).
 
-Each deserialization produces an independently owned tree. Duplicate transfer of the same root pointer is ignored, and the root list therefore contains one entry per owned tree (`packages/zts/src/context.zig:387`, `packages/zts/src/context.zig:567`). Destroying those disjoint roots with no seen-set is safe because wrapper cleanup has already treated their registered nodes as borrowed (`packages/zts/src/context.zig:554`).
+Each deserialization produces an independently owned tree. Duplicate transfer of the same root pointer is ignored, and the root list therefore contains one entry per owned tree (`packages/zts/src/context.zig:393`, `packages/zts/src/context.zig:573-580`). Destroying those disjoint roots with no seen-set is safe because wrapper cleanup has already treated their registered nodes as borrowed (`packages/zts/src/context.zig:564-571`).
 
-This guarantee is intentionally narrow: cached-bytecode ownership teardown is allocation-free after transfer. Source-compiled function teardown still uses the tracked seen-set path and is not claimed to be globally allocation-free (`packages/zts/src/context.zig:559`, `packages/zts/src/object.zig:1480`).
+This guarantee is intentionally narrow: cached-bytecode ownership teardown is allocation-free after transfer. Source-compiled function teardown still uses the tracked seen-set path and is not claimed to be globally allocation-free (`packages/zts/src/context.zig:568-571`, `packages/zts/src/object.zig:1480`).
 
 ## Prevention
 
@@ -73,4 +73,4 @@ The same bytecode node may be encountered through a runtime function object and 
 
 Cached bytecode is verified before ownership transfer or execution (`packages/runtime/src/handler_instance.zig:1228`). That ordering should remain intact: malformed input must not enter the ownership registry, and failed transfer must leave the deserialization result responsible for its own cleanup (`packages/runtime/src/handler_instance.zig:1214`).
 
-- [builtin-graph-teardown-use-after-free](builtin-graph-teardown-use-after-free.md) - the same allocation-free teardown discipline at a different ownership boundary. The two fixes sit in adjacent blocks of `Context.deinit` (`packages/zts/src/context.zig:554-570` here, `:572-598` there) precisely because they are separate ownership domains torn down in sequence: bytecode trees are keyed by a registry populated at load, builtin objects are a pointer graph with no registry at all. Read that one for a use-after-free through a stale alias; read this one for a leak when a cleanup allocation fails.
+- [builtin-graph-teardown-use-after-free](builtin-graph-teardown-use-after-free.md) - the same allocation-free teardown discipline at a different ownership boundary. The two fixes sit in adjacent blocks of `Context.deinit` (`packages/zts/src/context.zig:564-580` here, `:582-609` there) precisely because they are separate ownership domains torn down in sequence: bytecode trees are keyed by a registry populated at load, builtin objects are a pointer graph with no registry at all. Read that one for a use-after-free through a stale alias; read this one for a leak when a cleanup allocation fails.

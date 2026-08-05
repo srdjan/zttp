@@ -3420,6 +3420,290 @@ test "threaded health and readiness probes return over socket accept path" {
     try Runner.expectProbe("/_readiness");
 }
 
+test "SIGTERM graceful shutdown stops accepts and drains an in-flight request" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const allocator = std.heap.c_allocator;
+    const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
+    const Wait = struct {
+        fn forFlag(flag: *const std.atomic.Value(bool), expected: bool, timeout_ms: u64) !void {
+            var timer = try engine.Timer.start();
+            while (flag.load(.acquire) != expected) {
+                if (timer.read() > timeout_ms * std.time.ns_per_ms) return error.TestTimedOut;
+                const pause = std.c.timespec{ .sec = 0, .nsec = std.time.ns_per_ms };
+                _ = std.c.nanosleep(&pause, null);
+            }
+        }
+
+        fn forReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
+            var fds = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+            try std.testing.expect(try std.posix.poll(&fds, timeout_ms) > 0);
+        }
+    };
+    const BlockingUpstream = struct {
+        allocator: std.mem.Allocator,
+        io_backend: Io.Threaded,
+        listener: net.Server,
+        port: u16,
+        thread: ?std.Thread = null,
+        request_started: std.atomic.Value(bool) = .init(false),
+        release_response: std.atomic.Value(bool) = .init(false),
+        thread_error: std.atomic.Value(ErrorInt) = .init(0),
+
+        const Upstream = @This();
+
+        fn init(upstream_allocator: std.mem.Allocator) !Upstream {
+            var io_backend = Io.Threaded.init(upstream_allocator, .{ .environ = .empty });
+            const io = io_backend.io();
+            const address = try net.IpAddress.parseIp4("127.0.0.1", 0);
+            const listener = try address.listen(io, .{ .reuse_address = true });
+            return .{
+                .allocator = upstream_allocator,
+                .io_backend = io_backend,
+                .listener = listener,
+                .port = listener.socket.address.getPort(),
+            };
+        }
+
+        fn start(self: *Upstream) !void {
+            self.thread = try std.Thread.spawn(.{}, run, .{self});
+        }
+
+        fn run(self: *Upstream) void {
+            self.runInner() catch |err| {
+                self.thread_error.store(@intFromError(err), .release);
+            };
+        }
+
+        fn runInner(self: *Upstream) !void {
+            const io = self.io_backend.io();
+            var stream = try self.listener.accept(io);
+            defer stream.close(io);
+
+            var request: std.ArrayList(u8) = .empty;
+            defer request.deinit(self.allocator);
+            var chunk: [512]u8 = undefined;
+            while (std.mem.indexOf(u8, request.items, "\r\n\r\n") == null) {
+                const n = try std.posix.read(stream.socket.handle, &chunk);
+                if (n == 0) return error.EndOfStream;
+                if (request.items.len + n > 16 * 1024) return error.StreamTooLong;
+                try request.appendSlice(self.allocator, chunk[0..n]);
+            }
+            self.request_started.store(true, .release);
+
+            try Wait.forFlag(&self.release_response, true, 10_000);
+            try writeAllFd(
+                stream.socket.handle,
+                "HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\ndrained",
+            );
+        }
+
+        fn wake(self: *Upstream) !net.Stream {
+            const io = self.io_backend.io();
+            const address = try net.IpAddress.parseIp4("127.0.0.1", self.port);
+            var stream = try address.connect(io, .{ .mode = .stream });
+            errdefer stream.close(io);
+            try writeAllFd(stream.socket.handle, "GET /cleanup HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+            return stream;
+        }
+
+        fn join(self: *Upstream) !void {
+            const thread = self.thread orelse return;
+            thread.join();
+            self.thread = null;
+            const err_int = self.thread_error.swap(0, .acq_rel);
+            if (err_int != 0) return @errorFromInt(err_int);
+        }
+
+        fn deinit(self: *Upstream) void {
+            self.release_response.store(true, .release);
+            const io = self.io_backend.io();
+            var wake_stream: ?net.Stream = null;
+            defer if (wake_stream) |*stream| stream.close(io);
+            // This branch is only reachable when the test failed before its
+            // explicit join, so report cleanup trouble and keep tearing down.
+            // A panic here would replace the failure being diagnosed.
+            var listener_closed = false;
+            if (self.thread != null) {
+                wake_stream = self.wake() catch |err| blk: {
+                    std.debug.print("blocking upstream cleanup wake failed: {s}\n", .{@errorName(err)});
+                    self.listener.deinit(io);
+                    listener_closed = true;
+                    self.thread.?.join();
+                    self.thread = null;
+                    break :blk null;
+                };
+            }
+            self.join() catch |err| {
+                std.debug.print("blocking upstream worker failed: {s}\n", .{@errorName(err)});
+            };
+            if (!listener_closed) self.listener.deinit(io);
+            self.io_backend.deinit();
+        }
+    };
+
+    var previous_term: std.posix.Sigaction = undefined;
+    var previous_int: std.posix.Sigaction = undefined;
+    std.posix.sigaction(std.posix.SIG.TERM, null, &previous_term);
+    std.posix.sigaction(std.posix.SIG.INT, null, &previous_int);
+    defer {
+        std.posix.sigaction(std.posix.SIG.TERM, &previous_term, null);
+        std.posix.sigaction(std.posix.SIG.INT, &previous_int, null);
+        g_shutdown_requested.store(false, .monotonic);
+    }
+
+    var upstream = try BlockingUpstream.init(allocator);
+    defer upstream.deinit();
+    try upstream.start();
+
+    const handler = try std.fmt.allocPrint(
+        allocator,
+        \\function handler(req) {{
+        \\  const response = fetchSync("http://127.0.0.1:{d}/hold");
+        \\  return Response.text(response.text());
+        \\}}
+    ,
+        .{upstream.port},
+    );
+    defer allocator.free(handler);
+
+    const io = upstream.io_backend.io();
+    const loopback = try net.IpAddress.parseIp4("127.0.0.1", 0);
+    var port_reservation = try loopback.listen(io, .{ .reuse_address = true });
+    const server_port = port_reservation.socket.address.getPort();
+    port_reservation.deinit(io);
+
+    var server = try Server.init(allocator, .{
+        .handler = .{ .inline_code = handler },
+        .port = server_port,
+        .pool_size = 1,
+        .timeout_ms = 5_000,
+        .keep_alive = false,
+        .log_requests = false,
+        .runtime_config = .{
+            .outbound_http_enabled = true,
+            .outbound_allow_host = "127.0.0.1",
+            .outbound_timeout_ms = 5_000,
+        },
+    });
+    defer server.deinit();
+    try server.start();
+
+    const server_address = try net.IpAddress.parseIp4("127.0.0.1", server_port);
+
+    var accept_error = std.atomic.Value(ErrorInt).init(0);
+    var shutdown_started = std.atomic.Value(bool).init(false);
+    var allow_shutdown = std.atomic.Value(bool).init(false);
+    var shutdown_done = std.atomic.Value(bool).init(false);
+    const AcceptContext = struct {
+        server: *Server,
+        result: *std.atomic.Value(ErrorInt),
+        shutdown_started: *std.atomic.Value(bool),
+        allow_shutdown: *const std.atomic.Value(bool),
+        shutdown_done: *std.atomic.Value(bool),
+
+        fn run(context: @This()) void {
+            context.server.acceptLoop() catch |err| {
+                context.result.store(@intFromError(err), .release);
+                return;
+            };
+            context.shutdown_started.store(true, .release);
+            Wait.forFlag(context.allow_shutdown, true, 10_000) catch |err| {
+                context.result.store(@intFromError(err), .release);
+                return;
+            };
+            context.server.shutdown(2_000);
+            context.shutdown_done.store(true, .release);
+        }
+    };
+    const accept_thread = try std.Thread.spawn(.{}, AcceptContext.run, .{AcceptContext{
+        .server = &server,
+        .result = &accept_error,
+        .shutdown_started = &shutdown_started,
+        .allow_shutdown = &allow_shutdown,
+        .shutdown_done = &shutdown_done,
+    }});
+    var accept_joined = false;
+    defer if (!accept_joined) {
+        g_shutdown_requested.store(true, .monotonic);
+        allow_shutdown.store(true, .release);
+        upstream.release_response.store(true, .release);
+        var wake = server_address.connect(io, .{ .mode = .stream }) catch blk: {
+            if (server.listener) |*listener| {
+                listener.deinit(server.io_backend.io());
+                server.listener = null;
+            }
+            break :blk null;
+        };
+        if (wake) |*stream| stream.close(io);
+        accept_thread.join();
+    };
+
+    var original = try server_address.connect(io, .{ .mode = .stream });
+    defer original.close(io);
+    try writeAllFd(
+        original.socket.handle,
+        "GET /drain HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    try Wait.forFlag(&upstream.request_started, true, 5_000);
+    try std.testing.expectEqual(@as(usize, 1), server.pool.?.getInUse());
+
+    try std.posix.raise(std.posix.SIG.TERM);
+    // No client is opened until acceptLoop has exited. This makes the server's
+    // own signal wake path the only way to reach the assertion.
+    try Wait.forFlag(&shutdown_started, true, 2_000);
+
+    // The accept loop is stopped, but shutdown is held at the test handshake
+    // until this connection is queued. It must close without being served.
+    var rejected = try server_address.connect(io, .{ .mode = .stream });
+    defer rejected.close(io);
+    allow_shutdown.store(true, .release);
+
+    try Wait.forReadable(rejected.socket.handle, 2_000);
+    var rejected_bytes: [64]u8 = undefined;
+    const rejected_len = std.posix.read(rejected.socket.handle, &rejected_bytes) catch |err| switch (err) {
+        error.ConnectionResetByPeer => 0,
+        else => return err,
+    };
+    try std.testing.expectEqual(@as(usize, 0), rejected_len);
+
+    // Give shutdown time to reach its drain loop while the upstream remains
+    // blocked. It must not return until that request is released.
+    const drain_probe_pause = std.c.timespec{ .sec = 0, .nsec = 100 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&drain_probe_pause, null);
+    try std.testing.expect(!shutdown_done.load(.acquire));
+    try std.testing.expectEqual(@as(usize, 1), server.pool.?.getInUse());
+
+    upstream.release_response.store(true, .release);
+    try Wait.forFlag(&shutdown_done, true, 2_000);
+    accept_thread.join();
+    accept_joined = true;
+    const accept_err_int = accept_error.load(.acquire);
+    if (accept_err_int != 0) return @errorFromInt(accept_err_int);
+
+    try std.testing.expect(!server.running);
+    try std.testing.expect(server.listener == null);
+    try std.testing.expectEqual(@as(usize, 0), server.pool.?.getInUse());
+    try std.testing.expectError(
+        error.ConnectionRefused,
+        server_address.connect(io, .{ .mode = .stream }),
+    );
+
+    var response: std.ArrayList(u8) = .empty;
+    defer response.deinit(allocator);
+    var response_chunk: [512]u8 = undefined;
+    while (std.mem.indexOf(u8, response.items, "\r\n\r\ndrained") == null) {
+        try Wait.forReadable(original.socket.handle, 2_000);
+        const n = try std.posix.read(original.socket.handle, &response_chunk);
+        if (n == 0) break;
+        if (response.items.len + n > 4 * 1024) return error.StreamTooLong;
+        try response.appendSlice(allocator, response_chunk[0..n]);
+    }
+    try std.testing.expect(std.mem.startsWith(u8, response.items, "HTTP/1.1 200 OK\r\n"));
+    try std.testing.expect(std.mem.endsWith(u8, response.items, "\r\n\r\ndrained"));
+    try upstream.join();
+}
+
 test "parseRequestFromBuffer rejects duplicate content length" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

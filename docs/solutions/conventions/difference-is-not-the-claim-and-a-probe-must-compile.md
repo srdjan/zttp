@@ -1,8 +1,9 @@
 ---
 title: Difference is not the claim, and a probe that does not compile is not a probe
 date: 2026-08-04
+last_updated: 2026-08-05
 category: conventions
-module: packages/pi (deterministic stand-in gates), repo-wide (probing any gate)
+module: packages/pi (deterministic stand-in gates), packages/runtime (graceful shutdown), tooling (repository metrics), repo-wide (probing any gate)
 problem_type: convention
 component: testing_framework
 severity: high
@@ -11,7 +12,7 @@ applies_when:
   - "Building a fixture whose two possible outcomes could write the same bytes"
   - "Probing a gate by breaking its input and confirming it fails"
   - "Reading a probe's result from grepped output instead of the build's exit code"
-  - "Citing a green gate as evidence that the behavior it names happened"
+  - "Citing a green gate or asynchronous E2E as evidence that the behavior it names happened"
 tags:
   - testing
   - build
@@ -20,6 +21,7 @@ tags:
   - fail-open
   - verification
   - probes
+  - async-ordering
 ---
 
 # Difference is not the claim, and a probe that does not compile is not a probe
@@ -31,7 +33,7 @@ place of a live model, so the expert loop can be driven offline. On 2026-08-04 i
 got defect seeds: handler drafts written to fail the compiler veto on purpose, so
 the rejection half of the loop became reachable without spending model turns.
 `packages/pi/src/standin/defect_seeds.zig` declares each seed's outcome as a
-`VetoClass`. One of the two classes is `salvaged`: the draft trips a
+`VetoClass`. One of the three classes is `salvaged`: the draft trips a
 canonical-band diagnostic, `canonicalize.normalizeSource` clears it inside
 `veto.runVeto`, the canonicalized bytes are applied, and the turn still counts as
 a first-draft pass. The model never sees a rejection.
@@ -54,6 +56,12 @@ read as a weak gate rather than an absent one.
 
 The sibling document covers a degenerate input. These are a degenerate assertion
 and a degenerate probe.
+
+On 2026-08-05 the production branch metric exposed the same assertion defect in
+a topology floor. The review found that the pre-fix classifier silently assigned
+an unknown `packages/*` directory to the repository bucket while every known
+package contributed input. The gate proved presence of known members while its
+report claimed a complete package classification.
 
 ## Guidance
 
@@ -99,6 +107,20 @@ try testing.expectEqualStrings(canonical, run.on_disk);
 Note that this does not weaken the oracle. The expected value comes from the
 production code path, not from a second model of it hand-written in the test.
 
+**A topology floor must reject unknown members, not merely require known ones.**
+
+`required_packages` defines the package set whose presence the production branch
+metric checks. The review found that the pre-fix path classifier used `.repo` as
+the fallback for both repository-level files and unknown directories below
+`packages/`. A new package therefore satisfied every existing floor while
+disappearing from the per-package report.
+
+The fixed classifier keeps `.repo` only for paths outside `packages/` and returns
+`error.UnknownPackage` for malformed or unknown paths inside that namespace
+(`tooling/production_branch_metric.zig:92-102`). `collect` classifies each path
+before file access, so parsing and I/O behavior cannot hide the topology error
+(`tooling/production_branch_metric.zig:262-279`).
+
 **A fixture must make the outcomes it separates observationally different.**
 
 The same fix exposed a second problem one level down. Each bad draft had been
@@ -125,11 +147,32 @@ The `compound-assign` seed took the same correction: its `total += 2;`
 canonicalizes to `total = total + 2;`, which is the baseline. It now uses
 `total += 7;`.
 
+**Observe a production checkpoint before the test emits an equivalent event.**
+
+The same ambiguity appears in concurrent tests even when the final state is
+exact. The runtime's signal path wakes a blocked `listener.accept()` by opening
+a loopback connection (`packages/runtime/src/server.zig:2393-2406`). Once the
+accept returns, the loop observes the shutdown flag and exits
+(`packages/runtime/src/server.zig:2422-2446`).
+
+The first graceful-shutdown E2E ordering raised `SIGTERM`, then opened another
+client before waiting for the accept loop to exit (session history). That client
+could release the same blocked accept call. A broken production wake and a
+working wake therefore reached the same observable end state.
+
+The corrected test waits for `shutdown_started` immediately after the signal and
+opens the rejection-probe client only after that checkpoint
+(`packages/runtime/src/server.zig:3651-3659`). The accept thread publishes the
+checkpoint only after `acceptLoop()` returns
+(`packages/runtime/src/server.zig:3605-3610`). At that point, no test-owned
+connection can create the event being attributed to the production signal path.
+
 **A probe must compile, or it tests nothing. Read its result from the build's
 exit code, not from a grep for a failure format.**
 
 The method this repo uses to validate a gate is to break the gate's input and
-confirm the gate goes red. A probe of the env synthesizer gate changed
+confirm the gate goes red. Commit `f69b28f7` records a probe of the env
+synthesizer gate that changed
 `if (!has_env_import)` in `synthesizeEnvFeature`
 (`packages/pi/src/standin/playbook.zig`) to `if (true)`, to force a duplicate
 import. Zig then refuses the file, because `has_env_import` has no remaining use:
@@ -151,7 +194,7 @@ condition is still unconditionally true, and the gate reports the duplicate.
 
 ## Why This Matters
 
-The sibling document already records at least four earlier recurrences of this
+The sibling document already records three earlier recurrences of this
 class and four more that landed at once on 2026-08-03. These two landed on
 2026-08-04, in the same subsystem, one day after the rule was written down, while
 its author was working from it. That is the useful fact: the floor-on-input rule
@@ -166,6 +209,11 @@ without a retry, over a run in which no draft was ever rejected. The env probe
 would have been read as proof that the gate was weak, which is a conclusion about
 the gate drawn from a run of the gate that never happened.
 
+A positive floor and an exhaustive boundary check prove different things. The
+first proves that every expected bucket received input. The second proves that no
+unexpected input was normalized into a bucket with different meaning. A
+closed-world report needs both claims before its totals are trustworthy.
+
 Both failures also point the same way as the defect these gates exist to catch:
 [an empty baseline made a file-destroying edit prove clean](../logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md).
 A check handed nothing, or asked something easier than intended, reports success.
@@ -179,6 +227,16 @@ occurred is among them, the assertion is not the claim.
 
 Whenever you build a fixture with two outcomes to tell apart, check that the two
 outcomes write different observable state before writing any assertion over it.
+
+Whenever an asynchronous test waits for a production-owned milestone, list every
+test action that can produce the same milestone. Put the assertion before those
+actions. Later probes may inspect the earlier transition, but they must not be
+able to create it.
+
+Whenever a gate reports a closed set of packages, modules, namespaces, or other
+categories, probe an unknown member as well as every known member. A catch-all is
+valid only outside the closed namespace. Inside it, an unknown member is a model
+change and must fail until the classifier is updated.
 
 Always when probing a gate. A probe is a code change that must make the gate fail.
 Confirm the build ran before you read anything into its output, and take the
@@ -225,6 +283,27 @@ try testing.expectEqual(@as(usize, 1), countOccurrences(proposed, "import { env 
 ```
 
 with `expected 1, found 2` on the variants that already carried the import.
+
+The graceful-shutdown probe. In `wakeAcceptOnShutdown`, temporarily change the
+connection target from the configured server port to port `0` while keeping the
+helper and test compilable. Then run:
+
+```text
+zig build test -j1 -Dtest-filter=SIGTERM --summary all
+```
+
+The corrected E2E exits nonzero at
+`Wait.forFlag(&shutdown_started, true, 2_000)` with `error.TestTimedOut`
+(`packages/runtime/src/server.zig:3429-3435`,
+`packages/runtime/src/server.zig:3651-3654`). Because no later test client exists
+before that wait, the probe disables the only ordinary wake path and the exact
+claim turns red. Restore the configured port after the probe.
+
+The topology probe passes a nonexistent unknown-package path to `collect` and
+expects `error.UnknownPackage` (`tooling/production_branch_metric.zig:428-451`).
+Using a nonexistent path is deliberate: that exact error proves classification
+ran before file access. A companion mapping test covers every known package and a
+real repository-level path (`tooling/production_branch_metric.zig:412-426`).
 
 Two questions to put to any gate, after the sibling document's "delete its input":
 

@@ -104,17 +104,7 @@ pub fn workflowCallCallback(
         return createFetchErrorResponse(rt, "WorkflowQueueRequiresRun", "queued workflow.call must run at top level inside durable.run");
     }
 
-    // The sub-handler dispatch reuses executeHandlerBorrowed, which sets-then-
-    // clears these per-thread globals around the run. A nested dispatch would
-    // otherwise leave them null for the orchestrator's continuation; on a
-    // sub-handler panic `clearThreadStateAfterPanic` nulls them too while the
-    // sub's restore-defers are skipped by longjmp. Snapshot the orchestrator's
-    // values and restore them unconditionally after dispatch. (current_interpreter
-    // is already save/restored per interpreter frame, but the panic path nulls it,
-    // so restore it here as well.)
-    const saved_interpreter = zq.interpreter.current_interpreter;
     const dispatch_result = registry.dispatch(name, view);
-    zq.interpreter.current_interpreter = saved_interpreter;
 
     var handle = dispatch_result catch |err| {
         return switch (err) {
@@ -184,9 +174,7 @@ fn workflowDirectDispatchParts(
     name: []const u8,
     view: HttpRequestView,
 ) !zq.JSValue {
-    const saved_interpreter = zq.interpreter.current_interpreter;
     const dispatch_result = registry.dispatch(name, view);
-    zq.interpreter.current_interpreter = saved_interpreter;
 
     var handle = dispatch_result catch |err| {
         const code = if (err == error.UnknownHandler) "UnknownHandler" else "WorkflowDispatchFailed";
@@ -203,9 +191,7 @@ fn workflowDirectTargetDispatchParts(
     target: *Target,
     view: HttpRequestView,
 ) !zq.JSValue {
-    const saved_interpreter = zq.interpreter.current_interpreter;
     const dispatch_result = target.pool.executeHandlerBorrowed(view);
-    zq.interpreter.current_interpreter = saved_interpreter;
 
     var handle = dispatch_result catch |err| {
         return workflowErrorParts(rt, ctx, "WorkflowDispatchFailed", @errorName(err));
@@ -289,9 +275,7 @@ fn completeQueuedDispatch(
     queued_request: *const workflow_queue.QueuedRequest,
     view: HttpRequestView,
 ) !void {
-    const saved_interpreter = zq.interpreter.current_interpreter;
     const dispatch_result = registry.dispatch(queued_request.target, view);
-    zq.interpreter.current_interpreter = saved_interpreter;
 
     var handle = dispatch_result catch |err| {
         const code = if (err == error.UnknownHandler) "UnknownHandler" else "WorkflowDispatchFailed";
@@ -512,11 +496,7 @@ pub fn workflowFollowCallback(
         return createFetchErrorResponse(rt, "WorkflowQueueRequiresRun", "queued workflow.follow must run at top level inside durable.run");
     }
 
-    // Guarded nested dispatch (see workflowCallCallback for the per-thread
-    // global snapshot/restore rationale).
-    const saved_interpreter = zq.interpreter.current_interpreter;
     const dispatch_result = target.pool.executeHandlerBorrowed(view);
-    zq.interpreter.current_interpreter = saved_interpreter;
 
     var handle = dispatch_result catch |err| {
         return createFetchErrorResponse(rt, "WorkflowDispatchFailed", @errorName(err));
@@ -1048,21 +1028,11 @@ pub fn workflowFanoutCallback(runtime_ptr: *anyopaque, ctx: *zq.Context, calls_v
 /// dispatched one at a time on this thread, and the result array is ordered
 /// by declaration index, not by completion order. Callers should not expect
 /// a wall-clock speedup from adding more calls. Genuine concurrent dispatch
-/// is deferred - see the workflow/fault-tolerance gaps plan (Scope
-/// Boundaries) for why: each nested dispatch swaps shared runtime/
-/// interpreter globals (see below), which is not safe to do across
-/// concurrently-running calls without a larger runtime change.
+/// is outside the current sequential API contract.
 fn dispatchAllToPartsArray(rt: *HandlerInstance, ctx: *zq.Context, registry: *SystemRuntime, arr: *zq.JSObject, count: u32) !zq.JSValue {
     var view_arena = std.heap.ArenaAllocator.init(rt.allocator);
     defer view_arena.deinit();
     const arena = view_arena.allocator();
-
-    // A nested dispatch still clears the interpreter threadlocal, and the panic
-    // path nulls it while the sub's restore-defers are skipped by longjmp, so
-    // snapshot it once and restore after the whole fan-out. The runtime and the
-    // JSX call callback no longer need this: both are reached from the Context.
-    const saved_interpreter = zq.interpreter.current_interpreter;
-    defer zq.interpreter.current_interpreter = saved_interpreter;
 
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const parts_arr = try ctx.createArray();

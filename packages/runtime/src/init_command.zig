@@ -840,6 +840,9 @@ const extension_readme_template =
     \\`build.zig.zon` ships with a `path = "../zttp-sdk"` placeholder. For
     \\external use, swap it for a `zig fetch --save <url>` line that pins a
     \\released tarball. Then run `zig build` to compile the binding.
+    \\The extension SDK and runtime bridge are revision-locked. Rebuild the
+    \\extension whenever its target runtime changes. Handle-bound operations
+    \\use distinct symbols so an incompatible call fails at link time.
     \\
 ;
 
@@ -911,6 +914,10 @@ test "init --extension scaffolds a manifest the parser accepts" {
     try testing.expectEqualStrings("zttp-ext:demoext", manifest.specifier);
     try testing.expectEqual(@as(usize, 1), manifest.exports.items.len);
     try testing.expectEqualStrings("greet", manifest.exports.items[0].name);
+
+    const readme = try zts.file_io.readFile(testing.allocator, "demoext/README.md", 256 * 1024);
+    defer testing.allocator.free(readme);
+    try testing.expect(std.mem.indexOf(u8, readme, "SDK and runtime bridge are revision-locked") != null);
 }
 
 test "init --extension sanitizes build zon package name for hyphenated names" {

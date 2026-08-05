@@ -290,10 +290,15 @@ test "findDuplicateRequiredCapability ignores unique capabilities" {
     try std.testing.expect(duplicate == null);
 }
 
-test "requireCapability respects active module context" {
-    const handle: *ModuleHandle = @ptrFromInt(0x1);
+test "requireCapability respects active module scope" {
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    const handle = contextToHandle(ctx);
 
-    const token = pushActiveModuleContext("zttp-ext:test", &.{ .clock, .stderr });
+    const token = pushActiveModuleContext(ctx, "zttp-ext:test", &.{ .clock, .stderr });
     defer popActiveModuleContext(token);
 
     try requireCapability(handle, .clock);
@@ -302,30 +307,42 @@ test "requireCapability respects active module context" {
 }
 
 test "active module helpers enforce declared capabilities" {
-    const token = pushActiveModuleContext("zttp:test", &.{ .clock, .random, .stderr, .crypto });
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const token = pushActiveModuleContext(ctx, "zttp:test", &.{ .clock, .random, .stderr, .crypto });
     defer popActiveModuleContext(token);
 
-    const now_ms = try nowMsForActiveModule();
+    const now_ms = try nowMsForActiveModule(ctx);
     try std.testing.expect(now_ms >= 0);
 
     var random_bytes: [8]u8 = undefined;
-    try fillRandomForActiveModule(&random_bytes);
+    try fillRandomForActiveModule(ctx, &random_bytes);
 
-    try writeStderrForActiveModule("");
+    try writeStderrForActiveModule(ctx, "");
 
     var digest: [std.crypto.hash.sha2.Sha256.digest_length]u8 = undefined;
-    try sha256ForActiveModule(&digest, "data");
+    try sha256ForActiveModule(ctx, &digest, "data");
 
     var mac: [std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8 = undefined;
-    try hmacSha256ForActiveModule(&mac, "data", "key");
+    try hmacSha256ForActiveModule(ctx, &mac, "data", "key");
 }
 
 test "active module helpers reject missing capabilities" {
-    const token = pushActiveModuleContext("zttp:test", &.{.clock});
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const token = pushActiveModuleContext(ctx, "zttp:test", &.{.clock});
     defer popActiveModuleContext(token);
 
     var bytes: [8]u8 = undefined;
-    try std.testing.expectError(ModuleCapabilityError.MissingModuleCapability, fillRandomForActiveModule(&bytes));
+    try std.testing.expectError(ModuleCapabilityError.MissingModuleCapability, fillRandomForActiveModule(ctx, &bytes));
 }
 
 test "FunctionBinding laws defaults to empty" {
@@ -477,7 +494,7 @@ test "validateBindings accepts idempotent_call on write-effect function" {
 // Sandbox invariant: when a NativeFn produced by wrapModuleFnWithCapabilities
 // is invoked through its function pointer (the same path used by both the
 // interpreter's doCall .none branch and the JIT slow-path jitCall), the
-// wrapper's threadlocal active-module-context push must fire before the inner
+// wrapper's Context-owned active-module-scope push must fire before the inner
 // user_fn observes the capability set. The interpreter's hot-builtin bypass
 // in interpreter/call.zig only fires for pure-function BuiltinIds (Math.*,
 // JSON.*, string slice/indexOf, parseInt/parseFloat), none of which consult
@@ -488,7 +505,7 @@ test "validateBindings accepts idempotent_call on write-effect function" {
 
 // Policy gating: the four `allows*ForActiveModule` helpers are the only
 // path SDK consumers reach to ask the runtime policy whether a given
-// name/host is admitted. The thread-local active context must declare
+// name/host is admitted. The Context-owned active scope must declare
 // `.policy_check` (rule: a module that consults policy must say so in
 // its binding), and the underlying `ctx.capability_policy` decides
 // allow vs deny per category. These tests pin both halves so a future
@@ -504,7 +521,7 @@ test "allowsEnvForActiveModule denies when policy enabled and name not in allowl
         .env = .{ .enabled = true, .values = &[_][]const u8{"ALLOWED"} },
     };
 
-    const token = pushActiveModuleContext("zttp:env-test", &.{.policy_check});
+    const token = pushActiveModuleContext(ctx, "zttp:env-test", &.{.policy_check});
     defer popActiveModuleContext(token);
 
     try std.testing.expect(try allowsEnvForActiveModule(ctx, "ALLOWED"));
@@ -519,7 +536,7 @@ test "allowsEnvForActiveModule allows everything when policy section is disabled
     defer ctx.deinit();
     // ctx.capability_policy is default: env.enabled = false → permissive
 
-    const token = pushActiveModuleContext("zttp:env-test", &.{.policy_check});
+    const token = pushActiveModuleContext(ctx, "zttp:env-test", &.{.policy_check});
     defer popActiveModuleContext(token);
 
     try std.testing.expect(try allowsEnvForActiveModule(ctx, "ANYTHING"));
@@ -533,7 +550,7 @@ test "allowsEnvForActiveModule fails closed when active module lacks policy_chec
     defer ctx.deinit();
 
     // Active module declares clock but not policy_check.
-    const token = pushActiveModuleContext("zttp:env-test", &.{.clock});
+    const token = pushActiveModuleContext(ctx, "zttp:env-test", &.{.clock});
     defer popActiveModuleContext(token);
 
     try std.testing.expectError(
@@ -543,14 +560,21 @@ test "allowsEnvForActiveModule fails closed when active module lacks policy_chec
 }
 
 test "SDK module state slots are active-module scoped" {
-    try std.testing.expect(!activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.sql)));
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    const handle = contextToHandle(ctx);
 
-    const sql_token = pushActiveModuleContext("zttp:sql", &.{});
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle, @intFromEnum(module_slots.Slot.sql)));
+
+    const sql_token = pushActiveModuleContext(ctx, "zttp:sql", &.{});
     defer popActiveModuleContext(sql_token);
 
-    try std.testing.expect(activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.sql)));
-    try std.testing.expect(!activeModuleOwnsStateSlot(@intFromEnum(module_slots.Slot.cache)));
-    try std.testing.expect(!activeModuleOwnsStateSlot(15));
+    try std.testing.expect(activeModuleOwnsStateSlot(handle, @intFromEnum(module_slots.Slot.sql)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle, @intFromEnum(module_slots.Slot.cache)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle, 15));
 }
 
 test "SDK filesystem reads require canonical allowlist entry" {
@@ -560,7 +584,7 @@ test "SDK filesystem reads require canonical allowlist entry" {
     const ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    const token = pushActiveModuleContext("zttp:service", &.{.filesystem});
+    const token = pushActiveModuleContext(ctx, "zttp:service", &.{.filesystem});
     defer popActiveModuleContext(token);
 
     try std.testing.expectError(
@@ -581,7 +605,7 @@ test "SDK sqlite opens require canonical allowlist entry" {
     const ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    const token = pushActiveModuleContext("zttp:sql", &.{.sqlite});
+    const token = pushActiveModuleContext(ctx, "zttp:sql", &.{.sqlite});
     defer popActiveModuleContext(token);
 
     try std.testing.expectError(
@@ -601,7 +625,7 @@ test "allowsCacheNamespaceForActiveModule denies namespaces outside the allowlis
         .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },
     };
 
-    const token = pushActiveModuleContext("zttp:cache-test", &.{.policy_check});
+    const token = pushActiveModuleContext(ctx, "zttp:cache-test", &.{.policy_check});
     defer popActiveModuleContext(token);
 
     try std.testing.expect(try allowsCacheNamespaceForActiveModule(ctx, "sessions"));
@@ -619,7 +643,7 @@ test "allowsSqlQueryForActiveModule denies queries outside the allowlist" {
         .sql = .{ .enabled = true, .values = &[_][]const u8{"listTodos"}, .queries = &.{} },
     };
 
-    const token = pushActiveModuleContext("zttp:sql-test", &.{.policy_check});
+    const token = pushActiveModuleContext(ctx, "zttp:sql-test", &.{.policy_check});
     defer popActiveModuleContext(token);
 
     try std.testing.expect(try allowsSqlQueryForActiveModule(ctx, "listTodos"));
@@ -635,7 +659,7 @@ test "allowsSqlQueryForActiveModule denies queries outside the allowlist" {
 // `allowsEgressHostForActiveModule` wrapper. Outbound `fetch` is a
 // runtime-initiated check (see zruntime.zig calling
 // `ctx.capability_policy.allowsEgressHost(host)`), not an SDK module
-// call routed through `active_module_context`, so it does not require
+// call routed through the active Context scope, so it does not require
 // `.policy_check`. This test pins the raw `RuntimePolicy.allowsEgressHost`
 // semantics (case-insensitive host match). If a future change moves
 // outbound checks into an SDK module, the parity (a `*ForActiveModule`

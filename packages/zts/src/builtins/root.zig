@@ -43,7 +43,6 @@ pub const jsonParse = json.jsonParse;
 pub const jsonStringify = json.jsonStringify;
 pub const jsonTryParse = json.jsonTryParse;
 pub const parseJsonValue = json.parseJsonValue;
-pub const clearJsonShapeCache = json.clearJsonShapeCache;
 pub const createResultOk = helpers.createResultOk;
 pub const createResultErr = helpers.createResultErr;
 pub const valueToStringSimple = helpers.valueToStringSimple;

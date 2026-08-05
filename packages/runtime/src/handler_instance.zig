@@ -102,15 +102,6 @@ const applyEmbeddedCapabilityPolicy = runtime_config_mod.applyEmbeddedCapability
 
 const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
 
-/// Clear thread-local interpreter state after a handler panic.
-/// Called from the setjmp recovery branch before returning error.HandlerPanicked.
-/// Must only touch thread-locals - the runtime heap may be mid-mutation. The
-/// runtime pointer and the JSX call callback used to be cleared here too; both
-/// now live on the Context, which the pool quarantines or recycles wholesale.
-pub fn clearThreadStateAfterPanic() void {
-    zq.interpreter.current_interpreter = null;
-}
-
 pub const AotOverrideFn = *const fn (ctx: *zq.Context, args: []const zq.JSValue) anyerror!zq.JSValue;
 threadlocal var aot_override: ?AotOverrideFn = null;
 

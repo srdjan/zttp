@@ -42,7 +42,7 @@ const service_mod = @import("modules/net/service.zig");
 const fetch_mod = @import("modules/net/fetch.zig");
 const websocket_mod = @import("modules/net/websocket.zig");
 
-// Coupled to zts internals: io reads a threadlocal set by fetchSync;
+// Coupled to zts internals: io installs Context-owned state read by fetchSync;
 // scope manipulates GC roots directly. durable is pending further work.
 const io_mod = @import("modules/workflow/io.zig");
 const scope_mod = @import("modules/workflow/scope.zig");

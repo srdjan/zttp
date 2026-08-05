@@ -362,6 +362,29 @@ pub fn build(b: *std.Build) void {
     const release_check_test_step = b.step("test-release-check", "Run release-passport tests");
     release_check_test_step.dependOn(&run_release_check_tests.step);
 
+    // Repository-only AST metric. The live command receives the tracked Zig
+    // source list from a NUL-safe script; its unit tests pin the AST definition
+    // and its input floors. It is never installed in user projects.
+    const production_branch_metric_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/production_branch_metric.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const production_branch_metric_tests = b.addTest(.{
+        .filters = test_filters,
+        .root_module = production_branch_metric_mod,
+    });
+    const run_production_branch_metric_tests = b.addRunArtifact(production_branch_metric_tests);
+    const production_branch_metric_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh" });
+    const production_branch_metric_step = b.step("production-branch-metric", "Measure production branch points in tracked Zig sources");
+    production_branch_metric_step.dependOn(&production_branch_metric_cmd.step);
+    const production_branch_metric_json_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh", "--json" });
+    const production_branch_metric_json_step = b.step("production-branch-metric-json", "Measure production branch points as JSON");
+    production_branch_metric_json_step.dependOn(&production_branch_metric_json_cmd.step);
+    const production_branch_metric_test_step = b.step("test-production-branch-metric", "Test and run the production branch metric");
+    production_branch_metric_test_step.dependOn(&run_production_branch_metric_tests.step);
+    production_branch_metric_test_step.dependOn(&production_branch_metric_cmd.step);
+
     // Development-only deterministic author. It speaks the OpenAI Responses
     // wire on loopback and is never part of the install step.
     const standin_mod = b.createModule(.{
@@ -665,6 +688,38 @@ pub fn build(b: *std.Build) void {
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "features", "--json" }, contract_fixtures ++ "/features.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "modules", "--json" }, contract_fixtures ++ "/modules.golden.json", 0);
     addExpertGolden(b, contract_golden_step, zts_exe, &.{ "restrictions", "--json" }, contract_fixtures ++ "/restrictions.golden.json", 0);
+
+    // Comptime strip failures predate the ZTS registry and currently expose
+    // only StripError.ComptimeEvaluationFailed. Pin that exact real-CLI
+    // identity, its unregistered JSON shape, and an accepted safe contrast.
+    // There is no registry rule to add to the expert replay or coverage page.
+    const comptime_cli_step = b.step("test-comptime-cli-matrix", "Run comptime CLI reject and safe-contrast fixtures");
+    const comptime_fixtures = "packages/tools/tests/fixtures/comptime";
+    addExpertExitCheck(b, comptime_cli_step, zts_exe, &.{
+        "check", comptime_fixtures ++ "/safe.ts", "--json",
+    }, 0);
+    const comptime_reject = b.addRunArtifact(zts_exe);
+    comptime_reject.addArgs(&.{ "check", comptime_fixtures ++ "/reject_random.ts", "--json" });
+    comptime_reject.expectExitCode(1);
+    comptime_reject.expectStdOutEqual("{\"success\":false,\"diagnostics\":[]}\n");
+    comptime_reject.expectStdErrEqual("TypeScript strip error: error.ComptimeEvaluationFailed\n");
+    comptime_cli_step.dependOn(&comptime_reject.step);
+
+    // Instantiating a generic application must preserve every intersection
+    // obligation, including members beyond sixteen. Run the real analyzer so
+    // the gate protects the public verdict, not only the representation.
+    const generic_intersection_cli_step = b.step(
+        "test-generic-intersection-cli-matrix",
+        "Run wide generic-intersection reject and safe-contrast fixtures",
+    );
+    const generic_intersection_fixtures = "packages/tools/tests/fixtures/generic-intersection";
+    addExpertExitCheck(b, generic_intersection_cli_step, zts_exe, &.{
+        "check", generic_intersection_fixtures ++ "/accept_all_17.ts", "--json",
+    }, 0);
+    addExpertGolden(b, generic_intersection_cli_step, zts_exe, &.{
+        "check", generic_intersection_fixtures ++ "/reject_member_17.ts", "--json",
+    }, generic_intersection_fixtures ++ "/reject_member_17.golden.json", 1);
+
     const expert_golden_step = b.step("test-expert-golden", "Check zts direct tool contract against golden fixtures");
     const fixtures_root = "packages/tools/tests/fixtures/expert";
     // `meta --json` leads with `compiler_version`, which bumps every release.
@@ -790,6 +845,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&module_boundary.step);
     test_step.dependOn(&proof_swallow.step);
     test_step.dependOn(&run_release_check_tests.step);
+    test_step.dependOn(production_branch_metric_test_step);
+    test_step.dependOn(comptime_cli_step);
+    test_step.dependOn(generic_intersection_cli_step);
     // `zttp-standin` is deliberately not installed, so nothing else forces it
     // to compile and a break in that path would surface only when somebody ran
     // the step by hand. Compile it here, without installing it.
@@ -884,8 +942,28 @@ pub fn build(b: *std.Build) void {
     panic_isolation_cmd.addArg(b.getInstallPath(.bin, "zttp"));
     panic_isolation_cmd.has_side_effects = true;
     panic_isolation_cmd.step.dependOn(b.getInstallStep());
+
+    const module_scope_panic_probe_mod = b.createModule(.{
+        .root_source_file = runtime_dep.path("src/module_scope_panic_probe.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    module_scope_panic_probe_mod.addImport("zts", zts_host_mod);
+    const module_scope_panic_probe = b.addExecutable(.{
+        .name = "module-scope-panic-probe",
+        .root_module = module_scope_panic_probe_mod,
+    });
+    const run_module_scope_panic_probe = b.addRunArtifact(module_scope_panic_probe);
+    const module_scope_panic_probe_step = b.step(
+        "test-module-scope-panic",
+        "Verify module authorization isolation across a recovered panic",
+    );
+    module_scope_panic_probe_step.dependOn(&run_module_scope_panic_probe.step);
+
     const panic_isolation_step = b.step("test-panic-isolation", "Run handler panic isolation E2E test");
     panic_isolation_step.dependOn(&panic_isolation_cmd.step);
+    panic_isolation_step.dependOn(&run_module_scope_panic_probe.step);
 
     const smoke_studio_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/smoke-studio.sh" });
     smoke_studio_cmd.has_side_effects = true;

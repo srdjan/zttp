@@ -71,83 +71,7 @@ pub const JsonError = error{ InvalidJson, UnexpectedEof, OutOfMemory, NoRootClas
 // JSON Shape Cache - Avoids hidden class transitions in JSON.parse
 // ============================================================================
 
-/// Maximum properties to cache per object shape
-const JSON_SHAPE_MAX_PROPS = 16;
-
-/// Number of cache entries (power of 2 for fast modulo)
-const JSON_SHAPE_CACHE_SIZE = 64;
-
-/// Entry in the JSON shape cache
-const JSONShapeCacheEntry = struct {
-    /// Hash of the property atom sequence
-    hash: u64 = 0,
-    /// Number of properties in this shape
-    prop_count: u8 = 0,
-    /// Property atoms in order
-    atoms: [JSON_SHAPE_MAX_PROPS]object.Atom = undefined,
-    /// Cached hidden class index for this shape
-    class_idx: object.HiddenClassIndex = .none,
-    /// Whether this entry is valid
-    valid: bool = false,
-};
-
-/// Thread-local JSON shape cache
-/// Maps property-atom-sequence to pre-built HiddenClassIndex
-/// IMPORTANT: Must be cleared when creating a new Context to avoid stale class indices
-threadlocal var json_shape_cache: [JSON_SHAPE_CACHE_SIZE]JSONShapeCacheEntry = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE;
-
-/// Clear the JSON shape cache. Must be called when creating a new Context
-/// to avoid stale HiddenClassIndex references from previous contexts.
-pub fn clearJsonShapeCache() void {
-    json_shape_cache = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE;
-}
-
-/// Compute hash for a sequence of atoms
-fn hashAtomSequence(atoms: []const object.Atom) u64 {
-    var hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
-    for (atoms) |atom| {
-        hash ^= @intFromEnum(atom);
-        hash *%= 0x100000001b3; // FNV-1a prime
-    }
-    return hash;
-}
-
-/// Look up a cached shape by atom sequence
-fn lookupJsonShape(atoms: []const object.Atom) ?object.HiddenClassIndex {
-    if (atoms.len == 0 or atoms.len > JSON_SHAPE_MAX_PROPS) return null;
-
-    const hash = hashAtomSequence(atoms);
-    const idx = hash % JSON_SHAPE_CACHE_SIZE;
-    const entry = &json_shape_cache[idx];
-
-    if (!entry.valid or entry.hash != hash or entry.prop_count != atoms.len) {
-        return null;
-    }
-
-    // Verify atoms match exactly (hash collision check)
-    for (atoms, 0..) |atom, i| {
-        if (entry.atoms[i] != atom) return null;
-    }
-
-    return entry.class_idx;
-}
-
-/// Cache a shape for future lookups
-fn cacheJsonShape(atoms: []const object.Atom, class_idx: object.HiddenClassIndex) void {
-    if (atoms.len == 0 or atoms.len > JSON_SHAPE_MAX_PROPS) return;
-
-    const hash = hashAtomSequence(atoms);
-    const idx = hash % JSON_SHAPE_CACHE_SIZE;
-    const entry = &json_shape_cache[idx];
-
-    entry.hash = hash;
-    entry.prop_count = @intCast(atoms.len);
-    for (atoms, 0..) |atom, i| {
-        entry.atoms[i] = atom;
-    }
-    entry.class_idx = class_idx;
-    entry.valid = true;
-}
+const JSON_SHAPE_MAX_PROPS = object.HiddenClassPool.JSON_SHAPE_MAX_PROPS;
 
 /// Build a hidden class with all properties in one go
 fn buildClassForAtoms(pool: *object.HiddenClassPool, atoms: []const object.Atom) !object.HiddenClassIndex {
@@ -282,7 +206,7 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: 
             // Overflow: fall back to slow path for remaining properties
             // First create object with buffered properties
             const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
-            const class_idx = lookupJsonShape(atoms[0..prop_count]) orelse
+            const class_idx = pool.lookupJsonShape(atoms[0..prop_count]) orelse
                 try buildClassForAtoms(pool, atoms[0..prop_count]);
 
             const obj = try ctx.createObjectWithClass(class_idx, ctx.object_prototype);
@@ -338,11 +262,11 @@ fn parseJsonObject(ctx: *context.Context, text: []const u8, pos: *usize, depth: 
     const atom_slice = atoms[0..prop_count];
 
     // Try to find cached shape
-    var class_idx = lookupJsonShape(atom_slice);
+    var class_idx = pool.lookupJsonShape(atom_slice);
     if (class_idx == null) {
         // Build new shape and cache it
         class_idx = try buildClassForAtoms(pool, atom_slice);
-        cacheJsonShape(atom_slice, class_idx.?);
+        pool.cacheJsonShape(atom_slice, class_idx.?);
     }
 
     // Create object with the shape - no hidden class transitions!
@@ -732,6 +656,70 @@ test "JSON.parse object duplicate keys use the last value" {
     const atom = try ctx.atoms.intern("a");
     const stored = obj.getProperty(ctx.hidden_class_pool.?, atom) orelse return error.MissingParsedProperty;
     try std.testing.expectEqual(@as(i32, 2), stored.getInt());
+}
+
+test "JSON shape cache stays bound to each hidden class pool" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+    const heap_mod = @import("../heap.zig");
+
+    var gc_a = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_a.deinit();
+    var heap_a = heap_mod.Heap.init(allocator, .{});
+    defer heap_a.deinit();
+    gc_a.setHeap(&heap_a);
+    const ctx_a = try context.Context.init(allocator, &gc_a, .{});
+    defer ctx_a.deinit();
+
+    const atom_a_a = try ctx_a.atoms.intern("a");
+    const atom_b_a = try ctx_a.atoms.intern("b");
+    const pool_a = ctx_a.hidden_class_pool.?;
+    var reversed_class = try pool_a.addProperty(pool_a.getEmptyClass(), atom_b_a);
+    reversed_class = try pool_a.addProperty(reversed_class, atom_a_a);
+
+    {
+        var gc_b = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+        defer gc_b.deinit();
+        var heap_b = heap_mod.Heap.init(allocator, .{});
+        defer heap_b.deinit();
+        gc_b.setHeap(&heap_b);
+        const ctx_b = try context.Context.init(allocator, &gc_b, .{});
+        defer ctx_b.deinit();
+
+        const atom_a_b = try ctx_b.atoms.intern("a");
+        const atom_b_b = try ctx_b.atoms.intern("b");
+        try std.testing.expectEqual(atom_a_a, atom_a_b);
+        try std.testing.expectEqual(atom_b_a, atom_b_b);
+
+        const parsed_b = try parseJsonValue(ctx_b, "{\"a\":1,\"b\":2}");
+        const object_b = parsed_b.toPtr(object.JSObject);
+        defer object_b.destroy(allocator);
+        try std.testing.expectEqual(@as(i32, 1), object_b.getProperty(ctx_b.hidden_class_pool.?, atom_a_b).?.getInt());
+        try std.testing.expectEqual(@as(i32, 2), object_b.getProperty(ctx_b.hidden_class_pool.?, atom_b_b).?.getInt());
+
+        const reversed_b = try parseJsonValue(ctx_b, "{\"b\":3,\"a\":4}");
+        const reversed_object_b = reversed_b.toPtr(object.JSObject);
+        defer reversed_object_b.destroy(allocator);
+        try std.testing.expectEqual(@as(i32, 4), reversed_object_b.getProperty(ctx_b.hidden_class_pool.?, atom_a_b).?.getInt());
+        try std.testing.expectEqual(@as(i32, 3), reversed_object_b.getProperty(ctx_b.hidden_class_pool.?, atom_b_b).?.getInt());
+
+        const parsed_b_again = try parseJsonValue(ctx_b, "{\"a\":5,\"b\":6}");
+        const object_b_again = parsed_b_again.toPtr(object.JSObject);
+        defer object_b_again.destroy(allocator);
+        try std.testing.expectEqual(object_b.hidden_class_idx, object_b_again.hidden_class_idx);
+    }
+
+    const parsed_a = try parseJsonValue(ctx_a, "{\"a\":1,\"b\":2}");
+    const object_a = parsed_a.toPtr(object.JSObject);
+    defer object_a.destroy(allocator);
+    try std.testing.expectEqual(@as(i32, 1), object_a.getProperty(ctx_a.hidden_class_pool.?, atom_a_a).?.getInt());
+    try std.testing.expectEqual(@as(i32, 2), object_a.getProperty(ctx_a.hidden_class_pool.?, atom_b_a).?.getInt());
+
+    const reversed_a = try parseJsonValue(ctx_a, "{\"b\":3,\"a\":4}");
+    const reversed_object_a = reversed_a.toPtr(object.JSObject);
+    defer reversed_object_a.destroy(allocator);
+    try std.testing.expectEqual(@as(i32, 4), reversed_object_a.getProperty(ctx_a.hidden_class_pool.?, atom_a_a).?.getInt());
+    try std.testing.expectEqual(@as(i32, 3), reversed_object_a.getProperty(ctx_a.hidden_class_pool.?, atom_b_a).?.getInt());
 }
 
 test "JSON.parse unicode escapes combine surrogate pairs and reject lone surrogates" {

@@ -2234,3 +2234,114 @@ test "comptime string concatenation frees with the evaluator allocator" {
     defer r.deinit(allocator);
     try std.testing.expectEqualStrings("foobar", r.string);
 }
+
+test "comptime behavior matrix preserves exact values operators builtins and capabilities" {
+    const allocator = std.testing.allocator;
+    const Matrix = struct {
+        fn expectLiteral(source: []const u8, expected: []const u8) !void {
+            var evaluator = ComptimeEvaluator.init(std.testing.allocator, source, 1, 1);
+            const value = try evaluator.evaluate();
+            defer value.deinit(std.testing.allocator);
+            const literal = try emitLiteral(std.testing.allocator, value);
+            defer std.testing.allocator.free(literal);
+            try std.testing.expectEqualStrings(expected, literal);
+        }
+    };
+    const cases = [_]struct {
+        source: []const u8,
+        expected: []const u8,
+    }{
+        .{ .source = "null", .expected = "null" },
+        .{ .source = "undefined", .expected = "undefined" },
+        .{ .source = "NaN", .expected = "NaN" },
+        .{ .source = "Infinity", .expected = "Infinity" },
+        .{ .source = "-Infinity", .expected = "-Infinity" },
+        .{ .source = "-0", .expected = "0" },
+        .{ .source = "\"line\\n\\\"quote\\\"\"", .expected = "\"line\\n\\\"quote\\\"\"" },
+        .{ .source = "[1, true, null]", .expected = "[1,true,null]" },
+        .{ .source = "{ plain: 1, \"hyphen-key\": \"x\" }", .expected = "({plain:1,\"hyphen-key\":\"x\"})" },
+        .{ .source = "1 + 2 * 3", .expected = "7" },
+        .{ .source = "\"5\" == 5", .expected = "true" },
+        .{ .source = "\"5\" === 5", .expected = "false" },
+        .{ .source = "null == undefined", .expected = "true" },
+        .{ .source = "1 / 0", .expected = "Infinity" },
+        .{ .source = "parseInt(\"ff\", 16)", .expected = "255" },
+        .{ .source = "parseFloat(\" 3.5 \")", .expected = "3.5" },
+        .{ .source = "JSON.parse(\"{\\\"ok\\\":true}\")", .expected = "({ok:true})" },
+        .{ .source = "hash(\"test\")", .expected = "\"afd071e5\"" },
+    };
+    for (cases) |case| try Matrix.expectLiteral(case.source, case.expected);
+
+    var env = std.StringHashMap([]const u8).init(allocator);
+    defer env.deinit();
+    const env_value = try allocator.dupe(u8, "https://example.test");
+    var env_value_owned = true;
+    errdefer if (env_value_owned) allocator.free(env_value);
+    try env.put("API_URL", env_value);
+    var env_evaluator = ComptimeEvaluator.init(allocator, "Env.API_URL", 1, 1);
+    env_evaluator.env = &env;
+    const env_result = try env_evaluator.evaluate();
+    env_value_owned = false;
+    defer env_result.deinit(allocator);
+    try std.testing.expectEqualStrings(env_value, env_result.string);
+
+    const metadata_cases = [_]struct {
+        source: []const u8,
+        field: enum { build_time, git_commit, version },
+        value: []const u8,
+    }{
+        .{ .source = "__BUILD_TIME__", .field = .build_time, .value = "2026-08-05T12:00:00Z" },
+        .{ .source = "__GIT_COMMIT__", .field = .git_commit, .value = "0123456789abcdef" },
+        .{ .source = "__VERSION__", .field = .version, .value = "0.18.0" },
+    };
+    for (metadata_cases) |case| {
+        const owned_value = try allocator.dupe(u8, case.value);
+        var owned_value_owned = true;
+        errdefer if (owned_value_owned) allocator.free(owned_value);
+        var evaluator = ComptimeEvaluator.init(allocator, case.source, 1, 1);
+        switch (case.field) {
+            .build_time => evaluator.build_time = owned_value,
+            .git_commit => evaluator.git_commit = owned_value,
+            .version => evaluator.version = owned_value,
+        }
+        const result = try evaluator.evaluate();
+        owned_value_owned = false;
+        defer result.deinit(allocator);
+        try std.testing.expectEqualStrings(case.value, result.string);
+    }
+}
+
+test "comptime behavior matrix rejects nondeterminism and malformed expressions" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        source: []const u8,
+        expected: ComptimeError,
+    }{
+        .{ .source = "Math.random()", .expected = ComptimeError.CallNotAllowed },
+        .{ .source = "Date.now()", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "arbitrary()", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "\"unterminated", .expected = ComptimeError.UnclosedString },
+        .{ .source = "(1 + 2", .expected = ComptimeError.UnclosedParen },
+        .{ .source = "[1, 2", .expected = ComptimeError.UnclosedBracket },
+        .{ .source = "{a: 1", .expected = ComptimeError.UnclosedBrace },
+    };
+    for (cases) |case| {
+        var evaluator = ComptimeEvaluator.init(allocator, case.source, 11, 7);
+        try std.testing.expectError(case.expected, evaluator.evaluate());
+    }
+
+    const long_expression = try allocator.alloc(u8, 8193);
+    defer allocator.free(long_expression);
+    @memset(long_expression, '1');
+    var long_evaluator = ComptimeEvaluator.init(allocator, long_expression, 1, 1);
+    try std.testing.expectError(ComptimeError.ExpressionTooLong, long_evaluator.evaluate());
+
+    const nesting = 65;
+    const deep_expression = try allocator.alloc(u8, nesting * 2 + 1);
+    defer allocator.free(deep_expression);
+    @memset(deep_expression[0..nesting], '(');
+    deep_expression[nesting] = '1';
+    @memset(deep_expression[nesting + 1 ..], ')');
+    var deep_evaluator = ComptimeEvaluator.init(allocator, deep_expression, 1, 1);
+    try std.testing.expectError(ComptimeError.DepthExceeded, deep_evaluator.evaluate());
+}

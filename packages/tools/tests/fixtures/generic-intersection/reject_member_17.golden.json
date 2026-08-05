@@ -1,0 +1,1 @@
+{"success":false,"diagnostics":[{"code":"ZTS203","severity":"error","message":"argument type does not match parameter type: expected ?, got ?","file":"packages/tools/tests/fixtures/generic-intersection/reject_member_17.ts","line":25,"column":29,"suggestion":null}]}

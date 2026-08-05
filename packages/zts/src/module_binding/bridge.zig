@@ -121,7 +121,7 @@ pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
 /// only from the comptime gate below lets `analyzer_only` builds (wasm) drop
 /// the whole family - and with it the interpreter value layer, SQLite, and
 /// libc - from the module graph. Native builds reference `sdk_bridge` and
-/// emit every symbol exactly as before.
+/// emit every declared bridge symbol.
 pub const sdk_bridge = struct {
     pub export fn zttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
         if (capability_tag > @intFromEnum(ModuleCapability.websocket)) return false;
@@ -130,13 +130,11 @@ pub const sdk_bridge = struct {
     }
 
     pub export fn zttpSdkNowMs(handle: *ModuleHandle, out_ms: *i64) bool {
-        _ = handle;
-        out_ms.* = nowMsForActiveModule() catch return false;
+        out_ms.* = nowMsForActiveModule(handleToContext(handle)) catch return false;
         return true;
     }
 
     pub export fn zttpSdkFillRandom(handle: *ModuleHandle, buf_ptr: [*]u8, len: usize) bool {
-        _ = handle;
         if (len == 0) return true;
         // The callers (zttp:id) pass `undefined`-initialized stack buffers and
         // emit them as security tokens. If the fill fails (missing capability or
@@ -144,7 +142,7 @@ pub const sdk_bridge = struct {
         // memory leaks as a "random" value, AND return false so the caller
         // surfaces a clean error rather than emitting an all-zero, predictable
         // token. Fails closed without a process panic.
-        fillRandomForActiveModule(buf_ptr[0..len]) catch {
+        fillRandomForActiveModule(handleToContext(handle), buf_ptr[0..len]) catch {
             @memset(buf_ptr[0..len], 0);
             return false;
         };
@@ -152,9 +150,8 @@ pub const sdk_bridge = struct {
     }
 
     pub export fn zttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, len: usize) bool {
-        _ = handle;
         if (len == 0) return true;
-        writeStderrForActiveModule(buf_ptr[0..len]) catch return false;
+        writeStderrForActiveModule(handleToContext(handle), buf_ptr[0..len]) catch return false;
         return true;
     }
 
@@ -260,23 +257,25 @@ pub const sdk_bridge = struct {
         return &ctx.allocator;
     }
 
-    pub export fn zttpSdkSha256(
+    pub export fn zttpSdkSha256WithHandle(
+        handle: *ModuleHandle,
         data_ptr: [*]const u8,
         data_len: usize,
         out: [*]u8,
     ) bool {
-        sha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len]) catch return false;
+        sha256ForActiveModule(handleToContext(handle), @ptrCast(out[0..32]), data_ptr[0..data_len]) catch return false;
         return true;
     }
 
-    pub export fn zttpSdkHmacSha256(
+    pub export fn zttpSdkHmacSha256WithHandle(
+        handle: *ModuleHandle,
         data_ptr: [*]const u8,
         data_len: usize,
         key_ptr: [*]const u8,
         key_len: usize,
         out: [*]u8,
     ) bool {
-        hmacSha256ForActiveModule(@ptrCast(out[0..32]), data_ptr[0..data_len], key_ptr[0..key_len]) catch return false;
+        hmacSha256ForActiveModule(handleToContext(handle), @ptrCast(out[0..32]), data_ptr[0..data_len], key_ptr[0..key_len]) catch return false;
         return true;
     }
 
@@ -309,7 +308,7 @@ pub const sdk_bridge = struct {
     };
 
     pub export fn zttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque {
-        if (!activeModuleOwnsStateSlot(slot)) return null;
+        if (!activeModuleOwnsStateSlot(handle, slot)) return null;
         const ctx = handleToContext(handle);
         return getSdkModuleStatePtr(ctx, slot);
     }
@@ -320,7 +319,7 @@ pub const sdk_bridge = struct {
         user_ptr: *anyopaque,
         sdk_deinit: *const fn (*anyopaque) callconv(.c) void,
     ) bool {
-        if (!activeModuleOwnsStateSlot(slot)) return false;
+        if (!activeModuleOwnsStateSlot(handle, slot)) return false;
         const ctx = handleToContext(handle);
         installSdkModuleState(ctx, slot, user_ptr, sdk_deinit) catch return false;
         return true;

@@ -340,10 +340,9 @@ test "B2: per-request timeout aborts a slow handler and returns RequestTimeout" 
     try std.testing.expectEqualStrings("alive", resp.body);
 }
 
-test "B3: Server.shutdown() stops the server and drains in-flight requests" {
-    // Verifies that Server.shutdown(grace_ms) is callable and leaves the server
-    // in a stopped state. We call it without an active accept loop to test the
-    // structural contract only (running becomes false).
+test "B3: Server.shutdown() is safe before start" {
+    // This structural edge case complements the real SIGTERM socket test in
+    // server.zig, which owns the accept loop and in-flight request machinery.
     const allocator = std.testing.allocator;
     var srv = try Server.init(allocator, .{
         .handler = .{ .inline_code = "function handler(req) { return Response.text('ok'); }" },

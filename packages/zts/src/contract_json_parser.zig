@@ -2957,3 +2957,110 @@ test "parseFromJson surfaces InvalidJson on adversarial deep nesting" {
 
     try std.testing.expectError(error.InvalidJson, parseFromJson(allocator, buf));
 }
+
+test "parseFromJson compatibility matrix preserves unknown fields and enum fallbacks" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "futureRoot": {"nested": [1, {"enabled": true}]},
+        \\  "version": 23,
+        \\  "handler": {"future": [false], "path": "handler\n.ts", "line": 7, "column": 3},
+        \\  "routes": [{
+        \\    "future": {"deep": [null]},
+        \\    "pattern": "/v1\titems",
+        \\    "type": "future-match",
+        \\    "field": "future-field",
+        \\    "status": 201,
+        \\    "contentType": "application/problem+json",
+        \\    "aot": true
+        \\  }],
+        \\  "api": {"routes": [{
+        \\    "future": {"nested": [1, 2]},
+        \\    "method": "POST",
+        \\    "path": "/v1/items",
+        \\    "queryParams": [{
+        \\      "future": {"value": true},
+        \\      "name": "page",
+        \\      "location": "cookie",
+        \\      "required": true,
+        \\      "schema": {"type": "integer"}
+        \\    }]
+        \\  }]}
+        \\}
+    ;
+
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 23), contract.version);
+    try std.testing.expectEqualStrings("handler\\n.ts", contract.handler.path);
+    try std.testing.expectEqual(@as(u32, 7), contract.handler.line);
+    try std.testing.expectEqual(@as(usize, 1), contract.routes.items.len);
+    try std.testing.expectEqualStrings("/v1\\titems", contract.routes.items[0].pattern);
+    try std.testing.expectEqualStrings("unknown", contract.routes.items[0].route_type);
+    try std.testing.expectEqualStrings("path", contract.routes.items[0].field);
+    try std.testing.expectEqualStrings("application/json", contract.routes.items[0].content_type);
+    try std.testing.expect(contract.routes.items[0].aot);
+    try std.testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
+    try std.testing.expectEqualStrings("POST", contract.api.routes.items[0].method);
+    try std.testing.expectEqual(@as(usize, 1), contract.api.routes.items[0].query_params.items.len);
+    try std.testing.expectEqualStrings("path", contract.api.routes.items[0].query_params.items[0].location);
+    try std.testing.expectEqualStrings("{\"type\": \"integer\"}", contract.api.routes.items[0].query_params.items[0].schema_json);
+}
+
+test "parseFromJson compatibility matrix preserves legacy API response backfill" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "api": {"routes": [{
+        \\    "method": "GET",
+        \\    "path": "/legacy",
+        \\    "responseStatus": 204,
+        \\    "responseContentType": "text/plain",
+        \\    "responseSchemaRef": "LegacyResponse"
+        \\  }]}
+        \\}
+    ;
+
+    var contract = try parseFromJson(allocator, json);
+    defer contract.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
+    const route = contract.api.routes.items[0];
+    try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
+    try std.testing.expectEqual(@as(?u16, 204), route.responses.items[0].status);
+    try std.testing.expectEqualStrings("text/plain", route.responses.items[0].content_type.?);
+    try std.testing.expectEqualStrings("LegacyResponse", route.responses.items[0].schema.schemaRef().?);
+}
+
+test "parseFromJson compatibility matrix preserves duplicate trailing and overflow behavior" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct {
+        json: []const u8,
+        version: u32,
+    }{
+        .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 17 },
+    };
+
+    for (cases) |case| {
+        var contract = try parseFromJson(allocator, case.json);
+        defer contract.deinit(allocator);
+        try std.testing.expectEqual(case.version, contract.version);
+    }
+}
+
+test "parseFromJson malformed structure matrix fails closed" {
+    const allocator = std.testing.allocator;
+    const cases = [_][]const u8{
+        "[]",
+        "{\"modules\":[1]}",
+        "{\"routes\":[1]}",
+        "{\"api\":{\"routes\":[1]}}",
+        "{\"handler\":{\"path\":\"unterminated",
+    };
+
+    for (cases) |json| {
+        try std.testing.expectError(error.InvalidJson, parseFromJson(allocator, json));
+    }
+}

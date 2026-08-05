@@ -1,8 +1,10 @@
 #!/bin/bash
 # E2E test for handler panic isolation (B1).
 # Verifies that a panicking handler returns HTTP 500 and the server survives to
-# serve subsequent requests. Uses the internal --_debug-panic-path test hook to
-# trigger a real panic on a specific request path inside callHandlerGuarded.
+# serve subsequent requests. It also verifies that a nested workflow panic
+# becomes a 599 response while the outer interpreter continues and both handler
+# pools remain usable. Uses the internal --_debug-panic-path test hook to trigger
+# a real panic on a specific request path inside callHandlerGuarded.
 #
 # Usage: bash scripts/test-panic-isolation.sh [--skip-build] [--zttp PATH]
 
@@ -38,15 +40,30 @@ SERVER_LOG="$TMP_DIR/server.log"
 SRV_PID=""
 
 cleanup() {
-    if [ -n "$SRV_PID" ]; then
-        kill "$SRV_PID" 2>/dev/null || true
-        sleep 0.2
-        kill -9 "$SRV_PID" 2>/dev/null || true
-        wait "$SRV_PID" 2>/dev/null || true
-    fi
+    stop_server
     rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
+
+stop_server() {
+    [ -n "$SRV_PID" ] || return
+    kill "$SRV_PID" 2>/dev/null || true
+    sleep 0.2
+    kill -9 "$SRV_PID" 2>/dev/null || true
+    wait "$SRV_PID" 2>/dev/null || true
+    SRV_PID=""
+}
+
+wait_for_server() {
+    local port="$1"
+    for _ in $(seq 1 25); do
+        if /usr/bin/curl -sf "http://127.0.0.1:$port/_health" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
 
 step() { printf '\n[panic-isolation] %s\n' "$*"; }
 fail() {
@@ -96,15 +113,7 @@ step "start server on :$PORT with panic injection path /crash"
 SRV_PID=$!
 
 # Wait up to 5s for the server to accept connections.
-ready=0
-for i in $(seq 1 25); do
-    if /usr/bin/curl -sf "http://127.0.0.1:$PORT/_health" >/dev/null 2>&1; then
-        ready=1
-        break
-    fi
-    sleep 0.2
-done
-[ "$ready" = "1" ] || fail "server did not become ready on :$PORT within 5s"
+wait_for_server "$PORT" || fail "server did not become ready on :$PORT within 5s"
 
 step "send panicking request GET /crash - expect HTTP 500"
 status=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" \
@@ -119,5 +128,39 @@ ok_status=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" \
     --max-time 5 "http://127.0.0.1:$PORT/ok")
 [ "$ok_status" = "200" ] || fail "expected 200 on recovery request, got $ok_status"
 
-step "PASS: handler panic isolated, worker survived and recovered"
+stop_server
+
+PORT=$((PORT + 1))
+step "start workflow system on :$PORT with nested panic injection path /boom"
+"$ZTTP" serve "$REPO_ROOT/examples/workflow/orchestrator.ts" -p "$PORT" \
+    --system "$REPO_ROOT/examples/workflow/system.json" \
+    --pool 1 \
+    --_debug-panic-path /boom >"$SERVER_LOG" 2>&1 &
+SRV_PID=$!
+
+wait_for_server "$PORT" || fail "workflow server did not become ready on :$PORT within 5s"
+
+step "verify nested child panic returns 599 and outer interpreter continues"
+panic_body=$(/usr/bin/curl -sf --max-time 5 "http://127.0.0.1:$PORT/panic") || \
+    fail "nested panic request did not return HTTP 200"
+case "$panic_body" in
+    *'"orchestrated":true'*'"subStatus":599'*'"error":"WorkflowDispatchFailed"'*'"details":"HandlerPanicked"'*) ;;
+    *) fail "nested panic response did not prove outer continuation: $panic_body" ;;
+esac
+
+step "verify nested panic reached the isolated handler boundary"
+grep -Fq 'handler panicked (isolated): zttp_debug_panic_path' "$SERVER_LOG" || \
+    fail "nested panic did not reach the isolated handler boundary"
+
+step "verify later outer request and rebuilt child slot both succeed"
+recovered_body=$(/usr/bin/curl -sf --max-time 5 "http://127.0.0.1:$PORT/ok") || \
+    fail "workflow recovery request did not return HTTP 200"
+case "$recovered_body" in
+    *'"orchestrated":true'*'"subStatus":200'*'"from":"greet"'*) ;;
+    *) fail "workflow recovery response was incomplete: $recovered_body" ;;
+esac
+
+kill -0 "$SRV_PID" 2>/dev/null || fail "workflow server exited after nested handler panic"
+
+step "PASS: top-level and nested handler panics were isolated and recovered"
 exit 0

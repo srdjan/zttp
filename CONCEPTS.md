@@ -37,6 +37,17 @@ A position where a value leaves the program — a response body, a log, or an ou
 ### Capability
 A kind of authority a function reaches for: reading the clock, drawing randomness, reading configuration, writing to storage, talking to the network. Capabilities are declared per module export and enforced where the call happens, so authority is visible in the contract rather than discovered at runtime.
 
+### Execution Context
+The isolated engine state that owns a JavaScript stack, globals, module state, runtime policy, the authorization for its current native-module call, and any structured-I/O collection scope active for that execution.
+
+### Active module scope
+The module identity and declared Capabilities authorized for the native-module call currently executing inside one Execution Context.
+
+Each Execution Context owns at most one active scope at a time. Nested calls replace and restore that scope locally; if panic recovery skips restoration, the failed Context is quarantined and revokes the scope before teardown callbacks run.
+
+### Module handle
+An opaque token given to a native module that identifies the Execution Context whose authorization and module-state bridge operations must use.
+
 ### Replay boundary
 A point where a value is recorded on the first run and reproduced on later ones. Values crossing it stop varying between runs, so the marks that mean "differs per run" are cleared there — but marks about disclosure are not, because a secret that was recorded is still a secret when it is replayed.
 
@@ -92,6 +103,8 @@ A Stand-in can show that the machinery runs correctly and can never measure an a
 A build step that fails when a repo invariant is violated, as distinct from a test that checks a behavior. A Gate is usually bidirectional: it fails both when something is missing from an allowlist and when an allowlist row no longer matches anything, so the list cannot rot in either direction.
 
 A Gate must assert a floor on its own input before any count it reports means anything. A Gate whose corpus is empty, whose filter matches nothing, or whose build product has no consumer reports success while checking nothing, and is then cited afterwards as evidence. Deleting a Gate's input and confirming it turns red is the check that separates the two.
+
+When a Gate classifies a closed set, it must also reject inputs outside that set. Mapping an unknown member into a fallback bucket lets the declared buckets stay green while the topology the Gate reports has already changed.
 
 The floor is necessary and not sufficient. A Gate holding a full input can still assert something weaker than its own name claims, so that runs in which the named behavior never happened satisfy it too. An assertion must name the value expected rather than the values excluded, since a difference from two wrong answers is satisfied by a third. A Gate is also only as good as the fixture beneath it: when two outcomes it is meant to separate write identical observable state, no assertion over that state can tell them apart.
 

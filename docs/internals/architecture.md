@@ -42,6 +42,19 @@ engine includes a garbage collector, but the default serving configuration
 uses the hybrid arena allocator, which disables collection on the serving path
 (`Context.setHybridAllocator` in `packages/zts/src/context.zig`).
 
+## Execution State Ownership
+
+Each `Context` owns the authorization scope for its current native-module call
+and the structured-I/O collector used by `parallel()` and `race()`. Nested calls
+replace these borrowed scopes and restore their parent on return, so alternating
+contexts on one worker thread cannot share ambient authority or collection
+state. A panicked runtime is quarantined, and `Context.deinit` clears both
+scopes before module-state destructors run.
+
+JSON object-shape entries contain pool-local hidden-class indexes. Their cache
+therefore belongs to `HiddenClassPool` and has the same lifetime as the indexes
+it stores, rather than the lifetime of a worker thread.
+
 Actor-style handler communication is opt-in. With `--actor-queue`, the server
 creates a process-owned `ActorQueue` and passes it through `RuntimeConfig` to
 each pooled runtime. `zttp:queue` serializes payloads to queue-owned JSON,
