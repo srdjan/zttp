@@ -756,6 +756,7 @@ pub const CodeGen = struct {
             .and_op => return self.emitShortCircuitAnd(binary),
             .or_op => return self.emitShortCircuitOr(binary),
             .nullish => return self.emitNullishCoalescing(binary),
+            .loose_eq, .loose_neq => return error.UnsupportedOperator,
             else => {},
         }
 

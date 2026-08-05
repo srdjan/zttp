@@ -27,6 +27,10 @@ pub const Tokenizer = struct {
     /// Whether we just saw a token that could precede a regex
     can_be_regex: bool,
 
+    /// Numeric separators are part of the isolated comptime expression
+    /// contract, but remain disabled for the normal ZigTS parser profile.
+    numeric_separators: bool,
+
     /// Template literal depth
     template_depth: u8,
 
@@ -41,6 +45,10 @@ pub const Tokenizer = struct {
     has_current: bool,
 
     pub fn init(source: []const u8) Tokenizer {
+        return initWithNumericSeparators(source, false);
+    }
+
+    pub fn initWithNumericSeparators(source: []const u8, enabled: bool) Tokenizer {
         return .{
             .source = source,
             .pos = 0,
@@ -49,6 +57,7 @@ pub const Tokenizer = struct {
             .jsx_mode = false,
             .jsx_depth = 0,
             .can_be_regex = true,
+            .numeric_separators = enabled,
             .template_depth = 0,
             .subst_brace_depths = [_]u8{0} ** 16,
             .current = undefined,
@@ -434,27 +443,32 @@ pub const Tokenizer = struct {
             const next_char = self.source[self.pos];
             if (next_char == 'x' or next_char == 'X') {
                 self.pos += 1;
-                while (self.pos < self.source.len and isHexDigit(self.source[self.pos])) self.pos += 1;
+                while (self.pos < self.source.len and (isHexDigit(self.source[self.pos]) or
+                    (self.numeric_separators and self.source[self.pos] == '_'))) self.pos += 1;
                 return self.tokN(start, col, line, .number);
             }
             if (next_char == 'b' or next_char == 'B') {
                 self.pos += 1;
-                while (self.pos < self.source.len and (self.source[self.pos] == '0' or self.source[self.pos] == '1')) self.pos += 1;
+                while (self.pos < self.source.len and (self.source[self.pos] == '0' or self.source[self.pos] == '1' or
+                    (self.numeric_separators and self.source[self.pos] == '_'))) self.pos += 1;
                 return self.tokN(start, col, line, .number);
             }
             if (next_char == 'o' or next_char == 'O') {
                 self.pos += 1;
-                while (self.pos < self.source.len and self.source[self.pos] >= '0' and self.source[self.pos] <= '7') self.pos += 1;
+                while (self.pos < self.source.len and ((self.source[self.pos] >= '0' and self.source[self.pos] <= '7') or
+                    (self.numeric_separators and self.source[self.pos] == '_'))) self.pos += 1;
                 return self.tokN(start, col, line, .number);
             }
         }
 
-        while (self.pos < self.source.len and isDigit(self.source[self.pos])) self.pos += 1;
+        while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or
+            (self.numeric_separators and self.source[self.pos] == '_'))) self.pos += 1;
 
         if (self.pos < self.source.len and self.source[self.pos] == '.') {
             if (self.pos + 1 < self.source.len and isDigit(self.source[self.pos + 1])) {
                 self.pos += 1;
-                while (self.pos < self.source.len and isDigit(self.source[self.pos])) self.pos += 1;
+                while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or
+                    (self.numeric_separators and self.source[self.pos] == '_'))) self.pos += 1;
             }
         }
 

@@ -38,6 +38,10 @@ const Binding = scope_mod.Binding;
 
 const ErrorList = error_mod.ErrorList;
 
+pub const ExpressionProfile = enum {
+    comptime_expression,
+};
+
 /// Operator precedence levels (higher = binds tighter)
 const Precedence = enum(u8) {
     none = 0,
@@ -85,6 +89,7 @@ pub const Parser = struct {
     // Context flags
     in_loop: bool,
     in_function: bool,
+    expression_profile: ?ExpressionProfile,
 
     // Guard composition: binding slot for `guard` imported from zttp:compose
     guard_binding_slot: ?u16 = null,
@@ -121,12 +126,23 @@ pub const Parser = struct {
     const temp_list_stack_bytes: usize = if (@import("builtin").target.cpu.arch.isWasm()) 32 else 256;
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
+        return initWithProfile(allocator, source, null);
+    }
+
+    pub fn initExpression(allocator: std.mem.Allocator, source: []const u8, profile: ExpressionProfile) !Parser {
+        return initWithProfile(allocator, source, profile);
+    }
+
+    fn initWithProfile(allocator: std.mem.Allocator, source: []const u8, profile: ?ExpressionProfile) !Parser {
         var nodes = IRStore.initCapacity(allocator, source.len);
         errdefer nodes.deinit();
 
         var parser = Parser{
             .allocator = allocator,
-            .tokenizer = Tokenizer.init(source),
+            .tokenizer = if (profile != null)
+                Tokenizer.initWithNumericSeparators(source, true)
+            else
+                Tokenizer.init(source),
             .source = source,
             .nodes = nodes,
             .constants = ConstantPool.init(allocator),
@@ -137,6 +153,7 @@ pub const Parser = struct {
             .atoms = null,
             .in_loop = false,
             .in_function = false,
+            .expression_profile = profile,
         };
         // Prime the parser with first token
         parser.advance();
@@ -198,12 +215,34 @@ pub const Parser = struct {
         });
     }
 
+    /// Parse exactly one expression with the profile selected by
+    /// `initExpression`, using the same Pratt parser as full programs.
+    pub fn parseExpressionOnly(self: *Parser) anyerror!NodeIndex {
+        if (self.expression_profile == null) return error.InvalidParserMode;
+        if (self.check(.eof)) {
+            self.errors.addErrorAt(.unexpected_eof, self.current, "expected expression");
+            return error.UnexpectedToken;
+        }
+
+        const root = try self.parseExpression(.none);
+        if (!self.check(.eof)) {
+            self.errors.addExpectedError(self.current, "end of expression");
+            return error.UnexpectedToken;
+        }
+        if (self.errors.hasErrors()) return error.ParseError;
+        return root;
+    }
+
+    fn recursionLimit(self: *const Parser) u32 {
+        return if (self.expression_profile != null) 64 else max_recursion_depth;
+    }
+
     // ============ Statement Parsing ============
 
     fn parseStatement(self: *Parser) anyerror!NodeIndex {
         self.recursion_depth += 1;
         defer self.recursion_depth -= 1;
-        if (self.recursion_depth > max_recursion_depth) {
+        if (self.recursion_depth > self.recursionLimit()) {
             self.errors.addErrorAt(.nesting_too_deep, self.current, "statements nest too deeply; simplify or split (nesting limit is 512)");
             return error.ParseError;
         }
@@ -1635,7 +1674,7 @@ pub const Parser = struct {
     fn parseExpression(self: *Parser, min_prec: Precedence) anyerror!NodeIndex {
         self.recursion_depth += 1;
         defer self.recursion_depth -= 1;
-        if (self.recursion_depth > max_recursion_depth) {
+        if (self.recursion_depth > self.recursionLimit()) {
             self.errors.addErrorAt(.nesting_too_deep, self.current, "expression nests too deeply; simplify or split it (nesting limit is 512)");
             return error.ParseError;
         }
@@ -1665,6 +1704,15 @@ pub const Parser = struct {
             .true_lit => self.parseBoolLiteral(true),
             .false_lit => self.parseBoolLiteral(false),
             .null_lit => {
+                if (self.expression_profile != null) {
+                    const loc = self.current.location();
+                    self.advance();
+                    return try self.nodes.add(.{
+                        .tag = .lit_null,
+                        .loc = loc,
+                        .data = .{ .none = {} },
+                    });
+                }
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'null' is not supported; use 'undefined' for absent values instead");
                 return error.ParseError;
             },
@@ -1755,10 +1803,20 @@ pub const Parser = struct {
         return switch (op_tok.type) {
             // Loose equality is not supported - use strict equality
             .eq => {
+                if (self.expression_profile != null) {
+                    self.advance();
+                    const right = try self.parseExpression(prec);
+                    return try self.nodes.add(Node.binaryOp(loc, .loose_eq, left, right));
+                }
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'==' is not supported; use '===' for strict equality instead");
                 return error.ParseError;
             },
             .ne => {
+                if (self.expression_profile != null) {
+                    self.advance();
+                    const right = try self.parseExpression(prec);
+                    return try self.nodes.add(Node.binaryOp(loc, .loose_neq, left, right));
+                }
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'!=' is not supported; use '!==' for strict inequality instead");
                 return error.ParseError;
             },
@@ -1789,7 +1847,7 @@ pub const Parser = struct {
             => {
                 // In JavaScript, a unary operator on the left of ** is a syntax
                 // error (e.g. -3**2 is ambiguous). Require parentheses.
-                if (op_tok.type == .star_star and self.nodes.getTag(left) == .unary_op) {
+                if (self.expression_profile == null and op_tok.type == .star_star and self.nodes.getTag(left) == .unary_op) {
                     self.errors.addErrorAt(.unsupported_feature, op_tok, "unary operator before '**' requires parentheses: (-3)**2 or -(3**2)");
                     return error.ParseError;
                 }
@@ -2130,6 +2188,10 @@ pub const Parser = struct {
         const text = self.current.text(self.source);
         self.advance();
 
+        if (self.expression_profile != null) {
+            return self.parseComptimeNumber(loc, text);
+        }
+
         // Try to parse as integer first
         if (std.fmt.parseInt(i32, text, 0)) |int_val| {
             return try self.nodes.add(Node.litInt(loc, int_val));
@@ -2145,14 +2207,66 @@ pub const Parser = struct {
         });
     }
 
+    fn parseComptimeNumber(self: *Parser, loc: SourceLocation, text: []const u8) anyerror!NodeIndex {
+        var clean: std.ArrayList(u8) = .empty;
+        defer clean.deinit(self.allocator);
+        for (text) |byte| {
+            if (byte != '_') try clean.append(self.allocator, byte);
+        }
+
+        const value: f64 = if (clean.items.len >= 2 and clean.items[0] == '0') blk: {
+            const radix: ?u8 = switch (clean.items[1]) {
+                'x', 'X' => 16,
+                'o', 'O' => 8,
+                'b', 'B' => 2,
+                else => null,
+            };
+            if (radix) |base| {
+                const integer = std.fmt.parseInt(u64, clean.items[2..], base) catch {
+                    self.errors.addError(.invalid_number, loc, "invalid number literal");
+                    return error.InvalidNumber;
+                };
+                break :blk @floatFromInt(integer);
+            }
+            break :blk std.fmt.parseFloat(f64, clean.items) catch {
+                self.errors.addError(.invalid_number, loc, "invalid number literal");
+                return error.InvalidNumber;
+            };
+        } else std.fmt.parseFloat(f64, clean.items) catch {
+            self.errors.addError(.invalid_number, loc, "invalid number literal");
+            return error.InvalidNumber;
+        };
+
+        const float_idx = try self.constants.addFloat(value);
+        return try self.nodes.add(.{
+            .tag = .lit_float,
+            .loc = loc,
+            .data = .{ .float_idx = float_idx },
+        });
+    }
+
     fn parseString(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         const text = self.current.text(self.source);
         self.advance();
 
+        if (self.expression_profile != null and (text.len < 2 or text[text.len - 1] != text[0])) {
+            self.errors.addError(.unterminated_string, loc, "unterminated string literal");
+            return error.UnexpectedToken;
+        }
+
         // Strip quotes
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-        const str_idx = try self.addUnescapedString(content);
+        const str_idx = if (self.expression_profile != null)
+            self.addUnescapedString(content) catch |err| switch (err) {
+                error.InvalidEscapeSequence => {
+                    self.errors.addError(.invalid_escape_sequence, loc, "invalid escape sequence");
+                    return error.UnexpectedToken;
+                },
+                else => return err,
+            }
+        else
+            try self.addUnescapedString(content);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -2175,8 +2289,12 @@ pub const Parser = struct {
             // Simple template with no interpolation
             const text = self.current.text(self.source);
             self.advance();
+            if (self.expression_profile != null and (text.len < 2 or text[text.len - 1] != '`')) {
+                self.errors.addError(.unterminated_template, loc, "unterminated template literal");
+                return error.UnexpectedToken;
+            }
             const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            const str_idx = try self.addUnescapedString(content);
+            const str_idx = try self.addUnescapedTemplateString(content);
             return try self.nodes.add(Node.litString(loc, str_idx));
         }
 
@@ -2188,7 +2306,7 @@ pub const Parser = struct {
         var text = self.current.text(self.source);
         self.advance();
         var content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-        var str_idx = try self.addUnescapedString(content);
+        var str_idx = try self.addUnescapedTemplateString(content);
         var str_node = try self.nodes.add(.{
             .tag = .template_part_string,
             .loc = loc,
@@ -2210,7 +2328,7 @@ pub const Parser = struct {
                 text = self.current.text(self.source);
                 self.advance();
                 content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-                str_idx = try self.addUnescapedString(content);
+                str_idx = try self.addUnescapedTemplateString(content);
                 str_node = try self.nodes.add(.{
                     .tag = .template_part_string,
                     .loc = loc,
@@ -2230,7 +2348,7 @@ pub const Parser = struct {
             text = self.current.text(self.source);
             self.advance();
             content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            str_idx = try self.addUnescapedString(content);
+            str_idx = try self.addUnescapedTemplateString(content);
             str_node = try self.nodes.add(.{
                 .tag = .template_part_string,
                 .loc = loc,
@@ -2487,7 +2605,10 @@ pub const Parser = struct {
                         self.advance();
                         const text = key.text(self.source);
                         const content = if (text.len >= 2) text[1 .. text.len - 1] else text;
-                        const key_idx = try self.addString(content);
+                        const key_idx = if (self.expression_profile != null)
+                            try self.addUnescapedString(content)
+                        else
+                            try self.addString(content);
                         key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
                     } else if (self.isKeyword(self.current.type)) {
                         // JavaScript allows reserved keywords as property names
@@ -3253,6 +3374,8 @@ pub const Parser = struct {
             .star_star, .star_star_assign => .pow,
             .eq_eq => .strict_eq,
             .ne_ne => .strict_neq,
+            .eq => .loose_eq,
+            .ne => .loose_neq,
             .lt => .lt,
             .le => .lte,
             .gt => .gt,
@@ -3658,9 +3781,62 @@ pub const Parser = struct {
     /// freshly allocated (i.e. the input contained backslashes), regardless of
     /// whether the string was new or a duplicate in the constant pool.
     fn addUnescapedString(self: *Parser, content: []const u8) !u16 {
-        const unescaped = try self.unescapeString(content);
+        const unescaped = if (self.expression_profile != null)
+            try self.unescapeComptimeString(content, false)
+        else
+            try self.unescapeString(content);
         defer unescaped.deinit(self.allocator);
         return self.addString(unescaped.bytes);
+    }
+
+    fn addUnescapedTemplateString(self: *Parser, content: []const u8) !u16 {
+        if (self.expression_profile == null) return self.addUnescapedString(content);
+        const unescaped = try self.unescapeComptimeString(content, true);
+        defer unescaped.deinit(self.allocator);
+        return self.addString(unescaped.bytes);
+    }
+
+    fn unescapeComptimeString(self: *Parser, input: []const u8, template: bool) !UnescapedString {
+        if (std.mem.indexOfScalar(u8, input, '\\') == null) return .{ .bytes = input };
+
+        var result = try self.allocator.alloc(u8, input.len);
+        errdefer self.allocator.free(result);
+        var out_pos: usize = 0;
+        var i: usize = 0;
+        while (i < input.len) {
+            if (input[i] != '\\') {
+                result[out_pos] = input[i];
+                out_pos += 1;
+                i += 1;
+                continue;
+            }
+            if (i + 1 >= input.len) return error.InvalidEscapeSequence;
+
+            const escaped = input[i + 1];
+            if (!template and escaped == 'x') {
+                if (i + 3 >= input.len) return error.InvalidEscapeSequence;
+                result[out_pos] = std.fmt.parseInt(u8, input[i + 2 .. i + 4], 16) catch
+                    return error.InvalidEscapeSequence;
+                out_pos += 1;
+                i += 4;
+                continue;
+            }
+
+            result[out_pos] = switch (escaped) {
+                'n' => '\n',
+                'r' => '\r',
+                't' => '\t',
+                '\\' => '\\',
+                '\'' => if (template) escaped else '\'',
+                '"' => if (template) escaped else '"',
+                '0' => if (template) escaped else 0,
+                '`', '$' => if (template) escaped else escaped,
+                else => escaped,
+            };
+            out_pos += 1;
+            i += 2;
+        }
+        return .{ .bytes = result[0..out_pos], .allocation = result };
     }
 
     /// Unescape a JavaScript string literal, converting escape sequences to actual characters.
@@ -4500,6 +4676,21 @@ test "unsupported: loose equality ==" {
     };
 
     try std.testing.expect(false);
+}
+
+test "comptime expression profile preserves null and loose equality in IR" {
+    const allocator = std.testing.allocator;
+
+    var parser = try Parser.initExpression(allocator, "null == undefined", .comptime_expression);
+    defer parser.deinit();
+
+    const root = try parser.parseExpressionOnly();
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const binary = view.getBinary(root).?;
+
+    try std.testing.expectEqual(BinaryOp.loose_eq, binary.op);
+    try std.testing.expectEqual(NodeTag.lit_null, view.getTag(binary.left).?);
+    try std.testing.expectEqual(NodeTag.lit_undefined, view.getTag(binary.right).?);
 }
 
 test "unsupported: prefix increment ++" {

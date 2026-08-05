@@ -80,9 +80,6 @@ pub const BinaryOp = enum(u8) {
     pow,
 
     // Comparison
-    // Loose `==`/`!=` are parse errors, so BinaryOp carries only the strict
-    // forms. The `eq`/`neq` *opcodes* remain: they are modeled in the
-    // semantics registry with an SMT-proved lowering.
     strict_eq,
     strict_neq,
     lt,
@@ -105,6 +102,14 @@ pub const BinaryOp = enum(u8) {
 
     // Other
     in_op,
+
+    // The normal ZigTS parser profile rejects loose equality. The comptime
+    // expression profile preserves it explicitly so downstream consumers can
+    // reject it unless they deliberately implement JavaScript coercion. Keep
+    // these at the end so adding the isolated profile does not renumber the
+    // established IR operators.
+    loose_eq,
+    loose_neq,
 };
 
 /// Unary operator types

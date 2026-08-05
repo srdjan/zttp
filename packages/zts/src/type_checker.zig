@@ -2184,6 +2184,9 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
 
         return switch (bin.op) {
+            // Loose equality belongs only to the comptime expression profile.
+            // Fail closed if such an IR node reaches normal type analysis.
+            .loose_eq, .loose_neq => null_type_idx,
             .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op => pool.idx_boolean,
             .and_op, .or_op => {
                 const lt = self.inferType(bin.left);

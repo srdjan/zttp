@@ -724,6 +724,11 @@ pub const BoolChecker = struct {
         const bin = self.ir_view.getBinary(node) orelse return .unknown;
 
         return switch (bin.op) {
+            // These are emitted only by the isolated comptime expression
+            // profile. Treat an unexpected reach as unknown instead of
+            // teaching the normal checker JavaScript coercion semantics.
+            .loose_eq, .loose_neq => .unknown,
+
             // Comparisons always produce boolean
             .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op => .boolean,
 
