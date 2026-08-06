@@ -233,6 +233,22 @@ pub const Parser = struct {
         return root;
     }
 
+    /// Parse one primary/unary/aggregate root and leave trailing input alone.
+    /// This is profile-only because it exists for the legacy JSON.parse
+    /// compatibility contract; full programs must continue to consume their
+    /// complete grammar.
+    pub fn parseExpressionPrefix(self: *Parser) anyerror!NodeIndex {
+        if (self.expression_profile == null) return error.InvalidParserMode;
+        if (self.check(.eof)) {
+            self.errors.addErrorAt(.unexpected_eof, self.current, "expected expression");
+            return error.UnexpectedToken;
+        }
+
+        const root = try self.parseExpression(.call);
+        if (self.errors.hasErrors()) return error.ParseError;
+        return root;
+    }
+
     fn recursionLimit(self: *const Parser) u32 {
         return if (self.expression_profile != null) 64 else max_recursion_depth;
     }
@@ -1864,6 +1880,10 @@ pub const Parser = struct {
             // When guard() calls are present, the entire chain is desugared
             // into a flat guard composition function at compile time.
             .pipe_gt => {
+                if (self.expression_profile != null) {
+                    self.errors.addErrorAt(.unexpected_token, op_tok, "'|>' is not supported in comptime expressions");
+                    return error.UnexpectedToken;
+                }
                 if (self.guard_binding_slot == null) {
                     // Fast path: no guard imports, zero-allocation fold
                     var result = left;
@@ -4691,6 +4711,69 @@ test "comptime expression profile preserves null and loose equality in IR" {
     try std.testing.expectEqual(BinaryOp.loose_eq, binary.op);
     try std.testing.expectEqual(NodeTag.lit_null, view.getTag(binary.left).?);
     try std.testing.expectEqual(NodeTag.lit_undefined, view.getTag(binary.right).?);
+}
+
+test "comptime expression profile parses one aggregate root prefix" {
+    const allocator = std.testing.allocator;
+    const source = "{ loose: [1, 2] } trailing";
+
+    var parser = try Parser.initExpression(allocator, source, .comptime_expression);
+    defer parser.deinit();
+
+    const root = try parser.parseExpressionPrefix();
+    try std.testing.expectEqual(NodeTag.object_literal, parser.nodes.getTag(root));
+    try std.testing.expectEqual(TokenType.identifier, parser.current.type);
+    try std.testing.expectEqualStrings("trailing", parser.current.text(source));
+}
+
+test "comptime expression profile rejects pipe before normal desugaring" {
+    const allocator = std.testing.allocator;
+
+    var expression_parser = try Parser.initExpression(allocator, "\"value\" |> hash", .comptime_expression);
+    defer expression_parser.deinit();
+    try std.testing.expectError(error.UnexpectedToken, expression_parser.parseExpressionOnly());
+    try std.testing.expectEqual(error_mod.ErrorKind.unexpected_token, expression_parser.getErrors()[0].kind);
+
+    var program_parser = try Parser.init(allocator, "const result = \"value\" |> hash;");
+    defer program_parser.deinit();
+    _ = try program_parser.parse();
+    try std.testing.expect(!program_parser.hasErrors());
+}
+
+test "comptime numeric separators remain isolated from normal parsing" {
+    const allocator = std.testing.allocator;
+
+    var expression_parser = try Parser.initExpression(allocator, "1_000", .comptime_expression);
+    defer expression_parser.deinit();
+    const root = try expression_parser.parseExpressionOnly();
+    const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
+    try std.testing.expectEqual(@as(f64, 1000), view.getFloat(view.getFloatIdx(root).?).?);
+
+    var program_parser = try Parser.init(allocator, "const value = 1_000;");
+    defer program_parser.deinit();
+    const program_root = try program_parser.parse();
+    const program_view = ir.IrView.fromIRStore(&program_parser.nodes, &program_parser.constants);
+    const block = program_view.getBlock(program_root).?;
+    try std.testing.expectEqual(@as(u16, 2), block.stmts_count);
+    const decl = program_view.getVarDecl(program_view.getListIndex(block.stmts_start, 0)).?;
+    try std.testing.expectEqual(@as(i32, 1), program_view.getIntValue(decl.init).?);
+}
+
+test "comptime unary before exponent preserves legacy profile only" {
+    const allocator = std.testing.allocator;
+
+    var expression_parser = try Parser.initExpression(allocator, "-3 ** 2", .comptime_expression);
+    defer expression_parser.deinit();
+    const root = try expression_parser.parseExpressionOnly();
+    const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
+    const binary = view.getBinary(root).?;
+    try std.testing.expectEqual(BinaryOp.pow, binary.op);
+    try std.testing.expectEqual(NodeTag.unary_op, view.getTag(binary.left).?);
+
+    var program_parser = try Parser.init(allocator, "const value = -3 ** 2;");
+    defer program_parser.deinit();
+    try std.testing.expectError(error.ParseError, program_parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, program_parser.getErrors()[0].kind);
 }
 
 test "unsupported: prefix increment ++" {

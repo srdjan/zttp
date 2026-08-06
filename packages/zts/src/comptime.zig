@@ -1,7 +1,7 @@
 //! Compile-Time Expression Evaluator
 //!
 //! Evaluates comptime(<expr>) expressions during TypeScript stripping.
-//! Uses a Pratt parser to handle operator precedence correctly.
+//! Evaluates the canonical parser IR through a closed, deterministic allowlist.
 //!
 //! Supported:
 //! - Literals: number, string, boolean, null, undefined, NaN, Infinity
@@ -19,6 +19,8 @@
 //! - new, this, eval, assignments, loops
 
 const std = @import("std");
+const AtomTable = @import("atom_table.zig").AtomTable;
+const parser = @import("parser/root.zig");
 // Shared ECMAScript ToInt32 so compile-time bitwise folding matches the
 // interpreter and never hits the `@intFromFloat` out-of-range panic.
 const floatToInt32 = @import("interpreter/util.zig").floatToInt32;
@@ -176,43 +178,12 @@ pub const ComptimeValue = union(enum) {
 };
 
 // ============================================================================
-// Operator Precedence
-// ============================================================================
-
-const Precedence = enum(u8) {
-    none = 0,
-    ternary = 1, // ?:
-    nullish = 2, // ??
-    or_op = 3, // ||
-    and_op = 4, // &&
-    bit_or = 5, // |
-    bit_xor = 6, // ^
-    bit_and = 7, // &
-    equality = 8, // == != === !==
-    comparison = 9, // < > <= >=
-    shift = 10, // << >> >>>
-    additive = 11, // + -
-    multiplicative = 12, // * / %
-    exponent = 13, // **
-    unary = 14, // ! ~ - +
-    call = 15, // () .
-    primary = 16,
-};
-
-// ============================================================================
 // Evaluator
 // ============================================================================
 
 pub const ComptimeEvaluator = struct {
     source: []const u8,
-    pos: usize,
     allocator: std.mem.Allocator,
-
-    // Position tracking for errors
-    start_line: u32,
-    start_col: u32,
-    line: u32,
-    col: u32,
 
     // Performance guards
     max_depth: u16 = 64,
@@ -230,14 +201,11 @@ pub const ComptimeEvaluator = struct {
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8, start_line: u32, start_col: u32) Self {
+        _ = start_line;
+        _ = start_col;
         return .{
             .source = source,
-            .pos = 0,
             .allocator = allocator,
-            .start_line = start_line,
-            .start_col = start_col,
-            .line = start_line,
-            .col = start_col,
         };
     }
 
@@ -247,697 +215,572 @@ pub const ComptimeEvaluator = struct {
             return ComptimeError.ExpressionTooLong;
         }
 
-        self.skipWhitespace();
-        const result = try self.parseExpression(.none);
-        self.skipWhitespace();
-
-        // Should have consumed all input
-        if (self.pos < self.source.len) {
-            return ComptimeError.UnexpectedToken;
-        }
-
-        return result;
+        return self.evaluateExpression(.complete);
     }
 
-    // ========================================================================
-    // Pratt Parser Core
-    // ========================================================================
+    const ExpressionExtent = enum {
+        complete,
+        root_prefix,
+    };
 
-    fn parseExpression(self: *Self, min_prec: Precedence) ComptimeError!ComptimeValue {
+    fn evaluateExpression(self: *Self, extent: ExpressionExtent) ComptimeError!ComptimeValue {
+        if (extent == .root_prefix) try self.validateLegacyJsonRoot();
+
+        var atoms = AtomTable.init(self.allocator);
+        defer atoms.deinit();
+
+        var expression_parser = parser.JsParser.initExpression(
+            self.allocator,
+            self.source,
+            .comptime_expression,
+        ) catch |err| return mapParserInitError(err);
+        defer expression_parser.deinit();
+        expression_parser.setAtomTable(&atoms);
+
+        const root = switch (extent) {
+            .complete => expression_parser.parseExpressionOnly(),
+            .root_prefix => expression_parser.parseExpressionPrefix(),
+        } catch |err| {
+            return self.mapParserError(&expression_parser, err);
+        };
+        const ir = parser.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
+        return self.evalNode(ir, &atoms, root);
+    }
+
+    fn validateLegacyJsonRoot(self: *const Self) ComptimeError!void {
+        const source = std.mem.trimStart(u8, self.source, " \t\n\r");
+        if (source.len == 0) return ComptimeError.UnexpectedEnd;
+        switch (source[0]) {
+            '"', '[', '{', 't', 'f', 'n', '0'...'9' => {},
+            '-' => {
+                if (source.len < 2 or
+                    (!isDigit(source[1]) and
+                        !(source[1] == '.' and source.len >= 3 and isDigit(source[2]))))
+                {
+                    return ComptimeError.InvalidNumber;
+                }
+            },
+            else => return ComptimeError.SyntaxError,
+        }
+    }
+
+    fn evalNode(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
         self.current_depth += 1;
         defer self.current_depth -= 1;
+        if (self.current_depth > self.max_depth) return ComptimeError.DepthExceeded;
 
-        if (self.current_depth > self.max_depth) {
-            return ComptimeError.DepthExceeded;
-        }
-
-        // Parse prefix (primary or unary)
-        var left = try self.parsePrimary();
-
-        // Parse infix operators
-        while (true) {
-            self.skipWhitespace();
-            if (self.pos >= self.source.len) break;
-
-            const op_prec = self.getInfixPrecedence();
-            if (@intFromEnum(op_prec) <= @intFromEnum(min_prec)) break;
-
-            left = try self.parseInfix(left, op_prec);
-        }
-
-        return left;
-    }
-
-    fn parsePrimary(self: *Self) ComptimeError!ComptimeValue {
-        self.skipWhitespace();
-        if (self.pos >= self.source.len) return ComptimeError.UnexpectedEnd;
-
-        const c = self.source[self.pos];
-
-        // Unary operators
-        if (c == '!' or c == '~' or c == '-' or c == '+') {
-            return self.parseUnary();
-        }
-
-        // Grouping
-        if (c == '(') {
-            return self.parseGrouping();
-        }
-
-        // Array literal
-        if (c == '[') {
-            return self.parseArray();
-        }
-
-        // Object literal
-        if (c == '{') {
-            return self.parseObject();
-        }
-
-        // String literal
-        if (c == '"' or c == '\'') {
-            return self.parseString(c);
-        }
-
-        // Template literal (simple case only)
-        if (c == '`') {
-            return self.parseTemplateLiteral();
-        }
-
-        // Number literal
-        if (isDigit(c) or (c == '.' and self.pos + 1 < self.source.len and isDigit(self.source[self.pos + 1]))) {
-            return self.parseNumber();
-        }
-
-        // Identifier or keyword
-        if (isIdentifierStart(c)) {
-            return self.parseIdentifier();
-        }
-
-        return ComptimeError.UnexpectedToken;
-    }
-
-    fn parseUnary(self: *Self) ComptimeError!ComptimeValue {
-        const op = self.source[self.pos];
-        self.advance();
-        self.skipWhitespace();
-
-        const operand = try self.parseExpression(.unary);
-
-        return switch (op) {
-            '!' => .{ .boolean = !operand.toBool() },
-            '~' => blk: {
-                const n = operand.toNumber() orelse return ComptimeError.TypeMismatch;
-                if (std.math.isNan(n) or std.math.isInf(n)) {
-                    break :blk .{ .number = -1 };
-                }
-                const i: i32 = floatToInt32(n);
-                break :blk .{ .number = @floatFromInt(~i) };
+        const tag = ir.getTag(node_idx) orelse return ComptimeError.SyntaxError;
+        return switch (tag) {
+            .lit_int => .{ .number = @floatFromInt(ir.getIntValue(node_idx) orelse return ComptimeError.SyntaxError) },
+            .lit_float => .{ .number = ir.getFloat(ir.getFloatIdx(node_idx) orelse return ComptimeError.SyntaxError) orelse return ComptimeError.SyntaxError },
+            .lit_string => blk: {
+                const value = ir.getString(ir.getStringIdx(node_idx) orelse return ComptimeError.SyntaxError) orelse return ComptimeError.SyntaxError;
+                break :blk .{ .string = self.allocator.dupe(u8, value) catch return ComptimeError.OutOfMemory };
             },
-            '-' => blk: {
-                const n = operand.toNumber() orelse return ComptimeError.TypeMismatch;
-                break :blk .{ .number = -n };
-            },
-            '+' => blk: {
-                const n = operand.toNumber() orelse return ComptimeError.TypeMismatch;
-                break :blk .{ .number = n };
-            },
-            else => unreachable,
+            .lit_bool => .{ .boolean = ir.getBoolValue(node_idx) orelse return ComptimeError.SyntaxError },
+            .lit_null => .{ .null_val = {} },
+            .lit_undefined => .{ .undefined_val = {} },
+
+            .identifier => self.evalIdentifier(ir, atoms, node_idx),
+            .binary_op => self.evalBinary(ir, atoms, node_idx),
+            .unary_op => self.evalUnary(ir, atoms, node_idx),
+            .ternary => self.evalTernary(ir, atoms, node_idx),
+            .call => self.evalCall(ir, atoms, node_idx),
+            .member_access => self.evalMember(ir, atoms, node_idx),
+            .array_literal => self.evalArray(ir, atoms, node_idx),
+            .object_literal => self.evalObject(ir, atoms, node_idx),
+
+            .method_call,
+            .computed_access,
+            .optional_chain,
+            .optional_call,
+            .object_property,
+            .object_method,
+            .object_getter,
+            .object_setter,
+            .object_spread,
+            .function_expr,
+            .template_part_string,
+            .template_part_expr,
+            .spread,
+            .await_expr,
+            .yield_expr,
+            .sequence_expr,
+            .comma_expr,
+            .match_expr,
+            .match_arm,
+            .match_pattern,
+            .expr_stmt,
+            .var_decl,
+            .if_stmt,
+            .for_stmt,
+            .for_of_stmt,
+            .for_in_stmt,
+            .while_stmt,
+            .do_while_stmt,
+            .switch_stmt,
+            .case_clause,
+            .return_stmt,
+            .assert_stmt,
+            .throw_stmt,
+            .break_stmt,
+            .continue_stmt,
+            .try_stmt,
+            .block,
+            .empty_stmt,
+            .labeled_stmt,
+            .debugger_stmt,
+            .function_decl,
+            .array_pattern,
+            .object_pattern,
+            .pattern_element,
+            .pattern_rest,
+            .pattern_default,
+            .jsx_element,
+            .jsx_fragment,
+            .jsx_text,
+            .jsx_expr_container,
+            .jsx_attribute,
+            .jsx_spread_attribute,
+            .import_decl,
+            .import_specifier,
+            .import_default,
+            .import_namespace,
+            .export_decl,
+            .export_specifier,
+            .export_default,
+            .export_all,
+            .program,
+            .param_list,
+            .arg_list,
+            .stmt_list,
+            => ComptimeError.UnsupportedOp,
+            .assignment, .arrow_function => ComptimeError.UnexpectedToken,
+            .template_literal => ComptimeError.UnsupportedOp,
         };
     }
 
-    fn parseGrouping(self: *Self) ComptimeError!ComptimeValue {
-        self.expect('(') catch return ComptimeError.SyntaxError;
-        self.skipWhitespace();
-        const inner = try self.parseExpression(.none);
-        self.skipWhitespace();
-        self.expect(')') catch return ComptimeError.UnclosedParen;
-        return inner;
+    fn evalIdentifier(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const binding = ir.getBinding(node_idx) orelse return ComptimeError.SyntaxError;
+        const name = atomName(atoms, binding.name_atom) orelse return ComptimeError.UnknownIdentifier;
+
+        if (std.mem.eql(u8, name, "NaN")) return .{ .nan_val = {} };
+        if (std.mem.eql(u8, name, "Infinity")) return .{ .infinity = .{ .negative = false } };
+        if (std.mem.eql(u8, name, "__BUILD_TIME__")) return self.cloneOptionalString(self.build_time);
+        if (std.mem.eql(u8, name, "__GIT_COMMIT__")) return self.cloneOptionalString(self.git_commit);
+        if (std.mem.eql(u8, name, "__VERSION__")) return self.cloneOptionalString(self.version);
+        return ComptimeError.UnknownIdentifier;
     }
 
-    fn parseInfix(self: *Self, left: ComptimeValue, prec: Precedence) ComptimeError!ComptimeValue {
-        self.skipWhitespace();
+    fn cloneOptionalString(self: *Self, value: ?[]const u8) ComptimeError!ComptimeValue {
+        const bytes = value orelse return .{ .undefined_val = {} };
+        return .{ .string = self.allocator.dupe(u8, bytes) catch return ComptimeError.OutOfMemory };
+    }
 
-        // Ternary operator
-        if (self.peek() == '?') {
-            if (self.pos + 1 < self.source.len and self.source[self.pos + 1] == '?') {
-                // Nullish coalescing ??
-                self.advance();
-                self.advance();
-                self.skipWhitespace();
-                const right = try self.parseExpression(.nullish);
-                if (left.isNullish()) {
-                    return right;
-                } else {
-                    right.deinit(self.allocator);
-                    return left;
-                }
-            }
-            // Ternary ?:
-            self.advance();
-            self.skipWhitespace();
-            const then_val = try self.parseExpression(.none);
-            self.skipWhitespace();
-            self.expect(':') catch return ComptimeError.SyntaxError;
-            self.skipWhitespace();
-            const else_val = try self.parseExpression(.ternary);
-            defer left.deinit(self.allocator); // condition consumed by toBool; free if heap
-            if (left.toBool()) {
-                else_val.deinit(self.allocator);
-                return then_val;
-            } else {
-                then_val.deinit(self.allocator);
-                return else_val;
-            }
-        }
+    fn evalBinary(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const binary = ir.getBinary(node_idx) orelse return ComptimeError.SyntaxError;
+        const left = try self.evalNode(ir, atoms, binary.left);
+        var left_owned = true;
+        errdefer if (left_owned) left.deinit(self.allocator);
+        const right = try self.evalNode(ir, atoms, binary.right);
+        var right_owned = true;
+        errdefer if (right_owned) right.deinit(self.allocator);
 
-        // Two-char operators
-        if (self.pos + 1 < self.source.len) {
-            const two = self.source[self.pos .. self.pos + 2];
-
-            if (std.mem.eql(u8, two, "||")) {
-                self.pos += 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(.or_op);
-                if (left.toBool()) {
-                    right.deinit(self.allocator);
-                    return left;
-                }
-                left.deinit(self.allocator); // discarded falsy left may be a heap string ("")
-                return right;
-            }
-            if (std.mem.eql(u8, two, "&&")) {
-                self.pos += 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(.and_op);
+        switch (binary.op) {
+            .and_op => {
                 if (!left.toBool()) {
                     right.deinit(self.allocator);
+                    right_owned = false;
+                    left_owned = false;
                     return left;
                 }
-                left.deinit(self.allocator); // discarded truthy left may be a heap string
+                left.deinit(self.allocator);
+                left_owned = false;
+                right_owned = false;
                 return right;
-            }
-            // These operators consume both operands and yield a fresh value
-            // (boolean/number), so free any heap-backed operand strings on every
-            // path — including the TypeMismatch error returns — mirroring the
-            // single-char path below. Without this, e.g. `"a" === "b"` leaks both.
-            if (std.mem.eql(u8, two, "==")) {
-                const strict = self.pos + 2 < self.source.len and self.source[self.pos + 2] == '=';
-                self.pos += if (strict) @as(usize, 3) else 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(prec);
-                defer left.deinit(self.allocator);
-                defer right.deinit(self.allocator);
-                return .{ .boolean = if (strict) left.strictEquals(right) else left.looseEquals(right) };
-            }
-            if (std.mem.eql(u8, two, "!=")) {
-                const strict = self.pos + 2 < self.source.len and self.source[self.pos + 2] == '=';
-                self.pos += if (strict) @as(usize, 3) else 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(prec);
-                defer left.deinit(self.allocator);
-                defer right.deinit(self.allocator);
-                return .{ .boolean = if (strict) !left.strictEquals(right) else !left.looseEquals(right) };
-            }
-            if (std.mem.eql(u8, two, "<=")) {
-                self.pos += 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(prec);
-                defer left.deinit(self.allocator);
-                defer right.deinit(self.allocator);
-                const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
-                const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-                return .{ .boolean = ln <= rn };
-            }
-            if (std.mem.eql(u8, two, ">=")) {
-                self.pos += 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(prec);
-                defer left.deinit(self.allocator);
-                defer right.deinit(self.allocator);
-                const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
-                const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-                return .{ .boolean = ln >= rn };
-            }
-            if (std.mem.eql(u8, two, "<<")) {
-                self.pos += 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(prec);
-                defer left.deinit(self.allocator);
-                defer right.deinit(self.allocator);
-                return self.bitwiseShift(left, right, .left);
-            }
-            if (std.mem.eql(u8, two, ">>")) {
-                const unsigned = self.pos + 2 < self.source.len and self.source[self.pos + 2] == '>';
-                self.pos += if (unsigned) @as(usize, 3) else 2;
-                self.skipWhitespace();
-                const right = try self.parseExpression(prec);
-                defer left.deinit(self.allocator);
-                defer right.deinit(self.allocator);
-                return self.bitwiseShift(left, right, if (unsigned) .unsigned_right else .right);
-            }
-            if (std.mem.eql(u8, two, "**")) {
-                self.pos += 2;
-                self.skipWhitespace();
-                // Right-associative
-                const right = try self.parseExpression(@enumFromInt(@intFromEnum(prec) - 1));
-                defer left.deinit(self.allocator);
-                defer right.deinit(self.allocator);
-                const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
-                const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-                return .{ .number = std.math.pow(f64, ln, rn) };
-            }
+            },
+            .or_op => {
+                if (left.toBool()) {
+                    right.deinit(self.allocator);
+                    right_owned = false;
+                    left_owned = false;
+                    return left;
+                }
+                left.deinit(self.allocator);
+                left_owned = false;
+                right_owned = false;
+                return right;
+            },
+            .nullish => {
+                if (left.isNullish()) {
+                    left.deinit(self.allocator);
+                    left_owned = false;
+                    right_owned = false;
+                    return right;
+                }
+                right.deinit(self.allocator);
+                right_owned = false;
+                left_owned = false;
+                return left;
+            },
+            else => {},
         }
 
-        // Member access for strings
-        if (self.source[self.pos] == '.') {
-            self.advance();
-            self.skipWhitespace();
-            return self.handleMemberAccess(left);
-        }
-
-        // Single-char operators
-        const op = self.source[self.pos];
-        self.advance();
-        self.skipWhitespace();
-        const right = try self.parseExpression(prec);
-        // parseInfix consumes both operands; each op below produces a fresh
-        // value (add allocates a new string), so free any heap-backed operand
-        // strings on every path, including the TypeMismatch error returns.
         defer left.deinit(self.allocator);
+        left_owned = false;
         defer right.deinit(self.allocator);
+        right_owned = false;
+        return switch (binary.op) {
+            .add => self.add(left, right),
+            .sub => self.subtract(left, right),
+            .mul => self.multiply(left, right),
+            .div => self.divide(left, right),
+            .mod => self.modulo(left, right),
+            .pow => blk: {
+                const lhs = left.toNumber() orelse return ComptimeError.TypeMismatch;
+                const rhs = right.toNumber() orelse return ComptimeError.TypeMismatch;
+                break :blk .{ .number = std.math.pow(f64, lhs, rhs) };
+            },
+            .strict_eq => .{ .boolean = left.strictEquals(right) },
+            .strict_neq => .{ .boolean = !left.strictEquals(right) },
+            .loose_eq => .{ .boolean = left.looseEquals(right) },
+            .loose_neq => .{ .boolean = !left.looseEquals(right) },
+            .lt, .lte, .gt, .gte => self.compare(left, right, binary.op),
+            .bit_and => self.bitwiseAnd(left, right),
+            .bit_or => self.bitwiseOr(left, right),
+            .bit_xor => self.bitwiseXor(left, right),
+            .shl => self.bitwiseShift(left, right, .left),
+            .shr => self.bitwiseShift(left, right, .right),
+            .ushr => self.bitwiseShift(left, right, .unsigned_right),
+            .in_op => ComptimeError.UnsupportedOp,
+            .and_op, .or_op, .nullish => unreachable,
+        };
+    }
 
-        return switch (op) {
-            '+' => self.add(left, right),
-            '-' => self.subtract(left, right),
-            '*' => self.multiply(left, right),
-            '/' => self.divide(left, right),
-            '%' => self.modulo(left, right),
-            '|' => self.bitwiseOr(left, right),
-            '&' => self.bitwiseAnd(left, right),
-            '^' => self.bitwiseXor(left, right),
-            '<' => blk: {
-                const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
-                const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-                break :blk .{ .boolean = ln < rn };
+    fn compare(self: *Self, left: ComptimeValue, right: ComptimeValue, op: parser.BinaryOp) ComptimeError!ComptimeValue {
+        _ = self;
+        const lhs = left.toNumber() orelse return ComptimeError.TypeMismatch;
+        const rhs = right.toNumber() orelse return ComptimeError.TypeMismatch;
+        return .{ .boolean = switch (op) {
+            .lt => lhs < rhs,
+            .lte => lhs <= rhs,
+            .gt => lhs > rhs,
+            .gte => lhs >= rhs,
+            else => unreachable,
+        } };
+    }
+
+    fn evalUnary(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const unary = ir.getUnary(node_idx) orelse return ComptimeError.SyntaxError;
+        const operand = try self.evalNode(ir, atoms, unary.operand);
+        defer operand.deinit(self.allocator);
+        return switch (unary.op) {
+            .not => .{ .boolean = !operand.toBool() },
+            .bit_not => blk: {
+                const number = operand.toNumber() orelse return ComptimeError.TypeMismatch;
+                if (std.math.isNan(number) or std.math.isInf(number)) break :blk .{ .number = -1 };
+                break :blk .{ .number = @floatFromInt(~floatToInt32(number)) };
             },
-            '>' => blk: {
-                const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
-                const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
-                break :blk .{ .boolean = ln > rn };
-            },
+            .neg => .{ .number = -(operand.toNumber() orelse return ComptimeError.TypeMismatch) },
+            .pos => .{ .number = operand.toNumber() orelse return ComptimeError.TypeMismatch },
+            .typeof_op, .void_op => ComptimeError.UnsupportedOp,
+        };
+    }
+
+    fn evalTernary(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const ternary = ir.getTernary(node_idx) orelse return ComptimeError.SyntaxError;
+        const condition = try self.evalNode(ir, atoms, ternary.condition);
+        defer condition.deinit(self.allocator);
+        const then_value = try self.evalNode(ir, atoms, ternary.then_branch);
+        var then_owned = true;
+        errdefer if (then_owned) then_value.deinit(self.allocator);
+        const else_value = try self.evalNode(ir, atoms, ternary.else_branch);
+        if (condition.toBool()) {
+            else_value.deinit(self.allocator);
+            then_owned = false;
+            return then_value;
+        }
+        then_value.deinit(self.allocator);
+        then_owned = false;
+        return else_value;
+    }
+
+    fn evalArray(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const array = ir.getArray(node_idx) orelse return ComptimeError.SyntaxError;
+        if (array.has_spread) return ComptimeError.UnsupportedOp;
+        const values = self.allocator.alloc(ComptimeValue, array.elements_count) catch return ComptimeError.OutOfMemory;
+        var initialized: usize = 0;
+        errdefer {
+            for (values[0..initialized]) |value| value.deinit(self.allocator);
+            self.allocator.free(values);
+        }
+        while (initialized < values.len) : (initialized += 1) {
+            const child = ir.getListIndex(array.elements_start, @intCast(initialized));
+            values[initialized] = try self.evalNode(ir, atoms, child);
+        }
+        return .{ .array = values };
+    }
+
+    fn evalObject(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const object_literal = ir.getObject(node_idx) orelse return ComptimeError.SyntaxError;
+        const properties = self.allocator.alloc(ComptimeValue.ObjectProperty, object_literal.properties_count) catch return ComptimeError.OutOfMemory;
+        var initialized: usize = 0;
+        errdefer {
+            for (properties[0..initialized]) |property| {
+                self.allocator.free(property.key);
+                property.value.deinit(self.allocator);
+            }
+            self.allocator.free(properties);
+        }
+        while (initialized < properties.len) : (initialized += 1) {
+            const property_idx = ir.getListIndex(object_literal.properties_start, @intCast(initialized));
+            if (ir.getTag(property_idx) != .object_property) return ComptimeError.UnsupportedOp;
+            const property = ir.getProperty(property_idx) orelse return ComptimeError.SyntaxError;
+            if (property.is_computed or property.is_shorthand) return ComptimeError.SyntaxError;
+            if (ir.getTag(property.key) != .lit_string) return ComptimeError.SyntaxError;
+            const key_idx = ir.getStringIdx(property.key) orelse return ComptimeError.SyntaxError;
+            const key = ir.getString(key_idx) orelse return ComptimeError.SyntaxError;
+            const owned_key = self.allocator.dupe(u8, key) catch return ComptimeError.OutOfMemory;
+            errdefer self.allocator.free(owned_key);
+            const value = try self.evalNode(ir, atoms, property.value);
+            properties[initialized] = .{ .key = owned_key, .value = value };
+        }
+        return .{ .object = properties };
+    }
+
+    fn evalMember(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const member = ir.getMember(node_idx) orelse return ComptimeError.SyntaxError;
+        if (member.is_optional or member.computed != parser.null_node) return ComptimeError.UnsupportedOp;
+        const property = atomName(atoms, member.property) orelse return ComptimeError.SyntaxError;
+
+        if (identifierName(ir, atoms, member.object)) |base| {
+            if (std.mem.eql(u8, base, "Math")) return mathConstant(property) orelse ComptimeError.UnknownIdentifier;
+            if (std.mem.eql(u8, base, "Env")) return self.envValue(property);
+            return ComptimeError.UnknownIdentifier;
+        }
+
+        const object_value = try self.evalNode(ir, atoms, member.object);
+        defer object_value.deinit(self.allocator);
+        return switch (object_value) {
+            .string => |value| if (std.mem.eql(u8, property, "length"))
+                .{ .number = @floatFromInt(string.utf16Length(value)) }
+            else
+                ComptimeError.UnknownIdentifier,
+            .array => |value| if (std.mem.eql(u8, property, "length"))
+                .{ .number = @floatFromInt(value.len) }
+            else
+                ComptimeError.UnknownIdentifier,
             else => ComptimeError.UnsupportedOp,
         };
     }
 
-    fn getInfixPrecedence(self: *Self) Precedence {
-        if (self.pos >= self.source.len) return .none;
+    fn evalCall(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
+        const call = ir.getCall(node_idx) orelse return ComptimeError.SyntaxError;
+        if (call.is_optional) return ComptimeError.UnsupportedOp;
+        const callee_tag = ir.getTag(call.callee) orelse return ComptimeError.SyntaxError;
 
-        const c = self.source[self.pos];
-
-        // Check two-char operators first
-        if (self.pos + 1 < self.source.len) {
-            const two = self.source[self.pos .. self.pos + 2];
-            if (std.mem.eql(u8, two, "??")) return .nullish;
-            if (std.mem.eql(u8, two, "||")) return .or_op;
-            if (std.mem.eql(u8, two, "&&")) return .and_op;
-            if (std.mem.eql(u8, two, "==") or std.mem.eql(u8, two, "!=")) return .equality;
-            if (std.mem.eql(u8, two, "<=") or std.mem.eql(u8, two, ">=")) return .comparison;
-            if (std.mem.eql(u8, two, "<<") or std.mem.eql(u8, two, ">>")) return .shift;
-            if (std.mem.eql(u8, two, "**")) return .exponent;
+        if (callee_tag == .identifier) {
+            const name = identifierName(ir, atoms, call.callee) orelse return ComptimeError.UnknownIdentifier;
+            if (!std.mem.eql(u8, name, "hash") and
+                !std.mem.eql(u8, name, "parseInt") and
+                !std.mem.eql(u8, name, "parseFloat"))
+            {
+                return ComptimeError.UnknownIdentifier;
+            }
+            const args = try self.evalArguments(ir, atoms, call);
+            defer self.freeArgs(args);
+            if (std.mem.eql(u8, name, "hash")) return self.evaluateHash(args);
+            if (std.mem.eql(u8, name, "parseInt")) return evaluateParseInt(args);
+            return evaluateParseFloat(args);
         }
 
-        return switch (c) {
-            '?' => .ternary,
-            '|' => .bit_or,
-            '^' => .bit_xor,
-            '&' => .bit_and,
-            '<', '>' => .comparison,
-            '+', '-' => .additive,
-            '*', '/', '%' => .multiplicative,
-            '.' => .call,
-            '(' => .call,
-            else => .none,
+        if (callee_tag != .member_access) return ComptimeError.CallNotAllowed;
+        const member = ir.getMember(call.callee) orelse return ComptimeError.SyntaxError;
+        if (member.is_optional or member.computed != parser.null_node) return ComptimeError.UnsupportedOp;
+        const method = atomName(atoms, member.property) orelse return ComptimeError.SyntaxError;
+
+        if (identifierName(ir, atoms, member.object)) |base| {
+            if (std.mem.eql(u8, base, "Math")) {
+                if (std.mem.eql(u8, method, "random")) return ComptimeError.CallNotAllowed;
+                const args = try self.evalArguments(ir, atoms, call);
+                defer self.freeArgs(args);
+                return self.evaluateMathCall(method, args);
+            }
+            if (std.mem.eql(u8, base, "JSON")) {
+                if (!std.mem.eql(u8, method, "parse")) return ComptimeError.CallNotAllowed;
+                const args = try self.evalArguments(ir, atoms, call);
+                defer self.freeArgs(args);
+                return self.evaluateJsonParse(args);
+            }
+            return ComptimeError.UnknownIdentifier;
+        }
+
+        const receiver = try self.evalNode(ir, atoms, member.object);
+        defer receiver.deinit(self.allocator);
+        const args = try self.evalArguments(ir, atoms, call);
+        defer self.freeArgs(args);
+        return switch (receiver) {
+            .string => |value| self.evaluateStringCall(value, method, args),
+            else => ComptimeError.UnsupportedOp,
         };
     }
 
-    // ========================================================================
-    // Literal Parsing
-    // ========================================================================
-
-    fn parseNumber(self: *Self) ComptimeError!ComptimeValue {
-        const start = self.pos;
-
-        // Handle optional leading minus (e.g. from JSON.parse("-5"))
-        if (self.peek() == '-') self.advance();
-
-        // Handle hex, octal, binary
-        if (self.peek() == '0' and self.pos + 1 < self.source.len) {
-            const next = self.source[self.pos + 1];
-            if (next == 'x' or next == 'X') {
-                self.pos += 2;
-                return self.parseHex();
-            }
-            if (next == 'o' or next == 'O') {
-                self.pos += 2;
-                return self.parseOctal();
-            }
-            if (next == 'b' or next == 'B') {
-                self.pos += 2;
-                return self.parseBinary();
-            }
-        }
-
-        // Decimal number
-        while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or self.source[self.pos] == '_')) {
-            self.advance();
-        }
-
-        // Decimal point
-        if (self.pos < self.source.len and self.source[self.pos] == '.') {
-            self.advance();
-            while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or self.source[self.pos] == '_')) {
-                self.advance();
-            }
-        }
-
-        // Exponent
-        if (self.pos < self.source.len and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
-            self.advance();
-            if (self.pos < self.source.len and (self.source[self.pos] == '+' or self.source[self.pos] == '-')) {
-                self.advance();
-            }
-            while (self.pos < self.source.len and isDigit(self.source[self.pos])) {
-                self.advance();
-            }
-        }
-
-        // Remove underscores for parsing
-        const num_str = self.source[start..self.pos];
-        var clean: std.ArrayList(u8) = .empty;
-        defer clean.deinit(self.allocator);
-        for (num_str) |ch| {
-            if (ch != '_') clean.append(self.allocator, ch) catch return ComptimeError.OutOfMemory;
-        }
-
-        const value = std.fmt.parseFloat(f64, clean.items) catch return ComptimeError.InvalidNumber;
-        return .{ .number = value };
-    }
-
-    fn parseHex(self: *Self) ComptimeError!ComptimeValue {
-        var value: u64 = 0;
-        var has_digit = false;
-        while (self.pos < self.source.len) {
-            const c = self.source[self.pos];
-            if (c == '_') {
-                self.advance();
-                continue;
-            }
-            const digit = switch (c) {
-                '0'...'9' => c - '0',
-                'a'...'f' => c - 'a' + 10,
-                'A'...'F' => c - 'A' + 10,
-                else => break,
-            };
-            value = value * 16 + digit;
-            has_digit = true;
-            self.advance();
-        }
-        if (!has_digit) return ComptimeError.InvalidNumber;
-        return .{ .number = @floatFromInt(value) };
-    }
-
-    fn parseOctal(self: *Self) ComptimeError!ComptimeValue {
-        var value: u64 = 0;
-        var has_digit = false;
-        while (self.pos < self.source.len) {
-            const c = self.source[self.pos];
-            if (c == '_') {
-                self.advance();
-                continue;
-            }
-            if (c < '0' or c > '7') break;
-            value = value * 8 + (c - '0');
-            has_digit = true;
-            self.advance();
-        }
-        if (!has_digit) return ComptimeError.InvalidNumber;
-        return .{ .number = @floatFromInt(value) };
-    }
-
-    fn parseBinary(self: *Self) ComptimeError!ComptimeValue {
-        var value: u64 = 0;
-        var has_digit = false;
-        while (self.pos < self.source.len) {
-            const c = self.source[self.pos];
-            if (c == '_') {
-                self.advance();
-                continue;
-            }
-            if (c != '0' and c != '1') break;
-            value = value * 2 + (c - '0');
-            has_digit = true;
-            self.advance();
-        }
-        if (!has_digit) return ComptimeError.InvalidNumber;
-        return .{ .number = @floatFromInt(value) };
-    }
-
-    fn parseString(self: *Self, quote: u8) ComptimeError!ComptimeValue {
-        self.advance(); // Opening quote
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(self.allocator);
-
-        while (self.pos < self.source.len) {
-            const c = self.source[self.pos];
-            if (c == quote) {
-                self.advance();
-                const str = buf.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory;
-                return .{ .string = str };
-            }
-            if (c == '\\') {
-                self.advance();
-                if (self.pos >= self.source.len) return ComptimeError.InvalidEscape;
-                const escaped = switch (self.source[self.pos]) {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '\\' => '\\',
-                    '\'' => '\'',
-                    '"' => '"',
-                    '0' => 0,
-                    'x' => blk: {
-                        self.advance();
-                        if (self.pos + 2 > self.source.len) return ComptimeError.InvalidEscape;
-                        const hex = self.source[self.pos .. self.pos + 2];
-                        self.pos += 1; // Will advance again below
-                        break :blk std.fmt.parseInt(u8, hex, 16) catch return ComptimeError.InvalidEscape;
-                    },
-                    else => self.source[self.pos],
-                };
-                buf.append(self.allocator, escaped) catch return ComptimeError.OutOfMemory;
-            } else {
-                buf.append(self.allocator, c) catch return ComptimeError.OutOfMemory;
-            }
-            self.advance();
-        }
-        return ComptimeError.UnclosedString;
-    }
-
-    fn parseTemplateLiteral(self: *Self) ComptimeError!ComptimeValue {
-        self.advance(); // Opening backtick
-        var buf: std.ArrayList(u8) = .empty;
-        errdefer buf.deinit(self.allocator);
-
-        while (self.pos < self.source.len) {
-            const c = self.source[self.pos];
-            if (c == '`') {
-                self.advance();
-                const str = buf.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory;
-                return .{ .string = str };
-            }
-            if (c == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
-                // Template interpolation - not supported in comptime
-                return ComptimeError.UnsupportedOp;
-            }
-            if (c == '\\') {
-                self.advance();
-                if (self.pos >= self.source.len) return ComptimeError.InvalidEscape;
-                const escaped = switch (self.source[self.pos]) {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '\\' => '\\',
-                    '`' => '`',
-                    '$' => '$',
-                    else => self.source[self.pos],
-                };
-                buf.append(self.allocator, escaped) catch return ComptimeError.OutOfMemory;
-            } else {
-                buf.append(self.allocator, c) catch return ComptimeError.OutOfMemory;
-            }
-            self.advance();
-        }
-        return ComptimeError.UnclosedString;
-    }
-
-    fn parseArray(self: *Self) ComptimeError!ComptimeValue {
-        self.expect('[') catch return ComptimeError.SyntaxError;
-        self.skipWhitespace();
-
-        var elements: std.ArrayList(ComptimeValue) = .empty;
+    fn evalArguments(self: *Self, ir: parser.IrView, atoms: *AtomTable, call: parser.Node.CallExpr) ComptimeError![]const ComptimeValue {
+        const args = self.allocator.alloc(ComptimeValue, call.args_count) catch return ComptimeError.OutOfMemory;
+        var initialized: usize = 0;
         errdefer {
-            for (elements.items) |elem| {
-                elem.deinit(self.allocator);
-            }
-            elements.deinit(self.allocator);
+            for (args[0..initialized]) |arg| arg.deinit(self.allocator);
+            self.allocator.free(args);
         }
-
-        while (self.pos < self.source.len and self.peek() != ']') {
-            const elem = try self.parseExpression(.none);
-            elements.append(self.allocator, elem) catch {
-                elem.deinit(self.allocator);
-                return ComptimeError.OutOfMemory;
-            };
-            self.skipWhitespace();
-
-            if (self.peek() == ',') {
-                self.advance();
-                self.skipWhitespace();
-            } else {
-                break;
-            }
+        while (initialized < args.len) : (initialized += 1) {
+            const arg_idx = ir.getListIndex(call.args_start, @intCast(initialized));
+            if (ir.getTag(arg_idx) == .spread) return ComptimeError.UnsupportedOp;
+            args[initialized] = try self.evalNode(ir, atoms, arg_idx);
         }
-
-        self.expect(']') catch return ComptimeError.UnclosedBracket;
-        const arr = elements.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory;
-        return .{ .array = arr };
+        return args;
     }
 
-    fn parseObject(self: *Self) ComptimeError!ComptimeValue {
-        self.expect('{') catch return ComptimeError.SyntaxError;
-        self.skipWhitespace();
+    fn evaluateHash(self: *Self, args: []const ComptimeValue) ComptimeError!ComptimeValue {
+        if (args.len < 1) return ComptimeError.SyntaxError;
+        const input = switch (args[0]) {
+            .string => |value| value,
+            else => return ComptimeError.TypeMismatch,
+        };
+        var buf: [8]u8 = undefined;
+        _ = std.fmt.bufPrint(&buf, "{x:0>8}", .{fnv1a(input)}) catch return ComptimeError.OutOfMemory;
+        return .{ .string = self.allocator.dupe(u8, &buf) catch return ComptimeError.OutOfMemory };
+    }
 
-        var props: std.ArrayList(ComptimeValue.ObjectProperty) = .empty;
-        errdefer {
-            for (props.items) |prop| {
-                self.allocator.free(prop.key);
-                prop.value.deinit(self.allocator);
+    fn evaluateParseInt(args: []const ComptimeValue) ComptimeValue {
+        if (args.len < 1) return .{ .nan_val = {} };
+        return switch (args[0]) {
+            .string => |value| blk: {
+                const radix: u8 = if (args.len >= 2)
+                    std.math.lossyCast(u8, @trunc(args[1].toNumber() orelse 10))
+                else
+                    10;
+                const trimmed = std.mem.trim(u8, value, " \t\n\r");
+                const parsed = std.fmt.parseInt(i64, trimmed, radix) catch break :blk .{ .nan_val = {} };
+                break :blk .{ .number = @floatFromInt(parsed) };
+            },
+            .number => |value| .{ .number = @trunc(value) },
+            else => .{ .nan_val = {} },
+        };
+    }
+
+    fn evaluateParseFloat(args: []const ComptimeValue) ComptimeValue {
+        if (args.len < 1) return .{ .nan_val = {} };
+        return switch (args[0]) {
+            .string => |value| blk: {
+                const trimmed = std.mem.trim(u8, value, " \t\n\r");
+                const parsed = std.fmt.parseFloat(f64, trimmed) catch break :blk .{ .nan_val = {} };
+                break :blk .{ .number = parsed };
+            },
+            .number => |value| .{ .number = value },
+            else => .{ .nan_val = {} },
+        };
+    }
+
+    fn evaluateJsonParse(self: *Self, args: []const ComptimeValue) ComptimeError!ComptimeValue {
+        if (args.len < 1) return ComptimeError.SyntaxError;
+        const bytes = switch (args[0]) {
+            .string => |value| value,
+            else => return ComptimeError.TypeMismatch,
+        };
+        var value_evaluator = Self.init(self.allocator, bytes, 1, 1);
+        return value_evaluator.evaluateExpression(.root_prefix);
+    }
+
+    fn envValue(self: *Self, name: []const u8) ComptimeError!ComptimeValue {
+        const value = if (self.env) |map| map.get(name) else null;
+        return self.cloneOptionalString(value);
+    }
+
+    fn evaluateStringCall(self: *Self, str: []const u8, name: []const u8, args: []const ComptimeValue) ComptimeError!ComptimeValue {
+        if (std.mem.eql(u8, name, "toUpperCase")) return self.stringToUpperCase(str);
+        if (std.mem.eql(u8, name, "toLowerCase")) return self.stringToLowerCase(str);
+        if (std.mem.eql(u8, name, "trim")) return self.stringTrim(str);
+        if (std.mem.eql(u8, name, "trimStart") or std.mem.eql(u8, name, "trimLeft")) return self.stringTrimStart(str);
+        if (std.mem.eql(u8, name, "trimEnd") or std.mem.eql(u8, name, "trimRight")) return self.stringTrimEnd(str);
+
+        if (std.mem.eql(u8, name, "slice") or std.mem.eql(u8, name, "substring")) return self.stringSlice(str, args);
+        if (std.mem.eql(u8, name, "padStart")) return self.stringPadStart(str, args);
+        if (std.mem.eql(u8, name, "padEnd")) return self.stringPadEnd(str, args);
+
+        if (args.len >= 1) {
+            if (std.mem.eql(u8, name, "includes") or std.mem.eql(u8, name, "startsWith") or
+                std.mem.eql(u8, name, "endsWith") or std.mem.eql(u8, name, "indexOf"))
+            {
+                const search = switch (args[0]) {
+                    .string => |value| value,
+                    else => return ComptimeError.TypeMismatch,
+                };
+                if (std.mem.eql(u8, name, "includes")) return .{ .boolean = std.mem.indexOf(u8, str, search) != null };
+                if (std.mem.eql(u8, name, "startsWith")) return .{ .boolean = std.mem.startsWith(u8, str, search) };
+                if (std.mem.eql(u8, name, "endsWith")) return .{ .boolean = std.mem.endsWith(u8, str, search) };
+                const index = std.mem.indexOf(u8, str, search) orelse return .{ .number = -1 };
+                return .{ .number = @floatFromInt(string.byteOffsetToUtf16Index(str, index)) };
             }
-            props.deinit(self.allocator);
-        }
-
-        while (self.pos < self.source.len and self.peek() != '}') {
-            // Parse key (identifier or string)
-            self.skipWhitespace();
-            const key = blk: {
-                if (self.peek() == '"' or self.peek() == '\'') {
-                    const str_val = try self.parseString(self.peek());
-                    break :blk str_val.string;
-                } else if (isIdentifierStart(self.peek())) {
-                    // Always allocate key for consistent ownership
-                    const ident = self.scanIdentifier();
-                    break :blk self.allocator.dupe(u8, ident) catch return ComptimeError.OutOfMemory;
-                } else {
-                    return ComptimeError.SyntaxError;
+            if (std.mem.eql(u8, name, "repeat")) {
+                const count = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
+                if (!std.math.isFinite(count) or count < 0 or count > 10000) return ComptimeError.TypeMismatch;
+                var result: std.ArrayList(u8) = .empty;
+                errdefer result.deinit(self.allocator);
+                for (0..std.math.lossyCast(usize, @trunc(count))) |_| {
+                    result.appendSlice(self.allocator, str) catch return ComptimeError.OutOfMemory;
                 }
-            };
-
-            self.skipWhitespace();
-            self.expect(':') catch {
-                self.allocator.free(key);
-                return ComptimeError.SyntaxError;
-            };
-            self.skipWhitespace();
-
-            const value = self.parseExpression(.none) catch |err| {
-                self.allocator.free(key);
-                return err;
-            };
-            props.append(self.allocator, .{ .key = key, .value = value }) catch {
-                self.allocator.free(key);
-                value.deinit(self.allocator);
-                return ComptimeError.OutOfMemory;
-            };
-
-            self.skipWhitespace();
-            if (self.peek() == ',') {
-                self.advance();
-                self.skipWhitespace();
-            } else {
-                break;
+                return .{ .string = result.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory };
+            }
+            if (std.mem.eql(u8, name, "split")) {
+                const delimiter = switch (args[0]) {
+                    .string => |value| value,
+                    else => return ComptimeError.TypeMismatch,
+                };
+                return self.stringSplit(str, delimiter);
+            }
+            if (std.mem.eql(u8, name, "charAt")) {
+                const index_value = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
+                const index = charAtIndex(index_value);
+                const codepoint = if (index) |valid_index|
+                    if (valid_index <= std.math.maxInt(u32)) string.charCodepointSliceAt(str, @intCast(valid_index)) else null
+                else
+                    null;
+                return .{ .string = self.allocator.dupe(u8, codepoint orelse "") catch return ComptimeError.OutOfMemory };
             }
         }
 
-        self.expect('}') catch return ComptimeError.UnclosedBrace;
-        const obj = props.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory;
-        return .{ .object = obj };
+        if (std.mem.eql(u8, name, "replace") or std.mem.eql(u8, name, "replaceAll")) {
+            if (args.len < 2) return ComptimeError.SyntaxError;
+            const search = switch (args[0]) {
+                .string => |value| value,
+                else => return ComptimeError.TypeMismatch,
+            };
+            const replacement = switch (args[1]) {
+                .string => |value| value,
+                else => return ComptimeError.TypeMismatch,
+            };
+            return self.stringReplace(str, search, replacement, std.mem.eql(u8, name, "replaceAll"));
+        }
+        return ComptimeError.CallNotAllowed;
     }
 
-    fn parseIdentifier(self: *Self) ComptimeError!ComptimeValue {
-        const ident = self.scanIdentifier();
-
-        // Keywords and special values
-        if (std.mem.eql(u8, ident, "true")) return .{ .boolean = true };
-        if (std.mem.eql(u8, ident, "false")) return .{ .boolean = false };
-        if (std.mem.eql(u8, ident, "null")) return .{ .null_val = {} };
-        if (std.mem.eql(u8, ident, "undefined")) return .{ .undefined_val = {} };
-        if (std.mem.eql(u8, ident, "NaN")) return .{ .nan_val = {} };
-        if (std.mem.eql(u8, ident, "Infinity")) return .{ .infinity = .{ .negative = false } };
-
-        // Build metadata
-        if (std.mem.eql(u8, ident, "__BUILD_TIME__")) {
-            return if (self.build_time) |bt| .{ .string = bt } else .{ .undefined_val = {} };
-        }
-        if (std.mem.eql(u8, ident, "__GIT_COMMIT__")) {
-            return if (self.git_commit) |gc| .{ .string = gc } else .{ .undefined_val = {} };
-        }
-        if (std.mem.eql(u8, ident, "__VERSION__")) {
-            return if (self.version) |v| .{ .string = v } else .{ .undefined_val = {} };
-        }
-
-        // Check for Math, Env, JSON, etc.
-        self.skipWhitespace();
-        if (self.peek() == '.') {
-            self.advance();
-            self.skipWhitespace();
-
-            if (std.mem.eql(u8, ident, "Math")) {
-                return self.parseMathAccess();
-            }
-            if (std.mem.eql(u8, ident, "Env")) {
-                return self.parseEnvAccess();
-            }
-            if (std.mem.eql(u8, ident, "JSON")) {
-                return self.parseJSONAccess();
-            }
-        }
-
-        // Check for function call on identifier (e.g., hash(...), parseInt(...))
-        if (self.peek() == '(') {
-            if (std.mem.eql(u8, ident, "hash")) {
-                return self.parseHashCall();
-            }
-            if (std.mem.eql(u8, ident, "parseInt")) {
-                return self.parseParseIntCall();
-            }
-            if (std.mem.eql(u8, ident, "parseFloat")) {
-                return self.parseParseFloatCall();
-            }
-        }
-
-        return ComptimeError.UnknownIdentifier;
+    fn charAtIndex(value: f64) ?usize {
+        if (std.math.isNan(value) or value == 0) return 0;
+        if (!std.math.isFinite(value) or value < 0) return null;
+        return std.math.lossyCast(usize, @trunc(value));
     }
 
-    // ========================================================================
-    // Math Support
-    // ========================================================================
+    fn identifierName(ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ?[]const u8 {
+        if (ir.getTag(node_idx) != .identifier) return null;
+        const binding = ir.getBinding(node_idx) orelse return null;
+        return atomName(atoms, binding.name_atom);
+    }
 
-    fn parseMathAccess(self: *Self) ComptimeError!ComptimeValue {
-        const name = self.scanIdentifier();
-        self.skipWhitespace();
+    fn atomName(atoms: *AtomTable, atom: u16) ?[]const u8 {
+        return atoms.getName(@enumFromInt(@as(u32, atom)));
+    }
 
-        // Math constants
+    fn mathConstant(name: []const u8) ?ComptimeValue {
         if (std.mem.eql(u8, name, "PI")) return .{ .number = 3.141592653589793 };
         if (std.mem.eql(u8, name, "E")) return .{ .number = 2.718281828459045 };
         if (std.mem.eql(u8, name, "LN2")) return .{ .number = 0.6931471805599453 };
@@ -946,16 +789,51 @@ pub const ComptimeEvaluator = struct {
         if (std.mem.eql(u8, name, "LOG10E")) return .{ .number = 0.4342944819032518 };
         if (std.mem.eql(u8, name, "SQRT2")) return .{ .number = 1.4142135623730951 };
         if (std.mem.eql(u8, name, "SQRT1_2")) return .{ .number = 0.7071067811865476 };
+        return null;
+    }
 
-        // Math functions
-        if (self.peek() != '(') return ComptimeError.UnknownIdentifier;
+    fn mapParserInitError(err: anyerror) ComptimeError {
+        return switch (err) {
+            error.OutOfMemory => ComptimeError.OutOfMemory,
+            else => ComptimeError.SyntaxError,
+        };
+    }
 
-        // Disallowed functions
-        if (std.mem.eql(u8, name, "random")) return ComptimeError.CallNotAllowed;
+    fn mapParserError(self: *const Self, expression_parser: *const parser.JsParser, err: anyerror) ComptimeError {
+        if (err == error.OutOfMemory or expression_parser.errors.outOfMemory()) return ComptimeError.OutOfMemory;
+        const errors = expression_parser.getErrors();
+        if (errors.len == 0) return if (self.source.len == 0) ComptimeError.UnexpectedEnd else ComptimeError.UnexpectedToken;
 
-        const args = try self.parseCallArgs();
-        defer self.freeArgs(args);
-        return self.evaluateMathCall(name, args);
+        const parse_error = errors[0];
+        const trimmed_source = std.mem.trimStart(u8, self.source, " \t\n\r");
+        const starts_with_word = trimmed_source.len > 0 and std.ascii.isAlphabetic(trimmed_source[0]);
+        return switch (parse_error.kind) {
+            .nesting_too_deep => ComptimeError.DepthExceeded,
+            .unterminated_string, .unterminated_template => ComptimeError.UnclosedString,
+            .invalid_number => ComptimeError.InvalidNumber,
+            .invalid_escape_sequence, .invalid_unicode_escape => ComptimeError.InvalidEscape,
+            .unexpected_eof => ComptimeError.UnexpectedEnd,
+            .unsupported_feature => ComptimeError.UnknownIdentifier,
+            .expected_expression => if (starts_with_word)
+                ComptimeError.UnknownIdentifier
+            else
+                ComptimeError.UnexpectedToken,
+            .unexpected_token => if (starts_with_word)
+                ComptimeError.UnknownIdentifier
+            else
+                ComptimeError.UnexpectedToken,
+            .expected_token => blk: {
+                const expected = parse_error.expected orelse break :blk ComptimeError.SyntaxError;
+                if (std.mem.eql(u8, expected, "end of expression")) break :blk ComptimeError.UnexpectedToken;
+                if (parse_error.token_text == null) {
+                    if (std.mem.eql(u8, expected, "')'")) break :blk ComptimeError.UnclosedParen;
+                    if (std.mem.eql(u8, expected, "']'")) break :blk ComptimeError.UnclosedBracket;
+                    if (std.mem.eql(u8, expected, "'}'")) break :blk ComptimeError.UnclosedBrace;
+                }
+                break :blk ComptimeError.SyntaxError;
+            },
+            else => ComptimeError.UnexpectedToken,
+        };
     }
 
     fn evaluateMathCall(self: *Self, name: []const u8, args: []const ComptimeValue) ComptimeError!ComptimeValue {
@@ -1039,92 +917,6 @@ pub const ComptimeEvaluator = struct {
         return ComptimeError.CallNotAllowed;
     }
 
-    // ========================================================================
-    // Environment Variable Support
-    // ========================================================================
-
-    fn parseEnvAccess(self: *Self) ComptimeError!ComptimeValue {
-        const name = self.scanIdentifier();
-        if (self.env) |env_map| {
-            if (env_map.get(name)) |value| {
-                return .{ .string = value };
-            }
-        }
-        return .{ .undefined_val = {} };
-    }
-
-    // ========================================================================
-    // JSON Support
-    // ========================================================================
-
-    fn parseJSONAccess(self: *Self) ComptimeError!ComptimeValue {
-        const name = self.scanIdentifier();
-        self.skipWhitespace();
-
-        if (std.mem.eql(u8, name, "parse") and self.peek() == '(') {
-            return self.parseJSONParse();
-        }
-
-        return ComptimeError.CallNotAllowed;
-    }
-
-    fn parseJSONParse(self: *Self) ComptimeError!ComptimeValue {
-        const args = try self.parseCallArgs();
-        defer self.freeArgs(args);
-
-        if (args.len < 1) return ComptimeError.SyntaxError;
-
-        const json_str = switch (args[0]) {
-            .string => |s| s,
-            else => return ComptimeError.TypeMismatch,
-        };
-
-        // Parse JSON string as comptime value
-        var json_parser = Self.init(self.allocator, json_str, self.line, self.col);
-        return json_parser.parseJSONValue();
-    }
-
-    fn parseJSONValue(self: *Self) ComptimeError!ComptimeValue {
-        self.skipWhitespace();
-        if (self.pos >= self.source.len) return ComptimeError.UnexpectedEnd;
-
-        const c = self.source[self.pos];
-        if (c == '"') return self.parseString('"');
-        if (c == '[') return self.parseArray();
-        if (c == '{') return self.parseObject();
-        if (c == 't' or c == 'f') return self.parseIdentifier();
-        if (c == 'n') return self.parseIdentifier();
-        if (c == '-' or isDigit(c)) return self.parseNumber();
-
-        return ComptimeError.SyntaxError;
-    }
-
-    // ========================================================================
-    // Hash Function (FNV-1a)
-    // ========================================================================
-
-    fn parseHashCall(self: *Self) ComptimeError!ComptimeValue {
-        const args = try self.parseCallArgs();
-        defer self.freeArgs(args);
-
-        if (args.len < 1) return ComptimeError.SyntaxError;
-
-        const input = switch (args[0]) {
-            .string => |s| s,
-            else => return ComptimeError.TypeMismatch,
-        };
-
-        // FNV-1a 32-bit hash
-        const hash = fnv1a(input);
-
-        // Convert to 8-char hex string
-        var buf: [8]u8 = undefined;
-        _ = std.fmt.bufPrint(&buf, "{x:0>8}", .{hash}) catch return ComptimeError.OutOfMemory;
-
-        const result = self.allocator.dupe(u8, &buf) catch return ComptimeError.OutOfMemory;
-        return .{ .string = result };
-    }
-
     fn fnv1a(data: []const u8) u32 {
         var hash: u32 = 2166136261; // FNV offset basis
         for (data) |byte| {
@@ -1134,86 +926,6 @@ pub const ComptimeEvaluator = struct {
         return hash;
     }
 
-    // ========================================================================
-    // parseInt / parseFloat
-    // ========================================================================
-
-    fn parseParseIntCall(self: *Self) ComptimeError!ComptimeValue {
-        const args = try self.parseCallArgs();
-        defer self.freeArgs(args);
-
-        if (args.len < 1) return .{ .nan_val = {} };
-
-        switch (args[0]) {
-            .string => |s| {
-                const radix: u8 = if (args.len >= 2) blk: {
-                    const r = args[1].toNumber() orelse break :blk 10;
-                    break :blk std.math.lossyCast(u8, @trunc(r));
-                } else 10;
-
-                const trimmed = std.mem.trim(u8, s, " \t\n\r");
-                const value = std.fmt.parseInt(i64, trimmed, radix) catch return .{ .nan_val = {} };
-                return .{ .number = @floatFromInt(value) };
-            },
-            .number => |n| return .{ .number = @trunc(n) },
-            else => return .{ .nan_val = {} },
-        }
-    }
-
-    fn parseParseFloatCall(self: *Self) ComptimeError!ComptimeValue {
-        const args = try self.parseCallArgs();
-        defer self.freeArgs(args);
-
-        if (args.len < 1) return .{ .nan_val = {} };
-
-        switch (args[0]) {
-            .string => |s| {
-                const trimmed = std.mem.trim(u8, s, " \t\n\r");
-                const value = std.fmt.parseFloat(f64, trimmed) catch return .{ .nan_val = {} };
-                return .{ .number = value };
-            },
-            .number => |n| return .{ .number = n },
-            else => return .{ .nan_val = {} },
-        }
-    }
-
-    // ========================================================================
-    // Call Argument Parsing
-    // ========================================================================
-
-    fn parseCallArgs(self: *Self) ComptimeError![]const ComptimeValue {
-        self.expect('(') catch return ComptimeError.SyntaxError;
-        self.skipWhitespace();
-
-        var args: std.ArrayList(ComptimeValue) = .empty;
-        errdefer {
-            for (args.items) |arg| {
-                arg.deinit(self.allocator);
-            }
-            args.deinit(self.allocator);
-        }
-
-        while (self.pos < self.source.len and self.peek() != ')') {
-            const arg = try self.parseExpression(.none);
-            args.append(self.allocator, arg) catch {
-                arg.deinit(self.allocator);
-                return ComptimeError.OutOfMemory;
-            };
-            self.skipWhitespace();
-
-            if (self.peek() == ',') {
-                self.advance();
-                self.skipWhitespace();
-            } else {
-                break;
-            }
-        }
-
-        self.expect(')') catch return ComptimeError.UnclosedParen;
-        return args.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory;
-    }
-
-    /// Free argument list returned by parseCallArgs
     fn freeArgs(self: *Self, args: []const ComptimeValue) void {
         for (args) |arg| {
             arg.deinit(self.allocator);
@@ -1322,200 +1034,6 @@ pub const ComptimeEvaluator = struct {
                 break :blk .{ .number = @floatFromInt(ui >> shift) };
             },
         };
-    }
-
-    // ========================================================================
-    // Member Access (for method chaining on strings)
-    // ========================================================================
-
-    fn handleMemberAccess(self: *Self, left: ComptimeValue) ComptimeError!ComptimeValue {
-        // Parse property/method name
-        const name = self.scanIdentifier();
-        if (name.len == 0) return ComptimeError.SyntaxError;
-
-        self.skipWhitespace();
-
-        // String member access
-        if (left == .string) {
-            const str = left.string;
-
-            // Properties
-            if (std.mem.eql(u8, name, "length")) {
-                // JS .length is UTF-16 code units, not UTF-8 bytes.
-                const len = string.utf16Length(str); // Save before freeing
-                // Free the original string since we're consuming it
-                left.deinit(self.allocator);
-                return .{ .number = @floatFromInt(len) };
-            }
-
-            // Methods (require parentheses)
-            if (self.peek() == '(') {
-                const result = try self.handleStringMethod(str, name);
-                // Free the original string since we've consumed it
-                left.deinit(self.allocator);
-                return result;
-            }
-
-            return ComptimeError.UnknownIdentifier;
-        }
-
-        // Array member access
-        if (left == .array) {
-            const arr = left.array;
-
-            // Properties
-            if (std.mem.eql(u8, name, "length")) {
-                const len = arr.len; // Save before freeing
-                // Free the original array since we're consuming it
-                left.deinit(self.allocator);
-                return .{ .number = @floatFromInt(len) };
-            }
-
-            return ComptimeError.UnknownIdentifier;
-        }
-
-        return ComptimeError.UnsupportedOp;
-    }
-
-    fn handleStringMethod(self: *Self, str: []const u8, name: []const u8) ComptimeError!ComptimeValue {
-        const args = try self.parseCallArgs();
-        defer self.freeArgs(args);
-
-        // No-argument methods
-        if (std.mem.eql(u8, name, "toUpperCase")) {
-            return self.stringToUpperCase(str);
-        }
-        if (std.mem.eql(u8, name, "toLowerCase")) {
-            return self.stringToLowerCase(str);
-        }
-        if (std.mem.eql(u8, name, "trim")) {
-            return self.stringTrim(str);
-        }
-        if (std.mem.eql(u8, name, "trimStart") or std.mem.eql(u8, name, "trimLeft")) {
-            return self.stringTrimStart(str);
-        }
-        if (std.mem.eql(u8, name, "trimEnd") or std.mem.eql(u8, name, "trimRight")) {
-            return self.stringTrimEnd(str);
-        }
-
-        // Single-argument methods
-        if (args.len >= 1) {
-            if (std.mem.eql(u8, name, "includes")) {
-                const search = switch (args[0]) {
-                    .string => |s| s,
-                    else => return ComptimeError.TypeMismatch,
-                };
-                return .{ .boolean = std.mem.indexOf(u8, str, search) != null };
-            }
-            if (std.mem.eql(u8, name, "startsWith")) {
-                const search = switch (args[0]) {
-                    .string => |s| s,
-                    else => return ComptimeError.TypeMismatch,
-                };
-                return .{ .boolean = std.mem.startsWith(u8, str, search) };
-            }
-            if (std.mem.eql(u8, name, "endsWith")) {
-                const search = switch (args[0]) {
-                    .string => |s| s,
-                    else => return ComptimeError.TypeMismatch,
-                };
-                return .{ .boolean = std.mem.endsWith(u8, str, search) };
-            }
-            if (std.mem.eql(u8, name, "indexOf")) {
-                const search = switch (args[0]) {
-                    .string => |s| s,
-                    else => return ComptimeError.TypeMismatch,
-                };
-                if (std.mem.indexOf(u8, str, search)) |idx| {
-                    // Return a UTF-16 code-unit index (matches .length/slice).
-                    return .{ .number = @floatFromInt(string.byteOffsetToUtf16Index(str, idx)) };
-                }
-                return .{ .number = -1 };
-            }
-            if (std.mem.eql(u8, name, "repeat")) {
-                const count = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-                if (!std.math.isFinite(count) or count < 0 or count > 10000) return ComptimeError.TypeMismatch;
-                const n: usize = @intFromFloat(@trunc(count));
-                var result: std.ArrayList(u8) = .empty;
-                for (0..n) |_| {
-                    result.appendSlice(self.allocator, str) catch return ComptimeError.OutOfMemory;
-                }
-                return .{ .string = result.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory };
-            }
-            if (std.mem.eql(u8, name, "split")) {
-                const delim = switch (args[0]) {
-                    .string => |s| s,
-                    else => return ComptimeError.TypeMismatch,
-                };
-                return self.stringSplit(str, delim);
-            }
-            if (std.mem.eql(u8, name, "charAt")) {
-                const idx_f = args[0].toNumber() orelse return ComptimeError.TypeMismatch;
-                // Index by UTF-16 code unit (matches runtime charAt); an astral
-                // codepoint is returned whole for either of its two unit indices.
-                const idx_usize: usize = std.math.lossyCast(usize, @trunc(idx_f));
-                const slice: ?[]const u8 = if (idx_usize <= std.math.maxInt(u32))
-                    string.charCodepointSliceAt(str, @intCast(idx_usize))
-                else
-                    null;
-                if (slice) |cp| {
-                    const result = self.allocator.dupe(u8, cp) catch return ComptimeError.OutOfMemory;
-                    return .{ .string = result };
-                }
-                const empty = self.allocator.alloc(u8, 0) catch return ComptimeError.OutOfMemory;
-                return .{ .string = empty };
-            }
-        }
-
-        // slice(start, end?)
-        if (std.mem.eql(u8, name, "slice")) {
-            return self.stringSlice(str, args);
-        }
-
-        // substring(start, end?)
-        if (std.mem.eql(u8, name, "substring")) {
-            return self.stringSlice(str, args);
-        }
-
-        // padStart(length, padStr?)
-        if (std.mem.eql(u8, name, "padStart")) {
-            return self.stringPadStart(str, args);
-        }
-
-        // padEnd(length, padStr?)
-        if (std.mem.eql(u8, name, "padEnd")) {
-            return self.stringPadEnd(str, args);
-        }
-
-        // replace(search, replacement)
-        if (std.mem.eql(u8, name, "replace")) {
-            if (args.len < 2) return ComptimeError.SyntaxError;
-            const search = switch (args[0]) {
-                .string => |s| s,
-                else => return ComptimeError.TypeMismatch,
-            };
-            const replacement = switch (args[1]) {
-                .string => |s| s,
-                else => return ComptimeError.TypeMismatch,
-            };
-            return self.stringReplace(str, search, replacement, false);
-        }
-
-        // replaceAll(search, replacement)
-        if (std.mem.eql(u8, name, "replaceAll")) {
-            if (args.len < 2) return ComptimeError.SyntaxError;
-            const search = switch (args[0]) {
-                .string => |s| s,
-                else => return ComptimeError.TypeMismatch,
-            };
-            const replacement = switch (args[1]) {
-                .string => |s| s,
-                else => return ComptimeError.TypeMismatch,
-            };
-            return self.stringReplace(str, search, replacement, true);
-        }
-
-        return ComptimeError.CallNotAllowed;
     }
 
     // String helper methods
@@ -1716,51 +1234,6 @@ pub const ComptimeEvaluator = struct {
         }
 
         return .{ .string = result.toOwnedSlice(self.allocator) catch return ComptimeError.OutOfMemory };
-    }
-
-    // ========================================================================
-    // Helpers
-    // ========================================================================
-
-    fn peek(self: *Self) u8 {
-        if (self.pos >= self.source.len) return 0;
-        return self.source[self.pos];
-    }
-
-    fn advance(self: *Self) void {
-        if (self.pos < self.source.len) {
-            if (self.source[self.pos] == '\n') {
-                self.line += 1;
-                self.col = 1;
-            } else {
-                self.col += 1;
-            }
-            self.pos += 1;
-        }
-    }
-
-    fn expect(self: *Self, char: u8) ComptimeError!void {
-        if (self.peek() != char) return ComptimeError.UnexpectedToken;
-        self.advance();
-    }
-
-    fn skipWhitespace(self: *Self) void {
-        while (self.pos < self.source.len) {
-            const c = self.source[self.pos];
-            if (c == ' ' or c == '\t' or c == '\n' or c == '\r') {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-    }
-
-    fn scanIdentifier(self: *Self) []const u8 {
-        const start = self.pos;
-        while (self.pos < self.source.len and isIdentifierChar(self.source[self.pos])) {
-            self.advance();
-        }
-        return self.source[start..self.pos];
     }
 };
 
@@ -2325,6 +1798,7 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
         .{ .source = "8 / 2 % 3", .expected = "1" },
         .{ .source = "2 ** 3 ** 2", .expected = "512" },
         .{ .source = "~1 + 4", .expected = "2" },
+        .{ .source = "-3 ** 2", .expected = "9" },
         .{ .source = "\" x \".trim().length", .expected = "1" },
         .{ .source = "(1 + 2) * 3", .expected = "9" },
 
@@ -2378,6 +1852,11 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
         .{ .source = "\"hello\".endsWith(\"lo\")", .expected = "true" },
         .{ .source = "\"hello\".indexOf(\"l\")", .expected = "2" },
         .{ .source = "\"hello\".charAt(1)", .expected = "\"e\"" },
+        .{ .source = "\"abc\".charAt(NaN)", .expected = "\"a\"" },
+        .{ .source = "\"abc\".charAt(-0)", .expected = "\"a\"" },
+        .{ .source = "\"abc\".charAt(-1)", .expected = "\"\"" },
+        .{ .source = "\"abc\".charAt(Infinity)", .expected = "\"\"" },
+        .{ .source = "\"abc\".charAt(1.9)", .expected = "\"b\"" },
         .{ .source = "\"a,b,c\".split(\",\")", .expected = "[\"a\",\"b\",\"c\"]" },
         .{ .source = "\"ab\".repeat(3)", .expected = "\"ababab\"" },
         .{ .source = "\"hello\".replace(\"l\", \"L\")", .expected = "\"heLlo\"" },
@@ -2389,6 +1868,8 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
         .{ .source = "parseInt(\"ff\", 16)", .expected = "255" },
         .{ .source = "parseFloat(\" 3.5 \")", .expected = "3.5" },
         .{ .source = "JSON.parse(\"{\\\"ok\\\":true}\")", .expected = "({ok:true})" },
+        .{ .source = "JSON.parse(\"{loose:1} trailing\")", .expected = "({loose:1})" },
+        .{ .source = "JSON.parse(\"[1, undefined] trailing\")", .expected = "[1,undefined]" },
         .{ .source = "hash(\"test\")", .expected = "\"afd071e5\"" },
     };
     for (cases) |case| try Matrix.expectLiteral(case.source, case.expected);
@@ -2396,15 +1877,14 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
     var env = std.StringHashMap([]const u8).init(allocator);
     defer env.deinit();
     const env_value = try allocator.dupe(u8, "https://example.test");
-    var env_value_owned = true;
-    errdefer if (env_value_owned) allocator.free(env_value);
+    defer allocator.free(env_value);
     try env.put("API_URL", env_value);
     var env_evaluator = ComptimeEvaluator.init(allocator, "Env.API_URL", 1, 1);
     env_evaluator.env = &env;
     const env_result = try env_evaluator.evaluate();
-    env_value_owned = false;
     defer env_result.deinit(allocator);
     try std.testing.expectEqualStrings(env_value, env_result.string);
+    try std.testing.expect(env_value.ptr != env_result.string.ptr);
 
     const metadata_cases = [_]struct {
         source: []const u8,
@@ -2417,8 +1897,7 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
     };
     for (metadata_cases) |case| {
         const owned_value = try allocator.dupe(u8, case.value);
-        var owned_value_owned = true;
-        errdefer if (owned_value_owned) allocator.free(owned_value);
+        defer allocator.free(owned_value);
         var evaluator = ComptimeEvaluator.init(allocator, case.source, 1, 1);
         switch (case.field) {
             .build_time => evaluator.build_time = owned_value,
@@ -2426,9 +1905,9 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
             .version => evaluator.version = owned_value,
         }
         const result = try evaluator.evaluate();
-        owned_value_owned = false;
         defer result.deinit(allocator);
         try std.testing.expectEqualStrings(case.value, result.string);
+        try std.testing.expect(owned_value.ptr != result.string.ptr);
     }
 }
 
@@ -2451,6 +1930,32 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "while (true) 1", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "const value = 1", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "() => 1", .expected = ComptimeError.UnexpectedToken },
+        .{ .source = "\"value\" |> hash", .expected = ComptimeError.UnexpectedToken },
+        .{ .source = "1 |> Math.abs", .expected = ComptimeError.UnexpectedToken },
+
+        // Logical and ternary evaluation stays eager so an invalid expression
+        // cannot hide in either selected or unselected children.
+        .{ .source = "arbitrary() && false", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "false && arbitrary()", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "arbitrary() || true", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "true || arbitrary()", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "arbitrary() ?? 1", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "1 ?? arbitrary()", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "true ? arbitrary() : 0", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "true ? 1 : arbitrary()", .expected = ComptimeError.UnknownIdentifier },
+
+        // Canonical parser nodes outside the explicit evaluator ADT stay
+        // reachable in tests and fail closed under their current identities.
+        .{ .source = "[...[]]", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "{...{a: 1}}", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "{[\"a\"]: 1}", .expected = ComptimeError.SyntaxError },
+        .{ .source = "\"x\"[0]", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "Env?.VALUE", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "hash?.(\"x\")", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "Math.max(...[1, 2])", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "typeof 1", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "void 0", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "\"a\" in {a: 1}", .expected = ComptimeError.UnsupportedOp },
 
         // Stable malformed-input and evaluation error classes that can be
         // reached without allocator fault injection.
@@ -2465,6 +1970,9 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "", .expected = ComptimeError.UnexpectedEnd },
         .{ .source = "0x", .expected = ComptimeError.InvalidNumber },
         .{ .source = "\"\\xGG\"", .expected = ComptimeError.InvalidEscape },
+        .{ .source = "JSON.parse(\"'single-root'\")", .expected = ComptimeError.SyntaxError },
+        .{ .source = "JSON.parse(\".5\")", .expected = ComptimeError.SyntaxError },
+        .{ .source = "JSON.parse(\"{loose 1}\")", .expected = ComptimeError.SyntaxError },
     };
     for (cases) |case| {
         var evaluator = ComptimeEvaluator.init(allocator, case.source, 11, 7);
@@ -2485,4 +1993,42 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
     @memset(deep_expression[nesting + 1 ..], ')');
     var deep_evaluator = ComptimeEvaluator.init(allocator, deep_expression, 1, 1);
     try std.testing.expectError(ComptimeError.DepthExceeded, deep_evaluator.evaluate());
+}
+
+fn nestedJsonExpression(allocator: std.mem.Allocator, nesting: usize) ![]u8 {
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    for (0..nesting) |_| try json.append(allocator, '[');
+    try json.append(allocator, '0');
+    for (0..nesting) |_| try json.append(allocator, ']');
+    return std.fmt.allocPrint(allocator, "JSON.parse(\"{s}\")", .{json.items});
+}
+
+test "JSON.parse root prefix stays inside the 64-node depth contract" {
+    const allocator = std.testing.allocator;
+
+    const accepted_source = try nestedJsonExpression(allocator, 63);
+    defer allocator.free(accepted_source);
+    var accepted = ComptimeEvaluator.init(allocator, accepted_source, 1, 1);
+    const value = try accepted.evaluate();
+    defer value.deinit(allocator);
+
+    const rejected_source = try nestedJsonExpression(allocator, 64);
+    defer allocator.free(rejected_source);
+    var rejected = ComptimeEvaluator.init(allocator, rejected_source, 1, 1);
+    try std.testing.expectError(ComptimeError.DepthExceeded, rejected.evaluate());
+}
+
+fn evaluateAllocationFixture(allocator: std.mem.Allocator, source: []const u8) !void {
+    var evaluator = ComptimeEvaluator.init(allocator, source, 1, 1);
+    const value = try evaluator.evaluate();
+    defer value.deinit(allocator);
+}
+
+test "comptime aggregate evaluation cleans every allocation failure" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        evaluateAllocationFixture,
+        .{"[[\"owned\"], {nested: [\"value\"]}]"},
+    );
 }

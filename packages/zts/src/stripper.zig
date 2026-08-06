@@ -3429,6 +3429,45 @@ test "comptime strip matrix exposes its current unregistered reject identity" {
     );
 }
 
+test "comptime strip rejects pipe syntax before parser desugaring" {
+    const cases = [_][]const u8{
+        "const value = comptime(\"value\" |> hash);",
+        "const value = comptime(1 |> Math.abs);",
+    };
+    for (cases) |source| {
+        try std.testing.expectError(
+            StripError.ComptimeEvaluationFailed,
+            strip(std.testing.allocator, source, .{ .enable_comptime = true }),
+        );
+    }
+}
+
+fn nestedComptimeJsonSource(allocator: std.mem.Allocator, nesting: usize) ![]u8 {
+    var json: std.ArrayList(u8) = .empty;
+    defer json.deinit(allocator);
+    for (0..nesting) |_| try json.append(allocator, '[');
+    try json.append(allocator, '0');
+    for (0..nesting) |_| try json.append(allocator, ']');
+    return std.fmt.allocPrint(allocator, "const value = comptime(JSON.parse(\"{s}\"));", .{json.items});
+}
+
+test "comptime strip enforces JSON root depth at 64 nodes" {
+    const allocator = std.testing.allocator;
+
+    const accepted_source = try nestedComptimeJsonSource(allocator, 63);
+    defer allocator.free(accepted_source);
+    const result = try strip(allocator, accepted_source, .{ .enable_comptime = true });
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqual(accepted_source.len, result.code.len);
+
+    const rejected_source = try nestedComptimeJsonSource(allocator, 64);
+    defer allocator.free(rejected_source);
+    try std.testing.expectError(
+        StripError.ComptimeEvaluationFailed,
+        strip(allocator, rejected_source, .{ .enable_comptime = true }),
+    );
+}
+
 // ============================================================================
 // Type Annotation and TypeMap Tests
 // ============================================================================
