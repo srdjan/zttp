@@ -4,7 +4,7 @@
 - `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
 - `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `handler_instance.zig`); `zruntime_tests.zig` is the end-to-end test root behind `zig build test-zruntime`.
 - `packages/zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, modules).
-- `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with generated module specs under `module-specs/` (produced by `zttp module-spec-render` from the Zig bindings; do not hand-edit).
+- `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with module specs under `module-specs/` generated from the Zig bindings by `zttp module-spec-render`.
 - `packages/zts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
 - `packages/pi/` contains the interactive expert agent; `packages/proof-review/` contains the proof-review tooling.
 - `packages/zts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
@@ -13,7 +13,7 @@
 - `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`, `durable/`, `workflow/`, `websocket/`, `fetch/`, `hypermedia/`, `patterns/`, `system/`, `autoloop/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (see Documentation section below).
-- `zig-out/` and `.zig-cache/` are generated outputs; don't edit or commit them.
+- `zig-out/` and `.zig-cache/` are the Zig build's generated output directories.
 
 ## Documentation
 
@@ -55,14 +55,13 @@
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
 - `docs/internals/testing.md` maps the build steps: what `zig build test` runs, what it leaves to `scripts/verify.sh`, and why `test-zruntime` is standalone.
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
-- Add tests near the feature you touched in `packages/runtime/` or `packages/zts/` and run the relevant `zig build test*` step.
+- Runtime and ZTS tests live beside the affected code in `packages/runtime/` or `packages/zts/`; run the relevant `zig build test*` step.
 - Reaching a new `zts` internal module (anything in the internal tier of `packages/zts/src/root.zig`) from `runtime`, `tools`, `pi`, or `proof-review` needs a row in `scripts/module-boundary.allow`, and a row that nothing uses fails the same gate. Prefer the curated surface at the bottom of `root.zig`; widen the allowlist only deliberately, and say why in the commit. Run `zig build test-module-boundary`.
 - Discarding an error in the analysis files that decide whether a program is proven (the eleven listed in `scripts/check-proof-swallow.sh`) needs a row in `scripts/proof-swallow.allow` with the reason it cannot weaken a verdict, and a row nothing matches fails the same gate. A swallow there does not surface as a failure, it surfaces as a pass. Run `zig build test-proof-swallow`. The gate sees discarded errors, not wrong answers: a function that returns a value claiming more than it checked passes it, and five such fail-opens shipped past it in the flow checker - see [docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md](docs/solutions/security-issues/empty-label-set-claimed-a-value-was-clean.md) for the class and the probe method that finds it. The class recurred once more in `validateJson`, `coerceJson`, and `decodeJson`, which relabelled their output from their own contract rather than from their input, so a secret routed through any of them reached the response with `no_secret_leakage` PROVEN. Fixed: an export that derives its return value from its arguments discharges `user_input` and nothing else - see [docs/solutions/security-issues/validate-json-strips-the-label-it-was-asked-to-check.md](docs/solutions/security-issues/validate-json-strips-the-label-it-was-asked-to-check.md). When adding such an export, probe it: return a labelled value directly, confirm it is refused, then route the same value through the new export and check the diagnostic is still there. The class is not bounded by those eleven files: the same conflation later shipped in `packages/pi`, where no such gate exists, and destroyed a file - see [docs/solutions/logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md](docs/solutions/logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md).
 - A gate asserts a floor on its own input before any count it reports means anything. A gate whose corpus is empty, whose filter matches no test, or whose build product nothing depends on reports success while checking nothing, and is then cited as evidence. `scripts/check-runtime-purity.sh` and `scripts/check-docs-drift.sh` already do this; see [docs/solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md](docs/solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md) for the four shapes and the delete-its-input check. The floor is necessary and not sufficient: a gate holding a full input can still assert something weaker than its own name, so that runs in which the named behavior never happened satisfy it too - assert the value expected, not a difference from the values excluded. And a probe is code: one that does not compile runs no check, and since a failed build and a passing gate both emit no failure message, read a probe's verdict from the build's exit status rather than from a grep over its output. See [docs/solutions/conventions/difference-is-not-the-claim-and-a-probe-must-compile.md](docs/solutions/conventions/difference-is-not-the-claim-and-a-probe-must-compile.md).
 
-## Commit & Pull Request Guidelines
+## Commit Guidelines
 - Commit history is informal; keep subjects short and descriptive (lowercase is common). Use `WIP-#:` only for intentional multi-step series.
-- PRs should include: a clear summary, rationale, test commands run, and doc/example updates when behavior changes.
 
 ## Security & Configuration Notes
 - Preserve path traversal checks in `packages/runtime/src/server.zig`.
