@@ -94,12 +94,16 @@ names_used_in() {
   ' "$1"
 }
 
+# Every tracked Zig file in the package, not only `src/`. Scanning `src/` alone
+# left `packages/runtime/bench/*.zig` outside the gate, and those files reach
+# zts internals from code `zig build bench` compiles - one of them reached an
+# internal no row allowed while the gate still printed OK.
 used_pairs="$(
   for pkg in runtime tools pi modules proof-review zttp-sdk; do
-    [[ -d "packages/$pkg/src" ]] || continue
+    [[ -d "packages/$pkg" ]] || continue
     while IFS= read -r -d '' file; do
       names_used_in "$file"
-    done < <(git ls-files -z "packages/$pkg/src/*.zig") |
+    done < <(git ls-files -z "packages/$pkg/*.zig") |
       sort -u |
       while IFS= read -r name; do
         printf '%s\n' "$internals" | grep -qx -- "$name" || continue

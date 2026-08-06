@@ -29,6 +29,9 @@ runtime handler_contract
 runtime handler_policy
 runtime heap
 runtime http
+# packages/runtime/bench/benchmark.zig reads interpreter.PerfStats to report
+# perf counters. Benchmark-only; the counter layout is not stable surface.
+runtime interpreter
 runtime module_binding
 runtime modules
 runtime object
