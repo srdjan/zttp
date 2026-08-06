@@ -1137,7 +1137,7 @@ fn parseRepairs(
             return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must name its `intent`");
         if (intent_value != .string)
             return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`intent` must be a string");
-        const intent = zts.repair_intent.RepairIntent.fromString(intent_value.string) orelse
+        const intent = zts.RepairIntent.fromString(intent_value.string) orelse
             return try writeApplyRefusal(json, file_rel, digest, "unknown_intent", "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
 
         const line_value = o.get("line") orelse
@@ -1717,7 +1717,7 @@ fn byteOffsetOf(source: []const u8, line: u32, column: u32) usize {
 /// by accident. It answers from the registry now, so a rewrite is called
 /// mechanical exactly when something discharges it - the same condition
 /// `repair_available` keys on, read from the same place.
-fn candidateGrade(intent: zts.repair_intent.RepairIntent) []const u8 {
+fn candidateGrade(intent: zts.RepairIntent) []const u8 {
     return if (zts.repair_validator.gradable(intent)) "mechanical_repair" else "proposed_refactor";
 }
 

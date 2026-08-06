@@ -10,7 +10,7 @@ const ir = zts.parser;
 const counterexample = zts.counterexample;
 const flow_checker = zts.flow_checker;
 const handler_verifier = zts.handler_verifier;
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 const repair_plan = zts.repair_plan;
 
 const name = "pi_repair_plan";
@@ -130,7 +130,7 @@ pub fn planFromSource(
     };
     defer strip_result.deinit();
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
     var js_parser = try zts.parser.JsParser.init(allocator, strip_result.code);
     defer js_parser.deinit();
@@ -166,7 +166,7 @@ pub fn planFromSource(
     try w.writeAll("\",\"goals\":[");
     for (goals.items, 0..) |g, i| {
         if (i > 0) try w.writeByte(',');
-        try json_utils.writeJsonString(w, g.asString());
+        try writeJsonString(w, g.asString());
     }
     try w.writeAll("],\"diagnostics\":[");
 
@@ -272,20 +272,20 @@ fn writeVerifierDiagnostic(
     column: u32,
 ) !void {
     try writer.writeAll("{\"id\":");
-    try json_utils.writeJsonString(writer, id);
+    try writeJsonString(writer, id);
     try writer.writeAll(",\"kind\":");
-    try json_utils.writeJsonString(writer, @tagName(diag.kind));
+    try writeJsonString(writer, @tagName(diag.kind));
     try writer.writeAll(",\"severity\":");
-    try json_utils.writeJsonString(writer, diag.severity.label());
+    try writeJsonString(writer, diag.severity.label());
     try writer.writeAll(",\"line\":");
     try writer.print("{d}", .{line});
     try writer.writeAll(",\"column\":");
     try writer.print("{d}", .{column});
     try writer.writeAll(",\"message\":");
-    try json_utils.writeJsonString(writer, diag.message);
+    try writeJsonString(writer, diag.message);
     if (diag.help) |help| {
         try writer.writeAll(",\"help\":");
-        try json_utils.writeJsonString(writer, help);
+        try writeJsonString(writer, help);
     }
     try writer.writeByte('}');
 }
@@ -297,11 +297,11 @@ fn writeWitness(
     witness: counterexample.CounterexampleWitness,
 ) !void {
     try writer.writeAll("{\"id\":");
-    try json_utils.writeJsonString(writer, id);
+    try writeJsonString(writer, id);
     try writer.writeAll(",\"property\":");
-    try json_utils.writeJsonString(writer, witness.property.asString());
+    try writeJsonString(writer, witness.property.asString());
     try writer.writeAll(",\"summary\":");
-    try json_utils.writeJsonString(writer, diag.message);
+    try writeJsonString(writer, diag.message);
     try writer.writeAll(",\"origin\":{\"line\":");
     try writer.print("{d}", .{witness.origin.line});
     try writer.writeAll(",\"column\":");
@@ -311,9 +311,9 @@ fn writeWitness(
     try writer.writeAll(",\"column\":");
     try writer.print("{d}", .{witness.sink.column});
     try writer.writeAll("},\"request\":{\"method\":");
-    try json_utils.writeJsonString(writer, witness.request.method);
+    try writeJsonString(writer, witness.request.method);
     try writer.writeAll(",\"url\":");
-    try json_utils.writeJsonString(writer, witness.request.url);
+    try writeJsonString(writer, witness.request.url);
     try writer.writeAll(",\"has_auth_header\":");
     try writer.writeAll(if (witness.request.has_auth_header) "true" else "false");
     try writer.writeAll("},\"io_stubs\":[");
@@ -322,9 +322,9 @@ fn writeWitness(
         try writer.writeAll("{\"seq\":");
         try writer.print("{d}", .{stub.seq});
         try writer.writeAll(",\"module\":");
-        try json_utils.writeJsonString(writer, stub.module);
+        try writeJsonString(writer, stub.module);
         try writer.writeAll(",\"fn\":");
-        try json_utils.writeJsonString(writer, stub.func);
+        try writeJsonString(writer, stub.func);
         try writer.writeAll(",\"result\":");
         try writer.writeAll(stub.result_json);
         try writer.writeByte('}');
@@ -349,9 +349,9 @@ fn writePlan(
     defer allocator.free(template);
 
     try writer.writeAll("{\"id\":");
-    try json_utils.writeJsonString(writer, id);
+    try writeJsonString(writer, id);
     try writer.writeAll(",\"kind\":");
-    try json_utils.writeJsonString(writer, plan.kind.asString());
+    try writeJsonString(writer, plan.kind.asString());
     try writer.writeAll(",\"target\":{\"line\":");
     try writer.print("{d}", .{plan.target.line});
     try writer.writeAll(",\"column\":");
@@ -359,22 +359,22 @@ fn writePlan(
     try writer.writeAll("},\"behavioral_change\":");
     try writer.writeAll(if (plan.behavioral_change) "true" else "false");
     try writer.writeAll(",\"summary\":");
-    try json_utils.writeJsonString(writer, plan.summary);
+    try writeJsonString(writer, plan.summary);
     try writer.writeAll(",\"edit_intent\":{\"kind\":");
-    try json_utils.writeJsonString(writer, plan.edit_intent.kind.asString());
+    try writeJsonString(writer, plan.edit_intent.kind.asString());
     try writer.writeAll(",\"line\":");
     try writer.print("{d}", .{plan.edit_intent.line});
     try writer.writeAll(",\"column\":");
     try writer.print("{d}", .{plan.edit_intent.column});
     try writer.writeAll(",\"template\":");
-    try json_utils.writeJsonString(writer, template);
+    try writeJsonString(writer, template);
     if (subject_name) |name_text| {
         try writer.writeAll(",\"bindings\":{\"subject\":");
-        try json_utils.writeJsonString(writer, name_text);
+        try writeJsonString(writer, name_text);
         try writer.writeByte('}');
     }
     try writer.writeAll("},\"closes\":[");
-    try json_utils.writeJsonString(writer, closes);
+    try writeJsonString(writer, closes);
     try writer.writeAll("]}");
 }
 
@@ -406,7 +406,7 @@ pub fn concreteTemplate(
 
 pub fn repairSubjectName(
     ir_view: ir.IrView,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     diag: handler_verifier.Diagnostic,
 ) ?[]const u8 {
     return switch (diag.kind) {
@@ -418,7 +418,7 @@ pub fn repairSubjectName(
 
 fn memberObjectName(
     ir_view: ir.IrView,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     node: zts.parser.NodeIndex,
 ) ?[]const u8 {
     const tag = ir_view.getTag(node) orelse return null;
@@ -430,7 +430,7 @@ fn memberObjectName(
 
 fn identifierName(
     ir_view: ir.IrView,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     node: zts.parser.NodeIndex,
 ) ?[]const u8 {
     const tag = ir_view.getTag(node) orelse return null;

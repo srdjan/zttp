@@ -86,7 +86,7 @@ fn execute(
         break :blk value.string;
     } else null;
 
-    var registry = zts.manifest_registry.Registry.init(allocator);
+    var registry = zts.ManifestRegistry.init(allocator);
     defer registry.deinit();
 
     var parse_errors: std.ArrayListUnmanaged(ParseError) = .empty;
@@ -151,7 +151,7 @@ fn execute(
 fn loadManifestInto(
     allocator: std.mem.Allocator,
     path: []const u8,
-    registry: *zts.manifest_registry.Registry,
+    registry: *zts.ManifestRegistry,
     parse_errors: *std.ArrayListUnmanaged(ParseError),
 ) !void {
     const bytes = zts.file_io.readFile(allocator, path, 256 * 1024) catch |err| {
@@ -160,7 +160,7 @@ fn loadManifestInto(
     };
     defer allocator.free(bytes);
 
-    var manifest = zts.module_manifest.parse(allocator, bytes) catch |err| {
+    var manifest = zts.parseModuleManifest(allocator, bytes) catch |err| {
         try parse_errors.append(allocator, .{ .path = path, .err = @errorName(err) });
         return;
     };

@@ -197,8 +197,8 @@ pub fn collectModuleManifestPaths(
 pub fn buildManifestRegistryFromPaths(
     allocator: std.mem.Allocator,
     paths: []const []const u8,
-) !zts.manifest_registry.Registry {
-    var registry = zts.manifest_registry.Registry.init(allocator);
+) !zts.ManifestRegistry {
+    var registry = zts.ManifestRegistry.init(allocator);
     errdefer registry.deinit();
 
     for (paths) |path| {
@@ -208,7 +208,7 @@ pub fn buildManifestRegistryFromPaths(
         };
         defer allocator.free(bytes);
 
-        var manifest = zts.module_manifest.parse(allocator, bytes) catch |err| {
+        var manifest = zts.parseModuleManifest(allocator, bytes) catch |err| {
             errPrint("Error parsing module manifest '{s}': {}\n", .{ path, err });
             return err;
         };

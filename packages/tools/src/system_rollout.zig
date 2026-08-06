@@ -4,7 +4,7 @@ const zts = @import("zts");
 const contract_diff = zts.contract_diff;
 const handler_contract = zts.handler_contract;
 const system_linker = zts.system_linker;
-const writeJsonString = zts.json_utils.writeJsonString;
+const writeJsonString = zts.writeJsonString;
 
 const system_analysis = @import("system_analysis.zig");
 const upgrade_verifier = @import("upgrade_verifier.zig");

@@ -18,8 +18,8 @@ const ui_payload = @import("../ui_payload.zig");
 const common = @import("common.zig");
 const repair_apply = @import("repair_apply.zig");
 
-const json_utils = zts.json_utils;
-const RepairIntent = zts.repair_intent.RepairIntent;
+const writeJsonString = zts.writeJsonString;
+const RepairIntent = zts.RepairIntent;
 
 const name = "zts_expert_ast_rewrite";
 
@@ -284,13 +284,13 @@ fn buildResult(
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (ok) "true" else "false");
     try w.writeAll(",\"applied\":false,\"path\":");
-    try json_utils.writeJsonString(w, args.path);
+    try writeJsonString(w, args.path);
     try w.writeAll(",\"plan_id\":");
-    try json_utils.writeJsonString(w, args.plan_id);
+    try writeJsonString(w, args.plan_id);
     try w.writeAll(",\"intent\":");
-    try json_utils.writeJsonString(w, args.intent_str);
+    try writeJsonString(w, args.intent_str);
     try w.writeAll(",\"proposed_content\":");
-    try json_utils.writeJsonString(w, args.proposed);
+    try writeJsonString(w, args.proposed);
     try w.writeAll(",\"verification\":");
     try edit_simulate.writeResultJson(w, args.verdict);
     try w.writeAll("}\n");
@@ -403,13 +403,13 @@ fn failureJson(
     defer text_buf.deinit();
     const w = text_buf.writer();
     try w.writeAll("{\"ok\":false,\"applied\":false,\"plan_id\":");
-    try json_utils.writeJsonString(w, plan_id);
+    try writeJsonString(w, plan_id);
     try w.writeAll(",\"intent\":");
-    try json_utils.writeJsonString(w, intent_str);
+    try writeJsonString(w, intent_str);
     try w.writeAll(",\"reason\":");
-    try json_utils.writeJsonString(w, reason);
+    try writeJsonString(w, reason);
     try w.writeAll(",\"message\":");
-    try json_utils.writeJsonString(w, message);
+    try writeJsonString(w, message);
     try w.writeAll("}\n");
 
     return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };

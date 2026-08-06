@@ -22,7 +22,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const zts = @import("zts");
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 const file_io = zts.file_io;
 
 /// Per-project state directory beneath `project_root`. Kept relative so the
@@ -107,14 +107,14 @@ pub fn append(
     const w = &aw.writer;
 
     try w.writeAll("{\"id\":");
-    try json_utils.writeJsonString(w, entry.id);
+    try writeJsonString(w, entry.id);
     try w.writeAll(",\"fact\":");
-    try json_utils.writeJsonString(w, entry.fact);
+    try writeJsonString(w, entry.fact);
     try w.writeAll(",\"source\":");
-    try json_utils.writeJsonString(w, entry.source);
+    try writeJsonString(w, entry.source);
     try w.writeAll(",\"session_id\":");
     if (entry.session_id) |sid| {
-        try json_utils.writeJsonString(w, sid);
+        try writeJsonString(w, sid);
     } else {
         try w.writeAll("null");
     }

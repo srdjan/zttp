@@ -63,7 +63,7 @@ pub const TranspileResult = struct {
 
 pub const IrTranspiler = struct {
     ir: IrView,
-    atoms: ?*zts.context.AtomTable,
+    atoms: ?*zts.AtomTable,
     output: std.ArrayList(u8),
     indent: u16,
     allocator: std.mem.Allocator,
@@ -92,7 +92,7 @@ pub const IrTranspiler = struct {
     // Name allocations to free
     name_allocs: std.ArrayList([]const u8),
 
-    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*zts.context.AtomTable) IrTranspiler {
+    pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*zts.AtomTable) IrTranspiler {
         return .{
             .ir = ir_view,
             .atoms = atoms,
@@ -2720,8 +2720,8 @@ const testing = std.testing;
 /// Everything (parser, atoms, transpiler) is allocated from `arena`, so no
 /// per-object deinit is needed; the arena owner frees it all.
 fn transpileForTest(arena: std.mem.Allocator, source: []const u8) ![]const u8 {
-    const atoms = try arena.create(zts.context.AtomTable);
-    atoms.* = zts.context.AtomTable.init(arena);
+    const atoms = try arena.create(zts.AtomTable);
+    atoms.* = zts.AtomTable.init(arena);
     const js_parser = try arena.create(zts.parser.JsParser);
     js_parser.* = try zts.parser.JsParser.init(arena, source);
     js_parser.setAtomTable(atoms);

@@ -12,7 +12,7 @@ const json_writer = @import("../providers/anthropic/json_writer.zig");
 const pi_repair_plan = @import("pi_repair_plan.zig");
 const pi_apply_repair_plan = @import("pi_apply_repair_plan.zig");
 
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 
 const name = "pi_goal_candidate";
 
@@ -352,7 +352,7 @@ fn noCandidate(
     const w = text_buf.writer();
     try writePrefix(w, input, false, reason);
     try w.writeAll(",\"message\":");
-    try json_utils.writeJsonString(w, message);
+    try writeJsonString(w, message);
     try w.writeAll(",\"repairs_applied\":0,\"plan_ids\":[],\"proposed_content\":null}\n");
     return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
 }
@@ -372,10 +372,10 @@ fn candidateResult(
     try w.print(",\"repairs_applied\":{d},\"plan_ids\":[", .{repairs_applied});
     for (plan_ids, 0..) |id, i| {
         if (i > 0) try w.writeByte(',');
-        try json_utils.writeJsonString(w, id);
+        try writeJsonString(w, id);
     }
     try w.writeAll("],\"proposed_content\":");
-    try json_utils.writeJsonString(w, proposed_content);
+    try writeJsonString(w, proposed_content);
     try w.writeAll(",\"last_apply_result\":");
     try w.writeAll(last_apply_json);
     try w.writeAll("}\n");
@@ -386,14 +386,14 @@ fn writePrefix(writer: *std.Io.Writer, input: ParsedInput, ok: bool, reason: []c
     try writer.writeAll("{\"ok\":");
     try writer.writeAll(if (ok) "true" else "false");
     try writer.writeAll(",\"applied\":false,\"path\":");
-    try json_utils.writeJsonString(writer, input.path);
+    try writeJsonString(writer, input.path);
     try writer.writeAll(",\"goals\":[");
     for (input.goals, 0..) |goal, i| {
         if (i > 0) try writer.writeByte(',');
-        try json_utils.writeJsonString(writer, goal);
+        try writeJsonString(writer, goal);
     }
     try writer.writeAll("],\"reason\":");
-    try json_utils.writeJsonString(writer, reason);
+    try writeJsonString(writer, reason);
 }
 
 /// In-memory result of running the repair lane over a source snapshot, for

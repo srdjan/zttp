@@ -160,6 +160,7 @@ pub const Opcode = bytecode.Opcode;
 pub const FunctionBytecode = bytecode.FunctionBytecode;
 pub const FunctionBytecodeCompact = bytecode.FunctionBytecodeCompact;
 pub const Atom = object.Atom;
+pub const AtomTable = context.AtomTable;
 pub const HiddenClassIndex = object.HiddenClassIndex;
 pub const HiddenClassPool = object.HiddenClassPool;
 pub const JSObject = object.JSObject;
@@ -396,6 +397,21 @@ pub const HandlerPattern = bytecode.HandlerPattern;
 pub const HandlerFlags = bytecode.HandlerFlags;
 pub const TraceRecorder = trace.TraceRecorder;
 pub const TRACE_STATE_SLOT = trace.TRACE_STATE_SLOT;
+
+/// Serialize a string as a JSON string literal, escaping per RFC 8259. Every
+/// consumer that writes JSON by hand reached `json_utils` for this one function.
+pub const writeJsonString = json_utils.writeJsonString;
+
+/// The registry of installed extension manifests. `Registry` alone is too
+/// generic for a surface this small, so the curated name says which registry.
+pub const ManifestRegistry = manifest_registry.Registry;
+
+/// Parse a module manifest from its on-disk JSON form.
+pub const parseModuleManifest = module_manifest.parse;
+
+/// A single author-facing repair proposal, as produced by the analyzer and
+/// consumed by the expert agent and the canonicalizer.
+pub const RepairIntent = repair_intent.RepairIntent;
 
 /// Version information
 pub const version = struct {

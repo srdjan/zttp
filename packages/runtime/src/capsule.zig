@@ -15,7 +15,6 @@
 //! capsule recorded under an incompatible format is never silently replayed.
 
 const std = @import("std");
-const json_utils = @import("zts").json_utils;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 /// Bump when the manifest shape changes incompatibly. `parse` rejects any
@@ -127,7 +126,7 @@ fn writeStringArray(writer: anytype, items: []const []const u8) !void {
     try writer.writeAll("]");
 }
 
-const writeJsonString = json_utils.writeJsonString;
+const writeJsonString = @import("zts").writeJsonString;
 
 /// A parsed manifest plus the arena backing its string slices. Call `deinit`.
 pub const Loaded = struct {

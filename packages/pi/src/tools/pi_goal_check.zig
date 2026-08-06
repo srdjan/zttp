@@ -31,7 +31,7 @@ const property_goals = @import("../property_goals.zig");
 const ir = zts.parser;
 const counterexample = zts.counterexample;
 const flow_checker = zts.flow_checker;
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 const handler_verifier = zts.handler_verifier;
 
 const name = "pi_goal_check";
@@ -164,7 +164,7 @@ fn execute(
     };
     defer strip_result.deinit();
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
     var js_parser = try zts.parser.JsParser.init(allocator, strip_result.code);
     defer js_parser.deinit();
@@ -266,12 +266,12 @@ fn execute(
             "\",\"property\":\"{s}\",\"origin\":{{\"line\":{d},\"column\":{d}}},\"sink\":{{\"line\":{d},\"column\":{d}}},\"summary\":",
             .{ tag.asString(), span.line, span.column, span.line, span.column },
         );
-        try json_utils.writeJsonString(w, diag.message);
+        try writeJsonString(w, diag.message);
         try w.print(
             ",\"request\":{{\"method\":\"{s}\",\"url\":",
             .{witness.request.method},
         );
-        try json_utils.writeJsonString(w, witness.request.url);
+        try writeJsonString(w, witness.request.url);
         try w.writeAll(",\"has_auth_header\":");
         try w.writeAll(if (witness.request.has_auth_header) "true" else "false");
         try w.writeAll("},\"io_stubs\":[");

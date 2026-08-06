@@ -1141,7 +1141,7 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
     // Build a minimal but valid handler FunctionBytecode with one int constant
     // holding a rare marker value, so its ConstantTag byte can be located in
     // the serialized blob and flipped to an out-of-range value.
-    var source_atoms = zq.context.AtomTable.init(allocator);
+    var source_atoms = zq.AtomTable.init(allocator);
     defer source_atoms.deinit();
 
     const marker: i32 = 0x11223344;

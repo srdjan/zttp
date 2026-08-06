@@ -26,7 +26,7 @@ const std = @import("std");
 const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 const witness_corpus = zts.witness_corpus;
 
 const name = "pi_witnesses";
@@ -97,14 +97,14 @@ fn execute(
     const w = out.writer();
 
     try w.writeAll("{\"ok\":true,\"handler_path\":");
-    try json_utils.writeJsonString(w, handler_path);
+    try writeJsonString(w, handler_path);
     try w.print(",\"total\":{d},\"by_property\":{{", .{entries.len});
 
     const counts = try witness_corpus.countByProperty(allocator, corpus_dir);
     defer witness_corpus.freeCounts(allocator, counts);
     for (counts, 0..) |c, i| {
         if (i > 0) try w.writeByte(',');
-        try json_utils.writeJsonString(w, c.property);
+        try writeJsonString(w, c.property);
         try w.print(":{d}", .{c.count});
     }
     try w.writeAll("},\"entries\":[");
@@ -112,11 +112,11 @@ fn execute(
     for (entries, 0..) |e, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"key\":");
-        try json_utils.writeJsonString(w, e.key);
+        try writeJsonString(w, e.key);
         try w.writeAll(",\"property\":");
-        try json_utils.writeJsonString(w, e.property);
+        try writeJsonString(w, e.property);
         try w.writeAll(",\"summary\":");
-        try json_utils.writeJsonString(w, e.summary);
+        try writeJsonString(w, e.summary);
         try w.print(
             ",\"pinned\":{},\"first_seen_unix_s\":{d}}}",
             .{ e.pinned, e.first_seen_unix_s },
@@ -138,7 +138,7 @@ fn emitEmpty(
     const w = out.writer();
 
     try w.writeAll("{\"ok\":true,\"handler_path\":");
-    try json_utils.writeJsonString(w, handler_path);
+    try writeJsonString(w, handler_path);
     try w.writeAll(",\"total\":0,\"by_property\":{},\"entries\":[]}\n");
 
     const text = try out.toOwnedSlice();

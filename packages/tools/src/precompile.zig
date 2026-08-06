@@ -339,7 +339,7 @@ fn buildContractForServiceContext(
         source_to_parse = strip_result.?.code;
     }
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
     var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
@@ -520,7 +520,7 @@ fn importedFunctionLabels(
         to_parse = strip_result.?.code;
     }
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = zts.parser.JsParser.init(allocator, to_parse) catch return null;
     defer parser.deinit();
@@ -597,10 +597,10 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
     var manifest_registry = if (manifest_paths.len > 0)
         try buildManifestRegistryFromPaths(allocator, manifest_paths)
     else
-        zts.manifest_registry.Registry.init(allocator);
+        zts.ManifestRegistry.init(allocator);
     defer manifest_registry.deinit();
 
-    const registry_ptr: ?*const zts.manifest_registry.Registry =
+    const registry_ptr: ?*const zts.ManifestRegistry =
         if (manifest_paths.len > 0) &manifest_registry else null;
 
     var generator_pack: ?ResolvedGeneratorPack = null;
@@ -1022,7 +1022,7 @@ fn analyzeHandlerPaths(
     state_allocator: std.mem.Allocator,
     output_allocator: std.mem.Allocator,
     ir_view: ir.IrView,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     handler_fn: ir.NodeIndex,
     include_behaviors: bool,
 ) !PathAnalysis {
@@ -1171,7 +1171,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     }
 
     // Stage 2: Parse
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
     var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
@@ -1544,7 +1544,7 @@ pub fn runGenTests(
         source_to_parse = strip_result.?.code;
     }
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
     var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
@@ -1588,7 +1588,7 @@ pub const CompileOptions = struct {
     system_path: ?[]const u8 = null,
     /// Partner virtual-module manifests registered for this compile.
     /// The registry must outlive the call.
-    manifest_registry: ?*const zts.manifest_registry.Registry = null,
+    manifest_registry: ?*const zts.ManifestRegistry = null,
     /// ISO-8601 build timestamp. When null, compileHandler synthesizes one
     /// from the wall clock so `comptime(__BUILD_TIME__)` is never `undefined`.
     build_time: ?[]const u8 = null,
@@ -1664,7 +1664,7 @@ pub fn compileHandler(
     var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
     // Parse the source code (single pass for IR + bytecode)
@@ -2236,7 +2236,7 @@ pub fn compileHandler(
 
 fn resolveImportedAtomName(
     atom_value: u32,
-    atoms: ?*zts.context.AtomTable,
+    atoms: ?*zts.AtomTable,
 ) ?[]const u8 {
     const atom: zts.Atom = @enumFromInt(atom_value);
     if (atom.isPredefined()) return atom.toPredefinedName();
@@ -2246,7 +2246,7 @@ fn resolveImportedAtomName(
 
 fn validateVirtualModuleImports(
     view: ir.IrView,
-    atoms: ?*zts.context.AtomTable,
+    atoms: ?*zts.AtomTable,
     filename: []const u8,
 ) !void {
     const node_count = view.nodeCount();
@@ -2310,13 +2310,13 @@ fn compileMultiModule(
     entry_source: []const u8,
     filename: []const u8,
     strings: *zts.StringTable,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     needs_contract: bool,
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     service_type_context: ?*const ServiceTypeContext,
-    manifest_registry: ?*const zts.manifest_registry.Registry,
+    manifest_registry: ?*const zts.ManifestRegistry,
 ) !CompiledHandler {
     // Build module graph
     var graph = zts.modules.ModuleGraph.init(allocator);
@@ -2424,7 +2424,7 @@ const readFilePosixForGraph = zts.file_io.readFileForModuleGraph;
 fn analyzeAot(
     allocator: std.mem.Allocator,
     js_parser: *zts.parser.JsParser,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     root: ir.NodeIndex,
 ) !?AotAnalysis {
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
@@ -2481,7 +2481,7 @@ const findHandlerFunction = zts.findHandlerFunction;
 fn buildContractWithPolicy(
     allocator: std.mem.Allocator,
     js_parser: *zts.parser.JsParser,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     filename: []const u8,
     root: ir.NodeIndex,
     aot: ?AotAnalysis,
@@ -2496,7 +2496,7 @@ fn buildContractWithPolicy(
     /// then skips the IR walk but still performs contract property
     /// injection and stderr output.
     precomputed_flow: ?*const zts.FlowChecker,
-    manifest_registry: ?*const zts.manifest_registry.Registry,
+    manifest_registry: ?*const zts.ManifestRegistry,
     /// The resolved type session for this compile, when the caller ran one.
     /// Contract extraction then builds on the checker that already ran instead
     /// of constructing a second identical one and re-checking the same root.
@@ -2611,13 +2611,13 @@ fn buildMultiModuleContract(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
     compile_result: *const zts.modules.CompileResult,
-    atoms: *zts.context.AtomTable,
+    atoms: *zts.AtomTable,
     entry_filename: []const u8,
     emit_contract: bool,
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     service_type_context: ?*const ServiceTypeContext,
-    manifest_registry: ?*const zts.manifest_registry.Registry,
+    manifest_registry: ?*const zts.ManifestRegistry,
 ) !HandlerContract {
     var merged = try handler_contract.initMergedContract(allocator, entry_filename);
     errdefer merged.deinit(allocator);
@@ -3406,7 +3406,7 @@ fn buildTestContractForSource(
     var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
 
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
     var js_parser = try zts.parser.JsParser.init(allocator, source);
@@ -3439,7 +3439,7 @@ fn failContractTypeCheck(_: *zts.TypeChecker, _: ir.NodeIndex) anyerror!u32 {
 
 test "contract construction propagates type-check allocation failure" {
     const allocator = std.testing.allocator;
-    var atoms = zts.context.AtomTable.init(allocator);
+    var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
     const source = "function handler(req) { return Response.text('ok'); }";
@@ -4608,10 +4608,10 @@ test "compileHandler honors a registered partner manifest" {
         \\  ]
         \\}
     ;
-    var manifest = try zts.module_manifest.parse(allocator, manifest_json);
+    var manifest = try zts.parseModuleManifest(allocator, manifest_json);
     errdefer manifest.deinit(allocator);
 
-    var registry = zts.manifest_registry.Registry.init(allocator);
+    var registry = zts.ManifestRegistry.init(allocator);
     defer registry.deinit();
     try registry.register(manifest);
 

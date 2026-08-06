@@ -8,7 +8,7 @@ const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const edit_simulate = @import("edit_simulate.zig");
 const writeJsonString = zts.handler_contract.writeJsonString;
-pub const RepairIntent = zts.repair_intent.RepairIntent;
+pub const RepairIntent = zts.RepairIntent;
 
 pub const Refactor = struct {
     /// The typed intent this rewrite realizes. `StatementRewrite` has carried

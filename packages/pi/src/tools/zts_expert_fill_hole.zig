@@ -32,7 +32,7 @@ const ui_payload = @import("../ui_payload.zig");
 const common = @import("common.zig");
 const repair_apply = @import("repair_apply.zig");
 
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 
 const name = "zts_expert_fill_hole";
 
@@ -210,11 +210,11 @@ fn buildResult(allocator: std.mem.Allocator, args: BuildArgs) !registry_mod.Tool
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (ok) "true" else "false");
     try w.writeAll(",\"applied\":false,\"path\":");
-    try json_utils.writeJsonString(w, args.path);
+    try writeJsonString(w, args.path);
     try w.print(",\"line\":{d},\"column\":{d},\"expression\":", .{ args.line, args.column });
-    try json_utils.writeJsonString(w, args.expression);
+    try writeJsonString(w, args.expression);
     try w.writeAll(",\"proposed_content\":");
-    try json_utils.writeJsonString(w, args.proposed);
+    try writeJsonString(w, args.proposed);
     try w.writeAll(",\"verification\":");
     try edit_simulate.writeResultJson(w, args.verdict);
     try w.writeAll("}\n");
@@ -277,11 +277,11 @@ fn refusal(
     defer text_buf.deinit();
     const w = text_buf.writer();
     try w.writeAll("{\"ok\":false,\"applied\":false,\"path\":");
-    try json_utils.writeJsonString(w, path);
+    try writeJsonString(w, path);
     try w.print(",\"line\":{d},\"column\":{d},\"reason\":", .{ line, column });
-    try json_utils.writeJsonString(w, reason);
+    try writeJsonString(w, reason);
     try w.writeAll(",\"message\":");
-    try json_utils.writeJsonString(w, message);
+    try writeJsonString(w, message);
     try w.writeAll("}\n");
     return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
 }

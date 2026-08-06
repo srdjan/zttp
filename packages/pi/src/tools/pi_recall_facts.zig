@@ -25,7 +25,7 @@ const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const memory_store = @import("../memory_store.zig");
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 
 const name = "pi_recall_facts";
 const default_limit: usize = 20;
@@ -140,14 +140,14 @@ fn execute(
     for (kept.items, 0..) |e, i| {
         if (i > 0) try w.writeByte(',');
         try w.writeAll("{\"id\":");
-        try json_utils.writeJsonString(w, e.id);
+        try writeJsonString(w, e.id);
         try w.writeAll(",\"fact\":");
-        try json_utils.writeJsonString(w, e.fact);
+        try writeJsonString(w, e.fact);
         try w.writeAll(",\"source\":");
-        try json_utils.writeJsonString(w, e.source);
+        try writeJsonString(w, e.source);
         try w.writeAll(",\"session_id\":");
         if (e.session_id) |sid| {
-            try json_utils.writeJsonString(w, sid);
+            try writeJsonString(w, sid);
         } else {
             try w.writeAll("null");
         }

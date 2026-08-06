@@ -29,9 +29,7 @@ runtime handler_contract
 runtime handler_policy
 runtime heap
 runtime http
-runtime json_utils
 runtime module_binding
-runtime module_manifest
 runtime modules
 runtime object
 runtime parser
@@ -50,15 +48,12 @@ tools builtin_modules
 tools builtins
 tools bytecode_cache
 tools compat
-tools context
 tools contract_diff
 tools counterexample
 tools fault_coverage
 tools file_io
 tools handler_contract
 tools handler_policy
-tools json_utils
-tools manifest_registry
 tools module_binding
 tools module_manifest
 tools module_spec_render
@@ -67,7 +62,6 @@ tools parser
 tools pipeline
 tools proof_trace
 tools property_diagnostics
-tools repair_intent
 tools repair_validator
 tools route_match
 tools semantics
@@ -86,18 +80,13 @@ tools witness_corpus
 
 # pi
 pi compat
-pi context
 pi contract_diff
 pi counterexample
 pi file_io
 pi flow_checker
 pi handler_contract
 pi handler_verifier
-pi json_utils
-pi manifest_registry
-pi module_manifest
 pi parser
-pi repair_intent
 pi repair_plan
 pi repair_validator
 pi system_linker

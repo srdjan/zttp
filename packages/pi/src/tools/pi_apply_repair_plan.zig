@@ -9,7 +9,7 @@ const ui_payload = @import("../ui_payload.zig");
 const common = @import("common.zig");
 const repair_apply = @import("repair_apply.zig");
 
-const json_utils = zts.json_utils;
+const writeJsonString = zts.writeJsonString;
 
 const name = "pi_apply_repair_plan";
 
@@ -100,13 +100,13 @@ pub fn execute(
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (result.new_count == 0) "true" else "false");
     try w.writeAll(",\"applied\":false,\"path\":");
-    try json_utils.writeJsonString(w, path);
+    try writeJsonString(w, path);
     try w.writeAll(",\"plan_id\":");
-    try json_utils.writeJsonString(w, intent.plan_id);
+    try writeJsonString(w, intent.plan_id);
     try w.writeAll(",\"intent_kind\":");
-    try json_utils.writeJsonString(w, intent.intent_kind);
+    try writeJsonString(w, intent.intent_kind);
     try w.writeAll(",\"proposed_content\":");
-    try json_utils.writeJsonString(w, proposed);
+    try writeJsonString(w, proposed);
     try w.writeAll(",\"equivalence\":");
     try writeEquivalenceJson(w, intent, source, proposed);
     try w.writeAll(",\"verification\":");
@@ -159,7 +159,7 @@ fn writeEquivalenceJson(
     source: []const u8,
     proposed: []const u8,
 ) !void {
-    const typed = std.meta.stringToEnum(zts.repair_intent.RepairIntent, intent.intent_kind) orelse {
+    const typed = std.meta.stringToEnum(zts.RepairIntent, intent.intent_kind) orelse {
         try w.writeAll("null");
         return;
     };
@@ -172,16 +172,16 @@ fn writeEquivalenceJson(
         .no_validator => try w.writeAll("null"),
         .equivalent => {
             try w.writeAll("{\"method\":");
-            try json_utils.writeJsonString(w, row.method.id());
+            try writeJsonString(w, row.method.id());
             try w.writeAll(",\"discharged\":true,\"precondition\":");
-            try json_utils.writeJsonString(w, row.precondition orelse "");
+            try writeJsonString(w, row.precondition orelse "");
             try w.writeByte('}');
         },
         .not_law_shape => |why| {
             try w.writeAll("{\"method\":");
-            try json_utils.writeJsonString(w, row.method.id());
+            try writeJsonString(w, row.method.id());
             try w.writeAll(",\"discharged\":false,\"reason\":");
-            try json_utils.writeJsonString(w, why);
+            try writeJsonString(w, why);
             try w.writeByte('}');
         },
     }
@@ -246,13 +246,13 @@ fn jsonFailure(
     defer text_buf.deinit();
     const w = text_buf.writer();
     try w.writeAll("{\"ok\":false,\"applied\":false,\"plan_id\":");
-    try json_utils.writeJsonString(w, intent.plan_id);
+    try writeJsonString(w, intent.plan_id);
     try w.writeAll(",\"intent_kind\":");
-    try json_utils.writeJsonString(w, intent.intent_kind);
+    try writeJsonString(w, intent.intent_kind);
     try w.writeAll(",\"reason\":");
-    try json_utils.writeJsonString(w, reason);
+    try writeJsonString(w, reason);
     try w.writeAll(",\"message\":");
-    try json_utils.writeJsonString(w, message);
+    try writeJsonString(w, message);
     try w.writeAll("}\n");
 
     return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };

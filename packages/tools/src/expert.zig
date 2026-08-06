@@ -293,7 +293,7 @@ fn loadExtensionStatusEntry(
         const bytes = zts.file_io.readFile(allocator, path, 256 * 1024) catch null;
         if (bytes) |content| {
             defer allocator.free(content);
-            if (zts.module_manifest.parse(allocator, content)) |parsed_manifest| {
+            if (zts.parseModuleManifest(allocator, content)) |parsed_manifest| {
                 manifest_opt = parsed_manifest;
             } else |_| {}
         }

@@ -171,7 +171,7 @@ fn writeProjection(
     with_diagnostics: bool,
 ) std.Io.Writer.Error!bool {
     try writer.writeAll("{\"path\":");
-    try zts.json_utils.writeJsonString(writer, relative);
+    try zts.writeJsonString(writer, relative);
 
     if (check.contract) |*contract| {
         try writer.writeAll(",\"holes\":");
