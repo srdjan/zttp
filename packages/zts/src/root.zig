@@ -220,6 +220,18 @@ pub const ContractProof = struct {
         return contract_diff.claimScope(contract.properties);
     }
 };
+
+/// Stable identity of the analyzer policy linked into this build.
+pub fn policyHash() [64]u8 {
+    return rule_registry.policyHash();
+}
+
+test "stable policyHash exposes the policy registry identity" {
+    const stable_hash = policyHash();
+    const registry_hash = rule_registry.policyHash();
+    try std.testing.expectEqualStrings(&registry_hash, &stable_hash);
+}
+
 pub const DiagnosticProjection = diagnostic_projection;
 
 test "DiagnosticProjection exposes stable tagged checker codes" {

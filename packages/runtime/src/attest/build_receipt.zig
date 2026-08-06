@@ -77,7 +77,7 @@ fn buildJwsWithKey(
     std.crypto.hash.sha2.Sha256.hash(bytecode, &bytecode_sha, .{});
     const bytecode_sha_hex = std.fmt.bytesToHex(bytecode_sha, .lower);
 
-    const policy_sha_hex = zts.rule_registry.policyHash();
+    const policy_sha_hex = zts.policyHash();
     // All-zero means one thing here: the contract carries no capability
     // statement at all. It is not also "present but unstamped", which is what
     // an earlier comment claimed. Both producers stamp unconditionally

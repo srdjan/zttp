@@ -529,7 +529,7 @@ fn renderPassportJson(
     const latest = try latestLedgerSummary(allocator);
     defer if (latest.contract_sha) |sha| allocator.free(sha);
 
-    const policy_hash = zts.rule_registry.policyHash();
+    const policy_hash = zts.policyHash();
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var json: std.json.Stringify = .{ .writer = &aw.writer };

@@ -38,7 +38,6 @@ runtime parser
 runtime perf_receipt
 runtime pipeline
 runtime policy
-runtime rule_registry
 runtime security_events
 runtime spec_discharge
 runtime string

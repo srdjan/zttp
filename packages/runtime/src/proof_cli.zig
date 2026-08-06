@@ -29,7 +29,6 @@ const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 
 const trace = zts.trace;
 const file_io = zts.file_io;
-const rule_registry = zts.rule_registry;
 const precompile = zts_cli.precompile;
 const handler_contract = zts.handler_contract;
 const Sha256 = std.crypto.hash.sha2.Sha256;
@@ -193,7 +192,7 @@ pub fn replayCapsule(
     // Fail closed on policy drift: the recorded behavior was proven under the
     // rule set named by `policyHash`; a different rule set may classify the
     // same handler differently, so replaying silently would mislead.
-    const current_policy = rule_registry.policyHash();
+    const current_policy = zts.policyHash();
     if (!allow_version_mismatch and !std.mem.eql(u8, manifest.policy_hash, &current_policy)) {
         std.debug.print(
             "zttp proofs replay: capsule '{s}' was recorded under policy {s}, this binary is {s}.\n" ++
@@ -371,7 +370,7 @@ pub fn writeManifest(
     var contract_hash: [64]u8 = undefined;
     capsule.hashHex(contract_json.items, &contract_hash);
 
-    const policy = rule_registry.policyHash();
+    const policy = zts.policyHash();
 
     // Routes: prefer the api routes (carry method), fall back to plain routes.
     var routes: std.ArrayList(capsule.Route) = .empty;

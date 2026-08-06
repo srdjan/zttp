@@ -501,7 +501,7 @@ pub fn verifyCapabilityMatrix(contract: *const RuntimeContract) !void {
 /// which skips the check.
 pub fn verifyPolicyHash(contract: *const RuntimeContract) !void {
     if (std.mem.allEqual(u8, &contract.policy_hash, 0)) return;
-    const hex = zq.rule_registry.policyHash();
+    const hex = zq.policyHash();
     var live: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&live, &hex) catch return error.PolicyHashMismatch;
     if (!std.mem.eql(u8, &live, &contract.policy_hash)) {
@@ -1273,7 +1273,7 @@ test "verifyPolicyHash passes when hash matches live registry" {
         .properties = .{},
         .allocator = std.testing.allocator,
     };
-    const hex = zq.rule_registry.policyHash();
+    const hex = zq.policyHash();
     _ = try std.fmt.hexToBytes(&contract.policy_hash, &hex);
     try verifyPolicyHash(&contract);
 }
