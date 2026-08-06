@@ -738,6 +738,7 @@ pub fn build(b: *std.Build) void {
         fixtures_root ++ "/missing.ts",
         "--json",
     }, fixtures_root ++ "/verify_paths_missing.golden.json", 1);
+    addExpertGolden(b, expert_golden_step, zts_exe, &.{ "search", "guard", "--json" }, fixtures_root ++ "/search_guard.golden.json", 0);
     addExpertGolden(b, expert_golden_step, zts_exe, &.{ "describe-rule", "ZTS303", "--json" }, fixtures_root ++ "/describe_rule_ZTS303.golden.json", 0);
     addExpertGolden(b, expert_golden_step, zts_exe, &.{
         "canonicalize",

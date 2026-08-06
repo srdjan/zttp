@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
 const module_audit = @import("zts_cli").module_audit;
 const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
@@ -50,7 +49,7 @@ fn execute(
             var buf = registry_mod.helpers.TextBuffer.init(allocator);
             defer buf.deinit();
 
-            const hash = rule_registry.policyHash();
+            const hash = zts.policyHash();
             try module_audit.writeJsonEnvelope(buf.writer(), &result, hash);
 
             const llm_text = try buf.toOwnedSlice();
@@ -87,7 +86,7 @@ fn execute(
     var buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer buf.deinit();
 
-    const hash = rule_registry.policyHash();
+    const hash = zts.policyHash();
     try module_audit.writeJsonEnvelope(buf.writer(), &result, hash);
 
     const llm_text = try buf.toOwnedSlice();

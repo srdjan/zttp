@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
+const policy_catalog = zts.PolicyCatalog;
 const describe_rule = @import("zts_cli").describe_rule;
 const registry_mod = @import("../registry/registry.zig");
 
@@ -36,7 +36,7 @@ fn execute(
 
     if (args.len == 0) {
         try w.writeAll("[");
-        for (&rule_registry.all_rules, 0..) |*entry, i| {
+        for (policy_catalog.rules(), 0..) |*entry, i| {
             if (i > 0) try w.writeAll(",");
             try describe_rule.writeRuleJson(w, entry);
         }
@@ -46,8 +46,8 @@ fn execute(
     }
 
     const query = args[0];
-    const entry = rule_registry.findByName(query) orelse
-        rule_registry.findByCode(query) orelse
+    const entry = policy_catalog.findByName(query) orelse
+        policy_catalog.findByCode(query) orelse
         {
             try w.print("Unknown rule: {s}\n", .{query});
             return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };

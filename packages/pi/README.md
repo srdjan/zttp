@@ -140,7 +140,7 @@ Suppress with `--no-context-files`.
 
 ### Policy-hash drift detection (`agent.zig:injectDriftNote`)
 
-`meta.json` stamps the `policy_hash` computed from `zts.rule_registry.policyHash()`
+`meta.json` stamps the `policy_hash` computed from `zts.policyHash()`
 at session create. On `--resume`, if the binary's current hash differs
 from the stamped one, `injectDriftNote` prepends a `[policy drift]`
 system_note to the transcript so the model knows prior rule citations

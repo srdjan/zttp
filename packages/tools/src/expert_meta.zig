@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
+const policy_catalog = zts.PolicyCatalog;
 const builtin_modules = zts.builtin_modules;
 const module_manifest = zts.module_manifest;
 
@@ -31,7 +31,7 @@ pub const category_counts: Categories = blk: {
     var v: usize = 0;
     var p: usize = 0;
     var pr: usize = 0;
-    for (&rule_registry.all_rules) |*rule| {
+    for (policy_catalog.rules()) |rule| {
         switch (rule.category) {
             .verifier => v += 1,
             .policy => p += 1,
@@ -53,9 +53,9 @@ pub fn compute() MetaInfo {
     return .{
         .compiler_version = compiler_version,
         .policy_version = policy_version,
-        .policy_hash = rule_registry.policyHash(),
+        .policy_hash = zts.policyHash(),
         .module_registry_hash = module_manifest.registryHashFromBindings(&builtin_modules.all),
-        .rule_count = rule_registry.all_rules.len,
+        .rule_count = policy_catalog.rules().len,
         .categories = category_counts,
         .mode = mode,
     };

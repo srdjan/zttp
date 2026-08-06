@@ -232,6 +232,64 @@ test "stable policyHash exposes the policy registry identity" {
     try std.testing.expectEqualStrings(&registry_hash, &stable_hash);
 }
 
+/// Borrowed, read-only access to the analyzer rule catalog.
+pub const PolicyCatalog = struct {
+    pub const Category = rule_registry.RuleCategory;
+    pub const Rule = rule_registry.RuleEntry;
+
+    pub const SearchResults = rule_registry.SearchResults;
+
+    pub fn rules() []const Rule {
+        return &rule_registry.all_rules;
+    }
+
+    pub fn findByName(name: []const u8) ?*const Rule {
+        return rule_registry.findByName(name);
+    }
+
+    pub fn findByCode(code: []const u8) ?*const Rule {
+        return rule_registry.findByCode(code);
+    }
+
+    pub fn search(keyword: []const u8) SearchResults {
+        return rule_registry.search(keyword);
+    }
+
+    pub fn isCanonicalProfileCode(code: []const u8) bool {
+        return rule_registry.isCanonicalProfileCode(code);
+    }
+};
+
+test "stable PolicyCatalog exposes borrowed rule queries" {
+    const rules = PolicyCatalog.rules();
+    try std.testing.expectEqual(rule_registry.all_rules.len, rules.len);
+    try std.testing.expect(rules.len >= 35);
+
+    const first: *const PolicyCatalog.Rule = &rules[0];
+    const category: PolicyCatalog.Category = first.category;
+    try std.testing.expectEqual(first, PolicyCatalog.findByName(first.name).?);
+    try std.testing.expectEqual(first, PolicyCatalog.findByCode(first.code).?);
+    try std.testing.expectEqualStrings(first.category.label(), category.label());
+    try std.testing.expect(PolicyCatalog.findByName("not-a-rule") == null);
+    try std.testing.expect(PolicyCatalog.findByCode("ZTS9999") == null);
+
+    const exact = PolicyCatalog.search(first.name);
+    try std.testing.expect(exact.constSlice().len > 0);
+    var found_first = false;
+    for (exact.constSlice()) |rule| {
+        if (rule == first) found_first = true;
+    }
+    try std.testing.expect(found_first);
+
+    const all = PolicyCatalog.search("");
+    try std.testing.expectEqual(rules.len, all.constSlice().len);
+    const missing = PolicyCatalog.search("not-a-rule-or-description");
+    try std.testing.expectEqual(@as(usize, 0), missing.constSlice().len);
+
+    try std.testing.expect(PolicyCatalog.isCanonicalProfileCode("ZTS604"));
+    try std.testing.expect(!PolicyCatalog.isCanonicalProfileCode("ZTS500"));
+}
+
 pub const DiagnosticProjection = diagnostic_projection;
 
 test "DiagnosticProjection exposes stable tagged checker codes" {

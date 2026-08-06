@@ -5,7 +5,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
+const policy_catalog = zts.PolicyCatalog;
 const idiom_registry = zts.idiom_registry;
 const writeJsonString = zts.handler_contract.writeJsonString;
 
@@ -34,7 +34,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 
     if (hash_mode) {
-        const hash = rule_registry.policyHash();
+        const hash = zts.policyHash();
         _ = std.c.write(std.c.STDOUT_FILENO, &hash, hash.len);
         _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
         return;
@@ -63,8 +63,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 
     if (rule_name) |name| {
-        const entry = rule_registry.findByName(name) orelse
-            rule_registry.findByCode(name) orelse {
+        const entry = policy_catalog.findByName(name) orelse
+            policy_catalog.findByCode(name) orelse {
             // Type-checker codes (ZTS200-205) live in json_diagnostics, not the
             // rule_registry (the registry feeds the policy hash, so adding them
             // there would shift it). Describe them from a built-in fallback so
@@ -105,7 +105,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
     } else if (json_mode) {
         try aw.writer.writeAll("[");
-        for (&rule_registry.all_rules, 0..) |*entry, i| {
+        for (policy_catalog.rules(), 0..) |*entry, i| {
             if (i > 0) try aw.writer.writeAll(",");
             try writeRuleJson(&aw.writer, entry);
         }
@@ -113,7 +113,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     } else {
         try aw.writer.print("{s:<30} {s:<8} {s:<10} {s}\n", .{ "NAME", "CODE", "CATEGORY", "DESCRIPTION" });
         try aw.writer.writeAll("---\n");
-        for (&rule_registry.all_rules) |*entry| {
+        for (policy_catalog.rules()) |*entry| {
             try aw.writer.print("{s:<30} {s:<8} {s:<10} {s}\n", .{
                 entry.name,
                 entry.code,
@@ -129,7 +129,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 }
 
-pub fn writeRuleJson(writer: anytype, entry: *const rule_registry.RuleEntry) !void {
+pub fn writeRuleJson(writer: anytype, entry: *const policy_catalog.Rule) !void {
     try writer.writeAll("{\"name\":");
     try writeJsonString(writer, entry.name);
     try writer.writeAll(",\"code\":");
@@ -194,7 +194,7 @@ fn writeIdiomListText(writer: anytype) !void {
     }
 }
 
-fn writeRuleText(writer: anytype, entry: *const rule_registry.RuleEntry) !void {
+fn writeRuleText(writer: anytype, entry: *const policy_catalog.Rule) !void {
     try writer.print("Rule: {s}\n", .{entry.name});
     try writer.print("Code: {s}\n", .{entry.code});
     try writer.print("Category: {s}\n", .{entry.category.label()});

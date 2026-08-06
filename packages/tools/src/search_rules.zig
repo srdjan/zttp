@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
+const policy_catalog = zts.PolicyCatalog;
 const describe_rule = @import("describe_rule.zig");
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -30,7 +30,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         return;
     };
 
-    const indices = rule_registry.search(search_term);
+    const matches = policy_catalog.search(search_term);
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(allocator);
@@ -39,19 +39,18 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     if (json_mode) {
         try aw.writer.writeAll("[");
         var first = true;
-        for (indices.constSlice()) |idx| {
+        for (matches.constSlice()) |entry| {
             if (!first) try aw.writer.writeAll(",");
             first = false;
-            try describe_rule.writeRuleJson(&aw.writer, &rule_registry.all_rules[idx]);
+            try describe_rule.writeRuleJson(&aw.writer, entry);
         }
         try aw.writer.writeAll("]\n");
     } else {
-        if (indices.len == 0) {
+        if (matches.len == 0) {
             try aw.writer.print("No rules matching '{s}'\n", .{search_term});
         } else {
-            try aw.writer.print("{d} rule(s) matching '{s}':\n\n", .{ indices.len, search_term });
-            for (indices.constSlice()) |idx| {
-                const entry = &rule_registry.all_rules[idx];
+            try aw.writer.print("{d} rule(s) matching '{s}':\n\n", .{ matches.len, search_term });
+            for (matches.constSlice()) |entry| {
                 try aw.writer.print("  {s:<30} {s:<8} {s}\n", .{
                     entry.name,
                     entry.code,

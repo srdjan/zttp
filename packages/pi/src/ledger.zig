@@ -272,7 +272,7 @@ pub fn replayBundleInWorkspace(
         );
         defer analysis.deinit(allocator);
 
-        const current_hash = zts.rule_registry.policyHash();
+        const current_hash = zts.policyHash();
         if (!std.mem.eql(u8, &current_hash, patch.payload.policy_hash)) {
             return .{
                 .kind = .policy_drift,

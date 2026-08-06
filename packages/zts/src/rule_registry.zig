@@ -864,25 +864,25 @@ fn isCanonicalProfileName(name: []const u8) bool {
 }
 
 pub const SearchResults = struct {
-    buf: [total_count]usize = undefined,
+    buf: [total_count]*const RuleEntry = undefined,
     len: usize = 0,
 
-    pub fn constSlice(self: *const SearchResults) []const usize {
+    pub fn constSlice(self: *const SearchResults) []const *const RuleEntry {
         return self.buf[0..self.len];
     }
 };
 
-/// Returns indices into all_rules where `keyword` is a substring of name,
-/// description, or help. Stack-allocated, no heap.
+/// Returns borrowed rules where `keyword` is a substring of name, description,
+/// or help. Stack-allocated, no heap.
 pub fn search(keyword: []const u8) SearchResults {
     var results = SearchResults{};
 
-    for (&all_rules, 0..) |*rule, idx| {
+    for (&all_rules) |*rule| {
         if (containsSubstring(rule.name, keyword) or
             containsSubstring(rule.description, keyword) or
             containsSubstring(rule.help, keyword))
         {
-            results.buf[results.len] = idx;
+            results.buf[results.len] = rule;
             results.len += 1;
         }
     }

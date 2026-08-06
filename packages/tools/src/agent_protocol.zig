@@ -20,7 +20,7 @@ const json_diagnostics = @import("json_diagnostics.zig");
 const precompile = @import("precompile.zig");
 const canonicalize = @import("canonicalize.zig");
 
-const rule_registry = zts.rule_registry;
+const policy_catalog = zts.PolicyCatalog;
 const restriction_registry = zts.restriction_registry;
 
 /// The closed operation set (spec 4.8).
@@ -168,7 +168,7 @@ const Identity = struct {
 
 fn contextFreeIdentity() Identity {
     return .{
-        .policy_hash = rule_registry.policyHash(),
+        .policy_hash = zts.policyHash(),
         .module_graph_hash = module_graph_record.contextFreeHash(),
     };
 }
@@ -333,7 +333,7 @@ pub fn handleRequest(
     }
 
     const identity = Identity{
-        .policy_hash = rule_registry.policyHash(),
+        .policy_hash = zts.policyHash(),
         .module_graph_hash = if (graph) |g| g.hash else module_graph_record.contextFreeHash(),
     };
 
@@ -557,7 +557,7 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     try json.objectField("policy_version");
     try json.write(expert_meta.policy_version);
     try json.objectField("policy_hash");
-    try json.write(&rule_registry.policyHash());
+    try json.write(&zts.policyHash());
 
     try json.objectField("operations");
     try json.beginArray();
@@ -826,7 +826,7 @@ fn writeDescribeRulePayload(json: *std.json.Stringify, input: std.json.Value) !b
     try json.beginObject();
     try json.objectField("rules");
     try json.beginArray();
-    for (&rule_registry.all_rules) |*rule| {
+    for (policy_catalog.rules()) |*rule| {
         if (filter) |name| {
             if (!std.mem.eql(u8, rule.name, name) and !std.mem.eql(u8, rule.code, name)) continue;
         }
@@ -1643,7 +1643,7 @@ fn writeDiagnostic(
     try json.objectField("code");
     try json.write(diag.code);
     try json.objectField("rule_id");
-    if (rule_registry.findByCode(diag.code)) |rule| {
+    if (policy_catalog.findByCode(diag.code)) |rule| {
         try json.write(rule.name);
     } else {
         // The ZTS0xx parser band and the ZTS2xx type-checker band are real
@@ -1687,7 +1687,7 @@ fn writeDiagnostic(
 /// a rule with no typed repair, answers false: an unclassified rewrite is
 /// exactly what must not be advertised.
 fn repairAvailableFor(code: []const u8) bool {
-    const rule = rule_registry.findByCode(code) orelse return false;
+    const rule = policy_catalog.findByCode(code) orelse return false;
     const intent = rule.repair orelse return false;
     return zts.repair_validator.gradable(intent);
 }
@@ -2213,13 +2213,13 @@ test "an error response still carries the identity block" {
     var parsed = try parse(a, out);
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try testing.expectEqualStrings(&rule_registry.policyHash(), obj.get("policy_hash").?.string);
+    try testing.expectEqualStrings(&zts.policyHash(), obj.get("policy_hash").?.string);
     try testing.expectEqualStrings("zts-advanced-1", obj.get("profile_id").?.string);
 }
 
 test "a matching expected block passes the guard" {
     const a = testing.allocator;
-    const policy = rule_registry.policyHash();
+    const policy = zts.policyHash();
     const graph = module_graph_record.contextFreeHash();
     const req = try std.fmt.allocPrint(a,
         \\{{"schema_version":2,"operation":"meta","project_root":".","input":{{}},
@@ -2253,7 +2253,7 @@ test "a stale policy_hash fails with both values named" {
     // Both values, so a client re-binds without a second round trip.
     const message = err.get("message").?.string;
     try testing.expect(std.mem.indexOf(u8, message, "0000000000") != null);
-    try testing.expect(std.mem.indexOf(u8, message, &rule_registry.policyHash()) != null);
+    try testing.expect(std.mem.indexOf(u8, message, &zts.policyHash()) != null);
 }
 
 test "a stale profile_id fails the same way" {
@@ -2456,7 +2456,7 @@ test "describe_rule with no filter returns every registry rule" {
     defer parsed.deinit();
 
     const rules = parsed.value.object.get("payload").?.object.get("rules").?.array;
-    try testing.expectEqual(rule_registry.all_rules.len, rules.items.len);
+    try testing.expectEqual(policy_catalog.rules().len, rules.items.len);
     // No severity field: it is a property of the emission site, not the rule.
     try testing.expect(rules.items[0].object.get("severity") == null);
 }
@@ -3522,7 +3522,7 @@ test "meta publishes the three registry hashes it binds work to" {
     defer parsed.deinit();
 
     const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqualStrings(&rule_registry.policyHash(), payload.get("policy_hash").?.string);
+    try testing.expectEqualStrings(&zts.policyHash(), payload.get("policy_hash").?.string);
     try testing.expectEqualStrings(&zts.idiom_registry.tableHash(), payload.get("idiom_table_hash").?.string);
     try testing.expectEqualStrings(&restriction_registry.matrixHash(), payload.get("restriction_matrix_hash").?.string);
     try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);

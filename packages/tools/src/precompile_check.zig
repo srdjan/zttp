@@ -552,7 +552,7 @@ fn specDiagnosticMessage(diag: handler_contract.SpecDiagnostic) []const u8 {
 }
 
 fn isCanonicalDiagnostic(code: []const u8) bool {
-    return zts.rule_registry.isCanonicalProfileCode(code);
+    return zts.PolicyCatalog.isCanonicalProfileCode(code);
 }
 
 fn hasCanonicalDiagnostic(diagnostics: []const json_diag.JsonDiagnostic) bool {

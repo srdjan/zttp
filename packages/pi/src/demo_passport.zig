@@ -63,7 +63,7 @@ pub fn ensureSession(
     errdefer allocator.free(meta_path);
 
     if (!zts.file_io.fileExists(allocator, meta_path)) {
-        const policy_hash = zts.rule_registry.policyHash();
+        const policy_hash = zts.policyHash();
         try session_events.writeMeta(allocator, meta_path, .{
             .session_id = session_id,
             .workspace_realpath = realpath,
@@ -150,7 +150,7 @@ fn appendVerifiedPatch(
 ) !void {
     const before = options.before orelse return error.MissingBeforeSource;
     const after = options.after orelse return error.MissingAfterSource;
-    const policy_hash = zts.rule_registry.policyHash();
+    const policy_hash = zts.policyHash();
 
     var patch = try proof_enrichment.buildVerifiedPatchPayload(allocator, .{
         .workspace_root = options.workspace_root,

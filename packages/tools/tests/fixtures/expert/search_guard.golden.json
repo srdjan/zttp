@@ -1,0 +1,1 @@
+[{"name":"implicit_unknown","code":"ZTS600","category":"verifier","description":"A handler-reachable call result has implicit unknown type.","example":"const x = makeThing(); return Response.json(x);","help":"Add a return type annotation, use a modeled virtual module, or narrow the value with a type guard/assert."}]

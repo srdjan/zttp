@@ -2251,7 +2251,7 @@ pub fn simulateRefactors(
 pub const max_normalize_iterations: u32 = 64;
 
 fn isCanonicalBandCode(code: []const u8) bool {
-    return zts.rule_registry.isCanonicalProfileCode(code);
+    return zts.PolicyCatalog.isCanonicalProfileCode(code);
 }
 
 pub const NormalizeResult = struct {
@@ -2479,7 +2479,7 @@ fn cloneResidualDiagnostic(
     allocator: std.mem.Allocator,
     diag: precompile.json_diag.JsonDiagnostic,
 ) !ResidualDiagnostic {
-    const rule = zts.rule_registry.findByCode(diag.code);
+    const rule = zts.PolicyCatalog.findByCode(diag.code);
     var out = ResidualDiagnostic{
         .code = try allocator.dupe(u8, diag.code),
         .severity = &.{},
@@ -2505,7 +2505,7 @@ pub fn writeNormalizeJson(
     nr: *const NormalizeResult,
     written: bool,
 ) !void {
-    const hash = zts.rule_registry.policyHash();
+    const hash = zts.policyHash();
     try writer.writeAll("{\"ok\":true,\"file\":");
     try writeJsonString(writer, file);
     try writer.writeAll(",\"policy_hash\":");
@@ -2660,7 +2660,7 @@ pub fn writeJsonWithSimulation(
     result: *const Result,
     simulation: ?SimulationSummary,
 ) !void {
-    const hash = zts.rule_registry.policyHash();
+    const hash = zts.policyHash();
     try writer.writeAll("{\"ok\":true,\"file\":");
     try writeJsonString(writer, result.file);
     try writer.writeAll(",\"policy_hash\":");

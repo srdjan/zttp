@@ -74,7 +74,6 @@ tools repair_intent
 tools repair_validator
 tools restriction_registry
 tools route_match
-tools rule_registry
 tools semantics
 tools semantics_audit
 tools semantics_check
@@ -107,7 +106,6 @@ pi parser
 pi repair_intent
 pi repair_plan
 pi repair_validator
-pi rule_registry
 pi system_linker
 pi witness_corpus
 

@@ -266,7 +266,7 @@ pub const headline_model = request_mod.default_model;
 /// and a hand-maintained version number rots the moment someone edits a prompt.
 /// This hashes the corpus itself - names, prompts, seed files, and the pinned
 /// outcomes - so editing any case changes the version by construction. Same
-/// mechanism as `rule_registry.policyHash`, for the same reason.
+/// mechanism as `zts.policyHash`, for the same reason.
 pub fn corpusVersion() [64]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     for (&record_corpus) |*rc| {
@@ -1210,7 +1210,7 @@ fn assertCoveragePageCurrent(
         return error.CoveragePageUnreadable;
     }
 
-    const total: i64 = @intCast(zts.rule_registry.all_rules.len);
+    const total: i64 = @intCast(zts.PolicyCatalog.rules().len);
     const count: i64 = @intCast(tripped_count);
     if (!std.mem.eql(u8, published_version.string, version) or
         published_total.integer != total or
@@ -1238,7 +1238,7 @@ fn jsonUntripped(a: std.mem.Allocator, tripped: *const codegen.CodeSet) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     try buf.append(a, '[');
     var first = true;
-    for (zts.rule_registry.all_rules) |rule| {
+    for (zts.PolicyCatalog.rules()) |rule| {
         if (tripped.contains(rule.code)) continue;
         if (!first) try buf.append(a, ',');
         first = false;
@@ -1460,7 +1460,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             version[0..],
             summary.total,
             published_model,
-            zts.rule_registry.policyHash()[0..],
+            zts.policyHash()[0..],
             summary.firstDraftPassPercent(),
             summary.first_draft_passes,
             summary.median_roundtrips,
@@ -1488,10 +1488,10 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         // Floor on the denominator before the ratio means anything: a registry
         // that failed to assemble would publish "0 of 0" as a finished
         // measurement.
-        if (zts.rule_registry.all_rules.len < 35) {
+        if (zts.PolicyCatalog.rules().len < 35) {
             std.debug.print(
                 "[proof-coverage] the rule registry carries {d} rules; the denominator is not credible\n",
-                .{zts.rule_registry.all_rules.len},
+                .{zts.PolicyCatalog.rules().len},
             );
             return error.RuleRegistryTooSmall;
         }
@@ -1516,7 +1516,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
                 "\"tripped\":{s},\"untripped\":{s},\"offRegistry\":{s}}}\n",
             .{
                 version[0..],
-                zts.rule_registry.all_rules.len,
+                zts.PolicyCatalog.rules().len,
                 tripped.count(),
                 tripped_sorted,
                 untripped_sorted,

@@ -958,7 +958,7 @@ test "writeJsonEnvelope on empty VerifyResult emits the ok envelope" {
     defer buf.deinit(std.testing.allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
 
-    const hash = zts.rule_registry.policyHash();
+    const hash = zts.policyHash();
     try writeJsonEnvelope(&aw.writer, &result, hash);
 
     buf = aw.toArrayList();

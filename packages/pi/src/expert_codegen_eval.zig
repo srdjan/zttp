@@ -400,7 +400,7 @@ pub fn collectCodes(
             else => continue,
         };
 
-        for (zts.rule_registry.all_rules) |rule| {
+        for (zts.PolicyCatalog.rules()) |rule| {
             if (containsCodeToken(text, rule.code)) {
                 // The key is the registry's own literal, so it outlives any
                 // transcript and needs no dupe.
@@ -417,18 +417,11 @@ pub fn collectCodes(
             const code = text[pos..end];
             // ZTS000 is the synthesized "no violations" marker, not a rule.
             if (std.mem.eql(u8, code, "ZTS000")) continue;
-            if (registryCarriesCode(code)) continue;
+            if (zts.PolicyCatalog.findByCode(code) != null) continue;
             const gop = try off_registry.getOrPut(allocator, code);
             if (!gop.found_existing) gop.key_ptr.* = try allocator.dupe(u8, code);
         }
     }
-}
-
-fn registryCarriesCode(code: []const u8) bool {
-    for (zts.rule_registry.all_rules) |rule| {
-        if (std.mem.eql(u8, rule.code, code)) return true;
-    }
-    return false;
 }
 
 /// Substring match with both boundaries checked. Without it `ZTS30` matches

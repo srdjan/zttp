@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
 const module_audit = @import("module_audit.zig");
 const expert_meta = @import("expert_meta.zig");
 const verify_paths_core = @import("verify_paths_core.zig");
@@ -173,7 +172,7 @@ pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) 
     };
     defer parsed.paths.deinit(allocator);
 
-    const hash = rule_registry.policyHash();
+    const hash = zts.policyHash();
     var result = if (parsed.builtins)
         try module_audit.verifyBuiltins(allocator, .{ .strict = parsed.strict })
     else blk: {
@@ -332,7 +331,7 @@ pub fn runVerifyModuleManifest(allocator: std.mem.Allocator, argv: []const []con
         return error.MissingArgument;
     };
 
-    const hash = rule_registry.policyHash();
+    const hash = zts.policyHash();
     var result = try module_audit.verifyManifestPath(allocator, path);
     defer result.deinit(allocator);
 
@@ -718,7 +717,7 @@ test "v1 contract: policy_version pinned" {
 
 test "v1 contract: every rule has a category" {
     const sum = category_counts.verifier + category_counts.policy + category_counts.property;
-    try std.testing.expectEqual(rule_registry.all_rules.len, sum);
+    try std.testing.expectEqual(zts.PolicyCatalog.rules().len, sum);
 }
 
 test "verify-modules arg parser accepts builtins and strict flags" {

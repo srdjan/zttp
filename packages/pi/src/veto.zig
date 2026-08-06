@@ -226,7 +226,7 @@ pub fn runVetoWithSchema(
         try buildDiagnosticsPayload(allocator, edit.file, &result);
     errdefer payload.deinit(allocator);
 
-    const hash_bytes = zts.rule_registry.policyHash();
+    const hash_bytes = zts.policyHash();
     const hash_copy = try allocator.dupe(u8, &hash_bytes);
     errdefer allocator.free(hash_copy);
 
@@ -371,7 +371,7 @@ fn failedVetoWithGuidance(allocator: std.mem.Allocator, guidance: []const u8, is
     const llm_text = try allocator.dupe(u8, guidance);
     errdefer allocator.free(llm_text);
 
-    const hash_bytes = zts.rule_registry.policyHash();
+    const hash_bytes = zts.policyHash();
     const hash_copy = try allocator.dupe(u8, &hash_bytes);
     errdefer allocator.free(hash_copy);
 

@@ -6,7 +6,6 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
 const writeJsonString = zts.handler_contract.writeJsonString;
 const precompile = @import("precompile.zig");
 const json_diag = precompile.json_diag;
@@ -83,7 +82,7 @@ pub fn writeJsonEnvelope(
         .{
             if (outcome.ok) "true" else "false",
             expert_meta.policy_version,
-            rule_registry.policyHash(),
+            zts.policyHash(),
         },
     );
     for (paths, 0..) |path, i| {

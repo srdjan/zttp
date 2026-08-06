@@ -156,7 +156,7 @@ pub fn planFromSource(
     defer text_buf.deinit();
     const w = text_buf.writer();
 
-    const policy_hash = zts.rule_registry.policyHash();
+    const policy_hash = zts.policyHash();
     try w.writeAll("{\"ok\":");
     const has_failures = hasVerifierErrors(verifier.getDiagnostics()) or
         hasRequestedFlowDiagnostics(checker.getDiagnostics(), goals.items);

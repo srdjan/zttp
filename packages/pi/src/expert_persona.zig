@@ -13,7 +13,7 @@
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const zts = @import("zts");
-const rule_registry = zts.rule_registry;
+const policy_catalog = zts.PolicyCatalog;
 const witness_corpus = zts.witness_corpus;
 const zts_cli = @import("zts_cli");
 const expert_meta = zts_cli.expert_meta;
@@ -774,7 +774,7 @@ fn writeExample(writer: anytype, title: []const u8, body: []const u8) !void {
 }
 
 fn writeRuleSnapshot(writer: anytype) !void {
-    for (&rule_registry.all_rules) |*rule| {
+    for (policy_catalog.rules()) |*rule| {
         try writer.print("{s} {s} ({s})\n", .{ rule.code, rule.name, rule.category.label() });
         try writer.print("  {s}\n", .{rule.description});
         if (rule.example) |ex| {

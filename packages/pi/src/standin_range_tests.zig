@@ -524,12 +524,7 @@ test "stand-in gate: defect seeds are well formed and select by their own code" 
         }
         try testing.expectEqual(@as(usize, 1), duplicates);
 
-        for (zts.rule_registry.all_rules) |rule| {
-            if (std.mem.eql(u8, rule.code, seed.code)) {
-                in_registry += 1;
-                break;
-            }
-        }
+        if (zts.PolicyCatalog.findByCode(seed.code) != null) in_registry += 1;
     }
 
     // Not a requirement, a report. The parser, stripper, and type-checker
