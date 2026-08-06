@@ -13,7 +13,7 @@
 - `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`, `durable/`, `workflow/`, `websocket/`, `fetch/`, `hypermedia/`, `patterns/`, `system/`, `autoloop/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (see Documentation section below).
-- `zig-out/` and `.zig-cache/` are the Zig build's generated output directories.
+- `zig-out/` and `.zig-cache/` are generated output directories; do not edit or commit them.
 
 ## Documentation
 
