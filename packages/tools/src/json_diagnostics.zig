@@ -11,7 +11,7 @@ const std = @import("std");
 const zts = @import("zts");
 const parser = zts.parser;
 const diagnostic_projection = zts.DiagnosticProjection;
-const restriction_registry = zts.restriction_registry;
+const restrictionCatalog = zts.RestrictionCatalog;
 const handler_contract = zts.handler_contract;
 const writeJsonString = handler_contract.writeJsonString;
 
@@ -652,9 +652,9 @@ const allowed_features = [_]Feature{
 /// projection emits exactly the rows the v1 table published, in registry order,
 /// with the registry's strings.
 const blocked_features = blk: {
-    var out: [restriction_registry.v1_count]Feature = undefined;
+    var out: [restrictionCatalog.v1Count()]Feature = undefined;
     var n: usize = 0;
-    for (restriction_registry.entries) |entry| {
+    for (restrictionCatalog.restrictions()) |entry| {
         const name = entry.v1_feature_name orelse continue;
         out[n] = .{
             .name = name,
@@ -1010,7 +1010,7 @@ test "blocked features project from the restriction registry" {
         if (f.status != .blocked) continue;
         blocked += 1;
         const entry = blk: {
-            for (&restriction_registry.entries) |*e| {
+            for (restrictionCatalog.restrictions()) |*e| {
                 const name = e.v1_feature_name orelse continue;
                 if (std.mem.eql(u8, name, f.name)) break :blk e;
             }

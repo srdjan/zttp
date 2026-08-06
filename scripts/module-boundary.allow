@@ -58,7 +58,6 @@ tools fault_coverage
 tools file_io
 tools handler_contract
 tools handler_policy
-tools idiom_registry
 tools json_utils
 tools manifest_registry
 tools module_binding
@@ -72,7 +71,6 @@ tools proof_trace
 tools property_diagnostics
 tools repair_intent
 tools repair_validator
-tools restriction_registry
 tools route_match
 tools semantics
 tools semantics_audit

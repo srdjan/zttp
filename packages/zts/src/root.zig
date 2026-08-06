@@ -290,6 +290,76 @@ test "stable PolicyCatalog exposes borrowed rule queries" {
     try std.testing.expect(!PolicyCatalog.isCanonicalProfileCode("ZTS500"));
 }
 
+/// Stable identity of the idiom preference table linked into this build.
+pub fn idiomTableHash() [64]u8 {
+    return idiom_registry.tableHash();
+}
+
+/// Borrowed, read-only access to the idiom preference table.
+pub const IdiomCatalog = struct {
+    pub const Idiom = idiom_registry.IdiomEntry;
+
+    pub fn idioms() []const Idiom {
+        return &idiom_registry.entries;
+    }
+
+    pub fn findByRewriteRule(intentName: []const u8) ?*const Idiom {
+        return idiom_registry.findByRewriteRule(intentName);
+    }
+};
+
+/// Stable identity of the restriction matrix linked into this build.
+pub fn restrictionMatrixHash() [64]u8 {
+    return restriction_registry.matrixHash();
+}
+
+/// Borrowed, read-only access to the analyzer restriction matrix.
+pub const RestrictionCatalog = struct {
+    pub const Nature = restriction_registry.Nature;
+    pub const Restriction = restriction_registry.RestrictionEntry;
+
+    pub fn restrictions() []const Restriction {
+        return &restriction_registry.entries;
+    }
+
+    pub fn findById(id: []const u8) ?*const Restriction {
+        return restriction_registry.findById(id);
+    }
+
+    pub fn v1Count() usize {
+        return restriction_registry.v1_count;
+    }
+};
+
+test "stable policy metadata catalogs expose borrowed queries and hashes" {
+    const idioms = IdiomCatalog.idioms();
+    try std.testing.expectEqual(idiom_registry.entries.len, idioms.len);
+    try std.testing.expect(idioms.len > 0);
+    const wired = IdiomCatalog.findByRewriteRule("drop_unused_index_alias") orelse
+        return error.TestExpectedIdiom;
+    const internalWired = idiom_registry.findByRewriteRule("drop_unused_index_alias") orelse
+        return error.TestExpectedInternalIdiom;
+    try std.testing.expectEqual(internalWired, wired);
+    try std.testing.expect(IdiomCatalog.findByRewriteRule("not-a-rewrite") == null);
+    try std.testing.expectEqualStrings(&idiom_registry.tableHash(), &idiomTableHash());
+
+    const restrictions = RestrictionCatalog.restrictions();
+    try std.testing.expectEqual(restriction_registry.entries.len, restrictions.len);
+    try std.testing.expect(restrictions.len > RestrictionCatalog.v1Count());
+    const first: *const RestrictionCatalog.Restriction = &restrictions[0];
+    const nature: RestrictionCatalog.Nature = first.nature;
+    const found = RestrictionCatalog.findById(first.id) orelse
+        return error.TestExpectedRestriction;
+    try std.testing.expectEqual(first, found);
+    try std.testing.expectEqualStrings(first.nature.label(), nature.label());
+    try std.testing.expectEqual(restriction_registry.v1_count, RestrictionCatalog.v1Count());
+    try std.testing.expect(RestrictionCatalog.findById("restriction.missing") == null);
+    try std.testing.expectEqualStrings(
+        &restriction_registry.matrixHash(),
+        &restrictionMatrixHash(),
+    );
+}
+
 pub const DiagnosticProjection = diagnostic_projection;
 
 test "DiagnosticProjection exposes stable tagged checker codes" {

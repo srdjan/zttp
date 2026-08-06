@@ -6,7 +6,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const policy_catalog = zts.PolicyCatalog;
-const idiom_registry = zts.idiom_registry;
+const idiomCatalog = zts.IdiomCatalog;
 const writeJsonString = zts.handler_contract.writeJsonString;
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -155,7 +155,7 @@ pub fn writeRuleJson(writer: anytype, entry: *const policy_catalog.Rule) !void {
     try writer.writeAll("}");
 }
 
-pub fn writeIdiomJson(writer: anytype, entry: *const idiom_registry.IdiomEntry) !void {
+pub fn writeIdiomJson(writer: anytype, entry: *const idiomCatalog.Idiom) !void {
     try writer.writeAll("{\"id\":");
     try writeJsonString(writer, entry.id);
     try writer.writeAll(",\"operation\":");
@@ -179,7 +179,7 @@ pub fn writeIdiomJson(writer: anytype, entry: *const idiom_registry.IdiomEntry) 
 
 pub fn writeIdiomListJson(writer: anytype) !void {
     try writer.writeAll("{\"idioms\":[");
-    for (&idiom_registry.entries, 0..) |*entry, i| {
+    for (idiomCatalog.idioms(), 0..) |*entry, i| {
         if (i > 0) try writer.writeAll(",");
         try writeIdiomJson(writer, entry);
     }
@@ -189,7 +189,7 @@ pub fn writeIdiomListJson(writer: anytype) !void {
 fn writeIdiomListText(writer: anytype) !void {
     try writer.print("{s:<28} {s:<24} {s}\n", .{ "ID", "OPERATION", "IDIOMATIC" });
     try writer.writeAll("---\n");
-    for (&idiom_registry.entries) |*entry| {
+    for (idiomCatalog.idioms()) |*entry| {
         try writer.print("{s:<28} {s:<24} {s}\n", .{ entry.id, entry.operation, entry.idiomatic });
     }
 }
@@ -324,7 +324,7 @@ test "writeIdiomListJson emits every seeded row with a stable id" {
     defer parsed.deinit();
 
     const idioms = parsed.value.object.get("idioms").?.array;
-    try testing.expectEqual(idiom_registry.entries.len, idioms.items.len);
+    try testing.expectEqual(idiomCatalog.idioms().len, idioms.items.len);
     var wired: usize = 0;
     for (idioms.items) |item| {
         const obj = item.object;

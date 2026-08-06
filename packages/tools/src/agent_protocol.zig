@@ -21,7 +21,8 @@ const precompile = @import("precompile.zig");
 const canonicalize = @import("canonicalize.zig");
 
 const policy_catalog = zts.PolicyCatalog;
-const restriction_registry = zts.restriction_registry;
+const idiomCatalog = zts.IdiomCatalog;
+const restrictionCatalog = zts.RestrictionCatalog;
 
 /// The closed operation set (spec 4.8).
 pub const Operation = enum {
@@ -587,9 +588,9 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     try json.endArray();
 
     try json.objectField("idiom_table_hash");
-    try json.write(&zts.idiom_registry.tableHash());
+    try json.write(&zts.idiomTableHash());
     try json.objectField("restriction_matrix_hash");
-    try json.write(&restriction_registry.matrixHash());
+    try json.write(&zts.restrictionMatrixHash());
     try json.objectField("builtin_registry_hash");
     try json.write(&zts.module_manifest.registryHashFromBindings(&zts.builtin_modules.all));
 
@@ -610,7 +611,7 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
 
     try json.objectField("idioms");
     try json.beginArray();
-    for (&zts.idiom_registry.entries) |*entry| {
+    for (idiomCatalog.idioms()) |*entry| {
         try json.beginObject();
         try json.objectField("id");
         try json.write(entry.id);
@@ -751,7 +752,7 @@ fn writeFeaturesPayload(json: *std.json.Stringify) !bool {
         try json.write(null);
         try json.endObject();
     }
-    for (&restriction_registry.entries) |*entry| {
+    for (restrictionCatalog.restrictions()) |*entry| {
         try json.beginObject();
         try json.objectField("id");
         try json.write(entry.feature);
@@ -776,7 +777,7 @@ fn writeRestrictionsPayload(json: *std.json.Stringify) !bool {
     try json.objectField("restrictions");
     try json.beginArray();
 
-    for (&restriction_registry.entries) |*entry| {
+    for (restrictionCatalog.restrictions()) |*entry| {
         try json.beginObject();
         try json.objectField("id");
         try json.write(entry.id);
@@ -1871,7 +1872,7 @@ fn runNormalize(
         // The phase 0 back-reference: an applied intent resolves to the idiom
         // row it realizes, where one exists.
         try json.objectField("idiom_id");
-        if (zts.idiom_registry.findByRewriteRule(name)) |idiom| {
+        if (idiomCatalog.findByRewriteRule(name)) |idiom| {
             try json.write(idiom.id);
         } else {
             try json.write(null);
@@ -2377,8 +2378,8 @@ test "restrictions publishes every matrix row, not only the frozen v1 set" {
     defer parsed.deinit();
 
     const rows = parsed.value.object.get("payload").?.object.get("restrictions").?.array;
-    try testing.expectEqual(restriction_registry.entries.len, rows.items.len);
-    try testing.expect(rows.items.len > restriction_registry.v1_count);
+    try testing.expectEqual(restrictionCatalog.restrictions().len, rows.items.len);
+    try testing.expect(rows.items.len > restrictionCatalog.v1Count());
 
     const first = rows.items[0].object;
     try testing.expect(std.mem.startsWith(u8, first.get("id").?.string, "restriction."));
@@ -2428,7 +2429,7 @@ test "features publishes both halves and links refused forms to the matrix" {
 
     const items = parsed.value.object.get("payload").?.object.get("features").?.array;
     try testing.expectEqual(
-        json_diagnostics.allowed_feature_names.len + restriction_registry.entries.len,
+        json_diagnostics.allowed_feature_names.len + restrictionCatalog.restrictions().len,
         items.items.len,
     );
     var allowed: usize = 0;
@@ -2440,7 +2441,7 @@ test "features publishes both halves and links refused forms to the matrix" {
         } else {
             try testing.expectEqualStrings("blocked", status);
             const id = f.object.get("restriction_id").?.string;
-            try testing.expect(restriction_registry.findById(id) != null);
+            try testing.expect(restrictionCatalog.findById(id) != null);
         }
     }
     try testing.expectEqual(json_diagnostics.allowed_feature_names.len, allowed);
@@ -3523,8 +3524,8 @@ test "meta publishes the three registry hashes it binds work to" {
 
     const payload = parsed.value.object.get("payload").?.object;
     try testing.expectEqualStrings(&zts.policyHash(), payload.get("policy_hash").?.string);
-    try testing.expectEqualStrings(&zts.idiom_registry.tableHash(), payload.get("idiom_table_hash").?.string);
-    try testing.expectEqualStrings(&restriction_registry.matrixHash(), payload.get("restriction_matrix_hash").?.string);
+    try testing.expectEqualStrings(&zts.idiomTableHash(), payload.get("idiom_table_hash").?.string);
+    try testing.expectEqualStrings(&zts.restrictionMatrixHash(), payload.get("restriction_matrix_hash").?.string);
     try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);
 }
 
@@ -3559,7 +3560,7 @@ test "meta publishes the idiom table with its rewrite back-reference" {
     defer parsed.deinit();
 
     const idioms = parsed.value.object.get("payload").?.object.get("idioms").?.array;
-    try testing.expectEqual(zts.idiom_registry.entries.len, idioms.items.len);
+    try testing.expectEqual(idiomCatalog.idioms().len, idioms.items.len);
 
     var wired: usize = 0;
     for (idioms.items) |item| {
@@ -3570,7 +3571,7 @@ test "meta publishes the idiom table with its rewrite back-reference" {
             wired += 1;
             // A named rewrite must resolve back to this row, or the mapping a
             // client follows from a normalize trace is broken.
-            const entry = zts.idiom_registry.findByRewriteRule(row.get("rewrite_rule").?.string).?;
+            const entry = idiomCatalog.findByRewriteRule(row.get("rewrite_rule").?.string).?;
             try testing.expectEqualStrings(row.get("id").?.string, entry.id);
         }
     }
