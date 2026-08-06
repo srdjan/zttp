@@ -12,13 +12,12 @@ const std = @import("std");
 const zts = @import("zts");
 const handler_contract = zts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
-const contract_diff = zts.contract_diff;
 
 // -------------------------------------------------------------------------
 // Platform-agnostic proven facts
 // -------------------------------------------------------------------------
 
-pub const ProofLevel = contract_diff.ProofLevel;
+pub const ProofLevel = zts.ContractProof.Level;
 pub const default_cost_body_limit: u64 = 1024 * 1024;
 
 pub const ProvenRoute = struct {
@@ -255,7 +254,7 @@ fn extractHandlerName(path: []const u8) []const u8 {
     return filename[0..end];
 }
 
-pub const deriveProofLevel = contract_diff.deriveProofLevel;
+pub const deriveProofLevel = zts.ContractProof.level;
 
 // -------------------------------------------------------------------------
 // Renderer dispatch

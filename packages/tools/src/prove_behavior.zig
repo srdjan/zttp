@@ -121,7 +121,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer diff.deinit(allocator);
     const classification = diff.behavioralVerdict();
 
-    const scope = contract_diff.claimScope(after_contract.properties);
+    const scope = zts.ContractProof.claimScope(after_contract);
     const bd = diff.behavior_diff;
 
     if (json_mode) {
@@ -222,5 +222,6 @@ fn printHelp() void {
     std.debug.print("{s}", .{help});
 }
 
-// behavioralVerdict and claimScope live in `contract_diff` (shared with the
-// equivalence receipt); their unit tests live there too.
+// behavioralVerdict remains internal to `contract_diff`; the shared claim
+// scope is exposed through `zts.ContractProof` for this CLI and the
+// equivalence receipt.

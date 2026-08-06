@@ -80,7 +80,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var diff = try contract_diff.diffContracts(allocator, &old_contract, &new_contract);
     defer diff.deinit(allocator);
     const classification = diff.classify();
-    const proof_level = contract_diff.deriveProofLevel(&new_contract);
+    const proof_level = zts.ContractProof.level(&new_contract);
     const recommendation = try contract_diff.generateRecommendation(allocator, classification, &diff, null);
     defer allocator.free(recommendation);
 

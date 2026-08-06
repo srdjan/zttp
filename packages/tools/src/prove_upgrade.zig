@@ -65,7 +65,7 @@ pub fn prove(
         diff.classify();
 
     // Step 4: Derive proof level from new contract
-    const proof_level = contract_diff.deriveProofLevel(new_contract);
+    const proof_level = zts.ContractProof.level(new_contract);
 
     // Step 5: Generate recommendation
     const recommendation = try contract_diff.generateRecommendation(

@@ -118,5 +118,4 @@ pi system_linker
 pi witness_corpus
 
 # proof-review
-proof-review contract_diff
 proof-review file_io

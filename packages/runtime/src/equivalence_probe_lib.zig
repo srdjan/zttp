@@ -100,7 +100,7 @@ fn signAndAppend(
     defer diff.deinit(allocator);
 
     const classification = diff.behavioralVerdict();
-    const scope = contract_diff.claimScope(after_contract.properties);
+    const scope = zq.ContractProof.claimScope(after_contract);
 
     const before_hash = contractHashHex(allocator, before_contract) catch return;
     const after_hash = contractHashHex(allocator, after_contract) catch return;
@@ -249,8 +249,9 @@ test "contractHashHex hashes the serialized contract JSON" {
     try testing.expectEqualStrings(&expected, &got);
 }
 
-// behavioralVerdict and claimScope now live in `contract_diff` (shared with
-// the `prove-behavior` CLI); their unit tests live there too.
+// behavioralVerdict remains internal to `contract_diff`; the shared claim
+// scope is exposed through `zts.ContractProof` for this receipt and the
+// `prove-behavior` CLI.
 //
 // The full compile -> diff -> sign -> ledger chain is exercised end-to-end by
 // the `zttp prove-behavior` CLI (shared verdict computation) and covered

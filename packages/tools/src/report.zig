@@ -14,8 +14,7 @@ const handler_contract = zts.handler_contract;
 const HandlerContract = handler_contract.HandlerContract;
 const HandlerProperties = handler_contract.HandlerProperties;
 const FaultCoverageInfo = handler_contract.FaultCoverageInfo;
-const contract_diff = zts.contract_diff;
-const ProofLevel = contract_diff.ProofLevel;
+const ProofLevel = zts.ContractProof.Level;
 const manifest_alignment = @import("manifest_alignment.zig");
 const ManifestAlignment = manifest_alignment.ManifestAlignment;
 const AlignmentResult = manifest_alignment.AlignmentResult;
@@ -121,7 +120,7 @@ pub fn buildReport(
     integration_inputs: ?*const IntegrationSection,
     handler_path: []const u8,
 ) BuildReport {
-    const proof_level = contract_diff.deriveProofLevel(contract);
+    const proof_level = zts.ContractProof.level(contract);
 
     // Verification section
     const verification: ?VerificationSection = if (contract.verification) |v| blk: {

@@ -37,7 +37,7 @@ const ProvenFacts = zts_cli.deploy_manifest.ProvenFacts;
 pub const Verdict = zts_cli.upgrade_verifier.UpgradeVerdict;
 
 /// Contract-level proof completeness, owned by the engine.
-pub const ProofLevel = zts.contract_diff.ProofLevel;
+pub const ProofLevel = zts.ContractProof.Level;
 
 /// Higher rank means stronger proof. Used to detect downgrades.
 fn proofLevelRank(self: ProofLevel) u8 {

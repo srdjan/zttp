@@ -207,6 +207,17 @@ pub const FunctionEffect = effect_inference.FunctionEffect;
 pub const BytecodeVerifier = bytecode_verifier;
 pub const ContractBuilder = handler_contract.ContractBuilder;
 pub const HandlerContract = handler_contract.HandlerContract;
+pub const ContractProof = struct {
+    pub const Level = contract_diff.ProofLevel;
+
+    pub fn level(contract: *const HandlerContract) Level {
+        return contract_diff.deriveProofLevel(contract);
+    }
+
+    pub fn claimScope(contract: *const HandlerContract) []const u8 {
+        return contract_diff.claimScope(contract.properties);
+    }
+};
 pub const SpecDiagnostic = handler_contract.SpecDiagnostic;
 pub const writeContractJson = handler_contract.writeContractJson;
 pub const HandlerPolicy = handler_policy.HandlerPolicy;
@@ -278,6 +289,37 @@ test {
 
 test "version" {
     try std.testing.expectEqualStrings("0.18.0", version.string);
+}
+
+test "ContractProof projects proof metadata through the stable surface" {
+    var contract = handler_contract.emptyContract("handler.ts");
+
+    try std.testing.expectEqual(ContractProof.Level.none, ContractProof.level(&contract));
+    try std.testing.expectEqualStrings("structural", ContractProof.claimScope(&contract));
+
+    contract.verification = .{
+        .exhaustive_returns = true,
+        .results_safe = true,
+        .unreachable_code = false,
+        .bytecode_verified = true,
+    };
+    contract.properties = .{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+    };
+
+    try std.testing.expectEqual(ContractProof.Level.complete, ContractProof.level(&contract));
+    try std.testing.expectEqualStrings("pure", ContractProof.claimScope(&contract));
+
+    contract.env.dynamic = true;
+    contract.properties.?.pure = false;
+
+    try std.testing.expectEqual(ContractProof.Level.partial, ContractProof.level(&contract));
+    try std.testing.expectEqualStrings("deterministic", ContractProof.claimScope(&contract));
 }
 
 test "create and destroy context" {

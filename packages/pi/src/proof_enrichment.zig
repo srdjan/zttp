@@ -535,7 +535,7 @@ fn computeProveSummary(
 
             return .{
                 .classification = try allocator.dupe(u8, classification.toString()),
-                .proof_level = try allocator.dupe(u8, contract_diff.deriveProofLevel(after_contract).toString()),
+                .proof_level = try allocator.dupe(u8, zts.ContractProof.level(after_contract).toString()),
                 .recommendation = try allocator.dupe(u8, recommendation),
                 .counterexample = if (diff.canonical_counterexample) |counterexample|
                     try allocator.dupe(u8, counterexample)
