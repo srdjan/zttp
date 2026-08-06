@@ -116,7 +116,7 @@ fn executeBuildTimeHandler(
         try ctx.materializeShapes(shapes);
     }
 
-    const func = zts.bytecode.FunctionBytecode{
+    const func = zts.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
         .arg_count = 0,

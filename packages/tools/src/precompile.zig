@@ -2238,7 +2238,7 @@ fn resolveImportedAtomName(
     atom_value: u32,
     atoms: ?*zts.context.AtomTable,
 ) ?[]const u8 {
-    const atom: zts.object.Atom = @enumFromInt(atom_value);
+    const atom: zts.Atom = @enumFromInt(atom_value);
     if (atom.isPredefined()) return atom.toPredefinedName();
     if (atoms) |table| return table.getName(atom);
     return null;
@@ -2309,7 +2309,7 @@ fn compileMultiModule(
     allocator: std.mem.Allocator,
     entry_source: []const u8,
     filename: []const u8,
-    strings: *zts.string.StringTable,
+    strings: *zts.StringTable,
     atoms: *zts.context.AtomTable,
     needs_contract: bool,
     emit_contract: bool,

@@ -48,7 +48,6 @@ runtime witness_corpus
 # tools
 tools builtin_modules
 tools builtins
-tools bytecode
 tools bytecode_cache
 tools compat
 tools context
@@ -64,7 +63,6 @@ tools module_binding
 tools module_manifest
 tools module_spec_render
 tools modules
-tools object
 tools parser
 tools pipeline
 tools proof_trace
@@ -82,7 +80,6 @@ tools service_types
 tools spec_discharge
 tools sql_analysis
 tools sqlite
-tools string
 tools system_linker
 tools trace
 tools witness_corpus
@@ -92,7 +89,6 @@ pi compat
 pi context
 pi contract_diff
 pi counterexample
-pi effect_inference
 pi file_io
 pi flow_checker
 pi handler_contract

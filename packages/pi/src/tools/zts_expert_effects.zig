@@ -12,7 +12,6 @@ const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 
 const ir = zts.parser;
-const effect_inference = zts.effect_inference;
 
 const name = "zts_expert_effects";
 
@@ -92,7 +91,7 @@ fn execute(
     };
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
-    var analyzer = effect_inference.Analyzer.init(allocator, ir_view, &atoms);
+    var analyzer = zts.EffectAnalyzer.init(allocator, ir_view, &atoms);
     defer analyzer.deinit();
     analyzer.analyze(program_root) catch |e| {
         return registry_mod.ToolResult.errFmt(
@@ -138,7 +137,7 @@ fn writeEnvelope(
     writer: *std.Io.Writer,
     ctx: WriteContext,
     path: []const u8,
-    functions: []const effect_inference.FunctionEffect,
+    functions: []const zts.FunctionEffect,
 ) !void {
     try writer.writeAll("{\"path\":\"");
     try writer.writeAll(path);
@@ -153,7 +152,7 @@ fn writeEnvelope(
 fn writeFunction(
     writer: *std.Io.Writer,
     ctx: WriteContext,
-    fe: effect_inference.FunctionEffect,
+    fe: zts.FunctionEffect,
 ) !void {
     try writer.writeAll("{\"name\":\"");
     try writer.writeAll(fe.name);
