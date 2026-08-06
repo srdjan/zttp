@@ -1,7 +1,7 @@
 # Which zts internal modules each consumer package may name.
 #
 # `packages/zts/src/root.zig` re-exports a curated surface (JSValue, Context,
-# strip, ...) and, separately, ~74 internal implementation modules. Only the
+# strip, ...) and, separately, the internal implementation modules. Only the
 # internal tier is listed here; the curated surface is ungated.
 #
 # One row per (package, internal module). Enforced in both directions by

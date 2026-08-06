@@ -3,8 +3,10 @@
 # Module boundary gate.
 #
 # `packages/zts/src/root.zig` re-exports two tiers: a small curated surface
-# (JSValue, Context, strip, ...) and ~74 internal implementation modules that
-# exist only so the in-repo runtime, tools, and pi packages can share code.
+# (JSValue, Context, strip, ...) and a larger set of internal implementation
+# modules that exist only so the in-repo runtime, tools, and pi packages can
+# share code. This check counts the second tier from root.zig and prints the
+# live number on success, so no count is written down here to go stale.
 # The header calls the second tier internal, but nothing enforced it, so every
 # consumer reached in freely.
 #
