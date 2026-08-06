@@ -4,8 +4,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const policy_catalog = zts.PolicyCatalog;
-const builtin_modules = zts.builtin_modules;
-const module_manifest = zts.module_manifest;
+const moduleMetadata = zts.ModuleMetadata;
 
 pub const compiler_version = zts.version.string;
 pub const policy_version = "2026.04.2";
@@ -54,7 +53,7 @@ pub fn compute() MetaInfo {
         .compiler_version = compiler_version,
         .policy_version = policy_version,
         .policy_hash = zts.policyHash(),
-        .module_registry_hash = module_manifest.registryHashFromBindings(&builtin_modules.all),
+        .module_registry_hash = moduleMetadata.builtinRegistryHash(),
         .rule_count = policy_catalog.rules().len,
         .categories = category_counts,
         .mode = mode,

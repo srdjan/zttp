@@ -16,6 +16,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const agent_identity = @import("agent_identity.zig");
+const moduleMetadata = zts.ModuleMetadata;
 
 const resolver = zts.modules.resolver;
 const file_resolver = zts.modules.file_resolver;
@@ -197,7 +198,7 @@ pub fn build(
     const rejected_slice = try rejected.toOwnedSlice(allocator);
     std.mem.sort(Rejection, rejected_slice, {}, lessRejection);
 
-    const builtin_hash = zts.module_manifest.registryHashFromBindings(&zts.builtin_modules.all);
+    const builtin_hash = moduleMetadata.builtinRegistryHash();
     return .{
         .modules = module_slice,
         .rejected = rejected_slice,
@@ -381,7 +382,7 @@ fn computeHash(modules: []const ModuleRecord, builtin_hash: [64]u8) [64]u8 {
 /// registry alone. Operations that take no `file` bind this, so `expected` has
 /// something to compare and the envelope field is never empty.
 pub fn contextFreeHash() [64]u8 {
-    return computeHash(&.{}, zts.module_manifest.registryHashFromBindings(&zts.builtin_modules.all));
+    return computeHash(&.{}, moduleMetadata.builtinRegistryHash());
 }
 
 // ---------------------------------------------------------------------------

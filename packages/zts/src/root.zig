@@ -406,8 +406,60 @@ pub const writeJsonString = json_utils.writeJsonString;
 /// generic for a surface this small, so the curated name says which registry.
 pub const ManifestRegistry = manifest_registry.Registry;
 
+/// Stable module-manifest data and identity operations used by tooling.
+/// Parsed manifests own their strings and lists and retain the underlying
+/// manifest's explicit `deinit` contract.
+pub const ModuleMetadata = struct {
+    pub const Error = module_manifest.ManifestError;
+    pub const Manifest = module_manifest.Manifest;
+    pub const Export = module_manifest.Export;
+    pub const ContractExtractionRule = module_manifest.ContractExtractionRule;
+    pub const CapabilityDeclaration = module_manifest.CapabilityDeclaration;
+
+    pub const parse = parseModuleManifest;
+
+    pub fn builtinRegistryHash() [64]u8 {
+        return module_manifest.registryHashFromBindings(&builtin_modules.all);
+    }
+};
+
 /// Parse a module manifest from its on-disk JSON form.
 pub const parseModuleManifest = module_manifest.parse;
+
+test "stable ModuleMetadata exposes manifest types and builtin registry identity" {
+    const source =
+        \\{
+        \\  "schemaVersion": 1,
+        \\  "specifier": "zttp-ext:stable-metadata",
+        \\  "requiredCapabilities": ["clock"],
+        \\  "exports": [{
+        \\    "name": "fetch",
+        \\    "effect": "read",
+        \\    "returns": "string",
+        \\    "failureSeverity": "none",
+        \\    "contractExtractions": [{"category": "fetch_host"}]
+        \\  }]
+        \\}
+    ;
+
+    var manifest: ModuleMetadata.Manifest = try ModuleMetadata.parse(std.testing.allocator, source);
+    defer manifest.deinit(std.testing.allocator);
+
+    const capability: ModuleMetadata.CapabilityDeclaration = manifest.required_capabilities.items[0];
+    const export_entry: ModuleMetadata.Export = manifest.exports.items[0];
+    const rule: ModuleMetadata.ContractExtractionRule = export_entry.contract_extractions.items[0];
+    const parse_error: ModuleMetadata.Error = error.InvalidJson;
+
+    try std.testing.expectEqualStrings("zttp-ext:stable-metadata", manifest.specifier);
+    try std.testing.expectEqual(module_binding.ModuleCapability.clock, capability.effective);
+    try std.testing.expectEqualStrings("fetch", export_entry.name);
+    try std.testing.expectEqual(module_binding.ContractCategory.fetch_host, rule.category);
+    try std.testing.expectEqual(error.InvalidJson, parse_error);
+
+    const stable_hash = ModuleMetadata.builtinRegistryHash();
+    const internal_hash = module_manifest.registryHashFromBindings(&builtin_modules.all);
+    try std.testing.expectEqualStrings(&internal_hash, &stable_hash);
+}
 
 /// A single author-facing repair proposal, as produced by the analyzer and
 /// consumed by the expert agent and the canonicalizer.

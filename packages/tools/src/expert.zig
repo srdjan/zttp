@@ -9,6 +9,7 @@ const zts = @import("zts");
 const module_audit = @import("module_audit.zig");
 const expert_meta = @import("expert_meta.zig");
 const verify_paths_core = @import("verify_paths_core.zig");
+const moduleMetadata = zts.ModuleMetadata;
 
 const compiler_version = expert_meta.compiler_version;
 const policy_version = expert_meta.policy_version;
@@ -272,7 +273,7 @@ const ExtensionStatusEntry = struct {
     path: []const u8,
     invalid: bool,
     /// Non-null when the manifest parsed cleanly.
-    manifest: ?zts.module_manifest.Manifest,
+    manifest: ?moduleMetadata.Manifest,
     audit: module_audit.VerifyResult,
 
     pub fn deinit(self: *ExtensionStatusEntry, allocator: std.mem.Allocator) void {
@@ -288,12 +289,12 @@ fn loadExtensionStatusEntry(
     var audit = try module_audit.verifyManifestPath(allocator, path);
     errdefer audit.deinit(allocator);
 
-    var manifest_opt: ?zts.module_manifest.Manifest = null;
+    var manifest_opt: ?moduleMetadata.Manifest = null;
     if (!audit.hasErrors()) {
         const bytes = zts.file_io.readFile(allocator, path, 256 * 1024) catch null;
         if (bytes) |content| {
             defer allocator.free(content);
-            if (zts.parseModuleManifest(allocator, content)) |parsed_manifest| {
+            if (moduleMetadata.parse(allocator, content)) |parsed_manifest| {
                 manifest_opt = parsed_manifest;
             } else |_| {}
         }
@@ -478,7 +479,7 @@ fn writeLabelSetText(w: anytype, labels: zts.module_binding.LabelSet) !void {
     try w.writeByte('\n');
 }
 
-fn writeContractRuleText(w: anytype, rule: zts.module_manifest.ContractExtractionRule) !void {
+fn writeContractRuleText(w: anytype, rule: moduleMetadata.ContractExtractionRule) !void {
     try w.writeAll(@tagName(rule.category));
     if (rule.extension_category) |tag| try w.print("[{s}]", .{tag});
     try w.print(" arg={d}", .{rule.arg_position});
@@ -543,7 +544,7 @@ fn writeExtensionStatusJson(
     try w.writeAll("]}\n");
 }
 
-fn writeExportJson(w: anytype, exp: zts.module_manifest.Export) !void {
+fn writeExportJson(w: anytype, exp: moduleMetadata.Export) !void {
     try w.writeAll("{\"name\":");
     try zts.handler_contract.writeJsonString(w, exp.name);
     try w.writeAll(",\"effect\":");

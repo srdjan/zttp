@@ -24,6 +24,7 @@ const policy_catalog = zts.PolicyCatalog;
 const idiomCatalog = zts.IdiomCatalog;
 const restrictionCatalog = zts.RestrictionCatalog;
 const repairPolicy = zts.RepairPolicy;
+const moduleMetadata = zts.ModuleMetadata;
 
 /// The closed operation set (spec 4.8).
 pub const Operation = enum {
@@ -593,7 +594,7 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     try json.objectField("restriction_matrix_hash");
     try json.write(&zts.restrictionMatrixHash());
     try json.objectField("builtin_registry_hash");
-    try json.write(&zts.module_manifest.registryHashFromBindings(&zts.builtin_modules.all));
+    try json.write(&moduleMetadata.builtinRegistryHash());
 
     try json.objectField("severities");
     try json.beginObject();

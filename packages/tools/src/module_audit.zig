@@ -6,7 +6,7 @@ const writeJsonString = zts.handler_contract.writeJsonString;
 
 const file_io = zts.file_io;
 const builtin_modules = zts.builtin_modules;
-const module_manifest = zts.module_manifest;
+const moduleMetadata = zts.ModuleMetadata;
 
 /// Write the v1 verify-modules envelope to `writer`. Single source of truth
 /// for the shape documented in docs/zts-expert-contract.md.
@@ -268,7 +268,7 @@ pub fn verifyManifestPath(allocator: std.mem.Allocator, path: []const u8) !Verif
     };
     defer allocator.free(content);
 
-    var manifest = module_manifest.parse(allocator, content) catch |err| {
+    var manifest = moduleMetadata.parse(allocator, content) catch |err| {
         try appendManifestDiagnostic(allocator, &result.diagnostics, path, err);
         return result;
     };
@@ -387,7 +387,7 @@ fn auditModuleContentWithSpecPath(
         };
         defer allocator.free(spec_content);
 
-        var manifest = module_manifest.parse(allocator, spec_content) catch |err| {
+        var manifest = moduleMetadata.parse(allocator, spec_content) catch |err| {
             try appendManifestDiagnostic(allocator, diagnostics, path, err);
             return;
         };
@@ -443,7 +443,7 @@ fn checkBindingExportDrift(
     allocator: std.mem.Allocator,
     spec_path: []const u8,
     binding: *const zts.module_binding.ModuleBinding,
-    manifest: *const module_manifest.Manifest,
+    manifest: *const moduleMetadata.Manifest,
     diagnostics: *std.ArrayList(OwnedDiagnostic),
 ) !void {
     for (binding.exports) |binding_export| {
@@ -531,7 +531,7 @@ fn checkBindingExportDrift(
     }
 }
 
-fn findManifestExport(exports: []const module_manifest.Export, name: []const u8) ?*const module_manifest.Export {
+fn findManifestExport(exports: []const moduleMetadata.Export, name: []const u8) ?*const moduleMetadata.Export {
     for (exports) |*export_item| {
         if (std.mem.eql(u8, export_item.name, name)) return export_item;
     }
@@ -552,7 +552,7 @@ fn appendManifestDiagnostic(
     allocator: std.mem.Allocator,
     diagnostics: *std.ArrayList(OwnedDiagnostic),
     path: []const u8,
-    err: module_manifest.ManifestError,
+    err: moduleMetadata.Error,
 ) !void {
     const message = try std.fmt.allocPrint(allocator, "invalid module manifest: {s}", .{@errorName(err)});
     defer allocator.free(message);
@@ -740,7 +740,7 @@ fn resolveCompanionPath(
 
 fn sameCapabilities(
     binding_caps: []const []const u8,
-    manifest_caps: []const zts.module_manifest.CapabilityDeclaration,
+    manifest_caps: []const moduleMetadata.CapabilityDeclaration,
 ) bool {
     if (binding_caps.len != manifest_caps.len) return false;
     for (binding_caps) |item| {

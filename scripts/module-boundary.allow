@@ -58,7 +58,6 @@ tools file_io
 tools handler_contract
 tools handler_policy
 tools module_binding
-tools module_manifest
 tools module_spec_render
 tools modules
 tools parser
