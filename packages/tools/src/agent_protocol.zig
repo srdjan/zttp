@@ -597,10 +597,10 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     try json.beginObject();
     try json.objectField("set");
     try json.beginArray();
-    // Derived from the checker's enum, so the closed set on the wire is the one
-    // the compiler can actually emit.
-    inline for (@typeInfo(zts.strict_checker.Severity).@"enum".fields) |field| {
-        const severity: zts.strict_checker.Severity = @enumFromInt(field.value);
+    // Derived from the stable projection, so the closed wire set stays aligned
+    // with every checker without exposing a checker-specific severity type.
+    inline for (@typeInfo(zts.DiagnosticProjection.Severity).@"enum".fields) |field| {
+        const severity: zts.DiagnosticProjection.Severity = @enumFromInt(field.value);
         try json.write(severity.label());
     }
     try json.endArray();
@@ -3537,10 +3537,10 @@ test "meta publishes the closed severity set and the rule that decides success" 
 
     const severities = parsed.value.object.get("payload").?.object.get("severities").?.object;
     const set = severities.get("set").?.array;
-    // Derived from the checker's enum, so the wire set is what the compiler can
-    // actually emit - three since phase 0 added advisory.
+    // Derived from the stable projection, so the wire set is what every checker
+    // can emit - three since phase 0 added advisory.
     try testing.expectEqual(
-        @typeInfo(zts.strict_checker.Severity).@"enum".fields.len,
+        @typeInfo(zts.DiagnosticProjection.Severity).@"enum".fields.len,
         set.items.len,
     );
     var found_advisory = false;

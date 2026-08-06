@@ -47,7 +47,6 @@ runtime trace
 runtime witness_corpus
 
 # tools
-tools bool_checker
 tools builtin_modules
 tools builtins
 tools bytecode
@@ -58,10 +57,8 @@ tools contract_diff
 tools counterexample
 tools fault_coverage
 tools file_io
-tools flow_checker
 tools handler_contract
 tools handler_policy
-tools handler_verifier
 tools idiom_registry
 tools json_utils
 tools manifest_registry
@@ -89,11 +86,9 @@ tools service_types
 tools spec_discharge
 tools sql_analysis
 tools sqlite
-tools strict_checker
 tools string
 tools system_linker
 tools trace
-tools type_checker
 tools witness_corpus
 
 # pi

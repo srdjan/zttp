@@ -1,6 +1,6 @@
 # Phase 5 ZTS boundary classification
 
-Status: classification complete; migrations pending
+Status: classification complete; first two migrations implemented
 
 Date: 2026-08-06
 
@@ -243,6 +243,22 @@ shortcut for shrinking the count; generic filesystem access does not belong
 in the stable engine surface.
 
 Expected allowlist result: 100 rows, with no new row.
+
+## Migration progress
+
+The contract proof metadata migration landed first and reduced the allowlist
+from 101 to 100 reaches. The diagnostic migration then introduced one borrowed,
+tagged `DiagnosticProjection` with the complete checker code matrix and stable
+severity set. `tools` now consumes checker diagnostics, strict diagnostic codes,
+handler discovery, and flow property mapping through curated operations instead
+of the five checker implementation modules.
+
+The live implementation found that `handler_verifier` and `flow_checker` also
+served adjacent handler-discovery and witness-persistence call sites that the
+classification summary did not enumerate. Those uses moved through narrow
+operations in the same unit; checker-owned witness data remains inferred and is
+not part of the stable projection. The resulting boundary is 95 allowed package
+reaches, with no new internal reach.
 
 ## Verification
 

@@ -95,7 +95,7 @@ pub const CheckResult = struct {
     }
 };
 
-/// Walk the flow_checker diagnostics, materialise a counterexample witness
+/// Walk borrowed flow-witness projections, materialise a counterexample witness
 /// for each one that maps to a tracked PropertyTag, and persist it to
 /// `.zttp/witnesses/<short_hash>/`. Failures here never block the
 /// analysis result; the corpus is best-effort persistence. Returns the
@@ -107,44 +107,35 @@ pub const CheckResult = struct {
 /// branch below, keeping the `witness_corpus` subtree out of the module graph.
 pub fn persistFlowWitnesses(
     allocator: std.mem.Allocator,
-    flow_diags: []const zts.flow_checker.Diagnostic,
-    ir_view: zts.parser.IrView,
+    flow_witnesses: []const zts.DiagnosticProjection.FlowWitness,
     handler_path: []const u8,
 ) usize {
     if (comptime builtin.target.os.tag != .freestanding) {
-        return persistFlowWitnessesNative(allocator, flow_diags, ir_view, handler_path);
+        return persistFlowWitnessesNative(allocator, flow_witnesses, handler_path);
     }
     return 0;
 }
 
 fn persistFlowWitnessesNative(
     allocator: std.mem.Allocator,
-    flow_diags: []const zts.flow_checker.Diagnostic,
-    ir_view: zts.parser.IrView,
+    flow_witnesses: []const zts.DiagnosticProjection.FlowWitness,
     handler_path: []const u8,
 ) usize {
-    if (flow_diags.len == 0) return 0;
+    if (flow_witnesses.len == 0) return 0;
 
     const corpus_dir = zts.witness_corpus.corpusDir(allocator, handler_path) catch return 0;
     defer allocator.free(corpus_dir);
     zts.witness_corpus.ensureCorpusDir(allocator, corpus_dir, handler_path) catch return 0;
 
     var pinned_regressions: usize = 0;
-    for (flow_diags) |diag| {
-        const tag = zts.flow_checker.propertyTagForKind(diag.kind) orelse continue;
-        const loc = ir_view.getLoc(diag.node) orelse continue;
-        const constraints: []const zts.counterexample.WitnessConstraint =
-            if (diag.witness) |wit| wit.path_constraints else &.{};
-        const io_calls: []const zts.counterexample.TrackedIoCall =
-            if (diag.witness) |wit| wit.io_calls else &.{};
-
+    for (flow_witnesses) |projection| {
         var witness = zts.counterexample.solve(allocator, .{
-            .property = tag,
-            .origin = .{ .line = loc.line, .column = loc.column },
-            .sink = .{ .line = loc.line, .column = loc.column },
-            .summary = diag.message,
-            .constraints = constraints,
-            .io_calls = io_calls,
+            .property = projection.property,
+            .origin = .{ .line = projection.line, .column = projection.column },
+            .sink = .{ .line = projection.line, .column = projection.column },
+            .summary = projection.summary,
+            .constraints = projection.constraints,
+            .io_calls = projection.io_calls,
         }) catch continue;
         defer witness.deinit(allocator);
 
@@ -302,7 +293,7 @@ pub fn appendCanonicalPublicHelperDiagnostics(
         if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0 or cap.inferred.items.len == 0) continue;
         const repair = computedCapsuleRepair(allocator, "Effects", cap.inferred.items);
         result.json_diagnostics.append(allocator, .{
-            .code = json_diag.strictCheckerCode(.canonical_public_helper_effects),
+            .code = zts.DiagnosticProjection.code(.strict, .canonical_public_helper_effects),
             .severity = "error",
             .message = "public helper reaches capabilities and should declare Effects<...>",
             .file = handler_path,
@@ -323,7 +314,7 @@ pub fn appendCanonicalPublicHelperDiagnostics(
     for (contract.function_effect_capsules.items) |cap| {
         if (cap.exported or cap.declared.items.len == 0) continue;
         result.json_diagnostics.append(allocator, .{
-            .code = json_diag.strictCheckerCode(.canonical_internal_helper_effects),
+            .code = zts.DiagnosticProjection.code(.strict, .canonical_internal_helper_effects),
             .severity = "error",
             .message = "module-internal helper declares an Effects<...> ceiling",
             .file = handler_path,
@@ -340,7 +331,7 @@ pub fn appendCanonicalPublicHelperDiagnostics(
         var proven_buf: [4][]const u8 = undefined;
         const repair = computedCapsuleRepair(allocator, "Proof", provenPropertyNames(cap, &proven_buf));
         result.json_diagnostics.append(allocator, .{
-            .code = json_diag.strictCheckerCode(.canonical_public_helper_proof),
+            .code = zts.DiagnosticProjection.code(.strict, .canonical_public_helper_proof),
             .severity = "error",
             .message = "public helper participates in declared specs and should declare Proof<...>",
             .file = handler_path,

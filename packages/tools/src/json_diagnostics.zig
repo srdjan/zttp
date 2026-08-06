@@ -1,20 +1,16 @@
 //! Structured JSON Diagnostic Output
 //!
-//! Converts internal diagnostics from the parser, BoolChecker, TypeChecker,
-//! and HandlerVerifier into machine-readable JSON for the compiler-in-the-loop
-//! workflow. `zts expert` calls `zts check --json` and parses these
-//! diagnostics to fix handler code using the `suggestion` field.
+//! Converts parser and stable checker diagnostic projections into
+//! machine-readable JSON for the compiler-in-the-loop workflow. `zts expert`
+//! calls `zts check --json` and parses these diagnostics to fix handler code
+//! using the `suggestion` field.
 //!
-//! Architecture: each checker's Diagnostic -> JsonDiagnostic -> JSON on stdout
+//! Architecture: checker -> DiagnosticProjection -> JsonDiagnostic -> JSON
 
 const std = @import("std");
 const zts = @import("zts");
 const parser = zts.parser;
-const bool_checker = zts.bool_checker;
-const type_checker = zts.type_checker;
-const strict_checker = zts.strict_checker;
-const handler_verifier = zts.handler_verifier;
-const flow_checker = zts.flow_checker;
+const diagnostic_projection = zts.DiagnosticProjection;
 const restriction_registry = zts.restriction_registry;
 const handler_contract = zts.handler_contract;
 const writeJsonString = handler_contract.writeJsonString;
@@ -111,107 +107,6 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
     };
 }
 
-/// BoolChecker error codes: ZTS1xx
-fn boolCheckerCode(kind: bool_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .condition_not_boolean => "ZTS100",
-        .logical_operand_not_boolean => "ZTS101",
-        .not_operand_not_boolean => "ZTS102",
-        .nullish_on_non_nullable => "ZTS103",
-        .arithmetic_on_non_numeric => "ZTS104",
-        .mixed_type_add => "ZTS105",
-        .add_on_non_addable => "ZTS106",
-        .tautological_comparison => "ZTS107",
-    };
-}
-
-/// TypeChecker error codes: ZTS2xx
-fn typeCheckerCode(kind: type_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .type_mismatch => "ZTS200",
-        .missing_field => "ZTS201",
-        .arg_count_mismatch => "ZTS202",
-        .arg_type_mismatch => "ZTS203",
-        .return_type_mismatch => "ZTS204",
-        .non_exhaustive_match => "ZTS205",
-        // ZTS206 is reserved for `unresolved_type_reference` (amendment A1),
-        // and ZTS207 was `union_too_wide`, which task 3 measured away.
-        .ambiguous_type_argument => "ZTS208",
-        .type_constraint_violation => "ZTS209",
-        .type_argument_count_mismatch => "ZTS210",
-        .invalid_type_predicate => "ZTS211",
-    };
-}
-
-/// HandlerVerifier error codes: ZTS3xx (structural checks), ZTS5xx (specs).
-fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .missing_return_else => "ZTS300",
-        .missing_return_default => "ZTS301",
-        .missing_return_path => "ZTS302",
-        .unchecked_result_value => "ZTS303",
-        .unreachable_after_return => "ZTS304",
-        .unused_variable => "ZTS305",
-        .unused_import => "ZTS306",
-        .non_exhaustive_match => "ZTS307",
-        .unchecked_optional_use => "ZTS308",
-        .unchecked_optional_access => "ZTS309",
-        .module_scope_mutation => "ZTS310",
-        .websocket_import_without_events => "ZTS320",
-        .websocket_events_without_import => "ZTS321",
-        .spec_not_discharged => "ZTS500",
-        .spec_incompatible_with_import => "ZTS501",
-        .spec_unknown_name => "ZTS502",
-    };
-}
-
-/// StrictChecker error codes: ZTS6xx.
-///
-/// Public so emitters that build a `JsonDiagnostic` directly derive their code
-/// from the kind rather than writing the string twice. Two ZTS6xx kinds had
-/// exactly that duplication and read as dead enum variants because nothing
-/// named them.
-pub fn strictCheckerCode(kind: strict_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .implicit_unknown => "ZTS600",
-        .missing_public_annotation => "ZTS601",
-        .dynamic_capability_access => "ZTS602",
-        .non_exhaustive_profile_match => "ZTS603",
-        .avoidable_let => "ZTS604",
-        .computed_property_access => "ZTS605",
-        .mutable_live_iteration => "ZTS622",
-        .canonical_arrow_helper => "ZTS608",
-        .canonical_export_function_const => "ZTS609",
-        .canonical_public_helper_effects => "ZTS610",
-        .canonical_internal_helper_effects => "ZTS623",
-        .canonical_public_helper_proof => "ZTS611",
-        .canonical_ternary_impure => "ZTS612",
-        .canonical_ternary_chain => "ZTS621",
-        .canonical_compound_assignment => "ZTS613",
-        .canonical_non_leading_spread => "ZTS614",
-        .canonical_template_complex_interp => "ZTS615",
-        .canonical_call_spread => "ZTS616",
-        .canonical_default_parameter => "ZTS617",
-        .canonical_destructure_depth => "ZTS618",
-        .canonical_unused_index_alias => "ZTS619",
-        .canonical_redundant_bool_compare => "ZTS620",
-    };
-}
-
-/// FlowChecker error codes: ZTS4xx
-fn flowCheckerCode(kind: flow_checker.DiagnosticKind) []const u8 {
-    return switch (kind) {
-        .secret_in_response => "ZTS400",
-        .credential_in_response => "ZTS401",
-        .secret_in_log => "ZTS402",
-        .credential_in_log => "ZTS403",
-        .secret_in_egress_url => "ZTS404",
-        .credential_in_egress_url => "ZTS405",
-        .secret_in_egress_body => "ZTS406",
-        .unvalidated_input_in_egress => "ZTS407",
-    };
-}
-
 // -------------------------------------------------------------------------
 // Conversion helpers
 // -------------------------------------------------------------------------
@@ -295,45 +190,25 @@ pub fn fromStripError(diag: zts.StripDiagnostic, file: []const u8) JsonDiagnosti
 /// static-string messages; the resulting copy is owned (`message_owned`) and
 /// freed by `JsonDiagnostic.deinit`. On OOM the borrowed slice is returned
 /// unowned, preserving prior behavior.
-fn fromCheckerDiagnostic(
+pub fn fromCheckerDiagnostic(
     allocator: std.mem.Allocator,
-    comptime codeFn: anytype,
+    comptime source: diagnostic_projection.Source,
     diag: anytype,
     ir_view: IrView,
     file: []const u8,
 ) ?JsonDiagnostic {
-    const loc = ir_view.getLoc(diag.node) orelse return null;
-    const owned_msg = allocator.dupe(u8, diag.message) catch null;
+    const projected = diagnostic_projection.project(source, diag, ir_view) orelse return null;
+    const owned_msg = allocator.dupe(u8, projected.message) catch null;
     return .{
-        .code = codeFn(diag.kind),
-        .severity = diag.severity.label(),
-        .message = owned_msg orelse diag.message,
+        .code = projected.code,
+        .severity = projected.severity.label(),
+        .message = owned_msg orelse projected.message,
         .file = file,
-        .line = loc.line,
-        .column = loc.column,
-        .suggestion = diag.help,
+        .line = projected.line,
+        .column = projected.column,
+        .suggestion = projected.suggestion,
         .message_owned = owned_msg != null,
     };
-}
-
-pub fn fromBoolDiagnostic(allocator: std.mem.Allocator, diag: bool_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(allocator, boolCheckerCode, diag, ir_view, file);
-}
-
-pub fn fromTypeDiagnostic(allocator: std.mem.Allocator, diag: type_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(allocator, typeCheckerCode, diag, ir_view, file);
-}
-
-pub fn fromStrictDiagnostic(allocator: std.mem.Allocator, diag: strict_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(allocator, strictCheckerCode, diag, ir_view, file);
-}
-
-pub fn fromVerifierDiagnostic(allocator: std.mem.Allocator, diag: handler_verifier.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(allocator, verifierCode, diag, ir_view, file);
-}
-
-pub fn fromFlowDiagnostic(allocator: std.mem.Allocator, diag: flow_checker.Diagnostic, ir_view: IrView, file: []const u8) ?JsonDiagnostic {
-    return fromCheckerDiagnostic(allocator, flowCheckerCode, diag, ir_view, file);
 }
 
 // -------------------------------------------------------------------------
@@ -1081,21 +956,21 @@ test "parserErrorCode maps all kinds" {
     try std.testing.expectEqualStrings("ZTS037", parserErrorCode(.invalid_import));
 }
 
-test "boolCheckerCode maps all kinds" {
-    try std.testing.expectEqualStrings("ZTS100", boolCheckerCode(.condition_not_boolean));
-    try std.testing.expectEqualStrings("ZTS105", boolCheckerCode(.mixed_type_add));
+test "DiagnosticProjection maps boolean checker codes" {
+    try std.testing.expectEqualStrings("ZTS100", diagnostic_projection.code(.boolean, .condition_not_boolean));
+    try std.testing.expectEqualStrings("ZTS105", diagnostic_projection.code(.boolean, .mixed_type_add));
 }
 
-test "typeCheckerCode maps all kinds" {
-    try std.testing.expectEqualStrings("ZTS200", typeCheckerCode(.type_mismatch));
-    try std.testing.expectEqualStrings("ZTS202", typeCheckerCode(.arg_count_mismatch));
+test "DiagnosticProjection maps type checker codes" {
+    try std.testing.expectEqualStrings("ZTS200", diagnostic_projection.code(.type, .type_mismatch));
+    try std.testing.expectEqualStrings("ZTS202", diagnostic_projection.code(.type, .arg_count_mismatch));
 }
 
-test "verifierCode maps all kinds" {
-    try std.testing.expectEqualStrings("ZTS300", verifierCode(.missing_return_else));
-    try std.testing.expectEqualStrings("ZTS303", verifierCode(.unchecked_result_value));
-    try std.testing.expectEqualStrings("ZTS305", verifierCode(.unused_variable));
-    try std.testing.expectEqualStrings("ZTS310", verifierCode(.module_scope_mutation));
+test "DiagnosticProjection maps verifier codes" {
+    try std.testing.expectEqualStrings("ZTS300", diagnostic_projection.code(.verifier, .missing_return_else));
+    try std.testing.expectEqualStrings("ZTS303", diagnostic_projection.code(.verifier, .unchecked_result_value));
+    try std.testing.expectEqualStrings("ZTS305", diagnostic_projection.code(.verifier, .unused_variable));
+    try std.testing.expectEqualStrings("ZTS310", diagnostic_projection.code(.verifier, .module_scope_mutation));
 }
 
 test "fromParseError: unsupported feature extracts suggestion" {
@@ -1213,13 +1088,16 @@ test "every diagnostic code names exactly one diagnostic" {
     var seen: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer seen.deinit(std.testing.allocator);
 
+    for (diagnostic_projection.allCodes()) |entry| {
+        if (seen.get(entry.code)) |owner| {
+            std.debug.print("{s} names both {s} and {s}\n", .{ entry.code, owner, entry.kind });
+            return error.DuplicateDiagnosticCode;
+        }
+        try seen.put(std.testing.allocator, entry.code, entry.kind);
+    }
+
     const mappers = .{
         .{ ErrorKind, parserErrorCode },
-        .{ bool_checker.DiagnosticKind, boolCheckerCode },
-        .{ type_checker.DiagnosticKind, typeCheckerCode },
-        .{ handler_verifier.DiagnosticKind, verifierCode },
-        .{ strict_checker.DiagnosticKind, strictCheckerCode },
-        .{ flow_checker.DiagnosticKind, flowCheckerCode },
         .{ zts.StripDiagnosticKind, stripErrorCode },
     };
 

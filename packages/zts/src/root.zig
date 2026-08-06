@@ -49,6 +49,7 @@
 
 const std = @import("std");
 const build_options = @import("build_options");
+const diagnostic_projection = @import("diagnostic_projection.zig");
 
 // ============================================================================
 // Internal implementation modules (no cross-release stability guarantee).
@@ -183,6 +184,7 @@ pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
 pub const OptStats = bytecode_opt.OptStats;
 pub const HandlerAnalyzer = handler_analyzer.HandlerAnalyzer;
 pub const HandlerVerifier = handler_verifier.HandlerVerifier;
+pub const findHandlerFunction = handler_verifier.findHandlerFunction;
 pub const BoolChecker = bool_checker.BoolChecker;
 pub const FlowChecker = flow_checker.FlowChecker;
 pub const PathGenerator = path_generator.PathGenerator;
@@ -218,6 +220,30 @@ pub const ContractProof = struct {
         return contract_diff.claimScope(contract.properties);
     }
 };
+pub const DiagnosticProjection = diagnostic_projection;
+
+test "DiagnosticProjection exposes stable tagged checker codes" {
+    try std.testing.expectEqualStrings(
+        "ZTS100",
+        DiagnosticProjection.code(.boolean, .condition_not_boolean),
+    );
+    try std.testing.expectEqualStrings(
+        "ZTS200",
+        DiagnosticProjection.code(.type, .type_mismatch),
+    );
+    try std.testing.expectEqualStrings(
+        "ZTS300",
+        DiagnosticProjection.code(.verifier, .missing_return_else),
+    );
+    try std.testing.expectEqualStrings(
+        "ZTS400",
+        DiagnosticProjection.code(.flow, .secret_in_response),
+    );
+    try std.testing.expectEqualStrings(
+        "ZTS600",
+        DiagnosticProjection.code(.strict, .implicit_unknown),
+    );
+}
 pub const SpecDiagnostic = handler_contract.SpecDiagnostic;
 pub const writeContractJson = handler_contract.writeContractJson;
 pub const HandlerPolicy = handler_policy.HandlerPolicy;

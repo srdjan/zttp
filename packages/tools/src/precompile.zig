@@ -1252,7 +1252,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         if (bool_diags.len > 0) {
             if (json_mode) {
                 for (bool_diags) |diag| {
-                    if (json_diag.fromBoolDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
+                    if (json_diag.fromCheckerDiagnostic(allocator, .boolean, diag, ir_view, handler_path)) |jd| {
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
@@ -1277,7 +1277,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         if (tc_diags.len > 0) {
             if (json_mode) {
                 for (tc_diags) |diag| {
-                    if (json_diag.fromTypeDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
+                    if (json_diag.fromCheckerDiagnostic(allocator, .type, diag, ir_view, handler_path)) |jd| {
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
@@ -1301,7 +1301,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         result.strict_warnings = @intCast(strict_diags.len -| result.strict_errors);
         if (strict_diags.len > 0) {
             for (strict_diags) |diag| {
-                if (json_diag.fromStrictDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
+                if (json_diag.fromCheckerDiagnostic(allocator, .strict, diag, ir_view, handler_path)) |jd| {
                     result.json_diagnostics.append(allocator, jd) catch {};
                 }
             }
@@ -1324,7 +1324,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     var verify_info: ?VerificationInfo = null;
     var checked_opt: ?zts.pipeline.CheckedModule = null;
     defer if (checked_opt) |*c| c.deinit();
-    if (zts.handler_verifier.findHandlerFunction(ir_view, root)) |hf| {
+    if (zts.findHandlerFunction(ir_view, root)) |hf| {
         // Return labels for helpers imported from sibling files. Without them
         // the flow checker has no body to walk for such a call and has to
         // treat its value as untraceable, which costs every property the
@@ -1344,7 +1344,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         if (verifier_diags.len > 0) {
             if (json_mode) {
                 for (verifier_diags) |diag| {
-                    if (json_diag.fromVerifierDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
+                    if (json_diag.fromCheckerDiagnostic(allocator, .verifier, diag, ir_view, handler_path)) |jd| {
                         result.json_diagnostics.append(allocator, jd) catch {};
                     }
                 }
@@ -1382,7 +1382,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         result.flow_warnings = @intCast(flow_diags.len -| result.flow_errors);
         if (json_mode) {
             for (flow_diags) |diag| {
-                if (json_diag.fromFlowDiagnostic(allocator, diag, ir_view, handler_path)) |jd| {
+                if (json_diag.fromCheckerDiagnostic(allocator, .flow, diag, ir_view, handler_path)) |jd| {
                     result.json_diagnostics.append(allocator, jd) catch {};
                 }
             }
@@ -1393,7 +1393,13 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         // Persist any flow-property witnesses to the on-disk corpus so the
         // same falsifying input does not need to be rediscovered next session.
         // Runs in both JSON and human modes; failures are non-fatal.
-        result.pinned_witness_regressions = persistFlowWitnesses(allocator, flow_diags, ir_view, handler_path);
+        var flow_witnesses: std.ArrayList(zts.DiagnosticProjection.FlowWitness) = .empty;
+        defer flow_witnesses.deinit(allocator);
+        for (flow_diags) |diag| {
+            const witness = zts.DiagnosticProjection.projectFlowWitness(diag, ir_view) orelse continue;
+            flow_witnesses.append(allocator, witness) catch break;
+        }
+        result.pinned_witness_regressions = persistFlowWitnesses(allocator, flow_witnesses.items, handler_path);
 
         checked_opt = checked;
     }
@@ -1474,10 +1480,8 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     if (result.contract) |*c| {
         var trace_arena = std.heap.ArenaAllocator.init(allocator);
         defer trace_arena.deinit();
-        const flow_for_trace: []const zts.flow_checker.Diagnostic =
-            if (checked_opt) |*ck| ck.flowDiagnostics() else &.{};
-        const defended_for_trace: []const zts.flow_checker.DefendedPath =
-            if (checked_opt) |*ck| ck.defendedPaths() else &.{};
+        const flow_for_trace = if (checked_opt) |*ck| ck.flowDiagnostics() else &.{};
+        const defended_for_trace = if (checked_opt) |*ck| ck.defendedPaths() else &.{};
         if (zts.proof_trace.collect(
             trace_arena.allocator(),
             c,
@@ -1824,7 +1828,7 @@ pub fn compileHandler(
     var optional_safe: bool = false;
     if (emit_verify) {
         const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        const handler_fn = zts.handler_verifier.findHandlerFunction(ir_view, root);
+        const handler_fn = zts.findHandlerFunction(ir_view, root);
 
         const verifier_env: ?*const zts.TypeEnv = type_env_storage.envPtr();
         const verifier_type_checker: ?*const zts.TypeChecker =
@@ -2472,8 +2476,7 @@ fn countAotPatterns(dispatch: *const zts.PatternDispatchTable) usize {
     return count;
 }
 
-// findHandlerFunction is defined in handler_verifier.zig and exported via zts.
-const findHandlerFunction = zts.handler_verifier.findHandlerFunction;
+const findHandlerFunction = zts.findHandlerFunction;
 
 fn buildContractWithPolicy(
     allocator: std.mem.Allocator,
