@@ -65,7 +65,6 @@ tools parser
 tools pipeline
 tools proof_trace
 tools property_diagnostics
-tools repair_validator
 tools route_match
 tools semantics
 tools semantics_audit
@@ -91,7 +90,6 @@ pi handler_contract
 pi handler_verifier
 pi parser
 pi repair_plan
-pi repair_validator
 pi system_linker
 pi witness_corpus
 

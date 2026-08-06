@@ -8,6 +8,7 @@ const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const edit_simulate = @import("edit_simulate.zig");
 const writeJsonString = zts.handler_contract.writeJsonString;
+const repairPolicy = zts.RepairPolicy;
 pub const RepairIntent = zts.RepairIntent;
 
 pub const Refactor = struct {
@@ -2980,7 +2981,7 @@ test "every graded rewrite this rewriter emits discharges against its law" {
 
     var checked: usize = 0;
     for (fixtures) |fixture| {
-        if (!zts.repair_validator.gradable(fixture.intent)) continue;
+        if (!repairPolicy.isGradable(fixture.intent)) continue;
 
         var result = try collectFromSource(allocator, fixture.source, "handler.ts");
         defer result.deinit(allocator);
@@ -3001,7 +3002,7 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         const repaired = try applyRefactors(allocator, fixture.source, &one);
         defer allocator.free(repaired);
 
-        switch (zts.repair_validator.validateApplication(
+        switch (repairPolicy.validateApplication(
             fixture.intent,
             fixture.source,
             repaired,
@@ -3023,7 +3024,7 @@ test "every graded rewrite this rewriter emits discharges against its law" {
     // fails here rather than shipping a graded intent nothing cross-checks.
     var gradable_rows: usize = 0;
     for (rewrite_row_intents) |intent| {
-        if (zts.repair_validator.gradable(intent)) gradable_rows += 1;
+        if (repairPolicy.isGradable(intent)) gradable_rows += 1;
     }
     try std.testing.expectEqual(gradable_rows, checked);
 }

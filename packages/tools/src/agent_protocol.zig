@@ -23,6 +23,7 @@ const canonicalize = @import("canonicalize.zig");
 const policy_catalog = zts.PolicyCatalog;
 const idiomCatalog = zts.IdiomCatalog;
 const restrictionCatalog = zts.RestrictionCatalog;
+const repairPolicy = zts.RepairPolicy;
 
 /// The closed operation set (spec 4.8).
 pub const Operation = enum {
@@ -678,7 +679,7 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     // from a flag with no stated reason.
     try json.objectField("validators");
     try json.beginArray();
-    for (&zts.repair_validator.rows) |*row| {
+    for (repairPolicy.validators()) |row| {
         try json.beginObject();
         try json.objectField("intent");
         try json.write(@tagName(row.intent));
@@ -998,7 +999,7 @@ fn runApplyRepair(
     // reason about the request rather than about a rewrite it should not have
     // reached.
     for (repairs.items) |r| {
-        if (!zts.repair_validator.gradable(r.intent)) {
+        if (!repairPolicy.isGradable(r.intent)) {
             return try writeApplyRefusal(
                 json,
                 file_rel,
@@ -1025,7 +1026,7 @@ fn runApplyRepair(
             else => return err,
         };
 
-        switch (zts.repair_validator.validateApplication(r.intent, current, next, r.line)) {
+        switch (repairPolicy.validateApplication(r.intent, current, next, r.line)) {
             .equivalent => {},
             .not_law_shape => |why| {
                 allocator.free(next);
@@ -1690,7 +1691,7 @@ fn writeDiagnostic(
 fn repairAvailableFor(code: []const u8) bool {
     const rule = policy_catalog.findByCode(code) orelse return false;
     const intent = rule.repair orelse return false;
-    return zts.repair_validator.gradable(intent);
+    return repairPolicy.isGradable(intent);
 }
 
 /// Byte offset of a 1-based line and column. Exact for the reported position;
@@ -1718,7 +1719,7 @@ fn byteOffsetOf(source: []const u8, line: u32, column: u32) usize {
 /// mechanical exactly when something discharges it - the same condition
 /// `repair_available` keys on, read from the same place.
 fn candidateGrade(intent: zts.RepairIntent) []const u8 {
-    return if (zts.repair_validator.gradable(intent)) "mechanical_repair" else "proposed_refactor";
+    return if (repairPolicy.isGradable(intent)) "mechanical_repair" else "proposed_refactor";
 }
 
 fn boolField(input: std.json.Value, name: []const u8) bool {
@@ -1769,7 +1770,7 @@ fn runCanonicalize(
         // what would discharge this rewrite and whether anything runs it, in
         // the same object as the rewrite. Null for an intent with no row.
         try json.objectField("validator");
-        if (zts.repair_validator.find(refactor.intent)) |row| {
+        if (repairPolicy.findValidator(refactor.intent)) |row| {
             try json.beginObject();
             try json.objectField("method");
             try json.write(row.method.id());

@@ -413,6 +413,80 @@ pub const parseModuleManifest = module_manifest.parse;
 /// consumed by the expert agent and the canonicalizer.
 pub const RepairIntent = repair_intent.RepairIntent;
 
+/// Stable access to the repair validator registry and its independent
+/// application check. The catalog is borrowed and read-only.
+pub const RepairPolicy = struct {
+    pub const Validator = repair_validator.Row;
+    pub const Discharge = repair_validator.Discharge;
+
+    pub fn validators() []const Validator {
+        return &repair_validator.rows;
+    }
+
+    pub fn findValidator(intent: RepairIntent) ?Validator {
+        return repair_validator.find(intent);
+    }
+
+    pub fn isGradable(intent: RepairIntent) bool {
+        return repair_validator.gradable(intent);
+    }
+
+    pub fn validateApplication(
+        intent: RepairIntent,
+        original: []const u8,
+        repaired: []const u8,
+        line: u32,
+    ) Discharge {
+        return repair_validator.validateApplication(intent, original, repaired, line);
+    }
+};
+
+test "stable RepairPolicy exposes validator catalog and discharge" {
+    const validators = RepairPolicy.validators();
+    try std.testing.expectEqual(repair_validator.rows.len, validators.len);
+    try std.testing.expect(validators.len > 0);
+
+    const first: RepairPolicy.Validator = validators[0];
+    const found = RepairPolicy.findValidator(first.intent) orelse
+        return error.TestExpectedRepairValidator;
+    try std.testing.expectEqual(first.intent, found.intent);
+    try std.testing.expectEqual(first.method, found.method);
+    try std.testing.expectEqual(first.status, found.status);
+
+    try std.testing.expect(RepairPolicy.isGradable(.replace_let_with_const));
+    try std.testing.expect(!RepairPolicy.isGradable(.add_trailing_return));
+
+    const accepted: RepairPolicy.Discharge = RepairPolicy.validateApplication(
+        .replace_let_with_const,
+        "let value = 1;\n",
+        "const value = 1;\n",
+        1,
+    );
+    try std.testing.expectEqual(RepairPolicy.Discharge.equivalent, accepted);
+
+    const refused = RepairPolicy.validateApplication(
+        .replace_let_with_const,
+        "let value = 1;\n",
+        "let value = 2;\n",
+        1,
+    );
+    switch (refused) {
+        .not_law_shape => |reason| try std.testing.expect(reason.len > 0),
+        else => return error.TestExpectedRepairRefusal,
+    }
+
+    const unimplemented = RepairPolicy.validateApplication(
+        .add_trailing_return,
+        "function handler() {}\n",
+        "function handler() { return null; }\n",
+        1,
+    );
+    switch (unimplemented) {
+        .no_validator => {},
+        else => return error.TestExpectedMissingRepairValidator,
+    }
+}
+
 /// Version information
 pub const version = struct {
     pub const major = 0;

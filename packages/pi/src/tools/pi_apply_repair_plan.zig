@@ -10,6 +10,7 @@ const common = @import("common.zig");
 const repair_apply = @import("repair_apply.zig");
 
 const writeJsonString = zts.writeJsonString;
+const repairPolicy = zts.RepairPolicy;
 
 const name = "pi_apply_repair_plan";
 
@@ -163,12 +164,12 @@ fn writeEquivalenceJson(
         try w.writeAll("null");
         return;
     };
-    const row = zts.repair_validator.find(typed) orelse {
+    const row = repairPolicy.findValidator(typed) orelse {
         try w.writeAll("null");
         return;
     };
 
-    switch (zts.repair_validator.validateApplication(typed, source, proposed, intent.line)) {
+    switch (repairPolicy.validateApplication(typed, source, proposed, intent.line)) {
         .no_validator => try w.writeAll("null"),
         .equivalent => {
             try w.writeAll("{\"method\":");
