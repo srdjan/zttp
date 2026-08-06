@@ -1963,6 +1963,7 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "\"x\" - {}", .expected = ComptimeError.TypeMismatch },
         .{ .source = "{a 1}", .expected = ComptimeError.SyntaxError },
         .{ .source = "\"unterminated", .expected = ComptimeError.UnclosedString },
+        .{ .source = "{\"unterminated", .expected = ComptimeError.UnclosedString },
         .{ .source = "(1 + 2", .expected = ComptimeError.UnclosedParen },
         .{ .source = "[1, 2", .expected = ComptimeError.UnclosedBracket },
         .{ .source = "{a: 1", .expected = ComptimeError.UnclosedBrace },
@@ -1970,6 +1971,7 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "", .expected = ComptimeError.UnexpectedEnd },
         .{ .source = "0x", .expected = ComptimeError.InvalidNumber },
         .{ .source = "\"\\xGG\"", .expected = ComptimeError.InvalidEscape },
+        .{ .source = "{\"\\xGG\": 1}", .expected = ComptimeError.InvalidEscape },
         .{ .source = "JSON.parse(\"'single-root'\")", .expected = ComptimeError.SyntaxError },
         .{ .source = "JSON.parse(\".5\")", .expected = ComptimeError.SyntaxError },
         .{ .source = "JSON.parse(\"{loose 1}\")", .expected = ComptimeError.SyntaxError },
@@ -2025,10 +2027,25 @@ fn evaluateAllocationFixture(allocator: std.mem.Allocator, source: []const u8) !
     defer value.deinit(allocator);
 }
 
-test "comptime aggregate evaluation cleans every allocation failure" {
+test "comptime evaluation cleans every aggregate and call allocation failure" {
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
         evaluateAllocationFixture,
         .{"[[\"owned\"], {nested: [\"value\"]}]"},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        evaluateAllocationFixture,
+        .{"Math.max(1, 2, 3)"},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        evaluateAllocationFixture,
+        .{"parseInt(\"42\", 10)"},
+    );
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        evaluateAllocationFixture,
+        .{"hash(\"owned\")"},
     );
 }

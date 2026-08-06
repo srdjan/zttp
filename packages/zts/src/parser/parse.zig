@@ -2266,27 +2266,34 @@ pub const Parser = struct {
     }
 
     fn parseString(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        const text = self.current.text(self.source);
+        const token = self.current;
         self.advance();
 
-        if (self.expression_profile != null and (text.len < 2 or text[text.len - 1] != text[0])) {
+        if (self.expression_profile != null) return self.addComptimeStringNode(token);
+
+        // Strip quotes
+        const loc = token.location();
+        const text = token.text(self.source);
+        const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
+        const str_idx = try self.addUnescapedString(content);
+        return try self.nodes.add(Node.litString(loc, str_idx));
+    }
+
+    fn addComptimeStringNode(self: *Parser, token: Token) anyerror!NodeIndex {
+        const loc = token.location();
+        const text = token.text(self.source);
+        if (text.len < 2 or text[text.len - 1] != text[0]) {
             self.errors.addError(.unterminated_string, loc, "unterminated string literal");
             return error.UnexpectedToken;
         }
 
-        // Strip quotes
-        const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-        const str_idx = if (self.expression_profile != null)
-            self.addUnescapedString(content) catch |err| switch (err) {
-                error.InvalidEscapeSequence => {
-                    self.errors.addError(.invalid_escape_sequence, loc, "invalid escape sequence");
-                    return error.UnexpectedToken;
-                },
-                else => return err,
-            }
-        else
-            try self.addUnescapedString(content);
+        const str_idx = self.addUnescapedString(text[1 .. text.len - 1]) catch |err| switch (err) {
+            error.InvalidEscapeSequence => {
+                self.errors.addError(.invalid_escape_sequence, loc, "invalid escape sequence");
+                return error.UnexpectedToken;
+            },
+            else => return err,
+        };
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -2623,13 +2630,14 @@ pub const Parser = struct {
                     } else if (self.check(.string_literal)) {
                         const key = self.current;
                         self.advance();
-                        const text = key.text(self.source);
-                        const content = if (text.len >= 2) text[1 .. text.len - 1] else text;
-                        const key_idx = if (self.expression_profile != null)
-                            try self.addUnescapedString(content)
-                        else
-                            try self.addString(content);
-                        key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
+                        if (self.expression_profile != null) {
+                            key_node = try self.addComptimeStringNode(key);
+                        } else {
+                            const text = key.text(self.source);
+                            const content = if (text.len >= 2) text[1 .. text.len - 1] else text;
+                            const key_idx = try self.addString(content);
+                            key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
+                        }
                     } else if (self.isKeyword(self.current.type)) {
                         // JavaScript allows reserved keywords as property names
                         // e.g., {class: 'foo', if: 'bar'}
