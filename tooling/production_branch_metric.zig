@@ -274,16 +274,15 @@ fn collect(
         // FileNotFound or OutOfMemory here would abort the suite with
         // `error.ParseFailed` and send the operator hunting a syntax error that
         // does not exist, so everything else propagates under its own name.
-        const counts = countFile(io, allocator, path) catch |err| switch (err) {
-            error.ParseFailed => {
-                report.parse_failures += 1;
-                std.debug.print("production branch metric: {s}: {s}\n", .{ path, @errorName(err) });
-                continue;
-            },
-            else => {
-                std.debug.print("production branch metric: {s}: {s}\n", .{ path, @errorName(err) });
-                return err;
-            },
+        const counts = countFile(io, allocator, path) catch |err| {
+            std.debug.print("production branch metric: {s}: {s}\n", .{ path, @errorName(err) });
+            switch (err) {
+                error.ParseFailed => {
+                    report.parse_failures += 1;
+                    continue;
+                },
+                else => return err,
+            }
         };
         report.add(package, counts);
     }
