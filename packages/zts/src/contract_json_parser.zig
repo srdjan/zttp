@@ -874,7 +874,7 @@ fn projectApiBodies(
             .schema = .none,
         };
         errdefer body.deinit(allocator);
-        body.schema = try projectSchemaSpec(allocator, wire.schemaRef, wire.schema, wire.dynamic);
+        body.schema = try projectWireSchemaSpec(allocator, wire.schemaRef, wire.schema, wire.dynamic);
         result.appendAssumeCapacity(body);
     }
     return result;
@@ -897,22 +897,40 @@ fn projectApiResponses(
             .schema = .none,
         };
         errdefer response.deinit(allocator);
-        response.schema = try projectSchemaSpec(allocator, wire.schemaRef, wire.schema, wire.dynamic);
+        response.schema = try projectWireSchemaSpec(allocator, wire.schemaRef, wire.schema, wire.dynamic);
         result.appendAssumeCapacity(response);
     }
     return result;
 }
 
+/// The one place the schema precedence (dynamic > inline JSON > ref > none) is
+/// encoded. Wire-typed callers unwrap through `projectWireSchemaSpec` so the two
+/// entry points cannot drift apart: a route's `request_bodies` and its
+/// backfilled `responses` have to agree for the same contract to round-trip.
 fn projectSchemaSpec(
+    allocator: std.mem.Allocator,
+    schema_ref: ?[]const u8,
+    schema_json: ?[]const u8,
+    dynamic: bool,
+) !SchemaSpec {
+    if (dynamic) return .dynamic;
+    if (schema_json) |schema| return .{ .inline_json = try allocator.dupe(u8, schema) };
+    if (schema_ref) |reference| return .{ .ref = try allocator.dupe(u8, reference) };
+    return .none;
+}
+
+fn projectWireSchemaSpec(
     allocator: std.mem.Allocator,
     schema_ref: ?WireString,
     schema_json: ?RawJson,
     dynamic: bool,
 ) !SchemaSpec {
-    if (dynamic) return .dynamic;
-    if (schema_json) |schema| return .{ .inline_json = try allocator.dupe(u8, schema.bytes) };
-    if (schema_ref) |reference| return .{ .ref = try dupeWireString(allocator, reference) };
-    return .none;
+    return projectSchemaSpec(
+        allocator,
+        if (schema_ref) |value| value.bytes else null,
+        if (schema_json) |value| value.bytes else null,
+        dynamic,
+    );
 }
 
 fn backfillApiRouteCollections(
@@ -948,7 +966,7 @@ fn backfillApiRouteCollections(
             .schema = .none,
         };
         errdefer response.deinit(allocator);
-        response.schema = try schemaSpecFromLegacyFields(
+        response.schema = try projectSchemaSpec(
             allocator,
             route.response_schema_ref,
             route.response_schema_json,
@@ -968,18 +986,6 @@ fn containsRequestBodySchemaRef(
         if (std.mem.eql(u8, schema_ref, needle)) return true;
     }
     return false;
-}
-
-fn schemaSpecFromLegacyFields(
-    allocator: std.mem.Allocator,
-    schema_ref: ?[]const u8,
-    schema_json: ?[]const u8,
-    dynamic: bool,
-) !SchemaSpec {
-    if (dynamic) return .dynamic;
-    if (schema_json) |schema| return .{ .inline_json = try allocator.dupe(u8, schema) };
-    if (schema_ref) |reference| return .{ .ref = try allocator.dupe(u8, reference) };
-    return .none;
 }
 
 fn projectVerification(
