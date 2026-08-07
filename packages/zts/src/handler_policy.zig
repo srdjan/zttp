@@ -4,13 +4,19 @@
 //! env vars, outbound hosts, cache namespaces, and SQL query names.
 
 const std = @import("std");
-const contract_mod = @import("handler_contract.zig");
+/// The contract's data types, not `handler_contract.zig`. Everything this file
+/// names - HandlerContract, SqlQueryInfo, emptySqlInfo, emptyApiInfo - is
+/// defined here and only re-exported by `handler_contract.zig`, which adds the
+/// JSON reader and writer on top. Taking the alias route meant `context.zig`,
+/// which imports this file, dragged both serializers along. See
+/// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+const contract_mod = @import("contract_types.zig");
 
 const HandlerContract = contract_mod.HandlerContract;
 const ascii = std.ascii;
 
 /// Re-export so runtime-side serializers (self_extract) can name the per-query
-/// allowlist element type without reaching into handler_contract directly.
+/// allowlist element type without reaching into the contract types directly.
 pub const SqlQueryInfo = contract_mod.SqlQueryInfo;
 
 pub const AllowList = struct {
