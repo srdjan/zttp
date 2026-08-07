@@ -139,10 +139,7 @@ pub const Parser = struct {
 
         var parser = Parser{
             .allocator = allocator,
-            .tokenizer = if (profile != null)
-                Tokenizer.initWithNumericSeparators(source, true)
-            else
-                Tokenizer.init(source),
+            .tokenizer = Tokenizer.init(source),
             .source = source,
             .nodes = nodes,
             .constants = ConstantPool.init(allocator),
@@ -2212,6 +2209,14 @@ pub const Parser = struct {
             return self.parseComptimeNumber(loc, text);
         }
 
+        // Numeric separators belong to the comptime expression profile only.
+        // `std.fmt.parseInt` and `parseFloat` both accept `_`, so without this
+        // check `1_000` would quietly become a supported literal here.
+        if (std.mem.indexOfScalar(u8, text, '_') != null) {
+            self.errors.addError(.invalid_number, loc, "numeric separators are not supported outside comptime(); write the digits without '_'");
+            return error.InvalidNumber;
+        }
+
         // Try to parse as integer first
         if (std.fmt.parseInt(i32, text, 0)) |int_val| {
             return try self.nodes.add(Node.litInt(loc, int_val));
@@ -3827,6 +3832,28 @@ pub const Parser = struct {
         return self.addString(unescaped.bytes);
     }
 
+    /// Decode the `\uNNNN` or `\u{N..}` escape that starts at the backslash
+    /// `input[at]`, and report the index just past it. Both forms are accepted,
+    /// matching `unescapeString`.
+    fn decodeUnicodeEscape(input: []const u8, at: usize) !struct { codepoint: u21, next: usize } {
+        if (at + 2 < input.len and input[at + 2] == '{') {
+            const close = std.mem.indexOfScalarPos(u8, input, at + 3, '}') orelse
+                return error.InvalidEscapeSequence;
+            const hex = input[at + 3 .. close];
+            if (hex.len == 0 or hex.len > 6) return error.InvalidEscapeSequence;
+            return .{
+                .codepoint = std.fmt.parseInt(u21, hex, 16) catch return error.InvalidEscapeSequence,
+                .next = close + 1,
+            };
+        }
+        if (at + 5 >= input.len) return error.InvalidEscapeSequence;
+        return .{
+            .codepoint = std.fmt.parseInt(u16, input[at + 2 .. at + 6], 16) catch
+                return error.InvalidEscapeSequence,
+            .next = at + 6,
+        };
+    }
+
     fn unescapeComptimeString(self: *Parser, input: []const u8, template: bool) !UnescapedString {
         if (std.mem.indexOfScalar(u8, input, '\\') == null) return .{ .bytes = input };
 
@@ -3853,10 +3880,26 @@ pub const Parser = struct {
                 continue;
             }
 
+            // `\uNNNN` and `\u{N..}` must decode here for the same reason they
+            // decode in `unescapeString`: a comptime-folded literal has to be
+            // byte-identical to the same literal written outside `comptime(...)`.
+            // Falling through to the `else` arm below would emit the letter `u`
+            // and copy the hex digits as text.
+            if (escaped == 'u') {
+                const decoded = try decodeUnicodeEscape(input, i);
+                out_pos += std.unicode.utf8Encode(decoded.codepoint, result[out_pos..]) catch
+                    return error.InvalidEscapeSequence;
+                i = decoded.next;
+                continue;
+            }
+
             result[out_pos] = switch (escaped) {
                 'n' => '\n',
                 'r' => '\r',
                 't' => '\t',
+                'b' => 0x08,
+                'f' => 0x0C,
+                'v' => 0x0B,
                 '\\' => '\\',
                 '\'' => if (template) escaped else '\'',
                 '"' => if (template) escaped else '"',
@@ -4760,14 +4803,25 @@ test "comptime numeric separators remain isolated from normal parsing" {
     const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
     try std.testing.expectEqual(@as(f64, 1000), view.getFloat(view.getFloatIdx(root).?).?);
 
+    // Outside comptime the separator is a diagnostic, not a silent truncation:
+    // the literal used to lex as `1` followed by the identifier statement
+    // `_000`, so a handler served 1 where the author wrote 1000.
     var program_parser = try Parser.init(allocator, "const value = 1_000;");
     defer program_parser.deinit();
-    const program_root = try program_parser.parse();
-    const program_view = ir.IrView.fromIRStore(&program_parser.nodes, &program_parser.constants);
-    const block = program_view.getBlock(program_root).?;
-    try std.testing.expectEqual(@as(u16, 2), block.stmts_count);
-    const decl = program_view.getVarDecl(program_view.getListIndex(block.stmts_start, 0)).?;
-    try std.testing.expectEqual(@as(i32, 1), program_view.getIntValue(decl.init).?);
+    try std.testing.expectError(error.InvalidNumber, program_parser.parse());
+    const errors = program_parser.getErrors();
+    try std.testing.expect(errors.len >= 1);
+    try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
+}
+
+test "comptime string folding decodes unicode escapes like the normal parser" {
+    const allocator = std.testing.allocator;
+
+    var expression_parser = try Parser.initExpression(allocator, "\"caf\\u00e9\"", .comptime_expression);
+    defer expression_parser.deinit();
+    const root = try expression_parser.parseExpressionOnly();
+    const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
+    try std.testing.expectEqualStrings("café", view.getString(view.getStringIdx(root).?).?);
 }
 
 test "comptime unary before exponent preserves legacy profile only" {
