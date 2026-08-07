@@ -198,18 +198,18 @@ pub fn planFromSource(
     var first_witness = true;
     var witness_index: usize = 0;
     for (checker.getDiagnostics()) |diag| {
-        const tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
-        if (!goalRequested(goals.items, tag)) continue;
-        const loc = ir_view.getLoc(diag.node) orelse continue;
-        const constraints: []const counterexample.WitnessConstraint = if (diag.witness) |wit| wit.path_constraints else &.{};
-        const io_calls: []const counterexample.TrackedIoCall = if (diag.witness) |wit| wit.io_calls else &.{};
+        // Share the projection with the compiler's own witness persistence, so
+        // a repair plan and the on-disk corpus never disagree about what a
+        // diagnostic's witness contains.
+        const projection = zts.DiagnosticProjection.projectFlowWitness(diag, ir_view) orelse continue;
+        if (!goalRequested(goals.items, projection.property)) continue;
         var witness = zts.solveCounterexample(allocator, .{
-            .property = tag,
-            .origin = .{ .line = loc.line, .column = loc.column },
-            .sink = .{ .line = loc.line, .column = loc.column },
-            .summary = diag.message,
-            .constraints = constraints,
-            .io_calls = io_calls,
+            .property = projection.property,
+            .origin = .{ .line = projection.line, .column = projection.column },
+            .sink = .{ .line = projection.line, .column = projection.column },
+            .summary = projection.summary,
+            .constraints = projection.constraints,
+            .io_calls = projection.io_calls,
         }) catch continue;
         defer witness.deinit(allocator);
 

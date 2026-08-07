@@ -891,6 +891,43 @@ pub const TypeEnv = struct {
         return self.tryInstantiateGenericApp(parsed);
     }
 
+    /// Outcome of instantiating the members of a composite type. `unchanged`
+    /// lets the caller keep the original index instead of interning an
+    /// identical type; `changed` hands over an owned slice the caller frees.
+    const CompositeMembers = union(enum) {
+        failed,
+        unchanged,
+        changed: []TypeIndex,
+    };
+
+    /// Instantiate every member of an intersection or union.
+    ///
+    /// `live` is borrowed from the pool's shared members list, which a nested
+    /// instantiation may reallocate, so it is copied before the loop runs.
+    /// Reading through `live` inside the loop is a use-after-free that yields
+    /// garbage TypeIndex values.
+    ///
+    /// Intersection and union differ only in which getter produced `live` and
+    /// which adder consumes the result, so both go through here: the copy
+    /// discipline and the member-count handling are stated once.
+    fn instantiateCompositeMembers(self: *TypeEnv, live: []const TypeIndex) CompositeMembers {
+        const new_members = self.allocator.dupe(TypeIndex, live) catch {
+            if (self.pool.failure == null) self.pool.failure = error.OutOfMemory;
+            return .failed;
+        };
+        var changed = false;
+        for (new_members) |*member| {
+            const m = member.*;
+            member.* = self.tryInstantiateGenericApp(m);
+            if (member.* != m) changed = true;
+        }
+        if (!changed) {
+            self.allocator.free(new_members);
+            return .unchanged;
+        }
+        return .{ .changed = new_members };
+    }
+
     /// If idx is a t_generic_app whose base resolves to a generic alias,
     /// instantiate the alias body with the provided type arguments.
     /// Recurses through intersection and union members so a generic
@@ -987,42 +1024,21 @@ pub const TypeEnv = struct {
                     0,
                 );
             },
-            .t_intersection => {
-                // Copy members before the loop: getIntersectionMembers returns a
-                // slice into the pool's shared members list, which a nested
-                // instantiation may reallocate (UAF / garbage TypeIndex).
-                const live = self.pool.getIntersectionMembers(idx);
-                const new_members = self.allocator.dupe(TypeIndex, live) catch {
-                    if (self.pool.failure == null) self.pool.failure = error.OutOfMemory;
-                    return null_type_idx;
-                };
-                defer self.allocator.free(new_members);
-                var changed = false;
-                for (new_members) |*member| {
-                    const m = member.*;
-                    member.* = self.tryInstantiateGenericApp(m);
-                    if (member.* != m) changed = true;
-                }
-                if (!changed) return idx;
-                return self.pool.addIntersection(self.allocator, new_members);
+            .t_intersection => switch (self.instantiateCompositeMembers(self.pool.getIntersectionMembers(idx))) {
+                .failed => return null_type_idx,
+                .unchanged => return idx,
+                .changed => |members| {
+                    defer self.allocator.free(members);
+                    return self.pool.addIntersection(self.allocator, members);
+                },
             },
-            .t_union => {
-                // Copy members before the loop (see t_intersection above).
-                const live = self.pool.getUnionMembers(idx);
-                const new_members = self.allocator.alloc(TypeIndex, live.len) catch {
-                    if (self.pool.failure == null) self.pool.failure = error.OutOfMemory;
-                    return null_type_idx;
-                };
-                defer self.allocator.free(new_members);
-                @memcpy(new_members, live);
-                var changed = false;
-                for (new_members) |*member| {
-                    const m = member.*;
-                    member.* = self.tryInstantiateGenericApp(m);
-                    if (member.* != m) changed = true;
-                }
-                if (!changed) return idx;
-                return self.pool.addUnion(self.allocator, new_members);
+            .t_union => switch (self.instantiateCompositeMembers(self.pool.getUnionMembers(idx))) {
+                .failed => return null_type_idx,
+                .unchanged => return idx,
+                .changed => |members| {
+                    defer self.allocator.free(members);
+                    return self.pool.addUnion(self.allocator, members);
+                },
             },
             .t_nullable => {
                 // `Effects<Response, "env"> | undefined` parses as a nullable
