@@ -54,9 +54,9 @@
 //! follow-up work.
 
 const std = @import("std");
-const mb = @import("module_binding.zig");
+const mb = @import("zts-engine").module_binding;
 const handler_contract = @import("zts-contracts").handler_contract;
-const builtin_modules = @import("builtin_modules.zig");
+const builtin_modules = @import("zts-engine").builtin_modules;
 
 const PathIoCall = handler_contract.PathIoCall;
 const PathCondition = handler_contract.PathCondition;

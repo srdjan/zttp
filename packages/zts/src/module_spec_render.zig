@@ -25,7 +25,7 @@
 //! (`empty_string_literal`, `result_err`, `optional_string`).
 
 const std = @import("std");
-const module_binding = @import("module_binding.zig");
+const module_binding = @import("zts-engine").module_binding;
 
 const ModuleBinding = module_binding.ModuleBinding;
 const FunctionBinding = module_binding.FunctionBinding;
@@ -361,8 +361,8 @@ pub fn renderModuleCatalogTable(
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-const builtin_modules = @import("builtin_modules.zig");
-const file_io = @import("file_io.zig");
+const builtin_modules = @import("zts-engine").builtin_modules;
+const file_io = @import("zts-engine").file_io;
 
 fn renderBySpecifier(a: std.mem.Allocator, specifier: []const u8) ![]u8 {
     for (builtin_modules.builtins, builtin_modules.builtin_governance_entries) |binding, gov| {

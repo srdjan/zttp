@@ -11,11 +11,11 @@
 //! callee map; functions reachable from themselves are flagged.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const atom_table = @import("atom_table.zig");
-const module_binding = @import("module_binding.zig");
-const builtin_modules = @import("builtin_modules.zig");
+const ir = @import("zts-engine").parser.ir;
+const object = @import("zts-engine").object;
+const atom_table = @import("zts-engine").atom_table;
+const module_binding = @import("zts-engine").module_binding;
+const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
 const bool_checker = @import("bool_checker.zig");
@@ -914,8 +914,8 @@ fn isNonDeterministic(object_name: []const u8, property_name: []const u8) bool {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
-const JsParser = @import("parser/root.zig").JsParser;
-const module_manifest = @import("module_manifest.zig");
+const JsParser = @import("zts-engine").parser.JsParser;
+const module_manifest = @import("zts-engine").module_manifest;
 
 test "leaf pure function has empty effect row" {
     const allocator = testing.allocator;
@@ -1723,7 +1723,7 @@ test "the import scan records every specifier across the shared corpus" {
     for (import_corpus.cases, expected) |case, want| {
         try std.testing.expectEqualStrings(case.label, want.label);
 
-        var parser = try @import("parser/parse.zig").Parser.init(allocator, case.source);
+        var parser = try @import("zts-engine").parser.JsParser.init(allocator, case.source);
         defer parser.deinit();
         var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
@@ -1752,7 +1752,7 @@ test "this analyzer records imports from unresolved modules" {
     const allocator = std.testing.allocator;
     const source = "import { thing } from \"zttp-ext:unknown\";\n";
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();

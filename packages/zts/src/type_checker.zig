@@ -15,10 +15,10 @@
 //! Only annotated values are checked - unannotated code passes through unchecked.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
+const ir = @import("zts-engine").parser.ir;
 const json_utils = @import("zts-base").json_utils;
-const object = @import("object.zig");
-const context = @import("context.zig");
+const object = @import("zts-engine").object;
+const context = @import("zts-engine").context;
 const type_pool_mod = @import("type_pool.zig");
 const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
@@ -2113,7 +2113,7 @@ pub const TypeChecker = struct {
         self: *const TypeChecker,
         member_node: NodeIndex,
         literal_node: NodeIndex,
-        op: @import("parser/ir.zig").BinaryOp,
+        op: @import("zts-engine").parser.ir.BinaryOp,
     ) ?NarrowingGuard {
         const member = self.ir_view.getMember(member_node) orelse return null;
         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
@@ -3404,7 +3404,7 @@ const writeJsonString = json_utils.writeJsonString;
 
 test "TypeChecker fails closed when binding analysis cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "let count = 1;");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "let count = 1;");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3422,7 +3422,7 @@ test "TypeChecker fails closed when binding analysis cannot allocate" {
 
 test "TypeChecker fails closed when diagnostic storage cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3447,7 +3447,7 @@ test "TypeChecker fails closed when diagnostic storage cannot allocate" {
 
 test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3476,7 +3476,7 @@ test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
 
 test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3505,10 +3505,10 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
 fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     const allocator = std.testing.allocator;
 
-    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -3831,10 +3831,10 @@ fn checkTypedSourceWithServiceContext(
 ) !void {
     const allocator = std.testing.allocator;
 
-    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -4464,10 +4464,10 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
         \\
     );
 
-    var strip_result = try @import("stripper.zig").strip(allocator, aw.writer.buffered(), .{});
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, aw.writer.buffered(), .{});
     defer strip_result.deinit();
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -4518,10 +4518,10 @@ test "TypeChecker: toReversed type-checks clean" {
 fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8 {
     const allocator = std.testing.allocator;
 
-    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();

@@ -22,7 +22,7 @@
 //! surface deterministic" convention.
 
 const std = @import("std");
-const ir_mod = @import("parser/ir.zig");
+const ir_mod = @import("zts-engine").parser.ir;
 const handler_contract = @import("zts-contracts").handler_contract;
 
 const IrView = ir_mod.IrView;

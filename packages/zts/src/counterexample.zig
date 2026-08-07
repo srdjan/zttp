@@ -24,7 +24,7 @@
 //! first-class support (no_secret_leakage is the first consumer).
 
 const std = @import("std");
-const mb = @import("module_binding.zig");
+const mb = @import("zts-engine").module_binding;
 const json_utils = @import("zts-base").json_utils;
 
 // TODO: these types intentionally stay close to `path_generator.Constraint`

@@ -30,6 +30,14 @@ const atom_table_mod = @import("../atom_table.zig");
 const object = @import("../object.zig");
 
 // Re-export all parser components
+// The IR store as a module, for a consumer in another build module that
+// walks the IR rather than naming one symbol from it. A relative import
+// across the module line would compile a second copy of ir.zig, and a
+// NodeIndex from one copy is not a NodeIndex from the other. `parse.zig`
+// needs no such re-export: `JsParser` below is the only thing anyone wants
+// from it, and `parse` is already a function in this file.
+pub const ir = @import("ir.zig");
+
 pub const Token = @import("token.zig").Token;
 pub const TokenType = @import("token.zig").TokenType;
 pub const SourceLocation = @import("token.zig").SourceLocation;

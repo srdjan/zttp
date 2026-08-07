@@ -12,11 +12,11 @@
 //! interpreter catch those cases at execution time.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const context = @import("context.zig");
+const ir = @import("zts-engine").parser.ir;
+const object = @import("zts-engine").object;
+const context = @import("zts-engine").context;
 const module_facts_mod = @import("module_facts.zig");
-const node_types = @import("node_types.zig");
+const node_types = @import("zts-engine").node_types;
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -1576,8 +1576,8 @@ pub const BoolChecker = struct {
     // Virtual module return type table
     // -----------------------------------------------------------------------
 
-    const builtin_modules = @import("builtin_modules.zig");
-    const mb = @import("module_binding.zig");
+    const builtin_modules = @import("zts-engine").builtin_modules;
+    const mb = @import("zts-engine").module_binding;
 
     /// Return type entry derived from the module binding registry.
     const ModuleReturnEntry = struct {
@@ -1713,7 +1713,7 @@ pub fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
 
 test "BoolChecker fails closed when analysis state cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "if ({}) { const enabled = true; }");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "if ({}) { const enabled = true; }");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1731,7 +1731,7 @@ fn checkSource(source: []const u8, expect_errors: u32) !void {
 fn checkSourceFull(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     const allocator = std.testing.allocator;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     defer parser.deinit();
 
     const root = parser.parse() catch |err| return err;
@@ -1922,7 +1922,7 @@ test "sound: untracked function call is unknown (passes)" {
 test "sound: diagnostic includes operator context for object" {
     const allocator = std.testing.allocator;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "if ({}) { let x = 1; }");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "if ({}) { let x = 1; }");
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -2592,7 +2592,7 @@ test "the import scan maps builtin slots to return types in both atom modes" {
     const allocator = std.testing.allocator;
 
     for ([_]bool{ true, false }) |use_atoms| {
-        var parser = try @import("parser/parse.zig").Parser.init(allocator,
+        var parser = try @import("zts-engine").parser.JsParser.init(allocator,
             \\import { env } from "zttp:env";
             \\import { jwtVerify } from "zttp:auth";
             \\import { thing } from "zttp-ext:unknown";

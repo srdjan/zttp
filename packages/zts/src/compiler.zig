@@ -9,11 +9,11 @@
 //! docs/plans/2026-07-28-001-reset-simplification-plan.md.
 
 const std = @import("std");
-const parser = @import("parser/root.zig");
-const bytecode = @import("bytecode.zig");
-const value = @import("value.zig");
-const string = @import("string.zig");
-const context = @import("context.zig");
+const parser = @import("zts-engine").parser;
+const bytecode = @import("zts-engine").bytecode;
+const value = @import("zts-engine").value;
+const string = @import("zts-engine").string;
+const context = @import("zts-engine").context;
 
 // ============================================================================
 // Simple Single-Threaded Compile API

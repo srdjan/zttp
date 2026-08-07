@@ -113,37 +113,70 @@ pub fn build(b: *std.Build) void {
     const generator_pack_path = b.option([]const u8, "generator-pack", "Generator integration pack JSON for external manifest/property/data-label/replay/report wiring");
     const report_format = b.option([]const u8, "report", "Emit structured build report (values: json)");
 
-    // zts tests
-    const zts_tests_root = b.createModule(.{
-        .root_source_file = zts_dep.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
+    // zts tests.
+    //
+    // `zig test` collects tests only from the files its root module analyzes,
+    // and packages/zts is five modules now (four tiers plus the umbrella that
+    // re-exports them). One root over src/root.zig would compile and pass while
+    // running none of the tier tests, which is the shape
+    // docs/solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md
+    // warns about. So there is one root per module, and every one of them is a
+    // dependency of `test-zts`.
     const zts_build_options = b.addOptions();
     zts_build_options.addOption(bool, "perf_histogram", perf_histogram_enabled);
     zts_build_options.addOption(bool, "analyzer_only", false);
-    zts_tests_root.addOptions("build_options", zts_build_options);
-    // This root is a second module over the same src/root.zig, so it needs the
-    // same named imports the `zts` module gets in packages/zts/build.zig. The
-    // module object comes from the dependency, so `zts-base` is the same module
-    // here and there rather than a second copy of those files.
-    zts_tests_root.addImport("zts-base", zts_dep.module("zts-base"));
-    zts_tests_root.addImport("zts-contracts", zts_dep.module("zts-contracts"));
-    zts_tests_root.addImport("zttp-sdk", zttp_sdk_dep.module("zttp-sdk"));
-    zts_tests_root.addImport("zttp-modules", zttp_modules_dep.module("zttp-modules"));
-    zts_tests_root.addCSourceFile(.{
-        .file = zts_dep.path("deps/sqlite/sqlite3.c"),
-        .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
-    });
-    zts_tests_root.addIncludePath(zts_dep.path("deps/sqlite"));
-    const zts_tests = b.addTest(.{
-        .filters = test_filters,
-        .root_module = zts_tests_root,
-    });
-    const run_zts_tests = b.addRunArtifact(zts_tests);
+
     const zts_test_step = b.step("test-zts", "Run zts unit tests");
-    zts_test_step.dependOn(&run_zts_tests.step);
+    const zts_roots = [_]struct { name: []const u8, src: []const u8 }{
+        .{ .name = "zts-base", .src = "src/base_root.zig" },
+        .{ .name = "zts-contracts", .src = "src/contracts_root.zig" },
+        .{ .name = "zts-engine", .src = "src/engine_root.zig" },
+        .{ .name = "zts-compiler", .src = "src/compiler_root.zig" },
+        .{ .name = "zts", .src = "src/root.zig" },
+    };
+    for (zts_roots, 0..) |entry, index| {
+        const root = b.createModule(.{
+            .root_source_file = zts_dep.path(entry.src),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        root.addOptions("build_options", zts_build_options);
+        // Each root is a second module over a file that packages/zts/build.zig
+        // also compiles, so it needs the same named imports. The module objects
+        // come from the dependency, so a tier is the same module here and there
+        // rather than a second copy of its files.
+        //
+        // A root imports the tiers BELOW its own and no others. Importing its
+        // own tier makes zig report "file exists in modules 'root' and
+        // 'zts-engine'", because this module already analyzes those files.
+        // Importing a tier above is worse and quieter: the engine root pulling
+        // `zts-compiler` drags in that module's own `zts-engine` dependency, so
+        // sqlite3.c is compiled twice into one binary and every sqlite3_*
+        // symbol is a duplicate definition. Both are the duplicate-file failure
+        // this split exists to prevent, seen from the test side.
+        for (zts_roots[0..index]) |lower| {
+            root.addImport(lower.name, zts_dep.module(lower.name));
+        }
+        root.addImport("zttp-sdk", zttp_sdk_dep.module("zttp-sdk"));
+        root.addImport("zttp-modules", zttp_modules_dep.module("zttp-modules"));
+        // Only the engine root analyzes sqlite.zig, so only it compiles the C.
+        // Adding the source to a second root in the same binary made the linker
+        // report every sqlite3_* symbol as a duplicate definition.
+        if (std.mem.eql(u8, entry.name, "zts-engine")) {
+            root.addCSourceFile(.{
+                .file = zts_dep.path("deps/sqlite/sqlite3.c"),
+                .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=0", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
+            });
+            root.addIncludePath(zts_dep.path("deps/sqlite"));
+        }
+        const tests = b.addTest(.{
+            .name = entry.name,
+            .filters = test_filters,
+            .root_module = root,
+        });
+        zts_test_step.dependOn(&b.addRunArtifact(tests).step);
+    }
 
     const sdk_test_shim_mod = b.createModule(.{
         .root_source_file = zttp_sdk_dep.path("src/test_shim.zig"),
@@ -872,7 +905,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&doc_links.step);
     test_step.dependOn(&convergence_emitter.step);
     test_step.dependOn(&run_module_governance.step);
-    test_step.dependOn(&run_zts_tests.step);
+    test_step.dependOn(zts_test_step);
     test_step.dependOn(&run_sdk_tests.step);
     test_step.dependOn(&run_modules_tests.step);
     test_step.dependOn(&run_proof_review_pkg_tests.step);

@@ -28,16 +28,16 @@ fn snippetForVaryingRead(object_name: []const u8, property_name: []const u8) []c
 }
 
 const json_utils = @import("zts-base").json_utils;
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const atom_table = @import("atom_table.zig");
-const module_binding = @import("module_binding.zig");
-const builtin_modules = @import("builtin_modules.zig");
+const ir = @import("zts-engine").parser.ir;
+const object = @import("zts-engine").object;
+const atom_table = @import("zts-engine").atom_table;
+const module_binding = @import("zts-engine").module_binding;
+const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
-const module_manifest = @import("module_manifest.zig");
-const bytecode = @import("bytecode.zig");
-const handler_analyzer = @import("handler_analyzer.zig");
+const module_manifest = @import("zts-engine").module_manifest;
+const bytecode = @import("zts-engine").bytecode;
+const handler_analyzer = @import("zts-engine").handler_analyzer;
 const type_checker_mod = @import("type_checker.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
@@ -48,7 +48,7 @@ const saga_extractor = @import("saga_extractor.zig");
 const fanout_extractor = @import("fanout_extractor.zig");
 const effect_inference = @import("effect_inference.zig");
 const function_specs = @import("function_specs.zig");
-const JsParser = @import("parser/root.zig").JsParser;
+const JsParser = @import("zts-engine").parser.JsParser;
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -79,7 +79,7 @@ const HandlerProperties = contract_types.HandlerProperties;
 const RateLimitInfo = contract_types.RateLimitInfo;
 const ServiceCallInfo = contract_types.ServiceCallInfo;
 const DurableWorkflowProofLevel = contract_types.DurableWorkflowProofLevel;
-const computeCapabilityMatrix = @import("builtin_modules.zig").computeCapabilityMatrix;
+const computeCapabilityMatrix = @import("zts-engine").builtin_modules.computeCapabilityMatrix;
 
 const containsString = json_utils.containsString;
 const writeJsonString = json_utils.writeJsonString;
@@ -5236,7 +5236,7 @@ test "registered partner manifest contributes effect class to handler properties
         \\const r = chargeCard("tok");
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5296,7 +5296,7 @@ test "partner manifest contractExtractions populate extensions section" {
         \\const r = charge("api.stripe.com", "card_charge");
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5337,7 +5337,7 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
         \\const r = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m&timezone=auto", { headers: { "Accept": "application/json" } });
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5388,7 +5388,7 @@ test "resource() affordances are extracted strict-literal with method default an
         \\}
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5430,7 +5430,7 @@ test "resource() with a computed affordances argument fails closed as affordance
         \\}
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5461,7 +5461,7 @@ test "resource() affordance with a non-literal href is recorded dynamic, not res
         \\}
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5647,7 +5647,7 @@ test "missing manifest registry skips partner imports" {
         \\const r = unknownFn();
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);

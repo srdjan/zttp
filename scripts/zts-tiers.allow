@@ -1,13 +1,16 @@
 # Which tier each file in packages/zts/src belongs to.
 #
-# Four tiers, lowest first. A file may import its own tier and any tier below
-# it, never one above:
+# Five tiers, lowest first, each its own build module declared in
+# packages/zts/build.zig. A file may name a tier below its own, never one
+# above, and only by module name - a relative import across a tier line
+# compiles a second copy of the file into the importing module:
 #
 #   zts-base       utilities every tier names and that name nothing themselves
 #   zts-contracts  contract and receipt data with its serialization
 #   zts            the engine: values, GC, objects, bytecode, interpreter,
 #                  parser, builtins, virtual modules
 #   zts-compiler   everything that decides whether a program is proven
+#   zts-umbrella   src/root.zig alone: the `zts` module consumers import
 #
 # Enforced in both directions by scripts/check-zts-layering.sh, which
 # `zig build test` depends on: an upward import fails, and so does a file with
@@ -15,10 +18,9 @@
 # that lost its rows would otherwise report zero violations while checking
 # nothing.
 #
-# This is the assignment the four-module split will use. It is checked while the
-# package is still one module, so the split is known to compile before
-# packages/zts/build.zig is touched. Moving a file between tiers is a deliberate
-# edit: say why in the commit, and expect the gate to name whatever the move
+# The split is done: all five modules exist and there are zero cross-tier
+# relative imports. Moving a file between tiers is a deliberate edit: say why in
+# the commit, and expect both this gate and zig itself to name whatever the move
 # breaks. See docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
 #
 # Same-tier imports are unconstrained. This file pins the direction between
@@ -50,6 +52,7 @@ zts-contracts system_config.zig
 
 # zts
 zts arena.zig
+zts engine_root.zig
 zts atom_table.zig
 zts builtin_modules.zig
 zts builtins/array.zig
@@ -133,6 +136,7 @@ zts security_events.zig
 zts sqlite.zig
 zts string.zig
 zts stripper.zig
+zts tests/opcode_parity.zig
 zts trace.zig
 zts value.zig
 zts wasm/interpreter.zig
@@ -142,6 +146,7 @@ zts wasm/root.zig
 
 # zts-compiler
 zts-compiler api_schema.zig
+zts-compiler compiler_root.zig
 zts-compiler behavior_canonical.zig
 zts-compiler bool_checker.zig
 zts-compiler compiler.zig
@@ -170,7 +175,6 @@ zts-compiler repair_intent.zig
 zts-compiler repair_plan.zig
 zts-compiler repair_validator.zig
 zts-compiler restriction_registry.zig
-zts-compiler root.zig
 zts-compiler rule_registry.zig
 zts-compiler saga_extractor.zig
 zts-compiler semantics.zig
@@ -184,10 +188,15 @@ zts-compiler sql_analysis.zig
 zts-compiler strict_checker.zig
 zts-compiler system_linker.zig
 zts-compiler tests/import_corpus.zig
-zts-compiler tests/opcode_parity.zig
 zts-compiler type_checker.zig
 zts-compiler type_env.zig
 zts-compiler type_key.zig
 zts-compiler type_pool.zig
 zts-compiler witness_corpus.zig
 zts-compiler ws_consistency.zig
+
+# zts-umbrella
+# root.zig is the module every consumer imports. It re-exports the four tiers
+# and holds no implementation, so it names all of them and nothing names it.
+# Ranked above zts-compiler so any relative import of it is reported as upward.
+zts-umbrella root.zig

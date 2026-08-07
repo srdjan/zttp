@@ -3,22 +3,28 @@
 # Layering gate for the zts package.
 #
 # `scripts/zts-tiers.allow` assigns every tracked Zig file in `packages/zts` to
-# one of four tiers, ordered lowest first:
+# one of five tiers, ordered lowest first. Each is its own build module,
+# declared in `packages/zts/build.zig`:
 #
 #   zts-base       utilities every tier names and that name nothing themselves
 #   zts-contracts  contract and receipt data with its serialization
 #   zts            the engine: values, GC, objects, bytecode, interpreter,
-#                  parser, builtins, virtual modules
+#                  parser, builtins, virtual modules (module `zts-engine`)
 #   zts-compiler   everything that decides whether a program is proven
+#   zts-umbrella   src/root.zig alone: the `zts` module consumers import,
+#                  which re-exports the four tiers and holds no code
 #
-# A Zig module graph is a DAG: `zts-compiler` may import `zts`, and `zts` may
-# not import `zts-compiler`. This gate checks that direction across the tier
-# lines while the package is still one module, so the split is known to compile
-# before `packages/zts/build.zig` is touched. It fails in both directions:
+# Every tier is split, so the rule is absolute: no relative import may cross a
+# tier line in either direction. A relative path resolves inside the importing
+# module, so it compiles a second copy of the file there, and a type from one
+# copy is not the type from the other. Reach another tier by module name -
+# `@import("zts-base").json_utils`, `@import("zts-engine").context`. zig also
+# rejects this, with `file exists in modules 'zts-base' and 'root'`; this gate
+# reports it earlier and names both ends. It fails in both directions:
 #
-#   - an import from a lower tier to a higher one fails, because that is the
-#     cycle that makes Zig analyze the engine twice and turn one type into two
-#     incompatible ones across the module boundary;
+#   - a relative import across a tier line fails, and so does an import from a
+#     lower tier to a higher one even by name, because that is the cycle a DAG
+#     of modules cannot express;
 #   - a file with no row, and a row naming no file, both fail, so the manifest
 #     cannot drift out of step with the tree.
 #
@@ -50,7 +56,7 @@ PREFIX = "packages/zts/src/"
 MANIFEST = "scripts/zts-tiers.allow"
 
 # Lowest first. A file may import its own tier and any tier below it.
-TIERS = ["zts-base", "zts-contracts", "zts", "zts-compiler"]
+TIERS = ["zts-base", "zts-contracts", "zts", "zts-compiler", "zts-umbrella"]
 RANK = {name: i for i, name in enumerate(TIERS)}
 
 # Tiers already extracted into their own build module in
@@ -59,7 +65,7 @@ RANK = {name: i for i, name in enumerate(TIERS)}
 # path resolves inside the importing module, so it compiles a second copy of the
 # file there, and a type from one copy is not the type from the other. Reach a
 # split tier by module name - `@import("zts-base").json_utils`.
-SPLIT = ["zts-base", "zts-contracts"]
+SPLIT = ["zts-base", "zts-contracts", "zts", "zts-compiler", "zts-umbrella"]
 
 MIN_FILES = 100
 

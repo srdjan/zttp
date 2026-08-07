@@ -32,7 +32,7 @@
 
 const std = @import("std");
 const compiler = @import("compiler.zig");
-const bytecode = @import("bytecode.zig");
+const bytecode = @import("zts-engine").bytecode;
 const semantics = @import("semantics.zig");
 
 const Term = semantics.Term;

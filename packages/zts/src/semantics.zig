@@ -19,8 +19,8 @@
 //! unchanged.
 
 const std = @import("std");
-const bytecode = @import("bytecode.zig");
-const ir = @import("parser/ir.zig");
+const bytecode = @import("zts-engine").bytecode;
+const ir = @import("zts-engine").parser.ir;
 
 pub const Opcode = bytecode.Opcode;
 pub const NodeTag = ir.NodeTag;

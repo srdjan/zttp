@@ -43,7 +43,7 @@
 const std = @import("std");
 const counterexample = @import("counterexample.zig");
 const json_utils = @import("zts-base").json_utils;
-const file_io = @import("file_io.zig");
+const file_io = @import("zts-engine").file_io;
 const spec_discharge = @import("spec_discharge.zig");
 
 pub const corpus_root_relative = ".zttp/witnesses";

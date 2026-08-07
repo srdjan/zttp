@@ -25,7 +25,7 @@
 //! unknown sibling keys to keep the surface deterministic" convention.
 
 const std = @import("std");
-const ir_mod = @import("parser/ir.zig");
+const ir_mod = @import("zts-engine").parser.ir;
 const contract_types = @import("zts-contracts").contract_types;
 
 const IrView = ir_mod.IrView;

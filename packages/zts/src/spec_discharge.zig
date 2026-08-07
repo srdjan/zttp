@@ -10,7 +10,7 @@
 
 const std = @import("std");
 const contract_types = @import("zts-contracts").contract_types;
-const module_binding = @import("module_binding.zig");
+const module_binding = @import("zts-engine").module_binding;
 
 const HandlerProperties = contract_types.HandlerProperties;
 const PropertyCause = contract_types.PropertyCause;

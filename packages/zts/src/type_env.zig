@@ -2683,7 +2683,7 @@ test "a generic alias instantiates through the stripper's own recording" {
     // hand-built tests passed while the pipeline was broken, because they
     // wrote the parameter list the way the alias path wanted to read it.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("stripper.zig").strip(
+    var strip_result = try @import("zts-engine").stripper.strip(
         allocator,
         "type Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n",
         .{},
@@ -2725,7 +2725,7 @@ test "a type-parameter list wrapped across lines still reaches its signature" {
     // annotations are keyed to the line the signature starts on. Keyed apart,
     // the signature read as monomorphic and its bound was never checked.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("stripper.zig").strip(
+    var strip_result = try @import("zts-engine").stripper.strip(
         allocator,
         "function pick<\n  T,\n  U extends { id: string }\n>(a: T, b: U): T {\n  return a;\n}\n",
         .{},
@@ -2749,7 +2749,7 @@ test "an explicit type argument carrying a comma is one argument" {
     // `make<Record<string, number>>(1)` split on every comma read as two
     // arguments and the call was refused for the wrong arity.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("stripper.zig").strip(
+    var strip_result = try @import("zts-engine").stripper.strip(
         allocator,
         "function make<T>(n: number): T {\n  return hole();\n}\nconst v = make<Record<string, number>>(1);\n",
         .{},
@@ -2776,7 +2776,7 @@ test "readonly on an array alias survives to the resolved type" {
     // `t_ref` when the modifier is read and the modifier was dropped: a
     // declared read-only value was accepted by a mutating parameter.
     const allocator = std.testing.allocator;
-    var strip_result = try @import("stripper.zig").strip(
+    var strip_result = try @import("zts-engine").stripper.strip(
         allocator,
         "type Items = string[];\nconst f: readonly Items = [\"a\"];\n",
         .{},

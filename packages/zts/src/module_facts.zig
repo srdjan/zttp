@@ -22,13 +22,13 @@
 
 const std = @import("std");
 const contract_types = @import("zts-contracts").contract_types;
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const context = @import("context.zig");
-const module_binding = @import("module_binding.zig");
-const builtin_modules = @import("builtin_modules.zig");
+const ir = @import("zts-engine").parser.ir;
+const object = @import("zts-engine").object;
+const context = @import("zts-engine").context;
+const module_binding = @import("zts-engine").module_binding;
+const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
-const module_manifest = @import("module_manifest.zig");
+const module_manifest = @import("zts-engine").module_manifest;
 const json_utils = @import("zts-base").json_utils;
 
 const IrView = ir.IrView;
@@ -389,7 +389,7 @@ const testing = std.testing;
 /// facts; `Harness.deinit` frees the parser and atom table that the facts
 /// borrowed names from, so call it only after the assertions.
 const Harness = struct {
-    parser: @import("parser/parse.zig").Parser,
+    parser: @import("zts-engine").parser.JsParser,
     atoms: context.AtomTable,
 
     fn init(allocator: std.mem.Allocator, source: []const u8) !*Harness {
@@ -397,7 +397,7 @@ const Harness = struct {
         errdefer allocator.destroy(self);
 
         self.* = .{
-            .parser = try @import("parser/parse.zig").Parser.init(allocator, source),
+            .parser = try @import("zts-engine").parser.JsParser.init(allocator, source),
             .atoms = context.AtomTable.init(allocator),
         };
         errdefer {
@@ -750,7 +750,7 @@ test "the index resolves import names with no atom table" {
     // all. Pinned here so the fallback cannot be removed as dead code.
     const a = testing.allocator;
 
-    var parser = try @import("parser/parse.zig").Parser.init(a, "import { env } from \"zttp:env\";\n");
+    var parser = try @import("zts-engine").parser.JsParser.init(a, "import { env } from \"zttp:env\";\n");
     defer parser.deinit();
     // No setAtomTable: this is the standalone-parser path.
     _ = try parser.parse();

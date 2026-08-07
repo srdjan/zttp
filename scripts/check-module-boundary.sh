@@ -50,14 +50,20 @@ fail() {
 [[ -f "$root_file" ]] || fail "missing $root_file"
 
 # The internal tier, read from root.zig itself: every `pub const <lowercase> =
-# @import(...)` between the internal banner and the curated banner that follows
-# it. Curated entries are UpperCamelCase types or plain functions, and are
-# deliberately not matched here.
+# <tier>.<module>;` between the internal banner and the curated banner that
+# follows it. Curated entries are UpperCamelCase types or plain functions, and
+# are deliberately not matched here.
+#
+# root.zig used to spell these `= @import("value.zig")`. It is the `zts`
+# umbrella now and spells them `= engine.value`, `= compiler.flow_checker`, and
+# so on, one per tier module. The pattern moved with it. The floor below is what
+# caught the change rather than letting the gate quietly parse nothing: see
+# docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
 internals="$(
   awk '
     /^\/\/ Internal implementation modules/ { in_section = 1 }
     in_section && /^\/\/ =+$/ && seen_entry { exit }
-    in_section && match($0, /^pub const [a-z_][a-z0-9_]* *= @import/) {
+    in_section && match($0, /^pub const [a-z_][a-z0-9_]* *= (base|contracts|engine|compiler)\./) {
       seen_entry = 1
       line = $0
       sub(/^pub const /, "", line)

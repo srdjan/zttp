@@ -14,8 +14,8 @@
 //! JWT verification fails) and produces a coverage matrix as a build artifact.
 
 const std = @import("std");
-const mb = @import("module_binding.zig");
-const builtin_modules = @import("builtin_modules.zig");
+const mb = @import("zts-engine").module_binding;
+const builtin_modules = @import("zts-engine").builtin_modules;
 const path_gen = @import("path_generator.zig");
 
 const route_match = @import("zts-base").route_match;

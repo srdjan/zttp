@@ -9,7 +9,7 @@
 //! here too would double-report and mis-flag handler-only flow specs.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
+const ir = @import("zts-engine").parser.ir;
 const effect_inference = @import("effect_inference.zig");
 const handler_verifier = @import("handler_verifier.zig");
 const type_env_mod = @import("type_env.zig");
@@ -217,8 +217,8 @@ fn collectDeclared(
 // Tests
 // ---------------------------------------------------------------------------
 
-const context = @import("context.zig");
-const JsParser = @import("parser/root.zig").JsParser;
+const context = @import("zts-engine").context;
+const JsParser = @import("zts-engine").parser.JsParser;
 
 test "discharge records proven facts and skips the handler" {
     const allocator = std.testing.allocator;

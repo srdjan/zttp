@@ -1,5 +1,5 @@
 const std = @import("std");
-const ir = @import("parser/ir.zig");
+const ir = @import("zts-engine").parser.ir;
 const type_pool_mod = @import("type_pool.zig");
 
 const IrView = ir.IrView;

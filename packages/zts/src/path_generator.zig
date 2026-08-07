@@ -13,13 +13,13 @@
 //! so generated tests are immediately runnable via --test.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const atom_table = @import("atom_table.zig");
-const builtin_modules = @import("builtin_modules.zig");
+const ir = @import("zts-engine").parser.ir;
+const object = @import("zts-engine").object;
+const atom_table = @import("zts-engine").atom_table;
+const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
 const effect_inference = @import("effect_inference.zig");
-const mb = @import("module_binding.zig");
+const mb = @import("zts-engine").module_binding;
 const bool_checker_mod = @import("bool_checker.zig");
 const handler_contract = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
@@ -1826,7 +1826,7 @@ test "scanImports tracks virtual module functions with binding names" {
         \\const value = env("NAME");
     ;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1857,11 +1857,11 @@ test "scanImports tracks virtual module functions with binding names" {
     try std.testing.expectEqual(mb.ReturnKind.optional_string, meta.returns);
 }
 
-const parser_mod = @import("parser/parse.zig");
+const parser_mod = @import("zts-engine").parser;
 const handler_verifier = @import("handler_verifier.zig");
 
 const PathGeneratorFixture = struct {
-    parser: parser_mod.Parser,
+    parser: parser_mod.JsParser,
     atoms: atom_table.AtomTable,
     generator: PathGenerator,
 
@@ -1946,7 +1946,7 @@ const FailNextAllocation = struct {
 
 fn expectGenerationFailsOnFirstAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    var parser = try parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.JsParser.init(allocator, source);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -1984,7 +1984,7 @@ test "generate fails closed when handler binding allocation fails" {
 
 fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    var parser = try parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.JsParser.init(allocator, source);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -2036,7 +2036,7 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
         \\  return Response.json(true);
         \\}
     ;
-    var parser = try parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.JsParser.init(allocator, source);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -2091,7 +2091,7 @@ test "generate cleans every fatal allocation failure" {
         \\  return Response.json(true);
         \\}
     ;
-    var parser = try parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.JsParser.init(allocator, source);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -2167,7 +2167,7 @@ test "behavior path conversion cleans every allocation failure" {
 }
 
 fn generateFixture(allocator: std.mem.Allocator, source: []const u8) !PathGeneratorFixture {
-    var parser = try parser_mod.Parser.init(allocator, source);
+    var parser = try parser_mod.JsParser.init(allocator, source);
     errdefer parser.deinit();
 
     var atoms = atom_table.AtomTable.init(allocator);
@@ -2634,7 +2634,7 @@ test "the import scan maps builtin slots to function metadata in both atom modes
     const allocator = std.testing.allocator;
 
     for ([_]bool{ true, false }) |use_atoms| {
-        var parser = try @import("parser/parse.zig").Parser.init(allocator,
+        var parser = try @import("zts-engine").parser.JsParser.init(allocator,
             \\import { env } from "zttp:env";
             \\import { sha256 } from "zttp:crypto";
             \\import { thing } from "zttp-ext:unknown";
@@ -2664,7 +2664,7 @@ test "this generator skips imports from unresolved modules" {
     // The filter difference: builtins only, unlike strict_checker and
     // effect_inference which record every import.
     const allocator = std.testing.allocator;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator,
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator,
         \\import { env } from "zttp:env";
         \\import { thing } from "zttp-ext:unknown";
     );

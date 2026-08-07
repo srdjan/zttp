@@ -14,7 +14,7 @@
 //! once the handler is fixed.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
+const ir = @import("zts-engine").parser.ir;
 const path_gen = @import("path_generator.zig");
 const fault_cov = @import("fault_coverage.zig");
 const flow_checker_mod = @import("flow_checker.zig");

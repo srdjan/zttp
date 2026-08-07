@@ -34,28 +34,28 @@
 
 const std = @import("std");
 
-const parser_mod = @import("parser/root.zig");
+const parser_mod = @import("zts-engine").parser;
 const bool_checker_mod = @import("bool_checker.zig");
 const type_checker_mod = @import("type_checker.zig");
 const strict_checker_mod = @import("strict_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
 const flow_checker_mod = @import("flow_checker.zig");
 const module_facts_mod = @import("module_facts.zig");
-const context_mod = @import("context.zig");
+const context_mod = @import("zts-engine").context;
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_map_mod = @import("zts-base").type_map;
 const service_types_mod = @import("zts-contracts").service_types;
-const modules_mod = @import("modules/root.zig");
+const modules_mod = @import("zts-engine").modules;
 const module_types_mod = @import("module_types.zig");
-const ir_mod = @import("parser/ir.zig");
+const ir_mod = @import("zts-engine").parser.ir;
 const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_builder_mod = @import("contract_builder.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
-const bytecode_mod = @import("bytecode.zig");
-const stripper_mod = @import("stripper.zig");
+const bytecode_mod = @import("zts-engine").bytecode;
+const stripper_mod = @import("zts-engine").stripper;
 const compat_mod = @import("zts-base").compat;
-const string_mod = @import("string.zig");
+const string_mod = @import("zts-engine").string;
 
 const NodeIndex = ir_mod.NodeIndex;
 const IrView = ir_mod.IrView;
@@ -275,7 +275,7 @@ pub const CheckedModule = struct {
 /// the caller reads and walks those files and hands the answers in.
 pub const ImportedFnLabels = struct {
     slot: u16,
-    labels: @import("module_binding.zig").LabelSet,
+    labels: @import("zts-engine").module_binding.LabelSet,
 };
 
 pub const CheckOptions = struct {
@@ -957,7 +957,7 @@ test "extractContract rejects boolean diagnostics with strict disabled" {
 
 test "extractContract merges capabilities from relative imports" {
     const allocator = testing.allocator;
-    const file_io = @import("file_io.zig");
+    const file_io = @import("zts-engine").file_io;
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();

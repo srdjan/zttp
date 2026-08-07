@@ -10,7 +10,7 @@
 //! without monorepo edits.
 
 const std = @import("std");
-const module_manifest = @import("module_manifest.zig");
+const module_manifest = @import("zts-engine").module_manifest;
 
 pub const Manifest = module_manifest.Manifest;
 pub const Export = module_manifest.Export;

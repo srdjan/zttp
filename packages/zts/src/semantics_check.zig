@@ -33,7 +33,7 @@ const std = @import("std");
 const semantics = @import("semantics.zig");
 const semantics_smt = @import("semantics_smt.zig");
 const semantics_audit = @import("semantics_audit.zig");
-const bytecode = @import("bytecode.zig");
+const bytecode = @import("zts-engine").bytecode;
 
 const Term = semantics.Term;
 const Step = semantics.Step;

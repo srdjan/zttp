@@ -47,13 +47,26 @@
 //! is an allowlist, not a compiler-enforced split: every consumer still
 //! imports one `zts` module and they all move together under one test suite.
 
+// The four tiers this umbrella re-exports. Each is a separate build module,
+// declared in packages/zts/build.zig and layered lowest-first:
+//
+//   zts-base <- zts-contracts <- zts-engine <- zts-compiler
+//
+// This file names all four and nothing names this file, so the umbrella adds
+// no edge to that graph. A tier reaching another tier by relative path would
+// compile a second copy of the file into itself;
+// scripts/check-zts-layering.sh fails on that, and so does zig.
+const base = @import("zts-base");
+const contracts = @import("zts-contracts");
+const engine = @import("zts-engine");
+const compiler = @import("zts-compiler");
+
 const std = @import("std");
-const build_options = @import("build_options");
-const diagnostic_projection = @import("diagnostic_projection.zig");
+const diagnostic_projection = compiler.diagnostic_projection;
 // The contract extraction pass. Named here rather than through
 // `handler_contract.zig`, which holds the contract's data and serialization and
 // must not drag the extractor's dependencies along behind an alias.
-const contract_builder = @import("contract_builder.zig");
+const contract_builder = compiler.contract_builder;
 
 // ============================================================================
 // Internal implementation modules (no cross-release stability guarantee).
@@ -61,93 +74,86 @@ const contract_builder = @import("contract_builder.zig");
 // types in the "Stable public surface" section below. See the Stability note
 // at the top of this file.
 // ============================================================================
-pub const value = @import("value.zig");
-pub const heap = @import("heap.zig");
-pub const gc = @import("gc.zig");
-pub const string = @import("string.zig");
-pub const object = @import("object.zig");
-pub const context = @import("context.zig");
-pub const bytecode = @import("bytecode.zig");
-pub const interpreter = @import("interpreter.zig");
+pub const value = engine.value;
+pub const heap = engine.heap;
+pub const gc = engine.gc;
+pub const string = engine.string;
+pub const object = engine.object;
+pub const context = engine.context;
+pub const bytecode = engine.bytecode;
+pub const interpreter = engine.interpreter;
 
-// JIT C-ABI helpers are referenced from generated machine code via `extern fn`.
-// Anchor the module here so the linker emits the symbols. The analyzer-only
-// build (wasm/freestanding) never reaches the JIT, so skip the anchor to keep
-// the interpreter/JIT/GC subtree out of the module graph.
-comptime {
-    if (!build_options.analyzer_only) {}
-}
-pub const builtins = @import("builtins/root.zig");
+pub const builtins = engine.builtins;
 // New two-pass parser with proper function compilation
-pub const parser = @import("parser/root.zig");
+pub const parser = engine.parser;
 // Note: Legacy single-pass parser removed; use parser/root.zig
-pub const pool = @import("pool.zig");
-pub const http = @import("http.zig");
-pub const stripper = @import("stripper.zig");
-pub const comptime_eval = @import("comptime.zig");
-pub const bytecode_cache = @import("bytecode_cache.zig");
-pub const bytecode_opt = @import("bytecode_opt.zig");
-pub const arena = @import("arena.zig");
-pub const handler_analyzer = @import("handler_analyzer.zig");
-pub const handler_verifier = @import("handler_verifier.zig");
-pub const handler_contract = @import("zts-contracts").handler_contract;
-pub const handler_policy = @import("handler_policy.zig");
-pub const policy = @import("policy.zig");
-pub const bool_checker = @import("bool_checker.zig");
-pub const flow_checker = @import("flow_checker.zig");
-pub const path_generator = @import("path_generator.zig");
-pub const counterexample = @import("counterexample.zig");
-pub const proof_trace = @import("proof_trace.zig");
-pub const witness_corpus = @import("witness_corpus.zig");
-pub const repair_plan = @import("repair_plan.zig");
-pub const json_utils = @import("zts-base").json_utils;
-pub const behavior_canonical = @import("behavior_canonical.zig");
-pub const fault_coverage = @import("fault_coverage.zig");
-pub const property_diagnostics = @import("property_diagnostics.zig");
-pub const route_match = @import("zts-base").route_match;
-pub const type_map = @import("zts-base").type_map;
-pub const type_pool = @import("type_pool.zig");
-pub const type_key = @import("type_key.zig");
-pub const type_env = @import("type_env.zig");
-pub const service_types = @import("zts-contracts").service_types;
-pub const type_checker = @import("type_checker.zig");
-pub const strict_checker = @import("strict_checker.zig");
-pub const effect_inference = @import("effect_inference.zig");
-pub const pipeline = @import("pipeline.zig");
-pub const bytecode_verifier = @import("bytecode_verifier.zig");
-pub const trace = @import("trace.zig");
-pub const file_io = @import("file_io.zig");
-pub const module_slots = @import("zts-base").module_slots;
-pub const contract_diff = @import("contract_diff.zig");
-pub const system_linker = @import("system_linker.zig");
-pub const perf_receipt = @import("zts-contracts").perf_receipt;
-pub const equivalence_receipt = @import("zts-contracts").equivalence_receipt;
-pub const rule_registry = @import("rule_registry.zig");
-pub const idiom_registry = @import("idiom_registry.zig");
-pub const restriction_registry = @import("restriction_registry.zig");
-pub const repair_intent = @import("repair_intent.zig");
-pub const repair_validator = @import("repair_validator.zig");
-pub const ws_consistency = @import("ws_consistency.zig");
-pub const spec_discharge = @import("spec_discharge.zig");
-pub const function_specs = @import("function_specs.zig");
-pub const module_binding = @import("module_binding.zig");
-pub const module_manifest = @import("module_manifest.zig");
-pub const manifest_registry = @import("manifest_registry.zig");
-pub const builtin_modules = @import("builtin_modules.zig");
-pub const module_facts = @import("module_facts.zig");
-pub const security_events = @import("security_events.zig");
-pub const wasm = @import("wasm/root.zig");
-pub const sqlite = @import("sqlite.zig");
-pub const sql_analysis = @import("sql_analysis.zig");
-pub const modules = @import("modules/root.zig");
-pub const compat = @import("zts-base").compat;
-pub const semantics = @import("semantics.zig");
-pub const semantics_check = @import("semantics_check.zig");
-pub const semantics_smt = @import("semantics_smt.zig");
-pub const semantics_audit = @import("semantics_audit.zig");
-pub const semantics_corpus = @import("semantics_corpus.zig");
-pub const semantics_render = @import("semantics_render.zig");
-pub const module_spec_render = @import("module_spec_render.zig");
+pub const pool = engine.pool;
+pub const http = engine.http;
+pub const stripper = engine.stripper;
+pub const comptime_eval = engine.comptime_eval;
+pub const bytecode_cache = engine.bytecode_cache;
+pub const bytecode_opt = engine.bytecode_opt;
+pub const arena = engine.arena;
+pub const handler_analyzer = engine.handler_analyzer;
+pub const handler_verifier = compiler.handler_verifier;
+pub const handler_contract = contracts.handler_contract;
+pub const handler_policy = engine.handler_policy;
+pub const policy = engine.policy;
+pub const bool_checker = compiler.bool_checker;
+pub const flow_checker = compiler.flow_checker;
+pub const path_generator = compiler.path_generator;
+pub const counterexample = compiler.counterexample;
+pub const proof_trace = compiler.proof_trace;
+pub const witness_corpus = compiler.witness_corpus;
+pub const repair_plan = compiler.repair_plan;
+pub const json_utils = base.json_utils;
+pub const behavior_canonical = compiler.behavior_canonical;
+pub const fault_coverage = compiler.fault_coverage;
+pub const property_diagnostics = compiler.property_diagnostics;
+pub const route_match = base.route_match;
+pub const type_map = base.type_map;
+pub const type_pool = compiler.type_pool;
+pub const type_key = compiler.type_key;
+pub const type_env = compiler.type_env;
+pub const service_types = contracts.service_types;
+pub const type_checker = compiler.type_checker;
+pub const strict_checker = compiler.strict_checker;
+pub const effect_inference = compiler.effect_inference;
+pub const pipeline = compiler.pipeline;
+pub const bytecode_verifier = engine.bytecode_verifier;
+pub const trace = engine.trace;
+pub const file_io = engine.file_io;
+pub const module_slots = base.module_slots;
+pub const contract_diff = compiler.contract_diff;
+pub const system_linker = compiler.system_linker;
+pub const perf_receipt = contracts.perf_receipt;
+pub const equivalence_receipt = contracts.equivalence_receipt;
+pub const rule_registry = compiler.rule_registry;
+pub const idiom_registry = compiler.idiom_registry;
+pub const restriction_registry = compiler.restriction_registry;
+pub const repair_intent = compiler.repair_intent;
+pub const repair_validator = compiler.repair_validator;
+pub const ws_consistency = compiler.ws_consistency;
+pub const spec_discharge = compiler.spec_discharge;
+pub const function_specs = compiler.function_specs;
+pub const module_binding = engine.module_binding;
+pub const module_manifest = engine.module_manifest;
+pub const manifest_registry = compiler.manifest_registry;
+pub const builtin_modules = engine.builtin_modules;
+pub const module_facts = compiler.module_facts;
+pub const security_events = engine.security_events;
+pub const wasm = engine.wasm;
+pub const sqlite = engine.sqlite;
+pub const sql_analysis = compiler.sql_analysis;
+pub const modules = engine.modules;
+pub const compat = base.compat;
+pub const semantics = compiler.semantics;
+pub const semantics_check = compiler.semantics_check;
+pub const semantics_smt = compiler.semantics_smt;
+pub const semantics_audit = compiler.semantics_audit;
+pub const semantics_corpus = compiler.semantics_corpus;
+pub const semantics_render = compiler.semantics_render;
+pub const module_spec_render = compiler.module_spec_render;
 
 // ============================================================================
 // Stable public surface: primary types and entry points for embedding the
@@ -670,17 +676,8 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-// refAllDecls only recurses pub decls, so anchor the (non-pub) parity gate explicitly.
-test {
-    _ = @import("tests/opcode_parity.zig");
-}
-
-// modules/internal/compiler.zig is only reached via the `modules` re-export
-// above, which container-level laziness never forces the compiler to
-// analyze on its own, so its test blocks go uncollected without this anchor.
-test {
-    _ = @import("modules/internal/compiler.zig");
-}
+// The parity gate and modules/internal/compiler.zig are anchored in
+// engine_root.zig, the module that owns them.
 
 test "version" {
     try std.testing.expectEqualStrings("0.18.0", version.string);

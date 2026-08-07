@@ -5,9 +5,9 @@
 //! normal type/sound passes, and before handler verification/contract work.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const context = @import("context.zig");
+const ir = @import("zts-engine").parser.ir;
+const object = @import("zts-engine").object;
+const context = @import("zts-engine").context;
 const type_env_mod = @import("type_env.zig");
 const type_checker_mod = @import("type_checker.zig");
 const type_pool_mod = @import("type_pool.zig");
@@ -1628,7 +1628,7 @@ test "canonical_export_function_const survives the export annotation split" {
 
 test "strict checker flags avoidable let" {
     const source = "function handler(req) { let x = 1; return Response.json({x}); }";
-    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1640,7 +1640,7 @@ test "strict checker flags avoidable let" {
 
 test "strict checker accepts reassigned let" {
     const source = "function handler(req) { let x = 1; x = 2; return Response.json({x}); }";
-    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1654,7 +1654,7 @@ test "strict checker accepts reassigned let" {
 
 test "canonical profile warns on reused arrow helper" {
     const source = "const parse = (x) => x; function handler(req) { const a = parse(1); const b = parse(2); return Response.json({a,b}); }";
-    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1682,10 +1682,10 @@ test "canonical profile counts reused arrow helper after typed arrow" {
         \\  return Response.json({ a, b });
         \\}
     ;
-    var stripped = try @import("stripper.zig").strip(testing.allocator, source, .{});
+    var stripped = try @import("zts-engine").stripper.strip(testing.allocator, source, .{});
     defer stripped.deinit();
 
-    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, stripped.code);
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, stripped.code);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1709,7 +1709,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
 
 test "strict checker accepts one-off arrow helper value" {
     const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({a}); }";
-    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1747,7 +1747,7 @@ fn countKind(checker: *const StrictChecker, kind: DiagnosticKind) usize {
 
 test "StrictChecker fails closed when profile facts cannot allocate" {
     const allocator = testing.allocator;
-    var parser = try @import("parser/root.zig").JsParser.init(allocator, "let answer = 42;");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "let answer = 42;");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1759,7 +1759,7 @@ test "StrictChecker fails closed when profile facts cannot allocate" {
 }
 
 fn checkSource(source: []const u8) !StrictChecker {
-    var parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1773,7 +1773,7 @@ fn checkSource(source: []const u8) !StrictChecker {
 /// guard). Heap-allocated so the env/checker that capture `&pool`/`&env`
 /// keep stable addresses across the returned handle. Caller calls `deinit`.
 const TypedHarness = struct {
-    parser: @import("parser/root.zig").JsParser,
+    parser: @import("zts-engine").parser.JsParser,
     pool: type_pool_mod.TypePool,
     env: TypeEnv,
     tc: TypeChecker,
@@ -1792,7 +1792,7 @@ const TypedHarness = struct {
 fn checkSourceTyped(source: []const u8) !*TypedHarness {
     const h = try testing.allocator.create(TypedHarness);
     errdefer testing.allocator.destroy(h);
-    h.parser = try @import("parser/root.zig").JsParser.init(testing.allocator, source);
+    h.parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     const root = try h.parser.parse();
     const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
@@ -1825,8 +1825,8 @@ test "canonical_redundant_bool_compare fires on `!== false` for a boolean" {
 /// harness above parses raw source and never strips, so it has no TypeMap and
 /// cannot exercise annotation lookup at all.
 const StrippedHarness = struct {
-    stripped: @import("stripper.zig").StripResult,
-    parser: @import("parser/root.zig").JsParser,
+    stripped: @import("zts-engine").stripper.StripResult,
+    parser: @import("zts-engine").parser.JsParser,
     pool: type_pool_mod.TypePool,
     env: TypeEnv,
     tc: TypeChecker,
@@ -1846,8 +1846,8 @@ const StrippedHarness = struct {
 fn checkStripped(source: []const u8) !*StrippedHarness {
     const h = try testing.allocator.create(StrippedHarness);
     errdefer testing.allocator.destroy(h);
-    h.stripped = try @import("stripper.zig").strip(testing.allocator, source, .{});
-    h.parser = try @import("parser/root.zig").JsParser.init(testing.allocator, h.stripped.code);
+    h.stripped = try @import("zts-engine").stripper.strip(testing.allocator, source, .{});
+    h.parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, h.stripped.code);
     const root = try h.parser.parse();
     const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
@@ -2188,7 +2188,7 @@ test "the import scan records every specifier in order" {
         \\import { thing } from "zttp-ext:unknown";
         \\import { env } from "zttp:env";
     ;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -2221,7 +2221,7 @@ test "this checker records imports from unresolved modules" {
     const allocator = std.testing.allocator;
     const source = "import { thing } from \"zttp-ext:unknown\";\n";
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();

@@ -15,9 +15,9 @@
 //! Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 const std = @import("std");
-const ir = @import("parser/ir.zig");
-const object = @import("object.zig");
-const context = @import("context.zig");
+const ir = @import("zts-engine").parser.ir;
+const object = @import("zts-engine").object;
+const context = @import("zts-engine").context;
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_checker_mod = @import("type_checker.zig");
@@ -240,9 +240,9 @@ const FunctionProduces = enum {
     }
 };
 
-const builtin_modules = @import("builtin_modules.zig");
+const builtin_modules = @import("zts-engine").builtin_modules;
 const module_facts_mod = @import("module_facts.zig");
-const mb = @import("module_binding.zig");
+const mb = @import("zts-engine").module_binding;
 
 /// Look up whether a function produces a value requiring caller-side checking.
 /// Reads from the module binding registry instead of a hardcoded table.
@@ -1640,7 +1640,7 @@ test "diagnostic formatting" {
 
 test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "function handler(req) {}");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "function handler(req) {}");
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1655,10 +1655,10 @@ test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
 fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match_warnings: u32) !void {
     const allocator = std.testing.allocator;
 
-    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -1737,10 +1737,10 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
         \\}
     ;
 
-    var strip_result = try @import("stripper.zig").strip(allocator, source, .{});
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
     defer strip_result.deinit();
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, strip_result.code);
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -1774,7 +1774,7 @@ test "the import scan splits tracked builtins into result and optional slots" {
     // implementation. The no-table divergence keeps its own test below.
     const allocator = std.testing.allocator;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator,
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator,
         \\import { jwtVerify } from "zttp:auth";
         \\import { env } from "zttp:env";
         \\import { sha256 } from "zttp:crypto";
@@ -1814,7 +1814,7 @@ test "with no atom table the index resolves imports this verifier used to miss" 
     // sites are test blocks. All 11 of this file's tests pass either way.
     const allocator = std.testing.allocator;
 
-    var parser = try @import("parser/parse.zig").Parser.init(allocator, "import { env } from \"zttp:env\";\n");
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "import { env } from \"zttp:env\";\n");
     defer parser.deinit();
     // Deliberately no setAtomTable.
     _ = try parser.parse();
