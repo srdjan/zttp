@@ -75,30 +75,41 @@ RANK = {name: i for i, name in enumerate(TIERS)}
 # split tier by module name - `@import("zts-base").json_utils`.
 SPLIT = ["zts-base", "zts-contracts", "zts", "zts-compiler", "zts-umbrella"]
 
-# The build-module name each tier is declared under in `packages/zts/build.zig`,
-# and the root source file that module compiles. The engine tier is named `zts`
-# in the manifest but declared as `zts-engine`; `zts` the module name is the
-# umbrella. Without this map the direction rule below can only see relative
-# imports, which zig already rejects on its own - so the module-name half of the
-# claim in the header would be checking nothing.
-MODULE_OF = {
-    "zts-base": "zts-base",
-    "zts-contracts": "zts-contracts",
-    "zts": "zts-engine",
-    "zts-compiler": "zts-compiler",
-    "zts-umbrella": "zts",
-}
-TIER_OF_MODULE = {module: tier for tier, module in MODULE_OF.items()}
+# The build-module name each tier is declared under, and the root source file
+# that module compiles, both read out of `build.zig` rather than copied here.
+# A hand-copy goes stale silently: rename a module in build.zig and every
+# by-name import stops matching, so the direction rule below would report a pass
+# having examined nothing. `zts_roots` is the ordered table build.zig itself
+# uses to build the five test binaries, and its order is tier order, so the
+# tiers zip onto it positionally. The engine tier is named `zts` in the manifest
+# but declared as `zts-engine`; the module actually named `zts` is the umbrella.
+BUILD_ZIG = "build.zig"
+ROOTS_TABLE = re.compile(
+    r'\.\{\s*\.name\s*=\s*"([^"]+)"\s*,\s*\.src\s*=\s*"src/([^"]+)"\s*\}'
+)
 
-ROOT_OF = {
-    "zts-base": "base_root.zig",
-    "zts-contracts": "contracts_root.zig",
-    "zts": "engine_root.zig",
-    "zts-compiler": "compiler_root.zig",
-    "zts-umbrella": "root.zig",
-}
+with open(BUILD_ZIG, encoding="utf-8") as handle:
+    build_source = handle.read()
+declared = ROOTS_TABLE.findall(
+    build_source[build_source.index("zts_roots") :]
+    if "zts_roots" in build_source
+    else ""
+)[: len(TIERS)]
+if len(declared) != len(TIERS):
+    sys.exit(
+        f"zts layering: {BUILD_ZIG} declares {len(declared)} zts roots, expected "
+        f"{len(TIERS)}. The zts_roots table moved or changed shape, so the "
+        f"module-name and root-file maps cannot be derived."
+    )
+
+TIER_OF_MODULE = {module: tier for tier, (module, _) in zip(TIERS, declared)}
+ROOT_OF = {tier: root for tier, (_, root) in zip(TIERS, declared)}
 
 MIN_FILES = 100
+# Floor for the by-name direction rule. Without it a map that stops matching -
+# a renamed module, a moved table - filters every by-name import out and the
+# rule reports a pass over an empty input. Currently 97.
+MIN_NAMED_EDGES = 50
 
 listing = subprocess.run(
     ["git", "ls-files", "-z", "--", "packages/zts"],
@@ -230,52 +241,57 @@ for path in files:
         if RANK[src_tier] < RANK[dst_tier]:
             named_violations[(src_tier, dst_tier)].append((short(path), module))
 
-if named_violations:
-    total = sum(len(v) for v in named_violations.values())
-    print(
-        f"zts layering: {total} module-name imports point from a lower tier to a "
-        f"higher one:",
-        file=sys.stderr,
-    )
+def fail_buckets(buckets, headline, render_pairs, footer):
+    """Report tier-direction violations grouped by (source tier, target tier),
+    heaviest bucket first, then exit. Both direction rules report the same
+    shape and differ only in how a single edge is rendered."""
+    total = sum(len(pairs) for pairs in buckets.values())
+    print(headline.format(total=total), file=sys.stderr)
     for (src_tier, dst_tier), pairs in sorted(
-        named_violations.items(), key=lambda item: -len(item[1])
+        buckets.items(), key=lambda item: -len(item[1])
     ):
         print(f"\n  {src_tier} -> {dst_tier}  ({len(pairs)} edges)", file=sys.stderr)
-        for source_file, module in sorted(pairs):
-            print(f"    {source_file}  ->  @import(\"{module}\")", file=sys.stderr)
-    print(
+        render_pairs(pairs)
+    print(footer, file=sys.stderr)
+    sys.exit(1)
+
+
+def render_named(pairs):
+    for source_file, module in sorted(pairs):
+        print(f'    {source_file}  ->  @import("{module}")', file=sys.stderr)
+
+
+def render_relative(pairs):
+    by_source = defaultdict(list)
+    for source_file, target_file in pairs:
+        by_source[source_file].append(target_file)
+    for source_file in sorted(by_source):
+        targets = ", ".join(sorted(by_source[source_file]))
+        print(f"    {source_file}  ->  {targets}", file=sys.stderr)
+
+
+if named_violations:
+    fail_buckets(
+        named_violations,
+        "zts layering: {total} module-name imports point from a lower tier to a "
+        "higher one:",
+        render_named,
         f"\nA tier may name its own module's tier and any tier below it, never one "
         f"above.\nThat direction is the cycle a DAG of build modules cannot "
         f"express. Move the file,\nmove what it reaches for, or change its row in "
         f"{MANIFEST}.",
-        file=sys.stderr,
     )
-    sys.exit(1)
 
 if violations:
-    total = sum(len(v) for v in violations.values())
-    print(
-        f"zts layering: {total} relative imports cross a module line illegally:",
-        file=sys.stderr,
-    )
-    for (src_tier, dst_tier), pairs in sorted(
-        violations.items(), key=lambda item: -len(item[1])
-    ):
-        print(f"\n  {src_tier} -> {dst_tier}  ({len(pairs)} edges)", file=sys.stderr)
-        by_source = defaultdict(list)
-        for source_file, target_file in pairs:
-            by_source[source_file].append(target_file)
-        for source_file in sorted(by_source):
-            targets = ", ".join(sorted(by_source[source_file]))
-            print(f"    {source_file}  ->  {targets}", file=sys.stderr)
-    print(
+    fail_buckets(
+        violations,
+        "zts layering: {total} relative imports cross a module line illegally:",
+        render_relative,
         f"\nA lower tier must never name a higher one, and an already-split tier "
         f"({', '.join(SPLIT)})\nmust be reached by module name rather than by "
         f"relative path. Move the file, move what it\nreaches for, or change its "
         f"row in {MANIFEST}.",
-        file=sys.stderr,
     )
-    sys.exit(1)
 
 members_of = defaultdict(set)
 for path, tier in tier_of.items():
@@ -301,7 +317,10 @@ for tier in TIERS:
             if target in members and target not in seen:
                 seen.add(target)
                 stack.append(target)
-    reached_count += len(seen & members)
+    # `seen` starts at `root`, which the guard above proved is a member, and
+    # only grows through the `target in members` test - so it is a subset of
+    # `members` and needs no intersection.
+    reached_count += len(seen)
     for path in sorted(members - seen):
         unreachable.append((tier, short(path)))
 
@@ -322,10 +341,12 @@ if unreachable:
     )
     sys.exit(1)
 
-if reached_count != len(files):
+if named_count < MIN_NAMED_EDGES:
     sys.exit(
-        f"zts layering: reachability covered {reached_count} of {len(files)} files. "
-        f"The tier roots or the edge scan changed."
+        f"zts layering: only {named_count} by-name imports were examined; expected "
+        f"at least {MIN_NAMED_EDGES}. The module names derived from {BUILD_ZIG} no "
+        f"longer match what the tree imports, so the direction rule above checked "
+        f"almost nothing."
     )
 
 sizes = defaultdict(int)
