@@ -15,8 +15,9 @@ pub fn isParamSegment(seg: []const u8) bool {
     return false;
 }
 
-/// Compare two URL paths segment-by-segment, treating parameter segments
-/// as wildcards. `/api/orders/:id` matches `/api/orders/{id}`.
+/// Compare two URL paths segment-by-segment. Parameter segments are symmetric
+/// one-segment wildcards, `*` is literal, and trailing slashes are significant.
+/// `/api/orders/:id` matches `/api/orders/{id}`.
 pub fn pathsMatch(a: []const u8, b: []const u8) bool {
     var a_iter = std.mem.splitScalar(u8, a, '/');
     var b_iter = std.mem.splitScalar(u8, b, '/');
@@ -45,12 +46,11 @@ test "pathsMatch: identical static paths" {
     try std.testing.expect(pathsMatch("/api/orders", "/api/orders"));
 }
 
-test "pathsMatch: colon and brace params match" {
+test "pathsMatch: parameter wildcards are symmetric and match one segment" {
     try std.testing.expect(pathsMatch("/api/orders/:id", "/api/orders/{id}"));
-}
-
-test "pathsMatch: param matches any literal" {
     try std.testing.expect(pathsMatch("/api/orders/:id", "/api/orders/123"));
+    try std.testing.expect(pathsMatch("/api/orders/123", "/api/orders/{id}"));
+    try std.testing.expect(!pathsMatch("/api/orders/:id", "/api/orders/123/lines"));
 }
 
 test "pathsMatch: different segment counts" {
@@ -59,6 +59,18 @@ test "pathsMatch: different segment counts" {
 
 test "pathsMatch: different literal segments" {
     try std.testing.expect(!pathsMatch("/api/orders", "/api/items"));
+}
+
+test "pathsMatch: asterisk is a literal segment, not a catch-all" {
+    try std.testing.expect(pathsMatch("/assets/*", "/assets/*"));
+    try std.testing.expect(!pathsMatch("/assets/*", "/assets/app.js"));
+    try std.testing.expect(!pathsMatch("/assets/*", "/assets/js/app.js"));
+}
+
+test "pathsMatch: trailing slash is significant" {
+    try std.testing.expect(pathsMatch("/", "/"));
+    try std.testing.expect(!pathsMatch("/api/orders", "/api/orders/"));
+    try std.testing.expect(!pathsMatch("/api/orders/", "/api/orders"));
 }
 
 test "isParamSegment: colon prefix" {
