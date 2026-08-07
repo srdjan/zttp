@@ -1006,6 +1006,12 @@ pub const HandlerInstance = struct {
             };
             source_to_parse = strip_result.?.code;
         }
+        // Logged diagnostics name the file the author wrote, not the stripped
+        // text that was parsed.
+        const diag_view = if (strip_result) |*sr|
+            zq.SourceView.stripped(code, sr)
+        else
+            zq.SourceView.of(code);
 
         // Parse the source code
         var p = try zq.Parser.init(self.allocator, source_to_parse, self.strings, &self.ctx.atoms);
@@ -1057,7 +1063,7 @@ pub const HandlerInstance = struct {
                 var diag_output: std.ArrayList(u8) = .empty;
                 defer diag_output.deinit(self.allocator);
                 var diag_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &diag_output);
-                resolved.formatBoolDiagnostics(source_to_parse, &diag_aw.writer) catch {};
+                resolved.formatBoolDiagnostics(diag_view, &diag_aw.writer) catch {};
                 diag_output = diag_aw.toArrayList();
                 if (diag_output.items.len > 0) {
                     std.log.err("{s}", .{diag_output.items});
@@ -1076,7 +1082,7 @@ pub const HandlerInstance = struct {
                 var tc_output: std.ArrayList(u8) = .empty;
                 defer tc_output.deinit(self.allocator);
                 var tc_aw: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &tc_output);
-                resolved.formatTypeDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+                resolved.formatTypeDiagnostics(diag_view, &tc_aw.writer) catch {};
                 tc_output = tc_aw.toArrayList();
                 if (tc_output.items.len > 0) {
                     std.log.err("{s}", .{tc_output.items});

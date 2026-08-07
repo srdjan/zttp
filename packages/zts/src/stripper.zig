@@ -69,6 +69,38 @@ pub const StripDiagnostic = struct {
     kind: StripDiagnosticKind,
 };
 
+/// A 1-based line and column.
+pub const Position = struct {
+    line: u32,
+    column: u32,
+};
+
+/// One place where the stripped text stopped being byte-for-byte aligned with
+/// the source it came from.
+///
+/// Stripping is otherwise offset-preserving by construction: a removed type
+/// annotation is overwritten with spaces of its own width, so an offset in the
+/// stripped code is that same offset in the source, and every consumer can
+/// report a position from the stripped parse as if it came from the file the
+/// author wrote. `comptime(...)` folding is the one operation that cannot hold
+/// to that. The value it emits is not bounded by the width of the expression it
+/// replaces: `comptime(1/3)` is 13 characters and folds to the 18-character
+/// `0.3333333333333333`, so everything after it on that line sits 5 columns to
+/// the right of where the author put it.
+///
+/// Each entry records both ends of one such fold, in both coordinate systems,
+/// so `StripResult.sourceOffset` can undo the shift.
+pub const SpanEdit = struct {
+    /// Offset in the stripped code where the folded value starts.
+    stripped_start: u32,
+    /// Offset in the stripped code just past the folded value and its padding.
+    stripped_end: u32,
+    /// Offset in the source where the `comptime` keyword starts.
+    source_start: u32,
+    /// Offset in the source just past the `comptime(...)` closing paren.
+    source_end: u32,
+};
+
 pub const StripResult = struct {
     code: []const u8,
     allocator: std.mem.Allocator,
@@ -79,13 +111,135 @@ pub const StripResult = struct {
     /// the default abort-on-first-rejection mode (those still surface as a
     /// `StripError` instead).
     diagnostics: []const StripDiagnostic = &.{},
+    /// Folds whose emitted value did not fill the span it replaced, ordered by
+    /// `stripped_start`. Empty whenever stripping stayed offset-preserving,
+    /// which is every source with no `comptime(...)` and most sources with one -
+    /// so `sourceOffset` and `sourcePosition` are the identity on the common
+    /// path and no caller has to special-case the absence of a map.
+    span_edits: []const SpanEdit = &.{},
 
     pub fn deinit(self: *StripResult) void {
         @constCast(&self.type_map).deinit(self.allocator);
         self.allocator.free(self.code);
         if (self.diagnostics.len > 0) self.allocator.free(self.diagnostics);
+        if (self.span_edits.len > 0) self.allocator.free(self.span_edits);
+    }
+
+    /// Map an offset in `code` back to the offset it came from in the source.
+    ///
+    /// An offset inside a folded value maps to the start of the `comptime(...)`
+    /// expression that produced it: the digits of `0.3333333333333333` have no
+    /// separate source of their own, and the expression is the span a reader or
+    /// a repair has to be pointed at.
+    pub fn sourceOffset(self: StripResult, stripped_offset: u32) u32 {
+        var shift: i64 = 0;
+        for (self.span_edits) |edit| {
+            if (stripped_offset < edit.stripped_start) break;
+            if (stripped_offset < edit.stripped_end) return edit.source_start;
+            // Both ends are absolute, so the newest applicable entry already
+            // carries the total shift; it does not accumulate.
+            shift = @as(i64, edit.source_end) - @as(i64, edit.stripped_end);
+        }
+        const mapped = @as(i64, stripped_offset) + shift;
+        return @intCast(std.math.clamp(mapped, 0, std.math.maxInt(u32)));
+    }
+
+    /// Map a 1-based line and column in `code` back to the line and column in
+    /// `source`. Routing through offsets rather than adjusting the column
+    /// directly is what makes this correct for a fold that spans lines: such a
+    /// fold changes how many newlines precede everything after it, and only the
+    /// offsets know by how much.
+    pub fn sourcePosition(self: StripResult, source: []const u8, line: u32, column: u32) Position {
+        if (self.span_edits.len == 0) return .{ .line = line, .column = column };
+        const stripped_offset = offsetOfPosition(self.code, line, column);
+        return positionOfOffset(source, self.sourceOffset(stripped_offset));
     }
 };
+
+/// The text a diagnostic should be rendered against, plus what it takes to move
+/// a position from the parse back into it.
+///
+/// A checker's positions come from parsing `StripResult.code`, but the line a
+/// reader is shown and the byte a repair rewrites both belong to the file the
+/// author wrote. Those are the same coordinates for every handler that is not
+/// TypeScript and for every TypeScript handler whose `comptime(...)` folds fit
+/// their spans, which is why `of` exists: a caller with nothing to translate
+/// says so, and pays nothing.
+pub const SourceView = struct {
+    /// What a diagnostic's line and caret are rendered from.
+    text: []const u8,
+    /// The strip that produced the parsed text, when it was not `text` itself.
+    strip: ?*const StripResult = null,
+
+    /// A view whose text is what was parsed. The identity mapping.
+    pub fn of(text: []const u8) SourceView {
+        return .{ .text = text };
+    }
+
+    /// A view that renders `source` and translates positions out of `strip`.
+    pub fn stripped(source: []const u8, result: *const StripResult) SourceView {
+        return .{ .text = source, .strip = result };
+    }
+
+    pub fn position(self: SourceView, line: u32, column: u32) Position {
+        const result = self.strip orelse return .{ .line = line, .column = column };
+        return result.sourcePosition(self.text, line, column);
+    }
+
+    /// Write the `--> line:column` header, the source line, and the caret under
+    /// it, for a position the parse reported. Five checkers rendered this block
+    /// from their own copies of it; sharing one is what makes the translation
+    /// impossible to apply to four of them and forget the fifth.
+    pub fn writeLocation(self: SourceView, line: u32, column: u32, writer: anytype) !void {
+        const at = self.position(line, column);
+        try writer.print("  --> {d}:{d}\n", .{ at.line, at.column });
+        const text = self.lineText(at.line) orelse return;
+        try writer.print("   |\n", .{});
+        try writer.print("{d: >3} | {s}\n", .{ at.line, text });
+        try writer.print("   | ", .{});
+        var col: u32 = 1;
+        while (col < at.column) : (col += 1) try writer.writeByte(' ');
+        try writer.writeAll("^\n");
+    }
+
+    /// The 1-based `number`th line of `text`, without its newline.
+    pub fn lineText(self: SourceView, number: u32) ?[]const u8 {
+        if (number == 0) return null;
+        var remaining = self.text;
+        var current: u32 = 1;
+        while (current < number) : (current += 1) {
+            const newline = std.mem.indexOfScalar(u8, remaining, '\n') orelse return null;
+            remaining = remaining[newline + 1 ..];
+        }
+        const end = std.mem.indexOfScalar(u8, remaining, '\n') orelse remaining.len;
+        return remaining[0..end];
+    }
+};
+
+/// Byte offset of a 1-based line and column, clamped to the end of `text`.
+fn offsetOfPosition(text: []const u8, line: u32, column: u32) u32 {
+    var current_line: u32 = 1;
+    var index: usize = 0;
+    while (index < text.len and current_line < line) : (index += 1) {
+        if (text[index] == '\n') current_line += 1;
+    }
+    const offset = index + @as(usize, if (column > 0) column - 1 else 0);
+    return @intCast(@min(offset, text.len));
+}
+
+/// The 1-based line and column of a byte offset, clamped to the end of `text`.
+fn positionOfOffset(text: []const u8, offset: u32) Position {
+    const limit = @min(@as(usize, offset), text.len);
+    var line: u32 = 1;
+    var line_start: usize = 0;
+    for (text[0..limit], 0..) |byte, index| {
+        if (byte == '\n') {
+            line += 1;
+            line_start = index + 1;
+        }
+    }
+    return .{ .line = line, .column = @intCast(limit - line_start + 1) };
+}
 
 /// Environment for comptime evaluation
 pub const ComptimeEnv = struct {
@@ -126,6 +280,7 @@ pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOpt
     var stripper = Stripper.init(allocator, source, options);
     errdefer stripper.output.deinit(allocator);
     errdefer stripper.diagnostics.deinit(allocator);
+    errdefer stripper.span_edits.deinit(allocator);
     defer stripper.brace_stack.deinit(allocator);
     defer stripper.paren_cf_stack.deinit(allocator);
     defer stripper.binding_name_ordinals.deinit(allocator);
@@ -152,6 +307,9 @@ const Stripper = struct {
     /// All recorded type-assertion diagnostics. In abort mode only the first is
     /// recorded before the StripError; in collect mode every site lands here.
     diagnostics: std.ArrayListUnmanaged(StripDiagnostic),
+    /// Folds that broke offset alignment, appended in source order. Stays empty
+    /// unless a `comptime(...)` value failed to fill the span it replaced.
+    span_edits: std.ArrayListUnmanaged(SpanEdit),
 
     // State
     line: u32,
@@ -209,6 +367,7 @@ const Stripper = struct {
             .diagnostic_out = options.diagnostic_out,
             .collect_all_diagnostics = options.collect_all_diagnostics,
             .diagnostics = .empty,
+            .span_edits = .empty,
             .line = 1,
             .col = 1,
             .in_expression = false,
@@ -241,11 +400,14 @@ const Stripper = struct {
         const code = self.output.toOwnedSlice(self.allocator) catch return StripError.OutOfMemory;
         errdefer self.allocator.free(code);
         const diags = self.diagnostics.toOwnedSlice(self.allocator) catch return StripError.OutOfMemory;
+        errdefer self.allocator.free(diags);
+        const edits = self.span_edits.toOwnedSlice(self.allocator) catch return StripError.OutOfMemory;
         return StripResult{
             .code = code,
             .allocator = self.allocator,
             .type_map = self.type_map,
             .diagnostics = diags,
+            .span_edits = edits,
         };
     }
 
@@ -1614,19 +1776,37 @@ const Stripper = struct {
         const literal = comptime_eval.emitLiteral(self.allocator, result) catch return StripError.OutOfMemory;
         defer self.allocator.free(literal);
 
-        // Output the literal
+        const stripped_start = self.output.items.len;
         self.output.appendSlice(self.allocator, literal) catch return StripError.OutOfMemory;
 
-        // Pad with spaces to preserve line/column positions
-        // The total span is from keyword_start to self.pos (end of closing paren)
-        const total_span = self.pos - keyword_start;
-        const literal_len = literal.len;
-
-        if (total_span > literal_len) {
-            const padding = total_span - literal_len;
-            for (0..padding) |_| {
-                self.output.append(self.allocator, ' ') catch return StripError.OutOfMemory;
+        // Blank out the rest of the span the fold replaced, so a position after
+        // it is the position the author wrote. The span runs from keyword_start
+        // to self.pos (just past the closing paren). Each replaced byte becomes
+        // a space, except a newline, which stays a newline: a `comptime(...)`
+        // written across lines otherwise takes those lines away from everything
+        // below it.
+        const span = self.source[keyword_start..self.pos];
+        if (span.len > literal.len) {
+            for (span[literal.len..]) |byte| {
+                self.output.append(self.allocator, if (byte == '\n') '\n' else ' ') catch
+                    return StripError.OutOfMemory;
             }
+        }
+
+        // A value wider than its span cannot be padded back, and a newline the
+        // literal covered cannot be recovered. Either way the text below is no
+        // longer where the source has it, so record the shift rather than let a
+        // consumer read a stale position as if it were exact.
+        const emitted = self.output.items[stripped_start..];
+        const aligned = emitted.len == span.len and
+            std.mem.count(u8, emitted, "\n") == std.mem.count(u8, span, "\n");
+        if (!aligned) {
+            self.span_edits.append(self.allocator, .{
+                .stripped_start = @intCast(stripped_start),
+                .stripped_end = @intCast(self.output.items.len),
+                .source_start = @intCast(keyword_start),
+                .source_end = @intCast(self.pos),
+            }) catch return StripError.OutOfMemory;
         }
 
         return true;
@@ -3919,4 +4099,87 @@ test "fn-type var annotation stripped without arrow leak" {
         defer @constCast(&result).deinit();
         try std.testing.expect(std.mem.indexOf(u8, result.code, "=>") == null);
     }
+}
+
+test "a fold that fits its span leaves offsets alone and records no edit" {
+    const source = "const x = comptime(1 + 2); const y: number = 3;";
+    var result = try strip(std.testing.allocator, source, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    });
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 0), result.span_edits.len);
+    try std.testing.expectEqual(source.len, result.code.len);
+    // `const y` sits at the same column in both, so mapping is the identity.
+    const column: u32 = @intCast(std.mem.indexOf(u8, source, "const y").? + 1);
+    const mapped = result.sourcePosition(source, 1, column);
+    try std.testing.expectEqual(@as(u32, 1), mapped.line);
+    try std.testing.expectEqual(column, mapped.column);
+}
+
+test "a fold wider than its span maps later columns back to the source" {
+    // `comptime(2**60)` is 15 characters; the value it folds to is 19, so the
+    // stripped line is 4 bytes longer and everything after it moves right.
+    const source = "const big = comptime(2**60); const bad: number = \"s\";";
+    var result = try strip(std.testing.allocator, source, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    });
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.span_edits.len);
+    try std.testing.expect(result.code.len > source.len);
+
+    const source_column: u32 = @intCast(std.mem.indexOf(u8, source, "const bad").? + 1);
+    const stripped_column: u32 = @intCast(std.mem.indexOf(u8, result.code, "const bad").? + 1);
+    try std.testing.expect(stripped_column > source_column);
+
+    const mapped = result.sourcePosition(source, 1, stripped_column);
+    try std.testing.expectEqual(@as(u32, 1), mapped.line);
+    try std.testing.expectEqual(source_column, mapped.column);
+}
+
+test "a position inside the folded value maps to the comptime expression" {
+    const source = "const big = comptime(2**60);";
+    var result = try strip(std.testing.allocator, source, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    });
+    defer result.deinit();
+
+    const keyword = std.mem.indexOf(u8, source, "comptime").?;
+    const edit = result.span_edits[0];
+    // The digits of the folded value have no source of their own, so every
+    // offset within them answers with the expression that produced them.
+    try std.testing.expectEqual(
+        @as(u32, @intCast(keyword)),
+        result.sourceOffset(edit.stripped_start + 3),
+    );
+}
+
+test "a fold spanning lines keeps the lines below it on their own numbers" {
+    const source =
+        \\const a = comptime(
+        \\  1 + 2
+        \\);
+        \\const bad: number = "s";
+    ;
+    var result = try strip(std.testing.allocator, source, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    });
+    defer result.deinit();
+
+    // The fold is replaced in place and its newlines are kept, so `const bad`
+    // is still on line 4 of the stripped code and maps back to line 4.
+    const stripped_line = std.mem.count(
+        u8,
+        result.code[0..std.mem.indexOf(u8, result.code, "const bad").?],
+        "\n",
+    ) + 1;
+    try std.testing.expectEqual(@as(usize, 4), stripped_line);
+    const mapped = result.sourcePosition(source, @intCast(stripped_line), 1);
+    try std.testing.expectEqual(@as(u32, 4), mapped.line);
+    try std.testing.expectEqual(@as(u32, 1), mapped.column);
 }

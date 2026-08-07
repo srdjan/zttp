@@ -12,6 +12,7 @@
 //! interpreter catch those cases at execution time.
 
 const std = @import("std");
+const stripper = @import("zts-engine").stripper;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -218,36 +219,12 @@ pub const BoolChecker = struct {
     // Diagnostic formatting (mirrors handler_verifier.zig)
     // -----------------------------------------------------------------------
 
-    pub fn formatDiagnostics(
-        self: *const BoolChecker,
-        source: []const u8,
-        writer: anytype,
-    ) !void {
+    pub fn formatDiagnostics(self: *const BoolChecker, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
-
-            // Header
             try writer.print("{s}: {s}\n", .{ diag.severity.label(), diag.message });
-
-            // Location
-            try writer.print("  --> {d}:{d}\n", .{ loc.line, loc.column });
-
-            // Source context line
-            if (getSourceLine(source, loc.line)) |line| {
-                try writer.print("   |\n", .{});
-                try writer.print("{d: >3} | {s}\n", .{ loc.line, line });
-                try writer.print("   | ", .{});
-                var col: u16 = 1;
-                while (col < loc.column) : (col += 1) {
-                    try writer.writeByte(' ');
-                }
-                try writer.writeAll("^\n");
-            }
-
-            // Help text
-            if (diag.help) |help| {
-                try writer.print("   = help: {s}\n", .{help});
-            }
+            try source.writeLocation(loc.line, loc.column, writer);
+            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
             try writer.writeByte('\n');
         }
     }

@@ -15,6 +15,7 @@
 //! Verification is a recursive tree walk, not a fixpoint dataflow analysis.
 
 const std = @import("std");
+const stripper = @import("zts-engine").stripper;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -417,36 +418,12 @@ pub const HandlerVerifier = struct {
     }
 
     /// Format diagnostics to a writer. Requires source text for context lines.
-    pub fn formatDiagnostics(
-        self: *const HandlerVerifier,
-        source: []const u8,
-        writer: anytype,
-    ) !void {
+    pub fn formatDiagnostics(self: *const HandlerVerifier, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
-
-            // Header
             try writer.print("verify {s}: {s}\n", .{ diag.severity.label(), diag.message });
-
-            // Location
-            try writer.print("  --> {d}:{d}\n", .{ loc.line, loc.column });
-
-            // Source context line
-            if (getSourceLine(source, loc.line)) |line| {
-                try writer.print("   |\n", .{});
-                try writer.print("{d: >3} | {s}\n", .{ loc.line, line });
-                try writer.print("   | ", .{});
-                var col: u16 = 1;
-                while (col < loc.column) : (col += 1) {
-                    try writer.writeByte(' ');
-                }
-                try writer.writeAll("^\n");
-            }
-
-            // Help text
-            if (diag.help) |help| {
-                try writer.print("   = help: {s}\n", .{help});
-            }
+            try source.writeLocation(loc.line, loc.column, writer);
+            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
             try writer.writeByte('\n');
         }
     }
@@ -1459,31 +1436,6 @@ pub const HandlerVerifier = struct {
 // Utility
 // ---------------------------------------------------------------------------
 
-fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
-    var current_line: u32 = 1;
-    var line_start: usize = 0;
-
-    for (source, 0..) |c, i| {
-        if (current_line == target_line) {
-            var line_end = i;
-            while (line_end < source.len and source[line_end] != '\n') {
-                line_end += 1;
-            }
-            return source[line_start..line_end];
-        }
-        if (c == '\n') {
-            current_line += 1;
-            line_start = i + 1;
-        }
-    }
-
-    if (current_line == target_line and line_start < source.len) {
-        return source[line_start..];
-    }
-
-    return null;
-}
-
 /// Find the handler function in a parsed program.
 /// Looks for `function handler(...)` or `const handler = ...` at top level.
 pub fn findHandlerFunction(ir_view: IrView, root: NodeIndex) ?NodeIndex {
@@ -1576,14 +1528,6 @@ test "lookupTrackedFunction" {
     try std.testing.expect(lookupTrackedFunction("zttp:cache", "cacheSet") == null);
 }
 
-test "getSourceLine" {
-    const source = "line one\nline two\nline three";
-    try std.testing.expectEqualStrings("line one", getSourceLine(source, 1).?);
-    try std.testing.expectEqualStrings("line two", getSourceLine(source, 2).?);
-    try std.testing.expectEqualStrings("line three", getSourceLine(source, 3).?);
-    try std.testing.expect(getSourceLine(source, 4) == null);
-}
-
 test "verifier init and deinit" {
     // Create a minimal IR with just a program node
     var store = ir.IRStore.init(std.testing.allocator);
@@ -1632,7 +1576,7 @@ test "diagnostic formatting" {
     var output_buf: std.ArrayList(u8) = .empty;
     defer output_buf.deinit(std.testing.allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &output_buf);
-    try verifier.formatDiagnostics(source, &aw.writer);
+    try verifier.formatDiagnostics(stripper.SourceView.of(source), &aw.writer);
     output_buf = aw.toArrayList();
     try std.testing.expect(output_buf.items.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, output_buf.items, "verify error") != null);

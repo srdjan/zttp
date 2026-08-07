@@ -5,6 +5,7 @@
 //! normal type/sound passes, and before handler verification/contract work.
 
 const std = @import("std");
+const stripper = @import("zts-engine").stripper;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -221,19 +222,11 @@ pub const StrictChecker = struct {
         self.type_checker = null;
     }
 
-    pub fn formatDiagnostics(self: *const StrictChecker, source: []const u8, writer: anytype) !void {
+    pub fn formatDiagnostics(self: *const StrictChecker, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
             try writer.print("strict {s}: {s}\n", .{ diag.severity.label(), diag.message });
-            try writer.print("  --> {d}:{d}\n", .{ loc.line, loc.column });
-            if (getSourceLine(source, loc.line)) |line| {
-                try writer.print("   |\n", .{});
-                try writer.print("{d: >3} | {s}\n", .{ loc.line, line });
-                try writer.print("   | ", .{});
-                var col: u16 = 1;
-                while (col < loc.column) : (col += 1) try writer.writeByte(' ');
-                try writer.writeAll("^\n");
-            }
+            try source.writeLocation(loc.line, loc.column, writer);
             if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
             try writer.writeByte('\n');
         }
@@ -1559,21 +1552,6 @@ fn isArrayMutator(name: []const u8) bool {
 
 fn bindingKey(binding: ir.BindingRef) u32 {
     return bool_checker.packBindingKey(binding.scope_id, binding.slot);
-}
-
-fn getSourceLine(source: []const u8, line_num: u32) ?[]const u8 {
-    if (line_num == 0) return null;
-    var current_line: u32 = 1;
-    var start: usize = 0;
-    for (source, 0..) |c, i| {
-        if (c == '\n') {
-            if (current_line == line_num) return source[start..i];
-            current_line += 1;
-            start = i + 1;
-        }
-    }
-    if (current_line == line_num) return source[start..];
-    return null;
 }
 
 const testing = std.testing;

@@ -15,6 +15,7 @@
 //! Only annotated values are checked - unannotated code passes through unchecked.
 
 const std = @import("std");
+const stripper = @import("zts-engine").stripper;
 const ir = @import("zts-engine").parser.ir;
 const json_utils = @import("zts-base").json_utils;
 const object = @import("zts-engine").object;
@@ -241,31 +242,12 @@ pub const TypeChecker = struct {
     // Diagnostic formatting
     // -------------------------------------------------------------------
 
-    pub fn formatDiagnostics(
-        self: *const TypeChecker,
-        source: []const u8,
-        writer: anytype,
-    ) !void {
+    pub fn formatDiagnostics(self: *const TypeChecker, source: stripper.SourceView, writer: anytype) !void {
         for (self.diagnostics.items) |diag| {
             const loc = self.ir_view.getLoc(diag.node) orelse continue;
-
             try writer.print("type {s}: {s}\n", .{ diag.severity.label(), diag.message });
-            try writer.print("  --> {d}:{d}\n", .{ loc.line, loc.column });
-
-            if (getSourceLine(source, loc.line)) |line| {
-                try writer.print("   |\n", .{});
-                try writer.print("{d: >3} | {s}\n", .{ loc.line, line });
-                try writer.print("   | ", .{});
-                var col: u16 = 1;
-                while (col < loc.column) : (col += 1) {
-                    try writer.writeByte(' ');
-                }
-                try writer.writeAll("^\n");
-            }
-
-            if (diag.help) |help| {
-                try writer.print("   = help: {s}\n", .{help});
-            }
+            try source.writeLocation(loc.line, loc.column, writer);
+            if (diag.help) |help| try writer.print("   = help: {s}\n", .{help});
             try writer.writeByte('\n');
         }
     }
@@ -3398,7 +3380,6 @@ fn bindingKey(binding: ir.BindingRef) u64 {
         (@as(u64, @intFromEnum(binding.kind)) << 16) |
         @as(u64, binding.slot);
 }
-const getSourceLine = bool_checker_mod.getSourceLine;
 
 const writeJsonString = json_utils.writeJsonString;
 

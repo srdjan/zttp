@@ -192,6 +192,11 @@ pub const StripOptions = stripper.StripOptions;
 pub const StripDiagnostic = stripper.StripDiagnostic;
 pub const StripDiagnosticKind = stripper.StripDiagnosticKind;
 pub const ComptimeEnv = stripper.ComptimeEnv;
+/// The text a diagnostic is rendered against, plus the mapping that moves a
+/// position from the stripped parse back into it. A consumer that reports a
+/// position to a human or to a repair needs this, not the stripped text.
+pub const SourceView = stripper.SourceView;
+pub const SourcePosition = stripper.Position;
 pub const strip = stripper.strip;
 pub const ComptimeEvaluator = comptime_eval.ComptimeEvaluator;
 pub const ComptimeValue = comptime_eval.ComptimeValue;

@@ -1108,12 +1108,67 @@ pub fn runCheckOnlyFromSourceWithOptions(
     );
 }
 
+/// Every stage below the strip reports positions in the coordinates of the
+/// stripped code. That is the same thing as the author's coordinates for all but
+/// one construct: a `comptime(...)` whose folded value does not fit the span it
+/// replaced shifts everything after it. `StripResult.span_edits` records those,
+/// and this is the single exit where the shift is undone, before any position
+/// reaches `--json`, `agent_protocol`'s byte offsets, or a repair splice.
 fn runCheckOnlyFromSourceWithPathAllocator(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
     source: []const u8,
     handler_path: []const u8,
     opts: CheckOptions,
+) !CheckResult {
+    var strip_result: ?zts.StripResult = null;
+    defer if (strip_result) |*sr| sr.deinit();
+    // Diagnostics the strip stage raises carry source coordinates already;
+    // only what the parse of the stripped code produced needs mapping. The
+    // inner call reports where that boundary falls.
+    var already_mapped: usize = 0;
+
+    var result = try runCheckOnStrippedSource(
+        allocator,
+        path_allocator,
+        source,
+        handler_path,
+        opts,
+        &strip_result,
+        &already_mapped,
+    );
+    errdefer result.deinit(allocator);
+    if (strip_result) |sr| remapDiagnosticsToSource(&result, sr, source, already_mapped);
+    return result;
+}
+
+/// Undo the stripper's span shifts on every diagnostic the stripped parse
+/// produced. A no-op for a handler whose folds all fit, which is nearly all of
+/// them - and exactly at the handlers where it is not, an unmapped column sends
+/// a repair at the wrong byte of the file it is rewriting.
+fn remapDiagnosticsToSource(
+    result: *CheckResult,
+    strip_result: zts.StripResult,
+    source: []const u8,
+    already_mapped: usize,
+) void {
+    if (strip_result.span_edits.len == 0) return;
+    const items = result.json_diagnostics.items;
+    for (items[@min(already_mapped, items.len)..]) |*diagnostic| {
+        const mapped = strip_result.sourcePosition(source, diagnostic.line, diagnostic.column);
+        diagnostic.line = mapped.line;
+        diagnostic.column = mapped.column;
+    }
+}
+
+fn runCheckOnStrippedSource(
+    allocator: std.mem.Allocator,
+    path_allocator: std.mem.Allocator,
+    source: []const u8,
+    handler_path: []const u8,
+    opts: CheckOptions,
+    strip_out: *?zts.StripResult,
+    already_mapped: *usize,
 ) !CheckResult {
     const sql_schema_path = opts.sql_schema_path;
     const json_mode = opts.json_mode;
@@ -1124,8 +1179,6 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     result.line_count = @intCast(std.mem.count(u8, source, "\n") + 1);
 
     var source_to_parse: []const u8 = source;
-    var strip_result: ?zts.StripResult = null;
-    defer if (strip_result) |*sr| sr.deinit();
 
     const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
     const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
@@ -1138,7 +1191,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     // Stage 1: TypeScript strip
     if (is_ts or is_tsx) {
         var strip_diag: ?zts.StripDiagnostic = null;
-        strip_result = zts.strip(allocator, source, .{
+        strip_out.* = zts.strip(allocator, source, .{
             .tsx_mode = is_tsx,
             .enable_comptime = true,
             .comptime_env = .{},
@@ -1158,15 +1211,26 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         // Recovered type-assertion diagnostics: surface them all and stop before
         // parse. The recovered code has the assertions dropped, so parsing it
         // would analyze a different program than the author wrote.
-        if (strip_result.?.diagnostics.len > 0) {
-            for (strip_result.?.diagnostics) |d| {
+        if (strip_out.*.?.diagnostics.len > 0) {
+            for (strip_out.*.?.diagnostics) |d| {
                 result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
             }
-            result.parse_errors = @intCast(strip_result.?.diagnostics.len);
+            result.parse_errors = @intCast(strip_out.*.?.diagnostics.len);
             return result;
         }
-        source_to_parse = strip_result.?.code;
+        source_to_parse = strip_out.*.?.code;
     }
+    // Everything appended so far came from the stripper and is already in the
+    // author's coordinates; everything appended below is not.
+    already_mapped.* = result.json_diagnostics.items.len;
+
+    // Diagnostics are rendered against the file the author wrote, not the
+    // stripped text that was parsed, and the view carries what it takes to move
+    // a reported position between the two.
+    const diag_view = if (strip_out.*) |*sr|
+        zts.SourceView.stripped(source, sr)
+    else
+        zts.SourceView.of(source);
 
     // Stage 2: Parse
     var atoms = zts.AtomTable.init(allocator);
@@ -1228,7 +1292,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
 
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
-    if (strip_result) |sr| {
+    if (strip_out.*) |sr| {
         try type_env_storage.init(allocator, &sr.type_map);
     }
 
@@ -1258,7 +1322,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                resolved.formatBoolDiagnostics(source_to_parse, &aw.writer) catch {};
+                resolved.formatBoolDiagnostics(diag_view, &aw.writer) catch {};
                 buf = aw.toArrayList();
                 if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
@@ -1283,7 +1347,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                resolved.formatTypeDiagnostics(source_to_parse, &aw.writer) catch {};
+                resolved.formatTypeDiagnostics(diag_view, &aw.writer) catch {};
                 buf = aw.toArrayList();
                 if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
@@ -1307,7 +1371,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                resolved.formatStrictDiagnostics(source_to_parse, &aw.writer) catch {};
+                resolved.formatStrictDiagnostics(diag_view, &aw.writer) catch {};
                 buf = aw.toArrayList();
                 if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
@@ -1350,7 +1414,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
                 var buf: std.ArrayList(u8) = .empty;
                 defer buf.deinit(allocator);
                 var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                checked.verifier.formatDiagnostics(source_to_parse, &aw.writer) catch {};
+                checked.verifier.formatDiagnostics(diag_view, &aw.writer) catch {};
                 buf = aw.toArrayList();
                 if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
@@ -1423,7 +1487,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         root,
         null,
         verify_info,
-        if (strip_result) |*sr| &sr.type_map else null,
+        if (strip_out.*) |*sr| &sr.type_map else null,
         null,
         sql_schema_path,
         null,
@@ -1668,6 +1732,13 @@ pub fn compileHandler(
         if (!builtin.is_test) debugPrint("TypeScript stripped successfully\n", .{});
     }
 
+    // Rendered against the author's file, not the stripped text that was
+    // parsed; see runCheckOnStrippedSource.
+    const diag_view = if (strip_result) |*sr|
+        zts.SourceView.stripped(source, sr)
+    else
+        zts.SourceView.of(source);
+
     // Initialize string table and atom table for parsing
     var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
@@ -1764,7 +1835,7 @@ pub fn compileHandler(
             var bool_output: std.ArrayList(u8) = .empty;
             defer bool_output.deinit(allocator);
             var bool_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &bool_output);
-            resolved.formatBoolDiagnostics(source_to_parse, &bool_aw.writer) catch {};
+            resolved.formatBoolDiagnostics(diag_view, &bool_aw.writer) catch {};
             bool_output = bool_aw.toArrayList();
             if (bool_output.items.len > 0) {
                 debugPrint("{s}", .{bool_output.items});
@@ -1787,7 +1858,7 @@ pub fn compileHandler(
             var tc_output: std.ArrayList(u8) = .empty;
             defer tc_output.deinit(allocator);
             var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
-            resolved.formatTypeDiagnostics(source_to_parse, &tc_aw.writer) catch {};
+            resolved.formatTypeDiagnostics(diag_view, &tc_aw.writer) catch {};
             tc_output = tc_aw.toArrayList();
             if (tc_output.items.len > 0) {
                 debugPrint("{s}", .{tc_output.items});
@@ -1806,7 +1877,7 @@ pub fn compileHandler(
             var strict_output: std.ArrayList(u8) = .empty;
             defer strict_output.deinit(allocator);
             var strict_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &strict_output);
-            resolved.formatStrictDiagnostics(source_to_parse, &strict_aw.writer) catch {};
+            resolved.formatStrictDiagnostics(diag_view, &strict_aw.writer) catch {};
             strict_output = strict_aw.toArrayList();
             if (strict_output.items.len > 0) {
                 debugPrint("{s}", .{strict_output.items});
@@ -1854,7 +1925,7 @@ pub fn compileHandler(
                 var diag_output: std.ArrayList(u8) = .empty;
                 defer diag_output.deinit(allocator);
                 var diag_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &diag_output);
-                verifier.formatDiagnostics(source_to_parse, &diag_aw.writer) catch {};
+                verifier.formatDiagnostics(diag_view, &diag_aw.writer) catch {};
                 diag_output = diag_aw.toArrayList();
                 if (diag_output.items.len > 0) {
                     debugPrint("{s}", .{diag_output.items});
@@ -2564,7 +2635,7 @@ fn buildContractWithPolicy(
                 var flow_output: std.ArrayList(u8) = .empty;
                 defer flow_output.deinit(allocator);
                 var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
-                flow.formatDiagnostics("", &flow_aw.writer) catch {};
+                flow.formatDiagnostics(zts.SourceView.of(""), &flow_aw.writer) catch {};
                 flow_output = flow_aw.toArrayList();
                 if (flow_output.items.len > 0) {
                     debugPrint("{s}", .{flow_output.items});

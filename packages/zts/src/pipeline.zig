@@ -158,7 +158,7 @@ pub const ResolvedModule = struct {
 
     pub fn formatBoolDiagnostics(
         self: *const ResolvedModule,
-        source: []const u8,
+        source: stripper_mod.SourceView,
         writer: anytype,
     ) !void {
         try self.bool_checker.formatDiagnostics(source, writer);
@@ -166,7 +166,7 @@ pub const ResolvedModule = struct {
 
     pub fn formatTypeDiagnostics(
         self: *const ResolvedModule,
-        source: []const u8,
+        source: stripper_mod.SourceView,
         writer: anytype,
     ) !void {
         if (self.type_checker) |*tc| try tc.formatDiagnostics(source, writer);
@@ -174,7 +174,7 @@ pub const ResolvedModule = struct {
 
     pub fn formatStrictDiagnostics(
         self: *const ResolvedModule,
-        source: []const u8,
+        source: stripper_mod.SourceView,
         writer: anytype,
     ) !void {
         if (self.strict_checker) |*sc| try sc.formatDiagnostics(source, writer);
