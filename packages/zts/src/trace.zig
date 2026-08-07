@@ -2094,6 +2094,44 @@ test "parseTraceFile rejects response-less traces without a witness tag" {
     );
 }
 
+/// A standalone `Context` for the tests below, built from this file's own
+/// imports rather than from `root.zig`'s `createContext`.
+///
+/// Reaching `root.zig` from here was not free. `root.zig` re-exports every
+/// module in the package, `builtins/helpers.zig` imports this file, and
+/// `builtins/root.zig` imports that - so the four test-only imports made the
+/// engine's built-ins transitively import the flow checker, the type checker,
+/// and the semantics registry. Removing them drops 26 files out of the engine's
+/// import closure. See
+/// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+///
+/// The allocator is expected to be an arena: the GC and heap records are
+/// allocated from it and reclaimed when it is torn down, so only the resources
+/// their `deinit` methods own are released explicitly.
+fn testCreateContext(allocator: std.mem.Allocator) !*context.Context {
+    const gc_mod = @import("gc.zig");
+    const heap_mod = @import("heap.zig");
+
+    const gc_state = try allocator.create(gc_mod.GC);
+    gc_state.* = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    errdefer gc_state.deinit();
+
+    const heap_state = try allocator.create(heap_mod.Heap);
+    heap_state.* = heap_mod.Heap.init(allocator, .{});
+    errdefer heap_state.deinit();
+    gc_state.setHeap(heap_state);
+
+    return try context.Context.init(allocator, gc_state, .{});
+}
+
+fn testDestroyContext(ctx: *context.Context) void {
+    const gc_state = ctx.gc_state;
+    const heap_state = gc_state.heap_ptr;
+    ctx.deinit();
+    gc_state.deinit();
+    if (heap_state) |h| h.deinit();
+}
+
 test "parseTraceFile preserves optional absence and recorded undefined" {
     const source =
         "{\"type\":\"witness\",\"property\":\"optional-values\"}\n" ++
@@ -2112,21 +2150,19 @@ test "parseTraceFile preserves optional absence and recorded undefined" {
     try std.testing.expectEqualStrings("null", groups[0].io_calls[0].result_json);
     try std.testing.expectEqualStrings("null", groups[0].io_calls[1].result_json);
 
-    const zts = @import("root.zig");
     var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer test_arena.deinit();
-    const ctx = try zts.createContext(test_arena.allocator(), .{ .nursery_size = 4096 });
-    defer zts.destroyContext(ctx);
+    const ctx = try testCreateContext(test_arena.allocator());
+    defer testDestroyContext(ctx);
     try std.testing.expect(jsonToJSValue(ctx, groups[0].io_calls[1].result_json).isUndefined());
 }
 
 test "jsonToJSValue primitives" {
-    const zts = @import("root.zig");
     var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer test_arena.deinit();
     const allocator = test_arena.allocator();
-    const ctx = try zts.createContext(allocator, .{ .nursery_size = 4096 });
-    defer zts.destroyContext(ctx);
+    const ctx = try testCreateContext(allocator);
+    defer testDestroyContext(ctx);
 
     // null -> undefined
     try std.testing.expect(jsonToJSValue(ctx, "null").isUndefined());
@@ -2155,24 +2191,22 @@ test "jsonToJSValue primitives" {
 }
 
 test "jsonToJSValue object" {
-    const zts = @import("root.zig");
     var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer test_arena.deinit();
     const allocator = test_arena.allocator();
-    const ctx = try zts.createContext(allocator, .{ .nursery_size = 4096 });
-    defer zts.destroyContext(ctx);
+    const ctx = try testCreateContext(allocator);
+    defer testDestroyContext(ctx);
 
     const obj_val = jsonToJSValue(ctx, "{\"ok\":true,\"value\":42}");
     try std.testing.expect(obj_val.isObject());
 }
 
 test "jsonToJSValue array" {
-    const zts = @import("root.zig");
     var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer test_arena.deinit();
     const allocator = test_arena.allocator();
-    const ctx = try zts.createContext(allocator, .{ .nursery_size = 4096 });
-    defer zts.destroyContext(ctx);
+    const ctx = try testCreateContext(allocator);
+    defer testDestroyContext(ctx);
 
     const arr_val = jsonToJSValue(ctx, "[1,2,3]");
     try std.testing.expect(arr_val.isObject());
