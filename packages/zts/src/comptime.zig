@@ -553,10 +553,14 @@ pub const ComptimeEvaluator = struct {
         if (member.is_optional or member.computed != parser.null_node) return ComptimeError.UnsupportedOp;
         const property = atomName(atoms, member.property) orelse return ComptimeError.SyntaxError;
 
+        // `Math` and `Env` are namespaces, not values: the property decides the
+        // result and the receiver is never evaluated. Every other identifier
+        // receiver falls through and is evaluated as a value, so a build-metadata
+        // identifier keeps its string members. `evalIdentifier` still answers
+        // `UnknownIdentifier` for a receiver that names nothing.
         if (identifierName(ir, atoms, member.object)) |base| {
             if (std.mem.eql(u8, base, "Math")) return mathConstant(property) orelse ComptimeError.UnknownIdentifier;
             if (std.mem.eql(u8, base, "Env")) return self.envValue(property);
-            return ComptimeError.UnknownIdentifier;
         }
 
         const object_value = try self.evalNode(ir, atoms, member.object);
@@ -612,7 +616,8 @@ pub const ComptimeEvaluator = struct {
                 defer self.freeArgs(args);
                 return self.evaluateJsonParse(args);
             }
-            return ComptimeError.UnknownIdentifier;
+            // Any other identifier receiver is a value, not a namespace: fall
+            // through so its string methods resolve. See `evalMember`.
         }
 
         const receiver = try self.evalNode(ir, atoms, member.object);
@@ -1908,6 +1913,47 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
         defer result.deinit(allocator);
         try std.testing.expectEqualStrings(case.value, result.string);
         try std.testing.expect(owned_value.ptr != result.string.ptr);
+    }
+
+    // A build-metadata identifier is a string value, so the documented string
+    // members apply to it. `Math` and `Env` are namespaces and keep their own
+    // handling; every other identifier receiver is evaluated as a value.
+    const member_cases = [_]struct {
+        source: []const u8,
+        expected: []const u8,
+    }{
+        .{ .source = "__VERSION__.toUpperCase()", .expected = "0.18.0" },
+        .{ .source = "__GIT_COMMIT__.slice(0, 7)", .expected = "0123456" },
+        .{ .source = "__BUILD_TIME__.slice(0, 10)", .expected = "2026-08-05" },
+    };
+    for (member_cases) |case| {
+        var evaluator = ComptimeEvaluator.init(allocator, case.source, 1, 1);
+        evaluator.build_time = "2026-08-05T12:00:00Z";
+        evaluator.git_commit = "0123456789abcdef";
+        evaluator.version = "0.18.0";
+        const result = try evaluator.evaluate();
+        defer result.deinit(allocator);
+        try std.testing.expectEqualStrings(case.expected, result.string);
+    }
+
+    // `__VERSION__` is a string, so `.length` counts its UTF-16 units.
+    {
+        var evaluator = ComptimeEvaluator.init(allocator, "__VERSION__.length", 1, 1);
+        evaluator.version = "0.18.0";
+        const result = try evaluator.evaluate();
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(f64, 6), result.number);
+    }
+
+    // An identifier that names nothing still fails as an unknown identifier,
+    // whether it is read as a property or called as a method.
+    {
+        var evaluator = ComptimeEvaluator.init(allocator, "Nope.field", 1, 1);
+        try std.testing.expectError(ComptimeError.UnknownIdentifier, evaluator.evaluate());
+    }
+    {
+        var evaluator = ComptimeEvaluator.init(allocator, "Nope.method()", 1, 1);
+        try std.testing.expectError(ComptimeError.UnknownIdentifier, evaluator.evaluate());
     }
 }
 

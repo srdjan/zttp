@@ -46,7 +46,10 @@ cleanup() {
 trap cleanup EXIT
 
 stop_server() {
-    [ -n "$SRV_PID" ] || return
+    # `return 0`, not a bare `return`: with no server started the test yields
+    # the status of the failed `[ -n ... ]`, and under `set -e` that aborts the
+    # EXIT trap before `cleanup` reaches `rm -rf "$TMP_DIR"`.
+    [ -n "$SRV_PID" ] || return 0
     kill "$SRV_PID" 2>/dev/null || true
     sleep 0.2
     kill -9 "$SRV_PID" 2>/dev/null || true
