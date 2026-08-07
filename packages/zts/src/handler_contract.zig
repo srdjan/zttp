@@ -19,7 +19,6 @@ const module_binding = @import("module_binding.zig");
 const contract_json_writer = @import("contract_json_writer.zig");
 const contract_json_parser = @import("contract_json_parser.zig");
 const contract_types = @import("contract_types.zig");
-const contract_builder = @import("contract_builder.zig");
 
 // Re-exports from contract_types.zig
 pub const HandlerLoc = contract_types.HandlerLoc;
@@ -79,8 +78,14 @@ pub const CapabilityMatrix = contract_types.CapabilityMatrix;
 pub const computeCapabilityMatrix = contract_types.computeCapabilityMatrix;
 pub const HandlerContract = contract_types.HandlerContract;
 
-// Re-exports from contract_builder.zig
-pub const ContractBuilder = contract_builder.ContractBuilder;
+// `ContractBuilder` is deliberately NOT re-exported here. This file is the
+// contract's data and serialization; `contract_builder.zig` is the extraction
+// pass that fills one in, and it reaches the type checker, the effect
+// inference, the rule registry and six extractors to do so. Re-exporting the
+// builder made every consumer of the contract type import all of that: the
+// alias alone put 23 files into the engine's import closure. Name
+// `contract_builder.zig` directly. See
+// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 pub const containsString = json_utils.containsString;
 

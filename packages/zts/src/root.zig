@@ -50,6 +50,10 @@
 const std = @import("std");
 const build_options = @import("build_options");
 const diagnostic_projection = @import("diagnostic_projection.zig");
+// The contract extraction pass. Named here rather than through
+// `handler_contract.zig`, which holds the contract's data and serialization and
+// must not drag the extractor's dependencies along behind an alias.
+const contract_builder = @import("contract_builder.zig");
 
 // ============================================================================
 // Internal implementation modules (no cross-release stability guarantee).
@@ -236,7 +240,7 @@ pub const EffectAnalyzer = effect_inference.Analyzer;
 pub const EffectRow = effect_inference.EffectRow;
 pub const FunctionEffect = effect_inference.FunctionEffect;
 pub const BytecodeVerifier = bytecode_verifier;
-pub const ContractBuilder = handler_contract.ContractBuilder;
+pub const ContractBuilder = contract_builder.ContractBuilder;
 pub const HandlerContract = handler_contract.HandlerContract;
 pub const ContractProof = struct {
     pub const Level = contract_diff.ProofLevel;

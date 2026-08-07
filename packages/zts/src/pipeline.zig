@@ -49,6 +49,7 @@ const service_types_mod = @import("service_types.zig");
 const modules_mod = @import("modules/root.zig");
 const ir_mod = @import("parser/ir.zig");
 const handler_contract_mod = @import("handler_contract.zig");
+const contract_builder_mod = @import("contract_builder.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const bytecode_mod = @import("bytecode.zig");
 const stripper_mod = @import("stripper.zig");
@@ -69,7 +70,7 @@ const TypeMap = type_map_mod.TypeMap;
 const ServiceTypeContext = service_types_mod.ServiceTypeContext;
 const HandlerContract = handler_contract_mod.HandlerContract;
 const VerificationInfo = handler_contract_mod.VerificationInfo;
-const ContractBuilder = handler_contract_mod.ContractBuilder;
+const ContractBuilder = contract_builder_mod.ContractBuilder;
 const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
 /// Public because `buildModuleFacts` returns one and callers outside the
 /// package need to name it. Reaching `zts.module_facts` directly for the same
