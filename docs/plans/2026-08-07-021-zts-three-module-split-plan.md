@@ -2,8 +2,8 @@
 
 Planned as three modules; shipped as five. The filename keeps the original name.
 
-Status: steps 0 through 4 done. Step 5 (shrinking the consumer allowlist) is
-the only part left, and is deliberately separate - see criterion 6.
+Status: done. Steps 0 through 5 are complete; step 5 closed one allowlist row
+and the rest is recorded below as deliberately not done.
 Scope: `packages/zts/`, `packages/zts/build.zig`, the root `build.zig`,
 `scripts/check-module-boundary.sh`, `scripts/module-boundary.allow`.
 
@@ -172,12 +172,9 @@ and each is revertible on its own. Order matters only in that
 change, not two: a named import needs the module to exist. Done, bottom-up, one
 tier per commit; see the results below.
 
-**Step 5 - retire the allowlist to the extent the compiler now enforces it.**
-Rows in `scripts/module-boundary.allow` that name a module now in
-`zts-compiler` or `zts-contracts` become ordinary named imports and their rows
-are deleted. Rows still naming a `zts` internal keep the gate. The gate itself
-stays: the split enforces the tier direction, not the size of any one tier's
-public surface.
+**Step 5 - shrink the consumer allowlist where a curated name earns it.**
+Done, and it closed one row rather than many; see the results below. The
+premise this step was written on did not survive the umbrella decision.
 
 ## Step 1 results, 2026-08-07
 
@@ -404,6 +401,44 @@ designed.
    work with its own trade-offs; conflating it with the split would have meant
    rewriting 136 consumer call sites for reasons unrelated to the cycle. Step 5
    below is what remains of it.
+
+## Step 5 results, 2026-08-07
+
+One commit. `bash scripts/verify.sh` passes. `scripts/module-boundary.allow`
+goes from 55 allowed package reaches to 54.
+
+**The step was written on a premise the umbrella invalidated.** It assumed rows
+would delete because consumers would import `zts-compiler` and `zts-contracts`
+directly, making those reaches ordinary named imports. With `zts` as a
+re-export-only umbrella, consumers still reach one module, so the allowlist
+still gates every internal name that leaves the package. The compiler enforces
+direction *inside* `packages/zts`; this file gates what comes *out*. The two
+checks are complementary, not redundant, and the allowlist header now says so.
+
+**What did close.** `HandlerProperties` - what a build proved about a handler -
+is a field of `HandlerContract`, which was already curated, and sixteen call
+sites across the runtime, the tools and the expert agent reached
+`zts.handler_contract` for it because it had no curated name. It has one now.
+The same pass switched every `zts.handler_contract.writeJsonString` to the
+curated `zts.writeJsonString`, which existed all along. `pi` reached
+`handler_contract` for exactly those two names, so its row is gone.
+
+**What did not, and why not.** A row closes when every symbol behind it has a
+curated name. Measured after the split, most rows reach seven to eighteen
+symbols. Of the rows reaching three or fewer, most reach things that should stay
+internal: `interpreter.PerfStats` (a benchmark-only counter layout),
+`string.RopeNode`, `bytecode_cache.SliceWriter`, `sqlite.Db`, `arena.Arena`.
+Curating those to delete a row would trade a gated internal surface for an
+ungated public one, which is a worse position than the one being fixed. The
+policy is now written into the allowlist header: close a row when the name
+belongs in the curated surface on its own merits, not to make the list shorter.
+
+**A measurement trap worth recording.** A first pass that matched only
+`zq.<module>.<symbol>` reported `runtime module_binding` at 3 symbols and
+`tools contract_diff` at 1, which made both look like easy closures. Counting
+local `const X = zq.<module>;` aliases as well puts them at 8 and 10. Acting on
+the first numbers would have curated the wrong things. Any future pass over this
+list must be alias-aware.
 
 ## What the split bought
 
