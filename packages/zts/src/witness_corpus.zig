@@ -42,7 +42,7 @@
 
 const std = @import("std");
 const counterexample = @import("counterexample.zig");
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 const file_io = @import("file_io.zig");
 const spec_discharge = @import("spec_discharge.zig");
 

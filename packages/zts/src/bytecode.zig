@@ -3,7 +3,7 @@
 //! Variable-size instruction encoding with versioned format.
 
 const std = @import("std");
-const compat = @import("compat.zig");
+const compat = @import("zts-base").compat;
 const value = @import("value.zig");
 const object = @import("object.zig");
 

@@ -53,6 +53,14 @@ MANIFEST = "scripts/zts-tiers.allow"
 TIERS = ["zts-base", "zts-contracts", "zts", "zts-compiler"]
 RANK = {name: i for i, name in enumerate(TIERS)}
 
+# Tiers already extracted into their own build module in
+# `packages/zts/build.zig`. For these the rule is stricter than direction: no
+# relative import may cross the line at all, in either direction. A relative
+# path resolves inside the importing module, so it compiles a second copy of the
+# file there, and a type from one copy is not the type from the other. Reach a
+# split tier by module name - `@import("zts-base").json_utils`.
+SPLIT = ["zts-base"]
+
 MIN_FILES = 100
 
 listing = subprocess.run(
@@ -166,13 +174,13 @@ for path in files:
         if src_tier == dst_tier:
             continue
         cross_count += 1
-        if RANK[src_tier] < RANK[dst_tier]:
+        if RANK[src_tier] < RANK[dst_tier] or src_tier in SPLIT or dst_tier in SPLIT:
             violations[(src_tier, dst_tier)].append((short(path), short(target)))
 
 if violations:
     total = sum(len(v) for v in violations.values())
     print(
-        f"zts layering: {total} imports point from a lower tier to a higher one:",
+        f"zts layering: {total} relative imports cross a module line illegally:",
         file=sys.stderr,
     )
     for (src_tier, dst_tier), pairs in sorted(
@@ -186,9 +194,10 @@ if violations:
             targets = ", ".join(sorted(by_source[source_file]))
             print(f"    {source_file}  ->  {targets}", file=sys.stderr)
     print(
-        f"\nEach one is a cycle across a proposed module line. Move the file, move "
-        f"what it reaches for,\nor change its row in {MANIFEST} - but a lower tier "
-        f"must never name a higher one.",
+        f"\nA lower tier must never name a higher one, and an already-split tier "
+        f"({', '.join(SPLIT)})\nmust be reached by module name rather than by "
+        f"relative path. Move the file, move what it\nreaches for, or change its "
+        f"row in {MANIFEST}.",
         file=sys.stderr,
     )
     sys.exit(1)

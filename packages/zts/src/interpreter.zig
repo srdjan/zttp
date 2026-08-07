@@ -21,7 +21,7 @@ const call = @import("interpreter/call.zig");
 const alloc = @import("interpreter/alloc.zig");
 const util = @import("interpreter/util.zig");
 const lifecycle = @import("interpreter/lifecycle.zig");
-const compat = @import("compat.zig");
+const compat = @import("zts-base").compat;
 
 const tier_count = perf.tier_count;
 

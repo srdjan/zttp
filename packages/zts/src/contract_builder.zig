@@ -12,7 +12,7 @@ const std = @import("std");
 const handler_contract = @import("handler_contract.zig");
 const contract_types = @import("contract_types.zig");
 const api_schema = @import("api_schema.zig");
-const known_globals = @import("known_globals.zig");
+const known_globals = @import("zts-base").known_globals;
 
 /// Display form for a varying read, derived from the shared list so a new
 /// entry cannot reach the proof card without a snippet.
@@ -27,7 +27,7 @@ fn snippetForVaryingRead(object_name: []const u8, property_name: []const u8) []c
     return "a varying global read";
 }
 
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const atom_table = @import("atom_table.zig");

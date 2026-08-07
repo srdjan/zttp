@@ -124,6 +124,11 @@ pub fn build(b: *std.Build) void {
     zts_build_options.addOption(bool, "perf_histogram", perf_histogram_enabled);
     zts_build_options.addOption(bool, "analyzer_only", false);
     zts_tests_root.addOptions("build_options", zts_build_options);
+    // This root is a second module over the same src/root.zig, so it needs the
+    // same named imports the `zts` module gets in packages/zts/build.zig. The
+    // module object comes from the dependency, so `zts-base` is the same module
+    // here and there rather than a second copy of those files.
+    zts_tests_root.addImport("zts-base", zts_dep.module("zts-base"));
     zts_tests_root.addImport("zttp-sdk", zttp_sdk_dep.module("zttp-sdk"));
     zts_tests_root.addImport("zttp-modules", zttp_modules_dep.module("zttp-modules"));
     zts_tests_root.addCSourceFile(.{

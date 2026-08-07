@@ -18,7 +18,7 @@ const mb = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const path_gen = @import("path_generator.zig");
 
-const route_match = @import("route_match.zig");
+const route_match = @import("zts-base").route_match;
 const Constraint = path_gen.Constraint;
 const StubInfo = path_gen.StubInfo;
 const GeneratedTest = path_gen.GeneratedTest;

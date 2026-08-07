@@ -12,9 +12,9 @@
 
 const std = @import("std");
 const handler_contract = @import("handler_contract.zig");
-const route_match = @import("route_match.zig");
-const json_utils = @import("json_utils.zig");
-const json_wire = @import("json_wire.zig");
+const route_match = @import("zts-base").route_match;
+const json_utils = @import("zts-base").json_utils;
+const json_wire = @import("zts-base").json_wire;
 const system_config = @import("system_config.zig");
 
 const HandlerContract = handler_contract.HandlerContract;

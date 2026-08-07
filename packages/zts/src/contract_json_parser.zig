@@ -7,12 +7,12 @@
 const std = @import("std");
 const contract_types = @import("contract_types.zig");
 const handler_contract = @import("handler_contract.zig");
-const json_wire = @import("json_wire.zig");
+const json_wire = @import("zts-base").json_wire;
 // The capability vocabulary from the leaf file that defines it, not through
 // `module_binding.zig`, which would pull the module bridge and the engine
 // into a contract parser.
-const module_binding = @import("module_authorization.zig");
-const json_utils = @import("json_utils.zig");
+const module_binding = @import("zts-base").module_authorization;
+const json_utils = @import("zts-base").json_utils;
 
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;

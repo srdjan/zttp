@@ -16,7 +16,7 @@
 
 const std = @import("std");
 const ir = @import("parser/ir.zig");
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 const object = @import("object.zig");
 const context = @import("context.zig");
 const type_pool_mod = @import("type_pool.zig");

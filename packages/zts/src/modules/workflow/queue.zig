@@ -10,7 +10,7 @@ const value = @import("../../value.zig");
 const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
-pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.queue);
+pub const MODULE_STATE_SLOT = @intFromEnum(@import("zts-base").module_slots.Slot.queue);
 
 pub const QueueCallbacks = struct {
     send_fn: *const fn (*anyopaque, *context.Context, []const u8, value.JSValue) anyerror!value.JSValue,

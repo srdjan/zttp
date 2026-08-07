@@ -17,7 +17,7 @@ const builtins = @import("builtins/root.zig");
 const bytecode = @import("bytecode.zig");
 const handler_policy = @import("handler_policy.zig");
 const modules = @import("modules/root.zig");
-const module_authorization = @import("module_authorization.zig");
+const module_authorization = @import("zts-base").module_authorization;
 const parallel_collection = @import("parallel_collection.zig");
 
 pub const cost_meter = @import("cost_meter.zig");

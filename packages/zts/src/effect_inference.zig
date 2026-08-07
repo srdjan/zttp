@@ -19,7 +19,7 @@ const builtin_modules = @import("builtin_modules.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
 const bool_checker = @import("bool_checker.zig");
-const known_globals = @import("known_globals.zig");
+const known_globals = @import("zts-base").known_globals;
 
 const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;

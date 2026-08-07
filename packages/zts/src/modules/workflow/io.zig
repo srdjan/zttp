@@ -36,7 +36,7 @@ const parallel_collection = @import("../../parallel_collection.zig");
 /// to match.
 pub const MAX_PARALLEL: u32 = 8;
 
-pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.io);
+pub const MODULE_STATE_SLOT = @intFromEnum(@import("zts-base").module_slots.Slot.io);
 
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:io",

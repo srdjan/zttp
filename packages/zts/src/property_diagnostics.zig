@@ -20,7 +20,7 @@ const fault_cov = @import("fault_coverage.zig");
 const flow_checker_mod = @import("flow_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
 const handler_contract = @import("handler_contract.zig");
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 
 const IrView = ir.IrView;
 const GeneratedTest = path_gen.GeneratedTest;

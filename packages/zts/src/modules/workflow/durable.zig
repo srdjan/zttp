@@ -15,7 +15,7 @@ const resolver = @import("../internal/resolver.zig");
 const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
-pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.durable_api);
+pub const MODULE_STATE_SLOT = @intFromEnum(@import("zts-base").module_slots.Slot.durable_api);
 
 /// Runtime-owned callbacks installed by src/zruntime.zig when --durable is enabled.
 pub const DurableCallbacks = struct {

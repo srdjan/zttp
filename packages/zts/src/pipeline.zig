@@ -44,7 +44,7 @@ const module_facts_mod = @import("module_facts.zig");
 const context_mod = @import("context.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
-const type_map_mod = @import("type_map.zig");
+const type_map_mod = @import("zts-base").type_map;
 const service_types_mod = @import("service_types.zig");
 const modules_mod = @import("modules/root.zig");
 const module_types_mod = @import("module_types.zig");
@@ -54,7 +54,7 @@ const contract_builder_mod = @import("contract_builder.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const bytecode_mod = @import("bytecode.zig");
 const stripper_mod = @import("stripper.zig");
-const compat_mod = @import("compat.zig");
+const compat_mod = @import("zts-base").compat;
 const string_mod = @import("string.zig");
 
 const NodeIndex = ir_mod.NodeIndex;

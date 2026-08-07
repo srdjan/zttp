@@ -16,7 +16,7 @@ const handler_contract = @import("handler_contract.zig");
 const flow_checker = @import("flow_checker.zig");
 const counterexample = @import("counterexample.zig");
 const ir = @import("parser/ir.zig");
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 const spec_discharge = @import("spec_discharge.zig");
 
 const HandlerProperties = handler_contract.HandlerProperties;

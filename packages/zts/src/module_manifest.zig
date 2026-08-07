@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const mb = @import("module_binding.zig");
-const module_specifier = @import("module_specifier.zig");
+const module_specifier = @import("zts-base").module_specifier;
 
 /// Specifier syntax lives in `module_specifier.zig` so the parser and the
 /// module resolver can name it without importing this manifest parser.

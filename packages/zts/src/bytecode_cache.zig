@@ -14,7 +14,7 @@
 //! - Nested functions: recursive bytecode serialization
 
 const std = @import("std");
-const compat = @import("compat.zig");
+const compat = @import("zts-base").compat;
 const bytecode = @import("bytecode.zig");
 const value = @import("value.zig");
 const string = @import("string.zig");

@@ -12,7 +12,7 @@ const ModuleBinding = mb.ModuleBinding;
 const extension_bindings = @import("extension_bindings.zig");
 const file_io = @import("file_io.zig");
 const contract_types = @import("contract_types.zig");
-const module_authorization = @import("module_authorization.zig");
+const module_authorization = @import("zts-base").module_authorization;
 const std = @import("std");
 const modules = @import("zttp-modules");
 

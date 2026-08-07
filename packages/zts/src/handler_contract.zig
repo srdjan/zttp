@@ -14,8 +14,8 @@
 //! the parser and atom table that produced it.
 
 const std = @import("std");
-const json_utils = @import("json_utils.zig");
-const module_authorization = @import("module_authorization.zig");
+const json_utils = @import("zts-base").json_utils;
+const module_authorization = @import("zts-base").module_authorization;
 const contract_json_writer = @import("contract_json_writer.zig");
 const contract_json_parser = @import("contract_json_parser.zig");
 const contract_types = @import("contract_types.zig");

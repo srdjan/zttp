@@ -11,7 +11,7 @@
 //! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
-const json_wire = @import("json_wire.zig");
+const json_wire = @import("zts-base").json_wire;
 
 pub const SystemConfig = struct {
     version: u32,

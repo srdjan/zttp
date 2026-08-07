@@ -16,8 +16,8 @@ const object = @import("object.zig");
 const string = @import("string.zig");
 const util = @import("modules/internal/util.zig");
 
-const module_slots = @import("module_slots.zig");
-const json_utils = @import("json_utils.zig");
+const module_slots = @import("zts-base").module_slots;
+const json_utils = @import("zts-base").json_utils;
 
 pub const TRACE_STATE_SLOT = @intFromEnum(module_slots.Slot.trace);
 

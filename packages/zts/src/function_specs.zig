@@ -16,7 +16,7 @@ const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const spec_discharge = @import("spec_discharge.zig");
 const contract_types = @import("contract_types.zig");
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 
 const IrView = ir.IrView;
 const EffectAnalyzer = effect_inference.Analyzer;

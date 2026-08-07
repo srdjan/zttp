@@ -15,7 +15,7 @@ const match_analysis_mod = @import("match_analysis.zig");
 const bool_checker = @import("bool_checker.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 const module_facts_mod = @import("module_facts.zig");
-const known_globals = @import("known_globals.zig");
+const known_globals = @import("zts-base").known_globals;
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
 

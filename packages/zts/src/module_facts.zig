@@ -29,7 +29,7 @@ const module_binding = @import("module_binding.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_manifest = @import("module_manifest.zig");
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 
 const IrView = ir.IrView;
 const NodeIndex = ir.NodeIndex;

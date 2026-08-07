@@ -22,7 +22,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const comptime_eval = @import("comptime.zig");
-const type_map_mod = @import("type_map.zig");
+const type_map_mod = @import("zts-base").type_map;
 pub const TypeMap = type_map_mod.TypeMap;
 pub const TypeMapEntry = type_map_mod.TypeMapEntry;
 pub const TypeMapKind = type_map_mod.TypeMapKind;

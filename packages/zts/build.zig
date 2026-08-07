@@ -16,12 +16,27 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // `zts-base` is the bottom of the tier graph: vocabulary and pure helpers
+    // that name nothing else in this package. Declared as its own module so a
+    // higher tier reaches it by name. A relative import across this line would
+    // compile a second copy of the file into the importing module, and the two
+    // copies' types would not be interchangeable.
+    // `scripts/check-zts-layering.sh` fails on that; see
+    // docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+    const base_mod = b.addModule("zts-base", .{
+        .root_source_file = b.path("src/base_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = !analyzer_only,
+    });
+
     const mod = b.addModule("zts", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = !analyzer_only,
     });
+    mod.addImport("zts-base", base_mod);
     const build_options = b.addOptions();
     build_options.addOption(bool, "perf_histogram", perf_histogram);
     build_options.addOption(bool, "analyzer_only", analyzer_only);

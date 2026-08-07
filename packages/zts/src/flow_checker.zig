@@ -22,7 +22,7 @@ const builtin_modules = @import("builtin_modules.zig");
 const module_facts_mod = @import("module_facts.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
-const known_globals = @import("known_globals.zig");
+const known_globals = @import("zts-base").known_globals;
 const counterexample = @import("counterexample.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 

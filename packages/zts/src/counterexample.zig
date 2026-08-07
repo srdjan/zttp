@@ -25,7 +25,7 @@
 
 const std = @import("std");
 const mb = @import("module_binding.zig");
-const json_utils = @import("json_utils.zig");
+const json_utils = @import("zts-base").json_utils;
 
 // TODO: these types intentionally stay close to `path_generator.Constraint`
 // / `StubInfo`; a future extraction into a shared `witness_types.zig` lets

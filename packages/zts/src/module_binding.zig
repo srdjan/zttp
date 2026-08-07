@@ -26,8 +26,8 @@ const value = @import("value.zig");
 const context = @import("context.zig");
 const resolver = @import("modules/internal/resolver.zig");
 const gc = @import("gc.zig");
-const module_slots = @import("module_slots.zig");
-const compat = @import("compat.zig");
+const module_slots = @import("zts-base").module_slots;
+const compat = @import("zts-base").compat;
 const handler_policy = @import("handler_policy.zig");
 const security_events = @import("security_events.zig");
 

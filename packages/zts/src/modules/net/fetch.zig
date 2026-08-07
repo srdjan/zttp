@@ -1,5 +1,5 @@
 const std = @import("std");
-const compat = @import("../../compat.zig");
+const compat = @import("zts-base").compat;
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
 const adapter = @import("../../module_binding_adapter.zig");

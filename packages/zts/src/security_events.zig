@@ -3,8 +3,8 @@
 //! engine code and drained by the runtime to JSONL.
 
 const std = @import("std");
-const compat = @import("compat.zig");
-const json_utils = @import("json_utils.zig");
+const compat = @import("zts-base").compat;
+const json_utils = @import("zts-base").json_utils;
 
 pub const SecurityEventKind = enum {
     policy_denied_env,

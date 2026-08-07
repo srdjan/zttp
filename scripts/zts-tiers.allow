@@ -26,6 +26,7 @@
 # that, for consumer packages.
 
 # zts-base
+zts-base base_root.zig
 zts-base compat.zig
 zts-base json_utils.zig
 zts-base json_wire.zig

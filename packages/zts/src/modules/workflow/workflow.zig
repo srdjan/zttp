@@ -21,7 +21,7 @@ const value = @import("../../value.zig");
 const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
-pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.workflow);
+pub const MODULE_STATE_SLOT = @intFromEnum(@import("zts-base").module_slots.Slot.workflow);
 
 /// Runtime-owned callbacks installed by src/zruntime.zig when a system
 /// registry (a `--system` handler bundle) is present.

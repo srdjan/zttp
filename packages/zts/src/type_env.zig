@@ -12,7 +12,7 @@
 
 const std = @import("std");
 const type_pool_mod = @import("type_pool.zig");
-const type_map_mod = @import("type_map.zig");
+const type_map_mod = @import("zts-base").type_map;
 
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;

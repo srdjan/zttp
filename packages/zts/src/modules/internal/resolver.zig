@@ -11,7 +11,7 @@ const gc = @import("../../gc.zig");
 const trace = @import("../../trace.zig");
 const mb = @import("../../module_binding.zig");
 const builtin_modules = @import("../../builtin_modules.zig");
-const module_specifier = @import("../../module_specifier.zig");
+const module_specifier = @import("zts-base").module_specifier;
 
 /// Effect classification for virtual module functions.
 /// Used by the contract builder to derive handler-level properties

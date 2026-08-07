@@ -10,13 +10,13 @@ const object = @import("../object.zig");
 const value = @import("../value.zig");
 const context = @import("../context.zig");
 const cost_meter = context.cost_meter;
-const compat = @import("../compat.zig");
+const compat = @import("zts-base").compat;
 const file_io = @import("../file_io.zig");
 const sqlite_runtime = @import("../sqlite.zig");
 const security_events = @import("../security_events.zig");
 const gc = @import("../gc.zig");
 const handler_policy = @import("../handler_policy.zig");
-const module_slots = @import("../module_slots.zig");
+const module_slots = @import("zts-base").module_slots;
 const capabilities = @import("capabilities.zig");
 
 const ModuleHandle = capabilities.ModuleHandle;

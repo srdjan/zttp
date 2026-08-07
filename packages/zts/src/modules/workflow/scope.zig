@@ -15,7 +15,7 @@ const value = @import("../../value.zig");
 const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 
-pub const MODULE_STATE_SLOT = @intFromEnum(@import("../../module_slots.zig").Slot.scope);
+pub const MODULE_STATE_SLOT = @intFromEnum(@import("zts-base").module_slots.Slot.scope);
 
 pub const ScopeCallbacks = struct {
     call0_fn: *const fn (*anyopaque, value.JSValue) anyerror!value.JSValue,

@@ -16,7 +16,7 @@ const js_object = @import("../object.zig");
 const atom_table = @import("../atom_table.zig");
 const handler_analyzer = @import("../handler_analyzer.zig");
 const node_types = @import("../node_types.zig");
-const module_specifier = @import("../module_specifier.zig");
+const module_specifier = @import("zts-base").module_specifier;
 
 // Re-export types used by this module
 const JSValue = value.JSValue;

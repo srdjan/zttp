@@ -11,7 +11,7 @@ const std = @import("std");
 // file that defines them. `module_binding.zig` re-exports the same three
 // names, but reaching them there would pull the module bridge, the SDK
 // adapter and the engine into every consumer of a contract.
-const module_binding = @import("module_authorization.zig");
+const module_binding = @import("zts-base").module_authorization;
 
 fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try allocator.dupe(u8, v) else null;
