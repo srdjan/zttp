@@ -238,7 +238,7 @@ test "solve refutes a faithful-model non-law when z3 is present" {
     if (!available(a)) return error.SkipZigTest;
     const lhs = [_]zts.semantics.Term{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add } };
     const rhs = [_]zts.semantics.Term{ .{ .child = 1 }, .{ .child = 0 }, .{ .binop = .add } };
-    const q = try zts.semantics_audit.encodeRefutation(a, &lhs, &rhs);
+    const q = try zts.encodeRefutation(a, &lhs, &rhs);
     defer a.free(q);
     try std.testing.expectEqual(Verdict.counterexample, solve(q, a));
 }

@@ -14,7 +14,7 @@ const HandlerProperties = zq.handler_contract.HandlerProperties;
 const CostEnvelope = zq.handler_contract.CostEnvelope;
 const ModuleCapability = zq.module_binding.ModuleCapability;
 const capability_count = zq.module_binding.capability_count;
-const cost_meter = zq.context.cost_meter;
+const cost_meter = zq.CostMeter;
 
 pub const CapabilityMatrix = zq.handler_contract.CapabilityMatrix;
 pub const CostCeilings = runtime_config.CostCeilings;

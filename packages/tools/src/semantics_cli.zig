@@ -55,7 +55,7 @@ pub fn runSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8) !voi
     }
 
     const allocator = std.heap.smp_allocator;
-    const rendered = try zts.semantics_render.renderSpecTs(allocator);
+    const rendered = try zts.renderSpecTs(allocator);
     defer allocator.free(rendered);
 
     if (check_path) |path| {

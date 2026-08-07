@@ -3,7 +3,7 @@
 //!
 //! The tool loads the handler at `path`, runs the FlowChecker, and for each
 //! diagnostic whose property tag appears in the requested `goals` set,
-//! synthesises a witness using `zts.counterexample.solve`. Each witness
+//! synthesises a witness using `zts.solveCounterexample`. Each witness
 //! carries a concrete Request plus the virtual-module stub sequence needed
 //! to drive the handler into the violating state. The same shape feeds the
 //! runtime witness-replay path used by the expert loop.
@@ -27,8 +27,6 @@ const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const property_goals = @import("../property_goals.zig");
-
-const ir = zts.parser;
 const counterexample = zts.counterexample;
 const flow_checker = zts.flow_checker;
 const writeJsonString = zts.writeJsonString;
@@ -175,7 +173,7 @@ fn execute(
             .{@errorName(e)},
         );
     };
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
     const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
         return registry_mod.ToolResult.err(
@@ -235,7 +233,7 @@ fn execute(
         const io_calls: []const counterexample.TrackedIoCall =
             if (diag.witness) |wit| wit.io_calls else &.{};
 
-        var witness = counterexample.solve(allocator, .{
+        var witness = zts.solveCounterexample(allocator, .{
             .property = tag,
             .origin = span,
             .sink = span,

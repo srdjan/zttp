@@ -195,13 +195,11 @@ test "execute lists persisted entries with summary and counts" {
 
     // Seed the corpus directly via the witness_corpus API so the test does
     // not depend on flow_checker producing a witness from sample source.
-    const counterexample = zts.counterexample;
-
     const dir = try witness_corpus.corpusDir(allocator, "h.ts");
     defer allocator.free(dir);
     try witness_corpus.ensureCorpusDir(allocator, dir, "h.ts");
 
-    var w = try counterexample.solve(allocator, .{
+    var w = try zts.solveCounterexample(allocator, .{
         .property = .no_secret_leakage,
         .origin = .{ .line = 1, .column = 1 },
         .sink = .{ .line = 2, .column = 1 },

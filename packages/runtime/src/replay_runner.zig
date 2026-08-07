@@ -422,7 +422,7 @@ test "witness round-trip: solved witness replays into an executable leak" {
     const io_calls = [_]counterexample.TrackedIoCall{
         .{ .module = "env", .func = "env", .returns = .optional_string },
     };
-    var witness = try counterexample.solve(allocator, .{
+    var witness = try zq.solveCounterexample(allocator, .{
         .property = .no_secret_leakage,
         .origin = .{ .line = 3, .column = 18 },
         .sink = .{ .line = 5, .column = 12 },

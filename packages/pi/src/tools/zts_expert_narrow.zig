@@ -10,8 +10,6 @@ const std = @import("std");
 const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-
-const ir = zts.parser;
 const flow_checker = zts.flow_checker;
 const counterexample = zts.counterexample;
 const writeJsonString = zts.handler_contract.writeJsonString;
@@ -93,7 +91,7 @@ fn execute(
             .{@errorName(e)},
         );
     };
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
     const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
         return registry_mod.ToolResult.err(

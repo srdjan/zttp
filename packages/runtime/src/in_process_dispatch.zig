@@ -110,7 +110,7 @@ pub const SystemRuntime = struct {
         const system_json = try zq.file_io.readFile(allocator, system_json_path, 1024 * 1024);
         defer allocator.free(system_json);
 
-        var config = try zq.system_linker.parseSystemConfig(allocator, system_json);
+        var config = try zq.parseSystemConfig(allocator, system_json);
         defer config.deinit(allocator);
 
         var sub_config = base_config;

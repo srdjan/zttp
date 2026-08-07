@@ -7,7 +7,7 @@ const zq = @import("zts");
 const embedded_handler = @import("embedded_handler");
 const fault_explain = @import("fault_explain.zig");
 
-const cost_meter = zq.context.cost_meter;
+const cost_meter = zq.CostMeter;
 
 pub const DurableWorkflowProperties = struct {
     /// Runtime proof gates are off for direct/no-contract runtime use. The
@@ -165,7 +165,7 @@ pub fn openOplogAppendFile(allocator: std.mem.Allocator, path: []const u8) !std.
     return fd;
 }
 
-pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.heap.Heap, config: RuntimeConfig) void {
+pub fn applyRuntimeConfig(ctx: *zq.Context, gc_state: *zq.GC, heap_state: *zq.Heap, config: RuntimeConfig) void {
     ctx.enforce_arena_escape = config.enforce_arena_escape;
 
     // FaaS workloads see less benefit from the stock 10k threshold; the

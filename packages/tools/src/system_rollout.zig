@@ -606,7 +606,7 @@ fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {
     return std.mem.eql(u8, a.?, b.?);
 }
 
-fn proofLevelString(level: system_linker.ProofLevel) []const u8 {
+fn proofLevelString(level: zts.SystemProofLevel) []const u8 {
     return switch (level) {
         .complete => "complete",
         .partial => "partial",

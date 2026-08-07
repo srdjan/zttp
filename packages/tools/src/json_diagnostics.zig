@@ -15,7 +15,7 @@ const restrictionCatalog = zts.RestrictionCatalog;
 const handler_contract = zts.handler_contract;
 const writeJsonString = handler_contract.writeJsonString;
 
-pub const IrView = parser.IrView;
+pub const IrView = zts.IrView;
 pub const SourceLocation = parser.SourceLocation;
 pub const ParseError = parser.ParseError;
 pub const ErrorKind = parser.ErrorKind;
@@ -547,9 +547,8 @@ fn writeEffectCapsulesJson(writer: anytype, items: anytype) !void {
 // -------------------------------------------------------------------------
 
 pub fn writeModulesJson(writer: anytype) !void {
-    const builtin_modules = zts.builtin_modules;
     try writer.writeByte('[');
-    for (builtin_modules.all, 0..) |binding, i| {
+    for (zts.builtinModules, 0..) |binding, i| {
         if (i > 0) try writer.writeByte(',');
         try writer.writeAll("{\"specifier\":");
         try writeJsonString(writer, binding.specifier);
@@ -581,8 +580,7 @@ pub fn writeModulesJson(writer: anytype) !void {
 }
 
 pub fn writeModulesText(writer: anytype) !void {
-    const builtin_modules = zts.builtin_modules;
-    for (builtin_modules.all) |binding| {
+    for (zts.builtinModules) |binding| {
         try writer.print("{s}\n", .{binding.specifier});
         for (binding.exports) |func| {
             try writer.print("  {s}\n", .{func.name});

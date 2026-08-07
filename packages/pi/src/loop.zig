@@ -814,10 +814,10 @@ fn finishTurn(
     };
 }
 
-/// Monotonic time in milliseconds. Delegates to zts.compat.monotonicNowNs
+/// Monotonic time in milliseconds. Delegates to zts.monotonicNowNs
 /// which reads CLOCK_MONOTONIC directly and is safe for interval checks.
 fn nowMonotonicMs() i64 {
-    return @intCast((zts.compat.monotonicNowNs() catch 0) / 1_000_000);
+    return @intCast((zts.monotonicNowNs() catch 0) / 1_000_000);
 }
 
 fn invokeToolRecovering(

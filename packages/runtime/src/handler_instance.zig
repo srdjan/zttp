@@ -64,7 +64,7 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 
 const runtime_config_mod = @import("runtime_config.zig");
-const cost_meter = zq.context.cost_meter;
+const cost_meter = zq.CostMeter;
 
 /// Public because `HandlerInstance.init` takes one, and the benchmark harness
 /// in `packages/runtime/bench/` reaches this file as a module rather than by
@@ -115,7 +115,7 @@ pub const HandlerInstance = struct {
     allocator: std.mem.Allocator,
     ctx: *zq.Context,
     gc_state: *zq.GC,
-    heap: *zq.heap.Heap,
+    heap: *zq.Heap,
     interpreter: zq.Interpreter,
     last_opt_stats: zq.OptStats,
     strings: *zq.StringTable,
@@ -260,9 +260,9 @@ pub const HandlerInstance = struct {
         errdefer gc_state.deinit();
 
         // Initialize heap for size-class allocation and wire up to GC
-        const heap_state = try allocator.create(zq.heap.Heap);
+        const heap_state = try allocator.create(zq.Heap);
         errdefer allocator.destroy(heap_state);
-        heap_state.* = zq.heap.Heap.init(allocator, .{});
+        heap_state.* = zq.Heap.init(allocator, .{});
         gc_state.setHeap(heap_state);
 
         // Initialize context
@@ -273,7 +273,7 @@ pub const HandlerInstance = struct {
         applyEmbeddedCapabilityPolicy(ctx, config);
 
         // Install core JS builtins (Array.prototype, Object, Math, JSON, etc.)
-        try zq.builtins.initBuiltins(ctx);
+        try zq.initBuiltins(ctx);
 
         // Initialize hybrid allocation if enabled
         var arena_state: ?*zq.arena.Arena = null;
@@ -421,7 +421,7 @@ pub const HandlerInstance = struct {
 
         // Install core JS builtins if the pooled runtime hasn't already done so.
         if (pool_rt.ctx.builtin_objects.items.len == 0) {
-            try zq.builtins.initBuiltins(pool_rt.ctx);
+            try zq.initBuiltins(pool_rt.ctx);
         }
         try self.installBindings();
 
@@ -794,7 +794,7 @@ pub const HandlerInstance = struct {
     fn installVirtualModules(self: *Self) !void {
         if (self.config.replay_file_path != null) {
             // Replay mode: stubs that return recorded values from ReplayState
-            inline for (zq.builtin_modules.all) |binding| {
+            inline for (zq.builtinModules) |binding| {
                 if (comptime std.mem.eql(u8, binding.specifier, "zttp:queue")) {
                     if (self.queue_system_ref != null) {
                         try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
@@ -807,16 +807,16 @@ pub const HandlerInstance = struct {
             }
         } else if (self.config.durable_oplog_dir != null) {
             // Durable mode: hybrid replay/record wrappers
-            inline for (zq.builtin_modules.all) |binding| {
+            inline for (zq.builtinModules) |binding| {
                 try zq.modules.registerVirtualModuleDurable(binding, self.ctx, self.allocator);
             }
         } else if (self.config.trace_file_path != null) {
             // Use traced wrappers that record I/O to TraceRecorder
-            inline for (zq.builtin_modules.all) |binding| {
+            inline for (zq.builtinModules) |binding| {
                 try zq.modules.registerVirtualModuleTraced(binding, self.ctx, self.allocator);
             }
         } else {
-            inline for (zq.builtin_modules.all) |binding| {
+            inline for (zq.builtinModules) |binding| {
                 try zq.modules.registerVirtualModule(binding, self.ctx, self.allocator);
             }
         }
@@ -1033,7 +1033,7 @@ pub const HandlerInstance = struct {
         };
 
         {
-            const ir_view = zq.parser.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
+            const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
             const parsed = zq.pipeline.ParsedModule.fromExisting(ir_view, p.root_node, &self.ctx.atoms);
 
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
@@ -1155,7 +1155,7 @@ pub const HandlerInstance = struct {
     /// Call a global function by name with the provided arguments.
     /// Returns the function result or error.NotCallable if missing or not callable.
     pub fn callGlobalFunction(self: *Self, name: []const u8, args: []const zq.JSValue) !zq.JSValue {
-        const atom = zq.object.lookupPredefinedAtom(name) orelse try self.ctx.atoms.intern(name);
+        const atom = zq.lookupPredefinedAtom(name) orelse try self.ctx.atoms.intern(name);
         const func_val = self.ctx.getGlobal(atom) orelse return error.NotCallable;
         if (!func_val.isCallable()) return error.NotCallable;
         const func_obj = func_val.toPtr(zq.JSObject);

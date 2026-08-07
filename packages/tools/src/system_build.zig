@@ -57,7 +57,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
     };
     defer allocator.free(system_json);
 
-    var config = system_linker.parseSystemConfig(allocator, system_json) catch |err| {
+    var config = zts.parseSystemConfig(allocator, system_json) catch |err| {
         std.debug.print("Error parsing {s}: {}\n", .{ system_path, err });
         std.process.exit(2);
     };

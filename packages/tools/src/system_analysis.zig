@@ -22,7 +22,7 @@ pub fn loadCompiledSystem(
     const system_json = try zts.file_io.readFile(allocator, system_path, 1024 * 1024);
     defer allocator.free(system_json);
 
-    var config = try system_linker.parseSystemConfig(allocator, system_json);
+    var config = try zts.parseSystemConfig(allocator, system_json);
     errdefer config.deinit(allocator);
     try precompile.resolveSystemHandlerPaths(allocator, system_path, &config);
 

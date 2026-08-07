@@ -650,7 +650,7 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
 
     try json.objectField("module_catalog");
     try json.beginArray();
-    for (zts.builtin_modules.all) |binding| {
+    for (zts.builtinModules) |binding| {
         try json.beginObject();
         try json.objectField("specifier");
         try json.write(binding.specifier);
@@ -898,7 +898,7 @@ fn writeModulesPayload(
 
     try json.objectField("builtins");
     try json.beginArray();
-    for (zts.builtin_modules.all) |binding| {
+    for (zts.builtinModules) |binding| {
         try json.beginObject();
         try json.objectField("specifier");
         try json.write(binding.specifier);
@@ -3615,7 +3615,7 @@ test "meta publishes the built-in module catalog from the bindings" {
     defer parsed.deinit();
 
     const catalog = parsed.value.object.get("payload").?.object.get("module_catalog").?.array;
-    try testing.expectEqual(zts.builtin_modules.all.len, catalog.items.len);
+    try testing.expectEqual(zts.builtinModules.len, catalog.items.len);
     for (catalog.items) |item| {
         const module = item.object;
         try testing.expect(std.mem.startsWith(u8, module.get("specifier").?.string, "zttp:"));

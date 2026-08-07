@@ -14,45 +14,35 @@
 
 # runtime
 runtime arena
-runtime builtin_modules
 runtime builtins
 runtime bytecode
 runtime bytecode_cache
 runtime compat
-runtime context
 runtime contract_diff
 runtime counterexample
 runtime equivalence_receipt
 runtime file_io
 runtime handler_contract
 runtime handler_policy
-runtime heap
 runtime http
 # packages/runtime/bench/benchmark.zig reads interpreter.PerfStats to report
 # perf counters. Benchmark-only; the counter layout is not stable surface.
 runtime interpreter
 runtime module_binding
 runtime modules
-runtime object
-runtime parser
 runtime perf_receipt
 runtime pipeline
 runtime policy
 runtime security_events
 runtime spec_discharge
 runtime string
-runtime system_linker
 runtime trace
 runtime witness_corpus
 
 # tools
 tools builtin_modules
-tools builtins
 tools bytecode_cache
-tools compat
 tools contract_diff
-tools counterexample
-tools fault_coverage
 tools file_io
 tools handler_contract
 tools handler_policy
@@ -63,32 +53,25 @@ tools parser
 tools pipeline
 tools proof_trace
 tools property_diagnostics
-tools route_match
 tools semantics
-tools semantics_audit
 tools semantics_check
 tools semantics_corpus
-tools semantics_render
 tools semantics_smt
 tools service_types
 tools spec_discharge
-tools sql_analysis
 tools sqlite
 tools system_linker
 tools trace
 tools witness_corpus
 
 # pi
-pi compat
 pi contract_diff
 pi counterexample
 pi file_io
 pi flow_checker
 pi handler_contract
-pi handler_verifier
 pi parser
 pi repair_plan
-pi system_linker
 pi witness_corpus
 
 # proof-review

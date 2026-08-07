@@ -41,7 +41,7 @@ pub fn unixMillis() i64 {
 }
 
 pub fn monotonicNowNs() !u64 {
-    return zq.compat.monotonicNowNs();
+    return zq.monotonicNowNs();
 }
 
 pub fn jsInt(value: i32) JSValue {

@@ -11,7 +11,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const routePatternsMatch = zts.route_match.pathsMatch;
+const routePatternsMatch = zts.pathsMatch;
 const handler_contract = zts.handler_contract;
 const HandlerContract = zts.HandlerContract;
 

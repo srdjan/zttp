@@ -246,7 +246,7 @@ fn collectImports(
     if (is_tsx or std.mem.endsWith(u8, importer_rel, ".jsx")) js_parser.tokenizer.enableJsx();
     _ = js_parser.parse() catch {};
 
-    const view = parser.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const node_count = view.nodeCount();
     var idx: usize = 0;
     while (idx < node_count) : (idx += 1) {

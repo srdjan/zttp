@@ -129,7 +129,7 @@ fn persistFlowWitnessesNative(
 
     var pinned_regressions: usize = 0;
     for (flow_witnesses) |projection| {
-        var witness = zts.counterexample.solve(allocator, .{
+        var witness = zts.solveCounterexample(allocator, .{
             .property = projection.property,
             .origin = .{ .line = projection.line, .column = projection.column },
             .sink = .{ .line = projection.line, .column = projection.column },
@@ -687,7 +687,7 @@ fn forEachSignatureType(
     visit: fn (*Ctx, module: []const u8, export_name: []const u8, position: usize, text: []const u8) anyerror!void,
 ) !usize {
     var count: usize = 0;
-    for (zts.builtin_modules.all) |binding| {
+    for (zts.builtinModules) |binding| {
         for (binding.exports) |func| {
             for (func.param_types, 0..) |pt, i| {
                 try visit(ctx, binding.specifier, func.name, i, returnKindToTs(pt));
@@ -783,10 +783,10 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,
     // satisfies every assertion below over nothing at all - and then gets cited
     // as evidence that every export types.
-    try std.testing.expect(zts.builtin_modules.all.len > 0);
+    try std.testing.expect(zts.builtinModules.len > 0);
 
     var exports: usize = 0;
-    for (zts.builtin_modules.all) |binding| exports += binding.exports.len;
+    for (zts.builtinModules) |binding| exports += binding.exports.len;
     try std.testing.expect(exports > 0);
 
     const allocator = std.testing.allocator;
@@ -799,9 +799,9 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
     // Coverage, not mere presence: one `declare module` per module and one
     // `export function` per export, so an emitter that silently dropped a
     // module fails here rather than shrinking the corpus in silence.
-    try std.testing.expectEqual(zts.builtin_modules.all.len, std.mem.count(u8, emitted, "declare module \""));
+    try std.testing.expectEqual(zts.builtinModules.len, std.mem.count(u8, emitted, "declare module \""));
     try std.testing.expectEqual(exports, std.mem.count(u8, emitted, "  export function "));
-    for (zts.builtin_modules.all) |binding| {
+    for (zts.builtinModules) |binding| {
         try std.testing.expect(std.mem.indexOf(u8, emitted, binding.specifier) != null);
     }
 }

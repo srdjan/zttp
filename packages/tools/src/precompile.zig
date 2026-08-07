@@ -29,8 +29,6 @@ const prove_upgrade = @import("prove_upgrade.zig");
 const build_report = @import("report.zig");
 pub const json_diag = @import("json_diagnostics.zig");
 const sqlite = zts.sqlite;
-const sql_analysis = zts.sql_analysis;
-
 const util = @import("precompile_util.zig");
 
 const args_mod = @import("precompile_args.zig");
@@ -351,7 +349,7 @@ fn buildContractForServiceContext(
 
     const root = try js_parser.parse();
     try validateVirtualModuleImports(
-        ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
         &atoms,
         handler_path,
     );
@@ -401,7 +399,7 @@ fn loadServiceTypeContextNative(
     const system_json = try readFilePosix(allocator, resolved_system_path, 1024 * 1024);
     defer allocator.free(system_json);
 
-    var config = try system_linker.parseSystemConfig(allocator, system_json);
+    var config = try zts.parseSystemConfig(allocator, system_json);
     defer config.deinit(allocator);
     try resolveSystemHandlerPaths(allocator, resolved_system_path, &config);
 
@@ -528,7 +526,7 @@ fn importedFunctionLabels(
     if (is_tsx or std.mem.endsWith(u8, path, ".jsx")) parser.enableJsx();
     _ = parser.parse() catch return null;
 
-    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
     var flow = zts.FlowChecker.init(allocator, view, &atoms);
     defer flow.deinit();
     return flow.exportedReturnLabels(name);
@@ -1021,7 +1019,7 @@ const PathAnalysis = struct {
 fn analyzeHandlerPaths(
     state_allocator: std.mem.Allocator,
     output_allocator: std.mem.Allocator,
-    ir_view: ir.IrView,
+    ir_view: zts.IrView,
     atoms: *zts.AtomTable,
     handler_fn: ir.NodeIndex,
     include_behaviors: bool,
@@ -1062,7 +1060,7 @@ fn analyzeHandlerPaths(
         analysis.behaviors = try generator.toBehaviorPaths(output_allocator);
     }
 
-    var checker = zts.fault_coverage.FaultCoverageChecker.init(output_allocator, tests);
+    var checker = zts.FaultCoverageChecker.init(output_allocator, tests);
     defer checker.deinit();
     try checker.analyze();
     const report = checker.getReport();
@@ -1203,7 +1201,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
 
     // Stage 3: Import validation
     validateVirtualModuleImports(
-        ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
         &atoms,
         handler_path,
     ) catch {
@@ -1219,7 +1217,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         root,
     ) catch {};
 
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
 
     // One import index for this compile, owned here because the phase structs
@@ -1567,7 +1565,7 @@ pub fn runGenTests(
         return error.ParseError;
     };
 
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const handler_fn = findHandlerFunction(ir_view, root) orelse return 0;
 
     var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
@@ -1633,7 +1631,7 @@ pub fn compileHandler(
         // `undefined`.
         var iso_buf: [24]u8 = undefined;
         const fallback_seconds: i64 = blk: {
-            const ms = zts.compat.realtimeNowMs() catch break :blk 0;
+            const ms = zts.realtimeNowMs() catch break :blk 0;
             break :blk @divTrunc(ms, 1000);
         };
         const build_time_value = opts.build_time orelse zts.pipeline.formatIsoTimestamp(&iso_buf, fallback_seconds);
@@ -1696,7 +1694,7 @@ pub fn compileHandler(
     const needs_contract = true; // Always extract for auto-sandboxing
 
     try validateVirtualModuleImports(
-        ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
+        zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
         &atoms,
         filename,
     );
@@ -1733,7 +1731,7 @@ pub fn compileHandler(
         root,
     ) catch {};
 
-    const ir_view_check = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view_check = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view_check, root, &atoms);
 
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
@@ -1827,7 +1825,7 @@ pub fn compileHandler(
     var result_safe: bool = false;
     var optional_safe: bool = false;
     if (emit_verify) {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = zts.findHandlerFunction(ir_view, root);
 
         const verifier_env: ?*const zts.TypeEnv = type_env_storage.envPtr();
@@ -1981,7 +1979,7 @@ pub fn compileHandler(
 
     if (emit_aot) {
         // Try transpiler first (general-purpose IR-to-Zig)
-        const ir_view_aot = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const ir_view_aot = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         var transpiler = IrTranspiler.init(allocator, ir_view_aot, &atoms);
         // Note: transpiler is NOT deferred deinit - its output is borrowed
 
@@ -2077,7 +2075,7 @@ pub fn compileHandler(
     var violations_jsonl: ?[]const u8 = null;
     var violations_summary: ?[]const u8 = null;
     if (generate_tests or (emit_contract and contract != null)) {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
             var gen = zts.PathGenerator.init(allocator, ir_view, &atoms);
@@ -2124,7 +2122,7 @@ pub fn compileHandler(
             }
 
             // Fault coverage analysis on generated paths
-            var fc = zts.fault_coverage.FaultCoverageChecker.init(allocator, gen.getTests());
+            var fc = zts.FaultCoverageChecker.init(allocator, gen.getTests());
             defer fc.deinit();
             try fc.analyze();
             const fc_report = fc.getReport();
@@ -2245,7 +2243,7 @@ fn resolveImportedAtomName(
 }
 
 fn validateVirtualModuleImports(
-    view: ir.IrView,
+    view: zts.IrView,
     atoms: ?*zts.AtomTable,
     filename: []const u8,
 ) !void {
@@ -2284,7 +2282,7 @@ fn validateVirtualModuleImports(
 
 /// Scan parsed IR for file import declarations
 fn hasFileImports(js_parser: *zts.parser.JsParser, _: ir.NodeIndex) bool {
-    const view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const node_count = view.nodeCount();
 
     for (0..node_count) |idx| {
@@ -2427,7 +2425,7 @@ fn analyzeAot(
     atoms: *zts.AtomTable,
     root: ir.NodeIndex,
 ) !?AotAnalysis {
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const handler_fn = findHandlerFunction(ir_view, root) orelse return null;
 
     var analyzer = zts.HandlerAnalyzer.init(allocator, ir_view, atoms);
@@ -2502,7 +2500,7 @@ fn buildContractWithPolicy(
     /// of constructing a second identical one and re-checking the same root.
     resolved: ?*const zts.pipeline.ResolvedModule,
 ) !HandlerContract {
-    const contract_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const contract_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(contract_view, root, atoms);
 
     // One index for this contract build, shared by the contract builder and the
@@ -2535,7 +2533,7 @@ fn buildContractWithPolicy(
     // the caller ran it upstream (runCheckOnlyFromSource does), otherwise
     // runs the walk here.
     {
-        const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
             var owned_flow: ?zts.FlowChecker = null;
@@ -2636,7 +2634,7 @@ fn buildMultiModuleContract(
             null;
         defer if (temp_aot) |*aot| aot.deinit(allocator);
 
-        const module_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        const module_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         const parsed = zts.pipeline.ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
         var module_contract = try zts.pipeline.extractContractFromParsed(
             allocator,
@@ -2697,7 +2695,7 @@ fn validateSqlContractNative(
     defer db.close();
 
     for (contract.sql.queries.items) |*query| {
-        var analysis = sql_analysis.analyzeStatement(allocator, query.statement) catch |err| {
+        var analysis = zts.analyzeSqlStatement(allocator, query.statement) catch |err| {
             if (!builtin.is_test) {
                 debugPrint("Unsupported SQL statement for query '{s}': {s}\n", .{ query.name, query.statement });
             }
@@ -3447,7 +3445,7 @@ test "contract construction propagates type-check allocation failure" {
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     const root = try js_parser.parse();
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
 
     try std.testing.expectError(

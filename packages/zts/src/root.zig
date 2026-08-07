@@ -153,6 +153,7 @@ pub const JSValue = value.JSValue;
 pub const Context = context.Context;
 pub const GC = gc.GC;
 pub const GCConfig = gc.GCConfig;
+pub const Heap = heap.Heap;
 pub const LockFreePool = pool.LockFreePool;
 pub const Runtime = pool.LockFreePool.Runtime;
 pub const Interpreter = interpreter.Interpreter;
@@ -161,6 +162,9 @@ pub const FunctionBytecode = bytecode.FunctionBytecode;
 pub const FunctionBytecodeCompact = bytecode.FunctionBytecodeCompact;
 pub const Atom = object.Atom;
 pub const AtomTable = context.AtomTable;
+/// Per-request cost accounting: the `Meter` a `Context` carries and the
+/// `ModuleClass` buckets it charges against.
+pub const CostMeter = context.cost_meter;
 pub const HiddenClassIndex = object.HiddenClassIndex;
 pub const HiddenClassPool = object.HiddenClassPool;
 pub const JSObject = object.JSObject;
@@ -170,6 +174,9 @@ pub const JSString = string.JSString;
 pub const StringTable = string.StringTable;
 pub const createString = string.createString;
 pub const Parser = parser.Parser;
+/// Read-only view over a parsed IR store, for walking a program without
+/// holding the parser.
+pub const IrView = parser.IrView;
 pub const StripResult = stripper.StripResult;
 pub const StripOptions = stripper.StripOptions;
 pub const StripDiagnostic = stripper.StripDiagnostic;
@@ -422,6 +429,57 @@ pub const TRACE_STATE_SLOT = trace.TRACE_STATE_SLOT;
 /// Serialize a string as a JSON string literal, escaping per RFC 8259. Every
 /// consumer that writes JSON by hand reached `json_utils` for this one function.
 pub const writeJsonString = json_utils.writeJsonString;
+
+/// Every virtual module linked into this build: the core built-ins plus any
+/// explicitly registered extensions. Iterate it to register the module set.
+pub const builtinModules = builtin_modules.all;
+
+/// Install the JavaScript global built-ins into a fresh context.
+pub const initBuiltins = builtins.initBuiltins;
+
+/// Resolve a predefined atom by name, for a caller holding a name but no
+/// `AtomTable`.
+pub const lookupPredefinedAtom = object.lookupPredefinedAtom;
+
+/// Monotonic clock, for measuring elapsed time. Not comparable across
+/// processes and unrelated to wall-clock time.
+pub const monotonicNowNs = compat.monotonicNowNs;
+
+/// Wall-clock time in milliseconds since the Unix epoch.
+pub const realtimeNowMs = compat.realtimeNowMs;
+
+/// Enumerate the failable paths a handler can take and report which are
+/// covered.
+pub const FaultCoverageChecker = fault_coverage.FaultCoverageChecker;
+
+/// One finding from the handler verifier, with its location and kind.
+/// Qualified because `Diagnostic` alone says nothing about which checker
+/// produced it - compare `SpecDiagnostic` and `StripDiagnostic`.
+pub const VerifierDiagnostic = handler_verifier.Diagnostic;
+
+/// Search for a concrete input that refutes a proof obligation.
+pub const solveCounterexample = counterexample.solve;
+
+/// Whether a request path matches a route pattern, including parameter
+/// segments.
+pub const pathsMatch = route_match.pathsMatch;
+
+/// Classify a single SQL statement: which tables it touches and whether it
+/// writes.
+pub const analyzeSqlStatement = sql_analysis.analyzeStatement;
+
+/// Encode a semantics refutation for the SMT layer.
+pub const encodeRefutation = semantics_audit.encodeRefutation;
+
+/// Render a module semantics spec as TypeScript.
+pub const renderSpecTs = semantics_render.renderSpecTs;
+
+/// Parse a multi-handler system configuration from its on-disk form.
+pub const parseSystemConfig = system_linker.parseSystemConfig;
+
+/// How much of a linked system is proven. Qualified to keep it distinct from
+/// `ContractProof.Level`, which grades a single handler's contract.
+pub const SystemProofLevel = system_linker.ProofLevel;
 
 /// The registry of installed extension manifests. `Registry` alone is too
 /// generic for a surface this small, so the curated name says which registry.

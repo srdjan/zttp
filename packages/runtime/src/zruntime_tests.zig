@@ -46,7 +46,7 @@ const HttpRequestView = http_types.HttpRequestView;
 const HttpRequestOwned = http_types.HttpRequestOwned;
 
 const runtime_config_mod = @import("runtime_config.zig");
-const cost_meter = zq.context.cost_meter;
+const cost_meter = zq.CostMeter;
 
 const RuntimeConfig = runtime_config_mod.RuntimeConfig;
 

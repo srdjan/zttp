@@ -10,9 +10,6 @@ const std = @import("std");
 const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-
-const ir = zts.parser;
-
 const name = "zts_expert_effects";
 
 pub const tool: registry_mod.ToolDef = .{
@@ -89,7 +86,7 @@ fn execute(
             .{@errorName(e)},
         );
     };
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
     var analyzer = zts.EffectAnalyzer.init(allocator, ir_view, &atoms);
     defer analyzer.deinit();
@@ -130,7 +127,7 @@ fn execute(
 const WriteContext = struct {
     allocator: std.mem.Allocator,
     env: *const zts.TypeEnv,
-    ir_view: ir.IrView,
+    ir_view: zts.IrView,
 };
 
 fn writeEnvelope(

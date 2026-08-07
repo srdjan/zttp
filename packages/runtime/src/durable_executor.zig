@@ -27,7 +27,6 @@ const runtime_http = @import("runtime_http.zig");
 const HandlerInstance = handler_instance.HandlerInstance;
 const HttpResponse = @import("http_types.zig").HttpResponse;
 const HttpHeader = @import("http_types.zig").HttpHeader;
-const compat = zq.compat;
 const ActiveDurableRun = HandlerInstance.ActiveDurableRun;
 const PendingDurableRecovery = HandlerInstance.PendingDurableRecovery;
 const PendingDurableWait = HandlerInstance.PendingDurableWait;
@@ -58,7 +57,7 @@ const StepDeadlineGuard = struct {
             .deadline_ns = rt.ctx.deadline_ns,
             .interrupt_requested = rt.ctx.interrupt_requested.load(.monotonic),
         };
-        const now = compat.monotonicNowNs() catch return guard;
+        const now = zq.monotonicNowNs() catch return guard;
         const timeout_ns = if (timeout_ms <= 0)
             @as(u64, 0)
         else

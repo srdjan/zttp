@@ -905,7 +905,7 @@ fn stableViolationKey(
     return out;
 }
 
-fn systemProofLevelString(level: zts.system_linker.ProofLevel) []const u8 {
+fn systemProofLevelString(level: zts.SystemProofLevel) []const u8 {
     return switch (level) {
         .complete => "complete",
         .partial => "partial",

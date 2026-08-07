@@ -30,7 +30,7 @@ pub fn forWitness(
 
 test "forWitness produces a 64-char hex digest" {
     const allocator = std.testing.allocator;
-    var witness = try counterexample.solve(allocator, .{
+    var witness = try zts.solveCounterexample(allocator, .{
         .property = .no_secret_leakage,
         .origin = .{ .line = 3, .column = 1 },
         .sink = .{ .line = 5, .column = 12 },

@@ -296,9 +296,9 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !Compi
     const parser_alloc = parser_counting.allocator();
     const codegen_alloc = codegen_counting.allocator();
 
-    var strings = zq.string.StringTable.init(parser_alloc);
+    var strings = zq.StringTable.init(parser_alloc);
     defer strings.deinit();
-    var atoms = zq.context.AtomTable.init(parser_alloc);
+    var atoms = zq.AtomTable.init(parser_alloc);
     defer atoms.deinit();
 
     var p = try zq.Parser.init(parser_alloc, source, &strings, &atoms);

@@ -60,9 +60,9 @@ fn executeBuildTimeHandler(
 ) !HandlerExecResult {
     const ctx = try zts.createContext(allocator, .{ .nursery_size = 64 * 1024 });
     defer zts.destroyContext(ctx);
-    try zts.builtins.initBuiltins(ctx);
+    try zts.initBuiltins(ctx);
 
-    inline for (zts.builtin_modules.all) |binding| {
+    inline for (zts.builtinModules) |binding| {
         try zts.modules.registerVirtualModuleReplay(binding, ctx, allocator);
     }
 

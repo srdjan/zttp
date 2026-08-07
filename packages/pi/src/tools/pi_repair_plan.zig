@@ -5,11 +5,8 @@ const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const property_goals = @import("../property_goals.zig");
-
-const ir = zts.parser;
 const counterexample = zts.counterexample;
 const flow_checker = zts.flow_checker;
-const handler_verifier = zts.handler_verifier;
 const writeJsonString = zts.writeJsonString;
 const repair_plan = zts.repair_plan;
 
@@ -139,7 +136,7 @@ pub fn planFromSource(
     const program_root = js_parser.parse() catch |e| {
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": parse failed: {s}\n", .{@errorName(e)});
     };
-    const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
         return registry_mod.ToolResult.err(allocator, name ++ ": no handler function found in file\n");
     };
@@ -206,7 +203,7 @@ pub fn planFromSource(
         const loc = ir_view.getLoc(diag.node) orelse continue;
         const constraints: []const counterexample.WitnessConstraint = if (diag.witness) |wit| wit.path_constraints else &.{};
         const io_calls: []const counterexample.TrackedIoCall = if (diag.witness) |wit| wit.io_calls else &.{};
-        var witness = counterexample.solve(allocator, .{
+        var witness = zts.solveCounterexample(allocator, .{
             .property = tag,
             .origin = .{ .line = loc.line, .column = loc.column },
             .sink = .{ .line = loc.line, .column = loc.column },
@@ -267,7 +264,7 @@ pub fn planFromSource(
 fn writeVerifierDiagnostic(
     writer: *std.Io.Writer,
     id: []const u8,
-    diag: handler_verifier.Diagnostic,
+    diag: zts.VerifierDiagnostic,
     line: u32,
     column: u32,
 ) !void {
@@ -405,9 +402,9 @@ pub fn concreteTemplate(
 }
 
 pub fn repairSubjectName(
-    ir_view: ir.IrView,
+    ir_view: zts.IrView,
     atoms: *zts.AtomTable,
-    diag: handler_verifier.Diagnostic,
+    diag: zts.VerifierDiagnostic,
 ) ?[]const u8 {
     return switch (diag.kind) {
         .unchecked_result_value, .unchecked_optional_access => memberObjectName(ir_view, atoms, diag.node),
@@ -417,7 +414,7 @@ pub fn repairSubjectName(
 }
 
 fn memberObjectName(
-    ir_view: ir.IrView,
+    ir_view: zts.IrView,
     atoms: *zts.AtomTable,
     node: zts.parser.NodeIndex,
 ) ?[]const u8 {
@@ -429,7 +426,7 @@ fn memberObjectName(
 }
 
 fn identifierName(
-    ir_view: ir.IrView,
+    ir_view: zts.IrView,
     atoms: *zts.AtomTable,
     node: zts.parser.NodeIndex,
 ) ?[]const u8 {
@@ -452,7 +449,7 @@ fn hasRequestedFlowDiagnostics(
     return false;
 }
 
-fn hasVerifierErrors(diagnostics: []const handler_verifier.Diagnostic) bool {
+fn hasVerifierErrors(diagnostics: []const zts.VerifierDiagnostic) bool {
     for (diagnostics) |diag| {
         if (diag.severity == .err) return true;
     }

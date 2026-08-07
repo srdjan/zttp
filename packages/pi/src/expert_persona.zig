@@ -1071,7 +1071,7 @@ fn seedFixtureWitness(
     summary: []const u8,
     pinned: bool,
 ) ![]u8 {
-    var w = try counterexample.solve(allocator, .{
+    var w = try zts.solveCounterexample(allocator, .{
         .property = property,
         .origin = .{ .line = 1, .column = 1 },
         .sink = .{ .line = 2, .column = 1 },
@@ -1167,7 +1167,7 @@ test "persona witness section truncates cleanly when the budget overflows" {
     const wide_summary = "x" ** 600;
     var seeded: usize = 0;
     while (seeded < 64) : (seeded += 1) {
-        var w = try counterexample.solve(allocator, .{
+        var w = try zts.solveCounterexample(allocator, .{
             .property = .no_secret_leakage,
             .origin = .{ .line = @intCast(seeded + 1), .column = 1 },
             .sink = .{ .line = @intCast(seeded + 2), .column = 1 },
