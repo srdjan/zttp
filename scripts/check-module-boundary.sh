@@ -23,11 +23,16 @@
 # way to embed the engine. Only the internal tier is counted.
 #
 # This is the enforcement half of the "curated zts / zts-compiler /
-# zts-contracts modules" item. Splitting the package into three build modules
-# would additionally require rewiring 36 of the 84 files in packages/zts/src
-# off relative imports, or Zig analyzes the engine twice and the same type
-# becomes two incompatible types across the module boundary. The allowlist
-# freezes the surface first; the physical split stays available.
+# zts-contracts modules" item. This header used to price the other half at
+# "rewiring 36 of the 84 files in packages/zts/src off relative imports". Both
+# numbers went stale, and the import rewiring was never the blocker. Run
+# `bash scripts/zts-import-graph.sh` for the live figures and
+# `docs/plans/2026-08-07-021-zts-three-module-split-plan.md` for what the split
+# costs: the package is one cyclic import graph, its engine entry points reach
+# every file in it, and a cycle spanning a module line is exactly what makes
+# Zig analyze the engine twice and turn one type into two incompatible ones.
+# The cycles come first, the import rewiring second. The allowlist freezes the
+# surface meanwhile; the physical split stays available.
 
 set -euo pipefail
 
