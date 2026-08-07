@@ -161,9 +161,9 @@ and each is revertible on its own. Order matters only in that
 `trace.zig` to `root.zig` is first and free. Done; see the results below.
 
 **Step 2 - assign every file to a tier and prove the assignment is acyclic.**
-Extend the step 0 script to read a tier manifest and fail on any edge from a
-lower tier to a higher one. This is the gate that says the split will compile,
-before any build wiring is touched. Resolve the unplaced files here.
+`scripts/zts-tiers.allow` holds the assignment and
+`scripts/check-zts-layering.sh` enforces it, wired into `zig build test` as
+`test-zts-layering`. Done; see the results below.
 
 **Step 3 - rewire cross-tier relative imports to named imports.** Mechanical,
 and the compiler catches every miss. Under the assignment above this touches on
@@ -247,6 +247,69 @@ are now measured rather than guessed:
   consistent with all three being engine-tier runtime enforcement.
 - `file_io.zig` imports `modules/internal/module_graph.zig`, which is why it
   cannot go into `zts-base` as it stands.
+
+## Step 2 results, 2026-08-07
+
+Two commits. `bash scripts/verify.sh` passes, and `zig build test` now depends
+on `test-zts-layering`.
+
+The assignment, from `scripts/zts-tiers.allow`:
+
+| Tier | Files |
+|---|---|
+| `zts-base` | 9 |
+| `zts-contracts` | 8 |
+| `zts` | 90 |
+| `zts-compiler` | 50 |
+
+767 edges, 231 of them crossing a tier line, none pointing upward.
+
+The first run of the gate reported 26 upward imports. Every one came from the
+contracts tier or below; **the engine reported none**, which is what step 1 was
+for. They resolved in two ways.
+
+Four files were simply in the wrong tier. `module_facts.zig`, `proof_trace.zig`,
+`api_schema.zig` and `contract_diff.zig` all read like contract data by name,
+but they import the parser, the flow checker, the type environment and the
+behavior canonicalizer: they are compiler-tier and are now filed there.
+`module_manifest.zig` moved the other way, into `zts` - it parses extension
+manifests describing module bindings, which is about modules rather than about a
+handler's contract, and it belongs beside `builtin_modules.zig`.
+`route_match.zig` moved down to `zts-base`, `node_types.zig` up to `zts`.
+
+Six were real, and all six were the contracts tier reaching for vocabulary
+rather than machinery. Three moves fixed them:
+
+- `unescapeJson` moved from `trace.zig` to `json_utils.zig`. A contract parser
+  decoding a recorded body had to import the trace recorder, and the engine
+  behind it, for one string unescaper.
+- `capability_count` and `capabilityHash` moved from
+  `module_binding/capabilities.zig` to `module_authorization.zig`, beside the
+  `ModuleCapability` enum they derive from. That file imports nothing, so a
+  contract can name the whole capability vocabulary without the module bridge.
+- `computeCapabilityMatrix` moved from `contract_types.zig` to
+  `builtin_modules.zig`. It resolves each specifier through the linked module
+  registry, so it belongs with the registry; the `CapabilityMatrix` type needs
+  only the enum and stayed. `handler_contract.zig` stopped re-exporting it, and
+  the curated surface gained `zts.computeCapabilityMatrix` so the two runtime
+  callers did not need a wider internal allowlist.
+
+Each original file re-exports what it used to define, so no consumer package
+changed except those two runtime call sites.
+
+### Three unplaced files, now decided
+
+- **`file_io.zig` is `zts`, not `zts-base`.** It imports
+  `modules/internal/module_graph.zig`, so it cannot sit at the bottom as it
+  stands. Decision 2 said generic utilities go into `zts-base` to keep
+  `zts-compiler` from linking the engine to read a file; that still holds for
+  `compat.zig` and `json_utils.zig`, and `file_io.zig` needs its own cut before
+  it can join them. Not attempted here: it does not block the split, only the
+  size of what `zts-compiler` links.
+- **`policy.zig`, `handler_policy.zig` and `security_events.zig` are `zts`.**
+  They are runtime enforcement, they import each other, and nothing above them
+  needs them lower.
+- **`trace.zig` is `zts`**, as expected: it is the engine-side recorder.
 
 ## Success criteria
 
