@@ -158,7 +158,7 @@ stale price in the `check-module-boundary.sh` header. Done.
 **Step 1 - cut the seven back edges, one commit each.** No module boundary
 exists yet, so each cut is independently verifiable with `zig build test-zts`
 and each is revertible on its own. Order matters only in that
-`trace.zig` to `root.zig` is first and free.
+`trace.zig` to `root.zig` is first and free. Done; see the results below.
 
 **Step 2 - assign every file to a tier and prove the assignment is acyclic.**
 Extend the step 0 script to read a tier manifest and fail on any edge from a
@@ -180,6 +180,73 @@ Rows in `scripts/module-boundary.allow` that name a module now in
 are deleted. Rows still naming a `zts` internal keep the gate. The gate itself
 stays: the split enforces the tier direction, not the size of any one tier's
 public surface.
+
+## Step 1 results, 2026-08-07
+
+Six commits. `bash scripts/verify.sh` passes.
+
+| | Before | After |
+|---|---|---|
+| Files under `packages/zts/src` | 154 | 157 |
+| Relative import edges | 760 | 765 |
+| Engine import closure | 154 (100%) | 94 (60%) |
+| Largest strongly connected component | 101 | 48 |
+| Non-trivial components | 3 | 6 |
+
+What changed, in order:
+
+1. `trace.zig` stopped importing `root.zig`. Local
+   `testCreateContext`/`testDestroyContext` replace the four test-only reaches.
+   Closure 154 to 128.
+2. `handler_contract.zig` stopped re-exporting `ContractBuilder`. Its two
+   callers, `pipeline.zig` and `root.zig`, name `contract_builder.zig`.
+   Closure 128 to 105.
+3. Two new leaf files gave `parser/codegen.zig` lower homes for the vocabulary
+   it borrowed: `node_types.zig` holds `ExprType` and `NodeTypeMap` (was in
+   `bool_checker.zig`), and `module_specifier.zig` holds `validSpecifier` and
+   `namespaced_export_separator` (was in `module_manifest.zig`). Both original
+   files re-export what they used to define. Closure 105 to 102 with two files
+   added.
+4. `modules/internal/types.zig` moved to `module_types.zig`. It fills a
+   `TypeEnv` from the module bindings and only the type checker, the handler
+   verifier and the pipeline call it. Closure 102 to 98.
+5. `SystemConfig` and `parseSystemConfig` moved from `system_linker.zig` to
+   `system_config.zig`, so `zttp:service` can read `system.json` at runtime
+   without importing 1700 lines of cross-handler proof. Closure to 97 of 157.
+6. `handler_policy.zig` imports `contract_types.zig` instead of
+   `handler_contract.zig`. One line; every name it resolves is unchanged.
+   Closure 97 to 94.
+
+Two rows in the original table turned out not to be cuts:
+
+- **`parser/codegen.zig` to `handler_analyzer.zig` was left in place.**
+  `handler_analyzer.zig` imports `bytecode.zig`, `parser/ir.zig`, `object.zig`
+  and `context.zig` and nothing else, and what it produces is a
+  `PatternDispatchTable` the interpreter reads at run time. It is an engine
+  optimization pass, not analysis, so codegen naming it is a same-tier edge.
+  This is the row the plan flagged as behavior-bearing; the behavior does not
+  need to move, so no test was needed to pin it.
+- **`modules/internal/resolver.zig` to `builtin_modules.zig` resolved itself.**
+  Cuts 3 and 4 removed the paths that made it load-bearing.
+
+The two rows the ranking still reports are the same kind: what sits behind
+`parser/root.zig` to `parser/codegen.zig` is `handler_analyzer.zig`, and behind
+`modules/net/service.zig` to `system_config.zig` is `system_config.zig` and
+`json_wire.zig`. All are engine or base tier. **There is no engine-to-compiler
+back edge left.**
+
+The remaining components are each inside a single proposed tier, with one
+exception to resolve in step 2: the 48-file component is the engine, and it
+contains `contract_types.zig`, `handler_policy.zig`, `policy.zig` and
+`file_io.zig`. Those four are the unplaced files listed above, and three of them
+are now measured rather than guessed:
+
+- `contract_types.zig` imports `module_binding.zig` and `builtin_modules.zig`,
+  so contracts-at-the-bottom needs one more cut before it is legal.
+- `policy.zig` imports `handler_policy.zig` and `security_events.zig`, which is
+  consistent with all three being engine-tier runtime enforcement.
+- `file_io.zig` imports `modules/internal/module_graph.zig`, which is why it
+  cannot go into `zts-base` as it stands.
 
 ## Success criteria
 
