@@ -185,11 +185,11 @@ test "an all-zero capabilityHash means absent, and a present matrix never produc
 
     // A matrix built the normal way is always stamped, including when no
     // specifier maps to a capability.
-    const no_caps = zts.handler_contract.computeCapabilityMatrix(&.{});
+    const no_caps = zts.computeCapabilityMatrix(&.{});
     try std.testing.expect(!std.mem.allEqual(u8, &no_caps.hash, 0));
     try std.testing.expectEqual(@as(u8, 0), no_caps.len);
 
-    const with_caps = zts.handler_contract.computeCapabilityMatrix(&.{"zttp:crypto"});
+    const with_caps = zts.computeCapabilityMatrix(&.{"zttp:crypto"});
     try std.testing.expect(with_caps.len > 0);
     try std.testing.expect(!std.mem.allEqual(u8, &with_caps.hash, 0));
     try std.testing.expect(!std.mem.eql(u8, &no_caps.hash, &with_caps.hash));

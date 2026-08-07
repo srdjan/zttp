@@ -482,7 +482,7 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
 /// this handler's imports. Compare against `contract.capabilities.hash` to
 /// detect drift between a compiled contract and the runtime binary.
 pub fn deriveLiveCapabilityMatrix(contract: *const RuntimeContract) CapabilityMatrix {
-    return zq.handler_contract.computeCapabilityMatrix(contract.modules);
+    return zq.computeCapabilityMatrix(contract.modules);
 }
 
 /// Verify the embedded matrix still matches what the linked registry would

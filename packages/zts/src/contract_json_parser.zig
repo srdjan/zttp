@@ -8,8 +8,11 @@ const std = @import("std");
 const contract_types = @import("contract_types.zig");
 const handler_contract = @import("handler_contract.zig");
 const json_wire = @import("json_wire.zig");
-const module_binding = @import("module_binding.zig");
-const trace = @import("trace.zig");
+// The capability vocabulary from the leaf file that defines it, not through
+// `module_binding.zig`, which would pull the module bridge and the engine
+// into a contract parser.
+const module_binding = @import("module_authorization.zig");
+const json_utils = @import("json_utils.zig");
 
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
@@ -1134,11 +1137,11 @@ fn projectIntent(
         };
         errdefer assertion.deinit(allocator);
         if (assertion_wire.requestBodyJson) |body| {
-            assertion.request_body_json = try trace.unescapeJson(allocator, body.bytes);
+            assertion.request_body_json = try json_utils.unescapeJson(allocator, body.bytes);
         }
         assertion.expected_status = if (assertion_wire.expectedStatus) |status| status.value else null;
         if (assertion_wire.expectedBodyJson) |body| {
-            assertion.expected_body_json = try trace.unescapeJson(allocator, body.bytes);
+            assertion.expected_body_json = try json_utils.unescapeJson(allocator, body.bytes);
         }
         try assertion.expected_headers.ensureTotalCapacity(allocator, assertion_wire.expectedHeaders.len);
         for (assertion_wire.expectedHeaders) |header_wire| {

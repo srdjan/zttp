@@ -438,6 +438,11 @@ pub const writeJsonString = json_utils.writeJsonString;
 /// explicitly registered extensions. Iterate it to register the module set.
 pub const builtinModules = builtin_modules.all;
 
+/// Union the capabilities every named module requires, resolved through the
+/// registry linked into this build. The runtime compares the result against
+/// an embedded contract's stored matrix to detect drift.
+pub const computeCapabilityMatrix = builtin_modules.computeCapabilityMatrix;
+
 /// Install the JavaScript global built-ins into a fresh context.
 pub const initBuiltins = builtins.initBuiltins;
 

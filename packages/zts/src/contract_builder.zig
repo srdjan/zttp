@@ -79,7 +79,7 @@ const HandlerProperties = contract_types.HandlerProperties;
 const RateLimitInfo = contract_types.RateLimitInfo;
 const ServiceCallInfo = contract_types.ServiceCallInfo;
 const DurableWorkflowProofLevel = contract_types.DurableWorkflowProofLevel;
-const computeCapabilityMatrix = contract_types.computeCapabilityMatrix;
+const computeCapabilityMatrix = @import("builtin_modules.zig").computeCapabilityMatrix;
 
 const containsString = json_utils.containsString;
 const writeJsonString = json_utils.writeJsonString;

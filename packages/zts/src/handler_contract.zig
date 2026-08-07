@@ -15,7 +15,7 @@
 
 const std = @import("std");
 const json_utils = @import("json_utils.zig");
-const module_binding = @import("module_binding.zig");
+const module_authorization = @import("module_authorization.zig");
 const contract_json_writer = @import("contract_json_writer.zig");
 const contract_json_parser = @import("contract_json_parser.zig");
 const contract_types = @import("contract_types.zig");
@@ -75,7 +75,10 @@ pub const ServiceCallInfo = contract_types.ServiceCallInfo;
 pub const WorkflowCallInfo = contract_types.WorkflowCallInfo;
 pub const EmittedAffordance = contract_types.EmittedAffordance;
 pub const CapabilityMatrix = contract_types.CapabilityMatrix;
-pub const computeCapabilityMatrix = contract_types.computeCapabilityMatrix;
+// `computeCapabilityMatrix` is NOT re-exported: it resolves specifiers
+// through the linked module registry, so it lives in `builtin_modules.zig`
+// and is reached from the curated surface as `zts.computeCapabilityMatrix`.
+// Aliasing it here would put the whole registry behind the contract type.
 pub const HandlerContract = contract_types.HandlerContract;
 
 // `ContractBuilder` is deliberately NOT re-exported here. This file is the
@@ -1735,54 +1738,6 @@ test "intent absent roundtrips as null" {
     try std.testing.expect(parsed.intent == null);
 }
 
-test "computeCapabilityMatrix unions crypto and auth into canonical set" {
-    const specs = [_][]const u8{ "zttp:crypto", "zttp:auth" };
-    const matrix = computeCapabilityMatrix(&specs);
-
-    // auth needs crypto + clock, crypto needs crypto. Union = {crypto, clock}.
-    // Canonical order is enum-declaration order: clock before crypto.
-    try std.testing.expectEqual(@as(u8, 2), matrix.len);
-    try std.testing.expectEqual(module_binding.ModuleCapability.clock, matrix.items[0]);
-    try std.testing.expectEqual(module_binding.ModuleCapability.crypto, matrix.items[1]);
-
-    // Hash is non-zero and deterministic
-    try std.testing.expect(!std.mem.allEqual(u8, &matrix.hash, 0));
-    const again = computeCapabilityMatrix(&specs);
-    try std.testing.expectEqualSlices(u8, &matrix.hash, &again.hash);
-}
-
-test "computeCapabilityMatrix is order-independent for hash" {
-    const specs_ab = [_][]const u8{ "zttp:crypto", "zttp:auth" };
-    const specs_ba = [_][]const u8{ "zttp:auth", "zttp:crypto" };
-    const a = computeCapabilityMatrix(&specs_ab);
-    const b = computeCapabilityMatrix(&specs_ba);
-    try std.testing.expectEqualSlices(u8, &a.hash, &b.hash);
-    try std.testing.expectEqual(a.len, b.len);
-}
-
-test "computeCapabilityMatrix skips unknown specifiers" {
-    const specs = [_][]const u8{ "zttp:crypto", "zttp:does-not-exist" };
-    const matrix = computeCapabilityMatrix(&specs);
-    try std.testing.expectEqual(@as(u8, 1), matrix.len);
-    try std.testing.expectEqual(module_binding.ModuleCapability.crypto, matrix.items[0]);
-}
-
-test "computeCapabilityMatrix empty input has empty len and zero hash-of-empty" {
-    const matrix = computeCapabilityMatrix(&.{});
-    try std.testing.expectEqual(@as(u8, 0), matrix.len);
-    // Hash of an empty canonical list must still be deterministic
-    const again = computeCapabilityMatrix(&.{});
-    try std.testing.expectEqualSlices(u8, &matrix.hash, &again.hash);
-}
-
-test "CapabilityMatrix.has finds present and misses absent" {
-    const specs = [_][]const u8{"zttp:log"};
-    const matrix = computeCapabilityMatrix(&specs);
-    try std.testing.expect(matrix.has(.stderr));
-    try std.testing.expect(matrix.has(.clock));
-    try std.testing.expect(!matrix.has(.crypto));
-}
-
 test "sandbox block roundtrips through writeContractJson and parseFromJson" {
     const allocator = std.testing.allocator;
 
@@ -1815,7 +1770,17 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
         .verification = null,
         .aot = null,
     };
-    contract.capabilities = computeCapabilityMatrix(contract.modules.items);
+    // Built here rather than resolved through the module registry: this test is
+    // about the contract's JSON round-trip, and reaching `builtin_modules` for a
+    // two-element matrix would put the whole registry behind this file. The two
+    // capabilities are the ones `zttp:crypto` and `zttp:time` require, in the
+    // canonical enum order `computeCapabilityMatrix` emits.
+    var capabilities: CapabilityMatrix = .{};
+    capabilities.items[0] = .clock;
+    capabilities.items[1] = .crypto;
+    capabilities.len = 2;
+    capabilities.hash = module_authorization.capabilityHash(capabilities.slice());
+    contract.capabilities = capabilities;
     defer contract.deinit(allocator);
 
     var output: std.ArrayList(u8) = .empty;

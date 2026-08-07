@@ -156,20 +156,12 @@ pub fn popActiveModuleContext(token: ActiveModuleToken) void {
 /// handler-level effect classification or RuntimePolicy derivation.
 pub const ModuleCapability = module_authorization.ModuleCapability;
 
-pub const capability_count: usize = @typeInfo(ModuleCapability).@"enum".fields.len;
-
-/// SHA-256 over a canonical capability list. Tag names are hashed in the
-/// order given, newline-separated, so equal sets produce equal digests.
-pub fn capabilityHash(caps: []const ModuleCapability) [32]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    for (caps) |c| {
-        hasher.update(@tagName(c));
-        hasher.update("\n");
-    }
-    var out: [32]u8 = undefined;
-    hasher.final(&out);
-    return out;
-}
+/// The count and the canonical hash live in `module_authorization.zig`,
+/// beside the enum they are derived from, so a contract can name the
+/// capability vocabulary without importing the module bridge and the engine
+/// behind it. Re-exported because every caller already reaches them here.
+pub const capability_count = module_authorization.capability_count;
+pub const capabilityHash = module_authorization.capabilityHash;
 
 pub const ActiveCapabilityError = ModuleCapabilityError || error{
     ClockUnavailable,

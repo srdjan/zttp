@@ -11,6 +11,8 @@ const adapter = @import("module_binding_adapter.zig");
 const ModuleBinding = mb.ModuleBinding;
 const extension_bindings = @import("extension_bindings.zig");
 const file_io = @import("file_io.zig");
+const contract_types = @import("contract_types.zig");
+const module_authorization = @import("module_authorization.zig");
 const std = @import("std");
 const modules = @import("zttp-modules");
 
@@ -342,4 +344,76 @@ test "governance entries stay aligned with public built-ins" {
     try std.testing.expectEqualStrings("packages/modules/src/platform/env.zig", entries[0].module_path);
     try std.testing.expectEqualStrings("packages/modules/module-specs/platform/env.json", entries[0].spec_path);
     try std.testing.expectEqualStrings("zttp:websocket", entries[entries.len - 1].specifier);
+}
+
+/// Union `required_capabilities` across every module resolved from
+/// `specifiers`. Unknown specifiers (third-party modules not in the linked
+/// registry) are silently skipped.
+pub fn computeCapabilityMatrix(specifiers: []const []const u8) contract_types.CapabilityMatrix {
+    var matrix: contract_types.CapabilityMatrix = .{};
+    var seen = [_]bool{false} ** module_authorization.capability_count;
+    for (specifiers) |spec| {
+        const binding = fromSpecifier(spec) orelse continue;
+        for (binding.required_capabilities) |c| {
+            seen[@intFromEnum(c)] = true;
+        }
+    }
+    var n: u8 = 0;
+    for (std.enums.values(module_authorization.ModuleCapability)) |c| {
+        if (seen[@intFromEnum(c)]) {
+            matrix.items[n] = c;
+            n += 1;
+        }
+    }
+    matrix.len = n;
+    matrix.hash = module_authorization.capabilityHash(matrix.slice());
+    return matrix;
+}
+
+test "computeCapabilityMatrix unions crypto and auth into canonical set" {
+    const specs = [_][]const u8{ "zttp:crypto", "zttp:auth" };
+    const matrix = computeCapabilityMatrix(&specs);
+
+    // auth needs crypto + clock, crypto needs crypto. Union = {crypto, clock}.
+    // Canonical order is enum-declaration order: clock before crypto.
+    try std.testing.expectEqual(@as(u8, 2), matrix.len);
+    try std.testing.expectEqual(module_authorization.ModuleCapability.clock, matrix.items[0]);
+    try std.testing.expectEqual(module_authorization.ModuleCapability.crypto, matrix.items[1]);
+
+    // Hash is non-zero and deterministic
+    try std.testing.expect(!std.mem.allEqual(u8, &matrix.hash, 0));
+    const again = computeCapabilityMatrix(&specs);
+    try std.testing.expectEqualSlices(u8, &matrix.hash, &again.hash);
+}
+
+test "computeCapabilityMatrix is order-independent for hash" {
+    const specs_ab = [_][]const u8{ "zttp:crypto", "zttp:auth" };
+    const specs_ba = [_][]const u8{ "zttp:auth", "zttp:crypto" };
+    const a = computeCapabilityMatrix(&specs_ab);
+    const b = computeCapabilityMatrix(&specs_ba);
+    try std.testing.expectEqualSlices(u8, &a.hash, &b.hash);
+    try std.testing.expectEqual(a.len, b.len);
+}
+
+test "computeCapabilityMatrix skips unknown specifiers" {
+    const specs = [_][]const u8{ "zttp:crypto", "zttp:does-not-exist" };
+    const matrix = computeCapabilityMatrix(&specs);
+    try std.testing.expectEqual(@as(u8, 1), matrix.len);
+    try std.testing.expectEqual(module_authorization.ModuleCapability.crypto, matrix.items[0]);
+}
+
+test "computeCapabilityMatrix empty input has empty len and zero hash-of-empty" {
+    const matrix = computeCapabilityMatrix(&.{});
+    try std.testing.expectEqual(@as(u8, 0), matrix.len);
+    // Hash of an empty canonical list must still be deterministic
+    const again = computeCapabilityMatrix(&.{});
+    try std.testing.expectEqualSlices(u8, &matrix.hash, &again.hash);
+}
+
+test "CapabilityMatrix.has finds present and misses absent" {
+    const specs = [_][]const u8{"zttp:log"};
+    const matrix = computeCapabilityMatrix(&specs);
+    try std.testing.expect(matrix.has(.stderr));
+    try std.testing.expect(matrix.has(.clock));
+    try std.testing.expect(!matrix.has(.crypto));
 }

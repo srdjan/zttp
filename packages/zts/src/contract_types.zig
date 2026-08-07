@@ -7,8 +7,11 @@
 //! `computeCapabilityMatrix`) live here too.
 
 const std = @import("std");
-const module_binding = @import("module_binding.zig");
-const builtin_modules = @import("builtin_modules.zig");
+// The capability enum and its two derived helpers, straight from the leaf
+// file that defines them. `module_binding.zig` re-exports the same three
+// names, but reaching them there would pull the module bridge, the SDK
+// adapter and the engine into every consumer of a contract.
+const module_binding = @import("module_authorization.zig");
 
 fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try allocator.dupe(u8, v) else null;
@@ -1474,29 +1477,11 @@ pub const CapabilityMatrix = struct {
     }
 };
 
-/// Union `required_capabilities` across every module resolved from
-/// `specifiers`. Unknown specifiers (third-party modules not in the linked
-/// registry) are silently skipped.
-pub fn computeCapabilityMatrix(specifiers: []const []const u8) CapabilityMatrix {
-    var matrix: CapabilityMatrix = .{};
-    var seen = [_]bool{false} ** module_binding.capability_count;
-    for (specifiers) |spec| {
-        const binding = builtin_modules.fromSpecifier(spec) orelse continue;
-        for (binding.required_capabilities) |c| {
-            seen[@intFromEnum(c)] = true;
-        }
-    }
-    var n: u8 = 0;
-    for (std.enums.values(module_binding.ModuleCapability)) |c| {
-        if (seen[@intFromEnum(c)]) {
-            matrix.items[n] = c;
-            n += 1;
-        }
-    }
-    matrix.len = n;
-    matrix.hash = module_binding.capabilityHash(matrix.slice());
-    return matrix;
-}
+// `computeCapabilityMatrix` lives in `builtin_modules.zig`: it resolves each
+// specifier through the linked module registry, and that registry is the
+// engine's, not the contract's. Keeping the function here made every holder
+// of a contract import the whole registry. The matrix type above needs only
+// the capability vocabulary and stays.
 
 /// Author-declared intent assertions. Extracted from a static-literal
 /// `export const intent = { assertions: [...] }` in the handler module.

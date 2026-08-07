@@ -17,6 +17,7 @@ const string = @import("string.zig");
 const util = @import("modules/internal/util.zig");
 
 const module_slots = @import("module_slots.zig");
+const json_utils = @import("json_utils.zig");
 
 pub const TRACE_STATE_SLOT = @intFromEnum(module_slots.Slot.trace);
 
@@ -1098,47 +1099,11 @@ pub fn unescapeBody(allocator: std.mem.Allocator, body: ?[]const u8) struct { sl
     return .{ .slice = out, .owned = out };
 }
 
-pub fn unescapeJson(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    var result: std.ArrayList(u8) = .empty;
-    errdefer result.deinit(allocator);
-    var i: usize = 0;
-    while (i < input.len) : (i += 1) {
-        if (input[i] == '\\' and i + 1 < input.len) {
-            i += 1;
-            switch (input[i]) {
-                '"' => try result.append(allocator, '"'),
-                '\\' => try result.append(allocator, '\\'),
-                'n' => try result.append(allocator, '\n'),
-                'r' => try result.append(allocator, '\r'),
-                't' => try result.append(allocator, '\t'),
-                '/' => try result.append(allocator, '/'),
-                'u' => {
-                    // \uXXXX unicode escape -> UTF-8
-                    if (i + 4 < input.len) {
-                        const hex = input[i + 1 .. i + 5];
-                        const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
-                            try result.append(allocator, 'u');
-                            continue;
-                        };
-                        var buf: [4]u8 = undefined;
-                        const len = std.unicode.utf8Encode(codepoint, &buf) catch {
-                            try result.append(allocator, 'u');
-                            continue;
-                        };
-                        try result.appendSlice(allocator, buf[0..len]);
-                        i += 4;
-                    } else {
-                        try result.append(allocator, 'u');
-                    }
-                },
-                else => try result.append(allocator, input[i]),
-            }
-        } else {
-            try result.append(allocator, input[i]);
-        }
-    }
-    return try result.toOwnedSlice(allocator);
-}
+/// The JSON string unescaper lives in `json_utils.zig`, so a contract
+/// parser can unescape a body without importing the trace recorder and the
+/// engine behind it. Re-exported because every consumer that decodes a
+/// recorded body already reaches it here.
+pub const unescapeJson = json_utils.unescapeJson;
 
 fn allocFloat(_: *context.Context, f: f64) value.JSValue {
     // NaN-boxing: all f64 values stored inline, no heap allocation.

@@ -47,3 +47,45 @@ pub fn containsString(items: []const []const u8, needle: []const u8) bool {
     }
     return false;
 }
+
+pub fn unescapeJson(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var result: std.ArrayList(u8) = .empty;
+    errdefer result.deinit(allocator);
+    var i: usize = 0;
+    while (i < input.len) : (i += 1) {
+        if (input[i] == '\\' and i + 1 < input.len) {
+            i += 1;
+            switch (input[i]) {
+                '"' => try result.append(allocator, '"'),
+                '\\' => try result.append(allocator, '\\'),
+                'n' => try result.append(allocator, '\n'),
+                'r' => try result.append(allocator, '\r'),
+                't' => try result.append(allocator, '\t'),
+                '/' => try result.append(allocator, '/'),
+                'u' => {
+                    // \uXXXX unicode escape -> UTF-8
+                    if (i + 4 < input.len) {
+                        const hex = input[i + 1 .. i + 5];
+                        const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
+                            try result.append(allocator, 'u');
+                            continue;
+                        };
+                        var buf: [4]u8 = undefined;
+                        const len = std.unicode.utf8Encode(codepoint, &buf) catch {
+                            try result.append(allocator, 'u');
+                            continue;
+                        };
+                        try result.appendSlice(allocator, buf[0..len]);
+                        i += 4;
+                    } else {
+                        try result.append(allocator, 'u');
+                    }
+                },
+                else => try result.append(allocator, input[i]),
+            }
+        } else {
+            try result.append(allocator, input[i]);
+        }
+    }
+    return try result.toOwnedSlice(allocator);
+}
