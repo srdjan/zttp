@@ -14,7 +14,6 @@
 
 # runtime
 runtime arena
-runtime bool_checker
 runtime builtin_modules
 runtime builtins
 runtime bytecode

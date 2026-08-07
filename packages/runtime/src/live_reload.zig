@@ -1014,7 +1014,7 @@ fn writeRestrictionFrame(
     try writer.print("  {s}{s}:{d}:{d}{s}\n", .{ c.dim, d.file, d.line, d.column, c.reset });
 
     if (source) |src| {
-        if (zts.bool_checker.getSourceLine(src, d.line)) |line_text| {
+        if (zts.sourceLine(src, d.line)) |line_text| {
             try writer.print("    {d} | {s}\n", .{ d.line, line_text });
         }
     }

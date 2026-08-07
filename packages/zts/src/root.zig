@@ -179,6 +179,27 @@ pub const strip = stripper.strip;
 pub const ComptimeEvaluator = comptime_eval.ComptimeEvaluator;
 pub const ComptimeValue = comptime_eval.ComptimeValue;
 pub const emitLiteral = comptime_eval.emitLiteral;
+
+/// Return the borrowed contents of a 1-based source line without its newline.
+/// Empty input and the empty line after a trailing newline are not lines.
+pub fn sourceLine(source: []const u8, line: u32) ?[]const u8 {
+    return bool_checker.getSourceLine(source, line);
+}
+
+test "stable sourceLine preserves source line boundaries" {
+    try std.testing.expect(sourceLine("content", 0) == null);
+    try std.testing.expect(sourceLine("", 1) == null);
+
+    const source = "first\n\nfinal";
+    try std.testing.expectEqualStrings("first", sourceLine(source, 1).?);
+    try std.testing.expectEqualStrings("", sourceLine(source, 2).?);
+    try std.testing.expectEqualStrings("final", sourceLine(source, 3).?);
+    try std.testing.expect(sourceLine(source, 4) == null);
+
+    try std.testing.expectEqualStrings("", sourceLine("\ncontent", 1).?);
+    try std.testing.expect(sourceLine("content\n", 2) == null);
+}
+
 pub const BytecodeCache = bytecode_cache.BytecodeCache;
 pub const BytecodeOptimizer = bytecode_opt.BytecodeOptimizer;
 pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
