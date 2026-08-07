@@ -3519,7 +3519,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
 
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
@@ -3845,7 +3845,7 @@ fn checkTypedSourceWithServiceContext(
 
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, service_type_context);
@@ -4478,7 +4478,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
 
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
@@ -4532,7 +4532,7 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
 
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, null);

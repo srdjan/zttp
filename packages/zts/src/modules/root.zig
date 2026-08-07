@@ -13,7 +13,6 @@ pub const util = @import("internal/util.zig");
 pub const file_resolver = @import("internal/file_resolver.zig");
 pub const module_graph = @import("internal/module_graph.zig");
 pub const compiler = @import("internal/compiler.zig");
-pub const types = @import("internal/types.zig");
 
 pub const sql = @import("data/sql.zig");
 
@@ -40,4 +39,8 @@ pub const registerVirtualModuleTraced = resolver.registerVirtualModuleTraced;
 pub const registerVirtualModuleReplay = resolver.registerVirtualModuleReplay;
 pub const registerVirtualModuleDurable = resolver.registerVirtualModuleDurable;
 pub const validateImports = resolver.validateImports;
-pub const populateModuleTypes = types.populateModuleTypes;
+// `populateModuleTypes` moved to `module_types.zig`. It fills a TypeEnv from
+// the module bindings and is called only by the type checker, the handler
+// verifier, and the analysis pipeline - never by the module system itself.
+// Re-exporting it here made the engine's module root import the type pool and
+// the type environment. Name `module_types.zig` directly.

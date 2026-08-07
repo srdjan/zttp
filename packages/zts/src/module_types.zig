@@ -7,12 +7,20 @@
 //!
 //! Replaces the hardcoded module_return_types table in bool_checker when
 //! the type checker is active.
+//!
+//! This file sat under `modules/internal/` and was re-exported by
+//! `modules/root.zig`, which made the engine's module system import the type
+//! pool and the type environment. Nothing in the engine calls it: its only
+//! callers are the type checker, the handler verifier, and the analysis
+//! pipeline. It is analysis code that happened to be filed with the module
+//! implementations. See
+//! docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
 
 const std = @import("std");
-const type_pool_mod = @import("../../type_pool.zig");
-const type_env_mod = @import("../../type_env.zig");
-const mb = @import("../../module_binding.zig");
-const builtin_modules = @import("../../builtin_modules.zig");
+const type_pool_mod = @import("type_pool.zig");
+const type_env_mod = @import("type_env.zig");
+const mb = @import("module_binding.zig");
+const builtin_modules = @import("builtin_modules.zig");
 
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;

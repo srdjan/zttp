@@ -1673,7 +1673,7 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32, expect_match
 
     var env = type_env_mod.TypeEnv.init(allocator, &pool);
     defer env.deinit();
-    @import("modules/root.zig").populateModuleTypes(&env, &pool, allocator);
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, null, &env, null);
