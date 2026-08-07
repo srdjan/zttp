@@ -6,7 +6,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const writeJsonString = zts.handler_contract.writeJsonString;
+const writeJsonString = zts.writeJsonString;
 const precompile = @import("precompile.zig");
 const json_diag = precompile.json_diag;
 const expert_meta = @import("expert_meta.zig");

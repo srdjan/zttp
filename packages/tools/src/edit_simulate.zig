@@ -11,8 +11,8 @@ const precompile = @import("precompile.zig");
 const project_config_mod = @import("project_config");
 const json_diag = precompile.json_diag;
 const file_io = zts.file_io;
-const writeJsonString = zts.handler_contract.writeJsonString;
-const HandlerProperties = zts.handler_contract.HandlerProperties;
+const writeJsonString = zts.writeJsonString;
+const HandlerProperties = zts.HandlerProperties;
 
 /// Largest request body the stdin readers accept. Published in
 /// `meta.payload.limits`.

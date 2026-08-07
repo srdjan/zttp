@@ -7,7 +7,7 @@ const std = @import("std");
 const zts = @import("zts");
 const policy_catalog = zts.PolicyCatalog;
 const idiomCatalog = zts.IdiomCatalog;
-const writeJsonString = zts.handler_contract.writeJsonString;
+const writeJsonString = zts.writeJsonString;
 
 pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;

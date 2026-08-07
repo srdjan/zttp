@@ -36,7 +36,7 @@ const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const cli_args = @import("cli_args.zig");
 const precompile = zts_cli.precompile;
-const HandlerProperties = zts.handler_contract.HandlerProperties;
+const HandlerProperties = zts.HandlerProperties;
 
 /// Source-file size cap for `ratchet show`/`check`. Handlers are
 /// authored, not generated, so 10 MB is generous; this keeps the limit

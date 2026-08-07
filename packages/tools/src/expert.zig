@@ -496,36 +496,36 @@ fn writeExtensionStatusJson(
     for (entries, 0..) |entry, idx| {
         if (idx > 0) try w.writeByte(',');
         try w.writeAll("{\"path\":");
-        try zts.handler_contract.writeJsonString(w, entry.path);
+        try zts.writeJsonString(w, entry.path);
         try w.print(",\"valid\":{s}", .{if (entry.invalid) "false" else "true"});
         if (entry.manifest) |manifest| {
             try w.writeAll(",\"specifier\":");
-            try zts.handler_contract.writeJsonString(w, manifest.specifier);
+            try zts.writeJsonString(w, manifest.specifier);
             if (manifest.backend) |backend| {
                 try w.writeAll(",\"backend\":");
-                try zts.handler_contract.writeJsonString(w, @tagName(backend));
+                try zts.writeJsonString(w, @tagName(backend));
             }
             if (manifest.state_model) |state| {
                 try w.writeAll(",\"stateModel\":");
-                try zts.handler_contract.writeJsonString(w, @tagName(state));
+                try zts.writeJsonString(w, @tagName(state));
             }
             try w.writeAll(",\"requiredCapabilities\":[");
             for (manifest.required_capabilities.items, 0..) |decl, i| {
                 if (i > 0) try w.writeByte(',');
                 if (decl.partner_name) |name| {
                     try w.writeAll("{\"name\":");
-                    try zts.handler_contract.writeJsonString(w, name);
+                    try zts.writeJsonString(w, name);
                     try w.writeAll(",\"inherits\":");
-                    try zts.handler_contract.writeJsonString(w, @tagName(decl.effective));
+                    try zts.writeJsonString(w, @tagName(decl.effective));
                     try w.writeByte('}');
                 } else {
-                    try zts.handler_contract.writeJsonString(w, @tagName(decl.effective));
+                    try zts.writeJsonString(w, @tagName(decl.effective));
                 }
             }
             try w.writeAll("]");
             if (manifest.contract_section) |section| {
                 try w.writeAll(",\"contractSection\":");
-                try zts.handler_contract.writeJsonString(w, section);
+                try zts.writeJsonString(w, section);
             }
             try w.writeAll(",\"exports\":[");
             for (manifest.exports.items, 0..) |exp, i| {
@@ -546,13 +546,13 @@ fn writeExtensionStatusJson(
 
 fn writeExportJson(w: anytype, exp: moduleMetadata.Export) !void {
     try w.writeAll("{\"name\":");
-    try zts.handler_contract.writeJsonString(w, exp.name);
+    try zts.writeJsonString(w, exp.name);
     try w.writeAll(",\"effect\":");
-    try zts.handler_contract.writeJsonString(w, @tagName(exp.effect));
+    try zts.writeJsonString(w, @tagName(exp.effect));
     try w.writeAll(",\"returns\":");
-    try zts.handler_contract.writeJsonString(w, @tagName(exp.returns));
+    try zts.writeJsonString(w, @tagName(exp.returns));
     try w.writeAll(",\"failureSeverity\":");
-    try zts.handler_contract.writeJsonString(w, @tagName(exp.failure_severity));
+    try zts.writeJsonString(w, @tagName(exp.failure_severity));
     try w.print(",\"traceable\":{s}", .{if (exp.traceable) "true" else "false"});
     try w.writeAll(",\"returnLabels\":[");
     var first = true;
@@ -560,7 +560,7 @@ fn writeExportJson(w: anytype, exp: moduleMetadata.Export) !void {
         const label: zts.module_binding.DataLabel = @enumFromInt(field.value);
         if (exp.return_labels.has(label)) {
             if (!first) try w.writeByte(',');
-            try zts.handler_contract.writeJsonString(w, field.name);
+            try zts.writeJsonString(w, field.name);
             first = false;
         }
     }
@@ -574,11 +574,11 @@ fn writeExportJson(w: anytype, exp: moduleMetadata.Export) !void {
         });
         if (rule.transform) |t| {
             try w.writeAll(",\"transform\":");
-            try zts.handler_contract.writeJsonString(w, @tagName(t));
+            try zts.writeJsonString(w, @tagName(t));
         }
         if (rule.extension_category) |tag| {
             try w.writeAll(",\"extensionCategory\":");
-            try zts.handler_contract.writeJsonString(w, tag);
+            try zts.writeJsonString(w, tag);
         }
         try w.writeByte('}');
     }

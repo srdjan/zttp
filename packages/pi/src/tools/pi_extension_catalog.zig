@@ -29,7 +29,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
-const writeJsonString = zts.handler_contract.writeJsonString;
+const writeJsonString = zts.writeJsonString;
 
 const name = "pi_extension_catalog";
 

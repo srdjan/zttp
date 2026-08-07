@@ -12,7 +12,7 @@ const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const flow_checker = zts.flow_checker;
 const counterexample = zts.counterexample;
-const writeJsonString = zts.handler_contract.writeJsonString;
+const writeJsonString = zts.writeJsonString;
 
 const name = "zts_expert_narrow";
 

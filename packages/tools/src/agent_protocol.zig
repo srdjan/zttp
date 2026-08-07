@@ -1587,7 +1587,7 @@ fn writeCheckPayload(
             // reaches the wire without an edit here and cannot be silently
             // dropped.
             try json.beginObject();
-            inline for (@typeInfo(zts.handler_contract.HandlerProperties).@"struct".fields) |field| {
+            inline for (@typeInfo(zts.HandlerProperties).@"struct".fields) |field| {
                 try json.objectField(field.name);
                 switch (field.type) {
                     bool => try json.write(@field(props, field.name)),

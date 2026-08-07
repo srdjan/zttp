@@ -100,7 +100,7 @@ fn buildJwsWithKey(
     // Name every field. HandlerProperties defaults the six flow and isolation
     // fields to true, so relying on the defaults here would put proof chips
     // for properties the contract never asserted into a signed claim.
-    const props_or_default = contract.properties orelse zts.handler_contract.HandlerProperties{
+    const props_or_default = contract.properties orelse zts.HandlerProperties{
         .pure = false,
         .read_only = false,
         .stateless = false,

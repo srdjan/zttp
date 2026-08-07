@@ -248,6 +248,13 @@ pub const FunctionEffect = effect_inference.FunctionEffect;
 pub const BytecodeVerifier = bytecode_verifier;
 pub const ContractBuilder = contract_builder.ContractBuilder;
 pub const HandlerContract = handler_contract.HandlerContract;
+
+/// What a build proved about a handler: pure, read-only, stateless, retry-safe,
+/// deterministic, and the rest. Curated alongside `HandlerContract` because it
+/// is one of that type's fields, and every consumer that reads a contract reads
+/// this - sixteen call sites across the runtime, the tools and the expert agent
+/// reached `handler_contract` for it before it had a curated name.
+pub const HandlerProperties = handler_contract.HandlerProperties;
 pub const ContractProof = struct {
     pub const Level = contract_diff.ProofLevel;
 

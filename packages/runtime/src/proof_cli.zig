@@ -384,7 +384,7 @@ pub fn writeManifest(
     }
 
     // Proven specs from the classified properties.
-    var spec_buf: [zts.handler_contract.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
+    var spec_buf: [zts.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
     var proven: std.ArrayList([]const u8) = .empty;
     defer proven.deinit(allocator);
     if (contract.properties) |props| {

@@ -2,7 +2,7 @@ const std = @import("std");
 const zts = @import("zts");
 const json_diag = @import("json_diagnostics.zig");
 const expert_meta = @import("expert_meta.zig");
-const writeJsonString = zts.handler_contract.writeJsonString;
+const writeJsonString = zts.writeJsonString;
 
 const file_io = zts.file_io;
 const builtin_modules = zts.builtin_modules;

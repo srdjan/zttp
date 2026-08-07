@@ -7,7 +7,7 @@ const std = @import("std");
 const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const edit_simulate = @import("edit_simulate.zig");
-const writeJsonString = zts.handler_contract.writeJsonString;
+const writeJsonString = zts.writeJsonString;
 const repairPolicy = zts.RepairPolicy;
 pub const RepairIntent = zts.RepairIntent;
 

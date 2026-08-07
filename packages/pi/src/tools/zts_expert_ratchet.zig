@@ -14,7 +14,7 @@ const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 
-const HandlerProperties = zts.handler_contract.HandlerProperties;
+const HandlerProperties = zts.HandlerProperties;
 
 const name = "zts_expert_ratchet";
 

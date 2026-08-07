@@ -13,7 +13,7 @@ const edit_simulate = zts_cli.edit_simulate;
 const precompile = zts_cli.precompile;
 const system_analysis = zts_cli.system_analysis;
 const contract_diff = zts.contract_diff;
-const HandlerProperties = zts.handler_contract.HandlerProperties;
+const HandlerProperties = zts.HandlerProperties;
 
 pub const PatchAnalysis = struct {
     stats: ui_payload.ProofStats,

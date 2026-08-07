@@ -11,6 +11,21 @@
 #
 # Baseline captured from the tree as it stood when the gate was added; no row
 # here is an endorsement, only a record of the reach that already existed.
+#
+# The four-tier split of packages/zts did not shrink this list, and was not
+# expected to once `zts` became a re-export-only umbrella: consumers still
+# reach one module, so the compiler enforces direction INSIDE the package
+# while this file keeps gating what leaves it. The two checks are
+# complementary, not redundant - scripts/check-zts-layering.sh pins tier
+# direction, this pins consumer surface.
+#
+# A row closes when every symbol behind it has a curated name. Measured after
+# the split, most rows reach seven to eighteen symbols, and most of what the
+# short ones reach is genuinely internal - interpreter.PerfStats,
+# string.RopeNode, bytecode_cache.SliceWriter, sqlite.Db. Curating those to
+# delete a row would trade a gated internal surface for an ungated public
+# one, which is worse. Close a row when the name belongs in the curated
+# surface on its own merits, not to make this list shorter.
 
 # runtime
 runtime arena
@@ -69,7 +84,6 @@ pi contract_diff
 pi counterexample
 pi file_io
 pi flow_checker
-pi handler_contract
 pi parser
 pi repair_plan
 pi witness_corpus
