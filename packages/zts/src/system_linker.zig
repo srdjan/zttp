@@ -15,6 +15,7 @@ const handler_contract = @import("handler_contract.zig");
 const route_match = @import("route_match.zig");
 const json_utils = @import("json_utils.zig");
 const json_wire = @import("json_wire.zig");
+const system_config = @import("system_config.zig");
 
 const HandlerContract = handler_contract.HandlerContract;
 const BehaviorPath = handler_contract.BehaviorPath;
@@ -25,36 +26,12 @@ const BoundClass = handler_contract.BoundClass;
 // Types
 // -------------------------------------------------------------------------
 
-pub const SystemConfig = struct {
-    version: u32,
-    /// The bundle's single external HTTP entry point, naming one of
-    /// `handlers[].name`. Optional for backward compatibility with manifests
-    /// predating this field. When set, `zttp link` validates it names an
-    /// existing handler and the signed `kind=workflow` receipt attests to it.
-    entry: ?[]const u8 = null, // owned
-    handlers: []HandlerEntry,
-
-    pub const HandlerEntry = struct {
-        name: []const u8, // owned
-        path: []const u8, // owned
-        /// Real-HTTP base URL, consumed only by `zttp:service`'s
-        /// `serviceCall` and raw `fetchSync` egress resolution. Optional: a
-        /// handler reached only via `zttp:workflow`'s in-process
-        /// `call`/`saga`/`fanout`/`follow` (resolved by name, never by URL)
-        /// genuinely never needs one.
-        base_url: ?[]const u8 = null, // owned
-    };
-
-    pub fn deinit(self: *SystemConfig, allocator: std.mem.Allocator) void {
-        if (self.entry) |e| allocator.free(e);
-        for (self.handlers) |entry| {
-            allocator.free(entry.name);
-            allocator.free(entry.path);
-            if (entry.base_url) |base_url| allocator.free(base_url);
-        }
-        allocator.free(self.handlers);
-    }
-};
+/// The `system.json` manifest shape and its parser live in
+/// `system_config.zig`, so `zttp:service` can read a manifest at runtime
+/// without importing this proof. Re-exported here because every caller of
+/// the linker already looks for them on the linker.
+pub const SystemConfig = system_config.SystemConfig;
+pub const parseSystemConfig = system_config.parseSystemConfig;
 
 pub const LinkStatus = enum {
     /// fetchSync URL matched a route in a system handler.
@@ -1389,65 +1366,6 @@ fn formatStatusList(allocator: std.mem.Allocator, statuses: []const u16) ![]cons
 // System config parsing
 // -------------------------------------------------------------------------
 
-const SystemHandlerWire = struct {
-    name: ?json_wire.String = null,
-    path: ?json_wire.String = null,
-    baseUrl: ?json_wire.String = null,
-};
-
-const SystemConfigWire = struct {
-    version: json_wire.Unsigned(u32) = .{ .value = null },
-    entry: ?json_wire.String = null,
-    handlers: []const SystemHandlerWire = &.{},
-};
-
-pub fn parseSystemConfig(allocator: std.mem.Allocator, json_bytes: []const u8) !SystemConfig {
-    var parsed = try json_wire.parse(SystemConfigWire, allocator, json_bytes);
-    defer parsed.deinit();
-
-    var entries: std.ArrayList(SystemConfig.HandlerEntry) = .empty;
-    errdefer {
-        for (entries.items) |entry| {
-            allocator.free(entry.name);
-            allocator.free(entry.path);
-            if (entry.base_url) |base_url| allocator.free(base_url);
-        }
-        entries.deinit(allocator);
-    }
-
-    try entries.ensureTotalCapacity(allocator, parsed.value.handlers.len);
-    for (parsed.value.handlers) |wire| {
-        const name_wire = wire.name orelse return error.InvalidJson;
-        const path_wire = wire.path orelse return error.InvalidJson;
-        const name = try allocator.dupe(u8, name_wire.bytes);
-        errdefer allocator.free(name);
-        const path = try allocator.dupe(u8, path_wire.bytes);
-        errdefer allocator.free(path);
-        const base_url = try handler_contract.dupeOptionalString(
-            allocator,
-            if (wire.baseUrl) |value| value.bytes else null,
-        );
-        errdefer if (base_url) |value| allocator.free(value);
-        entries.appendAssumeCapacity(.{
-            .name = name,
-            .path = path,
-            .base_url = base_url,
-        });
-    }
-
-    const entry = try handler_contract.dupeOptionalString(
-        allocator,
-        if (parsed.value.entry) |value| value.bytes else null,
-    );
-    errdefer if (entry) |value| allocator.free(value);
-    const handlers = try entries.toOwnedSlice(allocator);
-    return .{
-        .version = parsed.value.version.value orelse 1,
-        .entry = entry,
-        .handlers = handlers,
-    };
-}
-
 // -------------------------------------------------------------------------
 // JSON output
 // -------------------------------------------------------------------------
@@ -1822,104 +1740,6 @@ test "extractPath basic" {
     try std.testing.expectEqualStrings("/api/v1/users", extractPath("https://users.internal/api/v1/users"));
     try std.testing.expectEqualStrings("/", extractPath("https://api.example.com"));
     try std.testing.expectEqualStrings("/path", extractPath("https://api.example.com/path?key=val"));
-}
-
-test "parseSystemConfig" {
-    const json =
-        \\{
-        \\  "version": 1,
-        \\  "handlers": [
-        \\    { "name": "gateway", "path": "gateway.ts", "baseUrl": "https://gateway.internal" },
-        \\    { "name": "users", "path": "users.ts", "baseUrl": "https://users.internal" }
-        \\  ]
-        \\}
-    ;
-    var config = try parseSystemConfig(std.testing.allocator, json);
-    defer config.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u32, 1), config.version);
-    try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
-    try std.testing.expectEqualStrings("gateway", config.handlers[0].name);
-    try std.testing.expectEqualStrings("gateway.ts", config.handlers[0].path);
-    try std.testing.expectEqualStrings("https://gateway.internal", config.handlers[0].base_url.?);
-    try std.testing.expectEqualStrings("users.ts", config.handlers[1].path);
-}
-
-test "parseSystemConfig: baseUrl and entry are optional" {
-    const json =
-        \\{
-        \\  "version": 1,
-        \\  "entry": "orchestrator",
-        \\  "handlers": [
-        \\    { "name": "orchestrator", "path": "orchestrator.ts" },
-        \\    { "name": "inventory", "path": "inventory.ts" }
-        \\  ]
-        \\}
-    ;
-    var config = try parseSystemConfig(std.testing.allocator, json);
-    defer config.deinit(std.testing.allocator);
-
-    try std.testing.expectEqualStrings("orchestrator", config.entry.?);
-    try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
-    try std.testing.expectEqual(@as(?[]const u8, null), config.handlers[0].base_url);
-    try std.testing.expectEqual(@as(?[]const u8, null), config.handlers[1].base_url);
-}
-
-test "parseSystemConfig preserves duplicate unknown trailing and raw-key behavior" {
-    const json =
-        \\{
-        \\  "future": {"nested": [true]},
-        \\  "version": 99999999999999999999,
-        \\  "entr\u0079": "ignored",
-        \\  "entry": "first",
-        \\  "entry": "second",
-        \\  "handlers": [{"name":"gateway","path":"gateway.ts"}],
-        \\  "handlers": [{"name":"users","path":"users.ts"}]
-        \\} trailing
-    ;
-    var config = try parseSystemConfig(std.testing.allocator, json);
-    defer config.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u32, 1), config.version);
-    try std.testing.expectEqualStrings("second", config.entry orelse unreachable);
-    try std.testing.expectEqual(@as(usize, 2), config.handlers.len);
-    try std.testing.expectEqualStrings("gateway", config.handlers[0].name);
-    try std.testing.expectEqualStrings("users", config.handlers[1].name);
-}
-
-test "parseSystemConfig rejects escaped required handler keys" {
-    try std.testing.expectError(
-        error.InvalidJson,
-        parseSystemConfig(
-            std.testing.allocator,
-            "{\"handlers\":[{\"na\\u006de\":\"gateway\",\"path\":\"gateway.ts\"}]}",
-        ),
-    );
-}
-
-fn parseSystemConfigAllocationFixture(
-    allocator: std.mem.Allocator,
-    json: []const u8,
-) !void {
-    var config = try parseSystemConfig(allocator, json);
-    defer config.deinit(allocator);
-}
-
-test "parseSystemConfig cleans every allocation failure" {
-    const json =
-        \\{
-        \\  "entry": "gateway",
-        \\  "handlers": [
-        \\    {"name":"gateway","path":"gateway.ts","baseUrl":"https://gateway.internal"},
-        \\    {"name":"users","path":"users.ts"}
-        \\  ]
-        \\}
-    ;
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        parseSystemConfigAllocationFixture,
-        .{json},
-    );
 }
 
 test "linkSystem: linked and external" {

@@ -5,7 +5,7 @@ const mb = @import("../../module_binding.zig");
 const adapter = @import("../../module_binding_adapter.zig");
 const sdk = @import("zttp-sdk");
 const modules = @import("zttp-modules");
-const system_linker = @import("../../system_linker.zig");
+const system_config = @import("../../system_config.zig");
 const service_module = modules.net.service;
 
 pub const binding = adapter.adaptModuleBinding(service_module.binding);
@@ -90,7 +90,7 @@ fn populateServices(
     const system_json = try mb.readFileChecked(ctx, system_path, 1024 * 1024);
     defer allocator.free(system_json);
 
-    var config = try system_linker.parseSystemConfig(allocator, system_json);
+    var config = try system_config.parseSystemConfig(allocator, system_json);
     defer config.deinit(allocator);
 
     for (config.handlers) |entry| {
