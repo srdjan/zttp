@@ -1,4 +1,6 @@
-# Splitting `zts` into `zts` / `zts-compiler` / `zts-contracts`
+# Splitting `zts` into layered build modules
+
+Planned as three modules; shipped as five. The filename keeps the original name.
 
 Status: steps 0 through 4 done. Step 5 (shrinking the consumer allowlist) is
 the only part left, and is deliberately separate - see criterion 6.
