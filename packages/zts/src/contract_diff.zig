@@ -8,7 +8,7 @@
 //! The caller must keep both contracts alive while using the diff.
 
 const std = @import("std");
-const handler_contract = @import("handler_contract.zig");
+const handler_contract = @import("zts-contracts").handler_contract;
 const behavior_canonical = @import("behavior_canonical.zig");
 const builtin_modules = @import("builtin_modules.zig");
 const HandlerContract = handler_contract.HandlerContract;

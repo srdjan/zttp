@@ -10,7 +10,7 @@ const std = @import("std");
 /// JSON reader and writer on top. Taking the alias route meant `context.zig`,
 /// which imports this file, dragged both serializers along. See
 /// docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
-const contract_mod = @import("contract_types.zig");
+const contract_mod = @import("zts-contracts").contract_types;
 
 const HandlerContract = contract_mod.HandlerContract;
 const ascii = std.ascii;

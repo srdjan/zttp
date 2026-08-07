@@ -59,7 +59,7 @@ RANK = {name: i for i, name in enumerate(TIERS)}
 # path resolves inside the importing module, so it compiles a second copy of the
 # file there, and a type from one copy is not the type from the other. Reach a
 # split tier by module name - `@import("zts-base").json_utils`.
-SPLIT = ["zts-base"]
+SPLIT = ["zts-base", "zts-contracts"]
 
 MIN_FILES = 100
 

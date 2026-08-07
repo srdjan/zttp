@@ -7,7 +7,7 @@
 const std = @import("std");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
-const handler_contract = @import("handler_contract.zig");
+const handler_contract = @import("zts-contracts").handler_contract;
 
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;

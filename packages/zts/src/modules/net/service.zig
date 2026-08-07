@@ -5,7 +5,7 @@ const mb = @import("../../module_binding.zig");
 const adapter = @import("../../module_binding_adapter.zig");
 const sdk = @import("zttp-sdk");
 const modules = @import("zttp-modules");
-const system_config = @import("../../system_config.zig");
+const system_config = @import("zts-contracts").system_config;
 const service_module = modules.net.service;
 
 pub const binding = adapter.adaptModuleBinding(service_module.binding);

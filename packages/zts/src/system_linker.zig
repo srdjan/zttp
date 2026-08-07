@@ -11,11 +11,11 @@
 //! Operates entirely on HandlerContract values (not IR or source code).
 
 const std = @import("std");
-const handler_contract = @import("handler_contract.zig");
+const handler_contract = @import("zts-contracts").handler_contract;
 const route_match = @import("zts-base").route_match;
 const json_utils = @import("zts-base").json_utils;
 const json_wire = @import("zts-base").json_wire;
-const system_config = @import("system_config.zig");
+const system_config = @import("zts-contracts").system_config;
 
 const HandlerContract = handler_contract.HandlerContract;
 const BehaviorPath = handler_contract.BehaviorPath;

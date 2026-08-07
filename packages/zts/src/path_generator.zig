@@ -21,8 +21,8 @@ const module_facts_mod = @import("module_facts.zig");
 const effect_inference = @import("effect_inference.zig");
 const mb = @import("module_binding.zig");
 const bool_checker_mod = @import("bool_checker.zig");
-const handler_contract = @import("handler_contract.zig");
-const contract_types = @import("contract_types.zig");
+const handler_contract = @import("zts-contracts").handler_contract;
+const contract_types = @import("zts-contracts").contract_types;
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;

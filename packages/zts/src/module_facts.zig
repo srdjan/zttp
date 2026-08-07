@@ -21,7 +21,7 @@
 //! projection of `modules`, so a reordering here moves golden bytes.
 
 const std = @import("std");
-const contract_types = @import("contract_types.zig");
+const contract_types = @import("zts-contracts").contract_types;
 const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");

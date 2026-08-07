@@ -26,7 +26,7 @@
 
 const std = @import("std");
 const ir_mod = @import("parser/ir.zig");
-const contract_types = @import("contract_types.zig");
+const contract_types = @import("zts-contracts").contract_types;
 
 const IrView = ir_mod.IrView;
 const NodeIndex = ir_mod.NodeIndex;

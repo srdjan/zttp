@@ -30,7 +30,7 @@
 
 const std = @import("std");
 const ir_mod = @import("parser/ir.zig");
-const handler_contract = @import("handler_contract.zig");
+const handler_contract = @import("zts-contracts").handler_contract;
 const object = @import("object.zig");
 
 const IrView = ir_mod.IrView;

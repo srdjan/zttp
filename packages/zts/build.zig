@@ -30,6 +30,18 @@ pub fn build(b: *std.Build) void {
         .link_libc = !analyzer_only,
     });
 
+    // `zts-contracts` is data and serialization: what a contract and its
+    // receipts are, never how they are produced. Both `zts` (which holds them
+    // at run time) and `zts-compiler` (which produces them at build time)
+    // depend on it, and it depends on neither.
+    const contracts_mod = b.addModule("zts-contracts", .{
+        .root_source_file = b.path("src/contracts_root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = !analyzer_only,
+    });
+    contracts_mod.addImport("zts-base", base_mod);
+
     const mod = b.addModule("zts", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -37,6 +49,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = !analyzer_only,
     });
     mod.addImport("zts-base", base_mod);
+    mod.addImport("zts-contracts", contracts_mod);
     const build_options = b.addOptions();
     build_options.addOption(bool, "perf_histogram", perf_histogram);
     build_options.addOption(bool, "analyzer_only", analyzer_only);

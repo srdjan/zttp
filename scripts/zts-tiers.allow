@@ -39,6 +39,7 @@ zts-base type_map.zig
 
 # zts-contracts
 zts-contracts contract_json_parser.zig
+zts-contracts contracts_root.zig
 zts-contracts contract_json_writer.zig
 zts-contracts contract_types.zig
 zts-contracts equivalence_receipt.zig

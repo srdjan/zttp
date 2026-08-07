@@ -12,7 +12,7 @@
 //! analyzer build emits the exact same `proofTrace` JSON as `zts check`.
 
 const std = @import("std");
-const handler_contract = @import("handler_contract.zig");
+const handler_contract = @import("zts-contracts").handler_contract;
 const flow_checker = @import("flow_checker.zig");
 const counterexample = @import("counterexample.zig");
 const ir = @import("parser/ir.zig");

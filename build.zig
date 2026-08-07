@@ -129,6 +129,7 @@ pub fn build(b: *std.Build) void {
     // module object comes from the dependency, so `zts-base` is the same module
     // here and there rather than a second copy of those files.
     zts_tests_root.addImport("zts-base", zts_dep.module("zts-base"));
+    zts_tests_root.addImport("zts-contracts", zts_dep.module("zts-contracts"));
     zts_tests_root.addImport("zttp-sdk", zttp_sdk_dep.module("zttp-sdk"));
     zts_tests_root.addImport("zttp-modules", zttp_modules_dep.module("zttp-modules"));
     zts_tests_root.addCSourceFile(.{

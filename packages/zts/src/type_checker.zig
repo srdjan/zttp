@@ -22,7 +22,7 @@ const context = @import("context.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
-const service_types_mod = @import("service_types.zig");
+const service_types_mod = @import("zts-contracts").service_types;
 const bool_checker_mod = @import("bool_checker.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 

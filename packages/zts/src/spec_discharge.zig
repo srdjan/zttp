@@ -9,7 +9,7 @@
 //! catch contradictions.
 
 const std = @import("std");
-const contract_types = @import("contract_types.zig");
+const contract_types = @import("zts-contracts").contract_types;
 const module_binding = @import("module_binding.zig");
 
 const HandlerProperties = contract_types.HandlerProperties;

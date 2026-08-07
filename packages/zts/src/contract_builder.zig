@@ -9,8 +9,8 @@
 //! because they're referenced by other split files and external callers.
 
 const std = @import("std");
-const handler_contract = @import("handler_contract.zig");
-const contract_types = @import("contract_types.zig");
+const handler_contract = @import("zts-contracts").handler_contract;
+const contract_types = @import("zts-contracts").contract_types;
 const api_schema = @import("api_schema.zig");
 const known_globals = @import("zts-base").known_globals;
 
