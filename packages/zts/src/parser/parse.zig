@@ -2203,6 +2203,7 @@ pub const Parser = struct {
     fn parseNumber(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         const text = self.current.text(self.source);
+        const has_separator = self.current.has_separator;
         self.advance();
 
         if (self.expression_profile != null) {
@@ -2212,7 +2213,7 @@ pub const Parser = struct {
         // Numeric separators belong to the comptime expression profile only.
         // `std.fmt.parseInt` and `parseFloat` both accept `_`, so without this
         // check `1_000` would quietly become a supported literal here.
-        if (std.mem.indexOfScalar(u8, text, '_') != null) {
+        if (has_separator) {
             self.errors.addError(.invalid_number, loc, "numeric separators are not supported outside comptime(); write the digits without '_'");
             return error.InvalidNumber;
         }
@@ -2326,7 +2327,7 @@ pub const Parser = struct {
                 return error.UnexpectedToken;
             }
             const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            const str_idx = try self.addUnescapedTemplateString(content);
+            const str_idx = try self.addUnescapedString(content);
             return try self.nodes.add(Node.litString(loc, str_idx));
         }
 
@@ -2338,7 +2339,7 @@ pub const Parser = struct {
         var text = self.current.text(self.source);
         self.advance();
         var content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-        var str_idx = try self.addUnescapedTemplateString(content);
+        var str_idx = try self.addUnescapedString(content);
         var str_node = try self.nodes.add(.{
             .tag = .template_part_string,
             .loc = loc,
@@ -2360,7 +2361,7 @@ pub const Parser = struct {
                 text = self.current.text(self.source);
                 self.advance();
                 content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-                str_idx = try self.addUnescapedTemplateString(content);
+                str_idx = try self.addUnescapedString(content);
                 str_node = try self.nodes.add(.{
                     .tag = .template_part_string,
                     .loc = loc,
@@ -2380,7 +2381,7 @@ pub const Parser = struct {
             text = self.current.text(self.source);
             self.advance();
             content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            str_idx = try self.addUnescapedTemplateString(content);
+            str_idx = try self.addUnescapedString(content);
             str_node = try self.nodes.add(.{
                 .tag = .template_part_string,
                 .loc = loc,
@@ -3816,31 +3817,28 @@ pub const Parser = struct {
     /// Unescape `content` then intern it. Frees the unescape buffer when it was
     /// freshly allocated (i.e. the input contained backslashes), regardless of
     /// whether the string was new or a duplicate in the constant pool.
+    ///
+    /// Template literals unescape through the same table as quoted strings.
+    /// They always did on the normal profile, and a comptime-folded literal has
+    /// to be byte-identical to the same literal written outside `comptime(...)`.
     fn addUnescapedString(self: *Parser, content: []const u8) !u16 {
-        const unescaped = if (self.expression_profile != null)
-            try self.unescapeComptimeString(content, false)
-        else
-            try self.unescapeString(content);
-        defer unescaped.deinit(self.allocator);
-        return self.addString(unescaped.bytes);
-    }
-
-    fn addUnescapedTemplateString(self: *Parser, content: []const u8) !u16 {
-        if (self.expression_profile == null) return self.addUnescapedString(content);
-        const unescaped = try self.unescapeComptimeString(content, true);
+        const unescaped = try self.unescape(content, self.expression_profile != null);
         defer unescaped.deinit(self.allocator);
         return self.addString(unescaped.bytes);
     }
 
     /// Decode the `\uNNNN` or `\u{N..}` escape that starts at the backslash
-    /// `input[at]`, and report the index just past it. Both forms are accepted,
-    /// matching `unescapeString`.
+    /// `input[at]`, and report the index just past it.
     fn decodeUnicodeEscape(input: []const u8, at: usize) !struct { codepoint: u21, next: usize } {
         if (at + 2 < input.len and input[at + 2] == '{') {
-            const close = std.mem.indexOfScalarPos(u8, input, at + 3, '}') orelse
+            // Only a `}` within six digits can produce an accepted answer, so
+            // bound the search there rather than scanning the whole literal to
+            // reject it.
+            const limit = @min(at + 10, input.len);
+            const close = std.mem.indexOfScalarPos(u8, input[0..limit], at + 3, '}') orelse
                 return error.InvalidEscapeSequence;
             const hex = input[at + 3 .. close];
-            if (hex.len == 0 or hex.len > 6) return error.InvalidEscapeSequence;
+            if (hex.len == 0) return error.InvalidEscapeSequence;
             return .{
                 .codepoint = std.fmt.parseInt(u21, hex, 16) catch return error.InvalidEscapeSequence,
                 .next = close + 1,
@@ -3854,222 +3852,87 @@ pub const Parser = struct {
         };
     }
 
-    fn unescapeComptimeString(self: *Parser, input: []const u8, template: bool) !UnescapedString {
+    /// Unescape a JavaScript string literal, converting escape sequences to
+    /// actual characters. Handles `\n`, `\r`, `\t`, `\b`, `\f`, `\v`, `\\`,
+    /// `\'`, `\"`, `\0`, `\xNN`, `\uNNNN`, and `\u{N..}`; every other escape
+    /// emits the character that follows the backslash.
+    ///
+    /// `strict` is the only axis the two parser profiles differ on. The comptime
+    /// expression profile passes true and reports malformed input as
+    /// `error.InvalidEscapeSequence`, which `addComptimeStringNode` turns into a
+    /// diagnostic; the normal profile passes false and copies a malformed escape
+    /// through literally. The escape table itself must not differ, or a
+    /// comptime-folded literal stops matching the same literal written outside
+    /// `comptime(...)`.
+    ///
+    /// Returns the original input on the fast path, or an owned allocation plus
+    /// the used byte range when escape decoding shortens the string.
+    fn unescape(self: *Parser, input: []const u8, strict: bool) !UnescapedString {
         if (std.mem.indexOfScalar(u8, input, '\\') == null) return .{ .bytes = input };
 
+        // The decoded form is never longer than the input: every escape emits
+        // at most as many bytes as its backslash sequence occupies.
         var result = try self.allocator.alloc(u8, input.len);
         errdefer self.allocator.free(result);
         var out_pos: usize = 0;
         var i: usize = 0;
+
         while (i < input.len) {
-            if (input[i] != '\\') {
+            if (input[i] != '\\' or i + 1 >= input.len) {
+                if (input[i] == '\\' and strict) return error.InvalidEscapeSequence;
                 result[out_pos] = input[i];
                 out_pos += 1;
                 i += 1;
                 continue;
             }
-            if (i + 1 >= input.len) return error.InvalidEscapeSequence;
 
             const escaped = input[i + 1];
-            if (!template and escaped == 'x') {
-                if (i + 3 >= input.len) return error.InvalidEscapeSequence;
-                result[out_pos] = std.fmt.parseInt(u8, input[i + 2 .. i + 4], 16) catch
-                    return error.InvalidEscapeSequence;
-                out_pos += 1;
-                i += 4;
-                continue;
-            }
-
-            // `\uNNNN` and `\u{N..}` must decode here for the same reason they
-            // decode in `unescapeString`: a comptime-folded literal has to be
-            // byte-identical to the same literal written outside `comptime(...)`.
-            // Falling through to the `else` arm below would emit the letter `u`
-            // and copy the hex digits as text.
-            if (escaped == 'u') {
-                const decoded = try decodeUnicodeEscape(input, i);
-                out_pos += std.unicode.utf8Encode(decoded.codepoint, result[out_pos..]) catch
-                    return error.InvalidEscapeSequence;
-                i = decoded.next;
-                continue;
-            }
-
-            result[out_pos] = switch (escaped) {
-                'n' => '\n',
-                'r' => '\r',
-                't' => '\t',
-                'b' => 0x08,
-                'f' => 0x0C,
-                'v' => 0x0B,
-                '\\' => '\\',
-                '\'' => if (template) escaped else '\'',
-                '"' => if (template) escaped else '"',
-                '0' => if (template) escaped else 0,
-                '`', '$' => if (template) escaped else escaped,
-                else => escaped,
-            };
-            out_pos += 1;
-            i += 2;
-        }
-        return .{ .bytes = result[0..out_pos], .allocation = result };
-    }
-
-    /// Unescape a JavaScript string literal, converting escape sequences to actual characters.
-    /// Handles: \n, \r, \t, \\, \', \", \0, \xNN (hex), \uNNNN (unicode)
-    /// Returns the original input on the fast path, or an owned allocation plus
-    /// the used byte range when escape decoding shortens the string.
-    fn unescapeString(self: *Parser, input: []const u8) !UnescapedString {
-        // Quick check: if no backslashes, return as-is (common case)
-        var has_escape = false;
-        for (input) |c| {
-            if (c == '\\') {
-                has_escape = true;
-                break;
-            }
-        }
-        if (!has_escape) {
-            return .{ .bytes = input };
-        }
-
-        // Allocate buffer for unescaped string (can be at most same length as input)
-        var result = try self.allocator.alloc(u8, input.len);
-        var out_pos: usize = 0;
-        var i: usize = 0;
-
-        while (i < input.len) {
-            if (input[i] == '\\' and i + 1 < input.len) {
-                const next = input[i + 1];
-                switch (next) {
-                    'n' => {
-                        result[out_pos] = '\n';
+            switch (escaped) {
+                'x' => {
+                    const decoded: ?u8 = if (i + 3 < input.len)
+                        std.fmt.parseInt(u8, input[i + 2 .. i + 4], 16) catch null
+                    else
+                        null;
+                    if (decoded) |byte| {
+                        result[out_pos] = byte;
                         out_pos += 1;
-                        i += 2;
-                    },
-                    'r' => {
-                        result[out_pos] = '\r';
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    't' => {
-                        result[out_pos] = '\t';
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    '\\' => {
-                        result[out_pos] = '\\';
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    '\'' => {
-                        result[out_pos] = '\'';
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    '"' => {
-                        result[out_pos] = '"';
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    '0' => {
-                        result[out_pos] = 0;
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    'b' => {
-                        result[out_pos] = 0x08; // backspace
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    'f' => {
-                        result[out_pos] = 0x0C; // form feed
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    'v' => {
-                        result[out_pos] = 0x0B; // vertical tab
-                        out_pos += 1;
-                        i += 2;
-                    },
-                    'x' => {
-                        // Hex escape: \xNN
-                        if (i + 3 < input.len) {
-                            const hex = input[i + 2 .. i + 4];
-                            const byte = std.fmt.parseInt(u8, hex, 16) catch {
-                                // Invalid hex, copy literally
-                                result[out_pos] = input[i];
-                                out_pos += 1;
-                                i += 1;
-                                continue;
-                            };
-                            result[out_pos] = byte;
-                            out_pos += 1;
-                            i += 4;
-                        } else {
-                            result[out_pos] = input[i];
-                            out_pos += 1;
-                            i += 1;
-                        }
-                    },
-                    'u' => {
-                        // ES6 braced form: \u{XXXXXX} — 1 to 6 hex digits
-                        if (i + 2 < input.len and input[i + 2] == '{') {
-                            var j = i + 3;
-                            while (j < input.len and input[j] != '}' and j - (i + 3) < 6) : (j += 1) {}
-                            if (j < input.len and input[j] == '}' and j > i + 3) {
-                                const hex = input[i + 3 .. j];
-                                const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
-                                    result[out_pos] = input[i];
-                                    out_pos += 1;
-                                    i += 1;
-                                    continue;
-                                };
-                                const len = std.unicode.utf8Encode(codepoint, result[out_pos..]) catch {
-                                    result[out_pos] = input[i];
-                                    out_pos += 1;
-                                    i += 1;
-                                    continue;
-                                };
-                                out_pos += len;
-                                i = j + 1;
-                            } else {
-                                result[out_pos] = input[i];
-                                out_pos += 1;
-                                i += 1;
-                            }
-                        }
-                        // Classic 4-hex form: \uNNNN
-                        else if (i + 5 < input.len) {
-                            const hex = input[i + 2 .. i + 6];
-                            const codepoint = std.fmt.parseInt(u21, hex, 16) catch {
-                                result[out_pos] = input[i];
-                                out_pos += 1;
-                                i += 1;
-                                continue;
-                            };
-                            const len = std.unicode.utf8Encode(codepoint, result[out_pos..]) catch {
-                                result[out_pos] = input[i];
-                                out_pos += 1;
-                                i += 1;
-                                continue;
-                            };
+                        i += 4;
+                        continue;
+                    }
+                    if (strict) return error.InvalidEscapeSequence;
+                    result[out_pos] = input[i];
+                    out_pos += 1;
+                    i += 1;
+                },
+                'u' => {
+                    if (decodeUnicodeEscape(input, i)) |decoded| {
+                        if (std.unicode.utf8Encode(decoded.codepoint, result[out_pos..])) |len| {
                             out_pos += len;
-                            i += 6;
-                        } else {
-                            result[out_pos] = input[i];
-                            out_pos += 1;
-                            i += 1;
-                        }
-                    },
-                    else => {
-                        // Unknown escape, just copy the character after backslash
-                        result[out_pos] = next;
-                        out_pos += 1;
-                        i += 2;
-                    },
-                }
-            } else {
-                result[out_pos] = input[i];
-                out_pos += 1;
-                i += 1;
+                            i = decoded.next;
+                            continue;
+                        } else |_| {}
+                    } else |_| {}
+                    if (strict) return error.InvalidEscapeSequence;
+                    result[out_pos] = input[i];
+                    out_pos += 1;
+                    i += 1;
+                },
+                else => {
+                    result[out_pos] = switch (escaped) {
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        'b' => 0x08, // backspace
+                        'f' => 0x0C, // form feed
+                        'v' => 0x0B, // vertical tab
+                        '0' => 0,
+                        // `\\`, `\'`, `\"`, `` \` ``, `\$` and every unknown
+                        // escape emit the character after the backslash.
+                        else => escaped,
+                    };
+                    out_pos += 1;
+                    i += 2;
+                },
             }
         }
 

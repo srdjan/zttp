@@ -186,6 +186,12 @@ pub const Token = struct {
     len: u32, // Token length in bytes
     line: u32, // 1-indexed line number
     column: u32, // 1-indexed column number
+    /// Set on a `.number` token whose digits contained a `_`. The tokenizer is
+    /// already examining each byte, so recording it there costs nothing, and it
+    /// saves the parser a second walk of the token text to decide whether the
+    /// separator is allowed in the current profile. Lands in the struct's
+    /// existing tail padding: `Token` is 20 bytes with and without it.
+    has_separator: bool = false,
 
     /// Get the text of this token from the source
     pub fn text(self: Token, source: []const u8) []const u8 {

@@ -428,44 +428,53 @@ pub const Tokenizer = struct {
         return self.tokN(start, col, line, .template_tail);
     }
 
+    /// Advance over a run of digits accepted by `accept`, treating `_` as a
+    /// separator between them and reporting whether one was seen. The `_` test
+    /// is the same comparison the old `accept(c) or c == '_'` condition made, so
+    /// recording it is free.
+    fn scanDigitRun(self: *Tokenizer, comptime accept: fn (u8) bool) bool {
+        var saw_separator = false;
+        while (self.pos < self.source.len) : (self.pos += 1) {
+            const c = self.source[self.pos];
+            if (accept(c)) continue;
+            if (c != '_') break;
+            saw_separator = true;
+        }
+        return saw_separator;
+    }
+
     /// A `_` between digits is always lexed into the number token, in both the
-    /// comptime and the normal parser profile. The profiles differ in what they
-    /// then accept: `parseComptimeNumber` strips the separators, `parseNumber`
-    /// rejects them. Stopping the scan at the `_` instead would split `1_000`
-    /// into the number `1` and the identifier `_000`, which ASI accepts as two
-    /// statements and no diagnostic ever reports.
+    /// comptime and the normal parser profile, and the token records that it was
+    /// there. The profiles differ in what they then accept: `parseComptimeNumber`
+    /// strips the separators, `parseNumber` rejects them. Stopping the scan at
+    /// the `_` instead would split `1_000` into the number `1` and the identifier
+    /// `_000`, which ASI accepts as two statements and no diagnostic ever reports.
     fn scanNumber(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
+        var saw_separator = false;
+
         // Handle hex, octal, binary
         if (start < self.source.len and self.source[start] == '0' and self.pos < self.source.len) {
             const next_char = self.source[self.pos];
             if (next_char == 'x' or next_char == 'X') {
                 self.pos += 1;
-                while (self.pos < self.source.len and (isHexDigit(self.source[self.pos]) or
-                    self.source[self.pos] == '_')) self.pos += 1;
-                return self.tokN(start, col, line, .number);
+                return self.numberToken(start, col, line, self.scanDigitRun(isHexDigit));
             }
             if (next_char == 'b' or next_char == 'B') {
                 self.pos += 1;
-                while (self.pos < self.source.len and (self.source[self.pos] == '0' or self.source[self.pos] == '1' or
-                    self.source[self.pos] == '_')) self.pos += 1;
-                return self.tokN(start, col, line, .number);
+                return self.numberToken(start, col, line, self.scanDigitRun(isBinaryDigit));
             }
             if (next_char == 'o' or next_char == 'O') {
                 self.pos += 1;
-                while (self.pos < self.source.len and ((self.source[self.pos] >= '0' and self.source[self.pos] <= '7') or
-                    self.source[self.pos] == '_')) self.pos += 1;
-                return self.tokN(start, col, line, .number);
+                return self.numberToken(start, col, line, self.scanDigitRun(isOctalDigit));
             }
         }
 
-        while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or
-            self.source[self.pos] == '_')) self.pos += 1;
+        saw_separator = self.scanDigitRun(isDigit);
 
         if (self.pos < self.source.len and self.source[self.pos] == '.') {
             if (self.pos + 1 < self.source.len and isDigit(self.source[self.pos + 1])) {
                 self.pos += 1;
-                while (self.pos < self.source.len and (isDigit(self.source[self.pos]) or
-                    self.source[self.pos] == '_')) self.pos += 1;
+                saw_separator = self.scanDigitRun(isDigit) or saw_separator;
             }
         }
 
@@ -475,7 +484,13 @@ pub const Tokenizer = struct {
             while (self.pos < self.source.len and isDigit(self.source[self.pos])) self.pos += 1;
         }
 
-        return self.tokN(start, col, line, .number);
+        return self.numberToken(start, col, line, saw_separator);
+    }
+
+    fn numberToken(self: *const Tokenizer, start: u32, col: u32, line: u32, has_separator: bool) Token {
+        var result = self.tokN(start, col, line, .number);
+        result.has_separator = has_separator;
+        return result;
     }
 
     fn scanIdentifier(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
@@ -654,6 +669,14 @@ fn isDigit(c: u8) bool {
 
 fn isHexDigit(c: u8) bool {
     return isDigit(c) or (c >= 'a' and c <= 'f') or (c >= 'A' and c <= 'F');
+}
+
+fn isBinaryDigit(c: u8) bool {
+    return c == '0' or c == '1';
+}
+
+fn isOctalDigit(c: u8) bool {
+    return c >= '0' and c <= '7';
 }
 
 fn isIdentifierStart(c: u8) bool {
