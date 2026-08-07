@@ -28,9 +28,17 @@
 #   - a file with no row, and a row naming no file, both fail, so the manifest
 #     cannot drift out of step with the tree.
 #
-# The second half is the input floor. A manifest that lost its rows, or a scan
-# whose path prefix moved, would otherwise report zero violations while checking
-# nothing. See
+# The third rule is reachability. Before the split, one root named every file,
+# so a file that nothing imported could not exist. Five roots can each leave a
+# file behind, and a file no root reaches still compiles, still passes
+# `zig fmt`, and still gets a manifest row - but the test binary never contains
+# it, so its `test` blocks never run and `zig build test-zts` reports a pass for
+# code it never executed. Every file must therefore be reachable from its own
+# tier's root through the relative-import graph.
+#
+# The manifest and reachability halves are the input floor. A manifest that lost
+# its rows, or a scan whose path prefix moved, would otherwise report zero
+# violations while checking nothing. See
 # docs/solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md.
 #
 # Same-tier imports are unconstrained: this gate pins the direction between
@@ -66,6 +74,29 @@ RANK = {name: i for i, name in enumerate(TIERS)}
 # file there, and a type from one copy is not the type from the other. Reach a
 # split tier by module name - `@import("zts-base").json_utils`.
 SPLIT = ["zts-base", "zts-contracts", "zts", "zts-compiler", "zts-umbrella"]
+
+# The build-module name each tier is declared under in `packages/zts/build.zig`,
+# and the root source file that module compiles. The engine tier is named `zts`
+# in the manifest but declared as `zts-engine`; `zts` the module name is the
+# umbrella. Without this map the direction rule below can only see relative
+# imports, which zig already rejects on its own - so the module-name half of the
+# claim in the header would be checking nothing.
+MODULE_OF = {
+    "zts-base": "zts-base",
+    "zts-contracts": "zts-contracts",
+    "zts": "zts-engine",
+    "zts-compiler": "zts-compiler",
+    "zts-umbrella": "zts",
+}
+TIER_OF_MODULE = {module: tier for tier, module in MODULE_OF.items()}
+
+ROOT_OF = {
+    "zts-base": "base_root.zig",
+    "zts-contracts": "contracts_root.zig",
+    "zts": "engine_root.zig",
+    "zts-compiler": "compiler_root.zig",
+    "zts-umbrella": "root.zig",
+}
 
 MIN_FILES = 100
 
@@ -157,8 +188,11 @@ def strip_comments(source):
 short = lambda p: p[len(PREFIX):]
 
 violations = defaultdict(list)
+named_violations = defaultdict(list)
+file_edges = {}
 edge_count = 0
 cross_count = 0
+named_count = 0
 for path in files:
     with open(path, encoding="utf-8") as handle:
         source = strip_comments(handle.read())
@@ -167,21 +201,56 @@ for path in files:
     # on three lines is one edge, and matches what scripts/zts-import-graph.sh
     # reports.
     targets = set()
+    named = set()
     for match in IMPORT.finditer(source):
         spec = match.group(1)
         if not spec.endswith(".zig"):
+            if spec in TIER_OF_MODULE:
+                named.add(spec)
             continue
         target = os.path.normpath(os.path.join(directory, spec))
         if target in fileset:
             targets.add(target)
+    file_edges[path] = targets
+    src_tier = tier_of[path]
     for target in sorted(targets):
         edge_count += 1
-        src_tier, dst_tier = tier_of[path], tier_of[target]
+        dst_tier = tier_of[target]
         if src_tier == dst_tier:
             continue
         cross_count += 1
         if RANK[src_tier] < RANK[dst_tier] or src_tier in SPLIT or dst_tier in SPLIT:
             violations[(src_tier, dst_tier)].append((short(path), short(target)))
+    # The by-name direction. `@import("zts-compiler")` from a `zts-base` file
+    # compiles only because `packages/zts/build.zig` happens not to declare that
+    # import; nothing else refuses it, and the refusal is what the header claims.
+    for module in sorted(named):
+        named_count += 1
+        dst_tier = TIER_OF_MODULE[module]
+        if RANK[src_tier] < RANK[dst_tier]:
+            named_violations[(src_tier, dst_tier)].append((short(path), module))
+
+if named_violations:
+    total = sum(len(v) for v in named_violations.values())
+    print(
+        f"zts layering: {total} module-name imports point from a lower tier to a "
+        f"higher one:",
+        file=sys.stderr,
+    )
+    for (src_tier, dst_tier), pairs in sorted(
+        named_violations.items(), key=lambda item: -len(item[1])
+    ):
+        print(f"\n  {src_tier} -> {dst_tier}  ({len(pairs)} edges)", file=sys.stderr)
+        for source_file, module in sorted(pairs):
+            print(f"    {source_file}  ->  @import(\"{module}\")", file=sys.stderr)
+    print(
+        f"\nA tier may name its own module's tier and any tier below it, never one "
+        f"above.\nThat direction is the cycle a DAG of build modules cannot "
+        f"express. Move the file,\nmove what it reaches for, or change its row in "
+        f"{MANIFEST}.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 if violations:
     total = sum(len(v) for v in violations.values())
@@ -208,12 +277,64 @@ if violations:
     )
     sys.exit(1)
 
+members_of = defaultdict(set)
+for path, tier in tier_of.items():
+    members_of[tier].add(path)
+
+unreachable = []
+reached_count = 0
+for tier in TIERS:
+    root = PREFIX + ROOT_OF[tier]
+    if root not in fileset:
+        sys.exit(f"zts layering: tier {tier} names a missing root: {ROOT_OF[tier]}")
+    if tier_of.get(root) != tier:
+        sys.exit(
+            f"zts layering: {ROOT_OF[tier]} is the root of tier {tier} but its "
+            f"manifest row says {tier_of.get(root)!r}"
+        )
+    members = members_of[tier]
+    seen = {root}
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        for target in file_edges[current]:
+            if target in members and target not in seen:
+                seen.add(target)
+                stack.append(target)
+    reached_count += len(seen & members)
+    for path in sorted(members - seen):
+        unreachable.append((tier, short(path)))
+
+if unreachable:
+    print(
+        f"zts layering: {len(unreachable)} files are not reachable from their "
+        f"tier's root:",
+        file=sys.stderr,
+    )
+    for tier, path in unreachable:
+        print(f"    {path}  (tier {tier}, root {ROOT_OF[tier]})", file=sys.stderr)
+    print(
+        "\nA file no root reaches is not compiled into that tier's test binary, so "
+        "its\n`test` blocks never run and `zig build test-zts` reports a pass for "
+        "code it never\nexecuted. Name it from the tier root, or from a file the "
+        "root already reaches.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+if reached_count != len(files):
+    sys.exit(
+        f"zts layering: reachability covered {reached_count} of {len(files)} files. "
+        f"The tier roots or the edge scan changed."
+    )
+
 sizes = defaultdict(int)
 for tier in tier_of.values():
     sizes[tier] += 1
 summary = ", ".join(f"{tier} {sizes[tier]}" for tier in TIERS)
 print(
     f"zts layering: OK ({len(files)} files, {edge_count} edges, "
-    f"{cross_count} cross-tier; {summary})"
+    f"{cross_count} cross-tier, {named_count} by-name, "
+    f"{reached_count} reachable; {summary})"
 )
 PY
