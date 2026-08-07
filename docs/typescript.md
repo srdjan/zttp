@@ -418,7 +418,9 @@ Variables, arbitrary function calls, `Date.now()`, `Math.random()`, `new`, `this
 | `ComptimeDepthExceeded` | Expression nesting too deep (max 64) |
 | `ComptimeExpressionTooLong` | Expression exceeds 8KB limit |
 | `ComptimeTypeMismatch` | Type error (e.g., string op on number) |
-| `ComptimeDivisionByZero` | Division by zero |
+
+Division by zero is not an error. `comptime(1 / 0)` folds to `Infinity`, the same
+value the expression produces at runtime.
 
 ### Performance Guards
 

@@ -41,7 +41,6 @@ pub const ComptimeError = error{
     DepthExceeded,
     ExpressionTooLong,
     TypeMismatch,
-    DivisionByZero,
     UnclosedString,
     UnclosedParen,
     UnclosedBracket,
@@ -1751,8 +1750,8 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
         .{ .source = "{ plain: 1, \"hyphen-key\": \"x\" }", .expected = "({plain:1,\"hyphen-key\":\"x\"})" },
 
         // Every documented operator, including coercion and value-returning
-        // logical operators. Division by zero currently follows JavaScript and
-        // emits Infinity, despite the ComptimeDivisionByZero documentation row.
+        // logical operators. Division by zero follows JavaScript and emits
+        // Infinity, which is what the same expression does at runtime.
         .{ .source = "1 + 2", .expected = "3" },
         .{ .source = "5 - 2", .expected = "3" },
         .{ .source = "3 * 4", .expected = "12" },
