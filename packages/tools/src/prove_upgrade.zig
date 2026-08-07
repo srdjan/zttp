@@ -13,7 +13,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const handler_contract = zts.handler_contract;
-const HandlerContract = handler_contract.HandlerContract;
+const HandlerContract = zts.HandlerContract;
 const contract_diff = zts.contract_diff;
 const ContractDiff = contract_diff.ContractDiff;
 const ProofCertificate = contract_diff.ProofCertificate;
@@ -25,7 +25,7 @@ pub const UpgradeManifest = upgrade_verifier.UpgradeManifest;
 pub const ProveResult = struct {
     certificate: ProofCertificate,
     /// Kept alive because the diff and certificate contain slices into it.
-    old_contract: handler_contract.HandlerContract,
+    old_contract: zts.HandlerContract,
     /// Upgrade verification manifest (present when behavioral data is available).
     upgrade_manifest: ?UpgradeManifest = null,
 

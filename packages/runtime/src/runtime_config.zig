@@ -97,7 +97,7 @@ pub const RuntimeConfig = struct {
     /// Null on AOT paths, which already carry their full policy in
     /// `embedded_handler.capability_policy`. Borrowed backing storage is owned
     /// by the dev server and retained across in-flight runtime generations.
-    dev_capability_policy: ?zq.handler_policy.RuntimePolicy = null,
+    dev_capability_policy: ?zq.RuntimePolicy = null,
     /// Per-request handler execution deadline in ms. 0 = disabled.
     /// Checked cooperatively at interpreter loop back-edges and call entries.
     request_timeout_ms: u32 = 0,

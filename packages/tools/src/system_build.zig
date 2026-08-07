@@ -81,7 +81,7 @@ fn runLink(allocator: std.mem.Allocator, system_path: []const u8, output_dir: []
 
     std.debug.print("System: {d} handlers\n", .{config.handlers.len});
 
-    var contracts = try allocator.alloc(handler_contract.HandlerContract, config.handlers.len);
+    var contracts = try allocator.alloc(zts.HandlerContract, config.handlers.len);
     // `alloc` returns uninitialized memory; walk only the populated prefix
     // on cleanup so a partial-fill failure does not deinit garbage. Same
     // idiom as `precompile.zig` after b8f0bbb.

@@ -32,8 +32,6 @@ const ir = zts.parser;
 const counterexample = zts.counterexample;
 const flow_checker = zts.flow_checker;
 const writeJsonString = zts.writeJsonString;
-const handler_verifier = zts.handler_verifier;
-
 const name = "pi_goal_check";
 
 pub const tool: registry_mod.ToolDef = .{
@@ -179,7 +177,7 @@ fn execute(
     };
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, program_root) orelse {
+    const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
         return registry_mod.ToolResult.err(
             allocator,
             name ++ ": no handler function found in file\n",

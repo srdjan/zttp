@@ -14,7 +14,6 @@ const common = @import("common.zig");
 const ir = zts.parser;
 const flow_checker = zts.flow_checker;
 const counterexample = zts.counterexample;
-const handler_verifier = zts.handler_verifier;
 const writeJsonString = zts.handler_contract.writeJsonString;
 
 const name = "zts_expert_narrow";
@@ -96,7 +95,7 @@ fn execute(
     };
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
 
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, program_root) orelse {
+    const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
         return registry_mod.ToolResult.err(
             allocator,
             name ++ ": no handler function found in file\n",

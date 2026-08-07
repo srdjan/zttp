@@ -13,7 +13,7 @@
 const std = @import("std");
 const handler_contract = @import("zts").handler_contract;
 
-const HandlerContract = handler_contract.HandlerContract;
+const HandlerContract = @import("zts").HandlerContract;
 const ApiRouteInfo = handler_contract.ApiRouteInfo;
 const ApiSchemaInfo = handler_contract.ApiSchemaInfo;
 const ApiParamInfo = handler_contract.ApiParamInfo;
@@ -1325,7 +1325,7 @@ test "writeTypeScriptClient emits discriminated union for multi-response route" 
         .responses_dynamic = false,
     });
 
-    var contract = handler_contract.HandlerContract{
+    var contract = HandlerContract{
         .handler = .{ .path = try allocator.dupe(u8, "users.ts"), .line = 1, .column = 1 },
         .routes = .empty,
         .modules = .empty,

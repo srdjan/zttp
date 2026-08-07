@@ -123,7 +123,7 @@ pub const HandlerInstance = struct {
     handler_atom: ?zq.Atom,
     cached_handler_obj: ?*zq.JSObject,
     cached_handler_arg_count: u8,
-    cached_dispatch: ?*const zq.bytecode.PatternDispatchTable,
+    cached_dispatch: ?*const zq.PatternDispatchTable,
     config: RuntimeConfig,
     /// The pool reload-generation this runtime was compiled for. The pool's
     /// live-reload / egress-policy swap bumps the pool counter; ensureRuntime
@@ -698,7 +698,7 @@ pub const HandlerInstance = struct {
     /// Called after parse() to verify that all import specifiers reference valid modules.
     /// Native functions are registered eagerly by installVirtualModules(), so this only validates.
     /// Returns true if file imports are present (requiring module graph compilation).
-    fn resolveModuleImports(_: *Self, p: *const zq.parser.Parser) !bool {
+    fn resolveModuleImports(_: *Self, p: *const zq.Parser) !bool {
         const imports = p.getImports() catch |err| {
             std.log.err("Failed to extract module imports: {}", .{err});
             return err;
@@ -1221,7 +1221,7 @@ pub const HandlerInstance = struct {
         // Materialize object literal shapes before execution
         if (result.shapes.len > 0) {
             // Convert [][]object.Atom to []const []const object.Atom for materializeShapes
-            const shapes_const: []const []const zq.object.Atom = @ptrCast(result.shapes);
+            const shapes_const: []const []const zq.Atom = @ptrCast(result.shapes);
             try self.ctx.materializeShapes(shapes_const);
         }
 
@@ -1553,7 +1553,7 @@ pub const HandlerInstance = struct {
     /// Returns response if a static pattern matches, null otherwise.
     fn tryFastPathDispatch(
         self: *Self,
-        dispatch: *const zq.bytecode.PatternDispatchTable,
+        dispatch: *const zq.PatternDispatchTable,
         url: []const u8,
         path: []const u8,
         borrow_body: bool,
@@ -1595,7 +1595,7 @@ pub const HandlerInstance = struct {
 
     fn tryFastExactMatch(
         self: *Self,
-        dispatch: *const zq.bytecode.PatternDispatchTable,
+        dispatch: *const zq.PatternDispatchTable,
         route_atom: zq.Atom,
         target: []const u8,
         borrow_body: bool,
@@ -1617,7 +1617,7 @@ pub const HandlerInstance = struct {
     /// Used for prefix patterns like /api/greet/:name -> {"greeting":"Hello, {name}!"}
     fn buildTemplatedResponse(
         self: *Self,
-        pattern: *const zq.bytecode.HandlerPattern,
+        pattern: *const zq.HandlerPattern,
         param: []const u8,
     ) !HttpResponse {
         const prefix = pattern.response_template_prefix orelse return error.NoTemplate;
@@ -1653,7 +1653,7 @@ pub const HandlerInstance = struct {
     /// Build a response from a pre-serialized static pattern.
     fn buildFastResponse(
         self: *Self,
-        pattern: *const zq.bytecode.HandlerPattern,
+        pattern: *const zq.HandlerPattern,
         borrow_body: bool,
     ) !HttpResponse {
         var response = HttpResponse.init(self.allocator);

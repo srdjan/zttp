@@ -2,12 +2,11 @@ const std = @import("std");
 const zts = @import("zts");
 
 const precompile = @import("precompile.zig");
-const handler_contract = zts.handler_contract;
 const system_linker = zts.system_linker;
 
 pub const CompiledSystem = struct {
     analysis: system_linker.SystemAnalysis,
-    contracts: []handler_contract.HandlerContract,
+    contracts: []zts.HandlerContract,
 
     pub fn deinit(self: *CompiledSystem, allocator: std.mem.Allocator) void {
         self.analysis.deinit(allocator);
@@ -29,7 +28,7 @@ pub fn loadCompiledSystem(
 
     if (config.handlers.len == 0) return error.EmptySystemConfig;
 
-    const contracts = try allocator.alloc(handler_contract.HandlerContract, config.handlers.len);
+    const contracts = try allocator.alloc(zts.HandlerContract, config.handlers.len);
     errdefer allocator.free(contracts);
 
     var compiled_count: usize = 0;

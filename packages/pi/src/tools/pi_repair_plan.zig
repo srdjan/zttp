@@ -140,7 +140,7 @@ pub fn planFromSource(
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": parse failed: {s}\n", .{@errorName(e)});
     };
     const ir_view = ir.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, program_root) orelse {
+    const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
         return registry_mod.ToolResult.err(allocator, name ++ ": no handler function found in file\n");
     };
 

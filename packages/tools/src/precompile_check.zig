@@ -7,8 +7,8 @@ const builtin = @import("builtin");
 const zts = @import("zts");
 
 const handler_contract = zts.handler_contract;
-const HandlerContract = handler_contract.HandlerContract;
-const SpecDiagnostic = handler_contract.SpecDiagnostic;
+const HandlerContract = zts.HandlerContract;
+const SpecDiagnostic = zts.SpecDiagnostic;
 const json_diag = @import("json_diagnostics.zig");
 
 pub const CheckResult = struct {
@@ -392,7 +392,7 @@ pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult
     contract.spec_diagnostics = refreshed;
 }
 
-fn preserveDuringSpecRefresh(diag: handler_contract.SpecDiagnostic) bool {
+fn preserveDuringSpecRefresh(diag: zts.SpecDiagnostic) bool {
     if (diag.function != null) return true;
     return switch (diag.kind) {
         .not_discharged,
@@ -524,7 +524,7 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 
 /// Human-readable message for a spec/Effects diagnostic, mirroring the JSON
 /// text in `appendSpecDiagnosticsJson` so the card and `--json` agree.
-fn specDiagnosticMessage(diag: handler_contract.SpecDiagnostic) []const u8 {
+fn specDiagnosticMessage(diag: zts.SpecDiagnostic) []const u8 {
     if (diag.implicit_default) {
         switch (diag.kind) {
             .not_discharged => return "handler declares no Spec<...>; the default proof profile demands a property this handler does not hold",

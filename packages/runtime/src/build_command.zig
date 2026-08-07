@@ -558,7 +558,7 @@ fn writeArtifactTail(
     const policy = if (input.contract) |contract|
         zts.handler_policy.contractToRuntimePolicy(contract)
     else
-        zts.handler_policy.RuntimePolicy{};
+        zts.RuntimePolicy{};
     const policy_section = try self_extract.serializePolicy(allocator, &policy);
     defer allocator.free(policy_section);
 

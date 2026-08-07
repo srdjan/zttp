@@ -9,9 +9,7 @@ const manifest_alignment = @import("manifest_alignment.zig");
 const property_expectations = @import("property_expectations.zig");
 const build_report = @import("report.zig");
 const prove_upgrade = @import("prove_upgrade.zig");
-
-const handler_contract = zts.handler_contract;
-const HandlerContract = handler_contract.HandlerContract;
+const HandlerContract = zts.HandlerContract;
 const readFilePosix = zts.file_io.readFile;
 
 pub fn runProvePipeline(

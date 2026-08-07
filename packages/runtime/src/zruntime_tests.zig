@@ -3744,7 +3744,7 @@ test "HandlerInstance rejects malformed cached bytecode before execution" {
         .line_table = null,
     };
 
-    const no_shapes: []const []const zq.object.Atom = &.{};
+    const no_shapes: []const []const zq.Atom = &.{};
     var buffer: [1024]u8 = undefined;
     var writer = bytecode_cache.SliceWriter{ .buffer = &buffer };
     try bytecode_cache.serializeBytecodeWithAtomsAndShapes(
@@ -3817,7 +3817,7 @@ test "HandlerInstance rejects malformed nested cached bytecode before execution"
         .line_table = null,
     };
 
-    const no_shapes: []const []const zq.object.Atom = &.{};
+    const no_shapes: []const []const zq.Atom = &.{};
     var buffer: [2048]u8 = undefined;
     var writer = bytecode_cache.SliceWriter{ .buffer = &buffer };
     try bytecode_cache.serializeBytecodeWithAtomsAndShapes(

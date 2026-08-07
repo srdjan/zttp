@@ -113,7 +113,7 @@ fn runAnalysis(a: std.mem.Allocator, source: []const u8, is_tsx: bool, w: *std.I
         null, // system_path: single-handler analysis only
         false, // skip_contract: run the full contract + proof pipeline
     );
-    const contract_ptr: ?*const zts.handler_contract.HandlerContract =
+    const contract_ptr: ?*const zts.HandlerContract =
         if (result.contract) |*c| c else null;
     if (result.totalErrors() > 0) {
         try json_diag.writeErrorJson(w, contract_ptr, result.json_diagnostics.items, null, result.proof_trace_json);

@@ -252,7 +252,7 @@ fn writeDiagnosticsArray(writer: anytype, diagnostics: []const JsonDiagnostic) !
 /// ensuring the block is well-formed JSON.
 pub fn writeSuccessJson(
     writer: anytype,
-    contract: ?*const handler_contract.HandlerContract,
+    contract: ?*const zts.HandlerContract,
     diagnostics: []const JsonDiagnostic,
     witnesses_block_json: ?[]const u8,
     proof_trace_json: ?[]const u8,
@@ -345,7 +345,7 @@ pub fn writeSuccessJson(
 /// JSON inserted under `proof.witnesses`, or null to omit.
 pub fn writeErrorJson(
     writer: anytype,
-    contract: ?*const handler_contract.HandlerContract,
+    contract: ?*const zts.HandlerContract,
     diagnostics: []const JsonDiagnostic,
     witnesses_block_json: ?[]const u8,
     proof_trace_json: ?[]const u8,
@@ -444,7 +444,7 @@ fn writeSpecDiagnosticsJson(writer: anytype, items: anytype) !void {
 /// separator. Shared verbatim by the success and error envelopes.
 fn writeSpecAndCapsulesJson(
     writer: anytype,
-    c: *const handler_contract.HandlerContract,
+    c: *const zts.HandlerContract,
 ) !void {
     try writer.writeAll("\"spec_diagnostics\":");
     try writeSpecDiagnosticsJson(writer, c.spec_diagnostics.items);

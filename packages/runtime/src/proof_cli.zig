@@ -30,7 +30,6 @@ const RuntimeConfig = @import("runtime_config.zig").RuntimeConfig;
 const trace = zts.trace;
 const file_io = zts.file_io;
 const precompile = zts_cli.precompile;
-const handler_contract = zts.handler_contract;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const max_handler_bytes = 4 * 1024 * 1024;
@@ -365,7 +364,7 @@ pub fn writeManifest(
     var contract_json: std.ArrayList(u8) = .empty;
     defer contract_json.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &contract_json);
-    try handler_contract.writeContractJson(contract, &aw.writer);
+    try zts.writeContractJson(contract, &aw.writer);
     contract_json = aw.toArrayList();
     var contract_hash: [64]u8 = undefined;
     capsule.hashHex(contract_json.items, &contract_hash);

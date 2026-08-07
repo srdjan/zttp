@@ -12,15 +12,15 @@ const zts = @import("zts");
 const ir = zts.parser;
 const IrTranspiler = @import("transpiler.zig").IrTranspiler;
 const handler_contract = zts.handler_contract;
-const writeContractJson = handler_contract.writeContractJson;
-const HandlerContract = handler_contract.HandlerContract;
+const writeContractJson = zts.writeContractJson;
+const HandlerContract = zts.HandlerContract;
 const VerificationInfo = handler_contract.VerificationInfo;
 const ServiceTypeContext = zts.service_types.ServiceTypeContext;
 const ServiceRouteInfo = zts.service_types.RouteInfo;
 const ServiceResponseVariant = zts.service_types.ResponseVariant;
 const system_linker = zts.system_linker;
 const handler_policy = zts.handler_policy;
-const HandlerPolicy = handler_policy.HandlerPolicy;
+const HandlerPolicy = zts.HandlerPolicy;
 const manifest_alignment = @import("manifest_alignment.zig");
 const openapi_manifest = @import("openapi_manifest.zig");
 const sdk_codegen = @import("sdk_codegen.zig");
@@ -4591,7 +4591,7 @@ test "runCheckOnlyFromSource: explicit unknown Spec suppresses defaults and emit
     try std.testing.expectEqual(@as(usize, 1), contract.declared_specs.items.len);
     try std.testing.expectEqualStrings("made_up", contract.declared_specs.items[0]);
     try std.testing.expectEqual(@as(usize, 1), contract.spec_diagnostics.items.len);
-    try std.testing.expectEqual(handler_contract.SpecDiagnostic.Kind.unknown_name, contract.spec_diagnostics.items[0].kind);
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.unknown_name, contract.spec_diagnostics.items[0].kind);
 }
 
 test "compileHandler honors a registered partner manifest" {

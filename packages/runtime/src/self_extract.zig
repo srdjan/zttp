@@ -31,7 +31,7 @@ pub const Payload = struct {
     bytecode: []const u8,
     dep_bytecodes: []const []const u8,
     contract_json: ?[]const u8,
-    policy: handler_policy.RuntimePolicy,
+    policy: zts.RuntimePolicy,
     // Owned string slices backing the policy allow lists
     policy_strings: []const []const u8,
     /// SHA-256 of the exact serialized bytes read from section 4.
@@ -122,7 +122,7 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
 /// attestation JWS. Shared by `create` and `serializePayload`.
 pub const PayloadInput = struct {
     bytecode: []const u8,
-    policy: *const handler_policy.RuntimePolicy,
+    policy: *const zts.RuntimePolicy,
     dep_bytecodes: []const []const u8 = &.{},
     contract_json: ?[]const u8 = null,
     attestation: ?[]const u8 = null,
@@ -301,7 +301,7 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var dep_bytecodes: ?[]const []const u8 = null;
     var contract_json: ?[]const u8 = null;
     var attestation_jws: ?[]const u8 = null;
-    var policy: handler_policy.RuntimePolicy = .{};
+    var policy: zts.RuntimePolicy = .{};
     var policy_section_sha256 = [_]u8{0} ** 32;
     var policy_strings: std.ArrayList([]const u8) = .empty;
     errdefer {
@@ -387,7 +387,7 @@ fn parseDeps(allocator: std.mem.Allocator, data: []const u8) ![]const []const u8
 // Format: for each of env, egress, cache, sql:
 //   [1 byte: enabled] [2 bytes: count] [for each: 2 bytes len + bytes]
 
-pub fn serializePolicy(allocator: std.mem.Allocator, policy: *const handler_policy.RuntimePolicy) ![]u8 {
+pub fn serializePolicy(allocator: std.mem.Allocator, policy: *const zts.RuntimePolicy) ![]u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
 
@@ -427,7 +427,7 @@ fn deserializePolicy(
     allocator: std.mem.Allocator,
     data: []const u8,
     strings: *std.ArrayList([]const u8),
-) !handler_policy.RuntimePolicy {
+) !zts.RuntimePolicy {
     var pos: usize = 0;
     const env = try deserializeAllowList(allocator, data, &pos, strings);
     const egress = try deserializeAllowList(allocator, data, &pos, strings);
@@ -630,7 +630,7 @@ test "create preserves the previous artifact when a payload write fails" {
     try zts.file_io.writeFile(allocator, base_path, base);
     try zts.file_io.writeFile(allocator, output_path, old_artifact);
 
-    const policy = handler_policy.RuntimePolicy{};
+    const policy = zts.RuntimePolicy{};
     var failing = FailingArtifactWriter{ .remaining = base.len + 1 };
     try std.testing.expectError(error.InjectedWriteFailure, createWithWriter(
         allocator,
@@ -671,7 +671,7 @@ test "create produces a runnable mode 0755 artifact" {
     const previous_umask = std.c.umask(0o022);
     defer _ = std.c.umask(previous_umask);
 
-    const policy = handler_policy.RuntimePolicy{};
+    const policy = zts.RuntimePolicy{};
     try create(allocator, base_path, output_path, .{ .bytecode = "payload", .policy = &policy });
 
     const output_path_z = try allocator.dupeZ(u8, output_path);
@@ -711,7 +711,7 @@ test "create respects umask while keeping the artifact executable" {
     const previous_umask = std.c.umask(0o077);
     defer _ = std.c.umask(previous_umask);
 
-    const policy = handler_policy.RuntimePolicy{};
+    const policy = zts.RuntimePolicy{};
     try create(allocator, base_path, output_path, .{ .bytecode = "payload", .policy = &policy });
 
     const output_path_z = try allocator.dupeZ(u8, output_path);
@@ -727,7 +727,7 @@ test "roundtrip: serialize and parse payload" {
 
     const bytecode = "test bytecode data";
     const contract = "{\"routes\":[]}";
-    const policy = handler_policy.RuntimePolicy{};
+    const policy = zts.RuntimePolicy{};
 
     const serialized = try serializePayload(allocator, .{
         .bytecode = bytecode,
@@ -752,7 +752,7 @@ test "roundtrip: payload with deps" {
     const dep1 = "dep_module_1";
     const dep2 = "dep_module_2";
     const deps = [_][]const u8{ dep1, dep2 };
-    const policy = handler_policy.RuntimePolicy{};
+    const policy = zts.RuntimePolicy{};
 
     const serialized = try serializePayload(allocator, .{ .bytecode = bytecode, .dep_bytecodes = &deps, .policy = &policy });
     defer allocator.free(serialized);
@@ -772,7 +772,7 @@ test "roundtrip: payload with attestation JWS" {
 
     const bytecode = "bc";
     const jws = "eyJhbGciOiJFZERTQSJ9.eyJ2IjoiMSJ9.AAA";
-    const policy = handler_policy.RuntimePolicy{};
+    const policy = zts.RuntimePolicy{};
 
     const serialized = try serializePayload(allocator, .{ .bytecode = bytecode, .policy = &policy, .attestation = jws });
     defer allocator.free(serialized);
@@ -789,7 +789,7 @@ test "older payload (no attestation section) parses with null attestation" {
 
     const bytecode = "bc";
     const contract = "{}";
-    const policy = handler_policy.RuntimePolicy{};
+    const policy = zts.RuntimePolicy{};
 
     const serialized = try serializePayload(allocator, .{ .bytecode = bytecode, .contract_json = contract, .policy = &policy });
     defer allocator.free(serialized);
@@ -810,7 +810,7 @@ test "roundtrip: payload policy with populated allow lists" {
         .{ .name = "listTodos", .operation = "select", .statement = "" },
         .{ .name = "insertTodo", .operation = "insert", .statement = "" },
     };
-    const policy = handler_policy.RuntimePolicy{
+    const policy = zts.RuntimePolicy{
         .env = .{ .enabled = true, .values = &[_][]const u8{ "API_KEY", "DB_URL" } },
         .egress = .{ .enabled = true, .values = &[_][]const u8{"api.stripe.com"} },
         .cache = .{ .enabled = true, .values = &[_][]const u8{"sessions"} },

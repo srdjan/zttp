@@ -58,7 +58,7 @@ pub const HandlerPool = struct {
     wait_percentiles: PercentileTracker,
     exec_percentiles: PercentileTracker,
     pool: zq.LockFreePool,
-    cache: bytecode_cache.BytecodeCache,
+    cache: zq.BytecodeCache,
     cache_mutex: compat.Mutex,
     /// Latches to true after a cache deserialize failure so subsequent
     /// requests skip both reads and writes and always recompile from
@@ -203,7 +203,7 @@ pub const HandlerPool = struct {
             .wait_percentiles = .{},
             .exec_percentiles = .{},
             .pool = pool,
-            .cache = bytecode_cache.BytecodeCache.init(allocator),
+            .cache = zq.BytecodeCache.init(allocator),
             .cache_mutex = .{},
             .cache_disabled = std.atomic.Value(bool).init(false),
             .runtime_init_mutex = .{},
@@ -259,7 +259,7 @@ pub const HandlerPool = struct {
         self: *Self,
         new_code: []const u8,
         new_filename: []const u8,
-        dev_policy: ?zq.handler_policy.RuntimePolicy,
+        dev_policy: ?zq.RuntimePolicy,
     ) usize {
         self.runtime_init_mutex.lock();
         self.cache_mutex.lock();
@@ -297,7 +297,7 @@ pub const HandlerPool = struct {
     /// (checked-out) runtimes finish under the previous policy, so the caller
     /// must keep the previous policy's backing storage alive one generation.
     /// Mirrors `reloadHandler`'s locking.
-    pub fn setDevCapabilityPolicy(self: *Self, policy: zq.handler_policy.RuntimePolicy) void {
+    pub fn setDevCapabilityPolicy(self: *Self, policy: zq.RuntimePolicy) void {
         self.runtime_init_mutex.lock();
         self.config.dev_capability_policy = policy;
         self.runtime_init_mutex.unlock();
@@ -931,7 +931,7 @@ pub const HandlerPool = struct {
         }
 
         // Fallback: runtime compilation (for development without -Dhandler)
-        const key = bytecode_cache.BytecodeCache.cacheKey(self.handler_code);
+        const key = zq.BytecodeCache.cacheKey(self.handler_code);
 
         // Acquire lock for parsing (double-checked locking pattern).
         // The old lockless fast path was unsafe: getRaw() releases its internal
@@ -1146,9 +1146,9 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
 
     const marker: i32 = 0x11223344;
     var constants = [_]zq.JSValue{zq.JSValue.fromInt(marker)};
-    var code_buf = [_]u8{@intFromEnum(zq.bytecode.Opcode.ret)};
+    var code_buf = [_]u8{@intFromEnum(zq.Opcode.ret)};
 
-    const func = try allocator.create(zq.bytecode.FunctionBytecode);
+    const func = try allocator.create(zq.FunctionBytecode);
     defer allocator.destroy(func);
     func.* = .{
         .header = .{},

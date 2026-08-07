@@ -11,7 +11,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const handler_contract = zts.handler_contract;
-const HandlerContract = handler_contract.HandlerContract;
+const HandlerContract = zts.HandlerContract;
 
 // -------------------------------------------------------------------------
 // Platform-agnostic proven facts

@@ -31,7 +31,7 @@ const module_spec_cli = @import("module_spec_cli.zig");
 const project_config_mod = @import("project_config");
 const zts = @import("zts");
 const zts_file_io = zts.file_io;
-const writeContractJson = zts.handler_contract.writeContractJson;
+const writeContractJson = zts.writeContractJson;
 
 /// Help-grouping for the canonical analyzer surface. `analyze` commands act on
 /// a handler/system; `machine` commands emit JSON metadata for IDE and
@@ -272,10 +272,10 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         };
 
         if (result.totalErrors() > 0) {
-            const contract_ptr: ?*const zts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
+            const contract_ptr: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
             json_diag.writeErrorJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block, result.proof_trace_json) catch {};
         } else {
-            const contract_ptr: ?*const zts.handler_contract.HandlerContract = if (result.contract) |*c| c else null;
+            const contract_ptr: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
             json_diag.writeSuccessJson(&aw.writer, contract_ptr, result.json_diagnostics.items, witnesses_block, result.proof_trace_json) catch {};
         }
 

@@ -2,7 +2,6 @@ const std = @import("std");
 const zts = @import("zts");
 
 const contract_diff = zts.contract_diff;
-const handler_contract = zts.handler_contract;
 const system_linker = zts.system_linker;
 const writeJsonString = zts.writeJsonString;
 
@@ -116,7 +115,7 @@ const StateAssessment = struct {
 
 const MixedSystem = struct {
     config: system_linker.SystemConfig,
-    contracts: []handler_contract.HandlerContract,
+    contracts: []zts.HandlerContract,
 
     fn deinit(self: *MixedSystem, allocator: std.mem.Allocator) void {
         self.config.deinit(allocator);
@@ -232,7 +231,7 @@ const Planner = struct {
             entries.deinit(self.allocator);
         }
 
-        var contracts: std.ArrayList(handler_contract.HandlerContract) = .empty;
+        var contracts: std.ArrayList(zts.HandlerContract) = .empty;
         errdefer contracts.deinit(self.allocator);
 
         for (self.handlers) |item| {
@@ -252,7 +251,7 @@ const Planner = struct {
 
     const SelectedVersion = struct {
         entry: *const system_linker.SystemConfig.HandlerEntry,
-        contract: *const handler_contract.HandlerContract,
+        contract: *const zts.HandlerContract,
     };
 
     fn selectedVersion(self: *Planner, item: HandlerVersion, mask: u32) ?SelectedVersion {
