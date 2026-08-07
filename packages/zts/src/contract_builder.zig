@@ -4563,15 +4563,17 @@ fn responseVariantMatches(existing: ApiResponseInfo, candidate: *const ContractB
 }
 
 /// Mirror ContractBuilder.ResponseSchemaCandidate's separate fields into the
-/// SchemaSpec union with the same precedence used by the JSON parser.
+/// SchemaSpec union. The precedence is `SchemaSpec.fromFields`, shared with the
+/// JSON parser and the differ.
 fn schemaSpecFromCandidate(
     allocator: std.mem.Allocator,
     candidate: *const ContractBuilder.ResponseSchemaCandidate,
 ) !SchemaSpec {
-    if (candidate.dynamic) return .dynamic;
-    if (candidate.schema_json) |s| return .{ .inline_json = try allocator.dupe(u8, s) };
-    if (candidate.schema_ref) |s| return .{ .ref = try allocator.dupe(u8, s) };
-    return .none;
+    return SchemaSpec.fromFields(
+        candidate.schema_ref,
+        candidate.schema_json,
+        candidate.dynamic,
+    ).dupeOwned(allocator);
 }
 
 fn eqlOptionalString(a: ?[]const u8, b: ?[]const u8) bool {

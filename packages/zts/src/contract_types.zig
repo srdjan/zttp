@@ -337,6 +337,25 @@ pub const SchemaSpec = union(enum) {
     inline_json: []const u8, // owned
     dynamic,
 
+    /// Build a spec from the separate scalar fields the wire format, the
+    /// builder's candidates, and the differ all carry. This is where the
+    /// precedence (dynamic > inline JSON > ref > none) is decided, once - it is
+    /// the round-trip invariant, so a copy that reorders these checks makes a
+    /// contract read back as something other than what was written.
+    ///
+    /// The payload slices are borrowed from the arguments. Chain `dupeOwned` for
+    /// an owned spec; that way only the winning branch allocates.
+    pub fn fromFields(
+        schema_ref: ?[]const u8,
+        schema_json: ?[]const u8,
+        dynamic: bool,
+    ) SchemaSpec {
+        if (dynamic) return .dynamic;
+        if (schema_json) |json| return .{ .inline_json = json };
+        if (schema_ref) |reference| return .{ .ref = reference };
+        return .none;
+    }
+
     pub fn schemaRef(self: SchemaSpec) ?[]const u8 {
         return switch (self) {
             .ref => |s| s,

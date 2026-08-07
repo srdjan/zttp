@@ -903,20 +903,16 @@ fn projectApiResponses(
     return result;
 }
 
-/// The one place the schema precedence (dynamic > inline JSON > ref > none) is
-/// encoded. Wire-typed callers unwrap through `projectWireSchemaSpec` so the two
-/// entry points cannot drift apart: a route's `request_bodies` and its
-/// backfilled `responses` have to agree for the same contract to round-trip.
+/// Own the spec `SchemaSpec.fromFields` decides. The precedence itself lives on
+/// the type, beside the builder's and the differ's uses of it, so a route's
+/// `request_bodies` and its backfilled `responses` cannot drift apart.
 fn projectSchemaSpec(
     allocator: std.mem.Allocator,
     schema_ref: ?[]const u8,
     schema_json: ?[]const u8,
     dynamic: bool,
 ) !SchemaSpec {
-    if (dynamic) return .dynamic;
-    if (schema_json) |schema| return .{ .inline_json = try allocator.dupe(u8, schema) };
-    if (schema_ref) |reference| return .{ .ref = try allocator.dupe(u8, reference) };
-    return .none;
+    return SchemaSpec.fromFields(schema_ref, schema_json, dynamic).dupeOwned(allocator);
 }
 
 fn projectWireSchemaSpec(

@@ -1637,10 +1637,7 @@ fn schemaSpecView(
     schema_json: ?[]const u8,
     is_dynamic: bool,
 ) handler_contract.SchemaSpec {
-    if (is_dynamic) return .dynamic;
-    if (schema_json) |s| return .{ .inline_json = s };
-    if (schema_ref) |s| return .{ .ref = s };
-    return .none;
+    return handler_contract.SchemaSpec.fromFields(schema_ref, schema_json, is_dynamic);
 }
 
 /// Compare two body schemas via exhaustive variant matching. Mixed-shape
