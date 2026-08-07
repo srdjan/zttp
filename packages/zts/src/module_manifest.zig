@@ -7,8 +7,13 @@
 
 const std = @import("std");
 const mb = @import("module_binding.zig");
+const module_specifier = @import("module_specifier.zig");
 
-pub const namespaced_export_separator = "#";
+/// Specifier syntax lives in `module_specifier.zig` so the parser and the
+/// module resolver can name it without importing this manifest parser.
+/// Re-exported here for the callers that already look for it on the manifest.
+pub const namespaced_export_separator = module_specifier.namespaced_export_separator;
+pub const validSpecifier = module_specifier.validSpecifier;
 
 pub const ManifestError = error{
     InvalidJson,
@@ -297,11 +302,6 @@ fn boolField(obj: anytype, key: []const u8) ?bool {
     const value = obj.get(key) orelse return null;
     if (value != .bool) return null;
     return value.bool;
-}
-
-pub fn validSpecifier(specifier: []const u8) bool {
-    return std.mem.startsWith(u8, specifier, "zttp:") or
-        std.mem.startsWith(u8, specifier, "zttp-ext:");
 }
 
 fn parseBackend(raw: []const u8) ?Backend {

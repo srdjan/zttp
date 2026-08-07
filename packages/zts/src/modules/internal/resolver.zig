@@ -11,7 +11,7 @@ const gc = @import("../../gc.zig");
 const trace = @import("../../trace.zig");
 const mb = @import("../../module_binding.zig");
 const builtin_modules = @import("../../builtin_modules.zig");
-const module_manifest = @import("../../module_manifest.zig");
+const module_specifier = @import("../../module_specifier.zig");
 
 /// Effect classification for virtual module functions.
 /// Used by the contract builder to derive handler-level properties
@@ -139,7 +139,7 @@ fn registerNativeExportForBinding(
     // (importGlobalAtom) always binds `import { fn } from "zttp:module"` to
     // this namespaced atom, so it is the only reachable path for virtual
     // module exports.
-    const namespaced_name = comptime binding.specifier ++ module_manifest.namespaced_export_separator ++ exp.name;
+    const namespaced_name = comptime binding.specifier ++ module_specifier.namespaced_export_separator ++ exp.name;
     const namespaced_atom = try ctx.atoms.intern(namespaced_name);
     try registerNativeExport(ctx, allocator, pool, namespaced_atom, func, exp.arg_count);
 }

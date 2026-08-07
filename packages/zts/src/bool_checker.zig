@@ -16,6 +16,7 @@ const ir = @import("parser/ir.zig");
 const object = @import("object.zig");
 const context = @import("context.zig");
 const module_facts_mod = @import("module_facts.zig");
+const node_types = @import("node_types.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -27,37 +28,11 @@ const null_node = ir.null_node;
 // Expression type inference
 // ---------------------------------------------------------------------------
 
-pub const ExprType = enum(u8) {
-    boolean, // true/false, comparisons, !(bool), &&/|| of bools
-    number, // int/float literals, arithmetic, bitwise, unary -/+/~
-    string, // string/template literals, typeof
-    undefined, // undefined literal
-    object, // object/array literals
-    function, // function/arrow expressions
-    unknown, // cannot determine statically (params, fn calls, let vars, property access)
-    // Optional variants: T | undefined
-    optional_string, // e.g. env(), parseBearer(), cacheGet()
-    optional_object, // e.g. routerMatch()
-
-    /// Returns true if this type is known to never be undefined.
-    pub fn isNonNullable(self: ExprType) bool {
-        return switch (self) {
-            .boolean, .number, .string, .object, .function => true,
-            else => false,
-        };
-    }
-
-    /// Remove optionality from a type: optional_string -> string, etc.
-    /// Returns .unknown for types that are purely undefined.
-    pub fn removeNullish(self: ExprType) ExprType {
-        return switch (self) {
-            .optional_string => .string,
-            .optional_object => .object,
-            .undefined => .unknown,
-            else => self,
-        };
-    }
-};
+/// The inference lattice and the map it fills live in `node_types.zig` so
+/// `parser/codegen.zig` can read type annotations without importing this
+/// checker. Re-exported here because this is where they are produced and
+/// where every caller already looks for them.
+pub const ExprType = node_types.ExprType;
 
 /// Unify two types into a single type. Returns .unknown if they're incompatible.
 /// Handles optional promotion: string + undefined -> optional_string, etc.
@@ -143,9 +118,7 @@ pub const Diagnostic = struct {
 // BoolChecker
 // ---------------------------------------------------------------------------
 
-/// Per-node type annotation map for type-directed codegen.
-/// Populated by BoolChecker during its walk, consumed by CodeGen to emit specialized opcodes.
-pub const NodeTypeMap = std.AutoHashMapUnmanaged(NodeIndex, ExprType);
+pub const NodeTypeMap = node_types.NodeTypeMap;
 
 pub const BoolChecker = struct {
     allocator: std.mem.Allocator,

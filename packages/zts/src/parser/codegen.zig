@@ -15,8 +15,8 @@ const string = @import("../string.zig");
 const js_object = @import("../object.zig");
 const atom_table = @import("../atom_table.zig");
 const handler_analyzer = @import("../handler_analyzer.zig");
-const bool_checker = @import("../bool_checker.zig");
-const module_manifest = @import("../module_manifest.zig");
+const node_types = @import("../node_types.zig");
+const module_specifier = @import("../module_specifier.zig");
 
 // Re-export types used by this module
 const JSValue = value.JSValue;
@@ -103,7 +103,7 @@ pub const CodeGen = struct {
     opt_stats: bytecode_opt.OptStats,
 
     /// Per-node type annotations from BoolChecker for type-specialized opcode emission.
-    node_types: ?*const bool_checker.NodeTypeMap,
+    node_types: ?*const node_types.NodeTypeMap,
 
     /// Object literal shapes collected during compilation.
     /// Each entry is an array of atoms representing property names in declaration order.
@@ -191,7 +191,7 @@ pub const CodeGen = struct {
     }
 
     /// Set the per-node type annotations from BoolChecker for type-directed codegen.
-    pub fn setNodeTypes(self: *CodeGen, nt: *const bool_checker.NodeTypeMap) void {
+    pub fn setNodeTypes(self: *CodeGen, nt: *const node_types.NodeTypeMap) void {
         self.node_types = nt;
     }
 
@@ -578,13 +578,13 @@ pub const CodeGen = struct {
 
     fn importGlobalAtom(self: *CodeGen, module_idx: u16, imported_atom: u16) !u16 {
         const module_name = self.ir.getString(module_idx) orelse return imported_atom;
-        if (!module_manifest.validSpecifier(module_name)) return imported_atom;
+        if (!module_specifier.validSpecifier(module_name)) return imported_atom;
 
         const atoms = self.atoms orelse return imported_atom;
         const imported_name = self.atomName(imported_atom) orelse return imported_atom;
         const namespaced = try std.fmt.allocPrint(
             self.allocator,
-            "{s}" ++ module_manifest.namespaced_export_separator ++ "{s}",
+            "{s}" ++ module_specifier.namespaced_export_separator ++ "{s}",
             .{ module_name, imported_name },
         );
         defer self.allocator.free(namespaced);
