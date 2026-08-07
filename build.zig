@@ -411,6 +411,10 @@ pub fn build(b: *std.Build) void {
     const proof_swallow_step = b.step("test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
     proof_swallow_step.dependOn(&proof_swallow.step);
 
+    const zts_layering = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-zts-layering.sh" });
+    const zts_layering_step = b.step("test-zts-layering", "Check zts tier assignments import only downward");
+    zts_layering_step.dependOn(&zts_layering.step);
+
     const convergence_emitter = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-convergence-emitter.sh" });
     const convergence_emitter_step = b.step("test-convergence-emitter", "Check the convergence marker has one producer and one consumer");
     convergence_emitter_step.dependOn(&convergence_emitter.step);
@@ -845,6 +849,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(&module_boundary.step);
     test_step.dependOn(&proof_swallow.step);
+    test_step.dependOn(&zts_layering.step);
     test_step.dependOn(&run_release_check_tests.step);
     test_step.dependOn(production_branch_metric_test_step);
     test_step.dependOn(comptime_cli_step);

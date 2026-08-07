@@ -1,0 +1,191 @@
+# Which tier each file in packages/zts/src belongs to.
+#
+# Four tiers, lowest first. A file may import its own tier and any tier below
+# it, never one above:
+#
+#   zts-base       utilities every tier names and that name nothing themselves
+#   zts-contracts  contract and receipt data with its serialization
+#   zts            the engine: values, GC, objects, bytecode, interpreter,
+#                  parser, builtins, virtual modules
+#   zts-compiler   everything that decides whether a program is proven
+#
+# Enforced in both directions by scripts/check-zts-layering.sh, which
+# `zig build test` depends on: an upward import fails, and so does a file with
+# no row or a row with no file. The second half is the input floor - a manifest
+# that lost its rows would otherwise report zero violations while checking
+# nothing.
+#
+# This is the assignment the four-module split will use. It is checked while the
+# package is still one module, so the split is known to compile before
+# packages/zts/build.zig is touched. Moving a file between tiers is a deliberate
+# edit: say why in the commit, and expect the gate to name whatever the move
+# breaks. See docs/plans/2026-08-07-021-zts-three-module-split-plan.md.
+#
+# Same-tier imports are unconstrained. This file pins the direction between
+# tiers, not the size of any tier's surface; scripts/module-boundary.allow does
+# that, for consumer packages.
+
+# zts-base
+zts-base compat.zig
+zts-base json_utils.zig
+zts-base json_wire.zig
+zts-base known_globals.zig
+zts-base module_authorization.zig
+zts-base module_slots.zig
+zts-base module_specifier.zig
+zts-base route_match.zig
+zts-base type_map.zig
+
+# zts-contracts
+zts-contracts contract_json_parser.zig
+zts-contracts contract_json_writer.zig
+zts-contracts contract_types.zig
+zts-contracts equivalence_receipt.zig
+zts-contracts handler_contract.zig
+zts-contracts perf_receipt.zig
+zts-contracts service_types.zig
+zts-contracts system_config.zig
+
+# zts
+zts arena.zig
+zts atom_table.zig
+zts builtin_modules.zig
+zts builtins/array.zig
+zts builtins/console.zig
+zts builtins/date.zig
+zts builtins/error.zig
+zts builtins/helpers.zig
+zts builtins/json.zig
+zts builtins/math.zig
+zts builtins/number.zig
+zts builtins/object_builtins.zig
+zts builtins/result.zig
+zts builtins/root.zig
+zts builtins/string_builtins.zig
+zts builtins/symbol.zig
+zts builtins/weak_collections.zig
+zts bytecode.zig
+zts bytecode_cache.zig
+zts bytecode_opt.zig
+zts bytecode_verifier.zig
+zts comptime.zig
+zts context.zig
+zts cost_meter.zig
+zts extension_bindings.zig
+zts file_io.zig
+zts gc.zig
+zts handler_analyzer.zig
+zts handler_policy.zig
+zts heap.zig
+zts http.zig
+zts http_cache.zig
+zts interpreter.zig
+zts interpreter/alloc.zig
+zts interpreter/arith.zig
+zts interpreter/call.zig
+zts interpreter/cmp.zig
+zts interpreter/env_cache.zig
+zts interpreter/frame.zig
+zts interpreter/ic.zig
+zts interpreter/lifecycle.zig
+zts interpreter/perf.zig
+zts interpreter/saved_state.zig
+zts interpreter/trace.zig
+zts interpreter/util.zig
+zts module_binding.zig
+zts module_manifest.zig
+zts module_binding/bridge.zig
+zts module_binding/capabilities.zig
+zts module_binding/types.zig
+zts module_binding_adapter.zig
+zts modules/data/sql.zig
+zts modules/internal/compiler.zig
+zts modules/internal/file_resolver.zig
+zts modules/internal/module_graph.zig
+zts modules/internal/resolver.zig
+zts modules/internal/util.zig
+zts modules/net/fetch.zig
+zts modules/net/service.zig
+zts modules/net/websocket.zig
+zts modules/root.zig
+zts modules/workflow/durable.zig
+zts modules/workflow/io.zig
+zts modules/workflow/queue.zig
+zts modules/workflow/scope.zig
+zts modules/workflow/workflow.zig
+zts node_types.zig
+zts object.zig
+zts parallel_collection.zig
+zts parser/codegen.zig
+zts parser/error.zig
+zts parser/ir.zig
+zts parser/ir_opt.zig
+zts parser/parse.zig
+zts parser/root.zig
+zts parser/scope.zig
+zts parser/token.zig
+zts parser/tokenizer.zig
+zts policy.zig
+zts pool.zig
+zts security_events.zig
+zts sqlite.zig
+zts string.zig
+zts stripper.zig
+zts trace.zig
+zts value.zig
+zts wasm/interpreter.zig
+zts wasm/loader.zig
+zts wasm/pool.zig
+zts wasm/root.zig
+
+# zts-compiler
+zts-compiler api_schema.zig
+zts-compiler behavior_canonical.zig
+zts-compiler bool_checker.zig
+zts-compiler compiler.zig
+zts-compiler contract_builder.zig
+zts-compiler contract_diff.zig
+zts-compiler counterexample.zig
+zts-compiler diagnostic_projection.zig
+zts-compiler effect_inference.zig
+zts-compiler fanout_extractor.zig
+zts-compiler fault_coverage.zig
+zts-compiler flow_checker.zig
+zts-compiler function_specs.zig
+zts-compiler handler_verifier.zig
+zts-compiler idiom_registry.zig
+zts-compiler intent_extractor.zig
+zts-compiler manifest_registry.zig
+zts-compiler match_analysis.zig
+zts-compiler module_facts.zig
+zts-compiler module_spec_render.zig
+zts-compiler module_types.zig
+zts-compiler path_generator.zig
+zts-compiler pipeline.zig
+zts-compiler proof_trace.zig
+zts-compiler property_diagnostics.zig
+zts-compiler repair_intent.zig
+zts-compiler repair_plan.zig
+zts-compiler repair_validator.zig
+zts-compiler restriction_registry.zig
+zts-compiler root.zig
+zts-compiler rule_registry.zig
+zts-compiler saga_extractor.zig
+zts-compiler semantics.zig
+zts-compiler semantics_audit.zig
+zts-compiler semantics_check.zig
+zts-compiler semantics_corpus.zig
+zts-compiler semantics_render.zig
+zts-compiler semantics_smt.zig
+zts-compiler spec_discharge.zig
+zts-compiler sql_analysis.zig
+zts-compiler strict_checker.zig
+zts-compiler system_linker.zig
+zts-compiler tests/import_corpus.zig
+zts-compiler tests/opcode_parity.zig
+zts-compiler type_checker.zig
+zts-compiler type_env.zig
+zts-compiler type_key.zig
+zts-compiler type_pool.zig
+zts-compiler witness_corpus.zig
+zts-compiler ws_consistency.zig
