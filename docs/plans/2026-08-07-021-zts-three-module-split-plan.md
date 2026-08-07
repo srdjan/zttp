@@ -1,6 +1,7 @@
 # Splitting `zts` into `zts` / `zts-compiler` / `zts-contracts`
 
-Status: plan, not started.
+Status: steps 0 through 4 done. Step 5 (shrinking the consumer allowlist) is
+the only part left, and is deliberately separate - see criterion 6.
 Scope: `packages/zts/`, `packages/zts/build.zig`, the root `build.zig`,
 `scripts/check-module-boundary.sh`, `scripts/module-boundary.allow`.
 
@@ -165,14 +166,9 @@ and each is revertible on its own. Order matters only in that
 `scripts/check-zts-layering.sh` enforces it, wired into `zig build test` as
 `test-zts-layering`. Done; see the results below.
 
-**Step 3 - rewire cross-tier relative imports to named imports.** Mechanical,
-and the compiler catches every miss. Under the assignment above this touches on
-the order of 57 files; the exact number falls out of step 2.
-
-**Step 4 - split `packages/zts/build.zig` into three `addModule` calls,**
-lowest tier first, and wire `zts-compiler` and `zts-contracts` into the root
-`build.zig` next to the existing `zts` module. Three test roots replace one, so
-`zig build test-zts` becomes three steps, or one step depending on three.
+**Steps 3 and 4 - rewire the imports and split the build.** These are one
+change, not two: a named import needs the module to exist. Done, bottom-up, one
+tier per commit; see the results below.
 
 **Step 5 - retire the allowlist to the extent the compiler now enforces it.**
 Rows in `scripts/module-boundary.allow` that name a module now in
@@ -311,54 +307,147 @@ changed except those two runtime call sites.
   needs them lower.
 - **`trace.zig` is `zts`**, as expected: it is the engine-side recorder.
 
-## Success criteria
+## Steps 3 and 4 results, 2026-08-07
 
-1. `bash scripts/verify.sh` passes at every step, not only at the end.
-2. The step 2 acyclicity check passes and is wired into `zig build test`.
-3. `zig build -Doptimize=ReleaseFast` and `zig build wasm` both succeed.
-4. No type identity regression: a value produced by `zts` and consumed through
-   `zts-compiler` compiles without a cast. The concrete probe is
-   `packages/tools`, which today names both `parser` and `handler_contract`.
-5. `zig build bench` runs and its numbers are unchanged within noise. The split
-   is a build-graph change and must not move the interpreter's performance.
-6. `scripts/check-module-boundary.sh` reports a smaller allowed-reach count than
-   it does today, and no row it still lists is stale.
+Three commits, one per extraction. `bash scripts/verify.sh` passes.
 
-## What the split buys
+| | Start of the work | Now |
+|---|---|---|
+| Files under `packages/zts/src` | 154 | 161 |
+| Relative import edges | 760 | 595 |
+| Edges crossing a tier line | 231 (measured at step 2) | **0** |
+| Largest strongly connected component | 101 | within one tier |
+| Build modules | 1 | 5 |
 
-Three things, stated so they can be checked afterward rather than assumed:
+The final shape, which differs from what this document originally planned:
 
-- **A compiler-enforced direction.** Today `scripts/module-boundary.allow` is
-  the only thing stopping the engine from importing the flow checker, and it
-  gates consumer packages, not `zts` itself. Inside the package there is no
-  boundary at all - that is what the 101-file cycle is.
-- **A smaller analyzer build.** `-Danalyzer_only` already exists to strip the
-  VM, SQLite, and libc for the wasm target, and it does so with `comptime`
-  gates scattered across `module_binding.zig`, `bridge.zig`, `capabilities.zig`,
-  and `root.zig:74`. With `zts-compiler` not importing `zts`, most of those
-  gates become unnecessary: the analyzer links the compiler module and never
-  names the engine.
-- **Test suites that match the code.** One `addTest` root over 154 files means
-  a change to the flow checker recompiles the interpreter's tests. Three roots
-  do not.
+    zts-base <- zts-contracts <- zts-engine <- zts-compiler
+                                                      ^
+                              zts (umbrella, holds no code)
 
-## Risks
+**Why the umbrella.** `zts-compiler` sits above the engine, so `src/root.zig`
+could not re-export it the way it re-exports the tiers below - that direction is
+the cycle. The plan as written had consumers import `zts` and `zts-compiler`
+separately, which measured at 136 call sites across 33 files in three packages,
+four consumer `build.zig` files, and about forty curated names moving to a new
+module. Making `root.zig` a re-export-only umbrella instead leaves every
+consumer's `@import("zts")` resolving exactly the names it always did.
+`zq.Context` comes from `zts-engine` and `zq.FlowChecker` from `zts-compiler`;
+both are the same module instance everywhere, so the types are interchangeable.
+`scripts/module-boundary.allow` is unchanged - 77 internal modules, 55 allowed
+package reaches, the same numbers as before the split.
 
-- **`refAllDecls` coverage.** `root.zig:660` collects tests by
-  `std.testing.refAllDecls(@This())`, and three of the anchors below it exist
-  because that recursion misses files nothing analyzes. Three roots means three
-  such anchor audits, and a file that lands in no root runs no tests while the
-  suite still reports a pass. This is the gate-with-no-input shape that
-  `docs/solutions/conventions/a-gate-that-counts-nothing-still-reports-a-pass.md`
-  documents. Assert a per-root file floor.
-- **`build_options`.** Each module needs its own `addOptions`, and
-  `analyzer_only` currently means one thing for the whole package. Splitting it
-  three ways without deciding what it means per tier will silently change which
-  code is compiled out.
-- **The seven cuts change behavior if done carelessly.** Six of them are alias
-  or single-call reaches, but `parser/codegen.zig:2907` constructs a
-  `HandlerAnalyzer` during code generation. Moving that out of codegen changes
-  when analysis runs. Reproduce the current behavior with a test before cutting.
+**What each extraction needed.**
+
+- `zts-base` (10 files) was already clean: no edges among its members, none
+  outbound, 60 inbound from 43 files.
+- `zts-contracts` (9 files) had seven internal edges and, after step 2, nothing
+  outbound above `zts-base`. 27 inbound from 20 files.
+- `zts-engine` (92) and `zts-compiler` (49) went together, 125 relative imports
+  across 33 files. `parser/root.zig` gained `pub const ir` so a compiler-tier
+  file can walk the IR without compiling a second copy of `ir.zig`; `parse.zig`
+  needed no such re-export, because `JsParser` was the only thing anyone wanted
+  from it.
+
+**The duplicate-file failure is real, and it fires twice.** Pointing
+`trace.zig` back at `"json_utils.zig"` makes the gate report
+`zts -> zts-base (1 edges): trace.zig -> json_utils.zig`, and makes zig fail
+with `error: file exists in modules 'zts-base' and 'root'`. That is the
+two-incompatible-types outcome this plan was written to prevent, reachable in
+one edit and caught at both ends.
+
+**Test collection was the real hazard**, exactly as the Risks section said. `zig
+test` collects only from the files its root module analyzes, so one root over
+`src/root.zig` would compile and pass while running none of the tier tests.
+There are five roots now, one per module, and each imports only the tiers below
+it. Importing its own tier makes zig report the duplicate-file error; importing
+one above drags in a second `sqlite3.c` and turns every `sqlite3_*` symbol into
+a duplicate definition. Both happened during this change. Coverage was then
+verified rather than assumed: a deliberately failing test appended to
+`compat.zig`, `contract_types.zig`, `interpreter.zig` and `flow_checker.zig`
+each made `zig build test-zts` exit nonzero, one per tier, against a control
+that passes.
+
+**`scripts/check-module-boundary.sh` needed its parser updated.** `root.zig`
+spells the internal tier `= engine.value` now, not `= @import("value.zig")`.
+Its own input floor caught this, reporting `only 0 internal modules parsed`
+rather than silently checking nothing - the gate-with-no-input shape, working as
+designed.
+
+## Success criteria, and how they came out
+
+1. **`bash scripts/verify.sh` passes at every step, not only at the end.** Met.
+   It was run and passed after each of the eleven commits.
+2. **The acyclicity check passes and is wired into `zig build test`.** Met.
+   `scripts/check-zts-layering.sh`, as the `test-zts-layering` step. It now
+   reports zero cross-tier relative imports rather than only zero upward ones.
+3. **`zig build -Doptimize=ReleaseFast` and `zig build wasm` both succeed.**
+   Half met, and honestly so. ReleaseFast passes. `zig build wasm` fails on
+   `std/posix.zig:108:21: error: struct 'posix.system__struct_*' has no member
+   named 'O'`, and that failure reproduces unchanged at the commit before this
+   work started. It is a pre-existing break in the freestanding analyzer target,
+   not a consequence of the split, and it is not addressed here.
+4. **No type identity regression.** Met. `packages/tools` names both `parser`
+   (engine) and `handler_contract` (contracts) and compiles without a cast, as
+   do `runtime` and `pi`. The umbrella is what makes this hold for free: every
+   consumer reaches one module instance per tier.
+5. **`zig build bench` runs and its numbers are unchanged within noise.** Met.
+   Total 62.2ms across thirteen benchmarks, with inline-cache hit rates
+   unchanged (propertyAccess 100.0%, jsonOps 75.0%, httpHandler 100.0%). The
+   split moved the build graph, not the interpreter.
+6. **`check-module-boundary.sh` reports a smaller allowed-reach count.** Not
+   met, and it should not have been the criterion. The count is unchanged at 77
+   internal modules and 55 allowed reaches, because the umbrella deliberately
+   preserves the consumer surface. Shrinking that surface is a separate piece of
+   work with its own trade-offs; conflating it with the split would have meant
+   rewriting 136 consumer call sites for reasons unrelated to the cycle. Step 5
+   below is what remains of it.
+
+## What the split bought
+
+Three things were claimed. Two are delivered, one is set up but not taken.
+
+- **A compiler-enforced direction. Delivered.** Before this,
+  `scripts/module-boundary.allow` was the only thing stopping the engine from
+  importing the flow checker, and it gated consumer packages, not `zts` itself.
+  Inside the package there was no boundary at all - that is what the 101-file
+  strongly connected component was. Now the direction is a property of the build
+  graph: an engine file that names a compiler file does not fail review, it
+  fails to compile.
+- **Test suites that match the code. Delivered.** One `addTest` root over 154
+  files meant a change to the flow checker recompiled the interpreter's tests.
+  Five roots do not.
+- **A smaller analyzer build. Set up, not taken.** `-Danalyzer_only` still
+  strips the VM, SQLite and libc with `comptime` gates in
+  `module_binding.zig`, `bridge.zig` and `capabilities.zig`. Those gates can now
+  go, because the analyzer can link `zts-compiler` and never name the engine -
+  but the wasm target does not build today for an unrelated `std.posix` reason
+  (criterion 3), so nothing was changed there and no size claim is made.
+
+## Risks, as they turned out
+
+- **`refAllDecls` coverage. Materialized, and was the main hazard.** `zig test`
+  collects only from the files its root module analyzes, so one root over
+  `src/root.zig` would have compiled and passed while running none of the tier
+  tests. Five roots now exist, one per module, each importing only the tiers
+  below it. Coverage was verified per tier with deliberately failing tests
+  rather than assumed.
+- **`build_options`. Materialized, benignly.** Options are per-module, so all
+  five modules get their own `addOptions` copy. `analyzer_only` still means one
+  thing for the whole package; nothing about its meaning changed, and deciding
+  what it should mean per tier is deferred with the analyzer-size work above.
+- **The seven cuts change behavior if done carelessly. Did not materialize.**
+  The one behavior-bearing cut, `parser/codegen.zig:2907` constructing a
+  `HandlerAnalyzer` during code generation, turned out not to be a cut at all:
+  `handler_analyzer.zig` imports only the bytecode, the IR, objects and the
+  context, and produces a dispatch table the interpreter reads at run time. It
+  is engine-tier, so codegen naming it is a same-tier edge and nothing moved.
+- **Two risks the plan did not name, both found by building.** Compiling
+  `sqlite3.c` into more than one module in a binary makes the linker report
+  every `sqlite3_*` symbol as a duplicate definition. And a test root that
+  imports its own tier makes zig report `file exists in modules 'root' and
+  'zts-engine'`. Both are the duplicate-file failure this plan is about, seen
+  from angles the plan did not anticipate.
 
 ## Decisions taken 2026-08-07
 
