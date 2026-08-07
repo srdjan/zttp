@@ -200,9 +200,7 @@ pub const ComptimeEvaluator = struct {
 
     const Self = @This();
 
-    pub fn init(allocator: std.mem.Allocator, source: []const u8, start_line: u32, start_col: u32) Self {
-        _ = start_line;
-        _ = start_col;
+    pub fn init(allocator: std.mem.Allocator, source: []const u8) Self {
         return .{
             .source = source,
             .allocator = allocator,
@@ -692,7 +690,7 @@ pub const ComptimeEvaluator = struct {
             .string => |value| value,
             else => return ComptimeError.TypeMismatch,
         };
-        var value_evaluator = Self.init(self.allocator, bytes, 1, 1);
+        var value_evaluator = Self.init(self.allocator, bytes);
         return value_evaluator.evaluateExpression(.root_prefix);
     }
 
@@ -1398,15 +1396,15 @@ fn valueToStringAlloc(allocator: std.mem.Allocator, value: ComptimeValue) error{
 test "comptime number literals" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "42", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "42");
     const r1 = try eval1.evaluate();
     try std.testing.expectEqual(@as(f64, 42), r1.number);
 
-    var eval2 = ComptimeEvaluator.init(allocator, "3.14", 1, 1);
+    var eval2 = ComptimeEvaluator.init(allocator, "3.14");
     const r2 = try eval2.evaluate();
     try std.testing.expectApproxEqAbs(@as(f64, 3.14), r2.number, 0.001);
 
-    var eval3 = ComptimeEvaluator.init(allocator, "0xFF", 1, 1);
+    var eval3 = ComptimeEvaluator.init(allocator, "0xFF");
     const r3 = try eval3.evaluate();
     try std.testing.expectEqual(@as(f64, 255), r3.number);
 }
@@ -1414,20 +1412,20 @@ test "comptime number literals" {
 test "comptime arithmetic" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "1 + 2", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "1 + 2");
     const r1 = try eval1.evaluate();
     try std.testing.expectEqual(@as(f64, 3), r1.number);
 
-    var eval2 = ComptimeEvaluator.init(allocator, "1 + 2 * 3", 1, 1);
+    var eval2 = ComptimeEvaluator.init(allocator, "1 + 2 * 3");
     const r2 = try eval2.evaluate();
     try std.testing.expectEqual(@as(f64, 7), r2.number);
 
-    var eval3 = ComptimeEvaluator.init(allocator, "2 ** 10", 1, 1);
+    var eval3 = ComptimeEvaluator.init(allocator, "2 ** 10");
     const r3 = try eval3.evaluate();
     try std.testing.expectEqual(@as(f64, 1024), r3.number);
 
     // JS % is truncated-toward-zero (not floored): -5 % 3 = -2, not 1.
-    var eval4 = ComptimeEvaluator.init(allocator, "-5 % 3", 1, 1);
+    var eval4 = ComptimeEvaluator.init(allocator, "-5 % 3");
     const r4 = try eval4.evaluate();
     try std.testing.expectEqual(@as(f64, -2), r4.number);
 }
@@ -1435,15 +1433,15 @@ test "comptime arithmetic" {
 test "comptime boolean operations" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "true && false", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "true && false");
     const r1 = try eval1.evaluate();
     try std.testing.expectEqual(false, r1.boolean);
 
-    var eval2 = ComptimeEvaluator.init(allocator, "true || false", 1, 1);
+    var eval2 = ComptimeEvaluator.init(allocator, "true || false");
     const r2 = try eval2.evaluate();
     try std.testing.expectEqual(true, r2.boolean);
 
-    var eval3 = ComptimeEvaluator.init(allocator, "!true", 1, 1);
+    var eval3 = ComptimeEvaluator.init(allocator, "!true");
     const r3 = try eval3.evaluate();
     try std.testing.expectEqual(false, r3.boolean);
 }
@@ -1451,11 +1449,11 @@ test "comptime boolean operations" {
 test "comptime comparison" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "5 > 3", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "5 > 3");
     const r1 = try eval1.evaluate();
     try std.testing.expectEqual(true, r1.boolean);
 
-    var eval2 = ComptimeEvaluator.init(allocator, "5 === 5", 1, 1);
+    var eval2 = ComptimeEvaluator.init(allocator, "5 === 5");
     const r2 = try eval2.evaluate();
     try std.testing.expectEqual(true, r2.boolean);
 }
@@ -1463,11 +1461,11 @@ test "comptime comparison" {
 test "comptime ternary" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "true ? 1 : 2", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "true ? 1 : 2");
     const r1 = try eval1.evaluate();
     try std.testing.expectEqual(@as(f64, 1), r1.number);
 
-    var eval2 = ComptimeEvaluator.init(allocator, "false ? 1 : 2", 1, 1);
+    var eval2 = ComptimeEvaluator.init(allocator, "false ? 1 : 2");
     const r2 = try eval2.evaluate();
     try std.testing.expectEqual(@as(f64, 2), r2.number);
 }
@@ -1475,15 +1473,15 @@ test "comptime ternary" {
 test "comptime Math" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "Math.PI", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "Math.PI");
     const r1 = try eval1.evaluate();
     try std.testing.expectApproxEqAbs(@as(f64, 3.141592653589793), r1.number, 0.0001);
 
-    var eval2 = ComptimeEvaluator.init(allocator, "Math.abs(-5)", 1, 1);
+    var eval2 = ComptimeEvaluator.init(allocator, "Math.abs(-5)");
     const r2 = try eval2.evaluate();
     try std.testing.expectEqual(@as(f64, 5), r2.number);
 
-    var eval3 = ComptimeEvaluator.init(allocator, "Math.max(1, 5, 3)", 1, 1);
+    var eval3 = ComptimeEvaluator.init(allocator, "Math.max(1, 5, 3)");
     const r3 = try eval3.evaluate();
     try std.testing.expectEqual(@as(f64, 5), r3.number);
 }
@@ -1503,7 +1501,7 @@ test "comptime bitwise ops fold via ToInt32 without panicking on large operands"
         .{ .src = "1 << 31", .want = -2147483648 },
     };
     for (cases) |c| {
-        var ev = ComptimeEvaluator.init(allocator, c.src, 1, 1);
+        var ev = ComptimeEvaluator.init(allocator, c.src);
         const r = try ev.evaluate();
         try std.testing.expectEqual(c.want, r.number);
     }
@@ -1512,7 +1510,7 @@ test "comptime bitwise ops fold via ToInt32 without panicking on large operands"
 test "comptime string" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "\"hello\"", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "\"hello\"");
     const r1 = try eval1.evaluate();
     defer r1.deinit(allocator);
     try std.testing.expectEqualStrings("hello", r1.string);
@@ -1522,24 +1520,24 @@ test "comptime string indexes by UTF-16 code units ENG-utf16" {
     const allocator = std.testing.allocator;
 
     // .length counts UTF-16 code units, matching the runtime (not UTF-8 bytes).
-    var e_len = ComptimeEvaluator.init(allocator, "\"é\".length", 1, 1);
+    var e_len = ComptimeEvaluator.init(allocator, "\"é\".length");
     const r_len = try e_len.evaluate();
     defer r_len.deinit(allocator);
     try std.testing.expectEqual(@as(f64, 1), r_len.number);
 
-    var e_astral = ComptimeEvaluator.init(allocator, "\"😀\".length", 1, 1);
+    var e_astral = ComptimeEvaluator.init(allocator, "\"😀\".length");
     const r_astral = try e_astral.evaluate();
     defer r_astral.deinit(allocator);
     try std.testing.expectEqual(@as(f64, 2), r_astral.number);
 
     // slice clamps by code units and cuts on codepoint boundaries.
-    var e_slice = ComptimeEvaluator.init(allocator, "\"héllo\".slice(0, 2)", 1, 1);
+    var e_slice = ComptimeEvaluator.init(allocator, "\"héllo\".slice(0, 2)");
     const r_slice = try e_slice.evaluate();
     defer r_slice.deinit(allocator);
     try std.testing.expectEqualStrings("hé", r_slice.string);
 
     // indexOf returns a code-unit index (was a byte offset).
-    var e_idx = ComptimeEvaluator.init(allocator, "\"café-x\".indexOf(\"x\")", 1, 1);
+    var e_idx = ComptimeEvaluator.init(allocator, "\"café-x\".indexOf(\"x\")");
     const r_idx = try e_idx.evaluate();
     defer r_idx.deinit(allocator);
     try std.testing.expectEqual(@as(f64, 5), r_idx.number);
@@ -1548,7 +1546,7 @@ test "comptime string indexes by UTF-16 code units ENG-utf16" {
 test "comptime array" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "[1, 2, 3]", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "[1, 2, 3]");
     const r1 = try eval1.evaluate();
     defer r1.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 3), r1.array.len);
@@ -1558,7 +1556,7 @@ test "comptime array" {
 test "comptime hash" {
     const allocator = std.testing.allocator;
 
-    var eval1 = ComptimeEvaluator.init(allocator, "hash(\"test\")", 1, 1);
+    var eval1 = ComptimeEvaluator.init(allocator, "hash(\"test\")");
     const r1 = try eval1.evaluate();
     defer r1.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 8), r1.string.len);
@@ -1581,7 +1579,7 @@ test "comptime string methods" {
 
     // toUpperCase
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".toUpperCase()", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".toUpperCase()");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("HELLO", r.string);
@@ -1589,7 +1587,7 @@ test "comptime string methods" {
 
     // toLowerCase
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"HELLO\".toLowerCase()", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"HELLO\".toLowerCase()");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("hello", r.string);
@@ -1597,7 +1595,7 @@ test "comptime string methods" {
 
     // trim
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"  hello  \".trim()", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"  hello  \".trim()");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("hello", r.string);
@@ -1605,7 +1603,7 @@ test "comptime string methods" {
 
     // slice
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".slice(1, 4)", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".slice(1, 4)");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("ell", r.string);
@@ -1613,28 +1611,28 @@ test "comptime string methods" {
 
     // includes
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".includes(\"ell\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".includes(\"ell\")");
         const r = try eval.evaluate();
         try std.testing.expect(r.boolean);
     }
 
     // startsWith
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".startsWith(\"he\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".startsWith(\"he\")");
         const r = try eval.evaluate();
         try std.testing.expect(r.boolean);
     }
 
     // endsWith
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".endsWith(\"lo\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".endsWith(\"lo\")");
         const r = try eval.evaluate();
         try std.testing.expect(r.boolean);
     }
 
     // split
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"a,b,c\".split(\",\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"a,b,c\".split(\",\")");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 3), r.array.len);
@@ -1645,7 +1643,7 @@ test "comptime string methods" {
 
     // repeat
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"ab\".repeat(3)", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"ab\".repeat(3)");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("ababab", r.string);
@@ -1653,7 +1651,7 @@ test "comptime string methods" {
 
     // replace
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".replace(\"l\", \"L\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".replace(\"l\", \"L\")");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("heLlo", r.string);
@@ -1661,7 +1659,7 @@ test "comptime string methods" {
 
     // replaceAll
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".replaceAll(\"l\", \"L\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".replaceAll(\"l\", \"L\")");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("heLLo", r.string);
@@ -1669,14 +1667,14 @@ test "comptime string methods" {
 
     // length property
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"hello\".length", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"hello\".length");
         const r = try eval.evaluate();
         try std.testing.expectEqual(@as(f64, 5), r.number);
     }
 
     // padStart
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"5\".padStart(3, \"0\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"5\".padStart(3, \"0\")");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("005", r.string);
@@ -1684,7 +1682,7 @@ test "comptime string methods" {
 
     // padEnd
     {
-        var eval = ComptimeEvaluator.init(allocator, "\"5\".padEnd(3, \"0\")", 1, 1);
+        var eval = ComptimeEvaluator.init(allocator, "\"5\".padEnd(3, \"0\")");
         const r = try eval.evaluate();
         defer r.deinit(allocator);
         try std.testing.expectEqualStrings("500", r.string);
@@ -1695,7 +1693,7 @@ test "comptime string method chaining" {
     const allocator = std.testing.allocator;
 
     // Chain multiple string methods
-    var eval = ComptimeEvaluator.init(allocator, "\"  hello world  \".trim().toUpperCase()", 1, 1);
+    var eval = ComptimeEvaluator.init(allocator, "\"  hello world  \".trim().toUpperCase()");
     const r = try eval.evaluate();
     defer r.deinit(allocator);
     try std.testing.expectEqualStrings("HELLO WORLD", r.string);
@@ -1707,7 +1705,7 @@ test "comptime string concatenation frees with the evaluator allocator" {
     // detecting testing allocator that cross-allocator free is caught here.
     const allocator = std.testing.allocator;
 
-    var eval = ComptimeEvaluator.init(allocator, "\"foo\" + \"bar\"", 1, 1);
+    var eval = ComptimeEvaluator.init(allocator, "\"foo\" + \"bar\"");
     const r = try eval.evaluate();
     defer r.deinit(allocator);
     try std.testing.expectEqualStrings("foobar", r.string);
@@ -1717,7 +1715,7 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
     const allocator = std.testing.allocator;
     const Matrix = struct {
         fn expectLiteral(source: []const u8, expected: []const u8) !void {
-            var evaluator = ComptimeEvaluator.init(std.testing.allocator, source, 1, 1);
+            var evaluator = ComptimeEvaluator.init(std.testing.allocator, source);
             const value = try evaluator.evaluate();
             defer value.deinit(std.testing.allocator);
             const literal = try emitLiteral(std.testing.allocator, value);
@@ -1884,7 +1882,7 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
     const env_value = try allocator.dupe(u8, "https://example.test");
     defer allocator.free(env_value);
     try env.put("API_URL", env_value);
-    var env_evaluator = ComptimeEvaluator.init(allocator, "Env.API_URL", 1, 1);
+    var env_evaluator = ComptimeEvaluator.init(allocator, "Env.API_URL");
     env_evaluator.env = &env;
     const env_result = try env_evaluator.evaluate();
     defer env_result.deinit(allocator);
@@ -1903,7 +1901,7 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
     for (metadata_cases) |case| {
         const owned_value = try allocator.dupe(u8, case.value);
         defer allocator.free(owned_value);
-        var evaluator = ComptimeEvaluator.init(allocator, case.source, 1, 1);
+        var evaluator = ComptimeEvaluator.init(allocator, case.source);
         switch (case.field) {
             .build_time => evaluator.build_time = owned_value,
             .git_commit => evaluator.git_commit = owned_value,
@@ -1927,7 +1925,7 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
         .{ .source = "__BUILD_TIME__.slice(0, 10)", .expected = "2026-08-05" },
     };
     for (member_cases) |case| {
-        var evaluator = ComptimeEvaluator.init(allocator, case.source, 1, 1);
+        var evaluator = ComptimeEvaluator.init(allocator, case.source);
         evaluator.build_time = "2026-08-05T12:00:00Z";
         evaluator.git_commit = "0123456789abcdef";
         evaluator.version = "0.18.0";
@@ -1938,7 +1936,7 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
 
     // `__VERSION__` is a string, so `.length` counts its UTF-16 units.
     {
-        var evaluator = ComptimeEvaluator.init(allocator, "__VERSION__.length", 1, 1);
+        var evaluator = ComptimeEvaluator.init(allocator, "__VERSION__.length");
         evaluator.version = "0.18.0";
         const result = try evaluator.evaluate();
         defer result.deinit(allocator);
@@ -1948,11 +1946,11 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
     // An identifier that names nothing still fails as an unknown identifier,
     // whether it is read as a property or called as a method.
     {
-        var evaluator = ComptimeEvaluator.init(allocator, "Nope.field", 1, 1);
+        var evaluator = ComptimeEvaluator.init(allocator, "Nope.field");
         try std.testing.expectError(ComptimeError.UnknownIdentifier, evaluator.evaluate());
     }
     {
-        var evaluator = ComptimeEvaluator.init(allocator, "Nope.method()", 1, 1);
+        var evaluator = ComptimeEvaluator.init(allocator, "Nope.method()");
         try std.testing.expectError(ComptimeError.UnknownIdentifier, evaluator.evaluate());
     }
 }
@@ -2023,14 +2021,14 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "JSON.parse(\"{loose 1}\")", .expected = ComptimeError.SyntaxError },
     };
     for (cases) |case| {
-        var evaluator = ComptimeEvaluator.init(allocator, case.source, 11, 7);
+        var evaluator = ComptimeEvaluator.init(allocator, case.source);
         try std.testing.expectError(case.expected, evaluator.evaluate());
     }
 
     const long_expression = try allocator.alloc(u8, 8193);
     defer allocator.free(long_expression);
     @memset(long_expression, '1');
-    var long_evaluator = ComptimeEvaluator.init(allocator, long_expression, 1, 1);
+    var long_evaluator = ComptimeEvaluator.init(allocator, long_expression);
     try std.testing.expectError(ComptimeError.ExpressionTooLong, long_evaluator.evaluate());
 
     const nesting = 65;
@@ -2039,7 +2037,7 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
     @memset(deep_expression[0..nesting], '(');
     deep_expression[nesting] = '1';
     @memset(deep_expression[nesting + 1 ..], ')');
-    var deep_evaluator = ComptimeEvaluator.init(allocator, deep_expression, 1, 1);
+    var deep_evaluator = ComptimeEvaluator.init(allocator, deep_expression);
     try std.testing.expectError(ComptimeError.DepthExceeded, deep_evaluator.evaluate());
 }
 
@@ -2057,18 +2055,18 @@ test "JSON.parse root prefix stays inside the 64-node depth contract" {
 
     const accepted_source = try nestedJsonExpression(allocator, 63);
     defer allocator.free(accepted_source);
-    var accepted = ComptimeEvaluator.init(allocator, accepted_source, 1, 1);
+    var accepted = ComptimeEvaluator.init(allocator, accepted_source);
     const value = try accepted.evaluate();
     defer value.deinit(allocator);
 
     const rejected_source = try nestedJsonExpression(allocator, 64);
     defer allocator.free(rejected_source);
-    var rejected = ComptimeEvaluator.init(allocator, rejected_source, 1, 1);
+    var rejected = ComptimeEvaluator.init(allocator, rejected_source);
     try std.testing.expectError(ComptimeError.DepthExceeded, rejected.evaluate());
 }
 
 fn evaluateAllocationFixture(allocator: std.mem.Allocator, source: []const u8) !void {
-    var evaluator = ComptimeEvaluator.init(allocator, source, 1, 1);
+    var evaluator = ComptimeEvaluator.init(allocator, source);
     const value = try evaluator.evaluate();
     defer value.deinit(allocator);
 }

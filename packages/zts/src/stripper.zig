@@ -1597,7 +1597,7 @@ const Stripper = struct {
         const expr = self.source[expr_start..expr_end];
 
         // Evaluate the expression
-        var evaluator = comptime_eval.ComptimeEvaluator.init(self.allocator, expr, self.line, self.col);
+        var evaluator = comptime_eval.ComptimeEvaluator.init(self.allocator, expr);
 
         // Set up environment if provided
         if (self.comptime_env) |env| {

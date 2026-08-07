@@ -1393,10 +1393,20 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         // Runs in both JSON and human modes; failures are non-fatal.
         var flow_witnesses: std.ArrayList(zts.DiagnosticProjection.FlowWitness) = .empty;
         defer flow_witnesses.deinit(allocator);
-        for (flow_diags) |diag| {
-            const witness = zts.DiagnosticProjection.projectFlowWitness(diag, ir_view) orelse continue;
-            flow_witnesses.append(allocator, witness) catch break;
-        }
+        // Reserve for every diagnostic up front so no append can fail partway
+        // and silently drop the witnesses after it. A mid-loop truncation would
+        // under-count pinned regressions, and live_reload.zig gates its
+        // "previously-defended pattern re-fired" warning on that count being
+        // non-zero, so the loss would surface as silence rather than an error.
+        // If the single reservation fails there is nothing to truncate: the
+        // list stays empty and persistence is skipped, which is the same
+        // non-fatal outcome the block already documents.
+        if (flow_witnesses.ensureTotalCapacity(allocator, flow_diags.len)) {
+            for (flow_diags) |diag| {
+                const witness = zts.DiagnosticProjection.projectFlowWitness(diag, ir_view) orelse continue;
+                flow_witnesses.appendAssumeCapacity(witness);
+            }
+        } else |_| {}
         result.pinned_witness_regressions = persistFlowWitnesses(allocator, flow_witnesses.items, handler_path);
 
         checked_opt = checked;

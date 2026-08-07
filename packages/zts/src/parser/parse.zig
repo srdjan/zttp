@@ -3402,8 +3402,11 @@ pub const Parser = struct {
             .star_star, .star_star_assign => .pow,
             .eq_eq => .strict_eq,
             .ne_ne => .strict_neq,
-            .eq => .loose_eq,
-            .ne => .loose_neq,
+            // `.eq` and `.ne` are deliberately absent. parseInfixExpr consumes
+            // both in their own prongs, which build `.loose_eq`/`.loose_neq`
+            // only when `expression_profile` is set and otherwise reject the
+            // source. Mapping them here would look like the sanctioned spelling
+            // while skipping that guard, admitting `==` into handler source.
             .lt => .lt,
             .le => .lte,
             .gt => .gt,
