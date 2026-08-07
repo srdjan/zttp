@@ -208,7 +208,7 @@ pub fn buildManifestRegistryFromPaths(
         };
         defer allocator.free(bytes);
 
-        var manifest = zts.parseModuleManifest(allocator, bytes) catch |err| {
+        var manifest = zts.ModuleMetadata.parse(allocator, bytes) catch |err| {
             errPrint("Error parsing module manifest '{s}': {}\n", .{ path, err });
             return err;
         };

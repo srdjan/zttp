@@ -4608,7 +4608,7 @@ test "compileHandler honors a registered partner manifest" {
         \\  ]
         \\}
     ;
-    var manifest = try zts.parseModuleManifest(allocator, manifest_json);
+    var manifest = try zts.ModuleMetadata.parse(allocator, manifest_json);
     errdefer manifest.deinit(allocator);
 
     var registry = zts.ManifestRegistry.init(allocator);

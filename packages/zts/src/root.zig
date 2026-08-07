@@ -437,15 +437,14 @@ pub const ModuleMetadata = struct {
     pub const ContractExtractionRule = module_manifest.ContractExtractionRule;
     pub const CapabilityDeclaration = module_manifest.CapabilityDeclaration;
 
-    pub const parse = parseModuleManifest;
+    /// Parse a module manifest from its on-disk JSON form. The result owns its
+    /// strings and lists; call `deinit`.
+    pub const parse = module_manifest.parse;
 
     pub fn builtinRegistryHash() [64]u8 {
         return module_manifest.registryHashFromBindings(&builtin_modules.all);
     }
 };
-
-/// Parse a module manifest from its on-disk JSON form.
-pub const parseModuleManifest = module_manifest.parse;
 
 test "stable ModuleMetadata exposes manifest types and builtin registry identity" {
     const source =

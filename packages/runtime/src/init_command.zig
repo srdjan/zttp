@@ -909,7 +909,7 @@ test "init --extension scaffolds a manifest the parser accepts" {
 
     const manifest_bytes = try zts.file_io.readFile(testing.allocator, "demoext/zttp-module.json", 256 * 1024);
     defer testing.allocator.free(manifest_bytes);
-    var manifest = try zts.parseModuleManifest(testing.allocator, manifest_bytes);
+    var manifest = try zts.ModuleMetadata.parse(testing.allocator, manifest_bytes);
     defer manifest.deinit(testing.allocator);
     try testing.expectEqualStrings("zttp-ext:demoext", manifest.specifier);
     try testing.expectEqual(@as(usize, 1), manifest.exports.items.len);

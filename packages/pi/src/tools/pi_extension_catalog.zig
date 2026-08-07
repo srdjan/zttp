@@ -160,7 +160,7 @@ fn loadManifestInto(
     };
     defer allocator.free(bytes);
 
-    var manifest = zts.parseModuleManifest(allocator, bytes) catch |err| {
+    var manifest = zts.ModuleMetadata.parse(allocator, bytes) catch |err| {
         try parse_errors.append(allocator, .{ .path = path, .err = @errorName(err) });
         return;
     };
