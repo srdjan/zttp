@@ -98,6 +98,17 @@ computed once per index.
   What did land here is the reporting half, `firstUnresolvedName`, so the site
   that closes A1 can tell an unresolved name apart from a real mismatch.
 
+  **Re-measured 2026-08-08: one of the three blockers is gone.** Inference
+  landed in Task 5 (`c2ccf441`), and `patterns/infer-and-generics.ts` now passes
+  under A1. Sweeping every example directly rather than through the `set -e`
+  harness gives seven failures, not five: `examples/jsx/jsx-ssr.tsx` on the
+  unresolved `Response`, and six orchestrators - dsl, durable, queued,
+  queued-fanout, timeout, wait-signal - on the coarse `unknown`. The surface
+  grew while the algorithm closed in. A1 is now a Phase 5 dependency only, and
+  retyping the durable and queue exports clears six of the seven before the ABI
+  names are defined at all. The intersection-member half was applied ahead of
+  the rest in `b77442f1`, since none of the seven is an intersection member.
+
 - **A1 side finding, fixed.** Running A1 exposed a live checker defect it had
   been masking: a nested function with no signature of its own kept the
   enclosing function's `current_return_type`, so an inner `return` was measured

@@ -1502,26 +1502,34 @@ pub const TypePool = struct {
         // rather than assumed. An unresolved name answers true on either side,
         // which is the "falls back to unknown" the profile forbids.
         //
-        // Closing it needs two things that do not exist yet. `Request` and
-        // `Response` are `t_ref` with no definition anywhere in `TypeEnv`, so
-        // every handler's declared return type is unresolved; and a module
-        // export like `zttp:durable.run` is declared to return the coarse
-        // `unknown`, which under sound rules is assignable to nothing. Closing
-        // A1 alone turns both into errors on working programs: three workflow
-        // examples and one generics example fail, and the generics example
-        // fails for the third missing piece, inference.
+        // Closing it needs the ABI types. `Request` and `Response` are `t_ref`
+        // with no definition anywhere in `TypeEnv`, so every handler's declared
+        // return type is unresolved; and the durable and queue exports are
+        // declared to return the coarse `unknown`, which under sound rules is
+        // assignable to nothing. `firstUnresolvedName` below is the reporting
+        // half, already here so the site that closes this has it.
         //
-        // So this closes with the ABI types and generic inference, not before.
-        // `firstUnresolvedName` below is the reporting half, and it is already
-        // here so the site that closes this has it.
+        // Re-measured 2026-08-08 by deleting the two lines below and checking
+        // every example: seven fail, all with "return type does not match
+        // declared return type". Six are the coarse `unknown`
+        // (dsl, durable, queued, queued-fanout, timeout, and wait-signal
+        // orchestrators) and one is the unresolved `Response`
+        // (`examples/jsx/jsx-ssr.tsx`). So retyping the durable and queue
+        // exports clears six of the seven on its own, and defining the two ABI
+        // names clears the last.
+        //
+        // The 2026-08-04 measurement listed a generics example too. It passes
+        // now: inference landed in `c2ccf441`, which was the third blocker and
+        // is no longer one. Count the failures with a direct sweep rather than
+        // `scripts/test-examples.sh` - that script is `set -e` and stops at the
+        // third orchestrator, reporting four.
         //
         // One half is closed ahead of the rest. The intersection-target loop
         // above refuses an unresolved member rather than letting it reach the
         // blanket-true here, because a dropped intersection member is a dropped
         // constraint and the corpus tolerates the narrower cut: 43/43 examples
-        // and an unchanged convergence row. The three workflow examples and the
-        // generics example listed above still fail under the global amendment,
-        // so the rest of A1 waits exactly where it did.
+        // and an unchanged convergence row. None of the seven above is an
+        // intersection member, which is why the narrower cut costs nothing.
         if (src_tag == .t_ref or src_tag == .t_generic_param) return true;
         if (tgt_tag == .t_ref or tgt_tag == .t_generic_param) return true;
 
