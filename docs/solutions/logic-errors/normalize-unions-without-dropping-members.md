@@ -276,6 +276,11 @@ The regression contract covers the failure at four boundaries:
   the same constructor, the later chapter: step 5 of the rewritten join rule
   deleted the wider of two records, so a declared two-arm union silently became
   one. The same polarity, one step further in.
+- [a-name-inside-an-intersection-weighed-nothing](a-name-inside-an-intersection-weighed-nothing.md) -
+  the same obligation lost on the target side, to an unresolved name rather than
+  to a bounded buffer. Found while building the regression fixture this document
+  asked for: written the obvious way, from the member count named here, that
+  fixture reaches neither defect.
 - `addIntersection` documents the sibling lossless-overflow rule at
   `packages/zts/src/type_pool.zig:556`.
 - `docs/plans/2026-07-30-014-d1-type-system-design.md` section 3 - the seven-step
