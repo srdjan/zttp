@@ -4932,7 +4932,7 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
         \\import { jwtVerify } from "zttp:auth";
         \\
         \\function handler(req: Request): Response {
-        \\  const token = parseBearer(req);
+        \\  const token = parseBearer(req.headers.get("authorization") ?? "");
         \\  if (!token) return Response.json({ error: "no token" }, { status: 401 });
         \\  const result = jwtVerify(token, "secret");
         \\  return Response.json({ user: result.value });
@@ -4964,7 +4964,7 @@ test "compileHandler sets result_safe and optional_safe when verification passes
         \\import { env } from "zttp:env";
         \\
         \\function handler(req: Request): Response {
-        \\  const token = parseBearer(req);
+        \\  const token = parseBearer(req.headers.get("authorization") ?? "");
         \\  if (!token) return Response.text("no token", { status: 401 });
         \\  const result = jwtVerify(token, "secret");
         \\  if (!result.ok) return Response.text(result.error, { status: 401 });

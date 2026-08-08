@@ -1098,7 +1098,19 @@ pub const TypeEnv = struct {
             return self.isObjectLike(source, 0);
         }
 
-        return self.pool.isAssignableTo(source, target);
+        return self.pool.isAssignableToWith(source, target, self.refResolver());
+    }
+
+    /// The environment's alias table, handed to the pool so a name nested
+    /// inside a compound type resolves during the comparison rather than only
+    /// at its top level.
+    fn refResolver(self: *const TypeEnv) type_pool_mod.TypePool.RefResolver {
+        return .{ .ctx = self, .resolve = resolveRefErased };
+    }
+
+    fn resolveRefErased(ctx: *const anyopaque, idx: TypeIndex) TypeIndex {
+        const self: *const TypeEnv = @ptrCast(@alignCast(ctx));
+        return self.resolveRef(idx);
     }
 
     fn isObjectLike(self: *const TypeEnv, source: TypeIndex, depth: u8) bool {
@@ -1180,6 +1192,14 @@ pub const TypeEnv = struct {
     /// Look up a type alias by name.
     pub fn getTypeAlias(self: *const TypeEnv, name: []const u8) ?TypeIndex {
         return self.type_aliases.get(name);
+    }
+
+    /// Register a type alias that no source text declares. The runtime's own
+    /// globals arrive this way: a handler writes `: Response` and there is no
+    /// `type Response = ...` anywhere to read it from.
+    pub fn putTypeAlias(self: *TypeEnv, name: []const u8, type_idx: TypeIndex) void {
+        const owned_name = self.internName(name);
+        self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
     }
 
     /// Look up an interface by name.

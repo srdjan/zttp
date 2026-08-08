@@ -298,6 +298,30 @@ pub const AbsorbingPattern = struct {
     };
 };
 
+/// How an export's return type is read off one of its arguments, for the
+/// exports whose answer is not a fixed type.
+///
+/// `ReturnKind` can only name a fixed type, so an export that hands back
+/// whatever its caller's callback produced had to declare `unknown`. That was
+/// harmless while an unresolved name answered assignable, and stops being
+/// harmless under D1 amendment A1: `unknown` is assignable to nothing, so every
+/// `durable.run(key, () => Response.json(...))` in a handler declaring
+/// `Response` became a return-type mismatch. The type is not unknown - it is
+/// the callback's, and this field says which argument to read it from.
+pub const ReturnFromParam = struct {
+    /// Position of the argument the return type is read from.
+    param_index: u8,
+
+    kind: enum {
+        /// The argument is a function and the export returns what calling it
+        /// returns: `run(key: string, fn: () => T) -> T`.
+        call_result,
+        /// The export returns the argument unchanged:
+        /// `using(resource: T, close: (T) => void) -> T`.
+        identity,
+    },
+};
+
 // -------------------------------------------------------------------------
 // Function binding
 // -------------------------------------------------------------------------
@@ -346,6 +370,13 @@ pub const FunctionBinding = struct {
 
     /// Return type classification. Drives verifier, bool checker, and type checker.
     returns: ReturnKind = .unknown,
+
+    /// Set when the return type is a function of an argument rather than a
+    /// fixed type. The type checker builds a one-parameter generic signature
+    /// from it and infers the parameter at each call site; every other consumer
+    /// keeps reading `returns`, which stays `.unknown` - the honest answer for
+    /// a caller that has no argument to read.
+    returns_from_param: ?ReturnFromParam = null,
 
     /// Type signature for parameter types (mapped to TypeIndex during type init).
     param_types: []const ReturnKind = &.{},
@@ -518,6 +549,24 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                     "{s}.{s} declares arg_count={d} but {d} param_types; declare one kind per argument",
                     .{ b.specifier, f.name, f.arg_count, f.param_types.len },
                 ));
+            }
+            // A return read off an argument must name an argument that exists,
+            // and must leave `returns` at `.unknown`. A fixed kind beside it
+            // would be a second answer to the same question, and the consumers
+            // that cannot instantiate a signature read that one.
+            if (f.returns_from_param) |from| {
+                if (from.param_index >= f.param_types.len) {
+                    @compileError(std.fmt.comptimePrint(
+                        "{s}.{s} reads its return type from argument {d} but declares {d} param_types",
+                        .{ b.specifier, f.name, from.param_index, f.param_types.len },
+                    ));
+                }
+                if (f.returns != .unknown) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " reads its return type from an argument, so `returns` must stay `.unknown`");
+                }
+                if (f.param_types[from.param_index] != .unknown) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " reads its return type from an argument whose declared kind is not `.unknown`; a callback or pass-through argument has no fixed kind to name");
+                }
             }
             if (f.laws.len > 0) {
                 if (b.comptime_only) {

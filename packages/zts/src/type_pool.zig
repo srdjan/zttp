@@ -1258,6 +1258,19 @@ pub const TypePool = struct {
     // Structural subtyping
     // -------------------------------------------------------------------
 
+    /// A way to look up what a named type names, supplied by whoever holds the
+    /// alias table. `resolve` answers the type `idx` names, or `idx` unchanged
+    /// when the name is not one it knows - so an unresolved name stays
+    /// unresolved and amendment A1 still refuses it.
+    pub const RefResolver = struct {
+        ctx: *const anyopaque,
+        resolve: *const fn (*const anyopaque, TypeIndex) TypeIndex,
+
+        fn apply(self: RefResolver, idx: TypeIndex) TypeIndex {
+            return self.resolve(self.ctx, idx);
+        }
+    };
+
     /// Pairs currently under comparison, so a recursive type terminates.
     ///
     /// D1 amendment A2: re-entering a pair already being compared returns true,
@@ -1272,6 +1285,14 @@ pub const TypePool = struct {
 
         pairs: [max_pairs]Pair = undefined,
         len: usize = 0,
+        /// How a `t_ref` reaches the type its name names. The pool holds no
+        /// alias table - that lives in `TypeEnv` - so without this the only
+        /// resolution a comparison gets is whatever the caller did to the two
+        /// indices it passed in, which reaches a top-level name and nothing
+        /// nested. `Todo` as a return type resolved; the `Todo` inside `Todo[]`
+        /// did not, and only the amendment-A1 fail-open below made the two
+        /// spellings look alike.
+        resolver: ?RefResolver = null,
         /// Set when the walk ran out of assumption slots. The answer is then a
         /// conservative "no", and the caller can tell that apart from a real
         /// mismatch.
@@ -1314,12 +1335,45 @@ pub const TypePool = struct {
         return self.assignableIn(&ctx, source, target);
     }
 
+    /// `isAssignableTo` with a way to resolve named types, so a `t_ref` nested
+    /// inside an array, a record field, or a function's return type reaches its
+    /// definition the same way a top-level one does.
+    pub fn isAssignableToWith(
+        self: *const TypePool,
+        source: TypeIndex,
+        target: TypeIndex,
+        resolver: RefResolver,
+    ) bool {
+        var ctx = AssignCtx{ .resolver = resolver };
+        return self.assignableIn(&ctx, source, target);
+    }
+
     fn assignableIn(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
         if (source == target) return true;
         if (ctx.seen(source, target)) return true;
         if (!ctx.push(source, target)) return false;
         defer ctx.pop();
+        if (self.resolveBoth(ctx, source, target)) |resolved| {
+            return self.assignableStep(ctx, resolved.source, resolved.target);
+        }
         return self.assignableStep(ctx, source, target);
+    }
+
+    /// Both sides with every name the resolver knows replaced by what it names,
+    /// or null when neither side moved. Resolution is idempotent - a resolver
+    /// answers an unknown name with the name - so the resolved pair is compared
+    /// once and never re-resolved.
+    fn resolveBoth(
+        self: *const TypePool,
+        ctx: *const AssignCtx,
+        source: TypeIndex,
+        target: TypeIndex,
+    ) ?AssignCtx.Pair {
+        const resolver = ctx.resolver orelse return null;
+        const resolved_source = if (self.getTag(source) == .t_ref) resolver.apply(source) else source;
+        const resolved_target = if (self.getTag(target) == .t_ref) resolver.apply(target) else target;
+        if (resolved_source == source and resolved_target == target) return null;
+        return .{ .source = resolved_source, .target = resolved_target };
     }
 
     fn assignableStep(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, target: TypeIndex) bool {
@@ -1474,11 +1528,10 @@ pub const TypePool = struct {
                 // constraint, which is the loss `unionMemberSubsumes` already
                 // refuses for the same reason.
                 //
-                // Site-local because the corpus says it can be: measured at
-                // 43/43 examples and an unchanged convergence row, against the
-                // three workflow and generics failures the global amendment
-                // still produces. Delete this line when A1 closes below - the
-                // rule there subsumes it.
+                // Kept after A1 closed below, and not redundant with it: the
+                // rule there refuses an unresolved name that reaches a
+                // comparison, and a member of an intersection target is
+                // discharged by this loop without ever reaching one.
                 if (self.firstUnresolvedName(member) != null) return false;
                 if (!self.assignableIn(ctx, source, member)) return false;
             }
@@ -1498,41 +1551,34 @@ pub const TypePool = struct {
             return false;
         }
 
-        // D1 amendment A1 is NOT applied here yet, and the reason is measured
-        // rather than assumed. An unresolved name answers true on either side,
-        // which is the "falls back to unknown" the profile forbids.
+        // D1 amendment A1 is applied: an unresolved name reaching here is not
+        // assignable, and the two lines that used to answer true for a `t_ref`
+        // or a `t_generic_param` on either side are gone. `firstUnresolvedName`
+        // below is the reporting half, so a caller can tell an unresolved name
+        // (ZTS206) apart from a real mismatch (ZTS200).
         //
-        // Closing it needs the ABI types. `Request` and `Response` are `t_ref`
-        // with no definition anywhere in `TypeEnv`, so every handler's declared
-        // return type is unresolved; and the durable and queue exports are
-        // declared to return the coarse `unknown`, which under sound rules is
-        // assignable to nothing. `firstUnresolvedName` below is the reporting
-        // half, already here so the site that closes this has it.
+        // Three things had to land first, and the deferral comment that stood
+        // here named only one of them correctly. Measured by deleting the two
+        // lines and sweeping every example, seven failed, all with "return type
+        // does not match declared return type":
         //
-        // Re-measured 2026-08-08 by deleting the two lines below and checking
-        // every example: seven fail, all with "return type does not match
-        // declared return type". Six are the coarse `unknown`
-        // (dsl, durable, queued, queued-fanout, timeout, and wait-signal
-        // orchestrators) and one is the unresolved `Response`
-        // (`examples/jsx/jsx-ssr.tsx`). So retyping the durable and queue
-        // exports clears six of the seven on its own, and defining the two ABI
-        // names clears the last.
+        //   - Six were `durable.run` returning the coarse `unknown`. Its return
+        //     type is its callback's, which `ReturnKind` cannot spell, so
+        //     `returns_from_param` says which argument to read it from and the
+        //     checker instantiates a generic signature per call site.
+        //   - One was `examples/jsx/jsx-ssr.tsx`, and not for the reason
+        //     recorded: the unresolved name was the file's own `Todo` inside
+        //     `Todo[]`, not `Response`. A name nested in a compound type never
+        //     resolved, because the pool holds no alias table; `AssignCtx` now
+        //     carries a resolver and `TypeEnv` supplies one.
+        //   - Neither of those was enough on its own, because `Response.json()`
+        //     inferred nothing, so the return check never ran and the six
+        //     orchestrators had no type to bind their callback's `T` to. The
+        //     `Response` global is typed in `abi_types.zig`.
         //
-        // The 2026-08-04 measurement listed a generics example too. It passes
-        // now: inference landed in `c2ccf441`, which was the third blocker and
-        // is no longer one. Count the failures with a direct sweep rather than
+        // Count failures with a direct sweep rather than
         // `scripts/test-examples.sh` - that script is `set -e` and stops at the
-        // third orchestrator, reporting four.
-        //
-        // One half is closed ahead of the rest. The intersection-target loop
-        // above refuses an unresolved member rather than letting it reach the
-        // blanket-true here, because a dropped intersection member is a dropped
-        // constraint and the corpus tolerates the narrower cut: 43/43 examples
-        // and an unchanged convergence row. None of the seven above is an
-        // intersection member, which is why the narrower cut costs nothing.
-        if (src_tag == .t_ref or src_tag == .t_generic_param) return true;
-        if (tgt_tag == .t_ref or tgt_tag == .t_generic_param) return true;
-
+        // third orchestrator, reporting four where seven exist.
         return false;
     }
 
@@ -3239,12 +3285,10 @@ test "isAssignableTo source intersection combines record fields" {
     try std.testing.expect(!pool.isAssignableTo(source, wrong_target));
 }
 
-test "isAssignableTo defers on unresolved generic param targets" {
-    // Call-site checking of a generic helper (`first<T>(xs: T[]): T`)
-    // reaches isAssignableTo with `T` still unresolved; the pool must defer
-    // rather than reject every generic call. This is the D1 amendment A1
-    // fail-open, and the comment at the deferral site records what has to
-    // exist before it can close.
+test "isAssignableTo refuses unresolved names on either side" {
+    // D1 amendment A1, applied. Before it, each of these answered true because
+    // the pool could not look, and a caller could not tell that apart from a
+    // checked yes.
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -3254,31 +3298,65 @@ test "isAssignableTo defers on unresolved generic param targets" {
     const strings = pool.addArray(allocator, pool.idx_string);
 
     // string[] -> T[]
-    try std.testing.expect(pool.isAssignableTo(strings, t_array_of_param));
+    try std.testing.expect(!pool.isAssignableTo(strings, t_array_of_param));
     // tuple of string literals -> T[]
     const lit = parseTypeExpr(&pool, allocator, "\"alice\"");
     const tuple = pool.addTuple(allocator, &.{ lit, lit });
-    try std.testing.expect(pool.isAssignableTo(tuple, t_array_of_param));
+    try std.testing.expect(!pool.isAssignableTo(tuple, t_array_of_param));
     // T -> string (return-position: `const head: string = first<string>(xs)`)
-    try std.testing.expect(pool.isAssignableTo(t_param, pool.idx_string));
+    try std.testing.expect(!pool.isAssignableTo(t_param, pool.idx_string));
     // Unresolved named ref -> number
     const ref = parseTypeExpr(&pool, allocator, "SomeAlias");
-    try std.testing.expect(pool.isAssignableTo(ref, pool.idx_number));
+    try std.testing.expect(!pool.isAssignableTo(ref, pool.idx_number));
     // Concrete mismatches still reject
     try std.testing.expect(!pool.isAssignableTo(pool.idx_number, pool.idx_string));
 
-    // The reporting half of A1 is present ahead of the rule: when the site
-    // that closes this asks why an answer was no, it gets a name rather than
-    // an indistinguishable mismatch.
+    // The reporting half tells an unresolved name apart from a real mismatch,
+    // which is the whole reason refusing is usable rather than mystifying.
     try std.testing.expectEqualStrings("T", pool.firstUnresolvedName(t_array_of_param).?);
     try std.testing.expectEqualStrings("SomeAlias", pool.firstUnresolvedName(ref).?);
     try std.testing.expect(pool.firstUnresolvedName(strings) == null);
 
     // Substituting first is what makes a generic call site check for real,
-    // which is the job inference does for the author.
+    // which is the job inference does for the author. A refusal above is never
+    // what a well-formed call site sees: `checkCallArgs` substitutes before it
+    // compares, and reports the call rather than its arguments when it cannot.
     const substituted = pool.instantiate(allocator, t_array_of_param, &.{"T"}, &.{pool.idx_string}, 0);
     try std.testing.expect(pool.firstUnresolvedName(substituted) == null);
     try std.testing.expect(pool.isAssignableTo(strings, substituted));
+}
+
+test "a name nested in a compound type resolves during the comparison" {
+    // The pool holds no alias table, so before `RefResolver` a name resolved
+    // only where the caller had already resolved it - the top level. `Todo`
+    // as a return type worked and the `Todo` inside `Todo[]` did not, and the
+    // A1 fail-open above hid the difference by answering true for both.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const todo = parseTypeExpr(&pool, allocator, "{ text: string, done: boolean }");
+    const todo_ref = pool.addRef(allocator, "Todo");
+    const todos = pool.addArray(allocator, todo_ref);
+    const literal_todos = pool.addArray(allocator, todo);
+
+    const Table = struct {
+        ref: TypeIndex,
+        target: TypeIndex,
+        fn resolve(ctx: *const anyopaque, idx: TypeIndex) TypeIndex {
+            const self: *const @This() = @ptrCast(@alignCast(ctx));
+            return if (idx == self.ref) self.target else idx;
+        }
+    };
+    const table = Table{ .ref = todo_ref, .target = todo };
+    const resolver = TypePool.RefResolver{ .ctx = &table, .resolve = Table.resolve };
+
+    try std.testing.expect(!pool.isAssignableTo(literal_todos, todos));
+    try std.testing.expect(pool.isAssignableToWith(literal_todos, todos, resolver));
+
+    // A name the resolver does not know stays unresolved, so A1 still refuses.
+    const unknown_ref = pool.addRef(allocator, "Absent");
+    try std.testing.expect(!pool.isAssignableToWith(todo, unknown_ref, resolver));
 }
 
 test "readonly array variance holds in both directions" {

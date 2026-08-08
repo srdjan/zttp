@@ -42,8 +42,8 @@ pub const binding = mb.ModuleBinding{
     .self_managed_io = true,
     .contract_section = "durable",
     .exports = &.{
-        .{ .name = "run", .func = runNative, .arg_count = 2, .effect = .write, .returns = .unknown, .param_types = &.{ .string, .unknown }, .contract_extractions = &.{.{ .category = .durable_key }}, .contract_flags = .{ .sets_durable_used = true } },
-        .{ .name = "step", .func = stepNative, .arg_count = 2, .effect = .write, .returns = .unknown, .param_types = &.{ .string, .unknown }, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "run", .func = runNative, .arg_count = 2, .effect = .write, .returns = .unknown, .returns_from_param = .{ .param_index = 1, .kind = .call_result }, .param_types = &.{ .string, .unknown }, .contract_extractions = &.{.{ .category = .durable_key }}, .contract_flags = .{ .sets_durable_used = true } },
+        .{ .name = "step", .func = stepNative, .arg_count = 2, .effect = .write, .returns = .unknown, .returns_from_param = .{ .param_index = 1, .kind = .call_result }, .param_types = &.{ .string, .unknown }, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true } },
         .{ .name = "stepWithTimeout", .func = stepWithTimeoutNative, .arg_count = 3, .effect = .write, .returns = .result, .param_types = &.{ .string, .number, .unknown }, .failure_severity = .expected, .traceable = true, .contract_extractions = &.{.{ .category = .durable_step }}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
         .{ .name = "sleep", .func = sleepNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },
         .{ .name = "sleepUntil", .func = sleepUntilNative, .arg_count = 1, .effect = .write, .returns = .undefined, .param_types = &.{.number}, .contract_flags = .{ .sets_durable_used = true, .sets_durable_timers = true } },

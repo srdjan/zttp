@@ -23,6 +23,7 @@ const context = @import("zts-engine").context;
 const type_pool_mod = @import("type_pool.zig");
 const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
+const abi_types = @import("abi_types.zig");
 const service_types_mod = @import("zts-contracts").service_types;
 const bool_checker_mod = @import("bool_checker.zig");
 const match_analysis_mod = @import("match_analysis.zig");
@@ -2441,11 +2442,33 @@ pub const TypeChecker = struct {
         return null_type_idx;
     }
 
+    /// The `Response` type when `call` is one of the four constructors on the
+    /// `Response` global, otherwise `null_type_idx`.
+    ///
+    /// `Response` is a global with no binding to hang a type on, so the object
+    /// side of `Response.json(...)` infers nothing and the member read after it
+    /// infers nothing either. Matching the name is how the checker reaches the
+    /// only thing that constructs a response. A shadowed `Response` is a
+    /// different value and is left alone, the same way `Array.isArray` is.
+    fn inferResponseConstructorType(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
+        const callee = self.ir_view.getMember(call.callee) orelse return null_type_idx;
+        if (self.ir_view.getTag(callee.object) != .identifier) return null_type_idx;
+        const object_binding = self.ir_view.getBinding(callee.object) orelse return null_type_idx;
+        const object_name = self.resolveAtomName(object_binding.name_atom) orelse return null_type_idx;
+        if (!std.mem.eql(u8, object_name, abi_types.RESPONSE_TYPE_NAME)) return null_type_idx;
+        if (self.binding_types.get(bindingKey(object_binding)) != null) return null_type_idx;
+        const method = self.resolveAtomName(callee.property) orelse return null_type_idx;
+        if (!abi_types.isResponseConstructor(method)) return null_type_idx;
+        return abi_types.responseType(self.env);
+    }
+
     fn inferCallType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const call = self.ir_view.getCall(node) orelse return null_type_idx;
         const callee_tag = self.ir_view.getTag(call.callee) orelse return null_type_idx;
 
         if (callee_tag == .member_access) {
+            const constructed = self.inferResponseConstructorType(call);
+            if (constructed != null_type_idx) return constructed;
             return self.inferFunctionReturnType(self.inferType(call.callee));
         }
         if (callee_tag != .identifier) return null_type_idx;
@@ -2820,7 +2843,7 @@ pub const TypeChecker = struct {
             var i: u8 = 0;
             while (i < sig.param_count and i < call.args_count) : (i += 1) {
                 const arg_idx = self.ir_view.getListIndex(call.args_start, i);
-                const arg_type = self.inferType(arg_idx);
+                const arg_type = self.argumentTypeForInference(arg_idx);
                 if (arg_type == null_type_idx) continue;
                 self.unify(type_params, sig.param_types[i], arg_type, &bindings, 0);
             }
@@ -2839,6 +2862,99 @@ pub const TypeChecker = struct {
         }
 
         return .{ .ok = bindings };
+    }
+
+    /// The type of one call argument, for the purpose of binding type
+    /// parameters.
+    ///
+    /// `inferType` answers `null_type_idx` for a function expression, because
+    /// the rest of the checker reaches a function through its recorded
+    /// signature rather than through a type. That is fine everywhere a callee
+    /// is named and wrong here: a callback passed as an argument is the only
+    /// evidence a signature like `run(key: string, fn: () => T): T` has for
+    /// what `T` is, and skipping it leaves `T` unbound and reports the call as
+    /// ambiguous. This builds the function type that argument position needs.
+    fn argumentTypeForInference(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const inferred = self.inferType(node);
+        if (inferred != null_type_idx) return inferred;
+        const tag = self.ir_view.getTag(node) orelse return null_type_idx;
+        if (tag != .arrow_function and tag != .function_expr) return null_type_idx;
+        return self.functionExprType(node);
+    }
+
+    /// A function type for a function expression written at a call site: its
+    /// declared signature when one was recorded, otherwise an empty parameter
+    /// list and the type its body returns.
+    ///
+    /// The parameter list is left empty when nothing declared it. `unify` walks
+    /// a function pattern only as far as both sides carry parameters and then
+    /// unifies the return types, so an empty list costs nothing here and
+    /// guessing parameter types from a body would be a second inference with no
+    /// caller asking for it.
+    fn functionExprType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const func = self.ir_view.getFunction(node) orelse return null_type_idx;
+        const declared: ?type_env_mod.FunctionSig = if (self.ir_view.getLoc(node)) |loc|
+            self.env.getFnSigByLoc(loc.line)
+        else
+            null;
+        if (declared) |sig| {
+            if (sig.return_type != null_type_idx) {
+                return self.env.pool.addFunctionWithReturn(self.allocator, &.{}, sig.return_type);
+            }
+        }
+        const returned = self.bodyReturnType(func.body, 0);
+        if (returned == null_type_idx) return null_type_idx;
+        return self.env.pool.addFunctionWithReturn(self.allocator, &.{}, returned);
+    }
+
+    /// The type a function body returns: the join of every `return` value the
+    /// body reaches, or `null_type_idx` when no `return` carries a value.
+    ///
+    /// Nested function bodies are not entered - their `return` answers their
+    /// own contract, not this one. A body whose returns disagree joins to a
+    /// union, which is the same answer the checker gives a match expression
+    /// whose arms disagree.
+    fn bodyReturnType(self: *const TypeChecker, node: NodeIndex, depth: u8) TypeIndex {
+        if (depth > 8 or node == null_node) return null_type_idx;
+        const tag = self.ir_view.getTag(node) orelse return null_type_idx;
+        switch (tag) {
+            .return_stmt => {
+                const value = self.ir_view.getOptValue(node) orelse return null_type_idx;
+                return self.inferType(value);
+            },
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return null_type_idx;
+                var result: TypeIndex = null_type_idx;
+                for (0..block.stmts_count) |i| {
+                    const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
+                    result = self.joinReturnType(result, self.bodyReturnType(stmt, depth + 1));
+                }
+                return result;
+            },
+            .if_stmt => {
+                const if_s = self.ir_view.getIfStmt(node) orelse return null_type_idx;
+                const then_type = self.bodyReturnType(if_s.then_branch, depth + 1);
+                const else_type = if (if_s.else_branch != null_node)
+                    self.bodyReturnType(if_s.else_branch, depth + 1)
+                else
+                    null_type_idx;
+                return self.joinReturnType(then_type, else_type);
+            },
+            // exhaustive: the listed statement shapes are the ones that can
+            // carry a `return` for this function. Every other tag either holds
+            // no statement (an expression, a declaration) or opens a nested
+            // function, whose returns answer its own contract. Answering
+            // nothing here is not a swallowed verdict: the caller infers no
+            // type for the argument and the type parameter stays unbound, which
+            // `instantiateSignature` reports as ambiguous.
+            else => return null_type_idx,
+        }
+    }
+
+    fn joinReturnType(self: *const TypeChecker, left: TypeIndex, right: TypeIndex) TypeIndex {
+        if (left == null_type_idx) return right;
+        if (right == null_type_idx or right == left) return left;
+        return self.env.pool.addUnion(self.allocator, &.{ left, right });
     }
 
     /// The declared type parameter `pattern` names, or null when `pattern` is
@@ -3254,7 +3370,21 @@ pub const TypeChecker = struct {
         // Bind the type parameters before the arguments are compared, so every
         // instantiation is checked against its substituted parameter types
         // rather than against a type variable that accepts anything.
-        const inst = self.reportInstantiation(node, self.instantiateSignature(node, sig, call));
+        const attempted = self.instantiateSignature(node, sig, call);
+        const failed = switch (attempted) {
+            .none, .ok => false,
+            .arity, .ambiguous, .violated => true,
+        };
+        const inst = self.reportInstantiation(node, attempted);
+
+        // A call whose type parameters could not be bound is already reported.
+        // Comparing its arguments against parameter types that still contain an
+        // unsubstituted `T` says nothing further about the program - under D1
+        // amendment A1 a type variable is assignable to nothing, so every
+        // argument of a refused call would be reported a second time for the
+        // same defect. This is the cascade `instantiatedReturnType` avoids on
+        // the return side.
+        if (failed) return;
 
         // Check argument types
         var i: u8 = 0;

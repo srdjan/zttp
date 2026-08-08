@@ -48,6 +48,7 @@ const type_map_mod = @import("zts-base").type_map;
 const service_types_mod = @import("zts-contracts").service_types;
 const modules_mod = @import("zts-engine").modules;
 const module_types_mod = @import("module_types.zig");
+const abi_types_mod = @import("abi_types.zig");
 const ir_mod = @import("zts-engine").parser.ir;
 const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_builder_mod = @import("contract_builder.zig");
@@ -355,6 +356,7 @@ pub const TypeEnvStorage = struct {
         errdefer self.env.deinit();
         try self.pool.ensureHealthy();
         module_types_mod.populateModuleTypes(&self.env, &self.pool, allocator);
+        abi_types_mod.populateHandlerAbiTypes(&self.env, &self.pool, allocator);
         try self.pool.ensureHealthy();
         self.env.populateFromTypeMap(type_map);
         try self.finishInitialization();
@@ -454,6 +456,7 @@ pub fn extractContractFromParsed(
     var type_env = TypeEnv.init(allocator, &type_pool);
     defer type_env.deinit();
     module_types_mod.populateModuleTypes(&type_env, &type_pool, allocator);
+    abi_types_mod.populateHandlerAbiTypes(&type_env, &type_pool, allocator);
     if (opts.type_map) |type_map| {
         type_env.populateFromTypeMap(type_map);
     }
@@ -787,6 +790,7 @@ test "TypeEnvStorage rejects a late poisoned TypePool" {
     defer storage.env.deinit();
     try storage.pool.ensureHealthy();
     module_types_mod.populateModuleTypes(&storage.env, &storage.pool, allocator);
+    abi_types_mod.populateHandlerAbiTypes(&storage.env, &storage.pool, allocator);
     try storage.pool.ensureHealthy();
     storage.env.populateFromTypeMap(&type_map);
     try storage.pool.ensureHealthy();

@@ -94,6 +94,47 @@ fn addFetchResponseType(pool: *TypePool, allocator: std.mem.Allocator, optional_
     });
 }
 
+/// The type-parameter name the callback-shaped exports are given. It appears in
+/// no source text: a handler writes `run(key, () => ...)` and never names the
+/// parameter, so the name only has to be stable for `unify`, which matches a
+/// pattern node against the signature's declared parameters by name.
+const RETURN_PARAM_NAME = "T";
+
+/// Rewrite `sig` into the one-parameter generic signature that `returns_from_param`
+/// describes, so the checker infers the return type per call site rather than
+/// reading the fixed `unknown` the binding declares for every other consumer.
+///
+/// `call_result` re-declares the named argument as `() => T` and returns `T`;
+/// `identity` declares it `T` and returns `T`. The parameter list the callback
+/// is declared with is empty on purpose - `unify` walks a function pattern only
+/// as far as both sides have parameters, then unifies the return types, so an
+/// empty list binds `T` from any arity of callback the author writes.
+fn applyReturnFromParam(
+    func: mb.FunctionBinding,
+    sig: *type_env_mod.FunctionSig,
+    env: *TypeEnv,
+    pool: *TypePool,
+    allocator: std.mem.Allocator,
+) void {
+    const from = func.returns_from_param orelse return;
+    if (from.param_index >= sig.param_count) return;
+
+    const t = pool.addGenericParam(allocator, RETURN_PARAM_NAME);
+    if (t == null_type_idx) return;
+
+    sig.param_types[from.param_index] = switch (from.kind) {
+        .call_result => pool.addFunctionWithReturn(allocator, &.{}, t),
+        .identity => t,
+    };
+    sig.return_type = t;
+    sig.type_params[0] = .{
+        .name = env.internName(RETURN_PARAM_NAME),
+        .idx = t,
+        .constraint = null_type_idx,
+    };
+    sig.type_param_count = 1;
+}
+
 /// Populate the TypeEnv with full type signatures for all virtual module exports.
 /// Reads from the builtin_modules registry instead of hardcoded tables.
 pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
@@ -145,6 +186,8 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
                     optional_object,
                 );
             }
+
+            applyReturnFromParam(func, &sig, env, pool, allocator);
 
             const owned = env.internName(func.name);
             env.fn_sigs_by_name.put(allocator, owned, sig) catch {};
