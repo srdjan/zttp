@@ -767,15 +767,25 @@ are in [docs/archive/plans/](archive/README.md); phase 2's plan is still
 
 Phase 2 met its exit against the frozen signature corpus: 24 modules and 90
 exports, every emitted signature parsing with no fallback to `unknown`, and
-pinned digests. It left one piece of its own scope open. Assignability amendment
-A1, which makes an unresolved name an error rather than `true`, was applied,
-measured, and deferred, because `Request` and `Response` have no definition in
-`TypeEnv` and the durable and queue exports return the coarse `unknown`. Both
-are phase 5 work, so A1 closes there. Re-measured on 2026-08-08, the global
-amendment fails seven examples, six of them on the coarse `unknown` alone. The
-intersection-member half was applied ahead of the rest, since none of the seven
-is an intersection member. The deferral and its numbers are recorded at the site
-in `packages/zts/src/type_pool.zig`.
+pinned digests. Assignability amendment A1, which makes an unresolved name an
+error rather than `true`, was the one piece of its scope left open, and it is
+closed. It had been deferred to phase 5 on the reading that it needed the ABI
+types and the durable and queue exports retyped; re-measuring found three causes
+and only one of them was that.
+
+A name nested in a compound type never resolved, because the pool holds no alias
+table: `getOne(): Todo` checked and `getTodos(): Todo[]` did not. `durable.run`
+returns its callback's type, which `ReturnKind` cannot spell, so it declared the
+coarse `unknown`. And `Response.json()` inferred nothing, so the handler return
+check has been passing by never running - a fact the fail-open kept invisible.
+The three fixes are `TypePool.RefResolver`, `FunctionBinding.returns_from_param`,
+and `abi_types.zig`. Zero of 55 examples report the A1 signal now.
+
+What that leaves for phase 5 is the ABI itself rather than A1. `abi_types.zig`
+describes today's shipped `Response`, not spec section 7.2, which renames the
+constructors to `responseJson<T>: Result<Response, JsonError>` and types the
+request side over `Bytes`, `Dict`, and `JsonValue` - none of which exist before
+phases 3 and 4.
 
 | Phase | Scope | Exit |
 |---|---|---|
@@ -801,7 +811,9 @@ retire an interim marker left in the code by phase 0:
 
 Four risks carry across phases. The generics retrofit in phase 2 had the long
 tail the plan named, and the frozen signature corpus is what bounded it; what
-the corpus could not bound was A1, which is deferred to phase 5 above.
+the corpus could not bound was A1, and the sweep over every example is what
+bounded that instead - seven failures, each traced to a cause before any of them
+was fixed.
 Normalization in phase 6 may not be confluent, mitigated by
 running the double-normalize property test from day one and falling back to
 advisory-only rows. Hand-written meta payloads would multiply drift gates, which
