@@ -1,15 +1,16 @@
 ---
 title: Difference is not the claim, and a probe that does not compile is not a probe
 date: 2026-08-04
-last_updated: 2026-08-05
+last_updated: 2026-08-08
 category: conventions
-module: packages/pi (deterministic stand-in gates), packages/runtime (graceful shutdown), tooling (repository metrics), repo-wide (probing any gate)
+module: packages/pi (deterministic stand-in gates), packages/runtime (graceful shutdown), packages/zts (generic instantiation), tooling (repository metrics), repo-wide (probing any gate)
 problem_type: convention
 component: testing_framework
 severity: high
 applies_when:
   - "Writing an assertion that says what the result is not, when the gate's name says what it is"
   - "Building a fixture whose two possible outcomes could write the same bytes"
+  - "Building a regression fixture from the parameter a bug report names, without reading the branch that bug lives behind"
   - "Probing a gate by breaking its input and confirming it fails"
   - "Reading a probe's result from grepped output instead of the build's exit code"
   - "Citing a green gate or asynchronous E2E as evidence that the behavior it names happened"
@@ -147,6 +148,51 @@ The `compound-assign` seed took the same correction: its `total += 2;`
 canonicalizes to `total = total + 2;`, which is the baseline. It now uses
 `total += 7;`.
 
+**A fixture must be able to reach the branch the gate is named for.**
+
+The bug report names a parameter. The branch is guarded by something else, and a
+fixture built from the parameter alone never arrives.
+
+On 2026-08-08 the code-quality rebase plan's P0 was reproduced end to end:
+`instantiateCompositeMembers` (`packages/zts/src/type_env.zig`) once copied
+intersection members into a fixed `[16]TypeIndex` buffer and rebuilt from that
+prefix, dropping a seventeenth obligation. "Seventeenth" is the parameter, so the
+obvious fixture is a seventeen-member intersection whose last member is the only
+one violated:
+
+```ts
+type Wide =
+  { f01: string } & { f02: string } & ... & { f17: string };
+const v: Wide = { f01: "v", ... f16: "v" };   // f17 missing
+```
+
+Seventeen members, an exact assertion on the error count, a probe that compiles.
+It rejects correctly. It also rejects with the truncation put back, because the
+function returns `.unchanged` when no member changed, and an intersection of
+plain record literals changes nothing. The truncated prefix is only ever used to
+rebuild, so a fixture that never triggers a rebuild cannot observe the defect in
+either direction.
+
+The guard is "a member changed", not "there are more than sixteen members". One
+generic application among the members satisfies it:
+
+```ts
+type Box<T> = { boxed: T };
+type Wide = Box<string> & { f01: string } & ... & { f15: string } & { last: string };
+```
+
+Measured against the same locally reintroduced `@min(live.len, 16)`:
+
+| Fixture | Fixed build | Truncated build |
+|---|---|---|
+| 17 members, one generic application | reject | **accept** |
+| 17 members, all plain records | reject | reject |
+
+The second row is the trap: correct count, exact assertion, working probe, and a
+permanent false pass. Both cases live in `packages/tools/src/precompile.zig`,
+with a floor test pinning `Box<` and the member count so a later edit cannot
+quietly turn the first fixture into the second.
+
 **Observe a production checkpoint before the test emits an equivalent event.**
 
 The same ambiguity appears in concurrent tests even when the final state is
@@ -233,6 +279,11 @@ test action that can produce the same milestone. Put the assertion before those
 actions. Later probes may inspect the earlier transition, but they must not be
 able to create it.
 
+Whenever you build a regression fixture from a bug report, read the branch the
+defect lives behind before choosing the fixture's shape. A report names the
+parameter that made the defect visible; the code guards that line with something
+else. Satisfy the guard, then vary the parameter.
+
 Whenever a gate reports a closed set of packages, modules, namespaces, or other
 categories, probe an unknown member as well as every known member. A catch-all is
 valid only outside the closed namespace. Inside it, an unknown member is a model
@@ -311,6 +362,9 @@ Two questions to put to any gate, after the sibling document's "delete its input
    without the named behavior is among them, the gate is not measuring it.
 2. Did my probe compile and run? If the answer comes from grepped text rather than
    an exit code, you do not know.
+3. Can this fixture reach the branch at all? Put the defect back and watch the
+   fixture go red. One that stays green under its own defect is measuring
+   something else, however exact its assertions are.
 
 ## Related Issues
 
@@ -319,4 +373,5 @@ Two questions to put to any gate, after the sibling document's "delete its input
 - [normalize-unions-without-dropping-members](../logic-errors/normalize-unions-without-dropping-members.md) - the polarity rule underneath the family: when something cannot see, it must widen or fail, never narrow to a pass
 - [two-hole-fills-in-one-turn-do-not-compose](../logic-errors/two-hole-fills-in-one-turn-do-not-compose.md) - another stand-in loop invariant carried by an assertion rather than by structure
 - Commit `6e27440e` - the seeded arms, the salvage gate correction, and the seed values that made the two outcomes distinguishable
+- Commit `dcbb694e` - the intersection reproduction, the floor test that pins its shape, and the plain-record fixture that reaches nothing
 - Commit `f69b28f7` - the generated synthesizer corpus and the probe that had to be re-done because it did not compile
