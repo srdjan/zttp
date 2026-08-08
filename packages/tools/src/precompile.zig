@@ -5243,3 +5243,86 @@ test "serialized bytecode matches the committed goldens" {
     }
     if (drifted > 0) return error.BytecodeGoldenDrift;
 }
+
+// The obligation past the sixteenth member of a generic intersection.
+//
+// `instantiateCompositeMembers` once copied members into a fixed `[16]TypeIndex`
+// buffer and rebuilt the intersection from that prefix, so a seventeenth member
+// was dropped and the value that should have failed it was accepted. The copy is
+// allocator-backed now, and `type_env.zig` unit-tests that seventeen members
+// survive the pool. These two cases assert the end-user verdict instead: what
+// `zts check` answers about a value that violates only the last obligation.
+//
+// The fixture must keep its generic application. `instantiateCompositeMembers`
+// returns `.unchanged` when no member changed, so an intersection of plain record
+// literals never rebuilds from the copied prefix - measured: the same seventeen
+// members written without `Box<string>` reject under the truncating implementation
+// too, and would have stood here as a permanent false pass.
+const wide_intersection_members =
+    \\type Box<T> = { boxed: T };
+    \\type Wide =
+    \\  Box<string> &
+    \\  { f01: string } & { f02: string } & { f03: string } & { f04: string } &
+    \\  { f05: string } & { f06: string } & { f07: string } & { f08: string } &
+    \\  { f09: string } & { f10: string } & { f11: string } & { f12: string } &
+    \\  { f13: string } & { f14: string } & { f15: string } &
+    \\  { last: string };
+    \\
+;
+
+const wide_intersection_satisfied =
+    \\function handler(req: Request): Response {
+    \\  const v: Wide = { boxed: "b", f01: "v", f02: "v", f03: "v", f04: "v",
+    \\    f05: "v", f06: "v", f07: "v", f08: "v", f09: "v", f10: "v", f11: "v",
+    \\    f12: "v", f13: "v", f14: "v", f15: "v", last: "v" };
+    \\  return Response.json(v);
+    \\}
+    \\
+;
+
+const wide_intersection_violated =
+    \\function handler(req: Request): Response {
+    \\  const v: Wide = { boxed: "b", f01: "v", f02: "v", f03: "v", f04: "v",
+    \\    f05: "v", f06: "v", f07: "v", f08: "v", f09: "v", f10: "v", f11: "v",
+    \\    f12: "v", f13: "v", f14: "v", f15: "v" };
+    \\  return Response.json(v);
+    \\}
+    \\
+;
+
+test "generic intersection fixture carries the members it claims" {
+    // The floor. Both assertions below are about the seventeenth member, and a
+    // fixture that lost a member, or lost `Box<`, satisfies them over a shape
+    // that cannot reproduce the defect at all.
+    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_members, "Box<string>") != null);
+    try std.testing.expectEqual(@as(usize, 16), std.mem.count(u8, wide_intersection_members, ": string }"));
+    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_members, "{ last: string }") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_violated, "last:") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wide_intersection_satisfied, "last: \"v\"") != null);
+}
+
+test "zts check rejects a value that violates only the seventeenth intersection member" {
+    const allocator = std.testing.allocator;
+    const source = try std.mem.concat(allocator, u8, &.{ wide_intersection_members, wide_intersection_violated });
+    defer allocator.free(source);
+
+    var check = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer check.deinit(allocator);
+
+    // The exact count, not "more than zero": a second type error would mean the
+    // fixture stopped isolating the obligation it names.
+    try std.testing.expectEqual(@as(u32, 1), check.type_errors);
+    try std.testing.expectEqual(@as(u32, 0), check.parse_errors);
+}
+
+test "zts check accepts the same value once the seventeenth member is satisfied" {
+    const allocator = std.testing.allocator;
+    const source = try std.mem.concat(allocator, u8, &.{ wide_intersection_members, wide_intersection_satisfied });
+    defer allocator.free(source);
+
+    var check = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer check.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), check.type_errors);
+    try std.testing.expectEqual(@as(u32, 0), check.parse_errors);
+}
