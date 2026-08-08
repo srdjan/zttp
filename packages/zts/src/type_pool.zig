@@ -1465,6 +1465,21 @@ pub const TypePool = struct {
         // Intersection target: source must be assignable to every member
         if (tgt_tag == .t_intersection) {
             for (self.getIntersectionMembers(target)) |member| {
+                // D1 amendment A1, applied at this site ahead of the global
+                // rule. An unresolved member reaches the blanket-true at the
+                // bottom of this function and discharges the obligation rather
+                // than widening it, so `type AB = A & B` accepted a value
+                // missing B's field while the inline spelling of the same type
+                // rejected it. A dropped intersection member is a dropped
+                // constraint, which is the loss `unionMemberSubsumes` already
+                // refuses for the same reason.
+                //
+                // Site-local because the corpus says it can be: measured at
+                // 43/43 examples and an unchanged convergence row, against the
+                // three workflow and generics failures the global amendment
+                // still produces. Delete this line when A1 closes below - the
+                // rule there subsumes it.
+                if (self.firstUnresolvedName(member) != null) return false;
                 if (!self.assignableIn(ctx, source, member)) return false;
             }
             return true;
@@ -1499,6 +1514,14 @@ pub const TypePool = struct {
         // So this closes with the ABI types and generic inference, not before.
         // `firstUnresolvedName` below is the reporting half, and it is already
         // here so the site that closes this has it.
+        //
+        // One half is closed ahead of the rest. The intersection-target loop
+        // above refuses an unresolved member rather than letting it reach the
+        // blanket-true here, because a dropped intersection member is a dropped
+        // constraint and the corpus tolerates the narrower cut: 43/43 examples
+        // and an unchanged convergence row. The three workflow examples and the
+        // generics example listed above still fail under the global amendment,
+        // so the rest of A1 waits exactly where it did.
         if (src_tag == .t_ref or src_tag == .t_generic_param) return true;
         if (tgt_tag == .t_ref or tgt_tag == .t_generic_param) return true;
 

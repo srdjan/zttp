@@ -5327,23 +5327,21 @@ test "zts check accepts the same value once the seventeenth member is satisfied"
     try std.testing.expectEqual(@as(u32, 0), check.parse_errors);
 }
 
-// The intersection fail-open, pinned as it behaves today.
+// An intersection member spelled as a name carries the same weight as one
+// spelled inline.
 //
 // `resolveType` substitutes an alias name only when the whole annotation matches
 // it, so a name written inside a compound expression stays a `t_ref`
-// (`type_env.zig`, "TypeEnv intersection alias type AB = A & B"). Assignability
-// answers true for an unresolved name in either direction while D1 amendment A1
-// is deferred (`type_pool.zig:1486-1503`), so an intersection member spelled as
-// an alias is discharged rather than checked.
+// (`type_env.zig`, "TypeEnv intersection alias type AB = A & B"). An unresolved
+// name reaches the blanket-true that D1 amendment A1 will delete, so the member
+// was discharged instead of checked: this pair once measured 0 named against 1
+// inline, the same value missing the same field.
 //
-// The inline spelling of the same type rejects the same value, which is what
-// makes this a fail-open rather than an unimplemented check. The two cases below
-// differ only in whether the members are named.
-//
-// The first expectation is the wrong answer, asserted on purpose. When A1 closes,
-// or when the intersection-member site is guarded ahead of it, it flips from 0 to
-// 1 and this test goes red. Flip it deliberately and say so in the commit; do not
-// delete the test.
+// The intersection-target loop applies A1's rule at that one site now
+// (`type_pool.zig`, "Intersection target"), so both spellings reject. The pair
+// stays because the asymmetry is what a regression here looks like: a change
+// that reopens the fail-open moves `named` back to 0 while leaving `inlined`
+// green, and only the contrast catches that.
 const named_intersection_members =
     \\type A = { a: string };
     \\type B = { b: string };
@@ -5364,7 +5362,7 @@ const inline_intersection_members =
     \\
 ;
 
-test "named intersection members are discharged unchecked while A1 is deferred" {
+test "a named intersection member is checked, like the inline spelling" {
     const allocator = std.testing.allocator;
 
     var named = try runCheckOnlyFromSource(allocator, named_intersection_members, "handler.ts", null, true, null, false);
@@ -5377,8 +5375,9 @@ test "named intersection members are discharged unchecked while A1 is deferred" 
     try std.testing.expectEqual(@as(u32, 0), named.parse_errors);
     try std.testing.expectEqual(@as(u32, 0), inlined.parse_errors);
 
-    // The contrast is the claim: the same missing field, rejected when the
-    // members are written inline and accepted when they are named.
+    // The contrast is the claim: the same missing field, rejected either way.
+    // Asserting both, rather than only the named case, is what makes a silent
+    // return to the fail-open visible.
     try std.testing.expectEqual(@as(u32, 1), inlined.type_errors);
-    try std.testing.expectEqual(@as(u32, 0), named.type_errors);
+    try std.testing.expectEqual(@as(u32, 1), named.type_errors);
 }
