@@ -761,12 +761,24 @@ admitted form adds its semantics-registry rules in the same phase, so
 `spec-check` stays green by construction; and no `meta` payload is ever
 hand-written, because a hand-written payload is another drift gate.
 
-Phases 0 and 1 are done. The executed plans and the program's decision log are
-in [docs/archive/plans/](archive/README.md).
+Phases 0 through 2 are done. The executed plans and the program's decision log
+are in [docs/archive/plans/](archive/README.md); phase 2's plan is still
+[docs/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md](plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md).
+
+Phase 2 met its exit against the frozen signature corpus: 24 modules and 90
+exports, every emitted signature parsing with no fallback to `unknown`, and
+pinned digests. It left one piece of its own scope open. Assignability amendment
+A1, which makes an unresolved name an error rather than `true`, was applied,
+measured, and deferred, because `Request` and `Response` have no definition in
+`TypeEnv` and the durable and queue exports return the coarse `unknown`. Both
+are phase 5 work, so A1 closes there. Re-measured on 2026-08-08, the global
+amendment fails seven examples, six of them on the coarse `unknown` alone. The
+intersection-member half was applied ahead of the rest, since none of the seven
+is an intersection member. The deferral and its numbers are recorded at the site
+in `packages/zts/src/type_pool.zig`.
 
 | Phase | Scope | Exit |
 |---|---|---|
-| 2. Type-system rock | Sound generic inference and instantiation per D1, constraints and explicit type arguments before inference; the closed narrowing list including negation, bare discriminant reads, and the `isDict`/`isBytes` value-kind guards; canonical type serialization per D3. | Generic functions instantiate soundly and never fall back to `unknown` over a frozen signature corpus covering every virtual-module export; narrowing conformance tests; stable type digests. |
 | 3. Source `null`, recursive aliases, match upgrades | `null` as explicit data with the `??`/`?.`-rejected-on-null diagnostic and its repair; contractive recursive aliases over a finite type graph with memoized unfolding; match binding fields, rename and shorthand bindings, type-test patterns, and effectful arms with exactly-one-arm evaluation. | `JsonValue` minus the Dict arm compiles; exhaustiveness over null, literals, and type tests. |
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | `Bytes` and `zttp:bytes`; the HTTP, WebSocket, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText`; trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch, websocket, and queue examples re-typed; ceiling-rule repair tests. |
@@ -777,7 +789,8 @@ retire an interim marker left in the code by phase 0:
 
 - [D1 type system](plans/2026-07-30-014-d1-type-system-design.md) - assignability,
   generic inference, narrowing dataflow, join and union normalization, canonical
-  type serialization. Unblocks phases 2, 3, and 4; retires `// D1-interim`.
+  type serialization. Unblocks phases 2, 3, and 4; retired `// D1-interim`, and
+  no marker of that name is left in the tree.
 - [D2 effects and purity](plans/2026-07-30-015-d2-effects-purity-design.md) -
   the effect-row atom set and its capability mapping, row inference and join, the
   purity predicate, and `Proof<T, P>`'s property domain. Unblocks phases 4 and 5;
@@ -786,9 +799,10 @@ retire an interim marker left in the code by phase 0:
   the lexical grammar, the canonical formatter, digest pre-images, protocol
   payload schemas, and the equivalence-validator taxonomy. Unblocks phase 6.
 
-Four risks carry across phases. The generics retrofit in phase 2 has a long
-tail, mitigated by the frozen signature corpus and by ordering constraints
-before inference. Normalization in phase 6 may not be confluent, mitigated by
+Four risks carry across phases. The generics retrofit in phase 2 had the long
+tail the plan named, and the frozen signature corpus is what bounded it; what
+the corpus could not bound was A1, which is deferred to phase 5 above.
+Normalization in phase 6 may not be confluent, mitigated by
 running the double-normalize property test from day one and falling back to
 advisory-only rows. Hand-written meta payloads would multiply drift gates, which
 is why the ground rule above bans them. Silent decisions leaking into wire
