@@ -94,8 +94,13 @@ One ask and everything the agent does to answer it: the model round-trips, the t
 
 State belongs to the Turn rather than to the session. The loop also writes to the Turn itself - a nudge after a refused draft, a compiler-authored repair - and those messages are part of the Turn they interrupt. Anything reconstructing a Turn from the wire must tell them from the next ask, which the transport does not help with: a control message the loop sends itself and a message from the user arrive in the same shape.
 
-### Cassette
-A recorded model Turn, kept so the same session can be replayed later against the current compiler. Recording costs model access and replay does not, which is what makes a published rate both reproducible and free to re-check. A rate may come from no other source.
+### Response Cassette
+A provider response captured as raw JSON or SSE and replayed through the production parser. It proves transport parsing and response assembly. By itself it does not prove that the model saw the expected prompt, transcript, tools, or workspace state.
+
+### Flow Cassette
+A versioned record of one complete simulator case. It binds the initial workspace, one or more Turns, semantic model-request checkpoints, raw Response Cassettes, approval previews and decisions, canonical events, receipts, typed outcomes, exact between-Turn workspace checkpoints, and the final workspace under one content hash.
+
+Replay validates each checkpoint before releasing its next response and runs the normal loop with approval and Veto behavior enabled. An `empirical_model` Flow Cassette may support a historical model measurement. A `deterministic_harness` Flow Cassette proves only the machinery and is excluded from convergence, first-draft, and intent denominators.
 
 ### Stand-in
 A scripted responder that replaces only a live model's choice on the wire while preserving the production boundaries and state transitions around it, so the surrounding agent machinery can be exercised with no model access at all. It answers a declared range of asks and refuses everything outside it, and the refusal is the point: a range it silently outgrew would answer asks it cannot really handle.

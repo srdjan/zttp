@@ -20,6 +20,8 @@ const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
 const http_errors = @import("../http_errors.zig");
 const apply_edit = @import("../anthropic/apply_edit.zig");
+const model_request = @import("../model_request.zig");
+const capture_sink = @import("../capture_sink.zig");
 
 const default_base_url = "https://api.openai.com/v1/responses";
 pub const default_model = "gpt-4o-mini";
@@ -42,9 +44,15 @@ pub const ClientError = error{
 
 pub const Client = struct {
     config: Config,
+    /// Borrowed for this client's lifetime. null preserves ordinary live use.
+    capture: ?*capture_sink.CaptureSink = null,
 
     pub fn init(config: Config) Client {
         return .{ .config = config };
+    }
+
+    pub fn initWithCapture(config: Config, capture: *capture_sink.CaptureSink) Client {
+        return .{ .config = config, .capture = capture };
     }
 
     pub fn asModelClient(self: *Client) loop.ModelClient {
@@ -67,8 +75,23 @@ pub const Client = struct {
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
     ) !loop.ModelCallResult {
-        const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
-        const response_body = try post(arena, self.config, body);
+        return self.sendTurnWithPost(arena, transcript, extra_user_text, post);
+    }
+
+    fn sendTurnWithPost(
+        self: *Client,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+        post_fn: anytype,
+    ) !loop.ModelCallResult {
+        var snapshot = try createRequestSnapshot(arena, self.config, transcript, extra_user_text);
+        defer snapshot.deinit(arena);
+
+        const body = try buildRequestBodyFromSnapshot(arena, &snapshot);
+        const response_body = try post_fn(arena, self.config, body);
+        if (self.capture) |sink| try sink.record(&snapshot, response_body);
+
         return assembleTurn(arena, response_body);
     }
 };
@@ -95,31 +118,61 @@ pub fn buildRequestBody(
     transcript: *const transcript_mod.Transcript,
     extra_user_text: ?[]const u8,
 ) ![]u8 {
+    var snapshot = try createRequestSnapshot(arena, config, transcript, extra_user_text);
+    defer snapshot.deinit(arena);
+    return buildRequestBodyFromSnapshot(arena, &snapshot);
+}
+
+fn createRequestSnapshot(
+    arena: std.mem.Allocator,
+    config: Config,
+    transcript: *const transcript_mod.Transcript,
+    extra_user_text: ?[]const u8,
+) !model_request.ModelRequestSnapshot {
+    return model_request.createSnapshot(arena, .{
+        .config = .{
+            .provider = .openai,
+            .model = config.model,
+            .max_output_tokens = config.max_tokens,
+            .system_prompt = config.system_prompt,
+            .tools_json = config.tools_json,
+        },
+        .transcript = transcript,
+        .extra_user_text = extra_user_text,
+    });
+}
+
+pub fn buildRequestBodyFromSnapshot(
+    arena: std.mem.Allocator,
+    snapshot: *const model_request.ModelRequestSnapshot,
+) ![]u8 {
+    if (snapshot.config.provider != .openai) return error.InvalidProvider;
     var buf = TextBuffer.init(arena);
     defer buf.deinit();
     const w = buf.writer();
 
     try w.writeByte('{');
     try w.writeAll("\"model\":");
-    try writeJsonString(w, config.model);
-    try w.print(",\"max_output_tokens\":{d}", .{config.max_tokens});
-    try w.writeAll(",\"stream\":true");
+    try writeJsonString(w, snapshot.config.model);
+    try w.print(",\"max_output_tokens\":{d}", .{snapshot.config.max_output_tokens});
+    try w.writeAll(",\"stream\":");
+    try w.writeAll(if (snapshot.config.stream) "true" else "false");
     try w.writeAll(",\"instructions\":");
-    try writeJsonString(w, config.system_prompt);
+    try writeJsonString(w, snapshot.config.system_prompt);
 
     try w.writeAll(",\"input\":[");
     var first_entry = true;
-    for (transcript.entries.items) |*entry| {
-        try writeTranscriptEntry(w, entry, &first_entry);
+    for (snapshot.items) |item| {
+        try writeSnapshotItem(w, item, &first_entry);
     }
-    if (extra_user_text) |body| {
+    if (snapshot.extra_user_text) |body| {
         if (!first_entry) try w.writeByte(',');
         first_entry = false;
         try writeUserMessage(w, body);
     }
     try w.writeByte(']');
 
-    if (config.tools_json) |tools| {
+    if (snapshot.config.tools_json) |tools| {
         try w.writeAll(",\"tools\":");
         try w.writeAll(tools);
     }
@@ -140,18 +193,13 @@ fn writeAssistantText(w: anytype, body: []const u8) !void {
     try w.writeAll("}]}");
 }
 
-fn writeTranscriptEntry(
+fn writeSnapshotItem(
     w: anytype,
-    entry: *const transcript_mod.OwnedEntry,
+    item: model_request.Item,
     first_entry: *bool,
 ) !void {
-    switch (entry.*) {
-        .user_text => |body| {
-            if (!first_entry.*) try w.writeByte(',');
-            first_entry.* = false;
-            try writeUserMessage(w, body);
-        },
-        .system_note => |body| {
+    switch (item) {
+        .user_text, .system_note => |body| {
             // System notes are surfaced as additional user-role context
             // blocks; the top-level `instructions` field carries the
             // persona prompt exclusively.
@@ -164,20 +212,18 @@ fn writeTranscriptEntry(
             first_entry.* = false;
             try writeAssistantText(w, body);
         },
-        .assistant_tool_use => |calls| {
+        .tool_use => |call| {
             // The Responses API expects each function call to be its own
             // top-level input item (no wrapping assistant message).
-            for (calls) |call| {
-                if (!first_entry.*) try w.writeByte(',');
-                first_entry.* = false;
-                try w.writeAll("{\"type\":\"function_call\",\"call_id\":");
-                try writeJsonString(w, call.id);
-                try w.writeAll(",\"name\":");
-                try writeJsonString(w, call.name);
-                try w.writeAll(",\"arguments\":");
-                try writeJsonString(w, call.args_json);
-                try w.writeByte('}');
-            }
+            if (!first_entry.*) try w.writeByte(',');
+            first_entry.* = false;
+            try w.writeAll("{\"type\":\"function_call\",\"call_id\":");
+            try writeJsonString(w, call.id);
+            try w.writeAll(",\"name\":");
+            try writeJsonString(w, call.name);
+            try w.writeAll(",\"arguments\":");
+            try writeJsonString(w, call.args_json);
+            try w.writeByte('}');
         },
         .tool_result => |result| {
             if (!first_entry.*) try w.writeByte(',');
@@ -188,7 +234,6 @@ fn writeTranscriptEntry(
             try writeJsonString(w, result.llm_text);
             try w.writeByte('}');
         },
-        .proof_card, .diagnostic_box, .verified_patch => {},
     }
 }
 
@@ -228,7 +273,7 @@ pub fn writeToolsArray(writer: anytype, registry: *const registry_mod.Registry) 
 // HTTPS POST (mirrors the anthropic client's pattern)
 // -----------------------------------------------------------------------
 
-fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]u8 {
+fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 {
     const uri = try std.Uri.parse(config.base_url);
 
     var io_backend = std.Io.Threaded.init(arena, .{ .environ = .empty });
@@ -388,6 +433,92 @@ test "OpenAI response pipeline remaps apply_edit into an edit reply" {
         },
         else => return error.TestFailed,
     }
+}
+
+const CaptureProbe = struct {
+    calls: usize = 0,
+    fail: bool = false,
+
+    fn record(
+        context: *anyopaque,
+        call_index: usize,
+        snapshot: *const model_request.ModelRequestSnapshot,
+        raw_response: []const u8,
+    ) !void {
+        const self: *CaptureProbe = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        try testing.expectEqual(@as(usize, 0), call_index);
+        try testing.expectEqual(model_request.Provider.openai, snapshot.config.provider);
+        try testing.expectEqualStrings("capture-model", snapshot.config.model);
+        try testing.expectEqualStrings("capture-system", snapshot.config.system_prompt);
+        try testing.expectEqualStrings("retry-context", snapshot.extra_user_text.?);
+        try testing.expectEqual(@as(usize, 1), snapshot.items.len);
+        try testing.expectEqualStrings("capture-user", snapshot.items[0].user_text);
+        try testing.expectEqualStrings(apply_edit_sse, raw_response);
+        if (self.fail) return error.InjectedCaptureFailure;
+    }
+};
+
+fn captureTestPost(_: std.mem.Allocator, _: Config, _: []const u8) ![]const u8 {
+    return apply_edit_sse;
+}
+
+test "OpenAI client records the canonical request and raw response before parsing" {
+    var probe: CaptureProbe = .{};
+    var sink: capture_sink.CaptureSink = .{
+        .context = &probe,
+        .record_fn = CaptureProbe.record,
+    };
+    var client = Client.initWithCapture(.{
+        .api_key = "not-captured",
+        .system_prompt = "capture-system",
+        .model = "capture-model",
+    }, &sink);
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "capture-user" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    _ = try client.sendTurnWithPost(
+        arena.allocator(),
+        &transcript,
+        "retry-context",
+        captureTestPost,
+    );
+
+    try testing.expectEqual(@as(usize, 1), probe.calls);
+    try testing.expectEqual(@as(usize, 1), sink.next_call_index);
+}
+
+test "OpenAI client propagates capture failure without advancing the cursor" {
+    var probe: CaptureProbe = .{ .fail = true };
+    var sink: capture_sink.CaptureSink = .{
+        .context = &probe,
+        .record_fn = CaptureProbe.record,
+    };
+    var client = Client.initWithCapture(.{
+        .api_key = "not-captured",
+        .system_prompt = "capture-system",
+        .model = "capture-model",
+    }, &sink);
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "capture-user" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(error.InjectedCaptureFailure, client.sendTurnWithPost(
+        arena.allocator(),
+        &transcript,
+        "retry-context",
+        captureTestPost,
+    ));
+
+    try testing.expectEqual(@as(usize, 1), probe.calls);
+    try testing.expectEqual(@as(usize, 0), sink.next_call_index);
 }
 
 test "buildRequestBody: first turn carries instructions + one user input item and no tools" {

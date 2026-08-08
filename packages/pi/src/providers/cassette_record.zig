@@ -2,20 +2,6 @@
 //!
 //! Live API responses are captured here and persisted as cassettes that
 //! the replay client (`cassette_client.zig`) plays back deterministically.
-//! This file is also the home of the `Mode` selector that the live
-//! provider clients consult before deciding whether to open a real socket.
-//!
-//! The mode is set by the env var `ZTTP_CASSETTE_MODE`:
-//!
-//!   replay      Default. Replay from the cassette path the caller already
-//!               holds; never open a socket. Missing cassette = test failure.
-//!   record      Open a real socket, capture request and response bytes,
-//!               and write a cassette to disk. Requires a real API key.
-//!   passthrough Open a real socket, do not write any cassette. Useful for
-//!               live smoke tests where the response is consumed in-process
-//!               and the test asserts on the parsed reply rather than the
-//!               raw byte stream.
-//!
 //! The recorder itself is provider-agnostic; the live providers know how to
 //! frame their request and which header to send. The recorder only owns
 //! capturing the HTTP response bytes and serialising them in the cassette
@@ -26,25 +12,6 @@ const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const zts = @import("zts");
 const file_io = zts.file_io;
 const cassette_client = @import("cassette_client.zig");
-
-pub const Mode = enum {
-    replay,
-    record,
-    passthrough,
-
-    pub fn fromString(s: []const u8) ?Mode {
-        if (std.mem.eql(u8, s, "replay")) return .replay;
-        if (std.mem.eql(u8, s, "record")) return .record;
-        if (std.mem.eql(u8, s, "passthrough")) return .passthrough;
-        return null;
-    }
-};
-
-pub const ParseModeError = error{InvalidMode};
-
-pub fn parseModeStrict(value: []const u8) ParseModeError!Mode {
-    return Mode.fromString(value) orelse error.InvalidMode;
-}
 
 // -----------------------------------------------------------------------
 // Captured response
@@ -267,19 +234,6 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
 // -----------------------------------------------------------------------
 
 const testing = std.testing;
-
-test "Mode.fromString covers the documented selectors" {
-    try testing.expectEqual(Mode.replay, Mode.fromString("replay").?);
-    try testing.expectEqual(Mode.record, Mode.fromString("record").?);
-    try testing.expectEqual(Mode.passthrough, Mode.fromString("passthrough").?);
-    try testing.expect(Mode.fromString("RECORD") == null);
-    try testing.expect(Mode.fromString("") == null);
-}
-
-test "parseModeStrict surfaces invalid values" {
-    try testing.expectError(error.InvalidMode, parseModeStrict("nonsense"));
-    try testing.expectEqual(Mode.replay, try parseModeStrict("replay"));
-}
 
 test "serializeCassette: non-streaming body emits header + single body line" {
     const body = "{\"id\":\"x\",\"choices\":[]}";

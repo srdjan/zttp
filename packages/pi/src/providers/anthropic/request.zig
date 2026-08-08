@@ -5,6 +5,7 @@
 const std = @import("std");
 const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const json_writer = @import("json_writer.zig");
+const model_request = @import("../model_request.zig");
 const transcript_mod = @import("../../transcript.zig");
 
 pub const default_model = "claude-sonnet-4-6";
@@ -24,8 +25,8 @@ const MessageRole = enum { user, assistant };
 
 const ContentBlock = union(enum) {
     text: []const u8,
-    tool_use: transcript_mod.OwnedToolCall,
-    tool_result: transcript_mod.OwnedToolResult,
+    tool_use: model_request.ToolUse,
+    tool_result: model_request.ToolResult,
 };
 
 const MessageGroup = struct {
@@ -38,22 +39,44 @@ pub fn writeRequestBody(
     allocator: std.mem.Allocator,
     params: RequestParams,
 ) !void {
+    var snapshot = try model_request.createSnapshot(allocator, .{
+        .config = .{
+            .provider = .anthropic,
+            .model = params.model,
+            .max_output_tokens = params.max_tokens,
+            .stream = params.stream,
+            .system_prompt = params.system_prompt,
+            .tools_json = params.tools_json,
+        },
+        .transcript = params.transcript,
+        .extra_user_text = params.extra_user_text,
+    });
+    defer snapshot.deinit(allocator);
+    return writeSnapshotRequestBody(writer, allocator, &snapshot);
+}
+
+pub fn writeSnapshotRequestBody(
+    writer: anytype,
+    allocator: std.mem.Allocator,
+    snapshot: *const model_request.ModelRequestSnapshot,
+) !void {
+    if (snapshot.config.provider != .anthropic) return error.InvalidProvider;
     try writer.writeByte('{');
 
     try writer.writeAll("\"model\":");
-    try json_writer.writeString(writer, params.model);
-    try writer.print(",\"max_tokens\":{d}", .{params.max_tokens});
+    try json_writer.writeString(writer, snapshot.config.model);
+    try writer.print(",\"max_tokens\":{d}", .{snapshot.config.max_output_tokens});
     try writer.writeAll(",\"stream\":");
-    try writer.writeAll(if (params.stream) "true" else "false");
+    try writer.writeAll(if (snapshot.config.stream) "true" else "false");
 
     try writer.writeAll(",\"system\":[{\"type\":\"text\",\"text\":");
-    try json_writer.writeString(writer, params.system_prompt);
+    try json_writer.writeString(writer, snapshot.config.system_prompt);
     try writer.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}}]");
 
     try writer.writeAll(",\"messages\":");
-    try writeMessagesArray(writer, allocator, params.transcript, params.extra_user_text);
+    try writeMessagesArray(writer, allocator, snapshot.items, snapshot.extra_user_text);
 
-    if (params.tools_json) |tools| {
+    if (snapshot.config.tools_json) |tools| {
         try writer.writeAll(",\"tools\":");
         try writer.writeAll(tools);
     }
@@ -64,7 +87,7 @@ pub fn writeRequestBody(
 fn writeMessagesArray(
     writer: anytype,
     allocator: std.mem.Allocator,
-    transcript: *const transcript_mod.Transcript,
+    items: []const model_request.Item,
     extra_user_text: ?[]const u8,
 ) !void {
     var groups: std.ArrayListUnmanaged(MessageGroup) = .empty;
@@ -73,18 +96,12 @@ fn writeMessagesArray(
         groups.deinit(allocator);
     }
 
-    for (transcript.entries.items) |*entry| {
-        switch (entry.*) {
-            .user_text => |body| try appendBlock(allocator, &groups, .user, .{ .text = body }),
+    for (items) |item| {
+        switch (item) {
+            .user_text, .system_note => |body| try appendBlock(allocator, &groups, .user, .{ .text = body }),
             .model_text => |body| try appendBlock(allocator, &groups, .assistant, .{ .text = body }),
-            .assistant_tool_use => |calls| {
-                for (calls) |call| {
-                    try appendBlock(allocator, &groups, .assistant, .{ .tool_use = call });
-                }
-            },
+            .tool_use => |call| try appendBlock(allocator, &groups, .assistant, .{ .tool_use = call }),
             .tool_result => |result| try appendBlock(allocator, &groups, .user, .{ .tool_result = result }),
-            .system_note => |body| try appendBlock(allocator, &groups, .user, .{ .text = body }),
-            .proof_card, .diagnostic_box, .verified_patch => {},
         }
     }
 

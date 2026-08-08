@@ -11,7 +11,8 @@ const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
 const apply_edit = @import("apply_edit.zig");
 const http_errors = @import("../http_errors.zig");
-const cassette_record = @import("../cassette_record.zig");
+const model_request = @import("../model_request.zig");
+const capture_sink = @import("../capture_sink.zig");
 
 const default_base_url = "https://api.anthropic.com/v1/messages";
 const default_anthropic_version = "2023-06-01";
@@ -33,25 +34,15 @@ pub const ClientError = error{
 
 pub const Client = struct {
     config: Config,
-    /// When set, every model roundtrip's raw SSE body is teed to a cassette
-    /// under `<record_dir>/<record_scenario>/step_<N>.jsonl`, one per call.
-    /// Used by the codegen-eval recorder to capture a faithful baseline that
-    /// the replay client plays back deterministically. null disables recording
-    /// (the default), so the live path is unchanged for normal sessions.
-    record_dir: ?[]const u8 = null,
-    record_scenario: []const u8 = "",
-    record_step: usize = 0,
+    /// Borrowed for this client's lifetime. null preserves ordinary live use.
+    capture: ?*capture_sink.CaptureSink = null,
 
     pub fn init(config: Config) Client {
         return .{ .config = config };
     }
 
-    /// Point this client at a per-scenario cassette directory and reset the
-    /// step counter. The recorder calls this once per corpus case.
-    pub fn enableRecording(self: *Client, dir: []const u8, scenario: []const u8) void {
-        self.record_dir = dir;
-        self.record_scenario = scenario;
-        self.record_step = 0;
+    pub fn initWithCapture(config: Config, capture: *capture_sink.CaptureSink) Client {
+        return .{ .config = config, .capture = capture };
     }
 
     pub fn asModelClient(self: *Client) loop.ModelClient {
@@ -74,13 +65,23 @@ pub const Client = struct {
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
     ) !loop.ModelCallResult {
-        const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
-        const response_body = try postAnthropic(arena, self.config, body);
-        if (self.record_dir) |dir| {
-            // Best-effort: a recording failure must never break a live turn.
-            recordCassette(arena, dir, self.record_scenario, self.record_step, self.config.model, response_body) catch {};
-            self.record_step += 1;
-        }
+        return self.sendTurnWithPost(arena, transcript, extra_user_text, postAnthropic);
+    }
+
+    fn sendTurnWithPost(
+        self: *Client,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+        post_fn: anytype,
+    ) !loop.ModelCallResult {
+        var snapshot = try createRequestSnapshot(arena, self.config, transcript, extra_user_text);
+        defer snapshot.deinit(arena);
+
+        const body = try buildRequestBodyFromSnapshot(arena, &snapshot);
+        const response_body = try post_fn(arena, self.config, body);
+        if (self.capture) |sink| try sink.record(&snapshot, response_body);
+
         const event_list = try sse_parser.parseAll(arena, response_body);
         const outcome = try response_assembler.assemble(arena, event_list);
         const reply = try apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
@@ -94,51 +95,45 @@ pub fn buildRequestBody(
     transcript: *const transcript_mod.Transcript,
     extra_user_text: ?[]const u8,
 ) ![]u8 {
-    var buf = TextBuffer.init(arena);
-    defer buf.deinit();
-    try request_mod.writeRequestBody(buf.writer(), arena, .{
-        .model = config.model,
-        .max_tokens = config.max_tokens,
-        .system_prompt = config.system_prompt,
-        .transcript = transcript,
-        .extra_user_text = extra_user_text,
-        .tools_json = config.tools_json,
-        .stream = true,
-    });
-    return try buf.toOwnedSlice();
+    var snapshot = try createRequestSnapshot(arena, config, transcript, extra_user_text);
+    defer snapshot.deinit(arena);
+    return buildRequestBodyFromSnapshot(arena, &snapshot);
 }
 
-/// Tee one roundtrip's SSE body to `<dir>/<scenario>/step_<step>.jsonl`. The
-/// cassette stores the stream verbatim; replay parses it through the same
-/// sse_parser/response_assembler this client uses, so the recorded reply and
-/// the live reply are identical bytes.
-fn recordCassette(
+fn createRequestSnapshot(
     arena: std.mem.Allocator,
-    dir: []const u8,
-    scenario: []const u8,
-    step: usize,
-    model: []const u8,
-    sse_body: []const u8,
-) !void {
-    const scenario_dir = try std.fs.path.join(arena, &.{ dir, scenario });
-    var io_backend = std.Io.Threaded.init(arena, .{ .environ = .empty });
-    defer io_backend.deinit();
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), scenario_dir);
-
-    const path = try std.fmt.allocPrint(arena, "{s}/step_{d}.jsonl", .{ scenario_dir, step });
-    try cassette_record.writeCassette(arena, path, sse_body, .{
-        .provider = .anthropic,
-        .scenario = scenario,
-        .stream = true,
-        .model = model,
+    config: Config,
+    transcript: *const transcript_mod.Transcript,
+    extra_user_text: ?[]const u8,
+) !model_request.ModelRequestSnapshot {
+    return model_request.createSnapshot(arena, .{
+        .config = .{
+            .provider = .anthropic,
+            .model = config.model,
+            .max_output_tokens = config.max_tokens,
+            .system_prompt = config.system_prompt,
+            .tools_json = config.tools_json,
+        },
+        .transcript = transcript,
+        .extra_user_text = extra_user_text,
     });
+}
+
+pub fn buildRequestBodyFromSnapshot(
+    arena: std.mem.Allocator,
+    snapshot: *const model_request.ModelRequestSnapshot,
+) ![]u8 {
+    var buf = TextBuffer.init(arena);
+    defer buf.deinit();
+    try request_mod.writeSnapshotRequestBody(buf.writer(), arena, snapshot);
+    return try buf.toOwnedSlice();
 }
 
 fn postAnthropic(
     arena: std.mem.Allocator,
     config: Config,
     body: []const u8,
-) ![]u8 {
+) ![]const u8 {
     const uri = try std.Uri.parse(config.base_url);
 
     var io_backend = std.Io.Threaded.init(arena, .{ .environ = .empty });
@@ -284,4 +279,92 @@ test "Client.asModelClient exposes the new request signature" {
     const mc = client.asModelClient();
     try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&client)));
     try testing.expect(@intFromPtr(mc.request_fn) != 0);
+}
+
+const capture_test_sse = @embedFile("cassettes/text_simple.sse");
+
+const CaptureProbe = struct {
+    calls: usize = 0,
+    fail: bool = false,
+
+    fn record(
+        context: *anyopaque,
+        call_index: usize,
+        snapshot: *const model_request.ModelRequestSnapshot,
+        raw_response: []const u8,
+    ) !void {
+        const self: *CaptureProbe = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        try testing.expectEqual(@as(usize, 0), call_index);
+        try testing.expectEqual(model_request.Provider.anthropic, snapshot.config.provider);
+        try testing.expectEqualStrings("capture-model", snapshot.config.model);
+        try testing.expectEqualStrings("capture-system", snapshot.config.system_prompt);
+        try testing.expectEqualStrings("retry-context", snapshot.extra_user_text.?);
+        try testing.expectEqual(@as(usize, 1), snapshot.items.len);
+        try testing.expectEqualStrings("capture-user", snapshot.items[0].user_text);
+        try testing.expectEqualStrings(capture_test_sse, raw_response);
+        if (self.fail) return error.InjectedCaptureFailure;
+    }
+};
+
+fn captureTestPost(_: std.mem.Allocator, _: Config, _: []const u8) ![]const u8 {
+    return capture_test_sse;
+}
+
+test "Anthropic client records the canonical request and raw response before parsing" {
+    var probe: CaptureProbe = .{};
+    var sink: capture_sink.CaptureSink = .{
+        .context = &probe,
+        .record_fn = CaptureProbe.record,
+    };
+    var client = Client.initWithCapture(.{
+        .api_key = "not-captured",
+        .system_prompt = "capture-system",
+        .model = "capture-model",
+    }, &sink);
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "capture-user" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    _ = try client.sendTurnWithPost(
+        arena.allocator(),
+        &transcript,
+        "retry-context",
+        captureTestPost,
+    );
+
+    try testing.expectEqual(@as(usize, 1), probe.calls);
+    try testing.expectEqual(@as(usize, 1), sink.next_call_index);
+}
+
+test "Anthropic client propagates capture failure without advancing the cursor" {
+    var probe: CaptureProbe = .{ .fail = true };
+    var sink: capture_sink.CaptureSink = .{
+        .context = &probe,
+        .record_fn = CaptureProbe.record,
+    };
+    var client = Client.initWithCapture(.{
+        .api_key = "not-captured",
+        .system_prompt = "capture-system",
+        .model = "capture-model",
+    }, &sink);
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "capture-user" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(error.InjectedCaptureFailure, client.sendTurnWithPost(
+        arena.allocator(),
+        &transcript,
+        "retry-context",
+        captureTestPost,
+    ));
+
+    try testing.expectEqual(@as(usize, 1), probe.calls);
+    try testing.expectEqual(@as(usize, 0), sink.next_call_index);
 }

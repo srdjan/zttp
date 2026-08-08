@@ -43,6 +43,7 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-openapi-manifest` | `packages/tools/src/openapi_manifest.zig` |
 | `test-expert-app` | `packages/pi/src/tests.zig` |
 | `test-cassette` | `packages/pi/src/cassette_tests.zig` |
+| `test-simulator` | `packages/pi/src/simulator_tests.zig` |
 | `test-standin` | `packages/pi/src/standin_tests.zig` |
 
 `test-standin` compiles with its filters pinned to the literal `stand-in`
@@ -54,6 +55,18 @@ Two of those roots exist because of how modules are wired rather than because
 of what they test. `canonicalize.zig` and `zts_cli.zig` are reached only
 through the `zts_cli` named module, so a test root that imports them by
 relative path collects none of their tests. The table entry is what runs them.
+
+`test-cassette` covers provider response parsing and assembly. `test-simulator`
+covers the versioned full-flow contract: strict loading, request checkpoint
+validation, approvals, multi-Turn transcript and workspace continuity, exact
+final state, and crash-safe promotion. Both run without credentials. Simulator
+fixtures marked `deterministic_harness` prove the full-flow machinery, not model
+quality or convergence. Published convergence remains historical empirical model
+evidence from response-only cassettes replayed by `expert_codegen_record.zig`.
+It is not full-flow evidence and must not be described as such until fresh
+`empirical_model` flows replace it through the direct cutover. Fresh capture
+requires runtime credentials and successful provider responses; this checkout
+does not contain synthetic replacements for that evidence.
 
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-release-check`, `test-server`, `test-compile-bench`.

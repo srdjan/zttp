@@ -719,7 +719,7 @@ provable set is true as far as the standing checks can see (item 1, and the two 
 classes written up in `docs/solutions/`), the gap is published and dated
 ([convergence.md](convergence.md)), and the mechanisms moved from rejection toward
 construction - six intents repair mechanically, and a turn can spend itself on one typed
-hole. The sixteen-case corpus is now the binding constraint on all three legs, which is
+hole. The twenty-case corpus is now the binding constraint on all three legs, which is
 the honest next thing to grow.
 
 The 2026-08-03 `InsufficientCredit` failure exposed a separate design problem: routine

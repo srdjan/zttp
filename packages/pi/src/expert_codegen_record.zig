@@ -11,6 +11,10 @@ const zts = @import("zts");
 const anthropic = @import("providers/anthropic/client.zig");
 const cassette_client = @import("providers/cassette_client.zig");
 const cassette_record = @import("providers/cassette_record.zig");
+const capture_sink = @import("providers/capture_sink.zig");
+const model_request = @import("providers/model_request.zig");
+const flow_promotion = @import("simulator/promotion.zig");
+const flow_recorder = @import("simulator/recorder.zig");
 const transcript_mod = @import("transcript.zig");
 const loop = @import("loop.zig");
 const app = @import("app.zig");
@@ -21,6 +25,42 @@ const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
 
 const testing = std.testing;
+
+const CodegenResponseCapture = struct {
+    allocator: std.mem.Allocator,
+    out_dir: []const u8,
+    scenario: []const u8,
+
+    fn record(
+        context: *anyopaque,
+        call_index: usize,
+        snapshot: *const model_request.ModelRequestSnapshot,
+        raw_response: []const u8,
+    ) anyerror!void {
+        const self: *CodegenResponseCapture = @ptrCast(@alignCast(context));
+        const scenario_dir = try std.fs.path.join(self.allocator, &.{ self.out_dir, self.scenario });
+        defer self.allocator.free(scenario_dir);
+        var io_backend = std.Io.Threaded.init(self.allocator, .{ .environ = .empty });
+        defer io_backend.deinit();
+        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), scenario_dir);
+
+        const path = try std.fmt.allocPrint(
+            self.allocator,
+            "{s}/step_{d}.jsonl",
+            .{ scenario_dir, call_index },
+        );
+        defer self.allocator.free(path);
+        try cassette_record.writeCassette(self.allocator, path, raw_response, .{
+            .provider = switch (snapshot.config.provider) {
+                .anthropic => .anthropic,
+                .openai => .openai,
+            },
+            .scenario = self.scenario,
+            .stream = snapshot.config.stream,
+            .model = snapshot.config.model,
+        });
+    }
+};
 
 /// Replays a recorded multi-roundtrip session: each model request is served the
 /// next committed cassette step (step_0, step_1, ...), parsed through the same
@@ -145,6 +185,7 @@ fn readCaseSteps(allocator: std.mem.Allocator, dir_abs: []const u8) ![][]u8 {
 /// Where committed cassettes live, relative to the repo root (the cwd when the
 /// recorder runs via `zig build`).
 pub const cassette_root = "packages/pi/src/providers/testdata/codegen";
+pub const empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/codegen";
 
 /// Borrowed env-var read (no allocation), mirroring agent.zig's `envVar`:
 /// std.process env helpers are not the 0.16 path; std.c.getenv is.
@@ -193,13 +234,21 @@ test "record-tee captures a faithful anthropic cassette offline" {
     const record_root = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp.sub_path[0..] });
     defer allocator.free(record_root);
 
-    var client = anthropic.Client.init(.{
+    var capture = CodegenResponseCapture{
+        .allocator = allocator,
+        .out_dir = record_root,
+        .scenario = "_smoke",
+    };
+    var sink = capture_sink.CaptureSink{
+        .context = &capture,
+        .record_fn = CodegenResponseCapture.record,
+    };
+    var client = anthropic.Client.initWithCapture(.{
         .api_key = "unused-loopback-key",
         .system_prompt = "You are a terse assistant. Reply with exactly one word.",
         .model = "deterministic-recorder-smoke",
         .base_url = endpoint,
-    });
-    client.enableRecording(record_root, "_smoke");
+    }, &sink);
 
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(allocator);
@@ -251,6 +300,89 @@ const RecordCase = struct {
 };
 
 pub const Mode = enum { whole_file, holes };
+
+fn workspaceCaptureAllowlist(
+    allocator: std.mem.Allocator,
+    seed_files: []const codegen.SeedFile,
+) ![]const []const u8 {
+    var count: usize = 1;
+    for (seed_files) |seed| {
+        if (!std.mem.eql(u8, seed.path, "handler.ts")) count += 1;
+    }
+    const paths = try allocator.alloc([]const u8, count);
+    paths[0] = "handler.ts";
+    var index: usize = 1;
+    for (seed_files) |seed| {
+        if (std.mem.eql(u8, seed.path, "handler.ts")) continue;
+        paths[index] = seed.path;
+        index += 1;
+    }
+    return paths;
+}
+
+const IntentCheckFn = *const fn (
+    std.mem.Allocator,
+    codegen.IntentCheck,
+    []const u8,
+    []const u8,
+) codegen.IntentOutcome;
+
+fn requireRecordedIntent(
+    allocator: std.mem.Allocator,
+    intent: ?codegen.IntentCheck,
+    workspace_abs: []const u8,
+    zttp_bin: ?[]const u8,
+    run_intent_check: IntentCheckFn,
+) !void {
+    const declared = intent orelse return;
+    const bin = zttp_bin orelse return error.IntentCheckUnavailable;
+    if (run_intent_check(allocator, declared, workspace_abs, bin) != .passed) {
+        return error.RecordedIntentCheckFailed;
+    }
+}
+
+test "workspace capture allowlist includes handler and seed paths once" {
+    const paths = try workspaceCaptureAllowlist(testing.allocator, &.{
+        .{ .path = "handler.ts", .bytes = "seed handler" },
+        .{ .path = "lib/settings.ts", .bytes = "seed settings" },
+    });
+    defer testing.allocator.free(paths);
+    try testing.expectEqual(@as(usize, 2), paths.len);
+    try testing.expectEqualStrings("handler.ts", paths[0]);
+    try testing.expectEqualStrings("lib/settings.ts", paths[1]);
+}
+
+test "empirical recording requires declared intent to pass" {
+    const intent: codegen.IntentCheck = .{ .tests_jsonl = "fixture" };
+    const Probe = struct {
+        fn passed(_: std.mem.Allocator, _: codegen.IntentCheck, _: []const u8, _: []const u8) codegen.IntentOutcome {
+            return .passed;
+        }
+
+        fn failed(_: std.mem.Allocator, _: codegen.IntentCheck, _: []const u8, _: []const u8) codegen.IntentOutcome {
+            return .failed;
+        }
+
+        fn notChecked(_: std.mem.Allocator, _: codegen.IntentCheck, _: []const u8, _: []const u8) codegen.IntentOutcome {
+            return .not_checked;
+        }
+    };
+
+    try requireRecordedIntent(testing.allocator, null, "/workspace", null, Probe.failed);
+    try testing.expectError(
+        error.IntentCheckUnavailable,
+        requireRecordedIntent(testing.allocator, intent, "/workspace", null, Probe.passed),
+    );
+    try testing.expectError(
+        error.RecordedIntentCheckFailed,
+        requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.failed),
+    );
+    try testing.expectError(
+        error.RecordedIntentCheckFailed,
+        requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.notChecked),
+    );
+    try requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.passed);
+}
 
 /// The headline model for the published convergence number.
 ///
@@ -998,8 +1130,23 @@ test "record codegen baseline corpus (live, gated)" {
 
     const repo_root = try cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
-    const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, cassette_root });
+    const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, empirical_flow_root });
     defer allocator.free(out_dir);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, out_dir);
+
+    const request_config: model_request.Config = switch (session.backend) {
+        .anthropic => |client| .{
+            .provider = .anthropic,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        else => return error.UnsupportedRecordingProvider,
+    };
 
     var limit: usize = record_corpus.len;
     if (envValue("ZTTP_CODEGEN_LIMIT")) |lim| {
@@ -1020,57 +1167,105 @@ test "record codegen baseline corpus (live, gated)" {
         defer tmp.cleanup(allocator);
         for (rc.seed_files) |sf| try tmp.writeFile(allocator, sf.path, sf.bytes);
 
-        // Move the committed cassette aside rather than deleting it. A shorter
-        // new recording, or a mid-turn failure, must not leave stale trailing
-        // steps that would corrupt replay - and a failed run must not leave the
-        // case with nothing, which deleting up front used to do.
-        const stashed = stashCaseDir(allocator, out_dir, rc.name);
-        removeCaseDir(allocator, out_dir, rc.name);
+        const case_dir = try std.fs.path.join(allocator, &.{ out_dir, rc.name });
+        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, case_dir);
+        const case_root_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(io, case_dir, allocator);
+        defer allocator.free(case_root_abs);
+
+        const workspace_allowlist = try workspaceCaptureAllowlist(allocator, rc.seed_files);
+        defer allocator.free(workspace_allowlist);
+        var recorder = try flow_recorder.Recorder.init(allocator, .{
+            .case_name = rc.name,
+            .evidence_class = .empirical_model,
+            .provider = .anthropic,
+            .model = corpus_model,
+            .workspace_allowlist = workspace_allowlist,
+        });
+        defer recorder.deinit();
+        try recorder.captureInitialWorkspace(tmp.abs_path);
 
         const saved_cwd = try cwdPathAlloc(allocator);
         defer allocator.free(saved_cwd);
         try std.Io.Threaded.chdir(tmp.abs_path);
         defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-        session.backend.anthropic.enableRecording(out_dir, rc.name);
+        var sink = recorder.captureSink();
+        session.backend.anthropic.capture = &sink;
 
         var tr: transcript_mod.Transcript = .{};
         defer tr.deinit(allocator);
+        try recorder.beginTurn(rc.prompt, tr.len(), .approve);
         const result = loop.runTurnWith(allocator, session.modelClient(), &registry, &tr, rc.prompt, .{
             .workspace_root = ".",
             .max_attempts = loop.interactive_max_attempts,
-            .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
+            .approval_fn = recorder.approvalFn(),
             .replay_mode = false,
             .turn_timeout_ms = 0,
         }) catch |err| {
-            // A transient live error (e.g. a network ReadFailed) on one case
-            // must not abort the whole corpus run; skip and keep recording the
-            // rest. Remove the partial cassette so replay never reads a
-            // truncated step sequence.
-            std.debug.print("[codegen-record] {s}: turn failed: {s} (skipped)\n", .{ rc.name, @errorName(err) });
-            removeCaseDir(allocator, out_dir, rc.name);
-            if (stashed) {
-                restoreCaseDir(allocator, out_dir, rc.name);
-                std.debug.print("[codegen-record] {s}: previous cassette restored\n", .{rc.name});
-            }
-            continue;
+            session.backend.anthropic.capture = null;
+            // Collection is memory-only until validation and replay both pass,
+            // so a live failure cannot disturb the active case pointer.
+            std.debug.print("[codegen-record] {s}: turn failed: {s}\n", .{ rc.name, @errorName(err) });
+            return err;
         };
-        // The turn produced a cassette, so the stash is no longer needed.
-        if (stashed) dropStashedCaseDir(allocator, out_dir, rc.name);
+        session.backend.anthropic.capture = null;
+        try recorder.finishTurn(result, &tr);
+        try recorder.captureExpectedWorkspace(tmp.abs_path);
+        if (result.first_draft_veto_pass != rc.expect_first_draft_pass) {
+            std.debug.print(
+                "[codegen-record] {s}: pinned first_draft_pass={} but fresh flow observed {}; active case unchanged\n",
+                .{ rc.name, rc.expect_first_draft_pass, result.first_draft_veto_pass },
+            );
+            return error.PinnedExpectationMismatch;
+        }
+
+        const zttp_bin: ?[]u8 = if (rc.intent != null)
+            codegen.locateZttpBinary(allocator, repo_root) orelse {
+                std.debug.print(
+                    "[codegen-record] {s}: declared intent cannot run because zig-out/bin/zttp is unavailable; active case unchanged\n",
+                    .{rc.name},
+                );
+                return error.IntentCheckUnavailable;
+            }
+        else
+            null;
+        defer if (zttp_bin) |bin| allocator.free(bin);
+        requireRecordedIntent(
+            allocator,
+            rc.intent,
+            tmp.abs_path,
+            zttp_bin,
+            codegen.runIntentCheck,
+        ) catch |err| {
+            std.debug.print(
+                "[codegen-record] {s}: declared intent did not pass ({s}); active case unchanged\n",
+                .{ rc.name, @errorName(err) },
+            );
+            return err;
+        };
+
+        const active_version = try flow_promotion.validateAndPromote(
+            allocator,
+            &recorder,
+            case_root_abs,
+            &registry,
+            request_config,
+        );
         if (result.first_draft_veto_pass) first_draft_passes += 1;
         if (result.applied_edit) greens += 1;
         const fail_code = codegen.firstZtsCode(&tr) orelse "-";
         std.debug.print(
-            "[codegen-record] {s}: first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} steps={d} fail={s}\n",
+            "[codegen-record] {s}: flow={s} first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
             .{
                 rc.name,
+                active_version.slice()[0..12],
                 result.first_draft_veto_pass,
                 result.applied_edit,
                 result.compiler_authored_apply,
                 result.roundtrips,
                 result.veto_retry_count,
                 result.tool_call_count,
-                session.backend.anthropic.record_step,
+                sink.next_call_index,
                 fail_code,
             },
         );
@@ -1079,6 +1274,10 @@ test "record codegen baseline corpus (live, gated)" {
         "[codegen-record] BASELINE first-draft pass: {d}/{d}; reached-green: {d}/{d}\n",
         .{ first_draft_passes, total, greens, total },
     );
+    if (only_case != null and total != 1) return error.NamedCodegenCaseNotFound;
+    if (only_case == null and limit >= record_corpus.len and total != record_corpus.len) {
+        return error.CodegenCorpusCountMismatch;
+    }
 }
 
 /// The model a committed cassette was recorded against, read from the header
