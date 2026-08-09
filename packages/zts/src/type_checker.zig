@@ -5381,6 +5381,38 @@ test "the null literal and the four type tests exhaust JsonValue without a defau
     );
 }
 
+test "the recursive fold over JsonValue type-checks" {
+    // Spec 16.3 minus its Dict arm: the array arm recurses through the same
+    // alias, which is what the contractive rule exists to admit.
+    try checkTypedSource(
+        \\type JsonValue =
+        \\  | null
+        \\  | boolean
+        \\  | number
+        \\  | string
+        \\  | readonly JsonValue[];
+        \\function deeper(maximum: number, child: JsonValue): number {
+        \\    const childDepth = depth(child);
+        \\    return childDepth > maximum ? childDepth : maximum;
+        \\}
+        \\function depth(value: JsonValue): number {
+        \\    return match (value) {
+        \\        when null: 1
+        \\        when boolean: 1
+        \\        when number: 1
+        \\        when string: 1
+        \\        when array: value.reduce(deeper, 0) + 1
+        \\    };
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ d: depth([1, "a"]) });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Contractive recursive aliases (spec 5.7 / phase 3 task 4)
 // ---------------------------------------------------------------------------

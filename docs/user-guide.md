@@ -158,6 +158,54 @@ Use:
 - Explicit Result and optional checks.
 - Type-only imports from `zttp:types` for proof annotations.
 
+### Match Patterns
+
+A `match` arm takes a literal, a record pattern, an array pattern, or a type
+test. The type tests are `boolean`, `number`, `string`, and `array`; `Dict` and
+`Bytes` arrive with their types.
+
+A record pattern field is one of three things: a discriminant test, a binding
+of the field under its own name, or a binding under a new name. A binding is an
+arm-scoped `const` that carries the field's narrowed type, so an arm reads the
+field by naming it in the pattern rather than off the scrutinee.
+
+```ts
+type Command =
+    | { kind: "echo"; text: string }
+    | { kind: "ping" };
+
+function run(command: Command): string {
+    return match (command) {
+        when { kind: "echo", text }: text
+        when { kind: "ping" }: "pong"
+    };
+}
+```
+
+A union covered member by member is exhaustive and needs no `default`; an open
+domain such as `string` or `number` needs one. Exactly one arm's expression is
+evaluated, and an arm expression may be effectful.
+
+### `null`
+
+`null` is data, not an absence sentinel. It is admitted only where the declared
+type names it, so `const x: string | null = null;` is accepted and
+`const x: string | undefined = null;` is not. `undefined` remains the absence
+sentinel and the representation of an omitted optional field.
+
+Because `??` and `?.` test both values alike, they are refused (ZTS624) on an
+operand whose static type admits `null`, and on a generic parameter or
+`unknown`, where a later instantiation could admit it. Compare explicitly with
+`=== null` or `=== undefined`, or take the value apart with `match`. On a
+concrete type without `null` both operators keep their single meaning and stay
+the idiomatic spelling of it.
+
+A recursive type alias must be contractive: every cycle passes through a
+record, tuple, or array constructor. `type JsonValue = null | boolean | number
+| string | readonly JsonValue[]` is admitted; `type Loop = Loop` and
+`type U = number | U` are refused (ZTS212), because a union edge does not guard
+recursion.
+
 ### Author-Declared Specs
 
 ```ts

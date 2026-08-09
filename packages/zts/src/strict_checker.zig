@@ -2493,3 +2493,17 @@ test "a const initialized from a two-way effectful match passes the profile" {
     try expectNoKind(&h.checker, .canonical_ternary_impure);
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
+
+test "dropping one arm leaves the JsonValue match non-exhaustive" {
+    // The floor under the phase 3 exit gate: a coverage check that answered
+    // "exhaustive" for everything would pass the gate without measuring it.
+    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    defer h.deinit();
+    try expectKind(&h.checker, .non_exhaustive_profile_match);
+}
+
+test "the five arms cover JsonValue without a default" {
+    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n    when array: 2\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+}

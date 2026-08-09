@@ -1,11 +1,11 @@
 // zts semantics spec - GENERATED from packages/zts/src/semantics.zig.
 // Do not edit by hand; run `zts spec-render` to regenerate.
 //
-// semanticsHash:   f7b6a0fb20d14e65e7df47bb54963527b00fe2b6a6c9a0a6bbf2d2064318001f
-// irTableHash:     19ac13b87ab1996a21f39fc7464884765854558b9d2337a5ec47ecdd715a2e20
+// semanticsHash:   8016a0a7dfdc21d4c988c734baa8b067996d70da5defc098e70b14f4593f77a0
+// irTableHash:     851089d85fc76ed9e2d6bd245c23a558d6995591deb5c4e2b01382212e2434c1
 // opcodeTableHash: 6821f0d79ecd2d45211219f8a003bac9d2fea9d2409449d06d5173f935e76b00
 //
-// Coverage: 10/81 IR nodes, 7/130 bytecode opcodes specified.
+// Coverage: 12/82 IR nodes, 7/130 bytecode opcodes specified.
 // `denote` is what the node computes; `lower` is the bytecode it compiles to.
 // A value node's lower, symbolically executed, equals its denote (spec-check
 // mechanism 3), and the real compiler agrees on a corpus (mechanism 4).
@@ -25,6 +25,13 @@ export const lit_int = {
 export const lit_bool = {
   proof: "value",
   denote: (imm) => imm,
+  lower: "imm",
+};
+
+// lit_null: value node
+export const lit_null = {
+  proof: "value",
+  denote: () => imm,
   lower: "imm",
 };
 
@@ -64,6 +71,9 @@ export const call = {
   denote: () => call0(),
   lower: "call0()",
 };
+
+// match_type_test: statement / non-value (structural-only in this slice)
+export const match_type_test = { proof: "structural" };
 
 // if_stmt: statement / non-value (structural-only in this slice)
 export const if_stmt = { proof: "structural" };

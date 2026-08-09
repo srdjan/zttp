@@ -761,9 +761,11 @@ admitted form adds its semantics-registry rules in the same phase, so
 `spec-check` stays green by construction; and no `meta` payload is ever
 hand-written, because a hand-written payload is another drift gate.
 
-Phases 0 through 2 are done. The executed plans and the program's decision log
+Phases 0 through 3 are done. The executed plans and the program's decision log
 are in [docs/archive/plans/](archive/README.md); phase 2's plan is still
-[docs/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md](plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md).
+[docs/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md](plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md)
+and phase 3's is
+[docs/plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md](plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md).
 
 Phase 2 met its exit against the frozen signature corpus: 24 modules and 90
 exports, every emitted signature parsing with no fallback to `unknown`, and
@@ -787,9 +789,36 @@ constructors to `responseJson<T>: Result<Response, JsonError>` and types the
 request side over `Bytes`, `Dict`, and `JsonValue` - none of which exist before
 phases 3 and 4.
 
+Phase 3 met its exit: `JsonValue` minus the Dict arm compiles, and the `null`
+literal pattern plus the four type tests cover it with no `default`, which
+dropping one arm undoes. Four things it found are worth carrying forward.
+
+`null` needed no kernel work - `push_null` and `JSValue.null_val` have shipped
+all along - but it needed the two sentinels held apart in four places that had
+quietly conflated them: the type parser mapped the identifier `null` to
+`unknown` behind a pinned test, the nullable node accepted a `null` source, its
+printer spelled `T | undefined` as `T | null`, and the boolean lattice treated
+`x !== null` as an absence test that strips optionality. Admitting `null`
+turned each of those from harmless into wrong.
+
+Contractivity was the only missing piece of recursive aliases. The alias graph
+and amendment A2's assumption set already carried them: the spec's `JsonValue`
+compiled, assignability terminated, and match and join over it did too. What
+was missing was the refusal, and `type Loop = Loop` reported a type mismatch
+rather than the cycle.
+
+The strict profile demanded a `default` arm on every match, so the spelling
+spec 5.5 requires of a closed union - every member covered, no default - was
+the spelling it refused. It measures coverage now.
+
+The exit's own example is not the spec's: capsule discharge does not admit a
+recursive helper, so a handler that declares a `Spec` cannot call one.
+`examples/patterns/recursive-json-value.ts` therefore walks one level and the
+recursive fold is pinned as a type-checker test. That limit is the next thing
+this program touches on the proof side, not the type side.
+
 | Phase | Scope | Exit |
 |---|---|---|
-| 3. Source `null`, recursive aliases, match upgrades | `null` as explicit data with the `??`/`?.`-rejected-on-null diagnostic and its repair; contractive recursive aliases over a finite type graph with memoized unfolding; match binding fields, rename and shorthand bindings, type-test patterns, and effectful arms with exactly-one-arm evaluation. | `JsonValue` minus the Dict arm compiles; exhaustiveness over null, literals, and type tests. |
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | `Bytes` and `zttp:bytes`; the HTTP, WebSocket, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText`; trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch, websocket, and queue examples re-typed; ceiling-rule repair tests. |
 | 6. Full idiom table, validators, gate-complete protocol | The remaining idiom rows; equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
