@@ -16,6 +16,17 @@
       ]
     },
     {
+      "name": "parseJsonBytes",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "bytes"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
       "name": "stringifyJson",
       "effect": "none",
       "returns": "result",

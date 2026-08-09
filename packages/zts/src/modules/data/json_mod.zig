@@ -13,15 +13,19 @@
 //! canonical profile points at, and it is written to spec 6.4 rather than
 //! retrofitted onto a parser with different obligations.
 //!
-//! `parseJsonBytes` is not declared here. It needs `Bytes`, which arrives in
-//! phase 5, and an export whose type does not exist is exactly the fail-open
-//! the frozen-signature gate exists to catch.
+//! `parseJsonBytes` validates UTF-8 first and then applies the same JSON
+//! rules, which is the order spec 6.4 states. Its error type is the union
+//! `JsonError | BytesError`, and the only BytesError member it can produce is
+//! `invalid-encoding` - so invalid UTF-8 is reported as a decoding failure
+//! with its offset rather than as a syntax error at the same position, which
+//! would send the author looking for a missing brace.
 
 const std = @import("std");
 const context = @import("../../context.zig");
 const value = @import("../../value.zig");
 const object = @import("../../object.zig");
 const dict = @import("../../dict.zig");
+const bytes_mod = @import("../../bytes.zig");
 const util = @import("../internal/util.zig");
 const mb = @import("../../module_binding.zig");
 const helpers = @import("../../builtins/helpers.zig");
@@ -52,6 +56,7 @@ pub const binding = mb.ModuleBinding{
     .required_capabilities = &.{},
     .exports = &.{
         .{ .name = "parseJson", .func = parseJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.string}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "parseJsonBytes", .func = parseJsonBytesNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.bytes}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
         .{ .name = "stringifyJson", .func = stringifyJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
     },
 };
@@ -67,6 +72,10 @@ const ErrorKind = enum {
     size_limit,
     non_finite_number,
     cycle,
+    /// The one `BytesError` member reachable from this module. Spec 6.4 types
+    /// `parseJsonBytes` as failing with `JsonError | BytesError`, and the only
+    /// way octets fail before the parser sees them is by not being UTF-8.
+    invalid_encoding,
 
     fn wire(self: ErrorKind) []const u8 {
         return switch (self) {
@@ -76,6 +85,7 @@ const ErrorKind = enum {
             .size_limit => "size-limit",
             .non_finite_number => "non-finite-number",
             .cycle => "cycle",
+            .invalid_encoding => "invalid-encoding",
         };
     }
 };
@@ -85,6 +95,8 @@ const Failure = struct {
     offset: usize = 0,
     key: ?[]const u8 = null,
     limit: usize = 0,
+    /// Only `invalid_encoding` carries this, and it names which codec failed.
+    encoding: []const u8 = "",
 };
 
 const ParseError = error{ Failed, OutOfMemory };
@@ -307,22 +319,46 @@ fn parseJsonNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyer
     const ctx = util.castContext(ctx_ptr);
     const text = if (args.len > 0) helpers.getStringDataCtx(args[0], ctx) else null;
     if (text == null) return failure(ctx, .{ .kind = .invalid_syntax });
+    return parseText(ctx, text.?);
+}
 
-    if (text.?.len > limits.max_input_bytes) {
+/// The JSON half, shared by both entry points so `parseJsonBytes` applies the
+/// same rules rather than a second copy of them - which is the whole content
+/// of spec 6.4's "and then applies the same JSON rules".
+fn parseText(ctx: *context.Context, text: []const u8) anyerror!JSValue {
+    if (text.len > limits.max_input_bytes) {
         return failure(ctx, .{ .kind = .size_limit, .limit = limits.max_input_bytes });
     }
 
-    var parser = Parser{ .ctx = ctx, .text = text.? };
+    var parser = Parser{ .ctx = ctx, .text = text };
     const parsed = parser.parseValue(0) catch |err| switch (err) {
         error.Failed => return failure(ctx, parser.failure),
         error.OutOfMemory => return error.OutOfMemory,
     };
     parser.skipWs();
-    if (parser.pos != text.?.len) return failure(ctx, .{ .kind = .invalid_syntax, .offset = parser.pos });
+    if (parser.pos != text.len) return failure(ctx, .{ .kind = .invalid_syntax, .offset = parser.pos });
     return helpers.createResultOk(ctx, parsed);
 }
 
-/// Build the typed error value: `{ kind, offset?, key?, limit? }`, carrying
+/// `parseJsonBytes(value)`: UTF-8 first, then the same JSON rules. The order
+/// is what makes the diagnostic honest - a byte sequence that is not UTF-8 has
+/// no offset in a document, because there is no document yet.
+fn parseJsonBytesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerror!JSValue {
+    const ctx = util.castContext(ctx_ptr);
+    const b = if (args.len > 0) bytes_mod.asBytes(args[0]) else null;
+    const octets = if (b) |obj| bytes_mod.data(obj) else return failure(ctx, .{
+        .kind = .invalid_encoding,
+        .encoding = "utf-8",
+        .offset = 0,
+    });
+
+    if (bytes_mod.firstInvalidUtf8(octets)) |offset| {
+        return failure(ctx, .{ .kind = .invalid_encoding, .encoding = "utf-8", .offset = offset });
+    }
+    return parseText(ctx, octets);
+}
+
+/// Build the typed error value: `{ kind, offset?, key?, limit?, encoding? }`, carrying
 /// exactly the fields spec 6.4 declares for that kind and no others.
 fn failure(ctx: *context.Context, f: Failure) JSValue {
     const pool = ctx.hidden_class_pool orelse return helpers.createResultErr(ctx, JSValue.undefined_val);
@@ -347,6 +383,13 @@ fn failure(ctx: *context.Context, f: Failure) JSValue {
         .depth_limit, .size_limit => {
             const limit_atom = ctx.atoms.intern("limit") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
             obj.setProperty(ctx.allocator, pool, limit_atom, JSValue.fromInt(@intCast(f.limit))) catch {};
+        },
+        .invalid_encoding => {
+            const enc_atom = ctx.atoms.intern("encoding") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            const enc_text = ctx.createString(f.encoding) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            obj.setProperty(ctx.allocator, pool, enc_atom, enc_text) catch {};
+            const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset))) catch {};
         },
         .cycle => {},
     }
@@ -607,6 +650,75 @@ test "the depth limit reports itself and not a syntax error" {
     // The control: the same document inside the limit parses.
     limits.max_depth = 32;
     _ = try parse(h, "[[[[[1]]]]]");
+}
+
+fn callExport(h: *Harness, comptime name: []const u8, args: []const JSValue) !JSValue {
+    inline for (binding.exports) |f| {
+        if (comptime std.mem.eql(u8, f.name, name)) {
+            return f.func.?(@ptrCast(h.ctx), JSValue.undefined_val, args);
+        }
+    }
+    return error.TestUnknownExport;
+}
+
+fn resultField(h: *Harness, result: JSValue, name: []const u8) !JSValue {
+    const outer = helpers.getObject(result) orelse return error.TestExpectedResult;
+    const payload = helpers.getObject(outer.inline_slots[JSObject.Slots.RESULT_VALUE]) orelse
+        return error.TestExpectedErrorRecord;
+    const pool = h.ctx.hidden_class_pool orelse return error.TestNoPool;
+    const atom = try h.ctx.atoms.intern(name);
+    return payload.getProperty(pool, atom) orelse JSValue.undefined_val;
+}
+
+test "parseJsonBytes over UTF-8 agrees with parseJson over the same text" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const text = "{\"b\":1,\"a\":[true,null,\"\u{4e16}\"]}";
+    const from_bytes = try callExport(h, "parseJsonBytes", &.{
+        JSValue.fromPtr(try bytes_mod.fromSlice(h.ctx, text)),
+    });
+    const from_text = try callExport(h, "parseJson", &.{try h.ctx.createString(text)});
+
+    const a = helpers.getObject(from_bytes) orelse return error.TestExpectedResult;
+    const b = helpers.getObject(from_text) orelse return error.TestExpectedResult;
+    try testing.expect(a.inline_slots[JSObject.Slots.RESULT_IS_OK].isTrue());
+    try testing.expect(b.inline_slots[JSObject.Slots.RESULT_IS_OK].isTrue());
+
+    // The same document: both decode to a Dict with the same wire order.
+    const da = dict.asDict(a.inline_slots[JSObject.Slots.RESULT_VALUE]) orelse return error.TestExpectedDict;
+    const db = dict.asDict(b.inline_slots[JSObject.Slots.RESULT_VALUE]) orelse return error.TestExpectedDict;
+    try testing.expectEqual(dict.count(db), dict.count(da));
+    var i: u32 = 0;
+    while (i < dict.count(da)) : (i += 1) {
+        try testing.expectEqualStrings(
+            helpers.getStringDataCtx(dict.keyAt(db, i), h.ctx).?,
+            helpers.getStringDataCtx(dict.keyAt(da, i), h.ctx).?,
+        );
+    }
+}
+
+test "parseJsonBytes over invalid UTF-8 reports invalid-encoding and not invalid-syntax" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    // Well-formed JSON except that the string body is not UTF-8: a lone
+    // continuation byte at index 5. The parser would have called this a syntax
+    // error at some other offset, which is the wrong story to tell an author.
+    const raw = try bytes_mod.fromSlice(h.ctx, &[_]u8{ '{', '"', 'a', '"', ':', 0x80, '}' });
+    const result = try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(raw)});
+
+    const outer = helpers.getObject(result) orelse return error.TestExpectedResult;
+    try testing.expect(!outer.inline_slots[JSObject.Slots.RESULT_IS_OK].isTrue());
+    try testing.expectEqualStrings("invalid-encoding", helpers.getStringDataCtx(try resultField(h, result, "kind"), h.ctx).?);
+    try testing.expectEqualStrings("utf-8", helpers.getStringDataCtx(try resultField(h, result, "encoding"), h.ctx).?);
+    try testing.expectEqual(@as(f64, 5), (try resultField(h, result, "offset")).toNumber().?);
+
+    // The JSON rules still apply after the octets pass: valid UTF-8 that is
+    // not valid JSON reports the syntax error, not an encoding one.
+    const bad_json = try bytes_mod.fromSlice(h.ctx, "{oops}");
+    const syntax = try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(bad_json)});
+    try testing.expectEqualStrings("invalid-syntax", helpers.getStringDataCtx(try resultField(h, syntax, "kind"), h.ctx).?);
 }
 
 test "a round trip is byte-identical for a canonical document" {

@@ -262,6 +262,14 @@ pub fn globalIsDict(_: *context.Context, _: value.JSValue, args: []const value.J
     return if (@import("../dict.zig").isDict(args[0])) value.JSValue.true_val else value.JSValue.false_val;
 }
 
+/// `isBytes(value)` - the intrinsic type guard for `Bytes` (spec 6.3), for the
+/// same reason `isDict` exists: `when Bytes:` lowers to a call to this name, so
+/// a guard the checker recognizes has to be a real function at runtime.
+pub fn globalIsBytes(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (args.len == 0) return value.JSValue.false_val;
+    return if (args[0].isBytes()) value.JSValue.true_val else value.JSValue.false_val;
+}
+
 /// partially-written handler and say exactly which path is still empty.
 pub fn globalHole(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;

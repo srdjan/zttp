@@ -161,8 +161,8 @@ Use:
 ### Match Patterns
 
 A `match` arm takes a literal, a record pattern, an array pattern, or a type
-test. The type tests are `boolean`, `number`, `string`, and `array`; `Dict` and
-`Bytes` arrive with their types.
+test. The six type tests are `boolean`, `number`, `string`, `array`, `Dict`,
+and `Bytes`.
 
 A record pattern field is one of three things: a discriminant test, a binding
 of the field under its own name, or a binding under a new name. A binding is an

@@ -780,7 +780,7 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 
 /// The committed digest of the whole signature surface. Regenerate deliberately:
 /// a diff here is a change to what every handler sees from `zttp:*`.
-const frozen_signature_digest = "55d4f318490d1578936da3a37e6fed0e27a45e4d1cf8cb400e2bea7f8b8dce77";
+const frozen_signature_digest = "f088fc1b209bdb3e12eca596c3033ec22e0cbd875caf72b279e575ce84520596";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

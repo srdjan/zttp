@@ -187,6 +187,21 @@ pub fn slice(ctx: *context.Context, src: *const JSObject, start: u32, end: u32) 
     return .{ .ok = try fromSlice(ctx, octets[start..end]) };
 }
 
+/// The offset of the first byte that does not start a well-formed UTF-8
+/// sequence, or null when the whole slice is valid. An offset is what makes a
+/// decoding diagnostic actionable, which is why this exists rather than a call
+/// to `std.unicode.utf8ValidateSlice`, which answers only yes or no.
+pub fn firstInvalidUtf8(octets: []const u8) ?usize {
+    var i: usize = 0;
+    while (i < octets.len) {
+        const width = std.unicode.utf8ByteSequenceLength(octets[i]) catch return i;
+        if (i + width > octets.len) return i;
+        _ = std.unicode.utf8Decode(octets[i..][0..width]) catch return i;
+        i += width;
+    }
+    return null;
+}
+
 /// The mutable buffer of a freshly built Bytes. Construction is the only
 /// writer: nothing outside this file and `Context.createBytes` may call it,
 /// which is what keeps the value immutable once a caller can see it.

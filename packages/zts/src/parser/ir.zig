@@ -504,14 +504,15 @@ pub const Node = struct {
         props_count: u8,
     };
 
-    /// The closed set of value kinds a type-test pattern may name. `Bytes`
-    /// joins it in phase 5, with its type.
+    /// The closed set of value kinds a type-test pattern may name. Six, which
+    /// is what spec 5.5 lists - `Bytes` joined with its type in phase 5.
     pub const TypeTestKind = enum(u8) {
         boolean,
         number,
         string,
         array,
         dict,
+        bytes,
     };
 
     pub const MatchTypeTest = struct {

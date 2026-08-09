@@ -3006,6 +3006,22 @@ test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
 
+test "a union carrying Bytes is exhaustive with its Bytes arm" {
+    // Spec 5.5's type tests are six now, and `when Bytes:` is the sixth. A
+    // union covered member by member needs no `default`.
+    var h = try checkStripped("type Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when Bytes: \"bytes\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+}
+
+test "dropping the Bytes arm leaves that union non-exhaustive" {
+    // The half that makes the test above mean something: without it, a checker
+    // that ignored the arm entirely would pass the covered case too.
+    var h = try checkStripped("type Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    defer h.deinit();
+    try expectKind(&h.checker, .non_exhaustive_profile_match);
+}
+
 test "the six arms cover it" {
     var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();

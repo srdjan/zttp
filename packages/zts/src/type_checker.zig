@@ -1577,6 +1577,7 @@ pub const TypeChecker = struct {
         if (tag == .call) {
             if (self.extractIsArrayGuard(condition)) |guard| return guard;
             if (self.extractIsDictGuard(condition)) |guard| return guard;
+            if (self.extractIsBytesGuard(condition)) |guard| return guard;
             if (self.extractTypePredicateGuard(condition)) |guard| return guard;
         }
 
@@ -2117,6 +2118,69 @@ pub const TypeChecker = struct {
             // exhaustive: same reasoning as the array guard - a type with no
             // Dict in it narrows to nothing, and answering `never` would make
             // the guarded branch unreachable by construction.
+            else => return null,
+        }
+    }
+
+    /// `isBytes(x)` - the intrinsic guard for `Bytes` (spec 6.3). Same shape
+    /// as `isDict`: a global call, partitioning a union and refining `unknown`.
+    ///
+    /// The `unknown` case is not a convenience. A `Result`-returning export
+    /// types its payload as `unknown`, so the guard is written at exactly the
+    /// site where a member-less union would leave the value unusable - a body
+    /// read off a request, or a decoded payload.
+    fn extractIsBytesGuard(self: *const TypeChecker, call_node: NodeIndex) ?NarrowingGuard {
+        const call = self.ir_view.getCall(call_node) orelse return null;
+        if (call.args_count != 1) return null;
+        if (self.ir_view.getTag(call.callee) != .identifier) return null;
+
+        const callee_binding = self.ir_view.getBinding(call.callee) orelse return null;
+        const callee_name = self.resolveAtomName(callee_binding.name_atom) orelse return null;
+        if (!std.mem.eql(u8, callee_name, "isBytes")) return null;
+        // A shadowed `isBytes` is a different function, and a declared binding
+        // has a tracked type where the intrinsic does not.
+        if (self.binding_types.get(bindingKey(callee_binding)) != null) return null;
+
+        const arg = self.ir_view.getListIndex(call.args_start, 0);
+        if (self.ir_view.getTag(arg) != .identifier) return null;
+        const binding = self.ir_view.getBinding(arg) orelse return null;
+        const key = bindingKey(binding);
+        const current = self.currentBindingType(binding) orelse return null;
+
+        const pool = self.env.pool;
+        switch (pool.getTag(current) orelse return null) {
+            .t_bytes => return .{ .key = key, .narrowed_type = current, .negated = false },
+            .t_unknown_type => return .{
+                .key = key,
+                .narrowed_type = pool.idx_bytes,
+                .negated = false,
+            },
+            .t_union => {
+                var matched: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                defer matched.deinit(self.allocator);
+                var others: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                defer others.deinit(self.allocator);
+                for (pool.getUnionMembers(current)) |candidate| {
+                    if (pool.getTag(candidate) == .t_bytes) {
+                        matched.append(self.allocator, candidate) catch return null;
+                    } else {
+                        others.append(self.allocator, candidate) catch return null;
+                    }
+                }
+                if (matched.items.len == 0) return null;
+                return .{
+                    .key = key,
+                    .narrowed_type = pool.addUnion(self.allocator, matched.items),
+                    .negated = false,
+                    .else_type = if (others.items.len == 0)
+                        null_type_idx
+                    else
+                        pool.addUnion(self.allocator, others.items),
+                };
+            },
+            // exhaustive: same reasoning as the array and Dict guards - a type
+            // with no Bytes in it narrows to nothing, and answering `never`
+            // would make the guarded branch unreachable by construction.
             else => return null,
         }
     }
@@ -5510,6 +5574,103 @@ test "without the isDict guard the same call is refused" {
     ,
         1,
         "expected Dict<string, number>",
+    );
+}
+
+test "a Bytes arm narrows in the arm it guards and not in the others" {
+    // The binding's type inside the arm is `Bytes`, so a Bytes-taking helper
+    // accepts it there; in a sibling arm the same name is still the union, and
+    // the same call is refused. One program, both halves.
+    try checkTypedSource(
+        \\function take(b: Bytes): number {
+        \\    return 1;
+        \\}
+        \\function sizeOf(value: string | Bytes): number {
+        \\    return match (value) {
+        \\        when Bytes: take(value)
+        \\        when string: 0
+        \\    };
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: sizeOf("x") });
+        \\}
+    ,
+        0,
+        null,
+    );
+
+    try checkTypedSourceSaying(
+        \\function take(b: Bytes): number {
+        \\    return 1;
+        \\}
+        \\function sizeOf(value: string | Bytes): number {
+        \\    return match (value) {
+        \\        when Bytes: 0
+        \\        when string: take(value)
+        \\    };
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: sizeOf("x") });
+        \\}
+    ,
+        1,
+        "expected Bytes",
+    );
+}
+
+test "isBytes narrows to the Bytes member and leaves the rest to the else branch" {
+    try checkTypedSource(
+        \\function take(b: Bytes): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v: string | Bytes = "x";
+        \\    if (isBytes(v)) {
+        \\        return Response.json({ n: take(v) });
+        \\    }
+        \\    return Response.json({ n: 0 });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "without the isBytes guard the same call is refused" {
+    // The positive control: with no narrowing, both programs report the same
+    // count and the test above proves nothing.
+    try checkTypedSourceSaying(
+        \\function take(b: Bytes): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v: string | Bytes = "x";
+        \\    return Response.json({ n: take(v) });
+        \\}
+    ,
+        1,
+        "expected Bytes",
+    );
+}
+
+test "isBytes refines unknown, which is where the guard is written" {
+    // A `Result`-returning export types its payload `unknown`, so this is the
+    // site the guard exists for. Without the refinement the narrowed value is
+    // still `unknown` and every use of it is refused.
+    try checkTypedSource(
+        \\function take(b: Bytes): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v: unknown = 1;
+        \\    if (isBytes(v)) {
+        \\        return Response.json({ n: take(v) });
+        \\    }
+        \\    return Response.json({ n: 0 });
+        \\}
+    ,
+        0,
+        null,
     );
 }
 

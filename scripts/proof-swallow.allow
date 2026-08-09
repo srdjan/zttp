@@ -49,3 +49,4 @@ packages/zts/src/type_checker.zig resolveAbsentBinding catch-return
 packages/zts/src/type_checker.zig extractTypeofGuard catch-return
 packages/zts/src/type_checker.zig extractIsArrayGuard catch-return
 packages/zts/src/type_checker.zig extractIsDictGuard catch-return
+packages/zts/src/type_checker.zig extractIsBytesGuard catch-return

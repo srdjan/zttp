@@ -237,6 +237,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const is_dict_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalIsDict), is_dict_atom, 1);
     try ctx.setGlobal(is_dict_atom, is_dict_func.toValue());
 
+    // Global isBytes(): the intrinsic type guard for Bytes (spec 6.3).
+    const is_bytes_atom = try ctx.atoms.intern("isBytes");
+    const is_bytes_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalIsBytes), is_bytes_atom, 1);
+    try ctx.setGlobal(is_bytes_atom, is_bytes_func.toValue());
+
     // Global range()
     const range_atom = try ctx.atoms.intern("range");
     const range_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalRange), range_atom, 1);

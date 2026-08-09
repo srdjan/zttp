@@ -305,26 +305,11 @@ fn decodeUtf8Native(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anye
     });
 
     const octets = bytes.data(b);
-    if (firstInvalidUtf8(octets)) |offset| {
+    if (bytes.firstInvalidUtf8(octets)) |offset| {
         return failure(ctx, .{ .kind = .invalid_encoding, .encoding = "utf-8", .offset = offset });
     }
     const text = try ctx.createString(octets);
     return helpers.createResultOk(ctx, text);
-}
-
-/// The offset of the first byte that does not start a well-formed UTF-8
-/// sequence, or null when the whole slice is valid. An offset is what makes
-/// the diagnostic actionable, which is why this does not just call
-/// `std.unicode.utf8ValidateSlice`.
-fn firstInvalidUtf8(octets: []const u8) ?usize {
-    var i: usize = 0;
-    while (i < octets.len) {
-        const width = std.unicode.utf8ByteSequenceLength(octets[i]) catch return i;
-        if (i + width > octets.len) return i;
-        _ = std.unicode.utf8Decode(octets[i..][0..width]) catch return i;
-        i += width;
-    }
-    return null;
 }
 
 /// `decodeBase64(text)`: the standard alphabet with padding, the same one

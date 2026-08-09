@@ -1250,12 +1250,6 @@ pub const Parser = struct {
                 return null_node;
             }
             if (typeTestKindFor(text)) |kind| return self.parseTypeTestPattern(kind);
-            // Spec 5.5 names six value kinds. The one whose type does not
-            // exist yet says so, rather than reading as an unknown identifier.
-            if (std.mem.eql(u8, text, "Bytes")) {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "the 'Bytes' type-test pattern arrives with Bytes itself; use a record pattern or a literal until then");
-                return error.ParseError;
-            }
         }
 
         // Literal pattern: string, number, boolean, null, undefined
@@ -1281,6 +1275,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, text, "string")) return .string;
         if (std.mem.eql(u8, text, "array")) return .array;
         if (std.mem.eql(u8, text, "Dict")) return .dict;
+        if (std.mem.eql(u8, text, "Bytes")) return .bytes;
         return null;
     }
 
@@ -1305,6 +1300,7 @@ pub const Parser = struct {
         const predicate = switch (kind) {
             .array => try self.buildIsArrayCall(loc, scrutinee),
             .dict => try self.buildIsDictCall(loc, scrutinee),
+            .bytes => try self.buildIsBytesCall(loc, scrutinee),
             .boolean, .number, .string => try self.buildTypeofTest(loc, scrutinee, @tagName(kind)),
         };
 
@@ -1334,8 +1330,20 @@ pub const Parser = struct {
     /// rather than as a method, which is the one shape difference from the
     /// array test.
     fn buildIsDictCall(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex) anyerror!NodeIndex {
-        const name_atom = try self.addAtom("isDict");
-        const binding = try self.scopes.resolveBinding("isDict", name_atom);
+        return self.buildGlobalGuardCall(loc, scrutinee, "isDict");
+    }
+
+    /// `isBytes(s)` - the intrinsic guard for `Bytes` (spec 6.3), built the
+    /// same way `isDict` is: a global call rather than a method call.
+    fn buildIsBytesCall(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex) anyerror!NodeIndex {
+        return self.buildGlobalGuardCall(loc, scrutinee, "isBytes");
+    }
+
+    /// The shared shape behind `isDict(s)` and `isBytes(s)`: resolve the
+    /// intrinsic's name and call it with the scrutinee.
+    fn buildGlobalGuardCall(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex, name: []const u8) anyerror!NodeIndex {
+        const name_atom = try self.addAtom(name);
+        const binding = try self.scopes.resolveBinding(name, name_atom);
         const callee = try self.nodes.add(Node.identifier(loc, binding));
         const args_start = try self.addNodeList(&[_]NodeIndex{scrutinee});
         return try self.nodes.add(.{
@@ -5769,13 +5777,17 @@ test "null is a match pattern" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "the four admitted type-test patterns parse" {
+test "the six admitted type-test patterns parse" {
+    // Six is the whole of spec 5.5's list. A seventh identifier is not a type
+    // test - it is a binding - so this count is the closed set, not a sample.
     var parser = try Parser.init(std.testing.allocator,
         \\const x = match (v) {
         \\  when boolean: 1,
         \\  when number: 2,
         \\  when string: 3,
-        \\  when array: 4
+        \\  when array: 4,
+        \\  when Dict: 5,
+        \\  when Bytes: 6
         \\};
     );
     defer parser.deinit();
@@ -5793,24 +5805,38 @@ test "the four admitted type-test patterns parse" {
     while (node < view.nodeCount()) : (node += 1) {
         if (view.getTag(node) == .match_type_test) tests_found += 1;
     }
-    try std.testing.expectEqual(@as(usize, 4), tests_found);
+    try std.testing.expectEqual(@as(usize, 6), tests_found);
 }
 
-test "the Bytes type test names the phase it arrives in" {
+test "the Bytes type test lowers to an isBytes call" {
+    // The test that pinned the refusal now pins the lowering. `when Bytes:`
+    // reads the scrutinee a second time through the intrinsic guard, which is
+    // the same shape `when Dict:` uses and the reason `isBytes` has to be a
+    // real global rather than a checker-only name.
     const source = "const x = match (v) { when Bytes: 1, default: 2 };";
 
     var parser = try Parser.init(std.testing.allocator, source);
     defer parser.deinit();
 
-    _ = parser.parse() catch {
-        try std.testing.expect(parser.hasErrors());
-        const errors = parser.getErrors();
-        try std.testing.expect(errors.len > 0);
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
-        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "Bytes") != null);
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
         return;
     };
-    try std.testing.expect(false);
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var found: bool = false;
+    var node: NodeIndex = 0;
+    while (node < view.nodeCount()) : (node += 1) {
+        if (view.getTag(node) != .match_type_test) continue;
+        const test_node = view.getMatchTypeTest(node) orelse continue;
+        try std.testing.expectEqual(ir.Node.TypeTestKind.bytes, test_node.kind);
+        try std.testing.expect(test_node.predicate != null_node);
+        try std.testing.expectEqual(ir.NodeTag.call, view.getTag(test_node.predicate));
+        found = true;
+    }
+    try std.testing.expect(found);
 }
 
 test "the Dict type test parses now that Dict exists" {
