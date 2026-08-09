@@ -3937,7 +3937,10 @@ test "normalizeSource refuses to hoist a multi-line template (left as residual)"
     // The line-local hoist deliberately only handles single-line statements; a
     // template that wraps across lines is refused and stays a flagged ZTS615
     // hard error rather than risk an unsound splice.
-    const source = "function handler(req: Request): Response {\n  const g = `a ${req.x.toUpperCase()}\nb`;\n  return Response.text(g);\n}\n";
+    // `req.url`, not an invented field: with `Request` typed, a name the
+    // record does not carry makes this fixture prove a different thing than
+    // the multi-line hoist it is here to pin.
+    const source = "function handler(req: Request): Response {\n  const g = `a ${req.url.toUpperCase()}\nb`;\n  return Response.text(g);\n}\n";
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.converged);

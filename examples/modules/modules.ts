@@ -18,7 +18,7 @@ function verifyWebhook(body: string, signature: string): boolean {
 
 function handler(req: Request): Response {
     const appName = env("APP_NAME") ?? "zttp";
-    const hash = sha256(req.body);
+    const hash = sha256(req.body ?? "");
 
     return Response.json({
         app: appName,

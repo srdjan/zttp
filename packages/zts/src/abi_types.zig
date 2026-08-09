@@ -26,6 +26,9 @@ const TypeEnv = type_env_mod.TypeEnv;
 /// The name a handler writes to annotate its return type.
 pub const RESPONSE_TYPE_NAME = "Response";
 
+/// The name a handler writes to annotate its parameter.
+pub const REQUEST_TYPE_NAME = "Request";
+
 /// The four constructors on the `Response` global. Each returns a `Response`,
 /// and there is no other way for a handler to make one.
 pub const RESPONSE_CONSTRUCTORS = [_][]const u8{ "json", "text", "html", "redirect" };
@@ -72,6 +75,63 @@ pub fn populateHandlerAbiTypes(env: *TypeEnv, pool: *TypePool, allocator: std.me
     const response = pool.addNominalAlias(allocator, shape, RESPONSE_TYPE_NAME);
     if (response == null_type_idx) return;
     env.putTypeAlias(RESPONSE_TYPE_NAME, response);
+
+    populateRequestType(env, pool, allocator);
+}
+
+/// `Request` was a `known_globals` name resolving to a bare `t_ref`, so every
+/// property read off a request answered nothing: `req.method` had no type,
+/// `req.url` had no type, and a typo in a field name was as silent as a
+/// correct one. This is the first typing of the request side, not a re-typing
+/// - spec 7.2's request contract had nothing here to replace.
+///
+/// The fields are the ones the runtime sets, read off
+/// `handler_instance.createRequestObject` rather than guessed: `url`,
+/// `method`, `path`, `query`, `body`, and `headers`, plus the two prototype
+/// methods `text()` and `json()`. `body` is `string | undefined`, which is
+/// what the runtime writes when a request carries none.
+///
+/// `headers`, `query`, and `params` are the opaque `object`, which spec 7.2
+/// admits beside a precise type and which is the honest answer for all three:
+/// a header map is keyed by whatever the client sent, the query map by
+/// whatever the URL carried, and `params` by whatever pattern a router
+/// matched. Nothing enters as `unknown`, which is the line the spec draws -
+/// `object` says "a record whose keys I do not know", and `unknown` would say
+/// "I do not know what this is at all".
+///
+/// `params` is not set by the runtime. A router handler assigns it
+/// (`req.params = found.params`) and then reads it, which is the shipped
+/// idiom; declaring it is what keeps both halves of that idiom typed.
+fn populateRequestType(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
+    if (env.getTypeAlias(REQUEST_TYPE_NAME) != null) return;
+
+    const object_ref = pool.addRef(allocator, "object");
+    const optional_string = pool.addNullable(allocator, pool.idx_string);
+    const no_params: []const type_pool_mod.FuncParam = &.{};
+    const text_fn = pool.addFunctionWithReturn(allocator, no_params, pool.idx_string);
+    const json_fn = pool.addFunctionWithReturn(allocator, no_params, pool.idx_unknown);
+
+    const shape = pool.addRecord(allocator, &.{
+        addField(pool, allocator, "url", pool.idx_string),
+        addField(pool, allocator, "method", pool.idx_string),
+        addField(pool, allocator, "path", pool.idx_string),
+        addField(pool, allocator, "query", object_ref),
+        addField(pool, allocator, "body", optional_string),
+        addField(pool, allocator, "headers", object_ref),
+        addField(pool, allocator, "params", object_ref),
+        addField(pool, allocator, "text", text_fn),
+        addField(pool, allocator, "json", json_fn),
+    });
+    if (shape == null_type_idx) return;
+
+    const request = pool.addNominalAlias(allocator, shape, REQUEST_TYPE_NAME);
+    if (request == null_type_idx) return;
+    env.putTypeAlias(REQUEST_TYPE_NAME, request);
+}
+
+/// The registered `Request` type, or `null_type_idx` when nothing registered it.
+pub fn requestType(env: *const TypeEnv) TypeIndex {
+    return env.getTypeAlias(REQUEST_TYPE_NAME) orelse null_type_idx;
 }
 
 /// The registered `Response` type, or `null_type_idx` when nothing registered
@@ -142,6 +202,104 @@ test "a handler's Response annotation resolves to the registered type" {
     // What a `: Response` annotation lowers to before anything resolves it.
     const annotation = pool.addRef(allocator, RESPONSE_TYPE_NAME);
     try std.testing.expect(env.isAssignableTo(response, annotation));
+}
+
+test "populateHandlerAbiTypes registers a nominal Request with the runtime's fields" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateHandlerAbiTypes(&env, &pool, allocator);
+
+    const request = requestType(&env);
+    try std.testing.expect(request != null_type_idx);
+    try std.testing.expect(pool.isNominal(request));
+
+    // Every field the runtime sets, and the two prototype methods. A missing
+    // one reads as nothing at the call site, which is what the whole type
+    // exists to stop.
+    const expected = [_][]const u8{ "url", "method", "path", "query", "body", "headers", "params", "text", "json" };
+    const fields = pool.getRecordFields(request);
+    try std.testing.expectEqual(expected.len, fields.len);
+    for (expected, fields) |name, field| {
+        try std.testing.expectEqualStrings(name, pool.getName(field.name_start, field.name_len));
+    }
+}
+
+test "a request field reads its declared type, and body may be absent" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateHandlerAbiTypes(&env, &pool, allocator);
+    const request = requestType(&env);
+
+    var method: TypeIndex = null_type_idx;
+    var body: TypeIndex = null_type_idx;
+    var headers: TypeIndex = null_type_idx;
+    for (pool.getRecordFields(request)) |field| {
+        const name = pool.getName(field.name_start, field.name_len);
+        if (std.mem.eql(u8, name, "method")) method = field.type_idx;
+        if (std.mem.eql(u8, name, "body")) body = field.type_idx;
+        if (std.mem.eql(u8, name, "headers")) headers = field.type_idx;
+    }
+
+    try std.testing.expectEqual(pool.idx_string, method);
+
+    // The runtime writes `undefined` when a request carries no body, so the
+    // type says so - which is what made six examples that passed `req.body`
+    // straight into a `string` parameter report at last.
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_nullable, pool.getTag(body).?);
+    try std.testing.expectEqual(pool.idx_string, pool.getNullableInner(body));
+    try std.testing.expect(!env.isAssignableTo(body, pool.idx_string));
+    try std.testing.expect(env.isAssignableTo(pool.idx_string, body));
+
+    // Headers are opaque rather than precise, which spec 7.2 admits beside a
+    // fixed type. `object`, not `unknown`: the keys are unknown, the kind is
+    // not.
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(headers).?);
+    try std.testing.expectEqualStrings("object", pool.getRefName(headers));
+    try std.testing.expect(headers != pool.idx_unknown);
+}
+
+test "the Request brand refuses what is not one" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateHandlerAbiTypes(&env, &pool, allocator);
+    const request = requestType(&env);
+
+    // Not a Bytes, in either direction: spec 6.3 keeps binary and structured
+    // data apart, and the request side of the ABI is where they would meet.
+    try std.testing.expect(!env.isAssignableTo(pool.idx_bytes, request));
+    try std.testing.expect(!env.isAssignableTo(request, pool.idx_bytes));
+
+    // Not a Response either, though both are branded records: the brands are
+    // what separate them.
+    const response = responseType(&env);
+    try std.testing.expect(!env.isAssignableTo(response, request));
+    try std.testing.expect(!env.isAssignableTo(request, response));
+
+    // A record carrying one of the fields is not a Request.
+    const bare = pool.addRecord(allocator, &.{
+        addField(&pool, allocator, "method", pool.idx_string),
+    });
+    try std.testing.expect(!env.isAssignableTo(bare, request));
+
+    // What it *is* assignable to is recorded rather than assumed: `object`
+    // means object-like, and a Request is an object. The plan expected a
+    // refusal here; measurement says otherwise, and refusing would be wrong -
+    // it would make every `object`-typed parameter reject a request for no
+    // property the caller could name.
+    const object_ref = pool.addRef(allocator, "object");
+    try std.testing.expect(env.isAssignableTo(request, object_ref));
 }
 
 test "isResponseConstructor names only the four constructors" {

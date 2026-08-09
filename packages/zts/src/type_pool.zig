@@ -1859,6 +1859,15 @@ pub const TypePool = struct {
             try writer.writeAll("unknown");
             return;
         };
+        // A brand prints as its declared name. `Request` reading as
+        // `{ url: string; method: string; ... }` in a diagnostic tells an
+        // author the shape of a type they did not write and hides the one
+        // they did - and the name is what they would have to type to fix it.
+        const brand = self.nominalName(idx);
+        if (brand.len > 0) {
+            try writer.writeAll(brand);
+            return;
+        }
         switch (tag) {
             .t_boolean => try writer.writeAll("boolean"),
             .t_number => try writer.writeAll("number"),

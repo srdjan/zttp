@@ -591,7 +591,7 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
         \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic"> {
-        \\    const result = validateJson("item", req.body);
+        \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
         \\    return Response.json({ data });
         \\}
@@ -668,7 +668,7 @@ test "stand-in review reports source observations without a compiler verdict" {
         \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response {
-        \\    const result = validateJson("item", req.body);
+        \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
         \\    return Response.json({ data });
         \\}
@@ -782,7 +782,7 @@ test "stand-in violation fix preserves source around the inserted guard" {
         \\
         \\// KEEP: application-specific validation behavior
         \\function handler(req: Request): Response {
-        \\    const result = validateJson("item", req.body);
+        \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
         \\    return Response.json({ data });
         \\}
@@ -793,7 +793,7 @@ test "stand-in violation fix preserves source around the inserted guard" {
         \\
         \\// KEEP: application-specific validation behavior
         \\function handler(req: Request): Response {
-        \\    const result = validateJson("item", req.body);
+        \\    const result = validateJson("item", req.body ?? "");
         \\    if (!result.ok) {
         \\        return Response.json({ error: result.error }, { status: 400 });
         \\    }
@@ -830,7 +830,7 @@ test "stand-in violation fix returns a miss for an already guarded source" {
         \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response {
-        \\    const result = validateJson("item", req.body);
+        \\    const result = validateJson("item", req.body ?? "");
         \\    if (!result.ok) {
         \\        return Response.json({ error: result.error }, { status: 400 });
         \\    }
@@ -868,7 +868,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic"> {
-        \\    const result = validateJson("item", req.body);
+        \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
         \\    return Response.json({ data });
         \\}

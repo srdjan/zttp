@@ -43,7 +43,7 @@ function handler(req: Request): Response {
 
     // Validate request body
     if (req.method === "POST") {
-        const validation = validateJson("user", req.body);
+        const validation = validateJson("user", req.body ?? "");
         if (!validation.ok) {
             return Response.json({ errors: validation.errors }, { status: 400 });
         }

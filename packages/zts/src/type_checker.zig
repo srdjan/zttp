@@ -3870,6 +3870,7 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
@@ -3908,6 +3909,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
@@ -4234,6 +4236,7 @@ fn checkTypedSourceWithServiceContext(
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, service_type_context);
@@ -4867,6 +4870,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
@@ -4921,6 +4925,7 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
     @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
     env.populateFromTypeMap(&strip_result.type_map);
 
     var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
@@ -5615,6 +5620,49 @@ test "a Bytes arm narrows in the arm it guards and not in the others" {
     ,
         1,
         "expected Bytes",
+    );
+}
+
+test "a request field reads its declared type end to end" {
+    // `Request` was a name resolving to nothing, so every read off a request
+    // answered nothing and a typo was as silent as a correct field. These are
+    // the two halves: a declared field types, and passing an absent-capable
+    // one where a `string` is wanted now reports.
+    try checkTypedSource(
+        \\function take(s: string): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: take(req.method), u: take(req.url) });
+        \\}
+    ,
+        0,
+        null,
+    );
+
+    try checkTypedSourceSaying(
+        \\function take(s: string): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: take(req.body) });
+        \\}
+    ,
+        1,
+        "expected string, got string | undefined",
+    );
+
+    // And the narrowing an author writes discharges it.
+    try checkTypedSource(
+        \\function take(s: string): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: take(req.body ?? "") });
+        \\}
+    ,
+        0,
+        null,
     );
 }
 

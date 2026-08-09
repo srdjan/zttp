@@ -77,7 +77,7 @@ const clean_checked_result =
     \\import { validateJson } from "zttp:validate";
     \\
     \\function handler(req: Request): Response & Spec<"deterministic"> {
-    \\  const result = validateJson("item", req.body);
+    \\  const result = validateJson("item", req.body ?? "");
     \\  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
     \\  const data = result.value;
     \\  return Response.json({ data });
@@ -200,7 +200,7 @@ pub const seeds = [_]DefectSeed{
         \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response & Spec<"deterministic"> {
-        \\  const result = validateJson("item", req.body);
+        \\  const result = validateJson("item", req.body ?? "");
         \\  const data = result.value;
         \\  return Response.json({ data });
         \\}

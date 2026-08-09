@@ -18,7 +18,8 @@ function getUser(req: Request): Response {
 }
 
 function postEcho(req: Request): Response {
-    return Response.json({ received: req.body, hash: sha256(req.body) });
+    const body = req.body ?? "";
+    return Response.json({ received: body, hash: sha256(body) });
 }
 
 const routes = {

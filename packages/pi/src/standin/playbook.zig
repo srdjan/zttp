@@ -563,7 +563,7 @@ const ViolationTransform = union(enum) {
 };
 
 fn synthesizeViolationFix(allocator: std.mem.Allocator, source: []const u8) !ViolationTransform {
-    const result_marker = "const result = validateJson(\"item\", req.body);";
+    const result_marker = "const result = validateJson(\"item\", req.body ?? \"\");";
     const result_start = std.mem.indexOf(u8, source, result_marker) orelse return .unsupported_seed;
     const data_marker = "const data = result.value;";
     const data_start = std.mem.indexOfPos(u8, source, result_start + result_marker.len, data_marker) orelse {

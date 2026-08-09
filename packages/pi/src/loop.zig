@@ -1349,7 +1349,7 @@ const clean_handler =
 const unchecked_result_handler =
     "import { validateJson } from \"zttp:validate\";\n" ++
     "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
-    "  const result = validateJson(\"item\", req.body);\n" ++
+    "  const result = validateJson(\"item\", req.body ?? \"\");\n" ++
     "  const data = result.value;\n" ++
     "  return Response.json({ data });\n" ++
     "}\n";

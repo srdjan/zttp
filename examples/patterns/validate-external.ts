@@ -23,7 +23,7 @@ type Guardrails = Spec<
 >;
 
 function handler(req: Request): Response & Guardrails {
-    const parsed = validateJson("todo", req.body);
+    const parsed = validateJson("todo", req.body ?? "");
     if (!parsed.ok) {
         return Response.json({ error: "invalid body" }, { status: 400 });
     }

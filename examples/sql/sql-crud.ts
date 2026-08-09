@@ -40,7 +40,7 @@ function handler(req: Request): Response & CrudGuarantees {
         return Response.json({ items: sqlMany("listTodos") });
     }
 
-    const parsed = validateJson("todo.create", req.body);
+    const parsed = validateJson("todo.create", req.body ?? "");
     if (!parsed.ok) {
         return Response.json({ errors: parsed.errors }, { status: 400 });
     }

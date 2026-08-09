@@ -350,7 +350,7 @@ fn sequenceSource(entry_id: []const u8) []const u8 {
         \\import { validateJson } from "zttp:validate";
         \\
         \\function handler(req: Request): Response {
-        \\    const result = validateJson("item", req.body);
+        \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
         \\    return Response.json({ data });
         \\}
