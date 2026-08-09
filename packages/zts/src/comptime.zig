@@ -583,6 +583,28 @@ pub const ComptimeEvaluator = struct {
 
         if (callee_tag == .identifier) {
             const name = identifierName(ir, atoms, call.callee) orelse return ComptimeError.UnknownIdentifier;
+            // A closed set, and `dictFromEntries` is deliberately not in it.
+            //
+            // Spec 6.2 names `comptime(dictFromEntries([...]))` as the static-
+            // table construction form, whose duplicate-key check is discharged
+            // at build time. It does not land, and the reason is not that the
+            // evaluator cannot reach a module export - that would be a small
+            // addition here. It is that this channel's output is source text:
+            // `evaluate` produces a `ComptimeValue`, `emitLiteral` writes it
+            // back into the program, and the stripper splices the result. A
+            // `Dict` has no source literal to write. Spec 6.2 says so itself -
+            // construction is a module call - so a `ComptimeValue.dict` case
+            // could only be emitted as `dictFromEntries([...])`, which is the
+            // expression it started from.
+            //
+            // Giving `Dict` a literal syntax would add an IR node against a
+            // spec that says it has none. Making `comptime` yield a runtime
+            // value rather than text is a different mechanism from this one.
+            // Either is a decision of its own, not a task-7-sized addition, so
+            // the runtime `dictFromEntries` covers the same programs at a
+            // runtime check and the spec form fails the build loudly - the
+            // stripper turns the error below into
+            // `StripError.ComptimeEvaluationFailed`, which is pinned by a test.
             if (!std.mem.eql(u8, name, "hash") and
                 !std.mem.eql(u8, name, "parseInt") and
                 !std.mem.eql(u8, name, "parseFloat"))
@@ -2063,6 +2085,35 @@ test "JSON.parse root prefix stays inside the 64-node depth contract" {
     defer allocator.free(rejected_source);
     var rejected = ComptimeEvaluator.init(allocator, rejected_source);
     try std.testing.expectError(ComptimeError.DepthExceeded, rejected.evaluate());
+}
+
+test "the comptime channel emits source text, which a Dict has none of" {
+    // The measurement behind not landing spec 6.2's static-table form. This
+    // channel's whole output is a literal spliced back into the program, and
+    // every value it can produce has a spelling. `emitLiteral` over the value
+    // model is the enumeration: a `Dict` is absent from it not because the
+    // model is small but because spec 6.2 gives `Dict` no literal at all.
+    const allocator = std.testing.allocator;
+
+    // Every arm of the model round-trips through source and back.
+    const spellable = [_][]const u8{
+        "1",      "\"s\"",  "true", "null", "undefined", "NaN", "Infinity",
+        "[1, 2]", "{a: 1}",
+    };
+    for (spellable) |source| {
+        var evaluator = ComptimeEvaluator.init(allocator, source);
+        const value = try evaluator.evaluate();
+        defer value.deinit(allocator);
+        const emitted = try emitLiteral(allocator, value);
+        defer allocator.free(emitted);
+        try std.testing.expect(emitted.len > 0);
+    }
+
+    // And the form spec 6.2 names fails loudly rather than evaluating to
+    // something else. A silent answer here would be the dangerous outcome: the
+    // duplicate-key check the form exists for would appear to have run.
+    var refused = ComptimeEvaluator.init(allocator, "dictFromEntries([[\"a\", 1], [\"a\", 2]])");
+    try std.testing.expectError(ComptimeError.UnknownIdentifier, refused.evaluate());
 }
 
 fn evaluateAllocationFixture(allocator: std.mem.Allocator, source: []const u8) !void {

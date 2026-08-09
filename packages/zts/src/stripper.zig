@@ -3544,6 +3544,22 @@ test "comptime with types" {
     try std.testing.expectEqual(@as(u8, ';'), result.code[result.code.len - 1]);
 }
 
+test "the static-table form fails the build rather than evaluating to something else" {
+    // Spec 6.2's `comptime(dictFromEntries([...]))` does not land - see the
+    // closed name set in comptime.zig's `evalCall` for why. What matters is
+    // how it does not land: the whole point of that form is a duplicate-key
+    // check discharged at build time, so an answer that looked like it had run
+    // is worse than no answer. This one fails the strip.
+    try std.testing.expectError(
+        StripError.ComptimeEvaluationFailed,
+        strip(
+            std.testing.allocator,
+            "const table = comptime(dictFromEntries([[\"a\", 1], [\"a\", 2]]));",
+            .{ .enable_comptime = true },
+        ),
+    );
+}
+
 test "comptime identifier without parens passes through" {
     // The identifier 'comptime' without () should be passed through
     const result = try strip(std.testing.allocator, "const comptime = 5;", .{ .enable_comptime = true });

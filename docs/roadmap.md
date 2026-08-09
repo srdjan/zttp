@@ -819,8 +819,7 @@ recursive helper, so a handler that declares a `Spec` cannot call one.
 recursive fold is pinned as a type-checker test. That limit is the next thing
 this program touches on the proof side, not the type side.
 
-Phase 4 landed its Dict and JSON tracks and left the `Result` one open, which
-its plan is
+Phase 4 is closed, and its plan is
 [docs/plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md](plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md).
 `Dict<K, V>` is a runtime class of its own, since a JS object is hidden-class
 shaped and cannot hold an arbitrary key, a number key, or an insertion order.
@@ -843,9 +842,34 @@ corpus, and deleted. The same measurement found that `r.unwrapOr(d)` is refused
 too, which spec 6.1 admits - the deferred `zttp:result` track is what supplies
 it, as a free function rather than a method.
 
+That track closed the phase, and three of its findings are worth carrying.
+
+Effect-row polymorphism needed no mechanism. The combinators declare `.none`
+and reach nothing themselves; the join comes from `effect_inference` already
+walking a callback argument into the enclosing row. Both directions are pinned,
+because a combinator that always contributed its callback's worst case would
+satisfy a test that only checked the effectful one.
+
+`zttp:collections` and `zttp:json` were laundering data labels. Neither
+declared `return_labels`, and an export that declares nothing answers the empty
+set, so a secret put into a `Dict` and read back out reached the response with
+`no_secret_leakage` PROVEN. `FunctionBinding.derives_from_args` is the repair -
+`parsedResultLabels` without the `user_input` discharge, so "the data passes
+through" and "and validating clears `user_input`" stay separable claims. The
+class is wider than the three data modules: `sha256` and `base64Encode` launder
+the same way today, probed and open.
+
+Spec 6.2's `comptime(dictFromEntries([...]))` does not land, for a reason the
+plan did not anticipate. Reaching a module export from the comptime evaluator
+would be a small addition; the obstacle is that the channel emits source text,
+and a `Dict` has no literal spelling to emit - which spec 6.2 says itself, since
+construction is a module call. The form fails the build rather than evaluating
+to something else, which is the part that had to be checked: it exists for a
+duplicate-key discharge, so a silent answer would be worse than none.
+
 | Phase | Scope | Exit |
 |---|---|---|
-| 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **All three exit rows are met; the phase's own two remaining tasks are the Dict idiom rows and the `comptime` construction form.** |
+| 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | `Bytes` and `zttp:bytes`; the HTTP, WebSocket, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText`; trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch, websocket, and queue examples re-typed; ceiling-rule repair tests. |
 | 6. Full idiom table, validators, gate-complete protocol | The remaining idiom rows; equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
 | 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies every reachable node and opcode; paired live-model flows preserve behavior, intent, proofs, and reached-green convergence. |

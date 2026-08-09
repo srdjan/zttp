@@ -72,8 +72,18 @@ is the repair, and `zttp:result` carries it from the start. The class is wider
 than the three modules: `sha256` and `base64Encode` launder a secret the same
 way today, probed and left open.
 
-Two tasks are open: the Dict idiom rows (task 6) and the
-`comptime(dictFromEntries([...]))` decision (task 7).
+Task 6 landed the Dict idiom rows. ZTS627 covers both destinations of one
+shape - an entry round trip goes to `dictMapValues` or to `dictFilter`, chosen
+by what the transform does - and ZTS628 is the `reduce` over `dictEntries`. The
+preconditions are enforced rather than described: a callback that computes a
+new key is outside the map row and reports nothing, and so is an undecidable
+one.
+
+Task 7 is decided and does not land. The reason is not the one the plan
+expected: reaching a module export from `evalCall` would be small, but the
+comptime channel emits source text and a `Dict` has no spelling to emit.
+
+Phase 4 is closed.
 
 ## Global constraints
 
@@ -267,6 +277,32 @@ to the existing value model it lands, and if it needs the comptime evaluator to
 reach module exports it does not, and the runtime `dictFromEntries` covers the
 same programs at a runtime check. Whichever way it goes, the reason is recorded
 at the site and in this plan.
+
+
+**Decided: it does not land, and for a reason neither branch anticipated.**
+Reaching a module export would indeed be a small addition to `evalCall`, whose
+identifier arm admits a closed set of three names. That is not the obstacle.
+
+The obstacle is that this channel's output is source text. `comptime` is
+evaluated in the stripper: `ComptimeEvaluator.evaluate` produces a
+`ComptimeValue`, `emitLiteral` writes it back as a literal, and the stripper
+splices it over the span the author wrote. Every value the model holds has a
+spelling. A `Dict` has none - spec 6.2 says so itself, construction is a module
+call - so a `ComptimeValue.dict` case could only be emitted as
+`dictFromEntries([...])`, the expression it started from.
+
+The two ways out are both larger than this task. Giving `Dict` a literal syntax
+adds an IR node against a spec that says it has none, and against this phase's
+own pin on the node alphabet. Making `comptime` yield a runtime value rather
+than text is a different mechanism from the one that exists.
+
+So the runtime `dictFromEntries` covers the same programs at a runtime check,
+and the spec form fails the build rather than evaluating to something else -
+which is the part that had to be checked rather than assumed, because the form
+exists for a duplicate-key check and an answer that looked like it had run
+would be worse than no answer. `StripError.ComptimeEvaluationFailed`, pinned in
+`stripper.zig`; the enumeration behind "a Dict has no spelling" is pinned in
+`comptime.zig` against `emitLiteral` itself.
 
 ### Task 8: `unwrap` and `unwrapErr` refused in the profile
 
