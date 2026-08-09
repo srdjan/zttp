@@ -819,9 +819,33 @@ recursive helper, so a handler that declares a `Spec` cannot call one.
 recursive fold is pinned as a type-checker test. That limit is the next thing
 this program touches on the proof side, not the type side.
 
+Phase 4 landed its Dict and JSON tracks and left the `Result` one open, which
+its plan is
+[docs/plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md](plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md).
+`Dict<K, V>` is a runtime class of its own, since a JS object is hidden-class
+shaped and cannot hold an arbitrary key, a number key, or an insertion order.
+Entries live in the object's own slots so the GC traces them through the walk it
+already runs; lookup is a linear scan and copy-on-set is quadratic over the fold
+construction form, both recorded as measured-when-it-matters rather than
+optimized on a guess.
+
+Two things the behavioral suite found that serving a handler by hand did not: a
+Dict built outside the request arena leaks per request, and the parser's
+duplicate-key failure borrowed a key it had already freed. The suite is also
+what forced the twelve new exports to carry the audited `replay_pure` opt-in -
+without it a handler test sees `undefined` from every one of them, because a
+replay stub with no recorded I/O returns exactly that.
+
+The `unwrap` refusal this phase planned turned out to exist already: the
+modelled `Result` is a record with no methods, so `r.unwrap()` reports
+`property does not exist on type`. The rule was written, measured against the
+corpus, and deleted. The same measurement found that `r.unwrapOr(d)` is refused
+too, which spec 6.1 admits - the deferred `zttp:result` track is what supplies
+it, as a free function rather than a method.
+
 | Phase | Scope | Exit |
 |---|---|---|
-| 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. |
+| 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Dict and JSON are done; the `zttp:result` track and its `collectAll` row are open.** |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | `Bytes` and `zttp:bytes`; the HTTP, WebSocket, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText`; trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch, websocket, and queue examples re-typed; ceiling-rule repair tests. |
 | 6. Full idiom table, validators, gate-complete protocol | The remaining idiom rows; equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
 | 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies every reachable node and opcode; paired live-model flows preserve behavior, intent, proofs, and reached-green convergence. |
