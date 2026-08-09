@@ -46,6 +46,8 @@ pub const TypeTag = enum(u8) {
     t_number,
     t_string,
     t_null,
+    /// `Dict<K, V>` (spec 6.2): key type in `data.a`, value type in `data.b`.
+    t_dict,
     t_undefined,
     t_void,
     t_never,
@@ -629,6 +631,14 @@ pub const TypePool = struct {
         return self.addNode(allocator, .{
             .tag = .t_array,
             .data = .{ .a = element, .b = 0 },
+        });
+    }
+
+    /// Create a `Dict<K, V>`.
+    pub fn addDict(self: *TypePool, allocator: std.mem.Allocator, key: TypeIndex, val: TypeIndex) TypeIndex {
+        return self.addNode(allocator, .{
+            .tag = .t_dict,
+            .data = .{ .a = key, .b = val },
         });
     }
 
@@ -1226,6 +1236,18 @@ pub const TypePool = struct {
         return data.a;
     }
 
+    pub fn getDictKey(self: *const TypePool, idx: TypeIndex) TypeIndex {
+        const data = self.getData(idx) orelse return null_type_idx;
+        if (self.getTag(idx) != .t_dict) return null_type_idx;
+        return data.a;
+    }
+
+    pub fn getDictValue(self: *const TypePool, idx: TypeIndex) TypeIndex {
+        const data = self.getData(idx) orelse return null_type_idx;
+        if (self.getTag(idx) != .t_dict) return null_type_idx;
+        return data.b;
+    }
+
     /// Get the nullable inner type.
     pub fn getNullableInner(self: *const TypePool, idx: TypeIndex) TypeIndex {
         const data = self.getData(idx) orelse return null_type_idx;
@@ -1438,6 +1460,17 @@ pub const TypePool = struct {
                 .t_union => self.isUnionAssignableToUnion(ctx, source, target),
                 .t_intersection => self.isIntersectionAssignableToIntersection(ctx, source, target),
                 .t_nullable => self.assignableIn(ctx, self.getNullableInner(source), self.getNullableInner(target)),
+                // A Dict is invariant in its key and covariant in its value.
+                // The key decides which entries exist, so widening it would
+                // let a lookup that cannot be satisfied type-check; the value
+                // is only ever read out, so widening it is sound.
+                .t_dict => blk: {
+                    const src_key = self.getDictKey(source);
+                    const tgt_key = self.getDictKey(target);
+                    if (!self.assignableIn(ctx, src_key, tgt_key)) break :blk false;
+                    if (!self.assignableIn(ctx, tgt_key, src_key)) break :blk false;
+                    break :blk self.assignableIn(ctx, self.getDictValue(source), self.getDictValue(target));
+                },
                 .t_literal_string, .t_literal_number, .t_literal_bool => self.literalEquals(source, target),
                 .t_ref => std.mem.eql(u8, self.getRefName(source), self.getRefName(target)),
                 .t_tuple => blk: {
@@ -1607,6 +1640,10 @@ pub const TypePool = struct {
             .t_ref, .t_generic_param => return self.getRefName(idx),
             .t_array => return self.firstUnresolvedNameIn(self.getArrayElement(idx), depth),
             .t_nullable => return self.firstUnresolvedNameIn(self.getNullableInner(idx), depth),
+            .t_dict => {
+                if (self.firstUnresolvedNameIn(self.getDictKey(idx), depth)) |name| return name;
+                return self.firstUnresolvedNameIn(self.getDictValue(idx), depth);
+            },
             .t_record => {
                 for (self.getRecordFields(idx)) |field| {
                     if (self.firstUnresolvedNameIn(field.type_idx, depth)) |name| return name;
@@ -1819,6 +1856,13 @@ pub const TypePool = struct {
             .t_number => try writer.writeAll("number"),
             .t_string => try writer.writeAll("string"),
             .t_null => try writer.writeAll("null"),
+            .t_dict => {
+                try writer.writeAll("Dict<");
+                try self.writeType(self.getDictKey(idx), writer);
+                try writer.writeAll(", ");
+                try self.writeType(self.getDictValue(idx), writer);
+                try writer.writeAll(">");
+            },
             .t_undefined => try writer.writeAll("undefined"),
             .t_void => try writer.writeAll("void"),
             .t_never => try writer.writeAll("never"),
@@ -2417,6 +2461,13 @@ const TypeExprParser = struct {
             return self.pool.addReadonlyArray(self.allocator, args.items[0]);
         }
 
+        // Dict<K, V> is a value kind of its own (spec 6.2), not a named alias
+        // a user could shadow, so it resolves here rather than through the
+        // alias table.
+        if (std.mem.eql(u8, base_name, "Dict") and args.items.len == 2) {
+            return self.pool.addDict(self.allocator, args.items[0], args.items[1]);
+        }
+
         // Readonly<{...}> on an INLINE record -> mark all fields readonly here
         // (no alias resolution needed). Readonly<NamedAlias> must instead build a
         // generic-app so TypeEnv.tryInstantiateGenericApp resolves the alias to
@@ -2814,6 +2865,46 @@ test "parseTypeExpr primitives" {
     try std.testing.expectEqual(pool.idx_boolean, parseTypeExpr(&pool, allocator, "boolean"));
     try std.testing.expectEqual(pool.idx_void, parseTypeExpr(&pool, allocator, "void"));
     try std.testing.expectEqual(pool.idx_null, parseTypeExpr(&pool, allocator, "null"));
+}
+
+test "Dict resolves, prints, and keys structurally" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const a = parseTypeExpr(&pool, allocator, "Dict<string, number>");
+    try std.testing.expectEqual(TypeTag.t_dict, pool.getTag(a).?);
+    try std.testing.expectEqual(pool.idx_string, pool.getDictKey(a));
+    try std.testing.expectEqual(pool.idx_number, pool.getDictValue(a));
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Dict<string, number>", pool.formatType(a, &buf));
+
+    // Two independently built dicts of the same shape are one type.
+    const b = parseTypeExpr(&pool, allocator, "Dict<string, number>");
+    try std.testing.expect(a != b);
+    try std.testing.expect(pool.isAssignableTo(a, b));
+    try std.testing.expect(pool.isAssignableTo(b, a));
+}
+
+test "a Dict is invariant in its key and covariant in its value" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const string_number = parseTypeExpr(&pool, allocator, "Dict<string, number>");
+    const number_number = parseTypeExpr(&pool, allocator, "Dict<number, number>");
+    const string_literal = pool.addDict(allocator, pool.idx_string, pool.addLiteralString(allocator, "a"));
+    const string_string = parseTypeExpr(&pool, allocator, "Dict<string, string>");
+
+    // The key decides which lookups can be satisfied, so neither direction.
+    try std.testing.expect(!pool.isAssignableTo(string_number, number_number));
+    try std.testing.expect(!pool.isAssignableTo(number_number, string_number));
+
+    // The value is only ever read out, so widening it is sound and narrowing
+    // it is not.
+    try std.testing.expect(pool.isAssignableTo(string_literal, string_string));
+    try std.testing.expect(!pool.isAssignableTo(string_string, string_literal));
 }
 
 test "null is admitted only where the type names it" {

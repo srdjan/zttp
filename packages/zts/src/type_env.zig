@@ -743,11 +743,27 @@ pub const TypeEnv = struct {
         for (specs[0..spec_count], 0..) |spec, i| {
             if (i >= declared.count) break;
             if (spec.constraint_text.len == 0) continue;
-            const constraint = self.resolveType(spec.constraint_text);
+            const constraint = self.resolveBound(spec.constraint_text);
             declared.params[i].constraint = constraint;
             self.generic_scopes.items[self.generic_scopes.items.len - 1].setConstraint(spec.name, constraint);
         }
         return declared;
+    }
+
+    /// Resolve an `extends` bound. Identical to `resolveType` except that it
+    /// also recognizes the checker-only bounds spec 6.2 names, which are legal
+    /// in bound position and nowhere else - `DictKey` is not a source alias, so
+    /// writing it as a type annotation still reaches an unresolved name.
+    fn resolveBound(self: *TypeEnv, bound_text: []const u8) TypeIndex {
+        const trimmed = std.mem.trim(u8, bound_text, " \t\n\r");
+        if (std.mem.eql(u8, trimmed, "DictKey")) {
+            // The admitted key types are `string`, `number`, and a `distinct
+            // type` over either. A distinct type is assignable to its base
+            // (amendment A5), so this union is exactly that acceptance set,
+            // and `boolean` is outside it.
+            return self.pool.addUnion(self.allocator, &.{ self.pool.idx_string, self.pool.idx_number });
+        }
+        return self.resolveType(bound_text);
     }
 
     /// Resolve an annotation with a signature's type parameters in scope, so a
@@ -1145,7 +1161,7 @@ pub const TypeEnv = struct {
         switch (self.pool.getTag(idx) orelse return false) {
             // Guarded: a cycle that passes through one of these describes a
             // finite value of increasing depth, which is the whole point.
-            .t_record, .t_array, .t_tuple => return false,
+            .t_record, .t_array, .t_tuple, .t_dict => return false,
             .t_ref => {
                 const name = self.pool.getRefName(idx);
                 if (name.len == 0) return false;

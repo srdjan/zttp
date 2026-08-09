@@ -765,7 +765,9 @@ Phases 0 through 3 are done. The executed plans and the program's decision log
 are in [docs/archive/plans/](archive/README.md); phase 2's plan is still
 [docs/plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md](plans/2026-08-04-018-zts-advanced-rev4-phase2-plan.md)
 and phase 3's is
-[docs/plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md](plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md).
+[docs/plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md](plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md),
+and phase 4's is
+[docs/plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md](plans/2026-08-09-023-zts-advanced-rev4-phase4-plan.md).
 
 Phase 2 met its exit against the frozen signature corpus: 24 modules and 90
 exports, every emitted signature parsing with no fallback to `unknown`, and
@@ -822,6 +824,7 @@ this program touches on the proof side, not the type side.
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | `Bytes` and `zttp:bytes`; the HTTP, WebSocket, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText`; trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch, websocket, and queue examples re-typed; ceiling-rule repair tests. |
 | 6. Full idiom table, validators, gate-complete protocol | The remaining idiom rows; equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
+| 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies every reachable node and opcode; paired live-model flows preserve behavior, intent, proofs, and reached-green convergence. |
 
 Three design documents own the decisions the phases consume. Two of them also
 retire an interim marker left in the code by phase 0:
@@ -850,10 +853,11 @@ is why the ground rule above bans them. Silent decisions leaking into wire
 formats is why D1 lands before phase 2, D2 before phase 4, and D3's digest
 section before the phase-1 hash freeze.
 
-Two spelling decisions stay unresolved: the no-ASI flip waits for phase 6 and
-its unique-parse-insertion validator, because the live parser has `return`-ASI
-today; and the pipe operator (`|>`) and `interface` both stay shipped until the
-D workstream produces a migration policy for removing published surface.
+The no-ASI flip still waits for phase 6 and its unique-parse-insertion
+validator, because the live parser has `return`-ASI today. The migration policy
+is now decided: phase 7 performs a direct cutover to the model-minimal profile,
+including removal of `|>`, `pipe()`, `guard()`, and `interface`. Those forms
+stay shipped only until that phase begins; no compatibility profile is planned.
 
 ## Reset And Simplification
 

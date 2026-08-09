@@ -119,6 +119,7 @@ zts modules/workflow/queue.zig
 zts modules/workflow/scope.zig
 zts modules/workflow/workflow.zig
 zts node_types.zig
+zts dict.zig
 zts object.zig
 zts parallel_collection.zig
 zts parser/codegen.zig

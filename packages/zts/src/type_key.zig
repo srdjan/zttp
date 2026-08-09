@@ -123,6 +123,11 @@ const Encoder = struct {
                 try w.writeAll(if (data.b == 1) "Ar" else "Am");
                 try self.write(self.pool.getArrayElement(idx), w);
             },
+            .t_dict => {
+                try w.writeAll("D");
+                try self.write(self.pool.getDictKey(idx), w);
+                try self.write(self.pool.getDictValue(idx), w);
+            },
             .t_tuple => {
                 const elements = self.pool.getTupleElements(idx);
                 try w.print("Tm{d}", .{elements.len});
