@@ -1487,9 +1487,14 @@ pub const TypePool = struct {
             return self.matchesTemplateLiteral(source, target);
         }
 
-        // null/undefined are assignable to nullable types
+        // `undefined` is assignable to a nullable type, which is `T | undefined`
+        // and nothing more. Spec 5.3: `null` is permitted only where the type
+        // explicitly names it, so `null` reaching a `T | undefined` target is a
+        // mismatch. It becomes assignable by the union rule below the moment
+        // the author writes `T | null`, which parses as a real union member.
         if (tgt_tag == .t_nullable) {
-            if (src_tag == .t_null or src_tag == .t_undefined) return true;
+            if (src_tag == .t_undefined) return true;
+            if (src_tag == .t_null) return false;
             return self.assignableIn(ctx, source, self.getNullableInner(target));
         }
 
@@ -2340,8 +2345,7 @@ const TypeExprParser = struct {
         if (std.mem.eql(u8, ident, "boolean") or std.mem.eql(u8, ident, "bool")) return self.maybeArrayWrap(self.pool.idx_boolean);
         if (std.mem.eql(u8, ident, "number")) return self.maybeArrayWrap(self.pool.idx_number);
         if (std.mem.eql(u8, ident, "string")) return self.maybeArrayWrap(self.pool.idx_string);
-        // 'null' type not supported - treat as unknown (parser rejects null literals)
-        if (std.mem.eql(u8, ident, "null")) return self.maybeArrayWrap(self.pool.idx_unknown);
+        if (std.mem.eql(u8, ident, "null")) return self.maybeArrayWrap(self.pool.idx_null);
         if (std.mem.eql(u8, ident, "undefined")) return self.maybeArrayWrap(self.pool.idx_undefined);
         if (std.mem.eql(u8, ident, "void")) return self.maybeArrayWrap(self.pool.idx_void);
         if (std.mem.eql(u8, ident, "never")) return self.maybeArrayWrap(self.pool.idx_never);
@@ -2771,13 +2775,17 @@ test "isAssignableTo nullable" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const nullable_str = pool.addNullable(allocator, pool.idx_string);
-    // string is assignable to string | null
-    try std.testing.expect(pool.isAssignableTo(pool.idx_string, nullable_str));
-    // null is assignable to string | null
-    try std.testing.expect(pool.isAssignableTo(pool.idx_null, nullable_str));
-    // string | null is NOT assignable to string (might be null)
-    try std.testing.expect(!pool.isAssignableTo(nullable_str, pool.idx_string));
+    // `t_nullable` is `T | undefined`, not `T | null`. The comments here read
+    // the other way until phase 3, which is the misreading spec 5.3 forbids.
+    const optional_str = pool.addNullable(allocator, pool.idx_string);
+    // string is assignable to string | undefined
+    try std.testing.expect(pool.isAssignableTo(pool.idx_string, optional_str));
+    // undefined is assignable to string | undefined
+    try std.testing.expect(pool.isAssignableTo(pool.idx_undefined, optional_str));
+    // null is not: the type does not name it
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_null, optional_str));
+    // string | undefined is NOT assignable to string (might be absent)
+    try std.testing.expect(!pool.isAssignableTo(optional_str, pool.idx_string));
 }
 
 test "isAssignableTo union" {
@@ -2801,8 +2809,28 @@ test "parseTypeExpr primitives" {
     try std.testing.expectEqual(pool.idx_string, parseTypeExpr(&pool, allocator, "string"));
     try std.testing.expectEqual(pool.idx_boolean, parseTypeExpr(&pool, allocator, "boolean"));
     try std.testing.expectEqual(pool.idx_void, parseTypeExpr(&pool, allocator, "void"));
-    // 'null' type resolves to unknown (not supported)
-    try std.testing.expectEqual(pool.idx_unknown, parseTypeExpr(&pool, allocator, "null"));
+    try std.testing.expectEqual(pool.idx_null, parseTypeExpr(&pool, allocator, "null"));
+}
+
+test "null is admitted only where the type names it" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const string_or_null = parseTypeExpr(&pool, allocator, "string | null");
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(string_or_null).?);
+    try std.testing.expect(pool.isAssignableTo(pool.idx_null, string_or_null));
+
+    // `string | undefined` parses to the nullable wrapper, which is exactly
+    // `T | undefined`. Spec 5.3 keeps `null` out of it.
+    const string_or_undefined = parseTypeExpr(&pool, allocator, "string | undefined");
+    try std.testing.expectEqual(TypeTag.t_nullable, pool.getTag(string_or_undefined).?);
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_null, string_or_undefined));
+    try std.testing.expect(pool.isAssignableTo(pool.idx_undefined, string_or_undefined));
+
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_null, pool.idx_string));
+    try std.testing.expect(pool.isAssignableTo(pool.idx_null, pool.idx_unknown));
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_string, pool.idx_null));
 }
 
 test "parseTypeExpr union" {

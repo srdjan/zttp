@@ -1086,7 +1086,10 @@ pub const TypeEnv = struct {
         const target_tag = self.pool.getTag(target) orelse return false;
         if (target_tag == .t_nullable) {
             const source_tag = self.pool.getTag(source) orelse return false;
-            if (source_tag == .t_null or source_tag == .t_undefined) return true;
+            // Spec 5.3, the same direction `TypePool.assignableStep` holds:
+            // `T | undefined` admits `undefined` and refuses `null`.
+            if (source_tag == .t_null) return false;
+            if (source_tag == .t_undefined) return true;
             const target_inner = self.pool.getNullableInner(target);
             if (source_tag == .t_nullable) {
                 return self.isAssignableTo(self.pool.getNullableInner(source), target_inner);
@@ -1580,6 +1583,22 @@ test "TypeEnv variable annotation" {
     const port_type = env.getVarTypeByName("port");
     try std.testing.expect(port_type != null);
     try std.testing.expectEqual(pool.idx_number, port_type.?);
+}
+
+test "TypeEnv keeps null out of an optional type" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    const optional_str = pool.addNullable(allocator, pool.idx_string);
+    try std.testing.expect(env.isAssignableTo(pool.idx_undefined, optional_str));
+    try std.testing.expect(!env.isAssignableTo(pool.idx_null, optional_str));
+
+    const string_or_null = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_null });
+    try std.testing.expect(env.isAssignableTo(pool.idx_null, string_or_null));
 }
 
 test "TypeEnv resolves type aliases in annotations" {
