@@ -1491,7 +1491,7 @@ pub const TypeChecker = struct {
                 break :blk pool.addLiteralString(self.allocator, str);
             },
             .template_literal => pool.idx_string,
-            .lit_null => pool.idx_undefined, // parser rejects null, but map defensively
+            .lit_null => pool.idx_null,
             .lit_undefined => pool.idx_undefined,
             .object_literal => self.inferObjectLiteralType(node),
             .array_literal => self.inferArrayLiteralType(node),
@@ -1553,9 +1553,10 @@ pub const TypeChecker = struct {
     fn extractNarrowingGuard(self: *const TypeChecker, condition: NodeIndex) NarrowingGuard {
         const tag = self.ir_view.getTag(condition) orelse return .{};
 
-        // if (x) - truthiness guard on nullable binding
+        // if (x) - truthiness guard on nullable binding. Truthiness excludes
+        // both absent values, which is why this one asks for `.either`.
         if (tag == .identifier) {
-            const r = self.resolveNullableBinding(condition) orelse return .{};
+            const r = self.resolveAbsentBinding(condition, .either) orelse return .{};
             return .{ .key = r.key, .narrowed_type = r.inner, .negated = false };
         }
 
@@ -1584,12 +1585,20 @@ pub const TypeChecker = struct {
             const lhs_tag = self.ir_view.getTag(bin.left) orelse return .{};
             const rhs_tag = self.ir_view.getTag(bin.right) orelse return .{};
 
-            // Pattern: x === undefined / x !== undefined
-            if ((lhs_tag == .identifier and rhs_tag == .lit_undefined) or
-                (rhs_tag == .identifier and lhs_tag == .lit_undefined))
-            {
+            // Pattern: x === undefined / x !== undefined, and the same shape
+            // over `null`. Spec 5.3 makes the explicit comparison the way a
+            // type carrying `null` is taken apart, so each test removes only
+            // the value it names.
+            const absent_kind: ?AbsentKind = blk: {
+                if ((lhs_tag == .identifier and rhs_tag == .lit_undefined) or
+                    (rhs_tag == .identifier and lhs_tag == .lit_undefined)) break :blk .undefined_only;
+                if ((lhs_tag == .identifier and rhs_tag == .lit_null) or
+                    (rhs_tag == .identifier and lhs_tag == .lit_null)) break :blk .null_only;
+                break :blk null;
+            };
+            if (absent_kind) |kind| {
                 const ident_node = if (lhs_tag == .identifier) bin.left else bin.right;
-                const r = self.resolveNullableBinding(ident_node) orelse return .{};
+                const r = self.resolveAbsentBinding(ident_node, kind) orelse return .{};
                 return .{
                     .key = r.key,
                     .narrowed_type = r.inner,
@@ -2046,15 +2055,40 @@ pub const TypeChecker = struct {
 
     const NullableBinding = struct { key: u64, inner: TypeIndex };
 
-    /// If `ident_node` is an identifier bound to a nullable type, return
-    /// its binding key and the unwrapped inner type.
-    fn resolveNullableBinding(self: *const TypeChecker, ident_node: NodeIndex) ?NullableBinding {
+    /// Which absent value a guard removes. Spec 5.3 keeps `null` and
+    /// `undefined` distinct, so a test against one of them says nothing about
+    /// the other: over `string | null | undefined`, `v !== undefined` leaves
+    /// `string | null` and not `string`. `.either` is for truthiness, which is
+    /// the one test that excludes both.
+    const AbsentKind = enum {
+        undefined_only,
+        null_only,
+        either,
+
+        fn removes(self: AbsentKind, tag: type_pool_mod.TypeTag) bool {
+            return switch (self) {
+                .undefined_only => tag == .t_undefined,
+                .null_only => tag == .t_null,
+                .either => tag == .t_undefined or tag == .t_null,
+            };
+        }
+    };
+
+    /// If `ident_node` is an identifier bound to a type that may be absent in
+    /// the way `kind` names, return its binding key and the type left after
+    /// that absence is removed.
+    fn resolveAbsentBinding(self: *const TypeChecker, ident_node: NodeIndex, kind: AbsentKind) ?NullableBinding {
         const binding = self.ir_view.getBinding(ident_node) orelse return null;
         const key = bindingKey(binding);
         const current = self.currentBindingType(binding) orelse return null;
         const pool = self.env.pool;
         switch (pool.getTag(current) orelse return null) {
-            .t_nullable => return .{ .key = key, .inner = pool.getNullableInner(current) },
+            // `t_nullable` is `T | undefined`. It carries no `null`, so a
+            // `null` test over it removes nothing and installs no guard.
+            .t_nullable => {
+                if (kind == .null_only) return null;
+                return .{ .key = key, .inner = pool.getNullableInner(current) };
+            },
             // `string | undefined` written out is the same type as `string?`
             // and narrows the same way. Only the `t_nullable` spelling was
             // recognized, so every author who wrote the union form got no
@@ -2072,7 +2106,7 @@ pub const TypeChecker = struct {
                 var saw_absent = false;
                 for (members) |member| {
                     const tag = pool.getTag(member) orelse continue;
-                    if (tag == .t_undefined or tag == .t_null) {
+                    if (kind.removes(tag)) {
                         saw_absent = true;
                         continue;
                     }
@@ -3610,6 +3644,44 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
     try checkTypedSourceWithServiceContext(source, null, expect_errors, expect_warnings);
 }
 
+/// `checkTypedSource` plus the text of the diagnostic it expects. A count alone
+/// is satisfied by any error at all, including one from a different rule, so a
+/// test that means to pin a particular refusal names it.
+fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []const u8) !void {
+    const allocator = std.testing.allocator;
+
+    var strip_result = try @import("zts-engine").stripper.strip(allocator, source, .{});
+    defer strip_result.deinit();
+
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, strip_result.code);
+    defer parser.deinit();
+
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    env.populateFromTypeMap(&strip_result.type_map);
+
+    var checker = TypeChecker.init(allocator, ir_view, null, &env, null);
+    defer checker.deinit();
+
+    const errors = try checker.check(root);
+    try std.testing.expectEqual(expect_errors, errors);
+
+    for (checker.getDiagnostics()) |diag| {
+        if (std.mem.indexOf(u8, diag.message, needle) != null) return;
+    }
+    for (checker.getDiagnostics()) |diag| {
+        std.debug.print("diagnostic: {s}\n", .{diag.message});
+    }
+    return error.TestExpectedDiagnosticText;
+}
+
 /// Type the first ternary in `source` and render the result into `buf`. The
 /// rendering is returned rather than the `TypeIndex` because the pool dies with
 /// this function, so an index would dangle.
@@ -5006,6 +5078,87 @@ test "the same guard over a sixteen-member union is the control" {
     ,
         0,
         null,
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `null` narrowing (spec 5.3 / phase 3 task 2)
+// ---------------------------------------------------------------------------
+
+test "a null guard narrows the value it names" {
+    try checkTypedSource(
+        \\function take(s: string): number {
+        \\    return s.length;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const value: string | null = req.url;
+        \\    if (value !== null) {
+        \\        return Response.json({ n: take(value) });
+        \\    }
+        \\    return Response.json({ n: 0 });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "without the guard the same read is refused" {
+    // The positive control for the test above: with no narrowing at all, both
+    // programs would report the same count and neither would prove anything.
+    try checkTypedSourceSaying(
+        \\function take(s: string): number {
+        \\    return s.length;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const value: string | null = req.url;
+        \\    return Response.json({ n: take(value) });
+        \\}
+    ,
+        1,
+        "expected string, got string | null",
+    );
+}
+
+test "an undefined guard does not remove null" {
+    // Spec 5.3 keeps the two apart. `v !== undefined` over
+    // `string | null | undefined` leaves `string | null`, so the call still
+    // reports - the diagnostic is what proves the `null` member survived.
+    try checkTypedSourceSaying(
+        \\function take(s: string): number {
+        \\    return s.length;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const value: string | null | undefined = req.url;
+        \\    if (value !== undefined) {
+        \\        return Response.json({ n: take(value) });
+        \\    }
+        \\    return Response.json({ n: 0 });
+        \\}
+    ,
+        1,
+        "expected string, got string | null",
+    );
+}
+
+test "a null guard over an optional type narrows nothing" {
+    // `t_nullable` is `T | undefined` and carries no `null` member, so a
+    // `null` test over it removes nothing and must not strip the optionality
+    // the author declared.
+    try checkTypedSourceSaying(
+        \\function take(s: string): number {
+        \\    return s.length;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const value: string | undefined = req.url;
+        \\    if (value !== null) {
+        \\        return Response.json({ n: take(value) });
+        \\    }
+        \\    return Response.json({ n: 0 });
+        \\}
+    ,
+        1,
+        "expected string, got string | undefined",
     );
 }
 

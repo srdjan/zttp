@@ -37,7 +37,6 @@ current handler, so you can see which restrictions earned each `[+]` chip.
 | `async/await` | ambient scheduling and non-deterministic interleavings | deterministic effect boundary and replayable I/O | use fetch() from zttp:fetch, or parallel()/race() from zttp:io |
 | `new` | constructor dispatch and hidden initialization effects | explicit factory call sites and visible effects | use factory functions or object literals |
 | `this` | dynamic receiver binding | static call-graph and visible data flow | use explicit parameter passing |
-| `null` | dual absent-value sentinels | optional-narrowing proof totality | use undefined |
 | `== / !=` | implicit coercion paths | sound type-directed comparison | use === / !== |
 | `++ / --` | hidden in-place mutation in expressions | explicit assignment effects and state isolation | use x = x + 1 |
 | `regex` | opaque accept set and catastrophic backtracking | shape-checkable validation via zttp:validate schemas | use string methods (includes, startsWith, etc.) |
@@ -93,7 +92,6 @@ Per-restriction rationale, one sentence each.
 - **async/await** - ambient scheduling produces interleavings the replay log cannot reproduce.
 - **new** - constructor dispatch combined with prototypes hides effects from the IR.
 - **this** - the binding of `this` is dynamic and unreadable from the IR.
-- **null** - two absent-value sentinels split optional narrowing into two incompatible lattices.
 - **loose equality and implicit coercion** - loose equality coerces operands, creating control-flow paths the type checker cannot see.
 - **++ / --** - in-place mutation hides write effects in expression positions.
 - **regex literal or ambient RegExp** - regex literals describe an opaque accept set the validator cannot reason about.

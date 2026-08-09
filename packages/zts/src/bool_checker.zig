@@ -625,7 +625,10 @@ pub const BoolChecker = struct {
             .lit_bool => .boolean,
             .lit_int, .lit_float => .number,
             .lit_string, .template_literal => .string,
-            .lit_null => .undefined, // parser rejects null, but map defensively
+            // `null` is not `undefined`. This lattice has no member for it, and
+            // answering `.undefined` here would let a `null` value satisfy an
+            // absence test it does not satisfy, so it answers "cannot tell".
+            .lit_null => .unknown,
             .lit_undefined => .undefined,
             .object_literal, .array_literal => .object,
             .function_expr, .arrow_function, .function_decl => .function,
@@ -1371,10 +1374,14 @@ pub const BoolChecker = struct {
         // Pattern 2: x === undefined / undefined === x
         // For x !== undefined: narrow optional_T -> T (remove optionality)
         // For x === undefined: narrow to undefined in then-branch
+        // `null` is deliberately not one of these. This lattice cannot spell
+        // `T | null`, so treating `x !== null` as an absence test would strip
+        // optionality the comparison never established. A `null` comparison
+        // narrows through the type checker, over the real type pool.
         const ident_node = blk: {
-            if (left_tag == .identifier and (right_tag == .lit_null or right_tag == .lit_undefined)) {
+            if (left_tag == .identifier and right_tag == .lit_undefined) {
                 break :blk bin.left;
-            } else if ((left_tag == .lit_null or left_tag == .lit_undefined) and right_tag == .identifier) {
+            } else if (left_tag == .lit_undefined and right_tag == .identifier) {
                 break :blk bin.right;
             } else {
                 return null;

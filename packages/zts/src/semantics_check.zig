@@ -620,11 +620,11 @@ test "registry passes all slice mechanisms" {
 
     try std.testing.expect(result.ok());
     try std.testing.expectEqual(@as(usize, 0), result.failures.items.len);
-    // lit_int, lit_bool, identifier, ternary, call = 5 fixed value proofs
-    // + 5 binop instances + 2 unop instances = 12 nodes_proven
+    // lit_int, lit_bool, lit_null, identifier, ternary, call = 6 fixed value
+    // proofs + 5 binop instances + 2 unop instances = 13 nodes_proven
     try std.testing.expectEqual(@as(usize, 5), result.binop_instances);
     try std.testing.expectEqual(@as(usize, 2), result.unop_instances);
-    try std.testing.expectEqual(@as(usize, 12), result.nodes_proven);
+    try std.testing.expectEqual(@as(usize, 13), result.nodes_proven);
     try std.testing.expectEqual(@as(usize, 1), result.refinements_proven);
     try std.testing.expectEqual(@as(usize, 3), result.nodes_structural); // if_stmt, return_stmt, block
 }

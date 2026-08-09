@@ -1242,10 +1242,7 @@ pub const Parser = struct {
             .number => self.parseNumber(),
             .true_lit => self.parseBoolLiteral(true),
             .false_lit => self.parseBoolLiteral(false),
-            .null_lit => {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'null' is not supported; use 'undefined' for absent values instead");
-                return error.ParseError;
-            },
+            .null_lit => self.parseNullLiteral(),
             .undefined_lit => self.parseUndefinedLiteral(),
             else => {
                 self.errorAtCurrent("expected pattern (literal, object, array, or '_' wildcard)");
@@ -1716,19 +1713,7 @@ pub const Parser = struct {
             .string_literal => self.parseString(),
             .true_lit => self.parseBoolLiteral(true),
             .false_lit => self.parseBoolLiteral(false),
-            .null_lit => {
-                if (self.expression_profile != null) {
-                    const loc = self.current.location();
-                    self.advance();
-                    return try self.nodes.add(.{
-                        .tag = .lit_null,
-                        .loc = loc,
-                        .data = .{ .none = {} },
-                    });
-                }
-                self.errors.addErrorAt(.unsupported_feature, self.current, "'null' is not supported; use 'undefined' for absent values instead");
-                return error.ParseError;
-            },
+            .null_lit => self.parseNullLiteral(),
             .undefined_lit => self.parseUndefinedLiteral(),
             .regex_literal => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "regular expressions are not supported; use string methods instead");
@@ -2307,6 +2292,12 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance();
         return try self.nodes.add(Node.litBool(loc, value));
+    }
+
+    fn parseNullLiteral(self: *Parser) anyerror!NodeIndex {
+        const loc = self.current.location();
+        self.advance();
+        return try self.nodes.add(Node.litNull(loc));
     }
 
     fn parseUndefinedLiteral(self: *Parser) anyerror!NodeIndex {
@@ -5573,28 +5564,23 @@ test "parse match expression with nested object and array patterns" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "unsupported: null literal" {
+test "null literal parses as explicit data" {
     const allocator = std.testing.allocator;
     const source = "const x = null;";
 
     var parser = try Parser.init(allocator, source);
     defer parser.deinit();
 
-    _ = parser.parse() catch {
-        try std.testing.expect(parser.hasErrors());
-        const errors = parser.getErrors();
-        try std.testing.expect(errors.len > 0);
-        const err = errors[0];
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "null") != null);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "undefined") != null);
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
         return;
     };
 
-    try std.testing.expect(false);
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }
 
-test "unsupported: null in match pattern" {
+test "null is a match pattern" {
     const allocator = std.testing.allocator;
     const source =
         \\const x = match (val) {
@@ -5606,17 +5592,13 @@ test "unsupported: null in match pattern" {
     var parser = try Parser.init(allocator, source);
     defer parser.deinit();
 
-    _ = parser.parse() catch {
-        try std.testing.expect(parser.hasErrors());
-        const errors = parser.getErrors();
-        try std.testing.expect(errors.len > 0);
-        const err = errors[0];
-        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, err.kind);
-        try std.testing.expect(std.mem.indexOf(u8, err.message, "null") != null);
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
         return;
     };
 
-    try std.testing.expect(false);
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "match as property name" {

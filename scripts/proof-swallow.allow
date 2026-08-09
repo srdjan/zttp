@@ -45,6 +45,6 @@ packages/zts/src/type_checker.zig walkStmt catch-return
 # Every check downstream therefore sees more of the type than the guard proved,
 # so the failure can add a diagnostic and can never remove one. It cannot turn
 # an unproven program into a reported-proven one.
-packages/zts/src/type_checker.zig resolveNullableBinding catch-return
+packages/zts/src/type_checker.zig resolveAbsentBinding catch-return
 packages/zts/src/type_checker.zig extractTypeofGuard catch-return
 packages/zts/src/type_checker.zig extractIsArrayGuard catch-return

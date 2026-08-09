@@ -229,18 +229,6 @@ pub const entries = [_]RestrictionEntry{
         .v1_feature_name = "this",
     },
     .{
-        .id = "restriction.null",
-        .feature = "null",
-        .boundary = "one absent-value sentinel",
-        .nature = .replaced,
-        .note = "two absent-value sentinels split optional narrowing into two incompatible lattices.",
-        .alternative = "use undefined",
-        .failure_class = "dual absent-value sentinels",
-        .proof_unlocked = "optional-narrowing proof totality",
-        .enforced_by = &.{"ZTS001"},
-        .v1_feature_name = "null",
-    },
-    .{
         .id = "restriction.loose-equality",
         .feature = "loose equality and implicit coercion",
         .boundary = "visible type-directed branches",
@@ -559,10 +547,11 @@ test "every enforcing code resolves to a live rule or a known non-registry band"
 }
 
 test "the v1 projection keeps every name the v1 table published" {
-    // The v1 features table publishes 20 blocked rows. json_diagnostics asserts
+    // The v1 features table publishes 19 blocked rows. json_diagnostics asserts
     // the exact strings; this pins the count so a row cannot silently leave the
-    // v1 set.
-    try std.testing.expectEqual(@as(usize, 20), v1_count);
+    // v1 set. It was 20 until phase 3 admitted `null` (spec 5.3) and moved that
+    // name to the allowed table.
+    try std.testing.expectEqual(@as(usize, 19), v1_count);
 }
 
 test "every v1 row carries the three strings the v1 wire shape requires" {

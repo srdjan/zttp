@@ -1868,8 +1868,12 @@ pub const TypePool = struct {
                 }
             },
             .t_nullable => {
+                // The node is `T | undefined`. It printed as `T | null` while
+                // no source program could write either value, and the first
+                // `null` diagnostic to name it read "type 'null' is not
+                // assignable to type 'string | null'".
                 try self.writeType(self.getNullableInner(idx), writer);
-                try writer.writeAll(" | null");
+                try writer.writeAll(" | undefined");
             },
             .t_ref, .t_generic_param => {
                 try writer.writeAll(self.getRefName(idx));

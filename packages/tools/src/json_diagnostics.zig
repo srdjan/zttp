@@ -643,6 +643,10 @@ const allowed_features = [_]Feature{
     .{ .name = "type guards (x is T)", .status = .allowed, .alternative = null },
     .{ .name = "template literal types", .status = .allowed, .alternative = null },
     .{ .name = "comptime()", .status = .allowed, .alternative = null },
+    // Admitted in phase 3 (spec 5.3). It is data, not an absence sentinel, and
+    // it is permitted only where the declared type names it. Its row left the
+    // restriction matrix in the same commit, so the blocked count fell to 19.
+    .{ .name = "null", .status = .allowed, .alternative = null },
 };
 
 /// Refused surface forms, projected from the section-12 restriction matrix.
@@ -1020,7 +1024,10 @@ test "blocked features project from the restriction registry" {
         try std.testing.expectEqualStrings(entry.failure_class.?, f.failure_class.?);
         try std.testing.expectEqualStrings(entry.proof_unlocked.?, f.proof_unlocked.?);
     }
-    try std.testing.expectEqual(@as(usize, 20), blocked);
+    // Nineteen since phase 3 admitted `null`. A row leaves this table only when
+    // the language admits the form, which is visible in the diff and in
+    // `restrictionMatrixHash`.
+    try std.testing.expectEqual(@as(usize, 19), blocked);
     // Order is part of the frozen v1 wire shape: the registry's v1 rows come
     // out in registry order, after every allowed row.
     try std.testing.expectEqualStrings("switch/case", features[allowed_features.len].name);

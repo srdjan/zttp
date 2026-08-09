@@ -197,6 +197,10 @@ pub const node_rules = [_]NodeRule{
     // Literals: lower by pushing their own immediate, which is what they denote.
     .{ .tag = .lit_int, .proof = .value, .denote = &.{.imm}, .lower = .{ .straight = &.{.push_imm} } },
     .{ .tag = .lit_bool, .proof = .value, .denote = &.{.imm}, .lower = .{ .straight = &.{.push_imm} } },
+    // `null` is a constant of its own, distinct from `undefined`. It denotes
+    // its immediate and lowers to the constant push, the same shape the other
+    // literals have (spec 5.3).
+    .{ .tag = .lit_null, .proof = .value, .denote = &.{.imm}, .lower = .{ .straight = &.{.push_imm} } },
     // Identifier (local read): get_loc, denotes locals[0].
     .{ .tag = .identifier, .proof = .value, .denote = &.{.{ .local = 0 }}, .lower = .{ .straight = &.{.{ .push_local = 0 }} } },
     // binary_op: generic over its operator. denote = c0 c1 <op>; lower = <c0> <c1> <op>.

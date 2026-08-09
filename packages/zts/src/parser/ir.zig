@@ -593,6 +593,16 @@ pub const Node = struct {
         };
     }
 
+    /// Create a null literal node. Spec 5.3 admits `null` as explicit data,
+    /// distinct from `undefined` and permitted only where the type names it.
+    pub fn litNull(loc: SourceLocation) Node {
+        return .{
+            .tag = .lit_null,
+            .loc = loc,
+            .data = .{ .none = {} },
+        };
+    }
+
     /// Create an undefined literal node
     pub fn litUndefined(loc: SourceLocation) Node {
         return .{

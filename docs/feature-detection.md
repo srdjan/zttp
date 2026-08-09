@@ -175,12 +175,6 @@ Logical compound assignments require short-circuit semantics and are not support
 |---------|----------------------|
 | `instanceof` | Use discriminated unions with tag property |
 
-### Values
-
-| Feature | Suggested Alternative |
-|---------|----------------------|
-| `null` | Use `undefined` for absent values |
-
 ### Expression-level Features
 
 | Feature | Suggested Alternative |
