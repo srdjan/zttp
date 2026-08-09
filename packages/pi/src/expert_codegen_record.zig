@@ -13,6 +13,7 @@ const cassette_client = @import("providers/cassette_client.zig");
 const cassette_record = @import("providers/cassette_record.zig");
 const capture_sink = @import("providers/capture_sink.zig");
 const model_request = @import("providers/model_request.zig");
+const flow_artifact = @import("simulator/artifact.zig");
 const flow_promotion = @import("simulator/promotion.zig");
 const flow_recorder = @import("simulator/recorder.zig");
 const transcript_mod = @import("transcript.zig");
@@ -157,6 +158,96 @@ fn dropStashedCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, nam
     const stashed = std.fmt.allocPrint(allocator, "{s}{s}", .{ name, stash_suffix }) catch return;
     defer allocator.free(stashed);
     parent.deleteTree(io, stashed) catch {};
+}
+
+/// Where one case's provider responses were read from.
+pub const StepSource = enum { flow_artifact, flat_cassette };
+
+pub const ResolvedSteps = struct {
+    steps: [][]u8,
+    source: StepSource,
+};
+
+/// True when `name` has a recorded flow artifact, which is the descriptor's
+/// presence and nothing more. Whether that artifact loads is a separate
+/// question, and one this must not answer: a case with a descriptor and a
+/// broken generation is a corrupt corpus, and falling back to its old flat
+/// cassette would replay stale bytes under a fresh recording's name.
+fn hasFlowArtifact(allocator: std.mem.Allocator, case_root_abs: []const u8) bool {
+    const descriptor = std.fmt.allocPrint(allocator, "{s}/case.json", .{case_root_abs}) catch return false;
+    defer allocator.free(descriptor);
+    const bytes = zts.file_io.readFile(allocator, descriptor, 64 * 1024) catch return false;
+    allocator.free(bytes);
+    return true;
+}
+
+/// One case's provider responses, preferring the recorded flow artifact over
+/// the flat cassette.
+///
+/// The recorder writes flow artifacts and has since `71c7bbf4`; the flat
+/// cassettes are what every case recorded before it still carries. They are not
+/// convertible - re-recording a case to change its storage format redraws the
+/// sample, which is the re-rolling `docs/convergence.md` forbids - so both are
+/// read here and neither is ever written twice. A case has one or the other,
+/// the flat set only shrinks, and the split closes as cases are re-recorded for
+/// their own reasons.
+///
+/// Reading the artifact through `artifact.loadCase` rather than by globbing
+/// `responses/` is the point: it resolves the descriptor's active generation
+/// and checks every fixture against its recorded digest, so a corpus edited by
+/// hand fails here instead of replaying as a recording.
+fn resolveCaseSteps(
+    allocator: std.mem.Allocator,
+    repo_root: []const u8,
+    name: []const u8,
+) !ResolvedSteps {
+    const flow_case_root = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}/{s}",
+        .{ repo_root, empirical_flow_root, name },
+    );
+    defer allocator.free(flow_case_root);
+
+    if (hasFlowArtifact(allocator, flow_case_root)) {
+        var state = flow_artifact.loadCase(allocator, flow_case_root);
+        defer state.deinit();
+        switch (state) {
+            .available => |*flow_case| {
+                var list: std.ArrayList([]u8) = .empty;
+                errdefer {
+                    for (list.items) |s| allocator.free(s);
+                    list.deinit(allocator);
+                }
+                // `loadCase` appends response fixtures in `manifest.model_responses`
+                // order, which is call order, so the sequence needs no sorting.
+                for (flow_case.fixtures) |fixture| {
+                    if (fixture.role != .response) continue;
+                    try list.append(allocator, try allocator.dupe(u8, fixture.bytes));
+                }
+                return .{ .steps = try list.toOwnedSlice(allocator), .source = .flow_artifact };
+            },
+            .failure => |diagnostic| {
+                std.debug.print(
+                    "[codegen-replay] {s}: flow artifact failed to load ({s} in {s}, {s})\n",
+                    .{
+                        name,
+                        @tagName(diagnostic.kind),
+                        @tagName(diagnostic.component),
+                        diagnostic.fixturePath(),
+                    },
+                );
+                return error.UnloadableFlowArtifact;
+            },
+        }
+    }
+
+    const cassette_case_root = try std.fmt.allocPrint(
+        allocator,
+        "{s}/{s}/{s}",
+        .{ repo_root, cassette_root, name },
+    );
+    defer allocator.free(cassette_case_root);
+    return .{ .steps = try readCaseSteps(allocator, cassette_case_root), .source = .flat_cassette };
 }
 
 /// Read step_0.jsonl, step_1.jsonl, ... from an absolute case directory until a
@@ -1455,7 +1546,6 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     const a = arena.allocator();
 
     const repo_root = try cwdPathAlloc(a);
-    const codegen_dir = try std.fmt.allocPrint(a, "{s}/{s}", .{ repo_root, cassette_root });
 
     var registry = try app.buildRegistry(a);
     defer registry.deinit(a);
@@ -1478,6 +1568,11 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     // which would publish one row averaging two models.
     var corpus_model: ?[]const u8 = null;
     var models_read: usize = 0;
+    // How far the migration off flat cassettes has got. Reported rather than
+    // asserted: the count moves only when a case is re-recorded for its own
+    // reasons, so a target here would be a reason to re-record, which is the
+    // one thing the corpus rules forbid.
+    var flow_backed: usize = 0;
     // Which fences the corpus actually stands on, accumulated across cases.
     // Published under its own marker: this is a fact about the corpus and the
     // compiler, not a measurement of a model, and the two must never be lifted
@@ -1487,16 +1582,17 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     var off_registry: codegen.CodeSet = .empty;
     defer off_registry.deinit(a);
     for (record_corpus) |rc| {
-        const dir_abs = try std.fmt.allocPrint(a, "{s}/{s}", .{ codegen_dir, rc.name });
-        // Read the cassette steps from the repo (absolute) BEFORE chdir. A real
-        // read error propagates; an absent cassette yields no steps and is
+        // Read the responses from the repo (absolute) BEFORE chdir. A real read
+        // error propagates; an absent recording yields no steps and is
         // collected so the whole set is reported at once instead of aborting
         // on the first missing case.
-        const steps = try readCaseSteps(a, dir_abs);
+        const resolved = try resolveCaseSteps(a, repo_root, rc.name);
+        const steps = resolved.steps;
         if (steps.len == 0) {
             try missing.append(a, rc.name);
             continue;
         }
+        if (resolved.source == .flow_artifact) flow_backed += 1;
 
         if (cassetteModel(steps[0])) |model| {
             models_read += 1;
@@ -1627,6 +1723,10 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         return error.MissingCodegenCassette;
     }
     try testing.expectEqual(record_corpus.len, passes);
+    std.debug.print(
+        "[codegen-replay] {d}/{d} case(s) replayed from a flow artifact, {d} from a flat cassette\n",
+        .{ flow_backed, record_corpus.len, record_corpus.len - flow_backed },
+    );
 
     // Floor on the model read, before the column it feeds means anything. A
     // header-format change would leave `corpus_model` null on every case and
@@ -1835,6 +1935,69 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
         }
     }
+}
+
+test "every corpus case resolves to exactly one recording source" {
+    const allocator = std.testing.allocator;
+    const repo_root = try cwdPathAlloc(allocator);
+    defer allocator.free(repo_root);
+
+    var flow_backed: usize = 0;
+    for (record_corpus) |rc| {
+        const resolved = try resolveCaseSteps(allocator, repo_root, rc.name);
+        defer {
+            for (resolved.steps) |s| allocator.free(s);
+            allocator.free(resolved.steps);
+        }
+        // The floor that makes the counts below mean anything: a resolver that
+        // found nothing would report a clean split of zero and zero.
+        try std.testing.expect(resolved.steps.len > 0);
+        if (resolved.source == .flow_artifact) flow_backed += 1;
+    }
+
+    // Both sources are live. Asserting a number for either would be a reason to
+    // re-record a case to move it, which is the one thing the corpus rules
+    // forbid, so this asserts only that neither path is dead - a resolver that
+    // silently stopped reading artifacts would still pass a total-only check.
+    try std.testing.expect(flow_backed > 0);
+    try std.testing.expect(flow_backed < record_corpus.len);
+}
+
+test "a broken flow artifact is refused rather than falling back" {
+    const allocator = std.testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "codegen-resolve");
+    defer tmp.cleanup(allocator);
+
+    const name = "half-recorded";
+    // A descriptor and nothing else: what an interrupted recording leaves.
+    const descriptor = try std.fmt.allocPrint(allocator, "{s}/{s}/case.json", .{ empirical_flow_root, name });
+    defer allocator.free(descriptor);
+    try tmp.writeFile(allocator, descriptor, "{\"schema_version\":1}");
+
+    // The same case still has its previous flat cassette, which is exactly the
+    // situation a fallback would paper over: replaying last week's bytes under
+    // this week's recording.
+    const step = try std.fmt.allocPrint(allocator, "{s}/{s}/step_0.jsonl", .{ cassette_root, name });
+    defer allocator.free(step);
+    try tmp.writeFile(allocator, step, "{\"v\":1,\"model\":\"stale\"}\n");
+
+    try std.testing.expectError(
+        error.UnloadableFlowArtifact,
+        resolveCaseSteps(allocator, tmp.abs_path, name),
+    );
+}
+
+test "a case with neither recording resolves to no steps" {
+    const allocator = std.testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "codegen-resolve-empty");
+    defer tmp.cleanup(allocator);
+
+    const resolved = try resolveCaseSteps(allocator, tmp.abs_path, "never-recorded");
+    defer allocator.free(resolved.steps);
+    // Reported as missing by the caller, not thrown here: the whole missing set
+    // is worth more than an abort on the first one.
+    try std.testing.expectEqual(@as(usize, 0), resolved.steps.len);
+    try std.testing.expectEqual(StepSource.flat_cassette, resolved.source);
 }
 
 test "a failed recording restores the previous cassette" {
