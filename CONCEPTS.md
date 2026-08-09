@@ -34,7 +34,12 @@ A declared upper bound on the Capabilities a function may reach. The inferred se
 ### Data label
 A mark on a value recording where it came from — an environment secret, a caller's credential, request input, a clock or randomness read, or an explicit record that the analysis could not tell. Labels propagate through the operations a value passes through, so a value assembled from a labelled one carries the label.
 
-The empty set of labels is a positive claim that a value carries nothing, not an absence of information. Code that cannot determine a value's provenance must say so with the label that means "could not follow", because returning the empty set instead asserts cleanliness the analysis never established.
+The empty set of labels is a positive claim that a value carries nothing, not an absence of information. Code that cannot determine a value's provenance must say so with the label that means "could not follow", because returning the empty set instead asserts cleanliness the analysis never established. This bites hardest at a module call, where propagation is not automatic: an export is a propagator only when it declares that its result can hold what it was handed, and one that declares nothing is read as claiming its result holds nothing.
+
+### Declassifier
+An operation entitled to clear one named Data label, because performing it is what that label's discharge means — validating clears the "came from the request" mark, and a Replay boundary clears the "differs per run" mark.
+
+The entitlement is per-label and never general. A Declassifier still carries every other label its input held: a validated secret is a secret, an escaped secret is a secret, and a recorded secret is a secret. Conflating "this operation clears a label" with "this operation clears the labels" is the recurring way a disclosure Property comes to be proven over a value that discloses.
 
 ### Sink
 A position where a value leaves the program — a response body, a log, or an outbound request. Sinks are where Data labels are judged: a label arriving at a Sink is what costs a Property, and each Sink decides a different set of Properties, since a value reaching a log is not the same disclosure as one reaching a client.
