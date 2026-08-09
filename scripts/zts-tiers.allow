@@ -69,6 +69,7 @@ zts builtins/root.zig
 zts builtins/string_builtins.zig
 zts builtins/symbol.zig
 zts builtins/weak_collections.zig
+zts bytes.zig
 zts bytecode.zig
 zts bytecode_cache.zig
 zts bytecode_opt.zig

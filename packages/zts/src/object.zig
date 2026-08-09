@@ -1328,6 +1328,7 @@ pub const ClassId = enum(u8) {
     result = 22, // Result type for functional error handling
     range_iterator = 23, // Lazy range iterator for for...of
     dict = 24, // Dict<K, V>: immutable, insertion-ordered keyed data (spec 6.2)
+    bytes = 25, // Bytes: immutable octet data (spec 6.3)
     // Custom class IDs start here
     _,
 
@@ -1399,6 +1400,14 @@ pub const JSObject = extern struct {
         /// no new tracing path to keep in step (arrays store elements the same
         /// way, at slot index + 1).
         pub const DICT_ENTRIES_START: usize = 1;
+
+        /// Bytes objects: the octet buffer, a `bytes.ByteBuffer` block. One
+        /// slot and one edge, because a Bytes is written once at construction
+        /// and never mutated: the buffer is tagged `MemTag.byte_array`, which
+        /// the GC already scans as holding no pointers, so the trace
+        /// terminates there. A Dict needs two slots per entry because its
+        /// entries are values that can point onward; octets cannot.
+        pub const BYTES_BUFFER: usize = 0;
     };
 
     pub const ObjectFlags = packed struct(u8) {
@@ -1505,6 +1514,27 @@ pub const JSObject = extern struct {
             .arena_ptr = arena,
         };
         obj.inline_slots[Slots.DICT_COUNT] = value.JSValue.fromInt(0);
+        return obj;
+    }
+
+    /// A Bytes in the request arena. Same reclamation contract as an arena
+    /// Dict: the arena reset frees it, and `destroy` leaves it alone. The
+    /// buffer must come from the same arena - `Context.createBytes` is what
+    /// keeps the object and its buffer on one lifetime.
+    pub fn createBytesWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, buffer: value.JSValue) ?*JSObject {
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class_idx = class_idx,
+            .prototype = null,
+            .class_id = .bytes,
+            .flags = .{ .is_exotic = true, .is_arena = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
+        obj.inline_slots[Slots.BYTES_BUFFER] = buffer;
         return obj;
     }
 
@@ -2130,6 +2160,26 @@ pub const JSObject = extern struct {
             .arena_ptr = null,
         };
         obj.inline_slots[Slots.DICT_COUNT] = value.JSValue.fromInt(0);
+        return obj;
+    }
+
+    /// Create a Bytes over an already-built buffer. The buffer is installed at
+    /// construction and never replaced, so there is no window in which a Bytes
+    /// exists without its octets.
+    pub fn createBytes(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, buffer: value.JSValue) !*JSObject {
+        const obj = try allocator.create(JSObject);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class_idx = class_idx,
+            .prototype = null,
+            .class_id = .bytes,
+            .flags = .{ .is_exotic = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = null,
+        };
+        obj.inline_slots[Slots.BYTES_BUFFER] = buffer;
         return obj;
     }
 

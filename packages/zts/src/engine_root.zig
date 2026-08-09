@@ -25,6 +25,7 @@ pub const gc = @import("gc.zig");
 pub const string = @import("string.zig");
 pub const object = @import("object.zig");
 pub const dict = @import("dict.zig");
+pub const bytes = @import("bytes.zig");
 pub const context = @import("context.zig");
 pub const atom_table = @import("atom_table.zig");
 pub const bytecode = @import("bytecode.zig");

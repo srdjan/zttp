@@ -408,6 +408,13 @@ pub const JSValue = packed struct(u64) {
         return obj_ptr.class_id == .array;
     }
 
+    /// Check if value is a Bytes (spec 6.3)
+    pub inline fn isBytes(self: JSValue) bool {
+        if (!self.isObject()) return false;
+        const obj_ptr = self.toPtr(@import("object.zig").JSObject);
+        return obj_ptr.class_id == .bytes;
+    }
+
     /// Check if value is callable (function)
     pub inline fn isCallable(self: JSValue) bool {
         if (!self.isPtr()) return false;
@@ -525,6 +532,20 @@ pub const JSValue = packed struct(u64) {
                 const rope = other.toPtr(string.RopeNode);
                 return rope.eqlBytes(self_data.?);
             }
+        }
+
+        // Bytes compares by content (spec 6.3 puts equality in the pure
+        // surface and exports no function for it, so `===` is the only
+        // spelling). Two Bytes built independently from the same octets are
+        // one value; pointer identity would say otherwise. This sits after
+        // every other path because it only fires where the answer would
+        // already have been `false`.
+        if (self.isBytes() and other.isBytes()) {
+            const obj_mod = @import("object.zig");
+            return @import("bytes.zig").equals(
+                self.toPtr(obj_mod.JSObject),
+                other.toPtr(obj_mod.JSObject),
+            );
         }
 
         return false;

@@ -12,6 +12,7 @@ const atom_table_mod = @import("atom_table.zig");
 const http_cache_mod = @import("http_cache.zig");
 const arena_mod = @import("arena.zig");
 const string = @import("string.zig");
+const bytes_mod = @import("bytes.zig");
 const cmp = @import("interpreter/cmp.zig");
 const builtins = @import("builtins/root.zig");
 const bytecode = @import("bytecode.zig");
@@ -462,6 +463,37 @@ pub const Context = struct {
                 return error.OutOfMemory;
         }
         return try object.JSObject.createDict(self.allocator, self.root_class_idx);
+    }
+
+    /// Create a Bytes over a copy of `octets`, using the arena when hybrid
+    /// mode is enabled. The copy is what makes the value own its octets: a
+    /// Bytes over a caller's slice would outlive whatever produced it.
+    pub fn createBytes(self: *Context, octets: []const u8) !*object.JSObject {
+        if (octets.len > bytes_mod.MAX_LENGTH) return error.OutOfMemory;
+        const obj = try self.createBytesUninitialized(@intCast(octets.len));
+        @memcpy(bytes_mod.bufferMut(obj).?.dataMut(), octets);
+        return obj;
+    }
+
+    /// A Bytes of `len` octets whose buffer has not been written yet. Only
+    /// construction may call this, and it must fill the buffer before the
+    /// value reaches anything else - a Bytes is immutable from the moment a
+    /// caller can see it, not from the moment it is allocated.
+    ///
+    /// The object and its buffer are allocated from the same place. Splitting
+    /// them across the arena and the context allocator would either leak the
+    /// buffer at request end or leave the object pointing at a reclaimed one.
+    pub fn createBytesUninitialized(self: *Context, len: u32) !*object.JSObject {
+        if (len > bytes_mod.MAX_LENGTH) return error.OutOfMemory;
+        if (self.hybrid) |h| {
+            const buffer = bytes_mod.createBufferWithArena(h.arena, len) orelse
+                return error.OutOfMemory;
+            return object.JSObject.createBytesWithArena(h.arena, self.root_class_idx, value.JSValue.fromPtr(buffer)) orelse
+                return error.OutOfMemory;
+        }
+        const buffer = try bytes_mod.createBuffer(self.allocator, len);
+        errdefer bytes_mod.freeBuffer(self.allocator, buffer);
+        return try object.JSObject.createBytes(self.allocator, self.root_class_idx, value.JSValue.fromPtr(buffer));
     }
 
     /// Create a JS string pointer, using arena when hybrid mode is enabled
