@@ -103,6 +103,11 @@ fn adaptFunctionBinding(
         .required_capabilities = comptime adaptExportCapabilities(binding.required_capabilities),
         .returns = @enumFromInt(@intFromEnum(binding.returns)),
         .param_types = &param_types,
+        // Carried across the boundary rather than dropped: a peer-package
+        // module that declares a precise signature must reach the checker
+        // with it, or the coarse enum answers in its place and the loss is
+        // invisible.
+        .signature = if (binding.signature) |sig| .{ .params = sig.params, .returns = sig.returns } else null,
         .traceable = binding.traceable,
         .replay_pure = binding.replay_pure,
         .contract_extractions = &contract_extractions,

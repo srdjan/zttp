@@ -649,12 +649,32 @@ pub fn generateTypeDefs(writer: anytype) void {
             for (func.param_types, 0..) |pt, i| {
                 if (i > 0) writer.print(", ", .{}) catch return;
                 const optional_marker: []const u8 = if (i >= required_arg_count) "?" else "";
-                writer.print("arg{d}{s}: {s}", .{ i, optional_marker, returnKindToTs(pt) }) catch return;
+                writer.print("arg{d}{s}: {s}", .{ i, optional_marker, paramTypeText(func, i, pt) }) catch return;
             }
-            writer.print("): {s};\n", .{returnKindToTs(func.returns)}) catch return;
+            writer.print("): {s};\n", .{returnTypeText(func)}) catch return;
         }
         writer.print("}}\n\n", .{}) catch return;
     }
+}
+
+/// The text for parameter `index`: the binding's declared signature when it
+/// has one, and the coarse kind otherwise. Every consumer that turns a
+/// signature into text goes through this pair, so a declared signature cannot
+/// reach one surface and miss another.
+fn paramTypeText(
+    func: @import("zts").module_binding.FunctionBinding,
+    index: usize,
+    kind: @import("zts").module_binding.ReturnKind,
+) []const u8 {
+    if (func.signature) |sig| {
+        if (index < sig.params.len) return sig.params[index];
+    }
+    return returnKindToTs(kind);
+}
+
+fn returnTypeText(func: @import("zts").module_binding.FunctionBinding) []const u8 {
+    if (func.signature) |sig| return sig.returns;
+    return returnKindToTs(func.returns);
 }
 
 fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
@@ -693,10 +713,10 @@ fn forEachSignatureType(
     for (zts.builtinModules) |binding| {
         for (binding.exports) |func| {
             for (func.param_types, 0..) |pt, i| {
-                try visit(ctx, binding.specifier, func.name, i, returnKindToTs(pt));
+                try visit(ctx, binding.specifier, func.name, i, paramTypeText(func, i, pt));
                 count += 1;
             }
-            try visit(ctx, binding.specifier, func.name, func.param_types.len, returnKindToTs(func.returns));
+            try visit(ctx, binding.specifier, func.name, func.param_types.len, returnTypeText(func));
             count += 1;
         }
     }
@@ -764,14 +784,29 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
     try std.testing.expectEqual(@as(usize, 0), ctx.unparsed);
     try std.testing.expectEqual(@as(usize, 0), ctx.fallback_unknown);
 
-    // One name in the corpus does not resolve: `Record`, which `.object` and
-    // `.optional_object` emit as `Record<string, unknown>`. The pool has no
-    // index-signature type, so the application stays over an unresolved base -
-    // which assignability answers true for, in both directions, until D1
-    // amendment A1 lands. It is pinned by exact set rather than tolerated: a
-    // second unresolved name appearing in the surface fails here.
-    try std.testing.expectEqual(@as(usize, 1), ctx.unresolved.items.len);
-    try std.testing.expectEqualStrings("Record", ctx.unresolved.items[0]);
+    // Two names in the corpus do not resolve *in this pool*, and both are
+    // pinned by exact set rather than tolerated: a third appearing in the
+    // surface fails here.
+    //
+    // `Record`, which `.object` and `.optional_object` emit as
+    // `Record<string, unknown>`. The pool has no index-signature type, so the
+    // application stays over an unresolved base.
+    //
+    // `object`, from a declared signature that spells the coarse object type
+    // by its own name. It is unresolved only here: this gate parses each text
+    // in a fresh pool with no environment, and `TypeEnv.isAssignableTo` gives
+    // `object` a rule of its own (`isObjectLike`), so the checker resolves it
+    // where it matters. The gap between the two pipelines is the reason this
+    // set is asserted exactly rather than counted.
+    try std.testing.expectEqual(@as(usize, 2), ctx.unresolved.items.len);
+    var saw_record = false;
+    var saw_object = false;
+    for (ctx.unresolved.items) |name| {
+        if (std.mem.eql(u8, name, "Record")) saw_record = true;
+        if (std.mem.eql(u8, name, "object")) saw_object = true;
+    }
+    try std.testing.expect(saw_record);
+    try std.testing.expect(saw_object);
 
     var out: [32]u8 = undefined;
     hasher.final(&out);
@@ -780,7 +815,7 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 
 /// The committed digest of the whole signature surface. Regenerate deliberately:
 /// a diff here is a change to what every handler sees from `zttp:*`.
-const frozen_signature_digest = "f088fc1b209bdb3e12eca596c3033ec22e0cbd875caf72b279e575ce84520596";
+const frozen_signature_digest = "57e37055b254d9edf731c9605fc7839a171aab3b6841455fc47bff4a63063301";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

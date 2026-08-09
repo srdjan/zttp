@@ -22,11 +22,17 @@
 //! `undefined`, because that is what it means: `T | undefined` and `T?` are one
 //! type and must not hold two identities.
 //!
-//! An unresolved `t_ref` is a hard error and is never encoded. Callers resolve
-//! through `TypeEnv` first. `structurallyEqual` falls back to index equality
-//! when a key cannot be computed, which is the conservative direction: it can
-//! only fail to notice that two types are the same, never claim that two
-//! different types are one.
+//! An unresolved `t_ref` is encoded by its name, under `Z`, distinct from the
+//! `N` a nominal brand writes. That is the same identity `isAssignableTo`
+//! already gives two such refs - it compares the names and nothing else - so
+//! the encoding grants no equality the checker does not. It was a hard error
+//! until phase 5 task 5, which made an unresolved ref the normal case in one
+//! pipeline: the frozen-signature gate parses each declared signature in a
+//! fresh pool with no environment, so `Request`, `Response`, and `object`
+//! arrive there as bare refs while the checker resolves every one of them.
+//! `structurallyEqual` falls back to index equality when a key cannot be
+//! computed, which is the conservative direction: it can only fail to notice
+//! that two types are the same, never claim that two different types are one.
 
 const std = @import("std");
 const type_pool = @import("type_pool.zig");
@@ -180,7 +186,29 @@ const Encoder = struct {
                 };
             },
 
-            .t_ref => return error.UnresolvedTypeReference,
+            // A name the pool did not resolve is keyed by the name itself.
+            // That is exactly as strong as what assignability already says
+            // about two such refs - `assignableStep` compares them with
+            // `std.mem.eql` over the name and nothing else - so encoding the
+            // name adds no identity the checker does not already grant.
+            //
+            // Refusing instead was the earlier behavior, and it made the
+            // canonical key unable to cover any signature that named a type
+            // its own pool had no alias for. The declared-signature mechanism
+            // (phase 5 task 5) makes that the normal case: the frozen-
+            // signature gate parses each text in a fresh pool with no
+            // environment, so `Request`, `Response`, and `object` all arrive
+            // as bare refs there while the checker resolves every one of them.
+            //
+            // Fail-closed is preserved where it matters: `structurallyEqual`
+            // answers `false` on a key error, so the previous behavior called
+            // two identical unresolved refs different. Naming them makes that
+            // strictly more precise, never less.
+            .t_ref => {
+                const name = self.pool.getRefName(idx);
+                if (name.len == 0) return error.UnresolvedTypeReference;
+                try w.print("Z{d}:{s}", .{ name.len, name });
+            },
         }
     }
 
@@ -445,17 +473,29 @@ test "a self-referential type terminates and keeps its shape" {
     try testing.expectEqualStrings("R1.4:next^0", key);
 }
 
-test "an unresolved reference has no identity" {
+test "an unresolved reference is identified by its name" {
     const allocator = testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
     const ref = pool.addRef(allocator, "Missing");
-    try testing.expectError(error.UnresolvedTypeReference, typeKey(&pool, allocator, ref));
-    // The fallback is index equality, so two different unresolved refs are not
-    // reported as one type.
+    try testing.expectEqualStrings("Z7:Missing", try typeKey(&pool, allocator, ref));
+
+    // Two refs to one name are one type, which is what `assignableStep`
+    // already says: it compares the names and nothing else. This used to be a
+    // hard error, and the fallback then reported them as different types.
     const other = pool.addRef(allocator, "Missing");
-    try testing.expect(!structurallyEqual(&pool, allocator, ref, other));
+    try testing.expect(structurallyEqual(&pool, allocator, ref, other));
+
+    // Two names are still two types.
+    const different = pool.addRef(allocator, "Other");
+    try testing.expect(!structurallyEqual(&pool, allocator, ref, different));
+
+    // And the prefix does not collide with a nominal brand, which writes `N`
+    // and then its base's body - so a branded record and a bare name of the
+    // same spelling stay distinct.
+    const branded = pool.addNominalAlias(allocator, pool.idx_string, "Missing");
+    try testing.expect(!structurallyEqual(&pool, allocator, ref, branded));
 }
 
 test "the key is computed once per index" {

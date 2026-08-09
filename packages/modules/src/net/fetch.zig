@@ -40,6 +40,17 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object },
+            // The shape the runtime actually hands back, spelled here rather
+            // than assembled in `module_types.zig` behind an `is_fetch`
+            // branch. That branch also truncated the parameter list to one,
+            // so `init` typed as nothing; declaring both positions is what
+            // ends the truncation. Phase 5 task 6 replaces the second
+            // parameter with spec 7.2's `FetchOptions` and the return with
+            // `Result<Response, FetchError>`.
+            .signature = .{
+                .params = &.{ "string", "object" },
+                .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
+            },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
                 .{ .arg_position = 0, .category = .fetch_host, .transform = .extract_host },

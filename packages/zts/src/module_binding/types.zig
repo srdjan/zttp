@@ -78,6 +78,26 @@ pub const ReturnKind = enum {
     }
 };
 
+/// A signature spelled in source text, one entry per parameter plus the return.
+///
+/// `ReturnKind` can name a fixed set of coarse shapes and nothing else, so an
+/// export whose type is a literal union, a record, or a named ABI type had to
+/// declare `.object` or `.unknown` and lose the question at the call site.
+/// This is the override: `returnKindToTs` reads the text here before falling
+/// back to the enum, and `parseTypeExpr` - the same parser that already builds
+/// every module signature - turns it into the precise type.
+///
+/// It is a channel that already exists, not a new one. The frozen-signature
+/// gate runs the whole pipeline over every export, so a declared signature is
+/// covered by construction, and its "no fallback to `unknown`" assertion is
+/// what stops a mistyped signature from degrading quietly.
+pub const DeclaredSignature = struct {
+    /// One entry per declared parameter, in order. Must be `arg_count` long.
+    params: []const []const u8,
+    /// The return type as source text.
+    returns: []const u8,
+};
+
 // -------------------------------------------------------------------------
 // Failure severity classification
 // -------------------------------------------------------------------------
@@ -397,6 +417,12 @@ pub const FunctionBinding = struct {
     /// Type signature for parameter types (mapped to TypeIndex during type init).
     param_types: []const ReturnKind = &.{},
 
+    /// The precise signature, when the coarse kinds above cannot spell it.
+    /// Every consumer that reads `param_types`/`returns` as text goes through
+    /// `returnKindToTs`, which consults this first, so declaring it here is
+    /// enough - there is no second place to keep in step.
+    signature: ?DeclaredSignature = null,
+
     /// Whether trace/replay/durable should wrap this function.
     /// false for setup-only functions (schemaCompile, schemaDrop, sql register).
     traceable: bool = true,
@@ -578,6 +604,27 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             // io.parallel, io.race declared no parameters while reading args[0]).
             // Declare one kind per argument; mark trailing optional arguments
             // with `required_arg_count` rather than by omitting their type.
+            // A declared signature replaces the coarse text for every
+            // position, so it must cover every position. A short list would
+            // silently leave the trailing parameters on the enum - two
+            // answers to one question, with the imprecise one winning where
+            // it was least expected.
+            if (f.signature) |sig| {
+                if (sig.params.len != f.arg_count) {
+                    @compileError(std.fmt.comptimePrint(
+                        "{s}.{s} declares arg_count={d} but a signature with {d} parameters; declare one per argument",
+                        .{ b.specifier, f.name, f.arg_count, sig.params.len },
+                    ));
+                }
+                if (sig.returns.len == 0) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " declares a signature with an empty return type");
+                }
+                for (sig.params) |param_text| {
+                    if (param_text.len == 0) {
+                        @compileError(b.specifier ++ "." ++ f.name ++ " declares a signature with an empty parameter type");
+                    }
+                }
+            }
             if (f.param_types.len != f.arg_count) {
                 @compileError(std.fmt.comptimePrint(
                     "{s}.{s} declares arg_count={d} but {d} param_types; declare one kind per argument",

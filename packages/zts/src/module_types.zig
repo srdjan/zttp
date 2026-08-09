@@ -78,30 +78,6 @@ fn addField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, typ
     };
 }
 
-fn addFetchResponseType(pool: *TypePool, allocator: std.mem.Allocator, optional_string: TypeIndex) TypeIndex {
-    const name_param = addParam(pool, allocator, "name", pool.idx_string);
-    const headers_get = pool.addFunctionWithReturn(allocator, &.{name_param}, optional_string);
-    const headers_has = pool.addFunctionWithReturn(allocator, &.{name_param}, pool.idx_boolean);
-    const headers = pool.addRecord(allocator, &.{
-        addField(pool, allocator, "get", headers_get),
-        addField(pool, allocator, "has", headers_has),
-    });
-
-    const no_params: []const FuncParam = &.{};
-    const json_fn = pool.addFunctionWithReturn(allocator, no_params, pool.idx_unknown);
-    const text_fn = pool.addFunctionWithReturn(allocator, no_params, pool.idx_string);
-
-    return pool.addRecord(allocator, &.{
-        addField(pool, allocator, "ok", pool.idx_boolean),
-        addField(pool, allocator, "status", pool.idx_number),
-        addField(pool, allocator, "statusText", pool.idx_string),
-        addField(pool, allocator, "body", pool.idx_string),
-        addField(pool, allocator, "headers", headers),
-        addField(pool, allocator, "json", json_fn),
-        addField(pool, allocator, "text", text_fn),
-    });
-}
-
 /// The type-parameter name the callback-shaped exports are given. It appears in
 /// no source text: a handler writes `run(key, () => ...)` and never names the
 /// parameter, so the name only has to be stable for `unify`, which matches a
@@ -160,34 +136,21 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);
-    const fetch_response = addFetchResponseType(pool, allocator, optional_string);
 
     // Register all function signatures from the module registry
     for (builtin_modules.all) |binding| {
         for (binding.exports) |func| {
-            const is_fetch = std.mem.eql(u8, binding.specifier, "zttp:fetch") and
-                std.mem.eql(u8, func.name, "fetch");
-            const return_type_idx = if (is_fetch) fetch_response else mapReturnKind(
-                func.returns,
-                pool,
-                allocator,
-                result_type,
-                optional_string,
-                object_ref,
-                optional_object,
-            );
-
-            var sig = type_env_mod.FunctionSig{};
-            sig.return_type = return_type_idx;
-            const param_len = if (is_fetch) @min(func.param_types.len, 1) else func.param_types.len;
-            const param_count: u8 = @intCast(@min(param_len, 16));
-            sig.param_count = param_count;
-            if (func.required_arg_count) |required_arg_count| {
-                sig.required_param_count = @intCast(@min(required_arg_count, param_count));
-            }
-            for (func.param_types[0..param_count], 0..) |pt, i| {
-                sig.param_types[i] = mapReturnKind(
-                    pt,
+            // A declared signature overrides the coarse kind at every
+            // position. `zttp:fetch` was a hand-built special case here -
+            // a response record assembled in Zig and a parameter list
+            // truncated to one, so `init` typed as nothing at all. It is the
+            // first customer of the general mechanism rather than a case the
+            // mechanism has to keep working around.
+            const return_type_idx = if (func.signature) |declared|
+                env.resolveType(declared.returns)
+            else
+                mapReturnKind(
+                    func.returns,
                     pool,
                     allocator,
                     result_type,
@@ -195,6 +158,27 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
                     object_ref,
                     optional_object,
                 );
+
+            var sig = type_env_mod.FunctionSig{};
+            sig.return_type = return_type_idx;
+            const param_count: u8 = @intCast(@min(func.param_types.len, 16));
+            sig.param_count = param_count;
+            if (func.required_arg_count) |required_arg_count| {
+                sig.required_param_count = @intCast(@min(required_arg_count, param_count));
+            }
+            for (func.param_types[0..param_count], 0..) |pt, i| {
+                sig.param_types[i] = if (func.signature) |declared|
+                    env.resolveType(declared.params[i])
+                else
+                    mapReturnKind(
+                        pt,
+                        pool,
+                        allocator,
+                        result_type,
+                        optional_string,
+                        object_ref,
+                        optional_object,
+                    );
             }
 
             applyReturnFromParam(func, &sig, env, pool, allocator);
@@ -292,6 +276,50 @@ test "the bytes return kind maps to the Bytes primitive" {
     // Not the coarse `object` a binding would otherwise have had to declare -
     // which is the difference that makes a Bytes parameter refuse a record.
     try std.testing.expect(idx != object_ref);
+}
+
+test "a declared signature builds the precise type, and fetch is its first customer" {
+    // `zttp:fetch`.`fetch` was a hand-built special case in this file: a
+    // response record assembled in Zig, and a parameter list truncated to one
+    // so `init` typed as nothing at all. Both are gone; what replaces them is
+    // the text the binding owns.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateModuleTypes(&env, &pool, allocator);
+
+    const sig = env.getFnSigByName("fetch") orelse return error.MissingFetch;
+
+    // Both parameters, not one. This is the truncation ending.
+    try std.testing.expectEqual(@as(u8, 2), sig.param_count);
+    try std.testing.expectEqual(pool.idx_string, sig.param_types[0]);
+    try std.testing.expect(sig.param_types[1] != null_type_idx);
+
+    // The return type is the record the text spells, with its fields, and not
+    // the coarse `object` the binding's `returns` still declares for every
+    // other consumer.
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(sig.return_type).?);
+    var saw_status = false;
+    var saw_headers = false;
+    for (pool.getRecordFields(sig.return_type)) |f| {
+        const name = pool.getName(f.name_start, f.name_len);
+        if (std.mem.eql(u8, name, "status")) {
+            saw_status = true;
+            try std.testing.expectEqual(pool.idx_number, f.type_idx);
+        }
+        if (std.mem.eql(u8, name, "headers")) saw_headers = true;
+    }
+    try std.testing.expect(saw_status);
+    try std.testing.expect(saw_headers);
+
+    // The floor: an export with no declared signature still reads the enum, so
+    // the override is an override and not a replacement.
+    const sha = env.getFnSigByName("sha256") orelse return error.MissingSha256;
+    try std.testing.expectEqual(pool.idx_string, sha.return_type);
 }
 
 test "populateModuleTypes keeps fetchWithRetry options optional" {

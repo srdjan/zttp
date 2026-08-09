@@ -112,6 +112,7 @@ comptime {
 // --- types ----------------------------------------------------------------
 pub const EffectClass = types.EffectClass;
 pub const ReturnKind = types.ReturnKind;
+pub const DeclaredSignature = types.DeclaredSignature;
 pub const FailureSeverity = types.FailureSeverity;
 pub const DataLabel = types.DataLabel;
 pub const LabelSet = types.LabelSet;

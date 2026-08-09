@@ -38,6 +38,14 @@ pub const ReturnKind = enum {
     bytes,
 };
 
+/// A signature spelled in source text, one entry per parameter plus the
+/// return. Set it when the coarse `ReturnKind` cannot name the export's type -
+/// a literal union, a record, or a named ABI type.
+pub const DeclaredSignature = struct {
+    params: []const []const u8,
+    returns: []const u8,
+};
+
 pub const FailureSeverity = enum {
     critical,
     expected,
@@ -188,6 +196,8 @@ pub const FunctionBinding = struct {
     required_capabilities: ?[]const ModuleCapability = null,
     returns: ReturnKind = .unknown,
     param_types: []const ReturnKind = &.{},
+    /// The precise signature, when the coarse kinds above cannot spell it.
+    signature: ?DeclaredSignature = null,
     traceable: bool = true,
     /// Safe to execute live during replay/`serve --test` when no recorded I/O
     /// entry matches: result depends only on arguments and in-process setup,
