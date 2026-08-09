@@ -3,14 +3,25 @@
 const std = @import("std");
 const sdk = @import("zttp-sdk");
 
+// Three exports carry `derives_from_args`; the two that do not are the two
+// that declassify, and each says which label it clears.
+//
+// `escapeHtml` declares `validated`, which already unions its argument's
+// labels and clears only `user_input` - escaping defends against injection and
+// does not make a secret public. `mask` declares `internal`, and it is the one
+// export here whose whole purpose is to make a secret printable; unioning its
+// input back in would defeat it.
+//
+// The other three transform text and hand it back. `slugify` of a secret is a
+// slug of a secret.
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:text",
     .name = "text",
     .exports = &.{
         .{ .name = "escapeHtml", .module_func = escapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .return_labels = .{ .validated = true }, .laws = &.{.pure} },
-        .{ .name = "unescapeHtml", .module_func = unescapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
-        .{ .name = "slugify", .module_func = slugifyImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
-        .{ .name = "truncate", .module_func = truncateImpl, .arg_count = 3, .effect = .none, .returns = .string, .param_types = &.{ .string, .number, .string }, .required_arg_count = 2, .laws = &.{.pure} },
+        .{ .name = "unescapeHtml", .derives_from_args = true, .module_func = unescapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "slugify", .derives_from_args = true, .module_func = slugifyImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .laws = &.{.pure} },
+        .{ .name = "truncate", .derives_from_args = true, .module_func = truncateImpl, .arg_count = 3, .effect = .none, .returns = .string, .param_types = &.{ .string, .number, .string }, .required_arg_count = 2, .laws = &.{.pure} },
         .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .number }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .laws = &.{.pure} },
     },
 };

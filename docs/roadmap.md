@@ -855,9 +855,16 @@ declared `return_labels`, and an export that declares nothing answers the empty
 set, so a secret put into a `Dict` and read back out reached the response with
 `no_secret_leakage` PROVEN. `FunctionBinding.derives_from_args` is the repair -
 `parsedResultLabels` without the `user_input` discharge, so "the data passes
-through" and "and validating clears `user_input`" stay separable claims. The
-class is wider than the three data modules: `sha256` and `base64Encode` launder
-the same way today, probed and open.
+through" and "and validating clears `user_input`" stay separable claims.
+
+Sweeping the rest of the registry rather than reasoning about which modules look
+like security boundaries found twenty-one more, across six modules: every export
+that takes a value and returns something built from it, `slugify` and `urlEncode`
+alongside `sha256` and `base64Encode`. One survived - `escapeHtml`, because it
+declares `validated` and had been fixed already. Regenerating the goldens after
+the sweep moved a checked-in contract fixture from "the value stays contained"
+to a flow chain ending in the response body, which is what the fixture had
+always done.
 
 Spec 6.2's `comptime(dictFromEntries([...]))` does not land, for a reason the
 plan did not anticipate. Reaching a module export from the comptime evaluator

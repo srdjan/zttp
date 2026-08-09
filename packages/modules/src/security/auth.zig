@@ -20,6 +20,7 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "parseBearer",
+            .derives_from_args = true,
             // Splits a header string. Reaches neither crypto nor the clock.
             .required_capabilities = &.{},
             .module_func = parseBearerImpl,
@@ -57,7 +58,7 @@ pub const binding = sdk.ModuleBinding{
             },
         },
         // hmacSha256 only: the caller supplies every claim, including exp.
-        .{ .name = "jwtSign", .required_capabilities = &.{.crypto}, .module_func = jwtSignImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
+        .{ .name = "jwtSign", .derives_from_args = true, .required_capabilities = &.{.crypto}, .module_func = jwtSignImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .string }, .return_labels = .{ .credential = true } },
         .{
             .name = "verifyWebhookSignature",
             // hmacSha256 over the payload; no time window is checked here.

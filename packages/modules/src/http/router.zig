@@ -9,6 +9,7 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "routerMatch",
+            .derives_from_args = true,
             .module_func = routerMatchImpl,
             .arg_count = 2,
             .effect = .none,

@@ -192,6 +192,25 @@ pub const FunctionBinding = struct {
     contract_extractions: []const ContractExtraction = &.{},
     contract_flags: ContractFlags = .{},
     return_labels: LabelSet = .{},
+    /// The return value can contain data that arrived as an argument, and this
+    /// export validates nothing. The flow checker then unions every argument's
+    /// labels into the call's result instead of answering `return_labels`
+    /// alone.
+    ///
+    /// `return_labels` on its own is a fail-open for this shape, and the
+    /// default is the shape: an export declaring nothing answers the empty
+    /// set, which is a positive claim that its result carries no provenance.
+    /// Measured across this package before the field existed - `sha256`,
+    /// `base64Encode`, `urlEncode`, `slugify`, and sixteen others all returned
+    /// a secret to the response body with `no_secret_leakage` PROVEN.
+    ///
+    /// Not for an export whose result is a fact *about* its arguments rather
+    /// than data *from* them (`timingSafeEqual` returns a boolean and cannot
+    /// carry the value), one whose result comes from elsewhere (storage, a
+    /// fresh draw, the host), or a deliberate declassifier that declares what
+    /// it clears - `mask` exists to make a secret printable, and unioning its
+    /// input back in would defeat the export.
+    derives_from_args: bool = false,
     failure_severity: FailureSeverity = .none,
     laws: []const Law = &.{},
 };

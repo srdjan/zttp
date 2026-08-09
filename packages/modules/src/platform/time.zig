@@ -9,10 +9,10 @@ pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:time",
     .name = "time",
     .exports = &.{
-        .{ .name = "formatIso", .module_func = formatIsoImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
-        .{ .name = "formatHttp", .module_func = formatHttpImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
-        .{ .name = "parseIso", .module_func = parseIsoImpl, .arg_count = 1, .effect = .none, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected, .laws = &.{.pure} },
-        .{ .name = "addSeconds", .module_func = addSecondsImpl, .arg_count = 2, .effect = .none, .returns = .number, .param_types = &.{ .number, .number }, .laws = &.{.pure} },
+        .{ .name = "formatIso", .derives_from_args = true, .module_func = formatIsoImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
+        .{ .name = "formatHttp", .derives_from_args = true, .module_func = formatHttpImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.number}, .laws = &.{.pure} },
+        .{ .name = "parseIso", .derives_from_args = true, .module_func = parseIsoImpl, .arg_count = 1, .effect = .none, .returns = .number, .param_types = &.{.string}, .failure_severity = .expected, .laws = &.{.pure} },
+        .{ .name = "addSeconds", .derives_from_args = true, .module_func = addSecondsImpl, .arg_count = 2, .effect = .none, .returns = .number, .param_types = &.{ .number, .number }, .laws = &.{.pure} },
     },
 };
 

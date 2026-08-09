@@ -4948,6 +4948,78 @@ test "stringifyJson does not launder a secret" {
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
 }
 
+test "base64Encode does not launder a secret" {
+    // The sharpest row of the family: the output is the input, in another
+    // alphabet. Nothing about it is even arguably a declassification.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { base64Encode } from "zttp:crypto";
+        \\function handler(req) {
+        \\  return Response.json({ v: base64Encode(env("API_SECRET")) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "sha256 does not launder a secret" {
+    // The arguable row, and marked for the reason it is arguable. A hash is
+    // one-way, so "it is safe now" is available to say - and neither this
+    // registry nor the analysis can check it, while an unsalted hash of a
+    // low-entropy secret is recoverable. A declassification is spelled by an
+    // export that declares what it clears, the way `mask` does below.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) {
+        \\  return Response.json({ v: sha256(env("API_SECRET")) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a text transform does not launder a secret" {
+    // A second module, and one nobody would think of as a security boundary,
+    // which is the point: the shape is what decides, not the module's subject.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { slugify } from "zttp:text";
+        \\function handler(req) {
+        \\  return Response.json({ v: slugify(env("API_SECRET")) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "mask still declassifies, because that is what it is for" {
+    // The deliberate declassifier, pinned so the sweep that marked its
+    // neighbours cannot quietly take it with them. `mask` exists to make a
+    // secret printable; an export that unioned its input back in would have no
+    // reason to exist.
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  return Response.json({ v: mask(env("API_SECRET"), 4) });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "ordinary text through the same exports still proves clean" {
+    // The control for the whole sweep. Propagating every argument label is only
+    // useful if it does not refuse the handlers these modules exist for.
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\import { slugify } from "zttp:text";
+        \\import { urlEncode } from "zttp:url";
+        \\function handler(req) {
+        \\  const title = "hello world";
+        \\  return Response.json({ a: sha256(title), b: slugify(title), c: urlEncode(title) });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
 test "a dictionary of ordinary data still proves clean" {
     // The control. Propagating every argument label is only useful if it does
     // not refuse the handlers the module exists for: nothing labelled goes in

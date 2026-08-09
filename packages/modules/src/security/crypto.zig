@@ -9,6 +9,18 @@
 const std = @import("std");
 const sdk = @import("zttp-sdk");
 
+// Every export is `derives_from_args`, and `base64Encode` is the one that makes
+// the reason plain: its output *is* its input, in another alphabet. Before the
+// flag, `base64Encode(env("API_SECRET"))` returned to the response body with
+// `no_secret_leakage` PROVEN.
+//
+// `sha256` and `hmacSha256` are the arguable ones, and they are marked for the
+// same reason. A hash is one-way, so the argument that it declassifies is
+// available - which is exactly why leaving it undecided is dangerous. This
+// registry has no way to say "one-way", the analysis has no way to check one,
+// and an unsalted hash of a low-entropy secret is recoverable. A deliberate
+// declassification is spelled by an export that declares what it clears, the
+// way `mask` does.
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:crypto",
     .name = "crypto",
@@ -16,6 +28,7 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "sha256",
+            .derives_from_args = true,
             // Reaches sha256Checked through the SDK, which is what `.crypto`
             // gates.
             .required_capabilities = &.{.crypto},
@@ -28,6 +41,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "hmacSha256",
+            .derives_from_args = true,
             .required_capabilities = &.{.crypto},
             .module_func = hmacSha256Impl,
             .arg_count = 2,
@@ -38,6 +52,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "base64Encode",
+            .derives_from_args = true,
             // Base64 is a transport encoding, not a cryptographic one. The impl
             // is `std.base64` over the module allocator and reaches no gated
             // helper, so charging it `.crypto` made every ceiling over a
@@ -52,6 +67,7 @@ pub const binding = sdk.ModuleBinding{
         },
         .{
             .name = "base64Decode",
+            .derives_from_args = true,
             .required_capabilities = &.{},
             .module_func = base64DecodeImpl,
             .arg_count = 1,

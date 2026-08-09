@@ -16,6 +16,7 @@ pub const binding = sdk.ModuleBinding{
     .exports = &.{
         .{
             .name = "guard",
+            .derives_from_args = true,
             .module_func = guardImpl,
             .arg_count = 1,
             .effect = .none,
