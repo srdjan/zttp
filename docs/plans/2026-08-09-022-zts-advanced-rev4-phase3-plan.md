@@ -108,6 +108,20 @@ reports a type mismatch; a `null` literal reaches the interpreter and compares
 `=== null` true and `=== undefined` false; the restriction registry no longer
 advertises `null`, and the emitted doc matches the file.
 
+
+**Measured while landing this.** The v1 restriction surface was free to lose
+the row: nothing pins the blocked list by content, so `null` moved to the
+admitted table and the blocked count fell from 20 to 19, visible in the two
+goldens and in `restrictionMatrixHash`.
+
+Two conflations surfaced that were harmless only while no source program could
+produce a `null`. The boolean lattice has no `null` member, so it read
+`x !== null` as an absence test and stripped optionality the comparison never
+established; it answers "cannot tell" now and leaves the question to the type
+checker, where `resolveAbsentBinding` removes only the value the test names.
+And `t_nullable` printed as `T | null`, so the first `null` diagnostic read
+"type 'null' is not assignable to type 'string | null'".
+
 ### Task 3: the absence operators refuse `null`
 
 **Files:** `strict_checker.zig`, `rule_registry.zig`, `describe_rule.zig`,
@@ -131,6 +145,14 @@ non-null type is a defect in the rule.
 **Tests:** `??` over `string | null` reports ZTS624 with its repair; `??` over
 `string | undefined` does not; `?.` over a generic parameter reports; `?.` over a
 concrete record does not; the repair text names the comparison the operand needs.
+
+
+**The idiom table needed no edit.** Both rows already carried the precondition
+"operand type excludes null and is neither a generic parameter nor unknown",
+with nothing enforcing it. ZTS624 is that enforcement.
+
+**Zero of the thirteen examples trip it**, because no example annotates a
+null-bearing type yet. The corpus still replays at 100% first-draft.
 
 ### Task 4: contractive recursive aliases
 
@@ -157,6 +179,23 @@ is accepted; assignability between two structurally equal recursive aliases
 terminates and answers true; a union containing a recursive alias normalizes
 without expanding the cycle.
 
+
+**Measured before writing anything: the representation was already there.**
+The spec's `JsonValue` compiled, a nested array was assignable to it and a
+record was not, and match and join over it terminated. A2's assumption set is
+what does that work. Only the refusal was missing, and `type Loop = Loop`
+reported a type mismatch rather than the cycle.
+
+**The verdict is recorded by name and by resolved index.** Only a name with no
+definition survives as a `t_ref`: `type U = number | U` reaches the checker as
+the union itself, so a name-only lookup missed every alias that has a body -
+which is every alias that matters. Caught by the `type U = number | U` probe
+after the `type Loop = Loop` one passed.
+
+No visited set was added to `collectVariants`, `joinTypes`, or
+`normalizeUnion`. Each was probed with a self-referential alias, a
+non-contractive one, and a mutually recursive pair; none hangs.
+
 ### Task 5: match field bindings
 
 **Files:** `parse.zig`, `ir.zig`, `codegen.zig`, `scope.zig`, `type_checker.zig`,
@@ -180,6 +219,26 @@ value has the narrowed field type, not the union's; a binding does not make an
 arm match a variant lacking the field; the two idiom rows fire on their
 non-idiomatic spelling and stay silent on the idiomatic one.
 
+
+**A rule this task had to fix first.** The canonical profile asked only whether
+a `default` arm was present, so the spelling spec 5.5 requires of a closed
+union - every member covered, no `default` - was the spelling it refused. It
+measures coverage now, the same way the handler verifier does. Without that,
+the spec's own worked example does not compile and neither does the phase exit.
+
+**Bindings are arm-scoped by construction**: the parser opens one scope per arm
+before the pattern, so the name is a local in its arm and not one anywhere
+else. Codegen stores the field while the scrutinee is still on the stack.
+
+**The type had to come with the name.** A binding with no type infers nothing,
+and every use of it is checked against nothing - `take(text)` with a `number`
+parameter and a `string` field passed. `bindPatternBindings` binds the field's
+type in the arm's narrowed variant, and the test for it carries that program as
+its control.
+
+`examples/patterns/discriminated-union-match.ts` was written in exactly the
+shape ZTS626 names, and is rewritten to the binding form.
+
 ### Task 6: type-test patterns
 
 **Files:** `parse.zig`, `ir.zig`, `codegen.zig`, `match_analysis.zig`,
@@ -200,6 +259,17 @@ one missing test leaves the match non-exhaustive (ZTS205), which is the positive
 control that the coverage logic is not answering true for everything; `when
 Dict:` reports the deferral rather than parsing as a wildcard.
 
+
+**Lowered in the parser, not the kernel.** Each test becomes the narrowing test
+spec 5.4 already names for it - `typeof s === "..."`, `Array.isArray(s)` - so
+the new IR node is structural and the predicate it carries is made of nodes the
+semantics registry already covers. The alphabet pin moves from 81 to 82 and the
+structural count from 3 to 4.
+
+The lowering reads the scrutinee a second time, which is sound only for a name
+or a member path. Spec 5.5 requires exactly that of a scrutinee, so the parser
+says so at the site rather than letting a call be evaluated once per arm.
+
 ### Task 7: effectful arms, and exactly-one-arm evaluation
 
 **Files:** `strict_checker.zig`, `effect_inference.zig`, plus tests beside
@@ -217,6 +287,13 @@ call a counter-incrementing function runs exactly one of them.
 **Tests:** the counter test; an effectful second arm contributes its effect atom
 to the inferred row; a `const` initialized from a two-way effectful `match`
 passes the canonical profile.
+
+
+**All three claims already held.** Codegen lays out one labelled body per arm,
+effect inference walks every arm into one row, and no canonical rule refuses an
+effectful arm. Nothing was built here; three tests were added, each with the
+control that keeps it from being satisfied by a checker that answers the same
+way for everything.
 
 ### Task 8: the exit gate
 
@@ -243,6 +320,14 @@ check that never ran.
 
 `docs/coverage.md` and `docs/convergence.md` are regenerated in the same commit
 as whatever changes them, since the replay fails on drift.
+
+
+**The runnable example is not the spec's.** Capsule discharge does not admit a
+recursive helper - "recursive functions are not yet supported for capsule
+discharge" - so a handler that declares a `Spec` cannot call one, and
+`examples/patterns/recursive-json-value.ts` walks one level instead. The
+recursive fold is pinned as a type-checker test, where the proof stack is not
+involved. The limit is on the proof side and is recorded in the roadmap.
 
 ---
 
