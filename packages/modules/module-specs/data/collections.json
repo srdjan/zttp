@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:collections",
+  "source": "packages/zts/src/modules/data/collections.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "dictEmpty",
+      "effect": "none",
+      "returns": "dict",
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictFromEntries",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "object"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictGet",
+      "effect": "none",
+      "returns": "unknown",
+      "params": [
+        "dict",
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictSet",
+      "effect": "none",
+      "returns": "dict",
+      "params": [
+        "dict",
+        "unknown",
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictRemove",
+      "effect": "none",
+      "returns": "dict",
+      "params": [
+        "dict",
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictHas",
+      "effect": "none",
+      "returns": "boolean",
+      "params": [
+        "dict",
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictEntries",
+      "effect": "none",
+      "returns": "object",
+      "params": [
+        "dict"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictMapValues",
+      "effect": "none",
+      "returns": "dict",
+      "params": [
+        "dict",
+        "object"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictFilter",
+      "effect": "none",
+      "returns": "dict",
+      "params": [
+        "dict",
+        "object"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "dictFold",
+      "effect": "none",
+      "returns": "unknown",
+      "params": [
+        "dict",
+        "object",
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

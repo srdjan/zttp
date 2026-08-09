@@ -1800,6 +1800,7 @@ fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
         .number => "42",
         .undefined => "null",
         .unknown => "\"test-value\"",
+        .dict => "{}",
     };
 }
 

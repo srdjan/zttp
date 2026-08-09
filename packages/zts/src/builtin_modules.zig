@@ -46,6 +46,7 @@ const websocket_mod = @import("modules/net/websocket.zig");
 
 // Coupled to zts internals: io installs Context-owned state read by fetchSync;
 // scope manipulates GC roots directly. durable is pending further work.
+const collections_mod = @import("modules/data/collections.zig");
 const io_mod = @import("modules/workflow/io.zig");
 const scope_mod = @import("modules/workflow/scope.zig");
 const durable_mod = @import("modules/workflow/durable.zig");
@@ -61,6 +62,7 @@ pub const builtins = [_]ModuleBinding{
     ported.validate,
     ported.decode,
     ported.cache,
+    collections_mod.binding,
     sql_mod.binding,
     io_mod.binding,
     scope_mod.binding,
@@ -100,6 +102,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:validate", .module_path = "packages/modules/src/security/validate.zig", .spec_path = "packages/modules/module-specs/security/validate.json" },
     .{ .specifier = "zttp:decode", .module_path = "packages/modules/src/security/decode.zig", .spec_path = "packages/modules/module-specs/security/decode.json" },
     .{ .specifier = "zttp:cache", .module_path = "packages/modules/src/data/cache.zig", .spec_path = "packages/modules/module-specs/data/cache.json" },
+    .{ .specifier = "zttp:collections", .module_path = "packages/zts/src/modules/data/collections.zig", .spec_path = "packages/modules/module-specs/data/collections.json" },
     .{ .specifier = "zttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/modules/module-specs/data/sql.json" },
     .{ .specifier = "zttp:io", .module_path = "packages/zts/src/modules/workflow/io.zig", .spec_path = "packages/modules/module-specs/workflow/io.json" },
     .{ .specifier = "zttp:scope", .module_path = "packages/zts/src/modules/workflow/scope.zig", .spec_path = "packages/modules/module-specs/workflow/scope.json" },

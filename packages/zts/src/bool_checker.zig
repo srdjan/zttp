@@ -1593,6 +1593,10 @@ pub const BoolChecker = struct {
             .optional_string => .optional_string,
             .optional_object => .optional_object,
             .result => .object, // Result objects are typed as object in ExprType
+            // This lattice has no Dict member and the checker's own type pool
+            // is where a Dict is really typed; `.object` is the closest true
+            // statement here - a Dict is an object value, never absent.
+            .dict => .object,
         };
     }
 

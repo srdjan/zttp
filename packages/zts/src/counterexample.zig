@@ -365,6 +365,9 @@ fn stubValue(returns: mb.ReturnKind, truthy: bool) []const u8 {
         .number => "42",
         .undefined => "null",
         .unknown => "\"secret-sentinel\"",
+        // A Dict has no JSON literal: the witness stands in with the empty
+        // object, which is what an empty Dict serializes to.
+        .dict => "{}",
     };
 }
 

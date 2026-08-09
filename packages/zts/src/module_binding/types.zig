@@ -44,6 +44,11 @@ pub const ReturnKind = enum {
     /// Result type ({ok, value, error}) - verifier requires .ok check
     result,
 
+    /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: a binding
+    /// cannot spell an export's type parameters, so a declared `dict` reaches
+    /// the checker as `Dict<unknown, unknown>`.
+    dict,
+
     /// Lowercase JS-facing type name for signature advertisement (e.g. in
     /// `zts modules --json`). Maps the verifier-oriented tags onto the
     /// shapes a handler author actually sees at the call site.
@@ -58,6 +63,7 @@ pub const ReturnKind = enum {
             .optional_string => "string?",
             .optional_object => "object?",
             .result => "Result",
+            .dict => "Dict",
         };
     }
 };

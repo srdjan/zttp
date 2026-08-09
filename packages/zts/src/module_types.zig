@@ -32,6 +32,7 @@ const FuncParam = type_pool_mod.FuncParam;
 fn mapReturnKind(
     kind: mb.ReturnKind,
     pool: *TypePool,
+    allocator: std.mem.Allocator,
     result_type: TypeIndex,
     optional_string: TypeIndex,
     object_ref: TypeIndex,
@@ -47,6 +48,10 @@ fn mapReturnKind(
         .optional_string => optional_string,
         .optional_object => optional_object,
         .result => result_type,
+        // Coarse for the same reason `.result` is: a binding cannot spell the
+        // export's type parameters, so the value type is the top type until
+        // module signatures can carry them.
+        .dict => pool.addDict(allocator, pool.idx_unknown, pool.idx_unknown),
     };
 }
 
@@ -162,6 +167,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
             const return_type_idx = if (is_fetch) fetch_response else mapReturnKind(
                 func.returns,
                 pool,
+                allocator,
                 result_type,
                 optional_string,
                 object_ref,
@@ -180,6 +186,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
                 sig.param_types[i] = mapReturnKind(
                     pt,
                     pool,
+                    allocator,
                     result_type,
                     optional_string,
                     object_ref,

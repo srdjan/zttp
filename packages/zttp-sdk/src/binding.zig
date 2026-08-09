@@ -27,6 +27,10 @@ pub const ReturnKind = enum {
     optional_string,
     optional_object,
     result,
+    /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: the
+    /// binding surface cannot spell a module export's type parameters, so a
+    /// declared `dict` is `Dict<unknown, unknown>` to the checker.
+    dict,
 };
 
 pub const FailureSeverity = enum {
