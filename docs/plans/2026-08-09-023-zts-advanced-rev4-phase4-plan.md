@@ -54,9 +54,26 @@ band; ZTS627 upward in the canonical-profile band.
 
 Tasks 1 through 5 are done, task 8 is closed by measurement rather than by a
 rule, and task 9's example and behavioral suite are in
-`examples/patterns/json-and-dict.ts`. Two tasks are open: the Dict idiom rows
-(task 6) and the `comptime(dictFromEntries([...]))` decision (task 7), plus the
-`zttp:result` track this phase deferred from the start.
+`examples/patterns/json-and-dict.ts`.
+
+The deferred `zttp:result` track is done. Eight exports in
+`packages/zts/src/modules/data/result_mod.zig`, the roadmap's `collectAll`
+first-error row pinned both as a unit test and as a behavioral row in
+`examples/patterns/result-combinators.ts`. Effect-row polymorphism needed no
+mechanism: the exports reach nothing themselves and `effect_inference` already
+walks a callback argument into the enclosing row, which is now measured in both
+directions rather than assumed.
+
+Landing it uncovered one thing that had to come first. `zttp:collections` and
+`zttp:json` declared no `return_labels`, and an export that declares nothing
+answers the empty set - so a secret put into a Dict and read back out reached
+the response with `no_secret_leakage` PROVEN. `FunctionBinding.derives_from_args`
+is the repair, and `zttp:result` carries it from the start. The class is wider
+than the three modules: `sha256` and `base64Encode` launder a secret the same
+way today, probed and left open.
+
+Two tasks are open: the Dict idiom rows (task 6) and the
+`comptime(dictFromEntries([...]))` decision (task 7).
 
 ## Global constraints
 
