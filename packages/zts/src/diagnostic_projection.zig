@@ -203,6 +203,8 @@ fn strictCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .mutable_live_iteration => "ZTS622",
         .canonical_internal_helper_effects => "ZTS623",
         .nullish_operator_on_null => "ZTS624",
+        .canonical_redundant_pattern_rename => "ZTS625",
+        .canonical_unbound_field_read => "ZTS626",
     };
 }
 
@@ -245,7 +247,7 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    try std.testing.expectEqual(@as(usize, 66), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 68), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

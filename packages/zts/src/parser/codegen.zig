@@ -2347,6 +2347,11 @@ pub const CodeGen = struct {
             const arm_idx = self.ir.getListIndex(match_expr.arms_start, i);
             const arm = self.ir.getMatchArm(arm_idx) orelse continue;
 
+            // Spec 5.5 bindings read off the scrutinee, so they are stored
+            // while it is still on the stack - before the drop below, not
+            // after it.
+            try self.emitPatternBindings(arm.pattern);
+
             try self.emit(.drop);
             self.popStack(1);
             try self.emitNode(arm.body);
@@ -2357,6 +2362,33 @@ pub const CodeGen = struct {
         }
 
         try self.placeLabel(end_label);
+    }
+
+    /// Store every field a record pattern binds into its arm-scoped local.
+    /// The scrutinee is on top of the stack and stays there: each binding
+    /// duplicates it, reads one field, and stores that.
+    fn emitPatternBindings(self: *CodeGen, pattern_node: NodeIndex) anyerror!void {
+        if (pattern_node == null_node) return;
+        if (self.ir.getTag(pattern_node) != .match_pattern) return;
+        const pattern = self.ir.getMatchPattern(pattern_node) orelse return;
+
+        var j: u8 = 0;
+        while (j < pattern.props_count) : (j += 1) {
+            const prop_idx = self.ir.getListIndex(pattern.props_start, j);
+            const prop = self.ir.getProperty(prop_idx) orelse continue;
+            if (prop.value == null_node) continue;
+            if (self.ir.getTag(prop.value) != .identifier) continue;
+            const binding = self.ir.getBinding(prop.value) orelse continue;
+
+            const key_str_idx = self.ir.getStringIdx(prop.key) orelse continue;
+            const key_str = self.ir.getString(key_str_idx) orelse continue;
+            const atom = self.resolveKeyAtom(key_str, key_str_idx) catch continue;
+
+            try self.emit(.dup);
+            self.pushStack(1);
+            try self.emitGetField(@truncate(@intFromEnum(atom)));
+            try self.emitSetBinding(binding);
+        }
     }
 
     fn emitObjectPatternTest(self: *CodeGen, pattern_node: NodeIndex, target_label: u32) !void {
@@ -2386,6 +2418,11 @@ pub const CodeGen = struct {
 
             if (prop.value == null_node) {
                 try self.emitWildcardPresenceCheck(skip_label);
+            } else if (self.ir.getTag(prop.value) == .identifier) {
+                // A binding reads the field; it does not constrain it. The
+                // field was fetched to keep this loop uniform, so drop it.
+                try self.emit(.drop);
+                self.popStack(1);
             } else {
                 try self.emitPatternValueTest(prop.value, skip_label);
             }
@@ -2523,6 +2560,9 @@ pub const CodeGen = struct {
 
             if (prop.value == null_node) {
                 try self.emitWildcardPresenceCheck(cleanup_label);
+            } else if (self.ir.getTag(prop.value) == .identifier) {
+                try self.emit(.drop);
+                self.popStack(1);
             } else {
                 try self.emitPatternValueTest(prop.value, cleanup_label);
             }

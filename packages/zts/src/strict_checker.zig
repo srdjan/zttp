@@ -110,6 +110,13 @@ pub const DiagnosticKind = enum {
     /// `undefined` alike, so on such an operand they silently erase the
     /// distinction JSON fidelity depends on.
     nullish_operator_on_null,
+    /// A `match` record pattern renames a field to the name it already has
+    /// (`{ value: value }`). Spec 4.2.1 row `binding field name`: the
+    /// shorthand is the idiomatic spelling.
+    canonical_redundant_pattern_rename,
+    /// A `match` arm reads a field off the scrutinee instead of binding it in
+    /// the pattern. Spec 4.2.1 row `matched field read`.
+    canonical_unbound_field_read,
 };
 
 pub const Diagnostic = struct {
@@ -598,7 +605,8 @@ pub const StrictChecker = struct {
             .match_expr => {
                 const match = self.ir_view.getMatchExpr(node) orelse return;
                 self.walkExpr(match.discriminant);
-                if (!self.matchHasDefault(match)) {
+                self.checkMatchBindingIdioms(match);
+                if (!self.matchIsCovered(match)) {
                     self.addDiagnostic(.{
                         .severity = .err,
                         .kind = .non_exhaustive_profile_match,
@@ -844,6 +852,117 @@ pub const StrictChecker = struct {
             .help = help,
             .repair_intent = .drop_redundant_bool_compare,
         });
+    }
+
+    /// The two spec 4.2.1 rows a `match` binding realizes.
+    ///
+    /// `binding field name` (ZTS625): `{ value: value }` says the field name
+    /// twice; the shorthand `{ value }` is the same pattern.
+    ///
+    /// `matched field read` (ZTS626): an arm that reads a field off the
+    /// scrutinee is spelling by hand what a binding pattern field does, and
+    /// the read is a second traversal of the same value.
+    ///
+    /// Both are advisory: the code they name is correct, and the row names a
+    /// better spelling for it.
+    fn checkMatchBindingIdioms(self: *StrictChecker, match: ir.Node.MatchExpr) void {
+        const disc_binding: ?ir.BindingRef = if (self.ir_view.getTag(match.discriminant) == .identifier)
+            self.ir_view.getBinding(match.discriminant)
+        else
+            null;
+
+        for (0..match.arms_count) |i| {
+            const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+            self.checkRedundantPatternRename(arm.pattern);
+            if (disc_binding) |binding| self.checkUnboundFieldRead(arm.body, binding);
+        }
+    }
+
+    fn checkRedundantPatternRename(self: *StrictChecker, pattern: NodeIndex) void {
+        if (pattern == null_node) return;
+        if (self.ir_view.getTag(pattern) != .match_pattern) return;
+        const record = self.ir_view.getMatchPattern(pattern) orelse return;
+
+        for (0..record.props_count) |i| {
+            const prop_idx = self.ir_view.getListIndex(record.props_start, @intCast(i));
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            if (prop.is_shorthand) continue;
+            if (prop.value == null_node) continue;
+            if (self.ir_view.getTag(prop.value) != .identifier) continue;
+
+            const binding = self.ir_view.getBinding(prop.value) orelse continue;
+            const bound_name = self.resolveAtomName(binding.name_atom) orelse continue;
+            const key_str_idx = self.ir_view.getStringIdx(prop.key) orelse continue;
+            const key_str = self.ir_view.getString(key_str_idx) orelse continue;
+            if (!std.mem.eql(u8, bound_name, key_str)) continue;
+
+            self.addDiagnostic(.{
+                .severity = .advisory,
+                .kind = .canonical_redundant_pattern_rename,
+                .node = prop_idx,
+                .message = "a pattern field renamed to its own name is the shorthand binding",
+                .help = "drop the rename and write the field name once",
+            });
+        }
+    }
+
+    /// Report the first field read off `scrutinee` inside `body`. One per arm:
+    /// the repair is the same one every time, and an arm that reads three
+    /// fields does not need three advisories to say so.
+    fn checkUnboundFieldRead(self: *StrictChecker, body: NodeIndex, scrutinee: ir.BindingRef) void {
+        const found = self.findScrutineeFieldRead(body, scrutinee, 0) orelse return;
+        self.addDiagnostic(.{
+            .severity = .advisory,
+            .kind = .canonical_unbound_field_read,
+            .node = found,
+            .message = "a match arm reads a field off the scrutinee instead of binding it",
+            .help = "bind the field in the arm's pattern (`when { kind: \"echo\", text }:`) and read the bound name",
+        });
+    }
+
+    fn findScrutineeFieldRead(self: *const StrictChecker, node: NodeIndex, scrutinee: ir.BindingRef, depth: u8) ?NodeIndex {
+        if (node == null_node or depth > 16) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
+
+        switch (tag) {
+            .member_access, .optional_chain => {
+                const member = self.ir_view.getMember(node) orelse return null;
+                if (self.ir_view.getTag(member.object) == .identifier) {
+                    if (self.ir_view.getBinding(member.object)) |b| {
+                        if (b.scope_id == scrutinee.scope_id and b.slot == scrutinee.slot) return node;
+                    }
+                }
+                return self.findScrutineeFieldRead(member.object, scrutinee, depth + 1);
+            },
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return null;
+                return self.findScrutineeFieldRead(bin.left, scrutinee, depth + 1) orelse
+                    self.findScrutineeFieldRead(bin.right, scrutinee, depth + 1);
+            },
+            .unary_op, .spread => {
+                const un = self.ir_view.getUnary(node) orelse return null;
+                return self.findScrutineeFieldRead(un.operand, scrutinee, depth + 1);
+            },
+            .ternary => {
+                const t = self.ir_view.getTernary(node) orelse return null;
+                return self.findScrutineeFieldRead(t.condition, scrutinee, depth + 1) orelse
+                    self.findScrutineeFieldRead(t.then_branch, scrutinee, depth + 1) orelse
+                    self.findScrutineeFieldRead(t.else_branch, scrutinee, depth + 1);
+            },
+            .call => {
+                const call = self.ir_view.getCall(node) orelse return null;
+                var i: u16 = 0;
+                while (i < call.args_count) : (i += 1) {
+                    const arg = self.ir_view.getListIndex(call.args_start, i);
+                    if (self.findScrutineeFieldRead(arg, scrutinee, depth + 1)) |hit| return hit;
+                }
+                return null;
+            },
+            // exhaustive: the remaining tags are leaves, or they open a scope
+            // of their own whose reads are not this arm's spelling choice.
+            else => return null,
+        }
     }
 
     /// ZTS624 nullish_operator_on_null: `??` and `?.` test `null` and
@@ -1511,6 +1630,22 @@ pub const StrictChecker = struct {
 
     fn matchHasDefault(self: *const StrictChecker, match: ir.Node.MatchExpr) bool {
         return match_analysis_mod.hasDefaultArm(self.ir_view, match);
+    }
+
+    /// Spec 5.5: a closed literal or discriminated union MUST be covered
+    /// exactly and MUST NOT include `default`; an open domain MUST include
+    /// one. This rule asked only whether a `default` arm was present, so the
+    /// spelling the spec requires for a closed union - every member covered,
+    /// no `default` - was the spelling it refused. Coverage is measured the
+    /// same way the handler verifier measures it, and a `default` still
+    /// answers for a domain no analysis can enumerate.
+    fn matchIsCovered(self: *const StrictChecker, match: ir.Node.MatchExpr) bool {
+        if (self.matchHasDefault(match)) return true;
+        const tc = self.type_checker orelse return false;
+        const disc_type = tc.inferType(match.discriminant);
+        if (disc_type == null_type_idx) return false;
+        const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, tc.env.pool);
+        return analysis.isMatchExhaustive(disc_type, match);
     }
 
     fn isStaticComputedKey(self: *const StrictChecker, node: NodeIndex) bool {
@@ -2309,4 +2444,40 @@ test "`??` over unknown is refused ahead of the instantiation" {
     );
     defer h.deinit();
     try expectKind(&h.checker, .nullish_operator_on_null);
+}
+
+// ---------------------------------------------------------------------------
+// Match binding idioms, spec 4.2.1 rows (phase 3 task 5)
+// ---------------------------------------------------------------------------
+
+const command_union_source =
+    "type Command =\n  | { kind: \"echo\"; text: string }\n  | { kind: \"ping\" };\n";
+
+test "a pattern field renamed to its own name is advised to the shorthand" {
+    var h = try checkStripped(command_union_source ++
+        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text: text }: text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_pattern_rename);
+}
+
+test "the shorthand itself is advised nothing" {
+    var h = try checkStripped(command_union_source ++
+        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text }: text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_redundant_pattern_rename);
+    try expectNoKind(&h.checker, .canonical_unbound_field_read);
+}
+
+test "an arm reading the field off the scrutinee is advised to bind it" {
+    var h = try checkStripped(command_union_source ++
+        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\" }: command.text\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_unbound_field_read);
+}
+
+test "a rename under a different name is not the redundant form" {
+    var h = try checkStripped(command_union_source ++
+        "function run(command: Command): string {\n  return match (command) {\n    when { kind: \"echo\", text: message }: message\n    when { kind: \"ping\" }: \"pong\"\n  };\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_redundant_pattern_rename);
 }

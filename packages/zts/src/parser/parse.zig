@@ -1166,17 +1166,24 @@ pub const Parser = struct {
             const arm_loc = self.current.location();
             var pattern: NodeIndex = null_node;
 
+            // One scope per arm, opened before the pattern so a binding it
+            // declares is live for this arm's body and dead for the next one.
+            _ = try self.scopes.pushScope(.block);
+            errdefer self.scopes.popScope();
+
             if (self.match(.kw_when)) {
                 pattern = try self.parseMatchPattern();
             } else if (self.match(.kw_default)) {
                 // default arm - pattern stays null_node
             } else {
+                self.scopes.popScope();
                 self.errorAtCurrent("expected 'when' or 'default'");
                 break;
             }
             try self.expect(.colon, "':'");
 
             const body = try self.parseExpression(.none);
+            self.scopes.popScope();
 
             const arm_node = try self.nodes.add(.{
                 .tag = .match_arm,
@@ -1251,6 +1258,21 @@ pub const Parser = struct {
         };
     }
 
+    /// Declare a match-pattern binding as an arm-scoped `const` and return the
+    /// identifier node that carries it. The node sits in the pattern property's
+    /// value slot, which is where codegen reads the slot to store the field
+    /// into and where the analyzers read "this field is bound, not tested".
+    fn declarePatternBinding(self: *Parser, name: []const u8, loc: SourceLocation) anyerror!NodeIndex {
+        const name_atom = try self.addAtom(name);
+        const binding = self.scopes.declareBinding(
+            name,
+            name_atom,
+            .variable,
+            true,
+        ) catch return error.TooManyLocals;
+        return try self.nodes.add(Node.identifier(loc, binding));
+    }
+
     fn parseMatchObjectPattern(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance(); // consume '{'
@@ -1261,9 +1283,11 @@ pub const Parser = struct {
         while (!self.check(.rbrace) and !self.check(.eof)) {
             const prop_loc = self.current.location();
 
+            var key_name: []const u8 = "";
             const key = switch (self.current.type) {
                 .identifier => blk: {
                     const text = self.current.text(self.source);
+                    key_name = text;
                     const str_idx = try self.constants.addString(text);
                     self.advance();
                     break :blk try self.nodes.add(Node.litString(prop_loc, str_idx));
@@ -1275,8 +1299,32 @@ pub const Parser = struct {
                 },
             };
 
-            try self.expect(.colon, "':'");
-            const value = try self.parseMatchPattern();
+            // Spec 5.5: a record pattern field is a discriminant test, a
+            // binding under the field's own name (`{ text }`), or a binding
+            // under a new name (`{ value: v }`). A binding declares an
+            // arm-scoped `const` in the scope the caller pushed around this
+            // arm, so it cannot be read from the next arm or after the match.
+            var shorthand = false;
+            const value = blk: {
+                if (!self.check(.colon)) {
+                    if (key_name.len == 0) {
+                        self.errorAtCurrent("a string-keyed pattern field needs an explicit pattern or binding after ':'");
+                        return error.ParseError;
+                    }
+                    shorthand = true;
+                    break :blk try self.declarePatternBinding(key_name, prop_loc);
+                }
+                try self.expect(.colon, "':'");
+                if (self.check(.identifier)) {
+                    const text = self.current.text(self.source);
+                    if (!std.mem.eql(u8, text, "_")) {
+                        const name_loc = self.current.location();
+                        self.advance();
+                        break :blk try self.declarePatternBinding(text, name_loc);
+                    }
+                }
+                break :blk try self.parseMatchPattern();
+            };
 
             const prop_node = try self.nodes.add(.{
                 .tag = .object_property,
@@ -1285,7 +1333,7 @@ pub const Parser = struct {
                     .key = key,
                     .value = value,
                     .is_computed = false,
-                    .is_shorthand = false,
+                    .is_shorthand = shorthand,
                 } },
             });
             if (props_len >= props.len) {
@@ -5599,6 +5647,45 @@ test "null is a match pattern" {
 
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
+}
+
+test "a match binding is scoped to its arm" {
+    // The binding is declared in a scope opened per arm, so the name is a
+    // local inside its own arm and is not one anywhere else. Without the
+    // per-arm scope the second arm would resolve `text` to the first arm's
+    // slot, which is a value it never bound.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator,
+        \\const x = match (command) {
+        \\  when { kind: "echo", text }: text,
+        \\  when { kind: "ping" }: text
+        \\};
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var locals: usize = 0;
+    var non_locals: usize = 0;
+    var node: NodeIndex = 0;
+    while (node < view.nodeCount()) : (node += 1) {
+        if (view.getTag(node) != .identifier) continue;
+        const binding = view.getBinding(node) orelse continue;
+        switch (binding.kind) {
+            .local, .argument, .upvalue => locals += 1,
+            .global, .undeclared_global => non_locals += 1,
+        }
+    }
+    // The declaration and the first arm's read are locals; the second arm's
+    // read of the same name is not, because that binding is out of scope.
+    try std.testing.expect(locals >= 2);
+    try std.testing.expect(non_locals >= 1);
 }
 
 test "match as property name" {

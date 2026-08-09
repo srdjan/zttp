@@ -126,6 +126,22 @@ pub const entries = [_]IdiomEntry{
         .rewrite_rule = null,
     },
     .{
+        .id = "idiom.matched-field-read",
+        .operation = "matched field read",
+        .idiomatic = "a binding pattern field",
+        .superseded = "a match arm that reads the field off the scrutinee",
+        .precondition = "none",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.binding-field-name",
+        .operation = "binding field name",
+        .idiomatic = "shorthand { value }",
+        .superseded = "{ value: value }",
+        .precondition = "none",
+        .rewrite_rule = null,
+    },
+    .{
         .id = "idiom.element-iteration",
         .operation = "element iteration",
         .idiomatic = "for (const item of items)",

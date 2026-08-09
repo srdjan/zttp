@@ -381,6 +381,22 @@ const strict_meta = [_]struct {
         .repair = null,
     },
     .{
+        .kind = .canonical_redundant_pattern_rename,
+        .code = "ZTS625",
+        .description = "A match record pattern renames a field to the name it already has.",
+        .example = "when { value: value }: value",
+        .help = "Write the shorthand binding: `when { value }: value`.",
+        .repair = null,
+    },
+    .{
+        .kind = .canonical_unbound_field_read,
+        .code = "ZTS626",
+        .description = "A match arm reads a field off the scrutinee instead of binding it in the pattern.",
+        .example = "when { kind: \"echo\" }: command.text",
+        .help = "Bind the field in the pattern (`when { kind: \"echo\", text }:`) and read the bound name; the binding is already narrowed and needs no second read of the scrutinee.",
+        .repair = null,
+    },
+    .{
         .kind = .nullish_operator_on_null,
         .code = "ZTS624",
         .description = "`??` or `?.` applied where the operand's type admits `null`, a generic parameter, or `unknown`.",

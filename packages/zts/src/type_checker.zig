@@ -2746,6 +2746,7 @@ pub const TypeChecker = struct {
                 if (narrowed_type != null_type_idx) {
                     const saved = self.narrowed.get(disc_key.?);
                     self.narrowed.put(self.allocator, disc_key.?, narrowed_type) catch self.markAllocationFailure();
+                    self.bindPatternBindings(arm.pattern, narrowed_type);
                     self.walkExpr(arm.body);
                     if (saved) |s| {
                         self.narrowed.put(self.allocator, disc_key.?, s) catch self.markAllocationFailure();
@@ -2755,7 +2756,41 @@ pub const TypeChecker = struct {
                     continue;
                 }
             }
+            // Not a narrowable union, so the arm sees the scrutinee's own type.
+            // A binding still needs its field type: without one it infers
+            // nothing, and a call that misuses it is checked against nothing.
+            self.bindPatternBindings(arm.pattern, disc_type);
             self.walkExpr(arm.body);
+        }
+    }
+
+    /// Give every field a record pattern binds the type that field has in the
+    /// arm's narrowed scrutinee (spec 5.5). Without this the bound name infers
+    /// nothing, and every use of it is checked against nothing - which is the
+    /// fail-open shape, not a missing feature: `take(text)` with a `number`
+    /// parameter and a `string` field would pass.
+    fn bindPatternBindings(self: *TypeChecker, pattern: ir.NodeIndex, scrutinee: TypeIndex) void {
+        if (pattern == ir.null_node or scrutinee == null_type_idx) return;
+        if (self.ir_view.getTag(pattern) != .match_pattern) return;
+        const record = self.ir_view.getMatchPattern(pattern) orelse return;
+        const pool = self.env.pool;
+        if (pool.getTag(scrutinee) != .t_record) return;
+
+        for (0..record.props_count) |i| {
+            const prop_idx = self.ir_view.getListIndex(record.props_start, @intCast(i));
+            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+            if (prop.value == ir.null_node) continue;
+            if (self.ir_view.getTag(prop.value) != .identifier) continue;
+            const binding = self.ir_view.getBinding(prop.value) orelse continue;
+
+            const key_str_idx = self.ir_view.getStringIdx(prop.key) orelse continue;
+            const key_str = self.ir_view.getString(key_str_idx) orelse continue;
+
+            for (pool.getRecordFields(scrutinee)) |field| {
+                if (!std.mem.eql(u8, pool.getName(field.name_start, field.name_len), key_str)) continue;
+                self.binding_types.put(self.allocator, bindingKey(binding), field.type_idx) catch self.markAllocationFailure();
+                break;
+            }
         }
     }
 
@@ -5199,6 +5234,78 @@ test "a null guard over an optional type narrows nothing" {
     ,
         1,
         "expected string, got string | undefined",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `match` field bindings (spec 5.5 / phase 3 task 5)
+// ---------------------------------------------------------------------------
+
+const command_union =
+    \\type Command =
+    \\  | { kind: "echo"; text: string }
+    \\  | { kind: "ping" };
+;
+
+test "a shorthand binding carries the field type" {
+    try checkTypedSource(
+        command_union ++
+            \\function take(s: string): number {
+            \\    return s.length;
+            \\}
+            \\function run(command: Command): number {
+            \\    return match (command) {
+            \\        when { kind: "echo", text }: take(text)
+            \\        when { kind: "ping" }: 0
+            \\    };
+            \\}
+            \\function handler(req: Request): Response {
+            \\    return Response.json({ n: run({ kind: "ping" }) });
+            \\}
+        ,
+        0,
+        null,
+    );
+}
+
+test "a binding used against the wrong type is refused" {
+    // The positive control: with no type on the binding, every use of it is
+    // checked against nothing and this program passes too.
+    try checkTypedSourceSaying(
+        command_union ++
+            \\function take(n: number): number {
+            \\    return n;
+            \\}
+            \\function run(command: Command): number {
+            \\    return match (command) {
+            \\        when { kind: "echo", text }: take(text)
+            \\        when { kind: "ping" }: 0
+            \\    };
+            \\}
+            \\function handler(req: Request): Response {
+            \\    return Response.json({ n: run({ kind: "ping" }) });
+            \\}
+        ,
+        1,
+        "expected number, got string",
+    );
+}
+
+test "a rename binds the field under the new name" {
+    try checkTypedSource(
+        command_union ++
+            \\function run(command: Command): string {
+            \\    return match (command) {
+            \\        when { kind: "echo", text: message }: message
+            \\        when { kind: "ping" }: "pong"
+            \\    };
+            \\}
+            \\function handler(req: Request): Response {
+            \\    return Response.json({ s: run({ kind: "ping" }) });
+            \\}
+        ,
+        0,
+        null,
     );
 }
 

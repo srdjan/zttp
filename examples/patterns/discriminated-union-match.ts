@@ -2,10 +2,12 @@
 //
 // A tagged union makes impossible states unrepresentable: every value
 // carries a `kind` discriminant, so `match` narrows each arm to exactly
-// one variant. There is one absent-value sentinel, `undefined`, never
-// `null`. `match` exhaustiveness is checked natively: the `default` arm below
-// proves the match exhaustive (the reliable form for a parameter discriminant).
-// No `assertNever(x: never)` helper is needed to get that guarantee.
+// one variant. `match` exhaustiveness is checked natively: a closed union
+// covered member by member needs no `default`, and the spec forbids one
+// there. No `assertNever(x: never)` helper is needed to get that guarantee.
+//
+// An arm reads a field by binding it in the pattern (`text` below), not by
+// reading it back off the scrutinee.
 
 import type { Spec } from "zttp:types";
 
@@ -24,12 +26,10 @@ type Guardrails = Spec<
 
 function run(cmd: Command): string {
     return match (cmd) {
-        when { kind: "echo" }:
-            cmd.text
+        when { kind: "echo", text }:
+            text
         when { kind: "ping" }:
             "pong"
-        default:
-            "unknown"
     };
 }
 

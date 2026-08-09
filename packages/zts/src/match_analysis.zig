@@ -153,9 +153,14 @@ pub const MatchAnalysis = struct {
             .lit_string => self.stringPatternCanMatchType(pattern, type_idx),
             .lit_int => self.intPatternCanMatchType(pattern, type_idx),
             .lit_bool => self.boolPatternCanMatchType(pattern, type_idx),
+            .lit_null => type_tag == .t_null,
             .lit_undefined => type_tag == .t_undefined,
             .match_pattern => self.objectPatternCanMatchType(pattern, type_idx),
             .array_pattern => self.arrayPatternCanMatchType(pattern, type_idx),
+            // A binding (spec 5.5) reads the field; it constrains nothing, so
+            // it matches whatever the field holds - the same answer the
+            // wildcard gives, with a name attached.
+            .identifier => true,
             else => false,
         };
     }
@@ -184,9 +189,11 @@ pub const MatchAnalysis = struct {
             .lit_string => self.stringPatternFullyCoversType(pattern, type_idx),
             .lit_int => self.intPatternFullyCoversType(pattern, type_idx),
             .lit_bool => self.boolPatternFullyCoversType(pattern, type_idx),
+            .lit_null => type_tag == .t_null,
             .lit_undefined => type_tag == .t_undefined,
             .match_pattern => self.objectPatternFullyCoversType(pattern, type_idx),
             .array_pattern => self.arrayPatternFullyCoversType(pattern, type_idx),
+            .identifier => true,
             else => false,
         };
     }
