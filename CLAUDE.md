@@ -78,6 +78,7 @@ Import via `import { fn } from "zttp:module"`. Most implementations live in `pac
 | `zttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` |
 | `zttp:collections` | `dictEmpty`, `dictFromEntries`, `dictGet`, `dictSet`, `dictRemove`, `dictHas`, `dictEntries`, `dictMapValues`, `dictFilter`, `dictFold` |
 | `zttp:json` | `parseJson`, `stringifyJson` |
+| `zttp:result` | `ok`, `err`, `mapResult`, `mapError`, `andThen`, `orElse`, `unwrapOr`, `collectAll` |
 | `zttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` |
 | `zttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` |
 | `zttp:service` | `serviceCall` |

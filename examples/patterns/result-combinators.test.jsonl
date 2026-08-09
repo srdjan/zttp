@@ -1,0 +1,18 @@
+{"type":"test","name":"a combinator chain transforms the value and leaves the error alone"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"value\":43"}
+{"type":"test","name":"unwrapOr takes the fallback from an err"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"fallback\":-1"}
+{"type":"test","name":"orElse recovers from the relabelled error"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"recovered\":\"recovered from boom-relabelled\""}
+{"type":"test","name":"collectAll over all-ok collects the values in order"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"collected\":[1,2,3]"}
+{"type":"test","name":"collectAll returns the first error and not the second"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"firstError\":\"first\""}
+{"type":"test","name":"collectAll of an empty list is an ok"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"emptyOk\":true"}

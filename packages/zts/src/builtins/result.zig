@@ -34,7 +34,11 @@ fn resultErrorFieldAtom(obj: *const object.JSObject) object.Atom {
     return obj.resultErrorFieldAtom() orelse .@"error";
 }
 
-fn coerceResultLike(ctx: *context.Context, val: value.JSValue) ?value.JSValue {
+/// Read a value as a `Result`, whether it came from a native constructor or
+/// from a record literal with the `{ ok, value }` / `{ ok, error }` shape.
+/// Public for `zttp:result`, whose `collectAll` walks an array whose elements
+/// may be either.
+pub fn coerceResultLike(ctx: *context.Context, val: value.JSValue) ?value.JSValue {
     const pool = ctx.hidden_class_pool orelse return null;
     const obj = getObject(val) orelse return null;
     if (obj.class_id == .result) return val;
@@ -145,6 +149,20 @@ pub fn resultMapErr(ctx: *context.Context, this: value.JSValue, args: []const va
 pub fn resultAndThen(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const obj = getNativeResult(this) orelse return this;
     if (!obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
+    const callback = getCallbackArg(args) orelse return this;
+    const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
+    const next = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
+    return coerceResultLike(ctx, next) orelse value.JSValue.undefined_val;
+}
+
+/// `orElse(result, f)` - pass an ok through, hand an err's payload to `f` and
+/// take the `Result` it returns. The recovery half of `andThen`, and the shape
+/// spec 6.1 names. Not installed as a prototype method: the profile imports the
+/// combinators as free functions from `zttp:result`, and adding a method here
+/// would publish a second spelling of it.
+pub fn resultOrElse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+    const obj = getNativeResult(this) orelse return this;
+    if (obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
     const next = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;

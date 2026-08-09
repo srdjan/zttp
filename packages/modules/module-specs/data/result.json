@@ -1,0 +1,89 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:result",
+  "source": "packages/zts/src/modules/data/result_mod.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "ok",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "err",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "mapResult",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "result",
+        "object"
+      ]
+    },
+    {
+      "name": "mapError",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "result",
+        "object"
+      ]
+    },
+    {
+      "name": "andThen",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "result",
+        "object"
+      ]
+    },
+    {
+      "name": "orElse",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "result",
+        "object"
+      ]
+    },
+    {
+      "name": "unwrapOr",
+      "effect": "none",
+      "returns": "unknown",
+      "params": [
+        "result",
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "collectAll",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "object"
+      ],
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

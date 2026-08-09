@@ -27,6 +27,7 @@ Use `zttp modules --json` for the live export list from the built binary.
 | `zttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` | `clock`, `stderr` |
 | `zttp:queue` | `send`, `request`, `receive`, `ack`, `nack`, `reply` | `runtime_callback` |
 | `zttp:ratelimit` | `rateCheck`, `rateReset` | `clock` |
+| `zttp:result` | `ok`, `err`, `mapResult`, `mapError`, `andThen`, `orElse`, `unwrapOr`, `collectAll` | none |
 | `zttp:router` | `routerMatch` | none |
 | `zttp:scope` | `scope`, `using`, `ensure` | `runtime_callback` |
 | `zttp:service` | `serviceCall` | `network`, `filesystem`, `runtime_callback` |

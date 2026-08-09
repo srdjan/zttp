@@ -48,6 +48,7 @@ const websocket_mod = @import("modules/net/websocket.zig");
 // scope manipulates GC roots directly. durable is pending further work.
 const collections_mod = @import("modules/data/collections.zig");
 const json_mod = @import("modules/data/json_mod.zig");
+const result_mod = @import("modules/data/result_mod.zig");
 const io_mod = @import("modules/workflow/io.zig");
 const scope_mod = @import("modules/workflow/scope.zig");
 const durable_mod = @import("modules/workflow/durable.zig");
@@ -65,6 +66,7 @@ pub const builtins = [_]ModuleBinding{
     ported.cache,
     collections_mod.binding,
     json_mod.binding,
+    result_mod.binding,
     sql_mod.binding,
     io_mod.binding,
     scope_mod.binding,
@@ -106,6 +108,7 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:cache", .module_path = "packages/modules/src/data/cache.zig", .spec_path = "packages/modules/module-specs/data/cache.json" },
     .{ .specifier = "zttp:collections", .module_path = "packages/zts/src/modules/data/collections.zig", .spec_path = "packages/modules/module-specs/data/collections.json" },
     .{ .specifier = "zttp:json", .module_path = "packages/zts/src/modules/data/json_mod.zig", .spec_path = "packages/modules/module-specs/data/json.json" },
+    .{ .specifier = "zttp:result", .module_path = "packages/zts/src/modules/data/result_mod.zig", .spec_path = "packages/modules/module-specs/data/result.json" },
     .{ .specifier = "zttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/modules/module-specs/data/sql.json" },
     .{ .specifier = "zttp:io", .module_path = "packages/zts/src/modules/workflow/io.zig", .spec_path = "packages/modules/module-specs/workflow/io.json" },
     .{ .specifier = "zttp:scope", .module_path = "packages/zts/src/modules/workflow/scope.zig", .spec_path = "packages/modules/module-specs/workflow/scope.json" },

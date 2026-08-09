@@ -1585,6 +1585,43 @@ test "a named helper passed as a callback reaches the caller's row" {
     try testing.expect(render.capabilities.contains(.env));
 }
 
+test "a Result combinator's row is the join of its callback's" {
+    // Spec 6.1 makes the `zttp:result` combinators effect-row polymorphic: the
+    // callback MAY be effectful, and the call's row is the join of the
+    // callback's and its operands'. `mapResult` declares `.none` and reaches
+    // nothing itself, so the join is entirely this walk's answer - nothing
+    // declares it, and nothing but a test would notice if it stopped holding.
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { ok, mapResult } from "zttp:result";
+        \\function inline_cb(r) { return mapResult(r, (x) => env("PREFIX") + x); }
+        \\function named_cb(x) { return env("PREFIX") + x; }
+        \\function via_named(r) { return mapResult(r, named_cb); }
+        \\function pure_cb(r) { return mapResult(r, (x) => x + 1); }
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const inline_cb = analyzer.lookup("inline_cb") orelse return error.FunctionNotFound;
+    const via_named = analyzer.lookup("via_named") orelse return error.FunctionNotFound;
+    const pure_cb = analyzer.lookup("pure_cb") orelse return error.FunctionNotFound;
+    try testing.expect(inline_cb.capabilities.contains(.env));
+    try testing.expect(via_named.capabilities.contains(.env));
+    // The other half of polymorphic: a pure callback leaves the row empty. A
+    // combinator that always contributed its callback's worst case would pass
+    // the two assertions above and fail this one.
+    try testing.expect(!pure_cb.capabilities.contains(.env));
+}
+
 test "a call through a function-typed parameter marks the row a lower bound" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
