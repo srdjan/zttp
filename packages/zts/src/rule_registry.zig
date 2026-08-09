@@ -380,6 +380,14 @@ const strict_meta = [_]struct {
         .help = "Iterate a snapshot: read from one collection and build the mutated one separately.",
         .repair = null,
     },
+    .{
+        .kind = .nullish_operator_on_null,
+        .code = "ZTS624",
+        .description = "`??` or `?.` applied where the operand's type admits `null`, a generic parameter, or `unknown`.",
+        .example = "const name: string | null = row.name; const shown = name ?? \"anonymous\";",
+        .help = "Both operators test `null` and `undefined` alike, so on such an operand they erase the distinction. Compare explicitly (`x === null`, `x === undefined`) or take the value apart with `match`. On a concrete type without `null` both operators stay idiomatic.",
+        .repair = .insert_guard_before_line,
+    },
 };
 
 // ---------------------------------------------------------------------------

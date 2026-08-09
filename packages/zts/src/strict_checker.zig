@@ -105,6 +105,11 @@ pub const DiagnosticKind = enum {
     canonical_destructure_depth,
     canonical_unused_index_alias,
     canonical_redundant_bool_compare,
+    /// An absence operator (`??` or `?.`) applied where the operand's static
+    /// type can be `null`. Spec 5.3: both operators test `null` and
+    /// `undefined` alike, so on such an operand they silently erase the
+    /// distinction JSON fidelity depends on.
+    nullish_operator_on_null,
 };
 
 pub const Diagnostic = struct {
@@ -461,6 +466,7 @@ pub const StrictChecker = struct {
             .binary_op => {
                 const bin = self.ir_view.getBinary(node) orelse return;
                 self.checkRedundantBoolCompare(node, bin);
+                if (bin.op == .nullish) self.checkAbsenceOperator(node, bin.left, "??");
                 self.walkExpr(bin.left);
                 self.walkExpr(bin.right);
             },
@@ -497,6 +503,7 @@ pub const StrictChecker = struct {
             },
             .member_access, .optional_chain => {
                 const member = self.ir_view.getMember(node) orelse return;
+                if (tag == .optional_chain) self.checkAbsenceOperator(node, member.object, "?.");
                 self.walkExpr(member.object);
             },
             .computed_access => {
@@ -836,6 +843,45 @@ pub const StrictChecker = struct {
             .message = "comparing a boolean against a boolean literal is not canonical ZigTS",
             .help = help,
             .repair_intent = .drop_redundant_bool_compare,
+        });
+    }
+
+    /// ZTS624 nullish_operator_on_null: `??` and `?.` test `null` and
+    /// `undefined` alike, so on an operand whose static type can be `null`
+    /// they erase the distinction spec 5.3 keeps. The operator stays the
+    /// idiomatic spelling of `undefined`-absence on every concrete type
+    /// without `null`; the refusal is exactly the case where its single
+    /// meaning is not single.
+    ///
+    /// A generic parameter and `unknown` are refused for the same reason
+    /// ahead of time: a later instantiation can admit `null` under source the
+    /// checker has already accepted.
+    fn checkAbsenceOperator(self: *StrictChecker, node: NodeIndex, operand: NodeIndex, spelling: []const u8) void {
+        const tc = self.type_checker orelse return;
+        const pool = tc.env.pool;
+        const operand_type = tc.inferType(operand);
+        // No inferred type is not the same answer as `unknown`. Inference
+        // produced nothing here, so there is no claim to make either way.
+        if (operand_type == null_type_idx) return;
+
+        const admits_null = switch (pool.getTag(operand_type) orelse return) {
+            .t_generic_param => true,
+            else => tc.env.isAssignableTo(pool.idx_null, operand_type),
+        };
+        if (!admits_null) return;
+
+        const help = if (std.mem.eql(u8, spelling, "??"))
+            "test the value explicitly: `x === null ? fallback : x`, or `x === undefined ? fallback : x`, or take it apart with `match`"
+        else
+            "test the value explicitly before the read: `if (x !== null) { x.field }`, or take it apart with `match`";
+
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .nullish_operator_on_null,
+            .node = node,
+            .message = "an absence operator swallows `null` on an operand whose type admits it",
+            .help = help,
+            .repair_intent = .insert_guard_before_line,
         });
     }
 
@@ -2214,4 +2260,53 @@ test "this checker records imports from unresolved modules" {
     try std.testing.expectEqual(@as(usize, 1), checker.imported_functions.items.len);
     try std.testing.expectEqualStrings("zttp-ext:unknown", checker.imported_functions.items[0].module);
     try std.testing.expectEqualStrings("thing", checker.imported_functions.items[0].name);
+}
+
+// ---------------------------------------------------------------------------
+// ZTS624 nullish_operator_on_null (spec 5.3 / phase 3 task 3)
+// ---------------------------------------------------------------------------
+
+test "`??` over a type that admits null is refused" {
+    var h = try checkStripped(
+        "function handler(req: Request): Response {\n  const name: string | null = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown });\n}\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .nullish_operator_on_null);
+}
+
+test "`??` over an optional type stays idiomatic" {
+    // The control for the test above. On a concrete type without `null` the
+    // operator keeps exactly one meaning and is the idiomatic spelling of it,
+    // so a rule that fired here would refuse the corpus rather than a defect.
+    var h = try checkStripped(
+        "function handler(req: Request): Response {\n  const name: string | undefined = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown });\n}\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .nullish_operator_on_null);
+}
+
+test "`?.` over a type that admits null is refused" {
+    var h = try checkStripped(
+        "function handler(req: Request): Response {\n  const row: { name: string } | null = undefined;\n  const shown = row?.name;\n  return Response.json({ shown });\n}\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .nullish_operator_on_null);
+}
+
+test "`?.` over a concrete record stays idiomatic" {
+    var h = try checkStripped(
+        "function handler(req: Request): Response {\n  const row: { name: string } | undefined = undefined;\n  const shown = row?.name;\n  return Response.json({ shown });\n}\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .nullish_operator_on_null);
+}
+
+test "`??` over unknown is refused ahead of the instantiation" {
+    // Spec 5.3 refuses `unknown` and a generic parameter for the same reason:
+    // a later instantiation can admit `null` under source already accepted.
+    var h = try checkStripped(
+        "function handler(req: Request): Response {\n  const raw: unknown = req.url;\n  const shown = raw ?? \"anonymous\";\n  return Response.json({ ok: true });\n}\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .nullish_operator_on_null);
 }
