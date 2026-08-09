@@ -61,7 +61,27 @@ A point where a value is recorded on the first run and reproduced on later ones.
 ### Narrowing
 The compiler's flow-sensitive refinement of a binding's type inside the region a test proves something about it, held apart from the declared type so it can be discarded without losing the declaration.
 
-The set of tests admitted as evidence is closed and small: a value compared against the absent-value sentinel, a `typeof` comparison, an array test, a discriminant field compared against a literal, a bare boolean discriminant read, and the negation or conjunction of those. A test outside the list installs nothing, because a refinement the compiler cannot re-derive is a claim rather than a proof. A Narrowing is killed when the binding is assigned, when a loop body may assign it, and when the branch that established it closes - the last because a refinement established under a condition says nothing about the path where that condition was false. Admission is decided on the form of a test and never on whether that test would refine this particular declared type, since an admitted test over a type with nothing to refine is still an admitted test.
+The set of tests admitted as evidence is closed and small: a value compared against one of the two absent values, a `typeof` comparison, an array test, a discriminant field compared against a literal, a bare boolean discriminant read, and the negation or conjunction of those. A test outside the list installs nothing, because a refinement the compiler cannot re-derive is a claim rather than a proof. A Narrowing is killed when the binding is assigned, when a loop body may assign it, and when the branch that established it closes - the last because a refinement established under a condition says nothing about the path where that condition was false. Admission is decided on the form of a test and never on whether that test would refine this particular declared type, since an admitted test over a type with nothing to refine is still an admitted test.
+
+### Absence sentinel
+The one value that means "not there": a missing optional field, a lookup that found nothing, a parameter left off. Its counterpart is data that happens to be empty, which the language spells with a separate value and admits only where the declared type names it - so a type that carries the second value is not a type that may be absent.
+
+Keeping them apart is compiler-enforced rather than remembered, because the two operators that supply a default and read through an absent value test both alike and would silently erase the distinction. Those operators are refused on any operand whose type admits the data value, and on a type parameter or the top type, where a later instantiation could admit it. A test against one of the two says nothing about the other: a guard that removes absence leaves the data value in place, and a helper that removed both would claim a refinement the test never established.
+
+### Contractive alias
+A recursive type whose every cycle passes through a value constructor - a record, a tuple, an array - and which therefore describes finite values.
+
+Contractivity is what makes recursion admissible rather than an infinite type: the compiler unfolds a guarded cycle with a memoized pair comparison and never expands it. A union or intersection edge does not guard, so a type that names itself through only those, directly, or through a function parameter is refused. The check is decided once over the whole type namespace, after it closes, so a forward reference is not mistaken for a cycle.
+
+### Type-test pattern
+A `match` arm that selects on a value's kind rather than on its contents, covering the closed set of core value kinds.
+
+Each test lowers to the corresponding admitted Narrowing test, so a type test adds no evidence the compiler could not already re-derive, and it narrows the scrutinee for its arm the same way. Together with literal patterns it is what lets a heterogeneous union be taken apart exhaustively without a catch-all arm, which a closed union is required to do without.
+
+### Pattern binding
+A `match` record-pattern field that names the field instead of testing it, introducing an arm-scoped constant of that field's narrowed type.
+
+A binding constrains nothing - the discriminant tests in the same pattern do the selecting - and it is the idiomatic way for an arm to read a field, in place of reading it back off the scrutinee. Its scope is the arm: the name is not in scope in a sibling arm or after the match.
 
 ### Type predicate
 A declaration that a function's true return means its named parameter has a narrower type.
