@@ -368,6 +368,11 @@ fn stubValue(returns: mb.ReturnKind, truthy: bool) []const u8 {
         // A Dict has no JSON literal: the witness stands in with the empty
         // object, which is what an empty Dict serializes to.
         .dict => "{}",
+        // Nor does a Bytes, for the same reason: the empty octet list is
+        // what `bytesFromOctets` reads to build the empty value. The nine
+        // `zttp:bytes` exports are `replay_pure`, so a witness runs them for
+        // real rather than reaching this arm.
+        .bytes => "[]",
     };
 }
 

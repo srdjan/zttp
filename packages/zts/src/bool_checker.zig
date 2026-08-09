@@ -1597,6 +1597,9 @@ pub const BoolChecker = struct {
             // is where a Dict is really typed; `.object` is the closest true
             // statement here - a Dict is an object value, never absent.
             .dict => .object,
+            // Same reading for the same reason: a Bytes is an object value at
+            // run time and is never absent.
+            .bytes => .object,
         };
     }
 

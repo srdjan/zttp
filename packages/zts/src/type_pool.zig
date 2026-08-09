@@ -48,6 +48,10 @@ pub const TypeTag = enum(u8) {
     t_null,
     /// `Dict<K, V>` (spec 6.2): key type in `data.a`, value type in `data.b`.
     t_dict,
+    /// `Bytes` (spec 6.3). A primitive, not a constructor: it takes no type
+    /// parameters and holds no member type, so it needs no payload and cannot
+    /// carry a cycle.
+    t_bytes,
     t_undefined,
     t_void,
     t_never,
@@ -153,6 +157,9 @@ pub const TypePool = struct {
     idx_boolean: TypeIndex = null_type_idx,
     idx_number: TypeIndex = null_type_idx,
     idx_string: TypeIndex = null_type_idx,
+    /// `Bytes` gets a pool slot beside `idx_string` rather than a constructor
+    /// like `Dict`: it has no parameters, so every occurrence is the same type.
+    idx_bytes: TypeIndex = null_type_idx,
     idx_null: TypeIndex = null_type_idx,
     idx_undefined: TypeIndex = null_type_idx,
     idx_void: TypeIndex = null_type_idx,
@@ -173,6 +180,7 @@ pub const TypePool = struct {
         pool.idx_boolean = pool.addNode(allocator, .{ .tag = .t_boolean, .data = .{} });
         pool.idx_number = pool.addNode(allocator, .{ .tag = .t_number, .data = .{} });
         pool.idx_string = pool.addNode(allocator, .{ .tag = .t_string, .data = .{} });
+        pool.idx_bytes = pool.addNode(allocator, .{ .tag = .t_bytes, .data = .{} });
         pool.idx_null = pool.addNode(allocator, .{ .tag = .t_null, .data = .{} });
         pool.idx_undefined = pool.addNode(allocator, .{ .tag = .t_undefined, .data = .{} });
         pool.idx_void = pool.addNode(allocator, .{ .tag = .t_void, .data = .{} });
@@ -1445,7 +1453,7 @@ pub const TypePool = struct {
         // Same primitive tags
         if (src_tag == tgt_tag) {
             return switch (src_tag) {
-                .t_boolean, .t_number, .t_string, .t_null, .t_undefined, .t_void, .t_unknown_type => true,
+                .t_boolean, .t_number, .t_string, .t_bytes, .t_null, .t_undefined, .t_void, .t_unknown_type => true,
                 .t_record => self.isRecordAssignable(ctx, source, target),
                 // D1 amendment A3: `T[]` is assignable to `readonly T[]`, and
                 // `readonly T[]` is not assignable to `T[]` - handing a
@@ -1855,6 +1863,7 @@ pub const TypePool = struct {
             .t_boolean => try writer.writeAll("boolean"),
             .t_number => try writer.writeAll("number"),
             .t_string => try writer.writeAll("string"),
+            .t_bytes => try writer.writeAll("Bytes"),
             .t_null => try writer.writeAll("null"),
             .t_dict => {
                 try writer.writeAll("Dict<");
@@ -2393,6 +2402,12 @@ const TypeExprParser = struct {
         if (std.mem.eql(u8, ident, "boolean") or std.mem.eql(u8, ident, "bool")) return self.maybeArrayWrap(self.pool.idx_boolean);
         if (std.mem.eql(u8, ident, "number")) return self.maybeArrayWrap(self.pool.idx_number);
         if (std.mem.eql(u8, ident, "string")) return self.maybeArrayWrap(self.pool.idx_string);
+        // `Bytes` is a value kind of its own (spec 6.3), not an alias a handler
+        // could shadow, so it resolves here beside the other primitives. It is
+        // capitalized because it is not a JS primitive - the same reason `Dict`
+        // is - and resolving it here is what stops it reaching the checker as
+        // an unresolved name.
+        if (std.mem.eql(u8, ident, "Bytes")) return self.maybeArrayWrap(self.pool.idx_bytes);
         if (std.mem.eql(u8, ident, "null")) return self.maybeArrayWrap(self.pool.idx_null);
         if (std.mem.eql(u8, ident, "undefined")) return self.maybeArrayWrap(self.pool.idx_undefined);
         if (std.mem.eql(u8, ident, "void")) return self.maybeArrayWrap(self.pool.idx_void);
@@ -3516,6 +3531,100 @@ test "readonly array spellings parse and print" {
     // The bare spelling is still a mutable array.
     const plain = parseTypeExpr(&pool, allocator, "string[]");
     try std.testing.expect(!pool.isReadonlyArray(plain));
+}
+
+test "Bytes resolves from its identifier and prints as Bytes" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const parsed = parseTypeExpr(&pool, allocator, "Bytes");
+    try std.testing.expectEqual(pool.idx_bytes, parsed);
+    try std.testing.expectEqual(TypeTag.t_bytes, pool.getTag(parsed).?);
+
+    var buf: [64]u8 = undefined;
+    try std.testing.expectEqualStrings("Bytes", pool.formatType(parsed, &buf));
+
+    // It is a name, so the array suffix applies to it like any other.
+    const list = parseTypeExpr(&pool, allocator, "Bytes[]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(list).?);
+    try std.testing.expectEqual(pool.idx_bytes, pool.getArrayElement(list));
+
+    // And it is not an unresolved name, which is what the frozen-signature
+    // gate refuses and what a bare `t_ref` would have made it.
+    try std.testing.expect(pool.firstUnresolvedName(parsed) == null);
+}
+
+test "a string is not a Bytes and a Bytes is not a string" {
+    // Spec 6.3 exists to stop a text string standing in for an octet buffer.
+    // Assignability in either direction would put it back.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_string, pool.idx_bytes));
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_bytes, pool.idx_string));
+
+    // Nor is it a number, nor an array of them - the shape an octet list has
+    // before `bytesFromOctets` reads it.
+    const octets = parseTypeExpr(&pool, allocator, "number[]");
+    try std.testing.expect(!pool.isAssignableTo(octets, pool.idx_bytes));
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_bytes, octets));
+
+    // Assignable to itself and to `unknown`, and that is the whole list.
+    try std.testing.expect(pool.isAssignableTo(pool.idx_bytes, pool.idx_bytes));
+    try std.testing.expect(pool.isAssignableTo(pool.idx_bytes, pool.idx_unknown));
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_unknown, pool.idx_bytes));
+
+    // `Bytes` is a singleton index, so every comparison of two plain Bytes is
+    // settled by index identity before the tag ever matters. The tag rule is
+    // reached through a brand, which mints a second node carrying `t_bytes` -
+    // measured by deleting `.t_bytes` from that rule, which leaves every
+    // assertion above passing and fails only the two below.
+    const blob = pool.addNominalAlias(allocator, pool.idx_bytes, "Blob");
+    const blob_again = pool.addNominalAlias(allocator, pool.idx_bytes, "Blob");
+    try std.testing.expect(pool.isAssignableTo(blob, pool.idx_bytes));
+    try std.testing.expect(pool.isAssignableTo(blob_again, blob));
+    // And the brand is still one-way.
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_bytes, blob));
+}
+
+test "Bytes is not assignable to object" {
+    // The request side of the HTTP ABI depends on this: `object` is the name
+    // the coarse binding kind resolves to, and a Bytes reaching a parameter
+    // declared `object` would be the property reads spec 6.3 refuses.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const object_ref = pool.addRef(allocator, "object");
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_bytes, object_ref));
+    try std.testing.expect(!pool.isAssignableTo(object_ref, pool.idx_bytes));
+
+    // The positive control: without it the assertion above would hold for any
+    // pair at all, which is a weaker fact than the one claimed.
+    try std.testing.expect(pool.isAssignableTo(pool.idx_bytes, pool.idx_bytes));
+}
+
+test "two independently parsed Bytes share a canonical digest" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const a = parseTypeExpr(&pool, allocator, "Bytes");
+    const b = parseTypeExpr(&pool, allocator, " Bytes ");
+
+    try std.testing.expectEqualStrings(
+        try type_key.typeKey(&pool, allocator, a),
+        try type_key.typeKey(&pool, allocator, b),
+    );
+
+    // And it is its own identity, not a string's.
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        try type_key.typeKey(&pool, allocator, a),
+        try type_key.typeKey(&pool, allocator, pool.idx_string),
+    ));
 }
 
 test "a readonly field is not part of record assignability" {

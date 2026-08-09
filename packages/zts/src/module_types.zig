@@ -52,6 +52,8 @@ fn mapReturnKind(
         // export's type parameters, so the value type is the top type until
         // module signatures can carry them.
         .dict => pool.addDict(allocator, pool.idx_unknown, pool.idx_unknown),
+        // Not coarse: `Bytes` has no parameters, so the kind is the type.
+        .bytes => pool.idx_bytes,
     };
 }
 
@@ -265,6 +267,30 @@ test "populateModuleTypes declares validateObject payload as object" {
     try std.testing.expectEqual(pool.idx_string, sig.param_types[0]);
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(sig.param_types[1]).?);
     try std.testing.expectEqualStrings("object", pool.getRefName(sig.param_types[1]));
+}
+
+test "the bytes return kind maps to the Bytes primitive" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const object_ref = pool.addRef(allocator, "object");
+    const idx = mapReturnKind(
+        .bytes,
+        &pool,
+        allocator,
+        null_type_idx,
+        null_type_idx,
+        object_ref,
+        null_type_idx,
+    );
+
+    try std.testing.expectEqual(pool.idx_bytes, idx);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_bytes, pool.getTag(idx).?);
+
+    // Not the coarse `object` a binding would otherwise have had to declare -
+    // which is the difference that makes a Bytes parameter refuse a record.
+    try std.testing.expect(idx != object_ref);
 }
 
 test "populateModuleTypes keeps fetchWithRetry options optional" {

@@ -49,6 +49,10 @@ pub const ReturnKind = enum {
     /// the checker as `Dict<unknown, unknown>`.
     dict,
 
+    /// `Bytes` (spec 6.3). Not coarse: `Bytes` takes no type parameters, so
+    /// the kind names the type exactly.
+    bytes,
+
     /// Lowercase JS-facing type name for signature advertisement (e.g. in
     /// `zts modules --json`). Maps the verifier-oriented tags onto the
     /// shapes a handler author actually sees at the call site.
@@ -64,6 +68,7 @@ pub const ReturnKind = enum {
             .optional_object => "object?",
             .result => "Result",
             .dict => "Dict",
+            .bytes => "Bytes",
         };
     }
 };

@@ -31,6 +31,9 @@ pub const ReturnKind = enum {
     /// binding surface cannot spell a module export's type parameters, so a
     /// declared `dict` is `Dict<unknown, unknown>` to the checker.
     dict,
+    /// `Bytes` (spec 6.3). Not coarse: `Bytes` takes no type parameters, so
+    /// the kind names the type exactly.
+    bytes,
 };
 
 pub const FailureSeverity = enum {

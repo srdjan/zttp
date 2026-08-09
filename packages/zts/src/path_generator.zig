@@ -1801,6 +1801,10 @@ fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
         .undefined => "null",
         .unknown => "\"test-value\"",
         .dict => "{}",
+        // No JSON literal denotes a Bytes; the empty octet list is the
+        // closest true spelling. See counterexample.zig for why the
+        // `zttp:bytes` exports do not reach this arm.
+        .bytes => "[]",
     };
 }
 

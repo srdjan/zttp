@@ -669,6 +669,7 @@ fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
         .optional_object => "Record<string, unknown> | undefined",
         .result => "{ ok: boolean; value?: unknown; error?: string; errors?: unknown }",
         .dict => "Dict<unknown, unknown>",
+        .bytes => "Bytes",
     };
 }
 
@@ -805,6 +806,34 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
     for (zts.builtinModules) |binding| {
         try std.testing.expect(std.mem.indexOf(u8, emitted, binding.specifier) != null);
     }
+}
+
+test "every ReturnKind spells a type the pool parses" {
+    // The gate over the corpus can only see kinds some export declares. This
+    // one runs over the enum itself, so a kind added without a `returnKindToTs`
+    // row that parses is caught at the moment it is added rather than at the
+    // moment an export first uses it - which is the window `.bytes` sits in
+    // until `zttp:bytes` lands.
+    const allocator = std.testing.allocator;
+    var pool = zts.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const kinds = std.enums.values(@import("zts").module_binding.ReturnKind);
+    try std.testing.expect(kinds.len > 0);
+    for (kinds) |kind| {
+        const text = returnKindToTs(kind);
+        const idx = zts.parseTypeExpr(&pool, allocator, text);
+        try std.testing.expect(idx != zts.null_type_idx);
+        if (kind != .unknown) {
+            try std.testing.expect(pool.getTag(idx) != .t_unknown_type);
+        }
+    }
+
+    // `.bytes` in particular resolves to the primitive rather than to a name
+    // the checker would then have to look up and fail to find.
+    const bytes_idx = zts.parseTypeExpr(&pool, allocator, returnKindToTs(.bytes));
+    try std.testing.expectEqual(pool.idx_bytes, bytes_idx);
+    try std.testing.expect(pool.firstUnresolvedName(bytes_idx) == null);
 }
 
 test "frozen signature corpus: every export types, with no fallback to unknown" {

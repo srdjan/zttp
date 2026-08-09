@@ -97,6 +97,7 @@ const Encoder = struct {
             .t_boolean => try w.writeAll("b"),
             .t_number => try w.writeAll("n"),
             .t_string => try w.writeAll("s"),
+            .t_bytes => try w.writeAll("y"),
             .t_undefined => try w.writeAll("u"),
             .t_null => try w.writeAll("d"),
             .t_void => try w.writeAll("v"),

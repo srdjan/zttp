@@ -5608,6 +5608,41 @@ test "a union edge does not guard a cycle" {
     );
 }
 
+test "a Bytes member does not disturb a recursive alias either way" {
+    // `Bytes` is a leaf: it takes no type parameter and holds no member type,
+    // so it can neither guard a cycle nor close one, and the guard set does not
+    // mention it. Measured rather than argued - adding `.t_bytes` to the guard
+    // set in `type_env.reachesUnguarded` changes neither of these two programs,
+    // because in the first the cycle runs through the union and in the second
+    // it runs through the record.
+    //
+    // A record guards, so the alias is contractive and the Bytes field rides
+    // along.
+    try checkTypedSource(
+        \\type Chunk = { data: Bytes; next: Chunk | null };
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        0,
+        null,
+    );
+
+    // A union does not, so the same member cannot rescue it. ZTS212 fires
+    // where a declared annotation names the alias, which is why the binding is
+    // here and not just the alias.
+    try checkTypedSourceSaying(
+        \\type B = Bytes | B;
+        \\function handler(req: Request): Response {
+        \\    const v: B = 1;
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        1,
+        "has a cycle no data constructor guards",
+    );
+}
+
 test "a cycle through two names is refused" {
     try checkTypedSourceSaying(
         \\type A = B;
