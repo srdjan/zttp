@@ -1785,7 +1785,7 @@ pub const PathGenerator = struct {
 fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
     if (!truthy) {
         return switch (returns) {
-            .optional_string, .optional_object => "null",
+            .optional_string, .optional_object, .optional_number => "null",
             .result => "{\"ok\":false,\"error\":\"test-error\"}",
             .boolean => "false",
             .number => "0",
@@ -1797,7 +1797,7 @@ fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
         .optional_object, .object => "{\"id\":\"1\"}",
         .result => "{\"ok\":true,\"value\":{}}",
         .boolean => "true",
-        .number => "42",
+        .number, .optional_number => "42",
         .undefined => "null",
         .unknown => "\"test-value\"",
         .dict => "{}",

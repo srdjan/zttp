@@ -77,6 +77,7 @@ Import via `import { fn } from "zttp:module"`. Most implementations live in `pac
 | `zttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` |
 | `zttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` |
 | `zttp:collections` | `dictEmpty`, `dictFromEntries`, `dictGet`, `dictSet`, `dictRemove`, `dictHas`, `dictEntries`, `dictMapValues`, `dictFilter`, `dictFold` |
+| `zttp:bytes` | `bytesFromOctets`, `bytesLength`, `byteAt`, `sliceBytes`, `concatBytes`, `encodeUtf8`, `decodeUtf8`, `decodeBase64`, `encodeBase64` |
 | `zttp:json` | `parseJson`, `stringifyJson` |
 | `zttp:result` | `ok`, `err`, `mapResult`, `mapError`, `andThen`, `orElse`, `unwrapOr`, `collectAll` |
 | `zttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` |

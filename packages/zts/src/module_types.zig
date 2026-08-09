@@ -47,6 +47,7 @@ fn mapReturnKind(
         .unknown => pool.idx_unknown,
         .optional_string => optional_string,
         .optional_object => optional_object,
+        .optional_number => pool.addNullable(allocator, pool.idx_number),
         .result => result_type,
         // Coarse for the same reason `.result` is: a binding cannot spell the
         // export's type parameters, so the value type is the top type until

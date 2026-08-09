@@ -12,6 +12,7 @@ Use `zttp modules --json` for the live export list from the built binary.
 | Module | Exports | Capabilities |
 |---|---|---|
 | `zttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` | `crypto`, `clock` |
+| `zttp:bytes` | `bytesFromOctets`, `bytesLength`, `byteAt`, `sliceBytes`, `concatBytes`, `encodeUtf8`, `decodeUtf8`, `decodeBase64`, `encodeBase64` | none |
 | `zttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` | `clock`, `policy_check` |
 | `zttp:collections` | `dictEmpty`, `dictFromEntries`, `dictGet`, `dictSet`, `dictRemove`, `dictHas`, `dictEntries`, `dictMapValues`, `dictFilter`, `dictFold` | none |
 | `zttp:compose` | `guard`, `pipe` | none |

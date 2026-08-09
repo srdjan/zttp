@@ -26,6 +26,8 @@ pub const ReturnKind = enum {
     unknown,
     optional_string,
     optional_object,
+    /// `number | undefined`.
+    optional_number,
     result,
     /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: the
     /// binding surface cannot spell a module export's type parameters, so a

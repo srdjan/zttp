@@ -667,6 +667,7 @@ fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
         .unknown => "unknown",
         .optional_string => "string | undefined",
         .optional_object => "Record<string, unknown> | undefined",
+        .optional_number => "number | undefined",
         .result => "{ ok: boolean; value?: unknown; error?: string; errors?: unknown }",
         .dict => "Dict<unknown, unknown>",
         .bytes => "Bytes",
@@ -779,7 +780,7 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 
 /// The committed digest of the whole signature surface. Regenerate deliberately:
 /// a diff here is a change to what every handler sees from `zttp:*`.
-const frozen_signature_digest = "5db436d957cc4e5615e7008f251bcc3b7089b63eb200a9faa5ef433944eb8b93";
+const frozen_signature_digest = "55d4f318490d1578936da3a37e6fed0e27a45e4d1cf8cb400e2bea7f8b8dce77";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

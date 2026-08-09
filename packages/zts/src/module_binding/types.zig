@@ -40,6 +40,10 @@ pub const ReturnKind = enum {
     /// Optional types - verifier requires narrowing before use
     optional_string,
     optional_object,
+    /// `number | undefined`. The shape `byteAt` answers with, and the only
+    /// optional the vocabulary was missing: declaring it `.unknown` would have
+    /// been the checker knowing less than spec 6.3 states.
+    optional_number,
 
     /// Result type ({ok, value, error}) - verifier requires .ok check
     result,
@@ -66,6 +70,7 @@ pub const ReturnKind = enum {
             .unknown => "unknown",
             .optional_string => "string?",
             .optional_object => "object?",
+            .optional_number => "number?",
             .result => "Result",
             .dict => "Dict",
             .bytes => "Bytes",

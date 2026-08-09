@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:bytes",
+  "source": "packages/zts/src/modules/data/bytes_mod.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "bytesFromOctets",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "object"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "bytesLength",
+      "effect": "none",
+      "returns": "number",
+      "params": [
+        "bytes"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "byteAt",
+      "effect": "none",
+      "returns": "optional_number",
+      "params": [
+        "bytes",
+        "number"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "sliceBytes",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "bytes",
+        "number",
+        "number"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "concatBytes",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "object"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "encodeUtf8",
+      "effect": "none",
+      "returns": "bytes",
+      "params": [
+        "string"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "decodeUtf8",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "bytes"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "decodeBase64",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "string"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "encodeBase64",
+      "effect": "none",
+      "returns": "string",
+      "params": [
+        "bytes"
+      ],
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

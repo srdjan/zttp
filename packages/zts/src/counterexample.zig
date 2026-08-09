@@ -350,7 +350,7 @@ fn alternateUrl(url: []const u8) []const u8 {
 fn stubValue(returns: mb.ReturnKind, truthy: bool) []const u8 {
     if (!truthy) {
         return switch (returns) {
-            .optional_string, .optional_object => "null",
+            .optional_string, .optional_object, .optional_number => "null",
             .result => "{\"ok\":false,\"error\":\"counterexample\"}",
             .boolean => "false",
             .number => "0",
@@ -362,7 +362,7 @@ fn stubValue(returns: mb.ReturnKind, truthy: bool) []const u8 {
         .optional_object, .object => "{\"id\":\"1\"}",
         .result => "{\"ok\":true,\"value\":\"secret-sentinel\"}",
         .boolean => "true",
-        .number => "42",
+        .number, .optional_number => "42",
         .undefined => "null",
         .unknown => "\"secret-sentinel\"",
         // A Dict has no JSON literal: the witness stands in with the empty

@@ -78,8 +78,9 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 
 ### Modules that declare no capabilities
 
-These modules are pure compute - string manipulation, parsing, URL encoding, structural routing, type-directed decoding, keyed-collection transformation - and run without a wrapper. They appear in `modules/` with a `ModuleBinding` whose `required_capabilities = &.{}` or that omits the field.
+These modules are pure compute - string manipulation, parsing, URL encoding, structural routing, type-directed decoding, keyed-collection transformation, octet manipulation - and run without a wrapper. They appear in `modules/` with a `ModuleBinding` whose `required_capabilities = &.{}` or that omits the field.
 
+- `zttp:bytes`
 - `zttp:collections`
 - `zttp:compose`
 - `zttp:decode`

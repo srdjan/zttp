@@ -115,6 +115,7 @@ zts modules/net/service.zig
 zts modules/net/websocket.zig
 zts modules/root.zig
 zts modules/workflow/durable.zig
+zts modules/data/bytes_mod.zig
 zts modules/data/collections.zig
 zts modules/data/json_mod.zig
 zts modules/data/result_mod.zig

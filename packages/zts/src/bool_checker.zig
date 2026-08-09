@@ -1592,6 +1592,9 @@ pub const BoolChecker = struct {
             .unknown => .unknown,
             .optional_string => .optional_string,
             .optional_object => .optional_object,
+            // The lattice has no optional number; `.number` would claim the
+            // value is always present, so `.unknown` is the true statement.
+            .optional_number => .unknown,
             .result => .object, // Result objects are typed as object in ExprType
             // This lattice has no Dict member and the checker's own type pool
             // is where a Dict is really typed; `.object` is the closest true
