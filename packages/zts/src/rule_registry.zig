@@ -397,6 +397,22 @@ const strict_meta = [_]struct {
         .repair = null,
     },
     .{
+        .kind = .canonical_dict_entry_round_trip,
+        .code = "ZTS627",
+        .description = "An entry round trip through `dictEntries` and `dictFromEntries` that changes only values, or only drops entries.",
+        .example = "dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2]))",
+        .help = "Use `dictMapValues(d, f)` for a value-only change and `dictFilter(d, p)` for a drop. Both keep the key set by construction and return a `Dict`, so the `Result` the round trip forced on the caller goes away with it.",
+        .repair = null,
+    },
+    .{
+        .kind = .canonical_dict_entries_reduce,
+        .code = "ZTS628",
+        .description = "A `reduce` over `dictEntries(d)`.",
+        .example = "dictEntries(d).reduce((acc, p) => acc + p[1], 0)",
+        .help = "Fold the dictionary directly with `dictFold(d, (acc, value, key) => ..., init)`, which walks the entries without materializing the array first.",
+        .repair = null,
+    },
+    .{
         .kind = .nullish_operator_on_null,
         .code = "ZTS624",
         .description = "`??` or `?.` applied where the operand's type admits `null`, a generic parameter, or `unknown`.",

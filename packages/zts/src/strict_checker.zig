@@ -117,6 +117,16 @@ pub const DiagnosticKind = enum {
     /// A `match` arm reads a field off the scrutinee instead of binding it in
     /// the pattern. Spec 4.2.1 row `matched field read`.
     canonical_unbound_field_read,
+    /// An entry round trip through `dictEntries` and `dictFromEntries` that
+    /// changes only values, or only drops entries. Spec 4.2.1 rows
+    /// `dictionary map` and `dictionary filter`: `dictMapValues` and
+    /// `dictFilter` say the same thing, keep the key set by construction, and
+    /// return a `Dict` rather than a `Result` the caller must unwrap.
+    canonical_dict_entry_round_trip,
+    /// A `reduce` over `dictEntries(d)`. Spec 4.2.1 row `dictionary fold`:
+    /// `dictFold` folds the dictionary directly, without materializing the
+    /// entry array the reduce only walks once.
+    canonical_dict_entries_reduce,
 };
 
 pub const Diagnostic = struct {
@@ -138,6 +148,14 @@ const ImportedFunction = struct {
     name: []const u8,
 };
 
+/// What an expression built out of `dictEntries(d)` does to the entry list.
+/// The transform is what decides which spec 4.2.1 row a round trip realizes,
+/// and `callback` is the argument the key-preservation test reads.
+const EntryChain = struct {
+    transform: enum { map, filter, other },
+    callback: NodeIndex,
+};
+
 fn functionSigCovers(sig: ?FunctionSig, params_count: u16) bool {
     const s = sig orelse return false;
     return s.return_type != null_type_idx and s.param_count >= params_count;
@@ -153,6 +171,9 @@ pub const StrictChecker = struct {
     assigned_bindings: std.AutoHashMapUnmanaged(u32, void),
     annotated_function_bindings: std.AutoHashMapUnmanaged(u32, void),
     static_literal_bindings: std.AutoHashMapUnmanaged(u32, void),
+    /// Bindings whose initializer is built out of a `dictEntries(d)` call, so
+    /// a round trip spelled across two statements is seen as one.
+    entries_derived_bindings: std.AutoHashMapUnmanaged(u32, EntryChain),
     call_counts: std.AutoHashMapUnmanaged(u32, u32),
     imported_functions: std.ArrayList(ImportedFunction),
     /// Shared import index, injected by the orchestrator when one exists.
@@ -187,6 +208,7 @@ pub const StrictChecker = struct {
             .assigned_bindings = .empty,
             .annotated_function_bindings = .empty,
             .static_literal_bindings = .empty,
+            .entries_derived_bindings = .empty,
             .call_counts = .empty,
             .imported_functions = .empty,
             .allocation_failed = false,
@@ -198,6 +220,7 @@ pub const StrictChecker = struct {
         self.imported_functions.deinit(self.allocator);
         self.call_counts.deinit(self.allocator);
         self.static_literal_bindings.deinit(self.allocator);
+        self.entries_derived_bindings.deinit(self.allocator);
         self.annotated_function_bindings.deinit(self.allocator);
         self.assigned_bindings.deinit(self.allocator);
         self.diagnostics.deinit(self.allocator);
@@ -208,6 +231,7 @@ pub const StrictChecker = struct {
         self.scanImports();
         self.collectAnnotatedFunctions(root);
         self.collectStaticLiterals(root);
+        self.collectEntriesDerivedBindings(root);
         self.collectAssignments(root);
         self.collectCallCounts(root);
         self.walkStmt(root);
@@ -490,6 +514,7 @@ pub const StrictChecker = struct {
             },
             .call, .method_call => {
                 self.checkCall(node);
+                self.checkDictIdioms(node);
                 const call = self.ir_view.getCall(node) orelse return;
                 self.walkExpr(call.callee);
                 for (0..call.args_count) |i| {
@@ -962,6 +987,166 @@ pub const StrictChecker = struct {
             // exhaustive: the remaining tags are leaves, or they open a scope
             // of their own whose reads are not this arm's spelling choice.
             else => return null,
+        }
+    }
+
+    /// The two spec 4.2.1 rows spec 6.2 names as rewrites over a `Dict`.
+    ///
+    /// ZTS627 `dictionary map` / `dictionary filter`: an entry round trip
+    /// through `dictEntries` and `dictFromEntries` says in three steps what
+    /// one bulk operation says in one, and pays for it - the round trip can
+    /// produce a duplicate key, so `dictFromEntries` returns a `Result` and
+    /// the caller handles a failure the transform could not cause.
+    ///
+    /// ZTS628 `dictionary fold`: a `reduce` over `dictEntries(d)` materializes
+    /// an entry array to walk it once. `dictFold` folds the dictionary.
+    ///
+    /// Both are advisory: the code they name computes the right answer, and
+    /// the row names a better spelling for it.
+    fn checkDictIdioms(self: *StrictChecker, node: NodeIndex) void {
+        const call = self.ir_view.getCall(node) orelse return;
+
+        if (self.importedCollectionsFn(call.callee, "dictFromEntries")) {
+            if (call.args_count != 1) return;
+            const arg = self.ir_view.getListIndex(call.args_start, 0);
+            const chain = self.entriesChain(arg, 0) orelse return;
+            switch (chain.transform) {
+                .map => {
+                    // The `dictionary map` row rewrites a round trip that
+                    // changes only values. A callback that computes a new key
+                    // changes the key set, so the precondition does not hold
+                    // and the row says nothing about it.
+                    if (!self.preservesEntryKey(chain.callback)) return;
+                    self.addDiagnostic(.{
+                        .severity = .advisory,
+                        .kind = .canonical_dict_entry_round_trip,
+                        .node = node,
+                        .message = "an entry round trip that changes only values is `dictMapValues`",
+                        .help = "replace the whole site, including its `Result` handling, with `dictMapValues(d, f)`: it keeps the key set by construction and returns a `Dict`, so there is no duplicate-key error to unwrap",
+                    });
+                },
+                .filter => self.addDiagnostic(.{
+                    .severity = .advisory,
+                    .kind = .canonical_dict_entry_round_trip,
+                    .node = node,
+                    .message = "an entry round trip that only drops entries is `dictFilter`",
+                    .help = "replace the whole site, including its `Result` handling, with `dictFilter(d, p)`: dropping entries cannot introduce a duplicate key, so there is no error to unwrap",
+                }),
+                // A round trip with no transform at all is neither row: it
+                // rebuilds the dictionary it started from, which is a
+                // different observation and not one spec 4.2.1 makes.
+                .other => {},
+            }
+            return;
+        }
+
+        if (self.ir_view.getTag(call.callee) != .member_access) return;
+        const member = self.ir_view.getMember(call.callee) orelse return;
+        const method = self.resolveAtomName(member.property) orelse return;
+        if (!std.mem.eql(u8, method, "reduce")) return;
+        // The receiver, not the whole chain: `dictEntries(d).filter(p).reduce(f)`
+        // folds a filtered list, and `dictFold` over the unfiltered dictionary
+        // is a different program.
+        if (!self.isDictEntriesCall(member.object)) return;
+        self.addDiagnostic(.{
+            .severity = .advisory,
+            .kind = .canonical_dict_entries_reduce,
+            .node = node,
+            .message = "a reduce over `dictEntries` is `dictFold`",
+            .help = "fold the dictionary directly: `dictFold(d, (acc, value, key) => ..., init)`, which walks the entries without building the array first",
+        });
+    }
+
+    fn importedCollectionsFn(self: *const StrictChecker, callee: NodeIndex, name: []const u8) bool {
+        const imported = self.importedFunctionForCallee(callee) orelse return false;
+        return std.mem.eql(u8, imported.module, "zttp:collections") and
+            std.mem.eql(u8, imported.name, name);
+    }
+
+    fn isDictEntriesCall(self: *const StrictChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag != .call and tag != .method_call) return false;
+        const call = self.ir_view.getCall(node) orelse return false;
+        return self.importedCollectionsFn(call.callee, "dictEntries");
+    }
+
+    /// The `dictEntries` chain `node` is built out of, or null when it is not
+    /// built out of one. Descends a member chain to the `dictEntries` call and
+    /// reports, on the way back, the outermost `map` or `filter` applied to
+    /// it. An identifier resolves through the bindings the pre-pass recorded,
+    /// so the two-statement spelling of a round trip reads the same as the
+    /// nested one.
+    fn entriesChain(self: *const StrictChecker, node: NodeIndex, depth: u8) ?EntryChain {
+        if (node == null_node or depth > 8) return null;
+        const tag = self.ir_view.getTag(node) orelse return null;
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(node) orelse return null;
+                return self.entries_derived_bindings.get(bindingKey(binding));
+            },
+            .call, .method_call => {
+                const call = self.ir_view.getCall(node) orelse return null;
+                const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+                if (callee_tag == .identifier) {
+                    if (!self.importedCollectionsFn(call.callee, "dictEntries")) return null;
+                    return .{ .transform = .other, .callback = null_node };
+                }
+                if (callee_tag != .member_access) return null;
+                const member = self.ir_view.getMember(call.callee) orelse return null;
+                const inner = self.entriesChain(member.object, depth + 1) orelse return null;
+                const method = self.resolveAtomName(member.property) orelse return inner;
+                const callback = if (call.args_count > 0)
+                    self.ir_view.getListIndex(call.args_start, 0)
+                else
+                    null_node;
+                if (std.mem.eql(u8, method, "map")) return .{ .transform = .map, .callback = callback };
+                if (std.mem.eql(u8, method, "filter")) return .{ .transform = .filter, .callback = callback };
+                return inner;
+            },
+            else => return null,
+        }
+    }
+
+    /// True when `callback` hands back the pair's own key: `(p) => [p[0], v]`.
+    /// Anything else in the key position - a literal, a computed name, the
+    /// value - is a new key set, which is outside the `dictionary map` row.
+    /// Unreadable shapes answer false, so an undecidable callback reports
+    /// nothing rather than being advised into a rewrite that changes the
+    /// program.
+    fn preservesEntryKey(self: *const StrictChecker, callback: NodeIndex) bool {
+        if (callback == null_node) return false;
+        const func = self.ir_view.getFunction(callback) orelse return false;
+        if (func.params_count == 0) return false;
+        const param_idx = self.ir_view.getListIndex(func.params_start, 0);
+        const param = self.ir_view.paramBinding(param_idx) orelse return false;
+
+        const returned = self.returnedExpr(func.body, 0) orelse return false;
+        if (self.ir_view.getTag(returned) != .array_literal) return false;
+        const pair = self.ir_view.getArray(returned) orelse return false;
+        if (pair.elements_count != 2) return false;
+
+        const key_element = self.ir_view.getListIndex(pair.elements_start, 0);
+        if (self.ir_view.getTag(key_element) != .computed_access) return false;
+        const read = self.ir_view.getMember(key_element) orelse return false;
+        if (!self.isBindingReference(read.object, param)) return false;
+        const index = self.ir_view.getIntValue(read.computed) orelse return false;
+        return index == 0;
+    }
+
+    /// The single expression a callback yields: the concise arrow body itself,
+    /// or the value of a lone `return`. A body that yields on more than one
+    /// path answers null, which the caller reads as undecidable.
+    fn returnedExpr(self: *const StrictChecker, body: NodeIndex, depth: u8) ?NodeIndex {
+        if (body == null_node or depth > 4) return null;
+        const tag = self.ir_view.getTag(body) orelse return null;
+        switch (tag) {
+            .return_stmt => return self.ir_view.getOptValue(body),
+            .program, .block => {
+                const block = self.ir_view.getBlock(body) orelse return null;
+                if (block.stmts_count != 1) return null;
+                return self.returnedExpr(self.ir_view.getListIndex(block.stmts_start, 0), depth + 1);
+            },
+            else => return body,
         }
     }
 
@@ -1476,6 +1661,26 @@ pub const StrictChecker = struct {
             }
         }
         self.ir_view.forEachChild(node, self, collectStaticLiterals);
+    }
+
+    /// Record bindings initialized from a `dictEntries` chain. A round trip is
+    /// usually written across two statements - the transform bound to a name,
+    /// then `dictFromEntries` over it - and without this the use site sees an
+    /// identifier and nothing else. Source order is enough: the binding is
+    /// declared before it is used.
+    fn collectEntriesDerivedBindings(self: *StrictChecker, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        if (tag == .var_decl) {
+            const decl = self.ir_view.getVarDecl(node) orelse return;
+            if (decl.init != null_node) {
+                if (self.entriesChain(decl.init, 0)) |chain| {
+                    self.entries_derived_bindings.put(self.allocator, bindingKey(decl.binding), chain) catch
+                        self.markAllocationFailure();
+                }
+            }
+        }
+        self.ir_view.forEachChild(node, self, collectEntriesDerivedBindings);
     }
 
     fn collectExprAssignments(self: *StrictChecker, node: NodeIndex) void {
@@ -2444,6 +2649,84 @@ test "`??` over unknown is refused ahead of the instantiation" {
     );
     defer h.deinit();
     try expectKind(&h.checker, .nullish_operator_on_null);
+}
+
+// ---------------------------------------------------------------------------
+// Dict idioms, spec 4.2.1 rows / spec 6.2 (phase 4 task 6)
+// ---------------------------------------------------------------------------
+
+const dict_imports =
+    "import { dictEmpty, dictSet, dictEntries, dictFromEntries, dictMapValues, dictFilter, dictFold } from \"zttp:collections\";\n";
+
+fn expectMessageContains(checker: *const StrictChecker, kind: DiagnosticKind, needle: []const u8) !void {
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind != kind) continue;
+        if (std.mem.indexOf(u8, diag.message, needle) != null) return;
+    }
+    return error.DiagnosticNotEmitted;
+}
+
+test "a value-only entry round trip is advised to dictMapValues" {
+    var h = try checkStripped(dict_imports ++
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [p[0], p[1] * 2]);\n  const rebuilt = dictFromEntries(pairs);\n  return Response.json({ ok: rebuilt.ok });\n}\n");
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_dict_entry_round_trip);
+    try expectMessageContains(&h.checker, .canonical_dict_entry_round_trip, "dictMapValues");
+}
+
+test "the nested spelling of the same round trip reads the same" {
+    // The two-statement form above is the common one, and the nested form is
+    // the same program. Seeing only one of them would make the row's coverage
+    // a property of where the author put a `const`.
+    var h = try checkStripped(dict_imports ++
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const rebuilt = dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2]));\n  return Response.json({ ok: rebuilt.ok });\n}\n");
+    defer h.deinit();
+    try expectMessageContains(&h.checker, .canonical_dict_entry_round_trip, "dictMapValues");
+}
+
+test "a drop-only entry round trip is advised to dictFilter" {
+    var h = try checkStripped(dict_imports ++
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const kept = dictEntries(d).filter((p) => p[1] > 1);\n  const rebuilt = dictFromEntries(kept);\n  return Response.json({ ok: rebuilt.ok });\n}\n");
+    defer h.deinit();
+    try expectMessageContains(&h.checker, .canonical_dict_entry_round_trip, "dictFilter");
+}
+
+test "a round trip that changes the key set is advised nothing" {
+    // The `dictionary map` row rewrites a round trip that changes only values.
+    // This one computes a new key, so the precondition does not hold and the
+    // rewrite would change the program - a duplicate key it can now produce is
+    // exactly why `dictFromEntries` returns a `Result` at all.
+    var h = try checkStripped(dict_imports ++
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [\"fixed\", p[1]]);\n  const rebuilt = dictFromEntries(pairs);\n  return Response.json({ ok: rebuilt.ok });\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_dict_entry_round_trip);
+}
+
+test "a reduce over dictEntries is advised to dictFold" {
+    var h = try checkStripped(dict_imports ++
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total });\n}\n");
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_dict_entries_reduce);
+}
+
+test "the bulk operations themselves are advised nothing" {
+    // The control for all three rows at once. A rule that fired here would
+    // advise the idiomatic spelling to rewrite itself.
+    var h = try checkStripped(dict_imports ++
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const doubled = dictMapValues(d, (v, k) => v * 2);\n  const kept = dictFilter(d, (v, k) => v > 0);\n  const total = dictFold(d, (acc, v, k) => acc + v, 0);\n  return Response.json({ total, a: dictEntries(doubled).length, b: dictEntries(kept).length });\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_dict_entry_round_trip);
+    try expectNoKind(&h.checker, .canonical_dict_entries_reduce);
+}
+
+test "a reduce over a filtered entry list is not the fold row" {
+    // `dictFold` folds the whole dictionary. Folding a filtered list is a
+    // different program, so the row does not cover it and advising the rewrite
+    // would be advising a behavior change.
+    var h = try checkStripped(dict_imports ++
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).filter((p) => p[1] > 0).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total });\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_dict_entries_reduce);
 }
 
 // ---------------------------------------------------------------------------

@@ -8,10 +8,16 @@
 //! left alone.
 //!
 //! Phase 0 seeds only the rows that need no language the engine lacks today.
-//! The Dict, Result, match-binding, fold, and search-loop rows arrive with the
-//! features they describe (master plan phases 4 and 6). `rewrite_rule` names
-//! the canonicalize rewrite that implements the row; it stays null until that
-//! rewrite is wired, and a row with no rewrite is advisory-only.
+//! The Result, fold, and search-loop rows arrive with the features they
+//! describe (master plan phases 4 and 6); the Dict rows arrived with `Dict`.
+//! `rewrite_rule` names the canonicalize rewrite that implements the row; it
+//! stays null until that rewrite is wired, and a row with no rewrite is
+//! advisory-only.
+//!
+//! Three of the four Dict rows are also reported: `dictionary map` and
+//! `dictionary filter` share ZTS627 - one round trip, two destinations,
+//! chosen by what the transform does - and `dictionary fold` is ZTS628.
+//! `dictionary membership test` ships table-only, like most rows here.
 
 const std = @import("std");
 const repair_intent = @import("repair_intent.zig");
@@ -107,6 +113,38 @@ pub const entries = [_]IdiomEntry{
         .idiomatic = "items.some(p)",
         .superseded = "items.find(p) !== undefined",
         .precondition = "element type excludes undefined",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.dictionary-membership-test",
+        .operation = "dictionary membership test",
+        .idiomatic = "dictHas(d, k)",
+        .superseded = "dictGet(d, k) !== undefined",
+        .precondition = "V excludes undefined",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.dictionary-map",
+        .operation = "dictionary map",
+        .idiomatic = "dictMapValues(d, f)",
+        .superseded = "an entry round trip through dictEntries and dictFromEntries that changes only values",
+        .precondition = "the rewrite spans the whole consumption site, including its Result handling",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.dictionary-filter",
+        .operation = "dictionary filter",
+        .idiomatic = "dictFilter(d, p)",
+        .superseded = "an entry round trip that only drops entries",
+        .precondition = "the rewrite spans the whole consumption site, including its Result handling",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.dictionary-fold",
+        .operation = "dictionary fold",
+        .idiomatic = "dictFold(d, f, init)",
+        .superseded = "dictEntries(d).reduce(...)",
+        .precondition = "the fold has one accumulator",
         .rewrite_rule = null,
     },
     .{
