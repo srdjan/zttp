@@ -50,6 +50,14 @@ take a rule or be acknowledged in the same commit.
 Free diagnostic codes: ZTS206, ZTS207, and ZTS213 upward in the type-checker
 band; ZTS627 upward in the canonical-profile band.
 
+## Status
+
+Tasks 1 through 5 are done, task 8 is closed by measurement rather than by a
+rule, and task 9's example and behavioral suite are in
+`examples/patterns/json-and-dict.ts`. Two tasks are open: the Dict idiom rows
+(task 6) and the `comptime(dictFromEntries([...]))` decision (task 7), plus the
+`zttp:result` track this phase deferred from the start.
+
 ## Global constraints
 
 - The engine stays interpreter-only. `Dict` is the value kind spec 5.3 names,
@@ -94,6 +102,15 @@ key does not move it; `NaN` finds a `NaN` key; `-0` and `+0` are one key; a
 string key with an astral scalar round-trips; two dicts built in different
 orders are not equal by iteration order.
 
+
+**Measured while landing this.** A Dict built from `ctx.allocator` inside a
+request leaks: the request arena is what reclaims per-request values, and
+nothing else frees an object the GC never rooted. Serving the handler by hand
+never showed it - the behavioral test suite did, because the test runner
+allocates and destroys a runtime per case and reports the leak. Dict creation
+goes through `ctx.createDict`, which picks the arena the way `createArray` and
+`createObject` already do.
+
 ### Task 2: `Dict` in the type system
 
 **Files:** `type_pool.zig` (`t_dict`, printing, canonical key, assignability),
@@ -136,6 +153,13 @@ exports run their callback once per entry in insertion order.
 `dictFold` sees insertion order; `dictGet` of an absent key is `undefined`, not
 an error; every export's declared signature parses in the frozen-signature gate
 phase 2 built.
+
+
+**Every export is `replay_pure`.** The handler-test runner installs replay
+stubs instead of real module functions, and a stub with no recorded I/O returns
+`undefined` - so without the opt-in, a test of a Dict handler sees `undefined`
+from all ten exports. The opt-in is audited rather than inferred, and it holds
+here by construction: each export reads only its arguments.
 
 ### Task 4: `isDict`, the `Dict` type test, and `JsonValue`'s last arm
 
@@ -186,6 +210,19 @@ reports `size-limit`; `NaN` is refused by `stringifyJson`; a record with an
 optional `undefined` field omits it; `stringifyJson` of a function-valued field
 is refused by the checker rather than at runtime.
 
+
+**The coarse binding surface bites here, and the language answers it.** A
+`Result`-returning export types its payload as `unknown`, so a parsed document
+cannot be handed straight to a `Dict` parameter. The repair is the one spec 5.7
+names: narrow with `isDict` first. That guard now refines `unknown` to
+`Dict<unknown, unknown>`, which is what an intrinsic type guard is for - the
+union case partitions members, and a value with no members would otherwise be
+unusable at exactly the site the guard was written for.
+
+**A second leak, in the parser's own error path**: the duplicate-key failure
+borrowed the decoded key it had just freed. Fixed by copying it into the
+parser, truncated rather than kept alive past its owner.
+
 ### Task 6: the two Dict idiom rows
 
 **Files:** `idiom_registry.zig`, `strict_checker.zig`, `rule_registry.zig`,
@@ -226,6 +263,20 @@ frames it - the trapping extraction is not admitted, and the value is unchanged.
 
 **Tests:** `r.unwrap()` reports with its repair; `r.unwrapOr(d)` does not, since
 spec 6.1 admits it as consumption rule 1; the ok-guard form reports nothing.
+
+
+**Measured, and closed without a rule.** The type checker already refuses
+`r.unwrap()`: the modelled `Result` is a record with `ok`, `value`, `error`,
+and `errors`, and no methods at all, so a method call on it reports
+`property does not exist on type`. A ZTS627 would have duplicated a refusal
+that exists and failed in exactly the same place, so it was written, measured
+against the corpus, and deleted.
+
+The same measurement found the opposite half: `r.unwrapOr(d)` is refused too,
+and spec 6.1 admits it as consumption rule 1. That is not a rule to add here -
+spec 6.1 wants `unwrapOr` as a free function from `zttp:result`, which is the
+deferred track's job. It is recorded so the deferral is a known gap rather than
+a surprise.
 
 ### Task 9: the exit gate
 

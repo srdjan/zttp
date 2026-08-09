@@ -486,3 +486,146 @@ fn encodeString(allocator: std.mem.Allocator, text: []const u8, buf: *std.ArrayL
     }
     buf.append(allocator, '"') catch return error.OutOfMemory;
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+const testing = std.testing;
+const gc_mod = @import("../../gc.zig");
+
+const Harness = struct {
+    arena: std.heap.ArenaAllocator,
+    gc: gc_mod.GC,
+    ctx: *context.Context,
+
+    fn deinit(self: *Harness) void {
+        self.ctx.deinit();
+        self.gc.deinit();
+        self.arena.deinit();
+    }
+};
+
+fn harness() !*Harness {
+    const h = try testing.allocator.create(Harness);
+    h.arena = std.heap.ArenaAllocator.init(testing.allocator);
+    const allocator = h.arena.allocator();
+    h.gc = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    h.ctx = try context.Context.init(allocator, &h.gc, .{});
+    return h;
+}
+
+fn releaseHarness(h: *Harness) void {
+    h.deinit();
+    testing.allocator.destroy(h);
+}
+
+fn parse(h: *Harness, text: []const u8) !JSValue {
+    var parser = Parser{ .ctx = h.ctx, .text = text };
+    return parser.parseValue(0);
+}
+
+fn parseFailure(h: *Harness, text: []const u8) !Failure {
+    var parser = Parser{ .ctx = h.ctx, .text = text };
+    _ = parser.parseValue(0) catch |err| switch (err) {
+        error.Failed => return parser.failure,
+        error.OutOfMemory => return error.OutOfMemory,
+    };
+    return error.TestExpectedFailure;
+}
+
+test "an object node decodes to a Dict in wire order, twice the same way" {
+    // Determinism: the same text parsed twice iterates identically. A Dict
+    // whose order came from a hash would pass a single-parse test and fail
+    // this one.
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const text = "{\"b\":1,\"a\":2,\"c\":3}";
+    const first = dict.asDict(try parse(h, text)) orelse return error.TestExpectedDict;
+    const second = dict.asDict(try parse(h, text)) orelse return error.TestExpectedDict;
+
+    try testing.expectEqual(@as(u32, 3), dict.count(first));
+    try testing.expectEqual(dict.count(first), dict.count(second));
+    var i: u32 = 0;
+    while (i < dict.count(first)) : (i += 1) {
+        const a = helpers.getStringDataCtx(dict.keyAt(first, i), h.ctx) orelse return error.TestExpectedString;
+        const b = helpers.getStringDataCtx(dict.keyAt(second, i), h.ctx) orelse return error.TestExpectedString;
+        try testing.expectEqualStrings(a, b);
+    }
+    const first_key = helpers.getStringDataCtx(dict.keyAt(first, 0), h.ctx).?;
+    try testing.expectEqualStrings("b", first_key);
+}
+
+test "null decodes as data rather than absence" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const parsed = try parse(h, "[null]");
+    const arr = JSObject.fromValue(parsed);
+    const element = arr.getSlot(1);
+    try testing.expect(element.isNull());
+    try testing.expect(!element.isUndefined());
+}
+
+test "a duplicate key is refused and names the key" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const f = try parseFailure(h, "{\"a\":1,\"a\":2}");
+    try testing.expectEqual(ErrorKind.duplicate_key, f.kind);
+    try testing.expectEqualStrings("a", f.key orelse "");
+}
+
+test "a syntax error names itself and carries an offset" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const f = try parseFailure(h, "{oops}");
+    try testing.expectEqual(ErrorKind.invalid_syntax, f.kind);
+    try testing.expectEqual(@as(usize, 1), f.offset);
+}
+
+test "the depth limit reports itself and not a syntax error" {
+    // The distinction is the whole point of the taxonomy: before this module
+    // every one of these failures was the same `InvalidJson`.
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const saved = limits;
+    defer limits = saved;
+    limits.max_depth = 3;
+
+    const f = try parseFailure(h, "[[[[[1]]]]]");
+    try testing.expectEqual(ErrorKind.depth_limit, f.kind);
+    try testing.expectEqual(@as(usize, 3), f.limit);
+
+    // The control: the same document inside the limit parses.
+    limits.max_depth = 32;
+    _ = try parse(h, "[[[[[1]]]]]");
+}
+
+test "a round trip is byte-identical for a canonical document" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const text = "{\"name\":\"ada\",\"tags\":[1,null,true],\"ok\":false}";
+    const parsed = try parse(h, text);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(h.ctx.allocator);
+    try encode(h.ctx, parsed, &buf, 0);
+    try testing.expectEqualStrings(text, buf.items);
+}
+
+test "a non-finite number and an undefined element are refused by name" {
+    const h = try harness();
+    defer releaseHarness(h);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(h.ctx.allocator);
+
+    try testing.expectError(error.NonFinite, encode(h.ctx, JSValue.fromFloat(std.math.inf(f64)), &buf, 0));
+    buf.clearRetainingCapacity();
+    try testing.expectError(error.Unencodable, encode(h.ctx, JSValue.undefined_val, &buf, 0));
+}
