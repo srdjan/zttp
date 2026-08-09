@@ -16,6 +16,7 @@ const match_analysis_mod = @import("match_analysis.zig");
 const bool_checker = @import("bool_checker.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 const module_facts_mod = @import("module_facts.zig");
+const builtin_modules = @import("zts-engine").builtin_modules;
 const known_globals = @import("zts-base").known_globals;
 
 pub const RepairIntent = repair_intent_mod.RepairIntent;
@@ -170,6 +171,10 @@ pub const StrictChecker = struct {
     diagnostics: std.ArrayList(Diagnostic),
     assigned_bindings: std.AutoHashMapUnmanaged(u32, void),
     annotated_function_bindings: std.AutoHashMapUnmanaged(u32, void),
+    /// Every binding whose initializer is a function, annotated or not. A named
+    /// helper handed to a callback slot is a body this checker cannot read, and
+    /// the purity test has to refuse it rather than answer from its absence.
+    function_valued_bindings: std.AutoHashMapUnmanaged(u32, void),
     static_literal_bindings: std.AutoHashMapUnmanaged(u32, void),
     /// Bindings whose initializer is built out of a `dictEntries(d)` call, so
     /// a round trip spelled across two statements is seen as one.
@@ -207,6 +212,7 @@ pub const StrictChecker = struct {
             .diagnostics = .empty,
             .assigned_bindings = .empty,
             .annotated_function_bindings = .empty,
+            .function_valued_bindings = .empty,
             .static_literal_bindings = .empty,
             .entries_derived_bindings = .empty,
             .call_counts = .empty,
@@ -222,6 +228,7 @@ pub const StrictChecker = struct {
         self.static_literal_bindings.deinit(self.allocator);
         self.entries_derived_bindings.deinit(self.allocator);
         self.annotated_function_bindings.deinit(self.allocator);
+        self.function_valued_bindings.deinit(self.allocator);
         self.assigned_bindings.deinit(self.allocator);
         self.diagnostics.deinit(self.allocator);
     }
@@ -420,7 +427,17 @@ pub const StrictChecker = struct {
         if (node == null_node) return true;
         const tag = self.ir_view.getTag(node) orelse return true;
         return switch (tag) {
-            .call, .method_call, .assignment => false,
+            .assignment => false,
+            .call, .method_call => self.isPureModuleCall(node),
+            // A callback's purity is its body's. Answering `true` for every
+            // function node - which the `else` arm below used to do - made
+            // `dictMapValues(d, () => cacheGet(...))` look like a pure
+            // argument, so the export's own `.none` effect would have carried
+            // a call that reaches storage into a `?:` arm.
+            .arrow_function, .function_expr => blk: {
+                const func = self.ir_view.getFunction(node) orelse break :blk false;
+                break :blk self.isPureBody(func.body);
+            },
             .ternary => blk: {
                 const t = self.ir_view.getTernary(node) orelse break :blk true;
                 break :blk self.isPureExpr(t.condition) and
@@ -487,6 +504,115 @@ pub const StrictChecker = struct {
             },
             else => true,
         };
+    }
+
+    /// A callback body is pure when every statement in it is. The statement
+    /// kinds are enumerated and anything else answers false, which is the
+    /// direction that matters: an unmodelled statement is one this walk could
+    /// not read, and reporting an unread body pure is the fail-open the whole
+    /// test exists to avoid. A concise arrow body is not a statement at all, so
+    /// it falls through to the expression walk.
+    fn isPureBody(self: *const StrictChecker, node: NodeIndex) bool {
+        if (node == null_node) return true;
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return switch (tag) {
+            .program, .block => blk: {
+                const block = self.ir_view.getBlock(node) orelse break :blk false;
+                for (0..block.stmts_count) |i| {
+                    if (!self.isPureBody(self.ir_view.getListIndex(block.stmts_start, @intCast(i)))) break :blk false;
+                }
+                break :blk true;
+            },
+            .return_stmt, .expr_stmt => blk: {
+                const value = self.ir_view.getOptValue(node) orelse break :blk true;
+                break :blk self.isPureExpr(value);
+            },
+            .var_decl => blk: {
+                const decl = self.ir_view.getVarDecl(node) orelse break :blk false;
+                break :blk self.isPureExpr(decl.init);
+            },
+            // Every remaining statement kind in the IR alphabet, named rather
+            // than left to the expression walk below - which answers `true` for
+            // a tag it does not model, and would therefore report a body it
+            // could not read as pure. Most of these the profile does not admit
+            // anyway; listing them means adding one to the alphabet lands here
+            // as a refusal instead of silently as a pass.
+            .if_stmt,
+            .for_stmt,
+            .for_of_stmt,
+            .for_in_stmt,
+            .while_stmt,
+            .do_while_stmt,
+            .switch_stmt,
+            .assert_stmt,
+            .throw_stmt,
+            .break_stmt,
+            .continue_stmt,
+            .try_stmt,
+            .labeled_stmt,
+            .debugger_stmt,
+            .function_decl,
+            .import_decl,
+            => false,
+            // Not a statement: a concise arrow body, which the expression walk
+            // decides.
+            else => self.isPureExpr(node),
+        };
+    }
+
+    /// True when the registry says this call selects a value rather than
+    /// performing an effect.
+    ///
+    /// Every call used to answer false, which made spec 4.2.1's `two-way pure
+    /// selection` row - whose precondition is "none" - refuse
+    /// `c ? ok(a) : err(b)`. Both arms are calls to a zero-capability module
+    /// that declares no effect, so the rule was refusing the spelling it
+    /// exists to prefer.
+    ///
+    /// Three conditions, each closing a hole the others do not:
+    ///
+    /// The export declares `EffectClass.none`, which the registry documents as
+    /// "compile-time only, no runtime effect".
+    ///
+    /// It reaches no capability. `Law.pure` is the wrong test here and would
+    /// have been the tempting one: `env` declares `.pure` - the law is
+    /// algebraic - while reaching `.env` and `.policy_check` and reading the
+    /// host. The capability set is what says whether a call reaches for
+    /// authority, and reaching for it in one branch only is exactly the
+    /// conditional the rule wants spelled as `match` or `if`.
+    ///
+    /// Every argument is itself pure. This is what stops an effect entering
+    /// through a callback: `dictMapValues` declares `.none` and runs whatever
+    /// it is handed.
+    ///
+    /// A method call is never admitted, because `importedFunctionForCallee`
+    /// resolves an identifier callee only. `s.toUpperCase()` in a `?:` arm is
+    /// pure and still reported; deciding that needs a purity model for the
+    /// ambient sequence methods, which does not exist here.
+    fn isPureModuleCall(self: *const StrictChecker, node: NodeIndex) bool {
+        const call = self.ir_view.getCall(node) orelse return false;
+        const imported = self.importedFunctionForCallee(call.callee) orelse return false;
+        const entry = builtin_modules.findExport(imported.module, imported.name) orelse return false;
+        if (entry.func.effect != .none) return false;
+
+        const caps = entry.func.required_capabilities orelse entry.binding.required_capabilities;
+        if (caps.len > 0) return false;
+
+        for (0..call.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+            // A named helper in a callback slot is a body this walk cannot
+            // read. Its identifier would otherwise answer pure by being a
+            // leaf, which is the absence of information reported as a fact.
+            if (self.namesFunction(arg)) return false;
+            if (!self.isPureExpr(arg)) return false;
+        }
+        return true;
+    }
+
+    fn namesFunction(self: *const StrictChecker, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        return self.function_valued_bindings.contains(bindingKey(binding));
     }
 
     fn walkExpr(self: *StrictChecker, node: NodeIndex) void {
@@ -1575,13 +1701,16 @@ pub const StrictChecker = struct {
         switch (tag) {
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.function_valued_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
                 if (self.functionHasAnnotation(decl.init)) {
                     self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
                 }
             },
-            .var_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                if (decl.init != null_node and self.isFunctionNode(decl.init) and self.functionHasAnnotation(decl.init)) {
+            .var_decl => blk: {
+                const decl = self.ir_view.getVarDecl(node) orelse break :blk;
+                if (decl.init == null_node or !self.isFunctionNode(decl.init)) break :blk;
+                self.function_valued_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
+                if (self.functionHasAnnotation(decl.init)) {
                     self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
                 }
             },
@@ -2350,6 +2479,86 @@ test "ternary with a call nested inside a composite arm fires impure diagnostic"
     var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? [load(req)] : [500]; return Response.json({x}); }");
     defer checker.deinit();
     try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "a ternary over zero-capability module calls is admitted" {
+    // Spec 4.2.1's `two-way pure selection` row has precondition "none", and
+    // this is the shape it exists to prefer. Both arms call a module that
+    // declares no effect and reaches no capability; the rule used to refuse it
+    // because every call answered impure.
+    var h = try checkStripped(
+        "import { ok, err } from \"zttp:result\";\n" ++
+            "function handler(req: Request): Response {\n  const n = 2;\n  const r = n > 0 ? ok(n) : err(\"negative\");\n  return Response.json({ ok: r.ok });\n}\n",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_ternary_impure);
+}
+
+test "a ternary over a capability-reaching call still fires" {
+    // `sha256` declares no effect but reaches `.crypto`. Reaching for authority
+    // in one branch only is the conditional the rule wants spelled out, and it
+    // is why the capability set decides rather than the `pure` law - which
+    // `env` declares while reading the host.
+    var h = try checkStripped(
+        "import { sha256 } from \"zttp:crypto\";\n" ++
+            "function handler(req: Request): Response {\n  const n = 1;\n  const x = n > 0 ? sha256(\"a\") : \"\";\n  return Response.json({ x });\n}\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_ternary_impure);
+}
+
+test "a pure callback keeps its call pure, an effectful one does not" {
+    // `dictMapValues` declares `.none` and runs whatever it is handed, so the
+    // export's own effect says nothing about the call. Answering `true` for
+    // every function node - which the walk used to do - would admit both.
+    var pure_cb = try checkStripped(
+        "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
+            "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => v * 2) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
+    );
+    defer pure_cb.deinit();
+    try expectNoKind(&pure_cb.checker, .canonical_ternary_impure);
+
+    var effectful_cb = try checkStripped(
+        "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
+            "import { cacheGet } from \"zttp:cache\";\n" ++
+            "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => cacheGet(\"ns\", \"k\")) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
+    );
+    defer effectful_cb.deinit();
+    try expectKind(&effectful_cb.checker, .canonical_ternary_impure);
+}
+
+test "a block-bodied callback is read statement by statement" {
+    // The `const` and the `return` are both decidable, so the body is pure.
+    var pure_block = try checkStripped(
+        "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
+            "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => { const doubled = v * 2; return doubled; }) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
+    );
+    defer pure_block.deinit();
+    try expectNoKind(&pure_block.checker, .canonical_ternary_impure);
+
+    // An `if` is a statement kind the purity walk does not model, and an
+    // unmodelled statement is refused rather than assumed pure - here it hides
+    // a call that reaches storage.
+    var control_flow = try checkStripped(
+        "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
+            "import { cacheGet } from \"zttp:cache\";\n" ++
+            "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => { if (v > 0) { cacheGet(\"ns\", \"k\"); } return v; }) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
+    );
+    defer control_flow.deinit();
+    try expectKind(&control_flow.checker, .canonical_ternary_impure);
+}
+
+test "a named helper in a callback slot is refused rather than assumed pure" {
+    // The body is not readable from here, and an identifier is a leaf the walk
+    // would otherwise answer `pure` for - the absence of information reported
+    // as a fact.
+    var h = try checkStripped(
+        "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
+            "function double(v: number): number { return v * 2; }\n" ++
+            "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, double) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_ternary_impure);
 }
 
 test "chained ternary fires chain diagnostic" {
