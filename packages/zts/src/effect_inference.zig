@@ -1616,6 +1616,63 @@ test "a call through a function-typed parameter marks the row a lower bound" {
     try testing.expect(!calls_direct.lower_bound);
 }
 
+test "an effectful arm contributes its effect to the row" {
+    // Spec 5.5 admits effectful arm expressions and calls `match` the
+    // idiomatic effectful selection form. Every arm is walked into the same
+    // row, so a call in the second arm is not lost because the first arm is
+    // pure - taking the first arm's row would report a pure function.
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { logInfo } from "zttp:log";
+        \\function choose(tag) {
+        \\  return match (tag) {
+        \\    when "quiet": 0,
+        \\    when "loud": logInfo("hi")
+        \\  };
+        \\}
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const choose = analyzer.lookup("choose") orelse return error.FunctionNotFound;
+    try testing.expect(!choose.pure);
+}
+
+test "a match whose arms are all pure keeps a pure row" {
+    // The control: without it the test above passes for a checker that calls
+    // every match impure.
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\function choose(tag) {
+        \\  return match (tag) {
+        \\    when "quiet": 0,
+        \\    when "loud": 1
+        \\  };
+        \\}
+    ;
+    var parser = try JsParser.init(allocator, source);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var analyzer = Analyzer.init(allocator, view, &atoms);
+    defer analyzer.deinit();
+    try analyzer.analyze(root);
+
+    const choose = analyzer.lookup("choose") orelse return error.FunctionNotFound;
+    try testing.expect(choose.pure);
+}
+
 test "a lower bound propagates to callers" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);

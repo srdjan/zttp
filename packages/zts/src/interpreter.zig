@@ -4187,6 +4187,75 @@ test "Interpreter new_array" {
     try std.testing.expect(result.isObject());
 }
 
+test "End-to-end: a match evaluates exactly one arm" {
+    // Spec 5.5 admits effectful arm expressions and says exactly one arm's
+    // expression is evaluated. The property is a consequence of how the arms
+    // are laid out - one labelled body per arm, each jumping to the end - so
+    // this pins it by observing an effect rather than by reading the emitter.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const source =
+        \\let firstCalls = 0;
+        \\let secondCalls = 0;
+        \\function first() { firstCalls = firstCalls + 1; return 1; }
+        \\function second() { secondCalls = secondCalls + 1; return 2; }
+        \\let tag = "b";
+        \\let picked = match (tag) {
+        \\  when "a": first(),
+        \\  when "b": second()
+        \\};
+        \\let result = firstCalls * 100 + secondCalls * 10 + picked;
+    ;
+
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    try std.testing.expect(code.len > 0);
+
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const result_val = ctx.getGlobal(result_atom) orelse return error.MissingResult;
+    try std.testing.expect(result_val.isInt());
+    // The selected arm ran once and the other never ran: 0*100 + 1*10 + 2.
+    // Evaluating both arms would give 112.
+    try std.testing.expectEqual(@as(i32, 12), result_val.getInt());
+}
+
 test "End-to-end: computed compound assignment evaluates key once (object)" {
     // Regression: `obj[k()] += v` double-evaluated the key expression - once for
     // the read, once for the store - running k()'s side effect twice. The

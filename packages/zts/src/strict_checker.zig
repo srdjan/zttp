@@ -2481,3 +2481,15 @@ test "a rename under a different name is not the redundant form" {
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_redundant_pattern_rename);
 }
+
+test "a const initialized from a two-way effectful match passes the profile" {
+    // Spec 5.5 names `match` with effectful named calls in its arms the
+    // idiomatic effectful selection form, including for initializing a `const`
+    // from a two-way effectful choice. The canonical profile refuses an impure
+    // ternary (ZTS612) and points here, so a rule refusing this shape would
+    // leave the author with nowhere to go.
+    var h = try checkStripped("import { logInfo } from \"zttp:log\";\nfunction handler(req: Request): Response {\n  const chosen = match (req.method) {\n    when \"GET\": logInfo(\"read\")\n    default: logInfo(\"write\")\n  };\n  return Response.json({ ok: true });\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_ternary_impure);
+    try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+}
