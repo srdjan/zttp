@@ -411,6 +411,24 @@ pub const FunctionBinding = struct {
     /// Used by the flow checker to track sensitive data through the handler.
     return_labels: LabelSet = .{},
 
+    /// Set when the return value can contain data that arrived as an argument,
+    /// and the export validates nothing. The flow checker then unions every
+    /// argument's labels into the call's result instead of answering the
+    /// declared set alone.
+    ///
+    /// `return_labels` on its own is a fail-open for this shape. An export
+    /// that declares nothing answers the empty set, so `dictSet(d, k, secret)`
+    /// followed by `dictGet(d, k)` reached the response with
+    /// `no_secret_leakage` PROVEN - measured, not supposed. This is the same
+    /// conflation `validateJson` shipped, minus the discharge: `.validated`
+    /// says "and `user_input` is discharged, because validating is what
+    /// discharges it", and this flag says only "the data passes through".
+    ///
+    /// Not for an export whose result is a fact *about* an argument rather
+    /// than data *from* it: `dictHas` returns a presence boolean and cannot
+    /// carry the value.
+    derives_from_args: bool = false,
+
     /// Failure severity classification for fault coverage analysis.
     /// Determines how the fault coverage checker treats a 2xx response
     /// on this function's failure path.

@@ -116,6 +116,10 @@ fn adaptFunctionBinding(
         // Field by field, not a bitcast: the internal set carries `unknown`,
         // which the analysis assigns and an extension author cannot declare,
         // so the two types no longer share a width.
+        // `derives_from_args` has no SDK counterpart yet, so it takes its
+        // default here. An adapted export that passes its argument through
+        // therefore still answers its declared labels alone; giving the SDK the
+        // field is what closes that, and no adapted module needs it today.
         .return_labels = .{
             .secret = binding.return_labels.secret,
             .credential = binding.return_labels.credential,

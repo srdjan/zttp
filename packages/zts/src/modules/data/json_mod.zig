@@ -41,14 +41,18 @@ pub const Limits = struct {
 pub var limits: Limits = .{};
 
 // Both exports are `replay_pure`: parsing and encoding read only their
-// arguments, so running them live during replay is hermetic.
+// arguments, so running them live during replay is hermetic. Both also
+// `derives_from_args`, and for the same reason: a document is its input in
+// another shape, so a secret stringified is still the secret. Neither declares
+// `.validated`, which would additionally discharge `user_input` - `parseJson`
+// checks that the text is JSON, not that its content is admissible.
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:json",
     .name = "json",
     .required_capabilities = &.{},
     .exports = &.{
-        .{ .name = "parseJson", .func = parseJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.string}, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "stringifyJson", .func = stringifyJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .laws = &.{.pure}, .replay_pure = true },
+        .{ .name = "parseJson", .func = parseJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.string}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "stringifyJson", .func = stringifyJsonNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.unknown}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
     },
 };
 

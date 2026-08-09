@@ -27,21 +27,26 @@ const JSObject = object.JSObject;
 // replay is hermetic. Without the opt-in a handler test would see `undefined`
 // from every one of them, which is what a replay stub returns when no I/O was
 // recorded - and there is no I/O here to record.
+//
+// The same fact is why every export but two declares `derives_from_args`: a
+// dictionary holds what was put in it, so a value that came in as an argument
+// comes back out. `dictEmpty` has no argument to derive from, and `dictHas`
+// answers a presence question rather than handing back the value.
 pub const binding = mb.ModuleBinding{
     .specifier = "zttp:collections",
     .name = "collections",
     .required_capabilities = &.{},
     .exports = &.{
         .{ .name = "dictEmpty", .func = dictEmptyNative, .arg_count = 0, .required_arg_count = 0, .effect = .none, .returns = .dict, .param_types = &.{}, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictFromEntries", .func = dictFromEntriesNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictGet", .func = dictGetNative, .arg_count = 2, .effect = .none, .returns = .unknown, .param_types = &.{ .dict, .unknown }, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictSet", .func = dictSetNative, .arg_count = 3, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .unknown, .unknown }, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictRemove", .func = dictRemoveNative, .arg_count = 2, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .unknown }, .laws = &.{.pure}, .replay_pure = true },
+        .{ .name = "dictFromEntries", .func = dictFromEntriesNative, .arg_count = 1, .effect = .none, .returns = .result, .param_types = &.{.object}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "dictGet", .func = dictGetNative, .arg_count = 2, .effect = .none, .returns = .unknown, .param_types = &.{ .dict, .unknown }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "dictSet", .func = dictSetNative, .arg_count = 3, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .unknown, .unknown }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "dictRemove", .func = dictRemoveNative, .arg_count = 2, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .unknown }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
         .{ .name = "dictHas", .func = dictHasNative, .arg_count = 2, .effect = .none, .returns = .boolean, .param_types = &.{ .dict, .unknown }, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictEntries", .func = dictEntriesNative, .arg_count = 1, .effect = .none, .returns = .object, .param_types = &.{.dict}, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictMapValues", .func = dictMapValuesNative, .arg_count = 2, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .object }, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictFilter", .func = dictFilterNative, .arg_count = 2, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .object }, .laws = &.{.pure}, .replay_pure = true },
-        .{ .name = "dictFold", .func = dictFoldNative, .arg_count = 3, .effect = .none, .returns = .unknown, .param_types = &.{ .dict, .object, .unknown }, .laws = &.{.pure}, .replay_pure = true },
+        .{ .name = "dictEntries", .func = dictEntriesNative, .arg_count = 1, .effect = .none, .returns = .object, .param_types = &.{.dict}, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "dictMapValues", .func = dictMapValuesNative, .arg_count = 2, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .object }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "dictFilter", .func = dictFilterNative, .arg_count = 2, .effect = .none, .returns = .dict, .param_types = &.{ .dict, .object }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
+        .{ .name = "dictFold", .func = dictFoldNative, .arg_count = 3, .effect = .none, .returns = .unknown, .param_types = &.{ .dict, .object, .unknown }, .laws = &.{.pure}, .replay_pure = true, .derives_from_args = true },
     },
 };
 

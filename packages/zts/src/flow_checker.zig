@@ -279,6 +279,10 @@ pub const FlowChecker = struct {
     /// keyed by the same slot as `module_fn_labels`. Populated by `scanImports`
     /// and consumed by the counterexample-witness capture pipeline.
     module_fn_meta: std.AutoHashMapUnmanaged(u16, counterexample.StubInfo),
+    /// Slots of imported exports that declare `derives_from_args`: their result
+    /// can contain what an argument carried, so the call's labels are the union
+    /// of the arguments' rather than the declared set alone.
+    module_fn_arg_derived: std.AutoHashMapUnmanaged(u16, void),
     /// Return labels for functions imported from another file, local slot ->
     /// labels. The checker has no file access, so the caller computes these
     /// with `exportedReturnLabels` over the imported module and installs them
@@ -355,6 +359,7 @@ pub const FlowChecker = struct {
             .binding_labels = .empty,
             .module_fn_labels = .empty,
             .module_fn_meta = .empty,
+            .module_fn_arg_derived = .empty,
             .file_fn_labels = .empty,
             .binding_origin = .empty,
             .result_binding_labels = .empty,
@@ -389,6 +394,7 @@ pub const FlowChecker = struct {
         if (self.owned_facts) |*owned| owned.deinit();
         self.module_fn_labels.deinit(self.allocator);
         self.module_fn_meta.deinit(self.allocator);
+        self.module_fn_arg_derived.deinit(self.allocator);
         self.file_fn_labels.deinit(self.allocator);
         self.binding_origin.deinit(self.allocator);
         self.working_constraints.deinit(self.allocator);
@@ -949,6 +955,10 @@ pub const FlowChecker = struct {
                     .returns = entry.func.returns,
                 },
             ) catch self.markAllocationFailure();
+            if (entry.func.derives_from_args) {
+                self.module_fn_arg_derived.put(self.allocator, rec.slot, {}) catch
+                    self.markAllocationFailure();
+            }
             // Matched on the imported name, not the local alias, exactly as
             // before: `import { env as e }` still sets this slot.
             if (std.mem.eql(u8, rec.imported_name, "env")) {
@@ -1549,15 +1559,28 @@ pub const FlowChecker = struct {
     /// parsed credential is still a credential - the same reasoning the
     /// `renderToString` arm below already applies to escaping.
     fn parsedResultLabels(self: *FlowChecker, base: LabelSet, call_data: Node.CallExpr) LabelSet {
+        var labels = self.argDerivedLabels(base, call_data);
+        // Cleared after the union, not before: the argument is normally the
+        // thing carrying `user_input`, and clearing first would let the merge
+        // put it straight back.
+        labels.user_input = false;
+        return labels;
+    }
+
+    /// Labels for a call to an export declaring `derives_from_args`: its result
+    /// can contain what an argument carried, and it validates nothing, so every
+    /// label survives it. This is `parsedResultLabels` without the discharge -
+    /// the two differ by exactly the claim `.validated` makes.
+    ///
+    /// Without this an export declaring no labels answers the empty set, and a
+    /// secret through `dictSet` and back out of `dictGet` reached the response
+    /// with `no_secret_leakage` PROVEN.
+    fn argDerivedLabels(self: *FlowChecker, base: LabelSet, call_data: Node.CallExpr) LabelSet {
         var labels = base;
         for (0..call_data.args_count) |i| {
             const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
             labels = LabelSet.merge(labels, self.inferLabels(arg));
         }
-        // Cleared after the union, not before: the argument is normally the
-        // thing carrying `user_input`, and clearing first would let the merge
-        // put it straight back.
-        labels.user_input = false;
         return labels;
     }
 
@@ -1574,7 +1597,17 @@ pub const FlowChecker = struct {
                     return self.refineEnvLabels(arg, base_labels);
                 }
                 if (base_labels.validated) return self.parsedResultLabels(base_labels, call_data);
+                if (self.module_fn_arg_derived.contains(binding.slot)) {
+                    return self.argDerivedLabels(base_labels, call_data);
+                }
                 return LabelSet.merge(base_labels, self.closureArgLabels(binding.slot, call_data));
+            }
+
+            // Declared no labels of its own, but its result carries whatever
+            // its arguments did. Must precede the meta branch below, which
+            // answers with the closure labels alone.
+            if (self.module_fn_arg_derived.contains(binding.slot)) {
+                return self.argDerivedLabels(LabelSet.empty, call_data);
             }
 
             // A builtin module export with no labels to store above: the empty
@@ -4882,6 +4915,51 @@ test "a validator still discharges user input" {
         \\}
     ;
     try std.testing.expect(try runInputValidated(std.testing.allocator, source));
+}
+
+// The same conflation, one module further on, and without the discharge that
+// made the validator family arguable: a dictionary holds what was put in it,
+// and a JSON document is its input in another shape. Both modules declared no
+// labels at all, so both answered the empty set and every label the argument
+// carried was dropped. Measured before the fix: the first of these proved
+// `no_secret_leakage` with the secret in the response body.
+
+test "a dictionary does not launder a secret" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+        \\function handler(req) {
+        \\  const d = dictSet(dictEmpty(), "k", env("API_SECRET"));
+        \\  return Response.json({ v: dictGet(d, "k") });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "stringifyJson does not launder a secret" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { stringifyJson } from "zttp:json";
+        \\function handler(req) {
+        \\  const r = stringifyJson(env("API_SECRET"));
+        \\  return Response.json({ v: r.value });
+        \\}
+    ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "a dictionary of ordinary data still proves clean" {
+    // The control. Propagating every argument label is only useful if it does
+    // not refuse the handlers the module exists for: nothing labelled goes in
+    // here, so nothing labelled comes out.
+    const source =
+        \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+        \\function handler(req) {
+        \\  const d = dictSet(dictEmpty(), "k", "v");
+        \\  return Response.json({ v: dictGet(d, "k") });
+        \\}
+    ;
+    try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
 }
 
 test "a clock read reaching the response costs determinism" {
