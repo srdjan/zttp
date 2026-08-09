@@ -1327,6 +1327,7 @@ pub const ClassId = enum(u8) {
     arguments = 21,
     result = 22, // Result type for functional error handling
     range_iterator = 23, // Lazy range iterator for for...of
+    dict = 24, // Dict<K, V>: immutable, insertion-ordered keyed data (spec 6.2)
     // Custom class IDs start here
     _,
 
@@ -1389,6 +1390,15 @@ pub const JSObject = extern struct {
         pub const RANGE_STEP: usize = 2;
         /// Range iterator: cached length (computed once at creation)
         pub const RANGE_LENGTH: usize = 3;
+
+        /// Dict objects: entry count as integer
+        pub const DICT_COUNT: usize = 0;
+        /// Dict objects: entries start at slot 1, interleaved key, value, key,
+        /// value. Storing them in the object's own slots means the GC traces
+        /// them through the same walk it already runs over every object, with
+        /// no new tracing path to keep in step (arrays store elements the same
+        /// way, at slot index + 1).
+        pub const DICT_ENTRIES_START: usize = 1;
     };
 
     pub const ObjectFlags = packed struct(u8) {
@@ -2083,6 +2093,72 @@ pub const JSObject = extern struct {
         return obj;
     }
 
+    /// Create an empty Dict. Entries live in the object's own slots, so the
+    /// backing is the u16 overflow capacity shared with arrays: at two slots
+    /// per entry that bounds a Dict at `MAX_DICT_ENTRIES`, and the operations
+    /// that grow one fail closed at that bound rather than truncating.
+    pub fn createDict(allocator: std.mem.Allocator, class_idx: HiddenClassIndex) !*JSObject {
+        const obj = try allocator.create(JSObject);
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class_idx = class_idx,
+            .prototype = null,
+            .class_id = .dict,
+            .flags = .{ .is_exotic = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = null,
+        };
+        obj.inline_slots[Slots.DICT_COUNT] = value.JSValue.fromInt(0);
+        return obj;
+    }
+
+    /// The number of entries a Dict holds.
+    pub fn getDictCount(self: *const JSObject) u32 {
+        if (self.class_id != .dict) return 0;
+        const raw = self.inline_slots[Slots.DICT_COUNT];
+        if (!raw.isInt()) return 0;
+        const n = raw.getInt();
+        return if (n < 0) 0 else @intCast(n);
+    }
+
+    pub fn setDictCount(self: *JSObject, count: u32) void {
+        if (self.class_id != .dict) return;
+        self.inline_slots[Slots.DICT_COUNT] = value.JSValue.fromInt(@intCast(count));
+    }
+
+    /// Write the i-th entry, growing the slot backing as needed.
+    pub fn setDictEntry(self: *JSObject, allocator: std.mem.Allocator, index: u32, key: value.JSValue, val: value.JSValue) !void {
+        if (self.class_id != .dict) return;
+        if (index >= MAX_DICT_ENTRIES) return error.OutOfMemory;
+        const key_slot: u32 = @intCast(Slots.DICT_ENTRIES_START + @as(usize, index) * 2);
+        try self.writeDictSlot(allocator, key_slot, key);
+        try self.writeDictSlot(allocator, key_slot + 1, val);
+    }
+
+    fn writeDictSlot(self: *JSObject, allocator: std.mem.Allocator, slot: u32, val: value.JSValue) !void {
+        if (slot < INLINE_SLOT_COUNT) {
+            self.inline_slots[slot] = val;
+            return;
+        }
+        const overflow_idx: u16 = @intCast(slot - INLINE_SLOT_COUNT);
+        try self.ensureOverflowCapacity(allocator, overflow_idx + 1);
+        self.overflow_slots.?[overflow_idx] = val;
+    }
+
+    /// The i-th key, or undefined when `index` is past the entry count.
+    pub fn getDictKey(self: *const JSObject, index: u32) value.JSValue {
+        if (self.class_id != .dict or index >= self.getDictCount()) return value.JSValue.undefined_val;
+        return self.getSlot(@intCast(Slots.DICT_ENTRIES_START + @as(usize, index) * 2));
+    }
+
+    /// The i-th value, or undefined when `index` is past the entry count.
+    pub fn getDictValue(self: *const JSObject, index: u32) value.JSValue {
+        if (self.class_id != .dict or index >= self.getDictCount()) return value.JSValue.undefined_val;
+        return self.getSlot(@intCast(Slots.DICT_ENTRIES_START + @as(usize, index) * 2 + 1));
+    }
+
     fn computeRangeLength(start: i32, end: i32, step: i32) u32 {
         if (step == 0) return 0;
         const max_len = @as(u32, std.math.maxInt(i32));
@@ -2235,6 +2311,12 @@ pub const JSObject = extern struct {
     /// also reserve headroom for the slot-0 length, giving maxInt(u16) usable
     /// indices. Larger indices are rejected rather than silently truncated.
     pub const MAX_DENSE_ARRAY_LEN: u32 = std.math.maxInt(u16);
+
+    /// Entry ceiling for a Dict. Entries occupy two object slots each and the
+    /// overflow backing is addressed by a u16, so this is what the storage can
+    /// hold rather than a policy choice. Operations that would exceed it fail
+    /// closed with OutOfMemory, which every caller's error set already carries.
+    pub const MAX_DICT_ENTRIES: u32 = (std.math.maxInt(u16) - INLINE_SLOT_COUNT) / 2;
 
     /// Set element at index (for arrays)
     pub fn setIndex(self: *JSObject, allocator: std.mem.Allocator, index: u32, val: value.JSValue) !void {
