@@ -80,7 +80,7 @@ pub fn valueAt(dict: *const JSObject, index: u32) JSValue {
 
 /// A Dict with no entries.
 pub fn empty(ctx: *context.Context) !*JSObject {
-    const dict = try JSObject.createDict(ctx.allocator, ctx.root_class_idx);
+    const dict = try ctx.createDict();
     dict.prototype = null;
     return dict;
 }
@@ -94,7 +94,7 @@ pub fn set(ctx: *context.Context, dict: *const JSObject, key: JSValue, val: JSVa
     const new_count = if (existing == null) old_count + 1 else old_count;
     if (new_count > MAX_ENTRIES) return error.OutOfMemory;
 
-    const out = try JSObject.createDict(ctx.allocator, ctx.root_class_idx);
+    const out = try ctx.createDict();
     var i: u32 = 0;
     while (i < old_count) : (i += 1) {
         const entry_key = dict.getDictKey(i);
@@ -112,7 +112,7 @@ pub fn set(ctx: *context.Context, dict: *const JSObject, key: JSValue, val: JSVa
 /// returns an equal Dict rather than an error: `dictRemove` is total.
 pub fn remove(ctx: *context.Context, dict: *const JSObject, key: JSValue) !*JSObject {
     const old_count = dict.getDictCount();
-    const out = try JSObject.createDict(ctx.allocator, ctx.root_class_idx);
+    const out = try ctx.createDict();
     var written: u32 = 0;
     var i: u32 = 0;
     while (i < old_count) : (i += 1) {

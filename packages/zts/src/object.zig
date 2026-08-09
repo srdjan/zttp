@@ -1489,6 +1489,25 @@ pub const JSObject = extern struct {
         return obj;
     }
 
+    /// A Dict in the request arena. Same reclamation contract as an arena
+    /// array: the arena reset frees it, and `destroy` leaves it alone.
+    pub fn createDictWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex) ?*JSObject {
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class_idx = class_idx,
+            .prototype = null,
+            .class_id = .dict,
+            .flags = .{ .is_exotic = true, .is_arena = true },
+            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
+        obj.inline_slots[Slots.DICT_COUNT] = value.JSValue.fromInt(0);
+        return obj;
+    }
+
     /// Destroy object
     pub fn destroy(self: *JSObject, allocator: std.mem.Allocator) void {
         // Arena-allocated objects are reclaimed by arena reset/deinit.

@@ -452,6 +452,18 @@ pub const Context = struct {
         return try object.JSObject.createArray(self.allocator, self.root_class_idx);
     }
 
+    /// Create a Dict, using arena when hybrid mode is enabled. A Dict built
+    /// straight from `self.allocator` inside a request leaks: the request
+    /// arena is what reclaims per-request values, and nothing else frees an
+    /// object the GC never rooted.
+    pub fn createDict(self: *Context) !*object.JSObject {
+        if (self.hybrid) |h| {
+            return object.JSObject.createDictWithArena(h.arena, self.root_class_idx) orelse
+                return error.OutOfMemory;
+        }
+        return try object.JSObject.createDict(self.allocator, self.root_class_idx);
+    }
+
     /// Create a JS string pointer, using arena when hybrid mode is enabled
     pub fn createStringPtr(self: *Context, s: []const u8) !*string.JSString {
         if (self.hybrid) |h| {

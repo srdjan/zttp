@@ -1,0 +1,12 @@
+{"type":"test","name":"an object node decodes to a Dict in wire order"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"entries\":[[\"name\",\"ada\"],[\"tags\",[1,null,true]],[\"ok\",true]]"}
+{"type":"test","name":"null survives the round trip as data"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"roundTrip\":\"{\\\"name\\\":\\\"ada\\\",\\\"tags\\\":[1,null,true],\\\"ok\\\":true}\""}
+{"type":"test","name":"a duplicate key is refused and names the key"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"duplicateKind\":\"duplicate-key\",\"duplicateKey\":\"a\""}
+{"type":"test","name":"a syntax error names itself and carries an offset"}
+{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+{"type":"expect","status":200,"bodyContains":"\"malformedKind\":\"invalid-syntax\",\"malformedOffset\":1"}

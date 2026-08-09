@@ -2081,6 +2081,16 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
         switch (pool.getTag(current) orelse return null) {
             .t_dict => return .{ .key = key, .narrowed_type = current, .negated = false },
+            // A guard over `unknown` refines it, which is what an intrinsic
+            // type guard is for: after `isDict(x)` is true, `x` is a Dict. The
+            // union case below partitions members; there are none here, and
+            // answering "no guard" would leave the value unusable at exactly
+            // the site the guard was written for - a parsed JSON document.
+            .t_unknown_type => return .{
+                .key = key,
+                .narrowed_type = pool.addDict(self.allocator, pool.idx_unknown, pool.idx_unknown),
+                .negated = false,
+            },
             .t_union => {
                 var dicts: std.ArrayListUnmanaged(TypeIndex) = .empty;
                 defer dicts.deinit(self.allocator);

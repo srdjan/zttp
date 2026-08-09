@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "specifier": "zttp:json",
+  "source": "packages/zts/src/modules/data/json_mod.zig",
+  "requiredCapabilities": [],
+  "exports": [
+    {
+      "name": "parseJson",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "string"
+      ],
+      "laws": [
+        "pure"
+      ]
+    },
+    {
+      "name": "stringifyJson",
+      "effect": "none",
+      "returns": "result",
+      "params": [
+        "unknown"
+      ],
+      "laws": [
+        "pure"
+      ]
+    }
+  ]
+}

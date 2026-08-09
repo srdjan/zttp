@@ -450,6 +450,7 @@ for h in examples/patterns/*.ts; do check_types "$h"; done
 run_tests_with_args "examples/patterns/validate-external.ts"         "examples/patterns/validate-external.test.jsonl"
 run_tests_with_args "examples/patterns/discriminated-union-match.ts" "examples/patterns/discriminated-union-match.test.jsonl"
 run_tests_with_args "examples/patterns/derive-types.ts"              "examples/patterns/derive-types.test.jsonl"
+run_tests_with_args "examples/patterns/json-and-dict.ts"             "examples/patterns/json-and-dict.test.jsonl"
 
 # sql/ - a zttp:sql handler needs its schema to type-check; assert it proves
 # clean (this is the example whose one-arg sqlMany("listTodos") regressed when
