@@ -2507,3 +2507,15 @@ test "the five arms cover JsonValue without a default" {
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
+
+test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
+    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    defer h.deinit();
+    try expectKind(&h.checker, .non_exhaustive_profile_match);
+}
+
+test "the six arms cover it" {
+    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+}

@@ -232,6 +232,11 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     const global_is_finite_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalIsFinite), global_is_finite_atom, 1);
     try ctx.setGlobal(global_is_finite_atom, global_is_finite_func.toValue());
 
+    // Global isDict(): the specified intrinsic type guard for Dict (spec 5.7).
+    const is_dict_atom = try ctx.atoms.intern("isDict");
+    const is_dict_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalIsDict), is_dict_atom, 1);
+    try ctx.setGlobal(is_dict_atom, is_dict_func.toValue());
+
     // Global range()
     const range_atom = try ctx.atoms.intern("range");
     const range_func = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.globalRange), range_atom, 1);

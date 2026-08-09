@@ -212,6 +212,7 @@ pub const MatchAnalysis = struct {
             .number => type_tag == .t_number or type_tag == .t_literal_number,
             .string => type_tag == .t_string or type_tag == .t_literal_string or type_tag == .t_template_literal,
             .array => type_tag == .t_array or type_tag == .t_tuple,
+            .dict => type_tag == .t_dict,
         };
     }
 

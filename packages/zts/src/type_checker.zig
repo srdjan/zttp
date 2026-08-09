@@ -1576,6 +1576,7 @@ pub const TypeChecker = struct {
         // if (Array.isArray(x)), or a call to an admitted type predicate
         if (tag == .call) {
             if (self.extractIsArrayGuard(condition)) |guard| return guard;
+            if (self.extractIsDictGuard(condition)) |guard| return guard;
             if (self.extractTypePredicateGuard(condition)) |guard| return guard;
         }
 
@@ -2051,6 +2052,61 @@ pub const TypeChecker = struct {
             // somewhere in it. A record, a primitive, or a function is never an
             // array, so the honest answer is no guard rather than a narrowing to
             // `never` that would make the branch unreachable by construction.
+            else => return null,
+        }
+    }
+
+    /// `isDict(x)` - the intrinsic guard spec 5.7 names, narrowing a union to
+    /// its Dict members. It is a global call rather than a method call, which
+    /// is the only shape difference from `Array.isArray`; the narrowing it
+    /// installs is the same partition.
+    fn extractIsDictGuard(self: *const TypeChecker, call_node: NodeIndex) ?NarrowingGuard {
+        const call = self.ir_view.getCall(call_node) orelse return null;
+        if (call.args_count != 1) return null;
+        if (self.ir_view.getTag(call.callee) != .identifier) return null;
+
+        const callee_binding = self.ir_view.getBinding(call.callee) orelse return null;
+        const callee_name = self.resolveAtomName(callee_binding.name_atom) orelse return null;
+        if (!std.mem.eql(u8, callee_name, "isDict")) return null;
+        // A shadowed `isDict` is a different function, and a declared binding
+        // has a tracked type where the intrinsic does not.
+        if (self.binding_types.get(bindingKey(callee_binding)) != null) return null;
+
+        const arg = self.ir_view.getListIndex(call.args_start, 0);
+        if (self.ir_view.getTag(arg) != .identifier) return null;
+        const binding = self.ir_view.getBinding(arg) orelse return null;
+        const key = bindingKey(binding);
+        const current = self.currentBindingType(binding) orelse return null;
+
+        const pool = self.env.pool;
+        switch (pool.getTag(current) orelse return null) {
+            .t_dict => return .{ .key = key, .narrowed_type = current, .negated = false },
+            .t_union => {
+                var dicts: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                defer dicts.deinit(self.allocator);
+                var others: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                defer others.deinit(self.allocator);
+                for (pool.getUnionMembers(current)) |candidate| {
+                    if (pool.getTag(candidate) == .t_dict) {
+                        dicts.append(self.allocator, candidate) catch return null;
+                    } else {
+                        others.append(self.allocator, candidate) catch return null;
+                    }
+                }
+                if (dicts.items.len == 0) return null;
+                return .{
+                    .key = key,
+                    .narrowed_type = pool.addUnion(self.allocator, dicts.items),
+                    .negated = false,
+                    .else_type = if (others.items.len == 0)
+                        null_type_idx
+                    else
+                        pool.addUnion(self.allocator, others.items),
+                };
+            },
+            // exhaustive: same reasoning as the array guard - a type with no
+            // Dict in it narrows to nothing, and answering `never` would make
+            // the guarded branch unreachable by construction.
             else => return null,
         }
     }
@@ -5378,6 +5434,72 @@ test "the null literal and the four type tests exhaust JsonValue without a defau
     ,
         0,
         null,
+    );
+}
+
+test "the six arms cover JsonValue with its Dict arm" {
+    // Spec 16.3 in full: the null literal pattern plus the five type tests
+    // cover the six value kinds exactly, so the match is exhaustive without a
+    // `default` - which a closed union is required to do without.
+    try checkTypedSource(
+        \\type JsonValue =
+        \\  | null
+        \\  | boolean
+        \\  | number
+        \\  | string
+        \\  | readonly JsonValue[]
+        \\  | Dict<string, JsonValue>;
+        \\function kindOf(value: JsonValue): string {
+        \\    return match (value) {
+        \\        when null: "null"
+        \\        when boolean: "boolean"
+        \\        when number: "number"
+        \\        when string: "string"
+        \\        when array: "array"
+        \\        when Dict: "dict"
+        \\    };
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ k: kindOf(1) });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "isDict narrows to the Dict member and leaves the rest to the else branch" {
+    try checkTypedSource(
+        \\function take(d: Dict<string, number>): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v: string | Dict<string, number> = "x";
+        \\    if (isDict(v)) {
+        \\        return Response.json({ n: take(v) });
+        \\    }
+        \\    return Response.json({ n: 0 });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "without the isDict guard the same call is refused" {
+    // The positive control: with no narrowing, both programs report the same
+    // count and the test above proves nothing.
+    try checkTypedSourceSaying(
+        \\function take(d: Dict<string, number>): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v: string | Dict<string, number> = "x";
+        \\    return Response.json({ n: take(v) });
+        \\}
+    ,
+        1,
+        "expected Dict<string, number>",
     );
 }
 

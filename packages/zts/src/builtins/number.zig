@@ -253,6 +253,15 @@ pub fn globalIsFinite(_: *context.Context, _: value.JSValue, args: []const value
 /// Reaching one at runtime is not an error in the program, it is an unfinished
 /// program being run. The runtime maps this to 501 Not Implemented rather than
 /// the 500 a genuine fault produces, so `zttp dev` can serve a
+/// `isDict(value)` - the specified intrinsic type guard for `Dict` (spec 5.7).
+/// A guard the checker recognizes has to be a real function at runtime too:
+/// the `when Dict:` pattern lowers to a call to this name, exactly as
+/// `when array:` lowers to `Array.isArray`.
+pub fn globalIsDict(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (args.len == 0) return value.JSValue.false_val;
+    return if (@import("../dict.zig").isDict(args[0])) value.JSValue.true_val else value.JSValue.false_val;
+}
+
 /// partially-written handler and say exactly which path is still empty.
 pub fn globalHole(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;

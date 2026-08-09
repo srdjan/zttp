@@ -26,6 +26,7 @@ pub const names = [_][]const u8{
     "assert",
     "h",
     "hole",
+    "isDict",
     "parallel",
     "parseFloat",
     "parseInt",

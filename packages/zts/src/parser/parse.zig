@@ -1250,12 +1250,8 @@ pub const Parser = struct {
                 return null_node;
             }
             if (typeTestKindFor(text)) |kind| return self.parseTypeTestPattern(kind);
-            // Spec 5.5 names six value kinds. The two whose types do not exist
-            // yet say so, rather than reading as an unknown identifier.
-            if (std.mem.eql(u8, text, "Dict")) {
-                self.errors.addErrorAt(.unsupported_feature, self.current, "the 'Dict' type-test pattern arrives with Dict itself; use a record pattern or a literal until then");
-                return error.ParseError;
-            }
+            // Spec 5.5 names six value kinds. The one whose type does not
+            // exist yet says so, rather than reading as an unknown identifier.
             if (std.mem.eql(u8, text, "Bytes")) {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "the 'Bytes' type-test pattern arrives with Bytes itself; use a record pattern or a literal until then");
                 return error.ParseError;
@@ -1284,6 +1280,7 @@ pub const Parser = struct {
         if (std.mem.eql(u8, text, "number")) return .number;
         if (std.mem.eql(u8, text, "string")) return .string;
         if (std.mem.eql(u8, text, "array")) return .array;
+        if (std.mem.eql(u8, text, "Dict")) return .dict;
         return null;
     }
 
@@ -1307,6 +1304,7 @@ pub const Parser = struct {
 
         const predicate = switch (kind) {
             .array => try self.buildIsArrayCall(loc, scrutinee),
+            .dict => try self.buildIsDictCall(loc, scrutinee),
             .boolean, .number, .string => try self.buildTypeofTest(loc, scrutinee, @tagName(kind)),
         };
 
@@ -1329,6 +1327,26 @@ pub const Parser = struct {
             .tag = .binary_op,
             .loc = loc,
             .data = .{ .binary = .{ .op = .strict_eq, .left = typeof_node, .right = literal } },
+        });
+    }
+
+    /// `isDict(s)` - the intrinsic guard spec 5.7 names, called as a global
+    /// rather than as a method, which is the one shape difference from the
+    /// array test.
+    fn buildIsDictCall(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex) anyerror!NodeIndex {
+        const name_atom = try self.addAtom("isDict");
+        const binding = try self.scopes.resolveBinding("isDict", name_atom);
+        const callee = try self.nodes.add(Node.identifier(loc, binding));
+        const args_start = try self.addNodeList(&[_]NodeIndex{scrutinee});
+        return try self.nodes.add(.{
+            .tag = .call,
+            .loc = loc,
+            .data = .{ .call = .{
+                .callee = callee,
+                .args_start = args_start,
+                .args_count = 1,
+                .is_optional = false,
+            } },
         });
     }
 
@@ -5778,28 +5796,38 @@ test "the four admitted type-test patterns parse" {
     try std.testing.expectEqual(@as(usize, 4), tests_found);
 }
 
-test "the Dict and Bytes type tests name the phase they arrive in" {
-    for ([_][]const u8{ "Dict", "Bytes" }) |name| {
-        const source = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "const x = match (v) {{ when {s}: 1, default: 2 }};",
-            .{name},
-        );
-        defer std.testing.allocator.free(source);
+test "the Bytes type test names the phase it arrives in" {
+    const source = "const x = match (v) { when Bytes: 1, default: 2 };";
 
-        var parser = try Parser.init(std.testing.allocator, source);
-        defer parser.deinit();
+    var parser = try Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
 
-        _ = parser.parse() catch {
-            try std.testing.expect(parser.hasErrors());
-            const errors = parser.getErrors();
-            try std.testing.expect(errors.len > 0);
-            try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
-            try std.testing.expect(std.mem.indexOf(u8, errors[0].message, name) != null);
-            continue;
-        };
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len > 0);
+        try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+        try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "Bytes") != null);
+        return;
+    };
+    try std.testing.expect(false);
+}
+
+test "the Dict type test parses now that Dict exists" {
+    var parser = try Parser.init(std.testing.allocator,
+        \\const x = match (v) {
+        \\  when Dict: 1,
+        \\  default: 2
+        \\};
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
         try std.testing.expect(false);
-    }
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "a type test over a scrutinee that is not a name is refused" {
