@@ -380,6 +380,17 @@ pub const TypeEnv = struct {
     /// call's `(` in the stripped source.
     call_type_args: std.AutoHashMapUnmanaged(u32, CallTypeArgs),
 
+    /// Alias names whose definition contains a cycle that no data constructor
+    /// guards (spec 5.7). Filled once, after the type-namespace pass; read by
+    /// the type checker at every site that resolves such a name.
+    non_contractive_aliases: std.StringHashMapUnmanaged(void),
+    /// The same aliases by the index their name resolves to. An annotation is
+    /// resolved before the checker sees it, and only a name with no definition
+    /// at all survives as a `t_ref` - `type U = number | U` arrives as the
+    /// union itself, so a name-only lookup would miss every alias that has a
+    /// body, which is every one that matters.
+    non_contractive_indices: std.AutoHashMapUnmanaged(TypeIndex, void),
+
     /// Stable storage for interned names used as hash-map keys.
     /// Keys must not move after insertion, so each name owns its own allocation.
     name_storage: std.ArrayListUnmanaged([]const u8),
@@ -408,6 +419,8 @@ pub const TypeEnv = struct {
             .source_fn_sigs_by_name = .empty,
             .generic_scopes = .empty,
             .call_type_args = .empty,
+            .non_contractive_aliases = .empty,
+            .non_contractive_indices = .empty,
             .name_storage = .empty,
         };
         env.registerBuiltins();
@@ -506,6 +519,8 @@ pub const TypeEnv = struct {
     }
 
     pub fn deinit(self: *TypeEnv) void {
+        self.non_contractive_aliases.deinit(self.allocator);
+        self.non_contractive_indices.deinit(self.allocator);
         self.type_aliases.deinit(self.allocator);
         self.generic_aliases.deinit(self.allocator);
         self.interfaces.deinit(self.allocator);
@@ -554,6 +569,12 @@ pub const TypeEnv = struct {
                 else => {},
             }
         }
+
+        // The type namespace is complete here, so a name that is still
+        // unresolved is unresolved rather than not-yet-defined, and a cycle is
+        // a real cycle. Contractivity is decided once, before any annotation
+        // is resolved against these names.
+        self.findNonContractiveAliases();
 
         // Type parameters declared by a signature, keyed by the line the
         // signature starts on - the same key its parameter and return
@@ -1057,6 +1078,111 @@ pub const TypeEnv = struct {
             // is handled above; the rest have nothing to instantiate, and the
             // caller gets back the same type it passed in.
             else => return idx,
+        }
+    }
+
+    /// True when `name` is an alias whose own definition cycles back to it
+    /// without passing through a data constructor (spec 5.7).
+    pub fn isNonContractiveAlias(self: *const TypeEnv, name: []const u8) bool {
+        return self.non_contractive_aliases.contains(name);
+    }
+
+    /// The alias name a non-contractive type came from, so the diagnostic can
+    /// name what the author wrote rather than the shape it resolved to.
+    pub fn nameOfNonContractive(self: *const TypeEnv, idx: TypeIndex) ?[]const u8 {
+        var it = self.type_aliases.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != idx) continue;
+            if (self.non_contractive_aliases.contains(entry.key_ptr.*)) return entry.key_ptr.*;
+        }
+        return null;
+    }
+
+    /// True when `idx` is what a non-contractive alias name resolves to, or is
+    /// still the unresolved name itself.
+    pub fn isNonContractiveType(self: *const TypeEnv, idx: TypeIndex) bool {
+        if (idx == null_type_idx) return false;
+        if (self.non_contractive_indices.contains(idx)) return true;
+        if (self.pool.getTag(idx) != .t_ref) return false;
+        const name = self.pool.getRefName(idx);
+        return name.len > 0 and self.isNonContractiveAlias(name);
+    }
+
+    /// Spec 5.7: a recursive alias is contractive when every cycle passes
+    /// through a record, tuple, or array constructor - `Dict` joins that list
+    /// in phase 4. Union and intersection edges do not guard recursion, so
+    /// `type Loop = Loop`, `type U = number | U`, and a cycle through a
+    /// function parameter are all errors rather than infinite types.
+    ///
+    /// Decided per alias by walking its body and stopping at the first
+    /// guarded constructor. A name reached twice on one unguarded path is the
+    /// cycle; the visited set is the same walk's own path, so two aliases that
+    /// name a third are not mistaken for a cycle.
+    fn findNonContractiveAliases(self: *TypeEnv) void {
+        var it = self.type_aliases.iterator();
+        while (it.next()) |entry| {
+            const name = entry.key_ptr.*;
+            var path: [MAX_ALIAS_PATH][]const u8 = undefined;
+            path[0] = name;
+            if (self.reachesUnguarded(entry.value_ptr.*, path[0..], 1)) {
+                self.non_contractive_aliases.put(self.allocator, name, {}) catch self.markAllocationFailure();
+                self.non_contractive_indices.put(self.allocator, entry.value_ptr.*, {}) catch self.markAllocationFailure();
+            }
+        }
+    }
+
+    const MAX_ALIAS_PATH = 32;
+
+    /// True when `idx` reaches one of the names in `path[0..len]` without
+    /// crossing a data constructor.
+    fn reachesUnguarded(self: *const TypeEnv, idx: TypeIndex, path: [][]const u8, len: usize) bool {
+        if (idx == null_type_idx) return false;
+        // Out of path slots. Refusing to answer keeps the walk from claiming
+        // contractivity it did not establish; the alias is left alone and the
+        // assignability walk's own assumption set still terminates.
+        if (len >= path.len) return false;
+
+        switch (self.pool.getTag(idx) orelse return false) {
+            // Guarded: a cycle that passes through one of these describes a
+            // finite value of increasing depth, which is the whole point.
+            .t_record, .t_array, .t_tuple => return false,
+            .t_ref => {
+                const name = self.pool.getRefName(idx);
+                if (name.len == 0) return false;
+                for (path[0..len]) |seen| {
+                    if (std.mem.eql(u8, seen, name)) return true;
+                }
+                const next = self.type_aliases.get(name) orelse return false;
+                path[len] = name;
+                return self.reachesUnguarded(next, path, len + 1);
+            },
+            .t_union => {
+                for (self.pool.getUnionMembers(idx)) |member| {
+                    if (self.reachesUnguarded(member, path, len)) return true;
+                }
+                return false;
+            },
+            .t_intersection => {
+                for (self.pool.getIntersectionMembers(idx)) |member| {
+                    if (self.reachesUnguarded(member, path, len)) return true;
+                }
+                return false;
+            },
+            .t_nullable => return self.reachesUnguarded(self.pool.getNullableInner(idx), path, len),
+            // A function type is not a data constructor. A cycle through a
+            // parameter is the negative recursion spec 5.7 names, and one
+            // through the return type is no more finite than a bare cycle.
+            .t_function => {
+                const info = self.pool.getFunctionInfo(idx);
+                for (info.params) |param| {
+                    if (self.reachesUnguarded(param.type_idx, path, len)) return true;
+                }
+                return self.reachesUnguarded(info.ret, path, len);
+            },
+            // exhaustive: every remaining tag is a scalar, a literal, or an
+            // opaque capsule. None of them names another type, so none can
+            // close a cycle.
+            else => return false,
         }
     }
 

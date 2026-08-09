@@ -74,6 +74,7 @@ pub const DiagnosticKind = enum {
     ambiguous_type_argument, // a type parameter no argument position determines
     type_constraint_violation, // a type argument outside its `extends` bound
     type_argument_count_mismatch, // explicit type arguments, wrong count
+    non_contractive_alias, // a recursive alias whose cycle no data constructor guards
 };
 
 pub const Diagnostic = struct {
@@ -447,6 +448,7 @@ pub const TypeChecker = struct {
             .var_decl => {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
                 const declared = self.bindVarDeclaration(vd.binding);
+                self.reportIfNonContractive(declared, node);
                 self.bindCallableMetadata(vd.binding, .unavailable);
                 if (vd.init != null_node) {
                     self.walkExpr(vd.init);
@@ -3445,6 +3447,44 @@ pub const TypeChecker = struct {
         };
     }
 
+    /// Report ZTS212 when a declared annotation names an alias whose cycle no
+    /// data constructor guards (spec 5.7). The alias is decided once in
+    /// `TypeEnv`; this is the site that gives the verdict a source location,
+    /// since the declaration itself is blanked by the stripper and reaches the
+    /// parser as whitespace.
+    fn reportIfNonContractive(self: *TypeChecker, declared: TypeIndex, node: NodeIndex) void {
+        if (declared == null_type_idx or node == null_node) return;
+        if (!self.env.isNonContractiveType(declared)) return;
+        const name = if (self.env.pool.getTag(declared) == .t_ref)
+            self.env.pool.getRefName(declared)
+        else
+            self.env.nameOfNonContractive(declared) orelse "";
+        if (name.len == 0) return;
+
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "recursive type alias '{s}' has a cycle no data constructor guards",
+            .{name},
+        ) catch {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .non_contractive_alias,
+                .node = node,
+                .message = "recursive type alias has a cycle no data constructor guards",
+                .help = null,
+            });
+            return;
+        };
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .non_contractive_alias,
+            .node = node,
+            .message = msg,
+            .help = "route the recursion through a record, a tuple, or an array, the way `type JsonValue = ... | readonly JsonValue[]` does; a union or intersection edge does not guard it",
+            .allocated = true,
+        });
+    }
+
     fn addTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
         var buf: [256]u8 = undefined;
         const expected_str = self.env.pool.formatType(expected, buf[0..128]);
@@ -5159,6 +5199,96 @@ test "a null guard over an optional type narrows nothing" {
     ,
         1,
         "expected string, got string | undefined",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Contractive recursive aliases (spec 5.7 / phase 3 task 4)
+// ---------------------------------------------------------------------------
+
+test "a recursive alias guarded by an array is accepted" {
+    try checkTypedSource(
+        \\type JsonValue =
+        \\  | null
+        \\  | boolean
+        \\  | number
+        \\  | string
+        \\  | readonly JsonValue[];
+        \\function handler(req: Request): Response {
+        \\    const value: JsonValue = [1, "a", [true, null]];
+        \\    return Response.json({ value });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a recursive alias guarded by a record is accepted" {
+    try checkTypedSource(
+        \\type Tree = { value: number; children: readonly Tree[] };
+        \\function handler(req: Request): Response {
+        \\    const t: Tree = { value: 1, children: [] };
+        \\    return Response.json({ v: t.value });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a direct cycle is refused" {
+    try checkTypedSourceSaying(
+        \\type Loop = Loop;
+        \\function handler(req: Request): Response {
+        \\    const v: Loop = 1;
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        2,
+        "recursive type alias 'Loop' has a cycle no data constructor guards",
+    );
+}
+
+test "a union edge does not guard a cycle" {
+    // The union member is where the recursion sits, and a union is not a data
+    // constructor. `type U = number | U` describes no finite value.
+    try checkTypedSourceSaying(
+        \\type U = number | U;
+        \\function handler(req: Request): Response {
+        \\    const v: U = 1;
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        1,
+        "has a cycle no data constructor guards",
+    );
+}
+
+test "a cycle through two names is refused" {
+    try checkTypedSourceSaying(
+        \\type A = B;
+        \\type B = A;
+        \\function handler(req: Request): Response {
+        \\    const v: A = 1;
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        2,
+        "has a cycle no data constructor guards",
+    );
+}
+
+test "negative recursion through a function parameter is refused" {
+    try checkTypedSourceSaying(
+        \\type Neg = (value: Neg) => number;
+        \\function handler(req: Request): Response {
+        \\    const v: Neg = (value) => 1;
+        \\    return Response.json({ ok: true });
+        \\}
+    ,
+        1,
+        "recursive type alias 'Neg' has a cycle no data constructor guards",
     );
 }
 
