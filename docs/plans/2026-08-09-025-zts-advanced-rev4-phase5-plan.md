@@ -135,18 +135,32 @@ itself and to `unknown`; in particular it is not assignable to `object`, which
 is the check the request side of task 5 depends on, and a `string` is not
 assignable to it, which is the confusion spec 6.3 exists to prevent.
 
-It does not join the contractivity guard set. A recursive alias cannot pass
-through `Bytes`, so admitting it as a guard would admit a cycle with no data
-constructor - the exact refusal phase 3 built ZTS212 for.
+It does not join the contractivity guard set, and the reason measured on
+2026-08-09 is stronger than the one written here first. `Bytes` is a leaf that
+names no type, so no cycle can pass through it in either direction: it can
+neither guard a cycle nor close one. Adding `.t_bytes` to `reachesUnguarded`'s
+guard list changes no program. The guard set is left alone because the edit is
+inert, not because the edit would admit something.
 
 `ReturnKind.bytes` and its `returnKindToTs` row make the frozen-signature gate
 cover every `zttp:bytes` export by construction.
 
 **Tests:** `Bytes` resolves from its identifier and prints as `Bytes`; a `string`
 is not assignable to `Bytes` and the reverse holds too; `Bytes` is not assignable
-to `object`; two independently parsed `Bytes` share a canonical digest; a
-recursive alias whose only cycle passes through `Bytes` is refused by ZTS212;
-the frozen-signature corpus digest moves and is re-pinned in the same commit.
+to `object`; a brand over `Bytes` is assignable to `Bytes` and not the reverse,
+which is the only way the same-tag rule is reached at all - a plain `Bytes` is a
+singleton index and settles by identity first; two independently parsed `Bytes`
+share a canonical digest; a record-guarded alias carrying a `Bytes` field is
+accepted while `type B = Bytes | B` is still refused.
+
+Two expectations written here before measurement did not hold, recorded rather
+than forced. The ZTS212 test - "a recursive alias whose only cycle passes
+through `Bytes`" - is unwritable for the leaf reason above. And the
+frozen-signature digest does not move in this task: it is computed from the
+text each export's declared kinds emit, and no binding declares `.bytes` until
+task 3. The digest moves there. What lands here instead is a test that walks
+the `ReturnKind` enum itself, so a kind whose `returnKindToTs` row does not
+parse fails when the kind is added rather than when an export first uses it.
 
 ### Task 3: `zttp:bytes`
 
