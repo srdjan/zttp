@@ -5310,6 +5310,78 @@ test "a rename binds the field under the new name" {
 }
 
 // ---------------------------------------------------------------------------
+// Type-test patterns (spec 5.5 / phase 3 task 6)
+// ---------------------------------------------------------------------------
+
+test "a type test narrows its arm" {
+    try checkTypedSource(
+        \\function take(s: string): number {
+        \\    return s.length;
+        \\}
+        \\function label(value: string | number): number {
+        \\    return match (value) {
+        \\        when string: take(value)
+        \\        when number: 0
+        \\    };
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: label(1) });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a type test does not narrow the arm it does not name" {
+    // The positive control for the test above: if `when number:` narrowed to
+    // `string` too, or narrowed nothing, this program would pass.
+    try checkTypedSourceSaying(
+        \\function take(s: string): number {
+        \\    return s.length;
+        \\}
+        \\function label(value: string | number): number {
+        \\    return match (value) {
+        \\        when string: 0
+        \\        when number: take(value)
+        \\    };
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: label(1) });
+        \\}
+    ,
+        1,
+        "expected string, got number",
+    );
+}
+
+test "the null literal and the four type tests exhaust JsonValue without a default" {
+    try checkTypedSource(
+        \\type JsonValue =
+        \\  | null
+        \\  | boolean
+        \\  | number
+        \\  | string
+        \\  | readonly JsonValue[];
+        \\function depth(value: JsonValue): number {
+        \\    return match (value) {
+        \\        when null: 1
+        \\        when boolean: 1
+        \\        when number: 1
+        \\        when string: 1
+        \\        when array: 2
+        \\    };
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ d: depth([1, "a"]) });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Contractive recursive aliases (spec 5.7 / phase 3 task 4)
 // ---------------------------------------------------------------------------
 

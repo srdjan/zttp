@@ -2323,6 +2323,8 @@ pub const CodeGen = struct {
                 try self.emitObjectPatternTest(arm.pattern, body_labels[i]);
             } else if (pattern_tag == .array_pattern) {
                 try self.emitArrayPatternTest(arm.pattern, body_labels[i]);
+            } else if (pattern_tag == .match_type_test) {
+                try self.emitTypeTestPattern(arm.pattern, body_labels[i]);
             } else {
                 try self.emitEqTest(arm.pattern, body_labels[i]);
             }
@@ -2811,6 +2813,18 @@ pub const CodeGen = struct {
 
     /// Emit dup + value + strict_eq + conditional jump for discriminant testing.
     /// Used by both switch and match for case/arm equality checks.
+    /// A type-test pattern (spec 5.5) tests the scrutinee through the narrowing
+    /// test the parser lowered it to, so nothing new reaches the kernel: the
+    /// three scalars run `typeof`, the array runs `Array.isArray`. The
+    /// scrutinee stays on the stack untouched; the predicate leaves one boolean
+    /// that the branch consumes.
+    fn emitTypeTestPattern(self: *CodeGen, pattern_node: NodeIndex, label: u32) !void {
+        const test_node = self.ir.getMatchTypeTest(pattern_node) orelse return;
+        try self.emitNode(test_node.predicate);
+        try self.emitJump(.if_true, label);
+        self.popStack(1);
+    }
+
     fn emitEqTest(self: *CodeGen, test_expr: NodeIndex, label: u32) !void {
         try self.emit(.dup);
         self.pushStack(1);

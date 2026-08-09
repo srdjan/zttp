@@ -161,6 +161,7 @@ pub const MatchAnalysis = struct {
             // it matches whatever the field holds - the same answer the
             // wildcard gives, with a name attached.
             .identifier => true,
+            .match_type_test => self.typeTestCoversType(pattern, type_idx),
             else => false,
         };
     }
@@ -194,7 +195,23 @@ pub const MatchAnalysis = struct {
             .match_pattern => self.objectPatternFullyCoversType(pattern, type_idx),
             .array_pattern => self.arrayPatternFullyCoversType(pattern, type_idx),
             .identifier => true,
+            .match_type_test => self.typeTestCoversType(pattern, type_idx),
             else => false,
+        };
+    }
+
+    /// A type-test pattern (spec 5.5) selects the value kind it names: it
+    /// matches a union member of that kind and covers it exactly, so `string`
+    /// answers for `string` and for the literal `"a"`, and `array` answers for
+    /// an array or a fixed tuple.
+    fn typeTestCoversType(self: *const MatchAnalysis, pattern: NodeIndex, type_idx: TypeIndex) bool {
+        const test_node = self.ir_view.getMatchTypeTest(pattern) orelse return false;
+        const type_tag = self.pool.getTag(type_idx) orelse return false;
+        return switch (test_node.kind) {
+            .boolean => type_tag == .t_boolean or type_tag == .t_literal_bool,
+            .number => type_tag == .t_number or type_tag == .t_literal_number,
+            .string => type_tag == .t_string or type_tag == .t_literal_string or type_tag == .t_template_literal,
+            .array => type_tag == .t_array or type_tag == .t_tuple,
         };
     }
 

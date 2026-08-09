@@ -307,6 +307,7 @@ pub const ComptimeEvaluator = struct {
             .match_expr,
             .match_arm,
             .match_pattern,
+            .match_type_test,
             .expr_stmt,
             .var_decl,
             .if_stmt,

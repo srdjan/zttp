@@ -216,6 +216,10 @@ pub const node_rules = [_]NodeRule{
     } } },
     // call: the oracle boundary - denotes an opaque call_result, lowering pushes it.
     .{ .tag = .call, .proof = .value, .denote = &.{.{ .call_result = 0 }}, .lower = .{ .straight = &.{.{ .call_site = 0 }} } },
+    // A type-test pattern denotes nothing on its own: it selects an arm, and
+    // the value it tests with is the predicate expression the parser lowered
+    // it to, whose own nodes carry the denotation (spec 5.5).
+    .{ .tag = .match_type_test, .proof = .structural },
     // Statements: covered, no value denotation in this slice.
     .{ .tag = .if_stmt, .proof = .structural },
     .{ .tag = .return_stmt, .proof = .structural },
@@ -361,7 +365,7 @@ pub const SpecCode = enum {
 // alphabet", not "every byte value". Rename/reorder at equal size is caught by
 // the receipt's irTableHash/opcodeTableHash at check time. A per-member
 // rule-or-pending list plus SMT-checked coverage is the northstar's version.
-pub const expected_nodes = 81;
+pub const expected_nodes = 82;
 pub const expected_opcodes = 130;
 
 comptime {

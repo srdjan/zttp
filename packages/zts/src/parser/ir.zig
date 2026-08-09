@@ -182,6 +182,11 @@ pub const NodeTag = enum(u8) {
     match_expr,
     match_arm,
     match_pattern,
+    /// A `match` type-test pattern (spec 5.5): `when string:`, `when array:`.
+    /// Carries the value kind it tests and the predicate expression the parser
+    /// lowered it to, which is the corresponding narrowing test from the
+    /// section 5.4 closed list over the scrutinee.
+    match_type_test,
 
     // Statements
     expr_stmt,
@@ -315,6 +320,7 @@ pub const Node = struct {
 
         // Match pattern (object pattern)
         match_pattern: MatchPatternObj,
+        match_type_test: MatchTypeTest,
 
         // Assert statement
         assert_stmt: AssertStmt,
@@ -496,6 +502,22 @@ pub const Node = struct {
     pub const MatchPatternObj = struct {
         props_start: NodeIndex, // index into list storage
         props_count: u8,
+    };
+
+    /// The closed set of value kinds a type-test pattern may name. `Dict` and
+    /// `Bytes` join it in phases 4 and 5, with their types.
+    pub const TypeTestKind = enum(u8) {
+        boolean,
+        number,
+        string,
+        array,
+    };
+
+    pub const MatchTypeTest = struct {
+        kind: TypeTestKind,
+        /// The predicate expression this test lowers to: `typeof s === "..."`
+        /// for the scalars, `Array.isArray(s)` for the array.
+        predicate: NodeIndex,
     };
 
     pub const TryStmt = struct {
@@ -1259,6 +1281,13 @@ pub const IRStore = struct {
                 break :blk self.addNode(.match_pattern, loc, .{
                     .a = p.props_start,
                     .b = @as(u32, p.props_count),
+                });
+            },
+            .match_type_test => blk: {
+                const t = node.data.match_type_test;
+                break :blk self.addNode(.match_type_test, loc, .{
+                    .a = @intFromEnum(t.kind),
+                    .b = t.predicate,
                 });
             },
             .return_stmt, .throw_stmt => self.addNode(node.tag, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
@@ -2188,6 +2217,22 @@ pub const IrView = struct {
                 break :blk .{
                     .props_start = d.a,
                     .props_count = @truncate(d.b),
+                };
+            },
+        };
+    }
+
+    /// Get a type-test pattern's kind and lowered predicate (spec 5.5).
+    pub fn getMatchTypeTest(self: IrView, idx: NodeIndex) ?Node.MatchTypeTest {
+        if (self.getTag(idx) != .match_type_test) return null;
+        return switch (self.impl) {
+            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_type_test else null,
+            .ir_store => |ir| blk: {
+                if (idx >= ir.data.items.len) break :blk null;
+                const d = ir.data.items[idx];
+                break :blk .{
+                    .kind = @enumFromInt(@as(u8, @truncate(d.a))),
+                    .predicate = d.b,
                 };
             },
         };

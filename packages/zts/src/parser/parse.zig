@@ -90,6 +90,10 @@ pub const Parser = struct {
     in_loop: bool,
     in_function: bool,
     expression_profile: ?ExpressionProfile,
+    /// The scrutinee of the `match` currently being parsed. A type-test pattern
+    /// lowers to a narrowing test over it (spec 5.5), so the pattern parser
+    /// needs the node the arms are selecting on.
+    current_match_scrutinee: NodeIndex = null_node,
 
     // Guard composition: binding slot for `guard` imported from zttp:compose
     guard_binding_slot: ?u16 = null,
@@ -1159,6 +1163,10 @@ pub const Parser = struct {
         try self.expect(.rparen, "')'");
         try self.expect(.lbrace, "'{'");
 
+        const outer_scrutinee = self.current_match_scrutinee;
+        self.current_match_scrutinee = discriminant;
+        defer self.current_match_scrutinee = outer_scrutinee;
+
         var arms: [255]NodeIndex = undefined;
         var arms_len: u8 = 0;
 
@@ -1241,6 +1249,17 @@ pub const Parser = struct {
                 self.advance();
                 return null_node;
             }
+            if (typeTestKindFor(text)) |kind| return self.parseTypeTestPattern(kind);
+            // Spec 5.5 names six value kinds. The two whose types do not exist
+            // yet say so, rather than reading as an unknown identifier.
+            if (std.mem.eql(u8, text, "Dict")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "the 'Dict' type-test pattern arrives with Dict itself; use a record pattern or a literal until then");
+                return error.ParseError;
+            }
+            if (std.mem.eql(u8, text, "Bytes")) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "the 'Bytes' type-test pattern arrives with Bytes itself; use a record pattern or a literal until then");
+                return error.ParseError;
+            }
         }
 
         // Literal pattern: string, number, boolean, null, undefined
@@ -1256,6 +1275,89 @@ pub const Parser = struct {
                 return error.ParseError;
             },
         };
+    }
+
+    /// The value kind a type-test pattern names, or null when the identifier
+    /// is not one of them.
+    fn typeTestKindFor(text: []const u8) ?Node.TypeTestKind {
+        if (std.mem.eql(u8, text, "boolean")) return .boolean;
+        if (std.mem.eql(u8, text, "number")) return .number;
+        if (std.mem.eql(u8, text, "string")) return .string;
+        if (std.mem.eql(u8, text, "array")) return .array;
+        return null;
+    }
+
+    /// Build a type-test pattern and the narrowing test it lowers to (spec
+    /// 5.5): `typeof s === "..."` for the three scalars, `Array.isArray(s)` for
+    /// the array. The test reads the scrutinee a second time, so the scrutinee
+    /// must be a name or a member path - which is what spec 5.5 requires of it
+    /// anyway, with this diagnostic carrying the repair.
+    fn parseTypeTestPattern(self: *Parser, kind: Node.TypeTestKind) anyerror!NodeIndex {
+        const loc = self.current.location();
+        const scrutinee = self.current_match_scrutinee;
+        const readable = scrutinee != null_node and blk: {
+            const scrutinee_tag = self.nodes.getTag(scrutinee);
+            break :blk scrutinee_tag == .identifier or scrutinee_tag == .member_access;
+        };
+        if (!readable) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "a type-test pattern needs a scrutinee that is a name or a member path; bind the scrutinee to a const first and match on that");
+            return error.ParseError;
+        }
+        self.advance(); // consume the kind name
+
+        const predicate = switch (kind) {
+            .array => try self.buildIsArrayCall(loc, scrutinee),
+            .boolean, .number, .string => try self.buildTypeofTest(loc, scrutinee, @tagName(kind)),
+        };
+
+        return try self.nodes.add(.{
+            .tag = .match_type_test,
+            .loc = loc,
+            .data = .{ .match_type_test = .{ .kind = kind, .predicate = predicate } },
+        });
+    }
+
+    fn buildTypeofTest(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex, name: []const u8) anyerror!NodeIndex {
+        const typeof_node = try self.nodes.add(.{
+            .tag = .unary_op,
+            .loc = loc,
+            .data = .{ .unary = .{ .op = .typeof_op, .operand = scrutinee } },
+        });
+        const str_idx = try self.constants.addString(name);
+        const literal = try self.nodes.add(Node.litString(loc, str_idx));
+        return try self.nodes.add(.{
+            .tag = .binary_op,
+            .loc = loc,
+            .data = .{ .binary = .{ .op = .strict_eq, .left = typeof_node, .right = literal } },
+        });
+    }
+
+    fn buildIsArrayCall(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex) anyerror!NodeIndex {
+        const array_atom = try self.addAtom("Array");
+        const array_binding = try self.scopes.resolveBinding("Array", array_atom);
+        const array_ref = try self.nodes.add(Node.identifier(loc, array_binding));
+        const method_atom = try self.addAtom("isArray");
+        const callee = try self.nodes.add(.{
+            .tag = .member_access,
+            .loc = loc,
+            .data = .{ .member = .{
+                .object = array_ref,
+                .property = method_atom,
+                .computed = null_node,
+                .is_optional = false,
+            } },
+        });
+        const args_start = try self.addNodeList(&[_]NodeIndex{scrutinee});
+        return try self.nodes.add(.{
+            .tag = .call,
+            .loc = loc,
+            .data = .{ .call = .{
+                .callee = callee,
+                .args_start = args_start,
+                .args_count = 1,
+                .is_optional = false,
+            } },
+        });
     }
 
     /// Declare a match-pattern binding as an arm-scoped `const` and return the
@@ -5647,6 +5749,76 @@ test "null is a match pattern" {
 
     try std.testing.expect(result != null_node);
     try std.testing.expect(!parser.hasErrors());
+}
+
+test "the four admitted type-test patterns parse" {
+    var parser = try Parser.init(std.testing.allocator,
+        \\const x = match (v) {
+        \\  when boolean: 1,
+        \\  when number: 2,
+        \\  when string: 3,
+        \\  when array: 4
+        \\};
+    );
+    defer parser.deinit();
+
+    const result = parser.parse() catch {
+        try std.testing.expect(false);
+        return;
+    };
+    try std.testing.expect(result != null_node);
+    try std.testing.expect(!parser.hasErrors());
+
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var tests_found: usize = 0;
+    var node: NodeIndex = 0;
+    while (node < view.nodeCount()) : (node += 1) {
+        if (view.getTag(node) == .match_type_test) tests_found += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 4), tests_found);
+}
+
+test "the Dict and Bytes type tests name the phase they arrive in" {
+    for ([_][]const u8{ "Dict", "Bytes" }) |name| {
+        const source = try std.fmt.allocPrint(
+            std.testing.allocator,
+            "const x = match (v) {{ when {s}: 1, default: 2 }};",
+            .{name},
+        );
+        defer std.testing.allocator.free(source);
+
+        var parser = try Parser.init(std.testing.allocator, source);
+        defer parser.deinit();
+
+        _ = parser.parse() catch {
+            try std.testing.expect(parser.hasErrors());
+            const errors = parser.getErrors();
+            try std.testing.expect(errors.len > 0);
+            try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, errors[0].kind);
+            try std.testing.expect(std.mem.indexOf(u8, errors[0].message, name) != null);
+            continue;
+        };
+        try std.testing.expect(false);
+    }
+}
+
+test "a type test over a scrutinee that is not a name is refused" {
+    // The test reads the scrutinee a second time, so a call in that position
+    // would be evaluated twice. Spec 5.5 already requires a name or a member
+    // path there; this is the diagnostic that says so.
+    var parser = try Parser.init(std.testing.allocator,
+        \\const x = match (compute()) {
+        \\  when string: 1,
+        \\  default: 2
+        \\};
+    );
+    defer parser.deinit();
+
+    _ = parser.parse() catch {
+        try std.testing.expect(parser.hasErrors());
+        return;
+    };
+    try std.testing.expect(false);
 }
 
 test "a match binding is scoped to its arm" {

@@ -626,7 +626,7 @@ test "registry passes all slice mechanisms" {
     try std.testing.expectEqual(@as(usize, 2), result.unop_instances);
     try std.testing.expectEqual(@as(usize, 13), result.nodes_proven);
     try std.testing.expectEqual(@as(usize, 1), result.refinements_proven);
-    try std.testing.expectEqual(@as(usize, 3), result.nodes_structural); // if_stmt, return_stmt, block
+    try std.testing.expectEqual(@as(usize, 4), result.nodes_structural); // match_type_test, if_stmt, return_stmt, block
 }
 
 test "a wrong lowering is caught as divergence" {
