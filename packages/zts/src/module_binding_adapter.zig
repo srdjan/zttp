@@ -13,19 +13,39 @@ comptime {
         @compileError("zttp-sdk.JSValue must match runtime JSValue size");
     if (@bitSizeOf(sdk.JSValue) != @bitSizeOf(value.JSValue))
         @compileError("zttp-sdk.JSValue must match runtime JSValue bit size");
-    // Last variant of each paired enum must share an ordinal. Covers
-    // length alignment too: if SDK adds a tail variant the internal side
-    // lacks, the ordinal check catches it before any adaptor runs.
-    assertOrdinal(sdk.EffectClass.none, internal.EffectClass.none, "EffectClass");
-    assertOrdinal(sdk.ReturnKind.result, internal.ReturnKind.result, "ReturnKind");
-    assertOrdinal(sdk.FailureSeverity.none, internal.FailureSeverity.none, "FailureSeverity");
-    assertOrdinal(sdk.ContractCategory.extension_specific, internal.ContractCategory.extension_specific, "ContractCategory");
-    assertOrdinal(sdk.LawKind.absorbing, internal.LawKind.absorbing, "LawKind");
+    // Every paired enum must agree on length and on the ordinal of its last
+    // variant, because both adaptors convert with a raw `@intFromEnum`.
+    //
+    // Naming a variant by hand was the earlier form and it rotted twice in one
+    // phase: `ReturnKind.result` stopped being last when `dict` and `bytes`
+    // were appended, and the `ModuleCapability` assertion was deleted outright
+    // with the `websocket` variant rather than re-pointed. Both left the check
+    // passing over a pair it no longer covered. `assertTailAligned` reads the
+    // tail off the type, so it cannot be aimed at the wrong variant and cannot
+    // be silently dropped.
+    assertTailAligned(sdk.EffectClass, internal.EffectClass, "EffectClass");
+    assertTailAligned(sdk.ReturnKind, internal.ReturnKind, "ReturnKind");
+    assertTailAligned(sdk.FailureSeverity, internal.FailureSeverity, "FailureSeverity");
+    assertTailAligned(sdk.ContractCategory, internal.ContractCategory, "ContractCategory");
+    assertTailAligned(sdk.LawKind, internal.LawKind, "LawKind");
+    assertTailAligned(sdk.ModuleCapability, internal.ModuleCapability, "ModuleCapability");
 }
 
-fn assertOrdinal(comptime sdk_variant: anytype, comptime internal_variant: anytype, comptime name: []const u8) void {
-    if (@intFromEnum(sdk_variant) != @intFromEnum(internal_variant))
-        @compileError("sdk." ++ name ++ " ordinals diverge from internal");
+/// Both enums must have the same number of variants, and each pair at the
+/// same position must share a name and an ordinal. Reading the fields off the
+/// types is what keeps this honest when a variant is added or removed at
+/// either end.
+fn assertTailAligned(comptime SdkEnum: type, comptime InternalEnum: type, comptime name: []const u8) void {
+    const sdk_fields = @typeInfo(SdkEnum).@"enum".fields;
+    const internal_fields = @typeInfo(InternalEnum).@"enum".fields;
+    if (sdk_fields.len != internal_fields.len)
+        @compileError("sdk." ++ name ++ " has a different variant count from internal");
+    for (sdk_fields, internal_fields) |s, i| {
+        if (s.value != i.value)
+            @compileError("sdk." ++ name ++ "." ++ s.name ++ " ordinal diverges from internal");
+        if (!std.mem.eql(u8, s.name, i.name))
+            @compileError("sdk." ++ name ++ " variant order diverges from internal at '" ++ s.name ++ "'");
+    }
 }
 
 pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBinding {

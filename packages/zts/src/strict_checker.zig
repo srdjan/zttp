@@ -609,10 +609,29 @@ pub const StrictChecker = struct {
         return true;
     }
 
+    /// True when `node` is a bare identifier naming a function this walk
+    /// cannot read the body of - a locally-declared one, or an import.
+    ///
+    /// `function_valued_bindings` is filled only from `.function_decl` and
+    /// `.var_decl`, so an import was never in it and the identifier fell
+    /// through to `isPureExpr`'s leaf arm, which answers pure. That made
+    /// `flag ? dictMapValues(d, logInfo) : d` report clean: `dictMapValues`
+    /// declares `.none` and no capability, and it runs whatever it is handed -
+    /// here a `zttp:log` export that reaches `.clock` and `.stderr`. The rule
+    /// that exists to forbid a conditional effect stayed silent on one.
+    ///
+    /// Refusing every named import in an argument slot is the conservative
+    /// direction and the same one the local case already takes: an identifier
+    /// is a name, not a body, and answering pure for it reports the absence of
+    /// information as a fact.
     fn namesFunction(self: *const StrictChecker, node: NodeIndex) bool {
         if (self.ir_view.getTag(node) != .identifier) return false;
         const binding = self.ir_view.getBinding(node) orelse return false;
-        return self.function_valued_bindings.contains(bindingKey(binding));
+        if (self.function_valued_bindings.contains(bindingKey(binding))) return true;
+        // Slot numbers are per-kind, so a local `const d` can carry the same
+        // number as an import. Only a global binding can name one.
+        if (binding.kind != .global) return false;
+        return self.importedFunctionForSlot(binding.slot) != null;
     }
 
     fn walkExpr(self: *StrictChecker, node: NodeIndex) void {
@@ -2525,6 +2544,31 @@ test "a pure callback keeps its call pure, an effectful one does not" {
     );
     defer effectful_cb.deinit();
     try expectKind(&effectful_cb.checker, .canonical_ternary_impure);
+}
+
+test "an imported function in a callback slot is refused like a local one" {
+    // `function_valued_bindings` holds only locally-declared functions, so an
+    // import fell through to the leaf arm and answered pure. `dictMapValues`
+    // declares `.none` and runs whatever it is handed - here a `zttp:log`
+    // export that reaches `.clock` and `.stderr` - so the rule that exists to
+    // forbid a conditional effect reported nothing on one.
+    var imported_cb = try checkStripped(
+        "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
+            "import { logInfo } from \"zttp:log\";\n" ++
+            "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, logInfo) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
+    );
+    defer imported_cb.deinit();
+    try expectKind(&imported_cb.checker, .canonical_ternary_impure);
+
+    // The control that keeps the refusal from being "refuse every call": the
+    // two-way pure selection spec 4.2.1 prefers still passes, and its
+    // arguments are locals rather than named functions.
+    var pure_selection = try checkStripped(
+        "import { ok, err } from \"zttp:result\";\n" ++
+            "function handler(req: Request): Response {\n  const n = 1;\n  const r = n > 0 ? ok(1) : err(\"no\");\n  return Response.json({ ok: r.ok });\n}\n",
+    );
+    defer pure_selection.deinit();
+    try expectNoKind(&pure_selection.checker, .canonical_ternary_impure);
 }
 
 test "a block-bodied callback is read statement by statement" {

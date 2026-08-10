@@ -212,9 +212,27 @@ const Parser = struct {
                 't' => '\t',
                 'u' => {
                     if (self.text.len - self.pos < 4) return self.fail(.invalid_syntax, open);
-                    const code = std.fmt.parseInt(u21, self.text[self.pos..][0..4], 16) catch
+                    var code: u21 = std.fmt.parseInt(u21, self.text[self.pos..][0..4], 16) catch
                         return self.fail(.invalid_syntax, self.pos);
                     self.pos += 4;
+                    // A non-BMP character is written as a surrogate pair, which
+                    // is what `JSON.stringify` emits with ASCII-only escaping.
+                    // Encoding each half on its own is what
+                    // `utf8Encode` refuses, so `{"msg":"\ud83d\ude00"}` - a
+                    // well-formed document - was answered `invalid-syntax`.
+                    // The engine's own `JSON.parse` combines the pair; these
+                    // two readers disagreed on the same input.
+                    if (code >= 0xD800 and code <= 0xDBFF and
+                        self.text.len - self.pos >= 6 and
+                        self.text[self.pos] == '\\' and self.text[self.pos + 1] == 'u')
+                    {
+                        const low = std.fmt.parseInt(u21, self.text[self.pos + 2 ..][0..4], 16) catch
+                            return self.fail(.invalid_syntax, self.pos);
+                        if (low >= 0xDC00 and low <= 0xDFFF) {
+                            code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                            self.pos += 6;
+                        }
+                    }
                     var buf: [4]u8 = undefined;
                     const len = std.unicode.utf8Encode(code, &buf) catch return self.fail(.invalid_syntax, open);
                     out.appendSlice(self.ctx.allocator, buf[0..len]) catch return error.OutOfMemory;
@@ -447,7 +465,12 @@ fn encode(ctx: *context.Context, val: JSValue, buf: *std.ArrayListUnmanaged(u8),
     if (val.isNumber()) {
         const n = val.toNumber() orelse return error.Unencodable;
         if (!std.math.isFinite(n)) return error.NonFinite;
-        var tmp: [32]u8 = undefined;
+        // 32 bytes held every integer and nothing else: `{d}` over `1e300`
+        // needs 301 characters, so `stringifyJson(1e300)` returned
+        // `NoSpaceLeft` as an engine error and the handler died with a 500 on
+        // a perfectly encodable JSON number. `f64`'s widest `{d}` rendering is
+        // a denormal near 5e-324, which fits well inside this.
+        var tmp: [512]u8 = undefined;
         const text = if (n == @trunc(n) and @abs(n) < 1e15)
             std.fmt.bufPrint(&tmp, "{d}", .{@as(i64, @intFromFloat(n))}) catch return error.OutOfMemory
         else
@@ -726,6 +749,43 @@ test "parseJsonBytes over invalid UTF-8 reports invalid-encoding and not invalid
     const bad_json = try bytes_mod.fromSlice(h.ctx, "{oops}");
     const syntax = try callExport(h, "parseJsonBytes", &.{JSValue.fromPtr(bad_json)});
     try testing.expectEqualStrings("invalid-syntax", helpers.getStringDataCtx(try resultField(h, syntax, "kind"), h.ctx).?);
+}
+
+test "an escaped astral character is one scalar, not two refused halves" {
+    // `JSON.stringify` with ASCII-only escaping writes a non-BMP character as
+    // a surrogate pair. Encoding each half on its own is what `utf8Encode`
+    // refuses, so a well-formed document was answered `invalid-syntax` - and
+    // the engine's own `JSON.parse` accepted the same bytes, so the two
+    // readers disagreed.
+    const h = try harness();
+    defer releaseHarness(h);
+
+    const parsed = try parse(h, "\"\\ud83d\\ude00\"");
+    try testing.expectEqualStrings("\u{1F600}", helpers.getStringDataCtx(parsed, h.ctx).?);
+
+    // A lone high surrogate with no pair is still refused - the fix pairs
+    // them, it does not admit halves.
+    const f = try parseFailure(h, "\"\\ud83d\"");
+    try testing.expectEqual(ErrorKind.invalid_syntax, f.kind);
+}
+
+test "a large magnitude encodes instead of failing the call" {
+    // The scratch buffer held 32 bytes and `{d}` over 1e300 needs 301, so
+    // `stringifyJson(1e300)` returned an engine error out of the native call -
+    // a 500 for a perfectly encodable JSON number, with no Result to match on.
+    const h = try harness();
+    defer releaseHarness(h);
+
+    var buf: std.ArrayListUnmanaged(u8) = .empty;
+    defer buf.deinit(h.ctx.allocator);
+    try encode(h.ctx, JSValue.fromFloat(1e300), &buf, 0);
+    try testing.expect(buf.items.len > 32);
+    try testing.expectEqual(@as(u8, '1'), buf.items[0]);
+
+    // The other end of the range, a denormal.
+    buf.clearRetainingCapacity();
+    try encode(h.ctx, JSValue.fromFloat(5e-324), &buf, 0);
+    try testing.expect(buf.items.len > 0);
 }
 
 test "a round trip is byte-identical for a canonical document" {

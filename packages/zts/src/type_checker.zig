@@ -3572,19 +3572,52 @@ pub const TypeChecker = struct {
         });
     }
 
+    /// The module export a call's callee names, resolved through the import
+    /// that introduced it rather than by the local spelling.
+    ///
+    /// A bare-name lookup was wrong in both directions. `import { send as
+    /// publish }` never matched, so the export's checks were skipped under an
+    /// alias; and a handler's own `function send(...)` matched, so a local
+    /// function was checked against a module export's declaration. The import
+    /// record carries `imported_atom` - the name in the source module - and
+    /// the specifier, which together identify the export exactly.
+    fn resolveImportedExport(
+        self: *const TypeChecker,
+        callee_binding: ir.BindingRef,
+    ) ?@TypeOf(@import("zts-engine").builtin_modules.findExport("", "").?) {
+        const builtin_modules = @import("zts-engine").builtin_modules;
+        const node_count = self.ir_view.nodeCount();
+        var idx: NodeIndex = 0;
+        while (idx < node_count) : (idx += 1) {
+            if (self.ir_view.getTag(idx) != .import_decl) continue;
+            const decl = self.ir_view.getImportDecl(idx) orelse continue;
+            const specifier = self.ir_view.getString(decl.module_idx) orelse continue;
+            var i: u8 = 0;
+            while (i < decl.specifiers_count) : (i += 1) {
+                const spec_idx = self.ir_view.getListIndex(decl.specifiers_start, i);
+                const spec = self.ir_view.getImportSpec(spec_idx) orelse continue;
+                if (spec.kind != .named) continue;
+                if (spec.local_binding.slot != callee_binding.slot) continue;
+                if (spec.local_binding.kind != callee_binding.kind) continue;
+                const imported = self.resolveAtomName(spec.imported_atom) orelse continue;
+                if (builtin_modules.findExport(specifier, imported)) |entry| return entry;
+            }
+        }
+        return null;
+    }
+
     /// The `json_encodable_args` positions of the module export `call` names,
     /// checked with the same rule. A queue payload and a response body are
     /// serialized by the same encoder, so they answer to the same question.
     fn checkModuleEncodableArgs(self: *TypeChecker, call: Node.CallExpr) void {
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
-        const name = self.resolveAtomName(binding.name_atom) orelse return;
-        const entry = @import("zts-engine").builtin_modules.findFunction(name) orelse return;
+        const entry = self.resolveImportedExport(binding) orelse return;
         for (entry.func.json_encodable_args) |position| {
             if (position >= call.args_count) continue;
             const arg_idx = self.ir_view.getListIndex(call.args_start, position);
             var site_buf: [128]u8 = undefined;
-            const site = std.fmt.bufPrint(&site_buf, "{s}.{s}", .{ entry.binding.specifier, entry.func.name }) catch name;
+            const site = std.fmt.bufPrint(&site_buf, "{s}.{s}", .{ entry.binding.specifier, entry.func.name }) catch entry.func.name;
             self.reportIfUnencodable(arg_idx, site);
         }
     }
@@ -5827,6 +5860,38 @@ test "the encodability rule generalizes to a module payload" {
         \\function handler(req: Request): Response {
         \\    const r = request("worker", { id: "a", n: 1, flags: [true, false] });
         \\    return Response.json({ ok: r.ok });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "the encodability rule follows the import, not the local spelling" {
+    // A bare-name lookup was wrong in both directions: an alias never matched,
+    // so the check was skipped under `import { request as publish }`; and a
+    // handler's own function of the same name did match, so a local was
+    // checked against a module export's declaration.
+    try checkTypedSourceSaying(
+        \\import { request as publish } from "zttp:queue";
+        \\import { encodeUtf8 } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\    const r = publish("jobs", { raw: encodeUtf8("x") });
+        \\    return Response.json({ ok: r.ok });
+        \\}
+    ,
+        1,
+        "zttp:queue.request cannot encode this payload",
+    );
+
+    // A local function that happens to share the name is not the export.
+    try checkTypedSource(
+        \\import { encodeUtf8 } from "zttp:bytes";
+        \\function request(target: string, payload: unknown): number {
+        \\    return 1;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: request("jobs", { raw: encodeUtf8("x") }) });
         \\}
     ,
         0,

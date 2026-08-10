@@ -13,6 +13,7 @@ const context = @import("context.zig");
 const string = @import("string.zig");
 const util = @import("modules/internal/util.zig");
 const bytes_mod = @import("bytes.zig");
+const dict_mod = @import("dict.zig");
 const helpers = @import("builtins/helpers.zig");
 const json_mod = @import("modules/data/json_mod.zig");
 
@@ -1020,6 +1021,32 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, 
         try writer.writeByte('"');
     } else if (val.isObject()) {
         const obj = object.JSObject.fromValue(val);
+        // A Dict keeps its entries in the object's own slots and carries no
+        // hidden-class properties, so the property walk below saw an empty
+        // object and served `{}` - every key and value dropped, with a 200 and
+        // no diagnostic. `stringifyJson` in `modules/data/json_mod.zig` has
+        // always handled the class; this is the second encoder, and it did
+        // not. Spec 6.4 encodes a string-keyed Dict in insertion order.
+        if (obj.class_id == .dict) {
+            try writer.writeByte('{');
+            const total = dict_mod.count(obj);
+            var written: u32 = 0;
+            var i: u32 = 0;
+            while (i < total) : (i += 1) {
+                const key = dict_mod.keyAt(obj, i);
+                // A non-string key has no JSON spelling. Skipping it would be
+                // the same silent loss this arm exists to end, so the whole
+                // encode fails and the caller sees it.
+                if (!key.isAnyString()) return RenderError.OutOfMemory;
+                if (written > 0) try writer.writeByte(',');
+                written += 1;
+                try writeJsonDepth(ctx, key, writer, depth + 1);
+                try writer.writeByte(':');
+                try writeJsonDepth(ctx, dict_mod.valueAt(obj, i), writer, depth + 1);
+            }
+            try writer.writeByte('}');
+            return;
+        }
         if (obj.class_id == .array) {
             try writer.writeByte('[');
             const len = obj.getArrayLength();
@@ -1628,6 +1655,31 @@ test "requestJson applies the body rules first and the JSON rules after" {
         "invalid-syntax",
         helpers.getStringDataCtx(try readerField(rh, bad, "kind"), rh.ctx).?,
     );
+}
+
+test "a Dict serializes its entries rather than as an empty object" {
+    // `writeJson` walked hidden-class properties and a Dict has none, so
+    // `Response.json({ config: d })` served `{"config":{}}` - every key and
+    // value dropped, with a 200 and no diagnostic. Measured through the real
+    // encoder, not the arm in isolation.
+    const rh = try readerHarness();
+    defer releaseReaderHarness(rh);
+
+    const dict = @import("dict.zig");
+    var d = try dict.empty(rh.ctx);
+    d = try dict.set(rh.ctx, d, try rh.ctx.createString("b"), value.JSValue.fromInt(2));
+    d = try dict.set(rh.ctx, d, try rh.ctx.createString("a"), try rh.ctx.createString("x"));
+
+    const wrapper = try rh.ctx.createObject(null);
+    const pool = rh.ctx.hidden_class_pool.?;
+    try wrapper.setProperty(rh.ctx.allocator, pool, try rh.ctx.atoms.intern("config"), value.JSValue.fromPtr(d));
+
+    const json = try valueToJsonString(rh.ctx, wrapper.toValue());
+    const text = json.data();
+
+    // Insertion order, which is what spec 6.2 promises and what makes the
+    // encoding deterministic.
+    try std.testing.expectEqualStrings("{\"config\":{\"b\":2,\"a\":\"x\"}}", text);
 }
 
 test "escapeHtml" {

@@ -52,6 +52,42 @@ pub const binding = mb.ModuleBinding{
 
 pub const exports = binding.toModuleExports();
 
+test "a malformed entry names itself rather than a duplicate key" {
+    // `dictFromEntries([["a", 1], "oops"])` answered
+    // `{ kind: "duplicate-key", key: undefined }`. A caller matching on `kind`
+    // routed it to the duplicate branch and reported a key that does not
+    // exist, while the real defect - an entry that is not a two-element pair -
+    // was never named.
+    const testing = std.testing;
+    const gc_mod = @import("../../gc.zig");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const good = helpers.createArrayWithPrototype(ctx).?;
+    try good.setIndex(ctx.allocator, 0, try ctx.createString("a"));
+    try good.setIndex(ctx.allocator, 1, JSValue.fromInt(1));
+    const entries = helpers.createArrayWithPrototype(ctx).?;
+    try entries.setIndex(ctx.allocator, 0, JSValue.fromPtr(good));
+    try entries.setIndex(ctx.allocator, 1, try ctx.createString("oops"));
+
+    const result = try dictFromEntriesNative(@ptrCast(ctx), JSValue.undefined_val, &.{JSValue.fromPtr(entries)});
+    const outer = helpers.getObject(result).?;
+    try testing.expect(!outer.inline_slots[JSObject.Slots.RESULT_IS_OK].isTrue());
+
+    const payload = helpers.getObject(outer.inline_slots[JSObject.Slots.RESULT_VALUE]).?;
+    const pool = ctx.hidden_class_pool.?;
+    const kind = payload.getProperty(pool, try ctx.atoms.intern("kind")).?;
+    try testing.expectEqualStrings("malformed-entry", helpers.getStringDataCtx(kind, ctx).?);
+    const index = payload.getProperty(pool, try ctx.atoms.intern("index")).?;
+    try testing.expectEqual(@as(i32, 1), index.getInt());
+}
+
 fn dictArg(args: []const JSValue, index: usize) ?*JSObject {
     if (args.len <= index) return null;
     return dict.asDict(args[index]);
@@ -83,10 +119,14 @@ fn dictFromEntriesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue)
     var i: u32 = 0;
     while (i < len) : (i += 1) {
         const pair_val = entries.getSlot(@intCast(i + 1));
-        if (!pair_val.isObject()) return duplicateKeyError(ctx, JSValue.undefined_val);
+        // A malformed entry is not a duplicate key. Reporting one as the other
+        // sends a caller matching on `kind` to the duplicate branch to name a
+        // key that does not exist, while the real defect - an entry that is
+        // not a two-element pair - is never said out loud.
+        if (!pair_val.isObject()) return malformedEntryError(ctx, i);
         const pair = JSObject.fromValue(pair_val);
         if (pair.class_id != .array or pair.getArrayLength() < 2) {
-            return duplicateKeyError(ctx, JSValue.undefined_val);
+            return malformedEntryError(ctx, i);
         }
         const key = pair.getSlot(1);
         const val = pair.getSlot(2);
@@ -94,6 +134,21 @@ fn dictFromEntriesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue)
         out = try dict.set(ctx, out, key, val);
     }
     return helpers.createResultOk(ctx, JSValue.fromPtr(out));
+}
+
+/// `{ kind: "malformed-entry", index }` for an element that is not a
+/// two-element pair. Spec 6.2 names `duplicate-key` and nothing else for this
+/// export, so this member is added here rather than borrowed from it: a closed
+/// taxonomy is only closed if each member means one thing.
+fn malformedEntryError(ctx: *context.Context, index: u32) JSValue {
+    const pool = ctx.hidden_class_pool orelse return helpers.createResultErr(ctx, JSValue.undefined_val);
+    const obj = ctx.createObject(null) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+    const kind_text = ctx.createString("malformed-entry") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+    const kind_atom = ctx.atoms.intern("kind") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+    const index_atom = ctx.atoms.intern("index") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+    obj.setProperty(ctx.allocator, pool, kind_atom, kind_text) catch {};
+    obj.setProperty(ctx.allocator, pool, index_atom, JSValue.fromInt(@intCast(index))) catch {};
+    return helpers.createResultErr(ctx, JSValue.fromPtr(obj));
 }
 
 /// `{ kind: "duplicate-key", key }`, the error shape spec 6.2 declares.

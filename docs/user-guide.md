@@ -76,7 +76,8 @@ Request fields used by examples:
 | `req.path` | Path without query string. |
 | `req.query` | Query string object when available. |
 | `req.headers` | Lowercase header map. |
-| `req.body` | Decoded request body as a string. `Content-Length` and HTTP/1.1 chunked request bodies are accepted. |
+| `req.body` | Decoded request body, typed `string \| undefined`: the runtime writes `undefined` when the request carries none, so narrow it (`req.body ?? ""`) before passing it where a `string` is wanted. `Content-Length` and HTTP/1.1 chunked request bodies are accepted. |
+| `req.params` | Route parameters, when a router has assigned them. |
 
 Response helpers:
 
@@ -96,7 +97,7 @@ function handler(req: Request): Response {
         return Response.json({ items: [] });
     }
     if (req.method === "POST" && req.path === "/todos") {
-        const body = JSON.parse(req.body);
+        const body = JSON.parse(req.body ?? "{}");
         return Response.json({ title: body.title }, { status: 201 });
     }
     return Response.text("Not Found", { status: 404 });
@@ -132,7 +133,7 @@ import { schemaCompile, validateJson } from "zttp:validate";
 schemaCompile("todo", '{"type":"object","required":["title"]}');
 
 function handler(req: Request): Response {
-    const parsed = validateJson("todo", req.body);
+    const parsed = validateJson("todo", req.body ?? "");
     if (!parsed.ok) {
         return Response.json({ error: "invalid body" }, { status: 400 });
     }
