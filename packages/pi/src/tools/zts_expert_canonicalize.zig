@@ -50,7 +50,7 @@ fn execute(
     var result = try canonicalize.collect(allocator, args[0]);
     defer result.deinit(allocator);
     const simulation = if (args.len == 2)
-        try canonicalize.simulateRefactors(allocator, args[0], &result)
+        try canonicalize.simulateRepairs(allocator, args[0], &result)
     else
         null;
 

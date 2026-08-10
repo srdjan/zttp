@@ -988,9 +988,9 @@ fn runApplyRepair(
     defer allocator.free(source);
     const before_digest = agent_identity.sourceDigest(source);
 
-    var repairs: std.ArrayListUnmanaged(canonicalize.Refactor) = .empty;
+    var repairs: std.ArrayListUnmanaged(canonicalize.Repair) = .empty;
     defer repairs.deinit(allocator);
-    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, input)) |refused| return refused;
+    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
         return try writeApplyRefusal(json, file_rel, before_digest, "no_repairs", "`repairs` must carry at least one repair");
@@ -1011,19 +1011,53 @@ fn runApplyRepair(
         }
     }
 
-    // One at a time, each discharged against its own law on the edit it
+    // Validate the set as a set before applying any of it. Every repair's span
+    // is an offset into the file as read, so overlap and staleness are facts
+    // about the request that must be settled against those bytes: applying one
+    // repair first would move the others and turn "these two repairs conflict"
+    // into "this repair is stale", which names the wrong one. The spliced
+    // result is discarded; only the verdict is wanted here.
+    {
+        const dry = canonicalize.applyRepairs(allocator, source, repairs.items) catch |err| switch (err) {
+            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, "stale_repair", "a repair's `original` does not match the file as it stands"),
+            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, "overlapping_repairs", "two repairs cover the same bytes"),
+            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it"),
+            else => return err,
+        };
+        allocator.free(dry);
+    }
+
+    // Then one at a time, each discharged against its own law on the edit it
     // produced. A bulk apply followed by one check could not say which repair
     // was wrong, and could not catch two rewrites that are each wrong in ways
     // that cancel in the final text.
+    //
+    // Descending by start offset, which is what the span vocabulary requires
+    // and the line vocabulary hid: splicing at the highest offset first leaves
+    // every lower span, and every line number below it, exactly where the
+    // client computed it. Ascending order would shift the rest by the length
+    // difference after the first splice.
+    const order = try allocator.alloc(usize, repairs.items.len);
+    defer allocator.free(order);
+    for (order, 0..) |*o, i| o.* = i;
+    for (1..order.len) |i| {
+        var j = i;
+        while (j > 0 and repairs.items[order[j - 1]].start_offset < repairs.items[order[j]].start_offset) : (j -= 1) {
+            const tmp = order[j - 1];
+            order[j - 1] = order[j];
+            order[j] = tmp;
+        }
+    }
+
     var current = try allocator.dupe(u8, source);
     defer allocator.free(current);
-    for (repairs.items) |r| {
-        var one = [_]canonicalize.Refactor{r};
-        const next = canonicalize.applyRefactors(allocator, current, &one) catch |err| switch (err) {
-            error.StaleRefactorLine => return try writeApplyRefusal(json, file_rel, before_digest, "stale_repair", "a repair's `original` does not match the file as it stands"),
-            error.OverlappingRefactors => return try writeApplyRefusal(json, file_rel, before_digest, "overlapping_repairs", "two repairs target the same line"),
-            error.RefactorLineNotFound => return try writeApplyRefusal(json, file_rel, before_digest, "line_not_found", "a repair names a line past the end of the file"),
-            error.UnsupportedRefactor => return try writeApplyRefusal(json, file_rel, before_digest, "multiline_replacement", "a replacement spanning lines needs the span-keyed path"),
+    for (order) |idx| {
+        const r = repairs.items[idx];
+        var one = [_]canonicalize.Repair{r};
+        const next = canonicalize.applyRepairs(allocator, current, &one) catch |err| switch (err) {
+            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, "stale_repair", "a repair's `original` does not match the file as it stands"),
+            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, "overlapping_repairs", "two repairs cover the same bytes"),
+            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it"),
             else => return err,
         };
 
@@ -1119,10 +1153,13 @@ fn writeApplyRefusal(
 fn parseRepairs(
     allocator: std.mem.Allocator,
     json: *std.json.Stringify,
-    out: *std.ArrayListUnmanaged(canonicalize.Refactor),
+    out: *std.ArrayListUnmanaged(canonicalize.Repair),
     file_rel: []const u8,
     digest: [64]u8,
     input: ?std.json.Value,
+    /// The bytes the digest covers. A `line`-form repair is resolved to its
+    /// span against these, so both forms reach the applier as spans.
+    source: []const u8,
 ) !?bool {
     const items: []const std.json.Value = blk: {
         const obj = (input orelse break :blk &.{}).object;
@@ -1142,10 +1179,41 @@ fn parseRepairs(
         const intent = zts.RepairIntent.fromString(intent_value.string) orelse
             return try writeApplyRefusal(json, file_rel, digest, "unknown_intent", "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
 
-        const line_value = o.get("line") orelse
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry the `line` it applies to");
-        if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`line` must be a positive integer");
+        // A repair is keyed on a byte span. `line` is the older spelling of the
+        // same thing for a whole-line rewrite, and it keeps working: within
+        // schema version 2 a field cannot be removed, and every repair the
+        // previous release published named a line. `span` is the added optional
+        // field, it is what `canonicalize` now publishes, and it is the only
+        // form that can express a rewrite crossing a line boundary.
+        var start_offset: usize = 0;
+        var end_offset: usize = 0;
+        var line: u32 = 0;
+        if (o.get("span")) |span_value| {
+            if (span_value != .object)
+                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span` must be an object with `start` and `end`");
+            const start_value = span_value.object.get("start") orelse
+                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span` must carry `start`");
+            const end_value = span_value.object.get("end") orelse
+                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span` must carry `end`");
+            if (start_value != .integer or start_value.integer < 0 or
+                end_value != .integer or end_value.integer < start_value.integer)
+                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span.start` and `span.end` must be byte offsets with start <= end");
+            start_offset = @intCast(start_value.integer);
+            end_offset = @intCast(end_value.integer);
+            if (end_offset > source.len)
+                return try writeApplyRefusal(json, file_rel, digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it");
+            line = canonicalize.offsetLine(source, start_offset);
+        } else if (o.get("line")) |line_value| {
+            if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
+                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`line` must be a positive integer");
+            line = @intCast(line_value.integer);
+            const span = canonicalize.lineSpan(source, line) orelse
+                return try writeApplyRefusal(json, file_rel, digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it");
+            start_offset = span.start;
+            end_offset = span.end;
+        } else {
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
+        }
 
         const replacement_value = o.get("replacement") orelse
             return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry its `replacement`");
@@ -1155,17 +1223,19 @@ fn parseRepairs(
         // Required, not optional. An absent snapshot would make the staleness
         // check silently skip, which is the one thing this field exists for.
         const original_value = o.get("original") orelse
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry `original`, the snapshot of the line it replaces");
+            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry `original`, the snapshot of the bytes it replaces");
         if (original_value != .string)
             return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`original` must be a string");
 
         try out.append(allocator, .{
             .intent = intent,
-            .line = @intCast(line_value.integer),
+            .start_offset = start_offset,
+            .end_offset = end_offset,
+            .line = line,
             .column = 1,
             .message = "",
             .replacement = replacement_value.string,
-            .original_line = original_value.string,
+            .original = original_value.string,
         });
     }
     return null;
@@ -1198,23 +1268,22 @@ fn runSimulateEdit(
     defer allocator.free(source);
     const digest = agent_identity.sourceDigest(source);
 
-    var repairs: std.ArrayListUnmanaged(canonicalize.Refactor) = .empty;
+    var repairs: std.ArrayListUnmanaged(canonicalize.Repair) = .empty;
     defer repairs.deinit(allocator);
     // Shared with `apply_repair`: a client that previewed a set and then
     // applied it must not find the second call parsing it differently. The
     // refusal shape differs by operation, so the parser writes `apply_repair`'s
     // and simulate maps it - both carry the same `reason` strings.
-    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, input)) |refused| return refused;
+    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
         return try writeSimulateRefusal(json, file_rel, digest, "no_repairs", "`repairs` must carry at least one repair; simulating nothing has no answer to give");
     }
 
-    const proposed = canonicalize.applyRefactors(allocator, source, repairs.items) catch |err| switch (err) {
-        error.StaleRefactorLine => return try writeSimulateRefusal(json, file_rel, digest, "stale_repair", "a repair's `original` does not match the file as it stands; re-read the file and re-derive the repair"),
-        error.OverlappingRefactors => return try writeSimulateRefusal(json, file_rel, digest, "overlapping_repairs", "two repairs target the same line, so which one applies is undefined"),
-        error.RefactorLineNotFound => return try writeSimulateRefusal(json, file_rel, digest, "line_not_found", "a repair names a line past the end of the file"),
-        error.UnsupportedRefactor => return try writeSimulateRefusal(json, file_rel, digest, "multiline_replacement", "this operation applies line-local repairs; a replacement spanning lines needs the span-keyed path"),
+    const proposed = canonicalize.applyRepairs(allocator, source, repairs.items) catch |err| switch (err) {
+        error.StaleRepair => return try writeSimulateRefusal(json, file_rel, digest, "stale_repair", "a repair's `original` does not match the file as it stands; re-read the file and re-derive the repair"),
+        error.OverlappingRepairs => return try writeSimulateRefusal(json, file_rel, digest, "overlapping_repairs", "two repairs cover the same bytes, so which one applies is undefined"),
+        error.RepairOutOfBounds => return try writeSimulateRefusal(json, file_rel, digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it"),
         else => return err,
     };
     defer allocator.free(proposed);
@@ -1757,21 +1826,21 @@ fn runCanonicalize(
 
     try json.objectField("candidates");
     try json.beginArray();
-    for (result.refactors.items) |refactor| {
+    for (result.repairs.items) |repair| {
         try json.beginObject();
         // D3 §5's `repair` carries the typed intent, not a per-producer string.
         // `Refactor` used to carry one and that is what made the third parallel
         // vocabulary: five of its names differed from the tag by more than
         // spelling. The legacy names survive only on the frozen v1 surface.
         try json.objectField("intent");
-        try json.write(@tagName(refactor.intent));
+        try json.write(@tagName(repair.intent));
         try json.objectField("grade");
-        try json.write(candidateGrade(refactor.intent));
+        try json.write(candidateGrade(repair.intent));
         // The row from the equivalence-validator registry, so a client reads
         // what would discharge this rewrite and whether anything runs it, in
         // the same object as the rewrite. Null for an intent with no row.
         try json.objectField("validator");
-        if (repairPolicy.findValidator(refactor.intent)) |row| {
+        if (repairPolicy.findValidator(repair.intent)) |row| {
             try json.beginObject();
             try json.objectField("method");
             try json.write(row.method.id());
@@ -1783,32 +1852,41 @@ fn runCanonicalize(
         } else {
             try json.write(null);
         }
-        // No Refactor kind corresponds to an idiom row today: measured against
-        // the catalog, every line-keyed refactor repairs a canonical-profile
-        // restriction, while the idiom table picks among admitted spellings.
-        // The one wired pair (drop_unused_index_alias) is a span-keyed rewrite
-        // and surfaces in normalize's rewrite_trace instead.
+        // The idiom row this repair realizes, read off the repair rather than
+        // hardcoded null: the line-derived repairs all fix canonical-profile
+        // restrictions and carry none, but the vocabulary is one now, so a
+        // span-derived repair that realizes a row publishes it here.
         try json.objectField("idiom_id");
-        try json.write(null);
+        if (repair.idiom_id) |id| try json.write(id) else try json.write(null);
+        // The half-open byte span, which is what a repair is keyed on. `line`
+        // and `column` stay beside it: they are what the v1 surface names and
+        // what a human reads.
+        try json.objectField("span");
+        try json.beginObject();
+        try json.objectField("start");
+        try json.write(repair.start_offset);
+        try json.objectField("end");
+        try json.write(repair.end_offset);
+        try json.endObject();
         try json.objectField("line");
-        try json.write(refactor.line);
+        try json.write(repair.line);
         try json.objectField("column");
-        try json.write(refactor.column);
+        try json.write(repair.column);
         try json.objectField("message");
-        try json.write(refactor.message);
+        try json.write(repair.message);
         // D3 §5: the v1 JSON drops original_line, so a client cannot
         // re-validate staleness. The v2 wire publishes it.
         try json.objectField("original");
-        if (refactor.original_line) |line| try json.write(line) else try json.write(null);
+        try json.write(repair.original);
         try json.objectField("replacement");
-        try json.write(refactor.replacement);
+        try json.write(repair.replacement);
         try json.endObject();
     }
     try json.endArray();
 
     try json.objectField("simulation");
     if (boolField(input, "simulate")) {
-        const summary = try canonicalize.simulateRefactors(allocator, abs, &result);
+        const summary = try canonicalize.simulateRepairs(allocator, abs, &result);
         try json.beginObject();
         try json.objectField("ok");
         try json.write(summary.ok);
@@ -2845,6 +2923,103 @@ test "apply_repair writes a graded repair and rebinds the digest" {
     // to the file it just changed rather than the one it read.
     const digest = agent_identity.sourceDigest(on_disk);
     try testing.expectEqualStrings(&digest, payload.get("source_digest").?.string);
+}
+
+test "apply_repair accepts a repair keyed on a byte span" {
+    // The span is what a repair is keyed on now. `line` still works - the test
+    // above sends one, and a field cannot be removed inside schema version 2 -
+    // but a client that took `span` off a `canonicalize` candidate must be able
+    // to hand it straight back, which is the round trip the two operations
+    // exist to make possible.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const target = "    let name = \"world\";";
+    const start = std.mem.indexOf(u8, let_handler, target).?;
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","span":{{"start":{d},"end":{d}}},"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
+    , .{ root, start, start + target.len });
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("success").?.bool);
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 1), payload.get("applied").?.integer);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "const name") != null);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
+}
+
+test "apply_repair refuses a span outside the file" {
+    // The floor under the test above: a span the client made up is refused
+    // rather than clamped, so "the span form works" is not satisfied by an
+    // applier that ignores the span it was given.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","span":{{"start":10,"end":99999}},"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
+    try testing.expectEqualStrings("repair_out_of_range", payload.get("refusal").?.object.get("reason").?.string);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "canonicalize publishes the span a repair is keyed on" {
+    // The producing end of the round trip: a candidate carries the span, and
+    // the span names exactly the bytes its `original` snapshot copied. A
+    // candidate whose span and snapshot disagreed would round-trip into a
+    // `stale_repair` the client could not have avoided.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const candidates = parsed.value.object.get("payload").?.object.get("candidates").?.array;
+    try testing.expect(candidates.items.len >= 1);
+    for (candidates.items) |item| {
+        const c = item.object;
+        const span = c.get("span").?.object;
+        const start: usize = @intCast(span.get("start").?.integer);
+        const end: usize = @intCast(span.get("end").?.integer);
+        try testing.expect(end <= let_handler.len);
+        try testing.expectEqualStrings(let_handler[start..end], c.get("original").?.string);
+    }
 }
 
 test "apply_repair refuses an ungraded intent without touching the file" {

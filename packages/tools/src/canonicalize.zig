@@ -11,17 +11,56 @@ const writeJsonString = zts.writeJsonString;
 const repairPolicy = zts.RepairPolicy;
 pub const RepairIntent = zts.RepairIntent;
 
-pub const Refactor = struct {
-    /// The typed intent this rewrite realizes. `StatementRewrite` has carried
-    /// one since it existed; this side carried a free string, which is what
-    /// made three vocabularies out of one (D3 §5). They are one enum now, and
+/// One rewrite, span-keyed (D3 §5).
+///
+/// This is the single repair vocabulary. Two used to exist: a line-keyed
+/// `Refactor` that refused any replacement containing a newline and any two
+/// rewrites touching one line, and a span-keyed `Repair` for the
+/// multi-line rules. Two representations meant two apply paths, two sets of
+/// guards, and a scheduling rule ("line-keyed takes absolute priority") that
+/// existed only to keep them apart.
+///
+/// A whole-line rewrite is a span rewrite over the line's bytes, so the
+/// line-keyed producers lost nothing by moving: `appendRepairUnique` computes
+/// the span from the line it was already replacing whole. What the move buys is
+/// that a replacement may now contain newlines, and that two rewrites on one
+/// line are refused for the reason that is actually true - their spans overlap -
+/// rather than because the applier walked lines.
+pub const Repair = struct {
+    /// The typed intent this rewrite realizes. The span-keyed side has carried
+    /// one since it existed; the line-keyed side carried a free string, which is
+    /// what made three vocabularies out of one. They are one enum now, and
     /// `legacyKind` is the only place the old spelling survives.
     intent: RepairIntent,
-    line: u32,
-    column: u32,
-    message: []const u8,
+    /// The spec 4.2.1 idiom row this repair realizes, or null when it repairs a
+    /// restriction instead. Most repairs are the latter.
+    idiom_id: ?[]const u8 = null,
+    /// Half-open byte span `[start_offset, end_offset)` into the source this
+    /// repair was computed against. A span producer sets both; a line producer
+    /// leaves them at zero and `appendRepairUnique` derives them from the line,
+    /// which is why they carry a default rather than being required.
+    start_offset: usize = 0,
+    end_offset: usize = 0,
+    /// 1-based position of `start_offset`, kept for reporting and for the v1
+    /// `canonicalize --json` shape, which names a line. A line producer sets
+    /// them; a span producer leaves them and the appender derives them from the
+    /// offset, so neither side has to carry the other's coordinate system.
+    line: u32 = 0,
+    column: u32 = 0,
+    /// Human-readable reason, duped into the repair's allocator. The empty
+    /// string is the not-owned sentinel: a span producer has the diagnostic's
+    /// own message beside it and does not copy one.
+    message: []const u8 = "",
     replacement: []const u8,
-    original_line: ?[]const u8 = null,
+    /// Snapshot of `source[start_offset..end_offset]` when the repair was
+    /// built, re-validated before splicing. Required, not optional: an absent
+    /// snapshot makes the staleness check skip silently, which is the one thing
+    /// the field exists to prevent.
+    original: []const u8,
+
+    pub fn deinit(self: *Repair, allocator: std.mem.Allocator) void {
+        freeRepairOwned(allocator, self);
+    }
 };
 
 /// The v1 `canonicalize --json` name for an intent.
@@ -46,13 +85,18 @@ pub fn legacyKind(intent: RepairIntent) []const u8 {
     };
 }
 
+/// The repairs one analysis pass produced for one file. Both builders fill
+/// this: the line-derived rules and the span-derived ones share a list because
+/// they share a vocabulary. What is still separate is the normalize loop's
+/// policy of driving one group per pass, which is what keeps a critical pair
+/// observable to the confluence harness.
 pub const Result = struct {
     file: []const u8,
-    refactors: std.ArrayListUnmanaged(Refactor) = .empty,
+    repairs: std.ArrayListUnmanaged(Repair) = .empty,
 
     pub fn deinit(self: *Result, allocator: std.mem.Allocator) void {
-        for (self.refactors.items) |*r| freeRefactorOwned(allocator, r);
-        self.refactors.deinit(allocator);
+        for (self.repairs.items) |*r| freeRepairOwned(allocator, r);
+        self.repairs.deinit(allocator);
         self.* = .{ .file = "" };
     }
 };
@@ -85,14 +129,14 @@ pub fn collectFromSource(
     var result = Result{ .file = virtual_path };
     errdefer result.deinit(allocator);
 
-    try buildRefactors(allocator, source, check.json_diagnostics.items, &result);
+    try buildLineRepairs(allocator, source, check.json_diagnostics.items, &result);
     return result;
 }
 
 /// Translate the diagnostics from one analysis pass into concrete refactors.
 /// Shared by `collectFromSource` and the fixed-point `normalizeSource` loop so
 /// both read refactors from the same diagnostic set.
-fn buildRefactors(
+fn buildLineRepairs(
     allocator: std.mem.Allocator,
     source: []const u8,
     diagnostics: []const precompile.json_diag.JsonDiagnostic,
@@ -105,7 +149,7 @@ fn buildRefactors(
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendRefactorUnique(allocator, result, .{
+            try appendRepairUnique(allocator, source, result, .{
                 .intent = if (std.mem.eql(u8, diag.code, "ZTS608"))
                     .replace_arrow_with_function
                 else
@@ -114,14 +158,14 @@ fn buildRefactors(
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
-                .original_line = try allocator.dupe(u8, line),
+                .original = try allocator.dupe(u8, line),
             });
         } else if (std.mem.eql(u8, diag.code, "ZTS604")) {
             const replacement = avoidableLetReplacement(allocator, line) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendRefactorUnique(allocator, result, .{
+            try appendRepairUnique(allocator, source, result, .{
                 .intent = if (std.mem.indexOf(u8, line, "for (let ") != null)
                     .canonicalize_for_of_const
                 else
@@ -130,20 +174,20 @@ fn buildRefactors(
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
-                .original_line = try allocator.dupe(u8, line),
+                .original = try allocator.dupe(u8, line),
             });
         } else if (std.mem.eql(u8, diag.code, "ZTS613")) {
             const replacement = compoundAssignReplacement(allocator, line) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendRefactorUnique(allocator, result, .{
+            try appendRepairUnique(allocator, source, result, .{
                 .intent = .replace_compound_assign_with_explicit,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
-                .original_line = try allocator.dupe(u8, line),
+                .original = try allocator.dupe(u8, line),
             });
         } else if (std.mem.eql(u8, diag.code, "ZTS620")) {
             const positive = redundantBoolComparePositive(diag.suggestion) orelse continue;
@@ -151,61 +195,90 @@ fn buildRefactors(
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendRefactorUnique(allocator, result, .{
+            try appendRepairUnique(allocator, source, result, .{
                 .intent = .drop_redundant_bool_compare,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
                 .replacement = replacement,
-                .original_line = try allocator.dupe(u8, line),
+                .original = try allocator.dupe(u8, line),
             });
         } else if (std.mem.eql(u8, diag.code, "ZTS602")) {
             const replacement = capabilityAliasReplacement(allocator, source, diag, diagnostics) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendRefactorUnique(allocator, result, replacement);
+            try appendRepairUnique(allocator, source, result, replacement);
         }
     }
 }
 
-fn appendRefactorUnique(allocator: std.mem.Allocator, result: *Result, refactor: Refactor) !void {
-    var owned = refactor;
-    for (result.refactors.items) |*existing| {
-        if (existing.line == owned.line and std.mem.eql(u8, existing.replacement, owned.replacement)) {
+/// Append a line-keyed repair, filling its span from the line it names.
+///
+/// Producers do not set offsets. They already knew which line they were
+/// replacing whole and had already duped its text as the snapshot, so the span
+/// is derived here from those two facts and checked against the source before
+/// the repair is stored: a snapshot that does not match the bytes it claims is
+/// refused rather than carried to the applier, where it would fail later and
+/// further from the producer that got it wrong.
+fn appendRepairUnique(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    result: *Result,
+    repair: Repair,
+) !void {
+    var owned = repair;
+    const span = lineSpan(source, owned.line) orelse {
+        freeRepairOwned(allocator, &owned);
+        return;
+    };
+    if (!std.mem.eql(u8, source[span.start..span.end], owned.original)) {
+        freeRepairOwned(allocator, &owned);
+        return error.StaleRepair;
+    }
+    owned.start_offset = span.start;
+    owned.end_offset = span.end;
+
+    for (result.repairs.items) |*existing| {
+        if (existing.start_offset == owned.start_offset and
+            existing.end_offset == owned.end_offset and
+            std.mem.eql(u8, existing.replacement, owned.replacement))
+        {
             if (owned.intent == .canonicalize_capability_key_alias) {
                 existing.intent = owned.intent;
                 existing.column = owned.column;
                 // Move ownership of the duped message: free the old one, take
-                // owned's, and clear owned's so freeRefactorOwned skips it.
+                // owned's, and clear owned's so freeRepairOwned skips it.
                 if (existing.message.len > 0) allocator.free(existing.message);
                 existing.message = owned.message;
                 owned.message = "";
             }
-            freeRefactorOwned(allocator, &owned);
+            freeRepairOwned(allocator, &owned);
             return;
         }
     }
-    result.refactors.append(allocator, owned) catch |err| {
-        freeRefactorOwned(allocator, &owned);
+    result.repairs.append(allocator, owned) catch |err| {
+        freeRepairOwned(allocator, &owned);
         return err;
     };
 }
 
-fn freeRefactorOwned(allocator: std.mem.Allocator, refactor: *Refactor) void {
+fn freeRepairOwned(allocator: std.mem.Allocator, repair: *Repair) void {
     // `message` is duped into `allocator` at every build site (ENG-3: it must
     // outlive the CheckResult whose diagnostics it was copied from). The empty
     // string is the freed/moved-out sentinel and is never heap-owned.
-    if (refactor.message.len > 0) allocator.free(refactor.message);
-    allocator.free(refactor.replacement);
-    if (refactor.original_line) |line| allocator.free(line);
-    refactor.* = .{
+    if (repair.message.len > 0) allocator.free(repair.message);
+    allocator.free(repair.replacement);
+    allocator.free(repair.original);
+    repair.* = .{
         .intent = .canonicalize_capability_key_alias,
+        .start_offset = 0,
+        .end_offset = 0,
         .line = 0,
         .column = 0,
         .message = "",
         .replacement = "",
-        .original_line = null,
+        .original = "",
     };
 }
 
@@ -550,7 +623,7 @@ fn capabilityAliasReplacement(
     source: []const u8,
     diag: precompile.json_diag.JsonDiagnostic,
     diagnostics: []const precompile.json_diag.JsonDiagnostic,
-) !Refactor {
+) !Repair {
     const call_line = sourceLine(source, diag.line) orelse return error.UnsupportedRefactor;
     const ident = identifierAtColumn(call_line, diag.column) orelse return error.UnsupportedRefactor;
     const alias = findLiteralLetAlias(allocator, source, ident, diag.line, diagnostics) catch |err| switch (err) {
@@ -558,7 +631,7 @@ fn capabilityAliasReplacement(
         else => return err,
     };
     // alias.replacement / alias.original_line are heap-owned; free them if the
-    // message dupe below OOMs (they are never appended to result.refactors on
+    // message dupe below OOMs (they are never appended to result.repairs on
     // that path, so no later cleanup reclaims them).
     errdefer allocator.free(alias.replacement);
     errdefer allocator.free(alias.original_line);
@@ -568,7 +641,7 @@ fn capabilityAliasReplacement(
         .column = 1,
         .message = try allocator.dupe(u8, "make capability key alias compiler-visible"),
         .replacement = alias.replacement,
-        .original_line = alias.original_line,
+        .original = alias.original_line,
     };
 }
 
@@ -729,115 +802,40 @@ fn assignmentEquals(source: []const u8) ?usize {
 }
 
 pub fn sourceLine(source: []const u8, line_num: u32) ?[]const u8 {
+    const span = lineSpan(source, line_num) orelse return null;
+    return source[span.start..span.end];
+}
+
+pub const Span = struct { start: usize, end: usize };
+
+/// The half-open byte span of line `line_num`, excluding its newline. Every
+/// line-keyed producer replaces its line entire, so this is the span of the
+/// repair it emits, and deriving it in one place is what let the producers
+/// move to the span vocabulary without each learning to count bytes.
+pub fn lineSpan(source: []const u8, line_num: u32) ?Span {
     if (line_num == 0) return null;
     var current: u32 = 1;
     var start: usize = 0;
     for (source, 0..) |c, i| {
         if (c == '\n') {
-            if (current == line_num) return source[start..i];
+            if (current == line_num) return .{ .start = start, .end = i };
             current += 1;
             start = i + 1;
         }
     }
-    if (current == line_num) return source[start..];
+    if (current == line_num) return .{ .start = start, .end = source.len };
     return null;
 }
 
-pub fn applyRefactors(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    refactors: []const Refactor,
-) ![]u8 {
-    for (refactors, 0..) |a, i| {
-        if (std.mem.indexOfScalar(u8, a.replacement, '\n') != null) return error.UnsupportedRefactor;
-        for (refactors[i + 1 ..]) |b| {
-            if (a.line == b.line) return error.OverlappingRefactors;
-        }
-    }
-
-    const applied = try allocator.alloc(bool, refactors.len);
-    defer allocator.free(applied);
-    @memset(applied, false);
-
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(allocator);
-
-    var line_num: u32 = 1;
-    var start: usize = 0;
-    for (source, 0..) |c, i| {
-        if (c == '\n') {
-            try appendAppliedLine(allocator, &out, source[start..i], line_num, refactors, applied);
-            try out.append(allocator, '\n');
-            line_num += 1;
-            start = i + 1;
-        }
-    }
-    if (start < source.len) {
-        try appendAppliedLine(allocator, &out, source[start..], line_num, refactors, applied);
-    }
-
-    for (applied) |was_applied| {
-        if (!was_applied) return error.RefactorLineNotFound;
-    }
-
-    return try out.toOwnedSlice(allocator);
-}
-
-fn appendAppliedLine(
-    allocator: std.mem.Allocator,
-    out: *std.ArrayList(u8),
-    line: []const u8,
-    line_num: u32,
-    refactors: []const Refactor,
-    applied: []bool,
-) !void {
-    for (refactors, 0..) |refactor, i| {
-        if (refactor.line != line_num) continue;
-        if (refactor.original_line) |original| {
-            if (!std.mem.eql(u8, original, line)) return error.StaleRefactorLine;
-        }
-        try out.appendSlice(allocator, refactor.replacement);
-        applied[i] = true;
-        return;
-    }
-    try out.appendSlice(allocator, line);
-}
-
 // ---------------------------------------------------------------------------
-// Span-keyed (multi-line) rewrites
+// Applying repairs
 // ---------------------------------------------------------------------------
 //
-// `applyRefactors` above is line-keyed: it rejects any replacement spanning
-// more than one line and any two refactors that touch the same line. The
-// Phase-1 single-line rewriters depend on those guards, so they are left
-// untouched. The convention / multi-line canonical rewrites (ternary ->
-// match, ...) instead key on a byte span `[start_offset, end_offset)` of the
-// source and may produce multi-line output. `applyStatementRewrites` is the
-// second, span-keyed application path that serves them. It is kept entirely
-// separate from `applyRefactors`: the normalize loop drives one or the other
-// per pass, never both at once.
-
-pub const StatementRewrite = struct {
-    /// The typed intent this rewrite realizes (recorded in the rewrite trace).
-    intent: RepairIntent,
-    /// Byte span of the construct being replaced, in the source it was
-    /// computed against. Half-open: `[start_offset, end_offset)`.
-    start_offset: usize,
-    end_offset: usize,
-    /// The replacement text (may contain newlines).
-    replacement: []u8,
-    /// A snapshot of `source[start_offset..end_offset]` at the time the
-    /// rewrite was built. `applyStatementRewrites` re-validates the span still
-    /// matches before splicing, so a stale rewrite fails closed rather than
-    /// corrupting unrelated source.
-    original: []u8,
-
-    pub fn deinit(self: *StatementRewrite, allocator: std.mem.Allocator) void {
-        allocator.free(self.replacement);
-        allocator.free(self.original);
-        self.* = undefined;
-    }
-};
+// One path. There used to be two: a line-keyed one that walked lines and
+// refused a replacement containing a newline, and this span-keyed one. A
+// whole-line rewrite is a span rewrite over the line's bytes, so the first was
+// a special case of the second wearing its own guards, its own errors, and a
+// scheduling rule that existed to keep the two apart.
 
 /// Convert a 1-based (line, column) byte position into a byte offset into
 /// `source`. Returns null when the position is out of range. Column is a byte
@@ -862,18 +860,25 @@ fn lineColToOffset(source: []const u8, line: u32, column: u32) ?usize {
     return offset;
 }
 
-/// Apply a set of byte-span rewrites to `source`, returning fresh owned
-/// output. The set must be NON-OVERLAPPING: any two spans that overlap are a
-/// caller bug (the normalize loop only ever passes the innermost
-/// non-overlapping subset per pass), and are rejected with
-/// `error.OverlappingRefactors`. Each rewrite's `original` snapshot must still
-/// match `source[start..end)`, else `error.StaleRefactorLine`. Spans are
-/// spliced right-to-left so an earlier splice never shifts a later span's
-/// offsets.
-pub fn applyStatementRewrites(
+/// Apply a set of repairs to `source`, returning fresh owned output. This is
+/// the only application path.
+///
+/// The set must be NON-OVERLAPPING: any two spans that overlap are a caller bug
+/// (the normalize loop only ever passes the innermost non-overlapping subset
+/// per pass), and are rejected with `error.OverlappingRepairs`. Two whole-line
+/// repairs on one line have identical spans and are refused by that same rule,
+/// which is what the retired line-keyed applier's same-line check was for; two
+/// repairs on one line whose spans do not overlap now both apply, which it
+/// could not express.
+///
+/// Each repair's `original` snapshot must still match `source[start..end)`,
+/// else `error.StaleRepair`. A span outside the source is
+/// `error.RepairOutOfBounds`. Spans are spliced in ascending order so an
+/// earlier splice never shifts a later span's offsets.
+pub fn applyRepairs(
     allocator: std.mem.Allocator,
     source: []const u8,
-    rewrites: []const StatementRewrite,
+    rewrites: []const Repair,
 ) ![]u8 {
     if (rewrites.len == 0) return allocator.dupe(u8, source);
 
@@ -893,13 +898,21 @@ pub fn applyStatementRewrites(
 
     // Validate bounds, overlap, and the original snapshot for each span.
     var prev_end: ?usize = null;
+    var prev_start: ?usize = null;
     for (order) |idx| {
         const rw = rewrites[idx];
-        if (rw.start_offset > rw.end_offset or rw.end_offset > source.len) return error.RefactorLineNotFound;
+        if (rw.start_offset > rw.end_offset or rw.end_offset > source.len) return error.RepairOutOfBounds;
         if (prev_end) |pe| {
-            if (rw.start_offset < pe) return error.OverlappingRefactors;
+            if (rw.start_offset < pe) return error.OverlappingRepairs;
         }
-        if (!std.mem.eql(u8, source[rw.start_offset..rw.end_offset], rw.original)) return error.StaleRefactorLine;
+        // Two empty spans at one offset do not trip the `<` test above, and two
+        // repairs that both replace nothing at the same point are still two
+        // answers to one question.
+        if (prev_start) |ps| {
+            if (rw.start_offset == ps and rw.end_offset == prev_end.?) return error.OverlappingRepairs;
+        }
+        if (!std.mem.eql(u8, source[rw.start_offset..rw.end_offset], rw.original)) return error.StaleRepair;
+        prev_start = rw.start_offset;
         prev_end = rw.end_offset;
     }
 
@@ -918,26 +931,13 @@ pub fn applyStatementRewrites(
 }
 
 // ---------------------------------------------------------------------------
-// Statement-rewrite construction (from diagnostics)
+// Span-repair construction (from diagnostics)
 // ---------------------------------------------------------------------------
-
-/// Owned list of span-keyed rewrites built for one analysis pass. Distinct
-/// from `Result` (which carries the single-line `Refactor`s) so the two
-/// application paths never share storage or guards.
-pub const StatementRewriteResult = struct {
-    rewrites: std.ArrayListUnmanaged(StatementRewrite) = .empty,
-
-    pub fn deinit(self: *StatementRewriteResult, allocator: std.mem.Allocator) void {
-        for (self.rewrites.items) |*rw| rw.deinit(allocator);
-        self.rewrites.deinit(allocator);
-        self.* = .{};
-    }
-};
 
 /// Apply the one span-keyed rewrite that the requested intent asks for at
 /// `line`, returning fresh owned source.
 ///
-/// The normalize loop drives `buildStatementRewrites` over a whole file and
+/// The normalize loop drives `buildRepairs` over a whole file and
 /// applies every non-overlapping rewrite per pass. A repair client asks a
 /// narrower question - "realize this one intent, at this one line" - and until
 /// this entry point existed it had no way to ask it: the five span-keyed
@@ -962,12 +962,12 @@ pub fn applyStatementIntent(
     var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, null, true, null, false);
     defer check.deinit(allocator);
 
-    var stmt_result = StatementRewriteResult{};
+    var stmt_result = Result{ .file = "" };
     defer stmt_result.deinit(allocator);
-    try buildStatementRewrites(allocator, source, check.json_diagnostics.items, &stmt_result);
+    try buildSpanRepairs(allocator, source, check.json_diagnostics.items, &stmt_result);
 
-    var chosen: ?StatementRewrite = null;
-    for (stmt_result.rewrites.items) |rw| {
+    var chosen: ?Repair = null;
+    for (stmt_result.repairs.items) |rw| {
         if (rw.intent != intent) continue;
         if (offsetLine(source, rw.start_offset) != line) continue;
         if (chosen != null) return error.UnsupportedRepairIntent;
@@ -975,18 +975,18 @@ pub fn applyStatementIntent(
     }
     const only = chosen orelse return error.UnsupportedRepairIntent;
 
-    for (stmt_result.rewrites.items) |other| {
+    for (stmt_result.repairs.items) |other| {
         if (other.start_offset == only.start_offset and other.end_offset == only.end_offset) continue;
         const contains = only.start_offset <= other.start_offset and other.end_offset <= only.end_offset;
         if (contains) return error.UnsupportedRepairIntent;
     }
 
-    var one = [_]StatementRewrite{only};
-    return applyStatementRewrites(allocator, source, &one);
+    var one = [_]Repair{only};
+    return applyRepairs(allocator, source, &one);
 }
 
 /// The 1-based line `offset` falls on.
-fn offsetLine(source: []const u8, offset: usize) u32 {
+pub fn offsetLine(source: []const u8, offset: usize) u32 {
     var line: u32 = 1;
     var i: usize = 0;
     while (i < offset and i < source.len) : (i += 1) {
@@ -1001,11 +1001,11 @@ fn offsetLine(source: []const u8, offset: usize) u32 {
 /// the construct's byte span from the source and the diagnostic's start
 /// position, returning `error.UnsupportedRefactor` to leave the construct a
 /// flagged hard error when a provably-safe rewrite cannot be formed.
-fn buildStatementRewrites(
+fn buildSpanRepairs(
     allocator: std.mem.Allocator,
     source: []const u8,
     diagnostics: []const precompile.json_diag.JsonDiagnostic,
-    result: *StatementRewriteResult,
+    result: *Result,
 ) !void {
     for (diagnostics) |diag| {
         // ZTS612 (impure arm) and ZTS621 (chained) share one rewrite: both are
@@ -1016,25 +1016,25 @@ fn buildStatementRewrites(
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendStatementRewriteUnique(allocator, result, rw);
+            try appendSpanRepairUnique(allocator, source, result, rw);
         } else if (std.mem.eql(u8, diag.code, "ZTS615")) {
             const rw = templateHoistRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendStatementRewriteUnique(allocator, result, rw);
+            try appendSpanRepairUnique(allocator, source, result, rw);
         } else if (std.mem.eql(u8, diag.code, "ZTS618")) {
             const rw = nestedDestructureRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendStatementRewriteUnique(allocator, result, rw);
+            try appendSpanRepairUnique(allocator, source, result, rw);
         } else if (std.mem.eql(u8, diag.code, "ZTS619")) {
             const rw = unusedIndexAliasRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
-            try appendStatementRewriteUnique(allocator, result, rw);
+            try appendSpanRepairUnique(allocator, source, result, rw);
         }
     }
 }
@@ -1071,7 +1071,7 @@ fn ternaryToMatchRewrite(
     source: []const u8,
     line: u32,
     column: u32,
-) !StatementRewrite {
+) !Repair {
     const q = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     if (q >= source.len or source[q] != '?') return error.UnsupportedRefactor;
     // `?.` (optional chain) and `??` (nullish) are not ternaries.
@@ -1386,7 +1386,7 @@ fn templateHoistRewrite(
     source: []const u8,
     line: u32,
     column: u32,
-) !StatementRewrite {
+) !Repair {
     const tmpl_start = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     if (tmpl_start >= source.len or source[tmpl_start] != '`') return error.UnsupportedRefactor;
 
@@ -1613,7 +1613,7 @@ fn nestedDestructureRewrite(
     source: []const u8,
     line: u32,
     column: u32,
-) !StatementRewrite {
+) !Repair {
     const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     const line_start = lineStartOffset(source, pos);
     const line_end = lineEndOffset(source, pos);
@@ -1672,7 +1672,7 @@ fn unusedIndexAliasRewrite(
     source: []const u8,
     line: u32,
     column: u32,
-) !StatementRewrite {
+) !Repair {
     const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     const for_start = lineStartOffset(source, pos);
     const for_end = lineEndOffset(source, pos);
@@ -1932,20 +1932,27 @@ fn parseIndexAliasDestructure(line: []const u8, pair_binding: []const u8) ?Index
     return .{ .value = value_name };
 }
 
-fn appendStatementRewriteUnique(
+fn appendSpanRepairUnique(
     allocator: std.mem.Allocator,
-    result: *StatementRewriteResult,
-    rewrite: StatementRewrite,
+    source: []const u8,
+    result: *Result,
+    repair: Repair,
 ) !void {
-    var owned = rewrite;
-    for (result.rewrites.items) |existing| {
+    var owned = repair;
+    // A span producer computes its own offsets and knows nothing about lines.
+    // The line is filled here so every repair reports a position, whichever
+    // side built it - the wire, the rewrite trace, and the M4 law check all
+    // read one.
+    owned.line = offsetLine(source, owned.start_offset);
+    owned.column = 1;
+    for (result.repairs.items) |existing| {
         if (existing.start_offset == owned.start_offset and existing.end_offset == owned.end_offset) {
-            owned.deinit(allocator);
+            freeRepairOwned(allocator, &owned);
             return;
         }
     }
-    result.rewrites.append(allocator, owned) catch |err| {
-        owned.deinit(allocator);
+    result.repairs.append(allocator, owned) catch |err| {
+        freeRepairOwned(allocator, &owned);
         return err;
     };
 }
@@ -1959,9 +1966,9 @@ fn appendStatementRewriteUnique(
 /// from `rewrites`; the caller owns the backing list.
 fn selectNonOverlapping(
     allocator: std.mem.Allocator,
-    rewrites: []const StatementRewrite,
-) ![]const StatementRewrite {
-    var keep: std.ArrayListUnmanaged(StatementRewrite) = .empty;
+    rewrites: []const Repair,
+) ![]const Repair {
+    var keep: std.ArrayListUnmanaged(Repair) = .empty;
     errdefer keep.deinit(allocator);
     outer: for (rewrites, 0..) |a, i| {
         for (rewrites, 0..) |b, j| {
@@ -1983,7 +1990,7 @@ fn selectNonOverlapping(
     return keep.toOwnedSlice(allocator);
 }
 
-pub fn simulateRefactors(
+pub fn simulateRepairs(
     allocator: std.mem.Allocator,
     file: []const u8,
     result: *const Result,
@@ -1991,7 +1998,7 @@ pub fn simulateRefactors(
     const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
 
-    const proposed = try applyRefactors(allocator, source, result.refactors.items);
+    const proposed = try applyRepairs(allocator, source, result.repairs.items);
     defer allocator.free(proposed);
 
     var simulation = try edit_simulate.simulate(allocator, .{
@@ -2144,44 +2151,43 @@ pub fn normalizeSourceWithSchema(
         // guard.
         var result = Result{ .file = virtual_path };
         defer result.deinit(allocator);
-        try buildRefactors(allocator, current, check.json_diagnostics.items, &result);
+        try buildLineRepairs(allocator, current, check.json_diagnostics.items, &result);
 
         // Span-keyed multi-line / convention rewrites for this pass.
-        var stmt_result = StatementRewriteResult{};
+        var stmt_result = Result{ .file = "" };
         defer stmt_result.deinit(allocator);
-        try buildStatementRewrites(allocator, current, check.json_diagnostics.items, &stmt_result);
+        try buildSpanRepairs(allocator, current, check.json_diagnostics.items, &stmt_result);
 
-        if (result.refactors.items.len == 0 and stmt_result.rewrites.items.len == 0) {
+        if (result.repairs.items.len == 0 and stmt_result.repairs.items.len == 0) {
             converged = true;
             break;
         }
 
         const Step = struct { next: []u8, intents: []const RepairIntent, intents_owned: bool };
         const step: ?Step = blk: {
-            if (result.refactors.items.len > 0) {
-                const next = applyRefactors(allocator, current, result.refactors.items) catch |err| switch (err) {
-                    // A pass we cannot apply deterministically (two refactors on
-                    // one line, an unexpected multi-line replacement, a stale
-                    // line) stops the loop short of a fixed point rather than
+            if (result.repairs.items.len > 0) {
+                const next = applyRepairs(allocator, current, result.repairs.items) catch |err| switch (err) {
+                    // A pass we cannot apply deterministically (two repairs
+                    // whose spans overlap, a stale snapshot, a span outside the
+                    // source) stops the loop short of a fixed point rather than
                     // guessing.
-                    error.OverlappingRefactors,
-                    error.UnsupportedRefactor,
-                    error.StaleRefactorLine,
-                    error.RefactorLineNotFound,
+                    error.OverlappingRepairs,
+                    error.StaleRepair,
+                    error.RepairOutOfBounds,
                     => break :blk null,
                     else => return err,
                 };
                 break :blk .{ .next = next, .intents = &.{}, .intents_owned = false };
             }
-            // No single-line refactors this pass: apply the innermost
-            // non-overlapping subset of span rewrites, post-order.
-            const subset = selectNonOverlapping(allocator, stmt_result.rewrites.items) catch |err| return err;
+            // No line-derived repairs this pass: apply the innermost
+            // non-overlapping subset of span repairs, post-order.
+            const subset = selectNonOverlapping(allocator, stmt_result.repairs.items) catch |err| return err;
             defer allocator.free(subset);
             if (subset.len == 0) break :blk null;
-            const next = applyStatementRewrites(allocator, current, subset) catch |err| switch (err) {
-                error.OverlappingRefactors,
-                error.StaleRefactorLine,
-                error.RefactorLineNotFound,
+            const next = applyRepairs(allocator, current, subset) catch |err| switch (err) {
+                error.OverlappingRepairs,
+                error.StaleRepair,
+                error.RepairOutOfBounds,
                 => break :blk null,
                 else => return err,
             };
@@ -2215,8 +2221,8 @@ pub fn normalizeSourceWithSchema(
         {
             errdefer allocator.free(next);
             errdefer if (s.intents_owned) allocator.free(s.intents);
-            if (result.refactors.items.len > 0) {
-                for (result.refactors.items) |r| {
+            if (result.repairs.items.len > 0) {
+                for (result.repairs.items) |r| {
                     try trace.append(allocator, r.intent);
                 }
             } else {
@@ -2485,7 +2491,7 @@ pub fn writeJsonWithSimulation(
     try writer.writeAll(",\"policy_hash\":");
     try writeJsonString(writer, &hash);
     try writer.writeAll(",\"refactors\":[");
-    for (result.refactors.items, 0..) |r, i| {
+    for (result.repairs.items, 0..) |r, i| {
         if (i > 0) try writer.writeByte(',');
         // v1 keeps its spelling. D3 §6 freezes v1 command shapes, so this is
         // the one surface where the legacy names still appear.
@@ -2535,7 +2541,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var result = try collect(allocator, path);
     defer result.deinit(allocator);
     const simulation = if (simulate_mode)
-        try simulateRefactors(allocator, path, &result)
+        try simulateRepairs(allocator, path, &result)
     else
         null;
 
@@ -2804,8 +2810,8 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         var result = try collectFromSource(allocator, fixture.source, "handler.ts");
         defer result.deinit(allocator);
 
-        var found: ?Refactor = null;
-        for (result.refactors.items) |r| {
+        var found: ?Repair = null;
+        for (result.repairs.items) |r| {
             if (r.intent == fixture.intent) {
                 found = r;
                 break;
@@ -2816,8 +2822,8 @@ test "every graded rewrite this rewriter emits discharges against its law" {
             return error.TestFailed;
         };
 
-        var one = [_]Refactor{refactor};
-        const repaired = try applyRefactors(allocator, fixture.source, &one);
+        var one = [_]Repair{refactor};
+        const repaired = try applyRepairs(allocator, fixture.source, &one);
         defer allocator.free(repaired);
 
         switch (repairPolicy.validateApplication(
@@ -3009,51 +3015,140 @@ test "capability alias preview stays in enclosing scope" {
     }
 }
 
-test "applyRefactors rejects stale line mismatch" {
+test "applyRepairs applies a replacement that spans lines" {
+    // The retired line-keyed applier refused any replacement containing a
+    // newline, so a rewrite that changed the shape of a statement had to go
+    // through a second, separate path. One path now, and this is the case that
+    // proves the restriction is gone rather than relocated.
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const n = 1;
+        \\  return Response.json({ n });
+        \\}
+    ;
+    const span = lineSpan(source, 2).?;
+    const repair = Repair{
+        .intent = .replace_ternary_with_if,
+        .start_offset = span.start,
+        .end_offset = span.end,
+        .line = 2,
+        .column = 3,
+        .message = "",
+        .replacement = "  const a = 1;\n  const n = a;",
+        .original = "  const n = 1;",
+    };
+    const out = try applyRepairs(std.testing.allocator, source, &.{repair});
+    defer std.testing.allocator.free(out);
+    try std.testing.expect(std.mem.indexOf(u8, out, "const a = 1;\n  const n = a;") != null);
+    // The lines around it are untouched, so the splice took the span and not
+    // the line's neighbourhood.
+    try std.testing.expect(std.mem.indexOf(u8, out, "function handler(req: Request): Response {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return Response.json({ n });") != null);
+}
+
+test "applyRepairs applies two repairs on one line when their spans are disjoint" {
+    // The line-keyed applier refused this pair for a reason that was about the
+    // applier and not about the program: it walked lines, so one line could
+    // carry one rewrite. Two disjoint spans are two independent edits, and the
+    // overlap rule is what decides them now.
+    const source = "const pair = [alpha, beta];\n";
+    const alpha_start = std.mem.indexOf(u8, source, "alpha").?;
+    const beta_start = std.mem.indexOf(u8, source, "beta").?;
+    const first = Repair{
+        .intent = .replace_let_with_const,
+        .start_offset = alpha_start,
+        .end_offset = alpha_start + "alpha".len,
+        .line = 1,
+        .column = 1,
+        .message = "",
+        .replacement = "one",
+        .original = "alpha",
+    };
+    const second = Repair{
+        .intent = .replace_let_with_const,
+        .start_offset = beta_start,
+        .end_offset = beta_start + "beta".len,
+        .line = 1,
+        .column = 1,
+        .message = "",
+        .replacement = "two",
+        .original = "beta",
+    };
+    const out = try applyRepairs(std.testing.allocator, source, &.{ first, second });
+    defer std.testing.allocator.free(out);
+    try std.testing.expectEqualStrings("const pair = [one, two];\n", out);
+
+    // And the same two spans overlapping is still refused, so the pair above
+    // passes because the spans are disjoint and not because the rule went away.
+    const overlapping = Repair{
+        .intent = .replace_let_with_const,
+        .start_offset = alpha_start,
+        .end_offset = beta_start + "beta".len,
+        .line = 1,
+        .column = 1,
+        .message = "",
+        .replacement = "one, two",
+        .original = source[alpha_start .. beta_start + "beta".len],
+    };
+    try std.testing.expectError(
+        error.OverlappingRepairs,
+        applyRepairs(std.testing.allocator, source, &.{ first, overlapping }),
+    );
+}
+
+test "applyRepairs rejects a stale snapshot on a line-derived span" {
     const source =
         \\function handler(req: Request): Response {
         \\  const count = 1;
         \\  return Response.json({ count });
         \\}
     ;
-    const refactor = Refactor{
+    const span = lineSpan(source, 2).?;
+    const repair = Repair{
         .intent = .replace_let_with_const,
+        .start_offset = span.start,
+        .end_offset = span.end,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
         .replacement = "  const count = 1;",
-        .original_line = "  let count = 1;",
+        .original = "  let count = 1;",
     };
-    try std.testing.expectError(error.StaleRefactorLine, applyRefactors(std.testing.allocator, source, &.{refactor}));
+    try std.testing.expectError(error.StaleRepair, applyRepairs(std.testing.allocator, source, &.{repair}));
 }
 
-test "applyRefactors rejects overlapping replacements" {
+test "applyRepairs rejects two repairs covering the same bytes" {
     const source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
         \\  return Response.json({ count });
         \\}
     ;
-    const first = Refactor{
+    const span = lineSpan(source, 2).?;
+    const first = Repair{
         .intent = .replace_let_with_const,
+        .start_offset = span.start,
+        .end_offset = span.end,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
         .replacement = "  const count = 1;",
-        .original_line = "  let count = 1;",
+        .original = "  let count = 1;",
     };
-    const second = Refactor{
+    const second = Repair{
         .intent = .canonicalize_capability_key_alias,
+        .start_offset = span.start,
+        .end_offset = span.end,
         .line = 2,
         .column = 1,
         .message = "make capability key alias compiler-visible",
         .replacement = "  const count = 1;",
-        .original_line = "  let count = 1;",
+        .original = "  let count = 1;",
     };
-    try std.testing.expectError(error.OverlappingRefactors, applyRefactors(std.testing.allocator, source, &.{ first, second }));
+    try std.testing.expectError(error.OverlappingRepairs, applyRepairs(std.testing.allocator, source, &.{ first, second }));
 }
 
-test "applyRefactors applies multiple lines and edit simulation stays clean" {
+test "applyRepairs applies repairs on several lines and edit simulation stays clean" {
     const source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
@@ -3064,23 +3159,29 @@ test "applyRefactors applies multiple lines and edit simulation stays clean" {
         \\  return Response.json({ count });
         \\}
     ;
-    const first = Refactor{
+    const first_span = lineSpan(source, 2).?;
+    const second_span = lineSpan(source, 4).?;
+    const first = Repair{
         .intent = .replace_let_with_const,
+        .start_offset = first_span.start,
+        .end_offset = first_span.end,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
         .replacement = "  const count = 1;",
-        .original_line = "  let count = 1;",
+        .original = "  let count = 1;",
     };
-    const second = Refactor{
+    const second = Repair{
         .intent = .canonicalize_for_of_const,
+        .start_offset = second_span.start,
+        .end_offset = second_span.end,
         .line = 4,
         .column = 3,
         .message = "for-of binding uses let",
         .replacement = "  for (const item of items) {",
-        .original_line = "  for (let item of items) {",
+        .original = "  for (let item of items) {",
     };
-    const proposed = try applyRefactors(std.testing.allocator, source, &.{ first, second });
+    const proposed = try applyRepairs(std.testing.allocator, source, &.{ first, second });
     defer std.testing.allocator.free(proposed);
     try std.testing.expect(std.mem.indexOf(u8, proposed, "let ") == null);
 
@@ -3090,7 +3191,7 @@ test "applyRefactors applies multiple lines and edit simulation stays clean" {
     // had, which the rewrite did not introduce.)
     var after = try collectFromSource(std.testing.allocator, proposed, "handler.ts");
     defer after.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), after.refactors.items.len);
+    try std.testing.expectEqual(@as(usize, 0), after.repairs.items.len);
 }
 
 test "invalid applied replacement is caught by edit simulation" {
@@ -3100,15 +3201,18 @@ test "invalid applied replacement is caught by edit simulation" {
         \\  return Response.json({ count });
         \\}
     ;
-    const bad = Refactor{
+    const bad_span = lineSpan(source, 2).?;
+    const bad = Repair{
         .intent = .replace_let_with_const,
+        .start_offset = bad_span.start,
+        .end_offset = bad_span.end,
         .line = 2,
         .column = 3,
         .message = "let binding is never reassigned",
         .replacement = "  const = ;",
-        .original_line = "  let count = 1;",
+        .original = "  let count = 1;",
     };
-    const proposed = try applyRefactors(std.testing.allocator, source, &.{bad});
+    const proposed = try applyRepairs(std.testing.allocator, source, &.{bad});
     defer std.testing.allocator.free(proposed);
 
     var simulated = try edit_simulate.simulate(std.testing.allocator, .{
@@ -3131,8 +3235,8 @@ test "collect output can clear canonical diagnostic through edit simulation" {
     ;
     var preview = try collectFromSource(std.testing.allocator, source, "handler.ts");
     defer preview.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 1), preview.refactors.items.len);
-    try std.testing.expectEqual(RepairIntent.replace_arrow_with_function, preview.refactors.items[0].intent);
+    try std.testing.expectEqual(@as(usize, 1), preview.repairs.items.len);
+    try std.testing.expectEqual(RepairIntent.replace_arrow_with_function, preview.repairs.items[0].intent);
 
     const proposed = try std.fmt.allocPrint(
         std.testing.allocator,
@@ -3143,7 +3247,7 @@ test "collect output can clear canonical diagnostic through edit simulation" {
         \\  return Response.json({{ a, b }});
         \\}}
     ,
-        .{preview.refactors.items[0].replacement},
+        .{preview.repairs.items[0].replacement},
     );
     defer std.testing.allocator.free(proposed);
 
@@ -3154,7 +3258,7 @@ test "collect output can clear canonical diagnostic through edit simulation" {
     // had, which the rewrite did not introduce.)
     var after = try collectFromSource(std.testing.allocator, proposed, "handler.ts");
     defer after.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), after.refactors.items.len);
+    try std.testing.expectEqual(@as(usize, 0), after.repairs.items.len);
 }
 
 test "collect output can clear capability alias diagnostic through edit simulation" {
@@ -3168,13 +3272,13 @@ test "collect output can clear capability alias diagnostic through edit simulati
     ;
     var preview = try collectFromSource(std.testing.allocator, source, "handler.ts");
     defer preview.deinit(std.testing.allocator);
-    try std.testing.expect(preview.refactors.items.len >= 1);
+    try std.testing.expect(preview.repairs.items.len >= 1);
 
     var proposed = try std.ArrayList(u8).initCapacity(std.testing.allocator, source.len + 8);
     defer proposed.deinit(std.testing.allocator);
     try proposed.appendSlice(std.testing.allocator, "import { env } from \"zttp:env\";\n");
     try proposed.appendSlice(std.testing.allocator, "function handler(req: Request): Response {\n");
-    try proposed.appendSlice(std.testing.allocator, preview.refactors.items[0].replacement);
+    try proposed.appendSlice(std.testing.allocator, preview.repairs.items[0].replacement);
     try proposed.appendSlice(std.testing.allocator, "\n");
     try proposed.appendSlice(std.testing.allocator, "  const value = env(key);\n");
     try proposed.appendSlice(std.testing.allocator, "  return Response.json({ value });\n");
@@ -3184,7 +3288,7 @@ test "collect output can clear capability alias diagnostic through edit simulati
     // capability-alias canonical diagnostic is cleared by the rewrite.
     var after = try collectFromSource(std.testing.allocator, proposed.items, "handler.ts");
     defer after.deinit(std.testing.allocator);
-    try std.testing.expectEqual(@as(usize, 0), after.refactors.items.len);
+    try std.testing.expectEqual(@as(usize, 0), after.repairs.items.len);
 }
 
 test "normalizeSource fixes avoidable let to const and is fully canonical" {
@@ -3417,25 +3521,25 @@ test "templateHoistRewrite refuses when a prior statement shares the physical li
 // ZTS612 ternary -> match (span-keyed)
 // ---------------------------------------------------------------------------
 
-test "applyStatementRewrites splices a single span and validates the snapshot" {
+test "applyRepairs splices a single span and validates the snapshot" {
     const source = "const x = a ? 1 : 2;\n";
-    const rw = StatementRewrite{
+    const rw = Repair{
         .intent = .replace_ternary_with_if,
         .start_offset = 10,
         .end_offset = 19,
         .replacement = try std.testing.allocator.dupe(u8, "match (!!a) { when true: 1, default: 2 }"),
         .original = try std.testing.allocator.dupe(u8, "a ? 1 : 2"),
     };
-    var rws = [_]StatementRewrite{rw};
+    var rws = [_]Repair{rw};
     defer for (&rws) |*r| r.deinit(std.testing.allocator);
-    const out = try applyStatementRewrites(std.testing.allocator, source, &rws);
+    const out = try applyRepairs(std.testing.allocator, source, &rws);
     defer std.testing.allocator.free(out);
     try std.testing.expectEqualStrings("const x = match (!!a) { when true: 1, default: 2 };\n", out);
 }
 
-test "applyStatementRewrites rejects a stale snapshot" {
+test "applyRepairs rejects a stale snapshot" {
     const source = "const x = a ? 1 : 2;\n";
-    var rw = StatementRewrite{
+    var rw = Repair{
         .intent = .replace_ternary_with_if,
         .start_offset = 10,
         .end_offset = 19,
@@ -3443,20 +3547,20 @@ test "applyStatementRewrites rejects a stale snapshot" {
         .original = try std.testing.allocator.dupe(u8, "b ? 1 : 2"), // wrong
     };
     defer rw.deinit(std.testing.allocator);
-    var rws = [_]StatementRewrite{rw};
-    try std.testing.expectError(error.StaleRefactorLine, applyStatementRewrites(std.testing.allocator, source, &rws));
+    var rws = [_]Repair{rw};
+    try std.testing.expectError(error.StaleRepair, applyRepairs(std.testing.allocator, source, &rws));
 }
 
-test "applyStatementRewrites rejects overlapping spans" {
+test "applyRepairs rejects overlapping spans" {
     const source = "abcdefghij";
-    var a = StatementRewrite{
+    var a = Repair{
         .intent = .replace_ternary_with_if,
         .start_offset = 0,
         .end_offset = 5,
         .replacement = try std.testing.allocator.dupe(u8, "X"),
         .original = try std.testing.allocator.dupe(u8, "abcde"),
     };
-    var b = StatementRewrite{
+    var b = Repair{
         .intent = .replace_ternary_with_if,
         .start_offset = 3,
         .end_offset = 8,
@@ -3465,8 +3569,8 @@ test "applyStatementRewrites rejects overlapping spans" {
     };
     defer a.deinit(std.testing.allocator);
     defer b.deinit(std.testing.allocator);
-    var rws = [_]StatementRewrite{ a, b };
-    try std.testing.expectError(error.OverlappingRefactors, applyStatementRewrites(std.testing.allocator, source, &rws));
+    var rws = [_]Repair{ a, b };
+    try std.testing.expectError(error.OverlappingRepairs, applyRepairs(std.testing.allocator, source, &rws));
 }
 
 test "lineColToOffset maps a 1-based position to a byte offset" {
@@ -4183,11 +4287,11 @@ fn normalizeOnlyIntent(
         var result = collectFromSource(allocator, current, virtual_path) catch break;
         defer result.deinit(allocator);
 
-        var selected: std.ArrayListUnmanaged(Refactor) = .empty;
+        var selected: std.ArrayListUnmanaged(Repair) = .empty;
         defer selected.deinit(allocator);
         var seen_lines: std.ArrayListUnmanaged(u32) = .empty;
         defer seen_lines.deinit(allocator);
-        for (result.refactors.items) |r| {
+        for (result.repairs.items) |r| {
             if (r.intent != intent) continue;
             // `applyRefactors` refuses two refactors on one line; take the
             // first and let the next pass pick up the rest.
@@ -4197,7 +4301,7 @@ fn normalizeOnlyIntent(
         }
         if (selected.items.len == 0) break;
 
-        const next = applyRefactors(allocator, current, selected.items) catch break;
+        const next = applyRepairs(allocator, current, selected.items) catch break;
         allocator.free(current);
         current = next;
     }

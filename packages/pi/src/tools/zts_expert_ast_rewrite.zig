@@ -238,7 +238,7 @@ fn applyCapabilityAlias(
     // a single alias is in scope. Strict-line matching keeps the contract
     // unambiguous for the common case; the fallback covers UI ergonomics.
     var chosen: ?usize = null;
-    for (preview.refactors.items, 0..) |r, i| {
+    for (preview.repairs.items, 0..) |r, i| {
         if (r.intent != .canonicalize_capability_key_alias) continue;
         if (r.line == line) {
             chosen = i;
@@ -248,7 +248,7 @@ fn applyCapabilityAlias(
     if (chosen == null) {
         var count_alias: usize = 0;
         var last_alias_idx: usize = 0;
-        for (preview.refactors.items, 0..) |r, i| {
+        for (preview.repairs.items, 0..) |r, i| {
             if (r.intent != .canonicalize_capability_key_alias) continue;
             count_alias += 1;
             last_alias_idx = i;
@@ -256,8 +256,8 @@ fn applyCapabilityAlias(
         if (count_alias == 1) chosen = last_alias_idx;
     }
     const idx = chosen orelse return error.AliasNotFound;
-    const slice: []const canonicalize.Refactor = preview.refactors.items[idx .. idx + 1];
-    return try canonicalize.applyRefactors(allocator, source, slice);
+    const slice: []const canonicalize.Repair = preview.repairs.items[idx .. idx + 1];
+    return try canonicalize.applyRepairs(allocator, source, slice);
 }
 
 const BuildArgs = struct {
@@ -742,10 +742,10 @@ test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → vet
     // typed `replace_arrow_with_function` RepairIntent.
     var preview = try canonicalize.collect(testing.allocator, path);
     defer preview.deinit(testing.allocator);
-    try testing.expect(preview.refactors.items.len >= 1);
+    try testing.expect(preview.repairs.items.len >= 1);
     var saw_arrow = false;
     var arrow_line: u32 = 0;
-    for (preview.refactors.items) |r| {
+    for (preview.repairs.items) |r| {
         if (r.intent == .replace_arrow_with_function) {
             saw_arrow = true;
             arrow_line = r.line;
