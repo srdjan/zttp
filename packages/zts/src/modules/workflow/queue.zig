@@ -34,14 +34,14 @@ pub const binding = mb.ModuleBinding{
     .stateful = true,
     .contract_section = "queue",
     .exports = &.{
-        .{ .name = "send", .func = sendNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true },
-        .{ .name = "request", .func = requestNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true },
+        .{ .name = "send", .func = sendNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
+        .{ .name = "request", .func = requestNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
         // actor is optional (defaults to "main"), so required_arg_count = 0.
         .{ .name = "receive", .func = receiveNative, .arg_count = 1, .required_arg_count = 0, .effect = .write, .returns = .result, .param_types = &.{.string}, .failure_severity = .expected, .traceable = true, .return_labels = .{ .external = true } },
-        .{ .name = "ack", .func = ackNative, .arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{.string}, .failure_severity = .expected, .traceable = true },
+        .{ .name = "ack", .func = ackNative, .arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{.string}, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{"MessageId"}, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
         // trailing reason is optional (defaults to "nack"), so required_arg_count = 1.
-        .{ .name = "nack", .func = nackNative, .arg_count = 2, .required_arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .expected, .traceable = true },
-        .{ .name = "reply", .func = replyNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true },
+        .{ .name = "nack", .func = nackNative, .arg_count = 2, .required_arg_count = 1, .effect = .write, .returns = .result, .param_types = &.{ .string, .string }, .failure_severity = .expected, .traceable = true, .signature = .{ .params = &.{ "MessageId", "string" }, .returns = "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }" } },
+        .{ .name = "reply", .func = replyNative, .arg_count = 2, .effect = .write, .returns = .result, .param_types = &.{ .string, .unknown }, .failure_severity = .expected, .traceable = true, .json_encodable_args = &.{1} },
     },
 };
 

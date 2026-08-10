@@ -196,6 +196,12 @@ pub const FunctionBinding = struct {
     required_capabilities: ?[]const ModuleCapability = null,
     returns: ReturnKind = .unknown,
     param_types: []const ReturnKind = &.{},
+    /// Argument positions whose type must be JSON-encodable, checked by the
+    /// same rule `Response.json` runs. An export that serializes an argument
+    /// to the wire owes its caller the diagnostic at the call site rather than
+    /// a throw inside the encoder, and this is how it says which argument.
+    json_encodable_args: []const u8 = &.{},
+
     /// The precise signature, when the coarse kinds above cannot spell it.
     signature: ?DeclaredSignature = null,
     traceable: bool = true,

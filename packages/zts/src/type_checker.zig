@@ -3544,28 +3544,54 @@ pub const TypeChecker = struct {
         if (call.args_count == 0) return;
 
         const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
+        self.reportIfUnencodable(arg_idx, "Response.json");
+    }
+
+    /// Report ZTS213 when the value at `arg_idx` has a type JSON cannot carry.
+    /// Shared by `Response.json` and by every module export that marks an
+    /// argument `json_encodable_args` - one rule at both sites, which is what
+    /// makes it a rule rather than a special case.
+    fn reportIfUnencodable(self: *TypeChecker, arg_idx: NodeIndex, site: []const u8) void {
         const arg_type = self.inferType(arg_idx);
         const bad = self.firstUnencodable(arg_type, 0) orelse return;
 
-        var buf: [256]u8 = undefined;
-        const bad_str = self.env.pool.formatType(bad, buf[0..128]);
+        var buf: [1024]u8 = undefined;
+        const bad_str = self.env.pool.formatType(bad, &buf);
         const msg = std.fmt.allocPrint(
             self.allocator,
-            "Response.json cannot encode this payload: {s} is not a JSON value",
-            .{bad_str},
-        ) catch "Response.json cannot encode this payload";
+            "{s} cannot encode this payload: {s} is not a JSON value",
+            .{ site, bad_str },
+        ) catch "this payload is not JSON-encodable";
         self.addDiagnostic(.{
             .severity = .err,
             .kind = .unencodable_json_payload,
             .node = arg_idx,
             .message = msg,
             .help = "JSON carries scalars, arrays, tuples, records, and string-keyed Dict values. Encode a Bytes with encodeBase64, and call a function rather than sending it.",
-            .allocated = !std.mem.eql(u8, msg, "Response.json cannot encode this payload"),
+            .allocated = !std.mem.eql(u8, msg, "this payload is not JSON-encodable"),
         });
+    }
+
+    /// The `json_encodable_args` positions of the module export `call` names,
+    /// checked with the same rule. A queue payload and a response body are
+    /// serialized by the same encoder, so they answer to the same question.
+    fn checkModuleEncodableArgs(self: *TypeChecker, call: Node.CallExpr) void {
+        if (self.ir_view.getTag(call.callee) != .identifier) return;
+        const binding = self.ir_view.getBinding(call.callee) orelse return;
+        const name = self.resolveAtomName(binding.name_atom) orelse return;
+        const entry = @import("zts-engine").builtin_modules.findFunction(name) orelse return;
+        for (entry.func.json_encodable_args) |position| {
+            if (position >= call.args_count) continue;
+            const arg_idx = self.ir_view.getListIndex(call.args_start, position);
+            var site_buf: [128]u8 = undefined;
+            const site = std.fmt.bufPrint(&site_buf, "{s}.{s}", .{ entry.binding.specifier, entry.func.name }) catch name;
+            self.reportIfUnencodable(arg_idx, site);
+        }
     }
 
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag == .identifier) self.checkModuleEncodableArgs(call);
         if (callee_tag == .member_access) {
             self.checkResponseJsonPayload(call);
             const callee_type = self.inferType(call.callee);
@@ -5768,6 +5794,77 @@ test "the request readers are typed, and their parameter is a Request" {
     ,
         1,
         "expected Request",
+    );
+}
+
+test "the encodability rule generalizes to a module payload" {
+    // The same rule at a second site, which is the check that it is a rule
+    // rather than a special case for `Response.json`. A queue payload and a
+    // response body are serialized by the same encoder, so they answer the
+    // same question - and the diagnostic names which site asked it.
+    //
+    // `request` rather than `send`: two modules export a `send`, and
+    // `populateModuleTypes` keys its signature map by bare name, so
+    // `zttp:websocket.send` overwrites `zttp:queue.send` and a call to either
+    // is checked against the other's parameters. That collision is real and
+    // predates this rule; naming it here keeps the test measuring the rule.
+    try checkTypedSourceSaying(
+        \\import { request } from "zttp:queue";
+        \\import { encodeUtf8 } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\    const r = request("worker", { raw: encodeUtf8("hi") });
+        \\    return Response.json({ ok: r.ok });
+        \\}
+    ,
+        1,
+        "zttp:queue.request cannot encode this payload",
+    );
+
+    // The other half: an encodable payload passes, so the rule is usable
+    // rather than merely strict.
+    try checkTypedSource(
+        \\import { request } from "zttp:queue";
+        \\function handler(req: Request): Response {
+        \\    const r = request("worker", { id: "a", n: 1, flags: [true, false] });
+        \\    return Response.json({ ok: r.ok });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "a message id is not an actor name" {
+    // `ack(id)` and `send(target, payload)` both took a bare string, so the
+    // one confusion the queue ABI invites - settling a message with the actor
+    // name you just sent to - was unsayable in the types. `MessageId` is a
+    // brand over string, so a literal is refused.
+    try checkTypedSourceSaying(
+        \\import { ack } from "zttp:queue";
+        \\function handler(req: Request): Response {
+        \\    const done = ack("worker");
+        \\    return Response.json({ ok: done.ok });
+        \\}
+    ,
+        1,
+        "expected MessageId",
+    );
+
+    // The id a caller actually has comes out of a `Result` whose value types
+    // as nothing, so the checker admits it for want of information rather
+    // than for want of a brand. Recorded, because it is the half that does
+    // not hold yet and it needs phase 7's parameterized `Result`.
+    try checkTypedSource(
+        \\import { receive, ack } from "zttp:queue";
+        \\function handler(req: Request): Response {
+        \\    const r = receive("main");
+        \\    if (!r.ok) return Response.json({ ok: false });
+        \\    const done = ack(r.value.id);
+        \\    return Response.json({ ok: done.ok });
+        \\}
+    ,
+        0,
+        null,
     );
 }
 

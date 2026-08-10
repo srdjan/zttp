@@ -109,6 +109,26 @@ fn registerFetchOptions(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Alloc
     env.putTypeAlias("FetchOptions", options);
 }
 
+/// `MessageId`, the token `zttp:queue`'s `ack` and `nack` settle a message
+/// with. Spec 7.2 splits this into `MessageId` and `ReceiptId`; the runtime
+/// has one token - `queueMessageToValue` builds no `receipt` field and
+/// `ackNative` says "ack() expects message id" - so there is one brand here
+/// and the second is recorded rather than invented.
+///
+/// What the brand buys is one direction only, and that is worth stating: a
+/// literal string or an actor name reaching `ack` is refused, which is the
+/// confusion the two-string signature invited. The other direction is not
+/// reached, because the id a caller has comes out of a `Result` whose value
+/// types as nothing - so the checker admits it for want of information rather
+/// than for want of a brand. Closing that needs the parameterized `Result`
+/// phase 7 brings.
+fn registerMessageId(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
+    if (env.getTypeAlias("MessageId") != null) return;
+    const message_id = pool.addNominalAlias(allocator, pool.idx_string, "MessageId");
+    if (message_id == null_type_idx) return;
+    env.putTypeAlias("MessageId", message_id);
+}
+
 fn object_refFor(pool: *TypePool, allocator: std.mem.Allocator) TypeIndex {
     return pool.addRef(allocator, "object");
 }
@@ -203,6 +223,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const optional_object = pool.addNullable(allocator, object_ref);
 
     registerFetchOptions(env, pool, allocator);
+    registerMessageId(env, pool, allocator);
 
     // Register all function signatures from the module registry
     for (builtin_modules.all) |binding| {

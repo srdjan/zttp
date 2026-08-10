@@ -797,12 +797,13 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
     // in a fresh pool with no environment, and `TypePool.assignableStep` gives
     // `object` a rule of its own, so the checker resolves it where it matters.
     //
-    // `FetchOptions`, for the same reason and one step further: it is a real
-    // registered alias that `module_types.populateModuleTypes` builds before
-    // the export loop, so it resolves everywhere the checker runs and nowhere
-    // in this environment-free pool. The gap between the two pipelines is why
-    // this set is asserted exactly rather than counted.
-    const expected_unresolved = [_][]const u8{ "Record", "object", "FetchOptions" };
+    // `FetchOptions` and `MessageId`, for the same reason and one step
+    // further: each is a real registered alias that
+    // `module_types.populateModuleTypes` builds before the export loop, so
+    // both resolve everywhere the checker runs and nowhere in this
+    // environment-free pool. The gap between the two pipelines is why this set
+    // is asserted exactly rather than counted.
+    const expected_unresolved = [_][]const u8{ "Record", "object", "FetchOptions", "MessageId" };
     try std.testing.expectEqual(expected_unresolved.len, ctx.unresolved.items.len);
     for (expected_unresolved) |want| {
         var seen = false;
@@ -819,7 +820,7 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 
 /// The committed digest of the whole signature surface. Regenerate deliberately:
 /// a diff here is a change to what every handler sees from `zttp:*`.
-const frozen_signature_digest = "a021b5684946392fe0fee428a5af316e9c630432784ddab836cc66aa70ceb450";
+const frozen_signature_digest = "f6a2722859f9fdf8166ac1c55fe2534a0500b00181e136bce2ad032cfbec3ff4";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

@@ -417,6 +417,12 @@ pub const FunctionBinding = struct {
     /// Type signature for parameter types (mapped to TypeIndex during type init).
     param_types: []const ReturnKind = &.{},
 
+    /// Argument positions whose type must be JSON-encodable, checked by the
+    /// same rule `Response.json` runs. An export that serializes an argument
+    /// to the wire owes its caller the diagnostic at the call site rather than
+    /// a throw inside the encoder, and this is how it says which argument.
+    json_encodable_args: []const u8 = &.{},
+
     /// The precise signature, when the coarse kinds above cannot spell it.
     /// Every consumer that reads `param_types`/`returns` as text goes through
     /// `returnKindToTs`, which consults this first, so declaring it here is
@@ -609,6 +615,14 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             // silently leave the trailing parameters on the enum - two
             // answers to one question, with the imprecise one winning where
             // it was least expected.
+            for (f.json_encodable_args) |position| {
+                if (position >= f.arg_count) {
+                    @compileError(std.fmt.comptimePrint(
+                        "{s}.{s} marks argument {d} JSON-encodable but declares arg_count={d}",
+                        .{ b.specifier, f.name, position, f.arg_count },
+                    ));
+                }
+            }
             if (f.signature) |sig| {
                 if (sig.params.len != f.arg_count) {
                     @compileError(std.fmt.comptimePrint(
