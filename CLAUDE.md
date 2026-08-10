@@ -11,34 +11,13 @@ Serverless JavaScript runtime for FaaS, powered by zts (pure Zig JS engine). Tar
 Validated on Zig 0.16.0 stable. The build produces three binaries: `zttp` (developer CLI and local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
 
 ```bash
-zig build                                      # Debug build (all three binaries)
-zig build -Doptimize=ReleaseFast              # Release build
-zig build -Dstudio                             # Compile in the browser proof workbench (zttp studio); off by default
-zig build -Dedge                               # Compile in the edge runtime (zttp edge); off by default
-zig build -Dhandler=handler.jsx               # Precompile handler into zttp
-zig build -Dhandler=handler.jsx -Dverify      # Verify at compile time
-zig build -Dhandler=handler.jsx -Dcontract    # Emit contract.json
-zig build -Dhandler=handler.jsx -Dreplay=traces.jsonl   # Replay-verify
-zig build -Dhandler=handler.jsx -Dtest-file=tests.jsonl  # Handler tests at build time
-
-zig build run -- examples/handler/handler.ts -p 3000       # Run zttp
-zig build run -- examples/handler/handler.ts --watch --prove  # Proven live reload
-zig build run -- -e "function handler(req) { return Response.json({ok:true}); }"
-zig build cli -- --help                        # Run zttp
-
-zig build wasm                     # Build zts analyzer as a wasm module (web playground)
-bash scripts/build-wasm-playground.sh  # Build wasm + publish to zttp-website/static
-
-zig build test                     # Bulk unit suite (excludes zruntime root, smoke, panic-isolation, examples)
-bash scripts/verify.sh             # Full local gate mirroring CI, including zig fmt --check
-zig build test-zts                 # Engine tests only
-zig build test-zruntime            # Runtime tests only
-zig build test-cli                 # Developer CLI tests only
-zig build test -Dtest-filter="name"    # Single test (compile-time filter)
-bash scripts/test-examples.sh      # All example handler tests
-
-zig build bench                    # Zig-native benchmarks (packages/runtime/bench/benchmark.zig)
+zig build                                            # Debug build (all three binaries)
+zig build test                                       # Bulk unit suite (excludes zruntime root, smoke, panic-isolation, examples)
+bash scripts/verify.sh                               # Full local gate mirroring CI, including zig fmt --check
+zig build run -- examples/handler/handler.ts -p 3000 # Run zttp
 ```
+
+Release builds, handler precompilation (`-Dhandler` with `-Dverify`, `-Dcontract`, `-Dreplay`, `-Dtest-file`), the optional `-Dstudio` and `-Dedge` features, the wasm playground, the per-package test steps, and benchmarks are in the `zttp-build` skill.
 
 ## CLI Surface
 
@@ -68,35 +47,7 @@ Detail: [docs/internals/architecture.md](docs/internals/architecture.md) and [do
 
 Import via `import { fn } from "zttp:module"`. Most implementations live in `packages/modules/src/` under `data/`, `http/`, `net/`, `platform/`, `security/`, and `workflow/`; the workflow modules `zttp:io`, `zttp:scope`, `zttp:durable`, `zttp:workflow`, and `zttp:queue` live under `packages/zts/src/modules/workflow/`. The authoritative module-to-path registry is `packages/zts/src/builtin_modules.zig`. Each module owns its `pub const binding = sdk.ModuleBinding{...}` next to its implementation file; the type and the shared capability-enforcement helpers live in `packages/zts/src/module_binding.zig`. Bindings declare `required_capabilities` (clock, crypto, random, stderr, and so on) enforced at call time.
 
-| Module | Key Exports |
-|--------|-------------|
-| `zttp:env` | `env` |
-| `zttp:crypto` | `sha256`, `hmacSha256`, `base64Encode`, `base64Decode` |
-| `zttp:router` | `routerMatch` |
-| `zttp:auth` | `parseBearer`, `jwtVerify`, `jwtSign`, `verifyWebhookSignature`, `timingSafeEqual` |
-| `zttp:validate` | `schemaCompile`, `validateJson`, `validateObject`, `coerceJson`, `schemaDrop` |
-| `zttp:decode` | `decodeJson`, `decodeForm`, `decodeQuery`, `decodeFormMultipart` |
-| `zttp:collections` | `dictEmpty`, `dictFromEntries`, `dictGet`, `dictSet`, `dictRemove`, `dictHas`, `dictEntries`, `dictMapValues`, `dictFilter`, `dictFold` |
-| `zttp:bytes` | `bytesFromOctets`, `bytesLength`, `byteAt`, `sliceBytes`, `concatBytes`, `encodeUtf8`, `decodeUtf8`, `decodeBase64`, `encodeBase64` |
-| `zttp:json` | `parseJson`, `parseJsonBytes`, `stringifyJson` |
-| `zttp:result` | `ok`, `err`, `mapResult`, `mapError`, `andThen`, `orElse`, `unwrapOr`, `collectAll` |
-| `zttp:cache` | `cacheGet`, `cacheSet`, `cacheDelete`, `cacheIncr`, `cacheStats` |
-| `zttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` |
-| `zttp:service` | `serviceCall` |
-| `zttp:fetch` | `fetch(url, options?: FetchOptions)`, `fetchWithRetry` |
-| `zttp:io` | `parallel`, `race` |
-| `zttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |
-| `zttp:workflow` | `call`, `saga`, `fanout`, `follow` |
-| `zttp:queue` | `send`, `request`, `receive`, `ack`, `nack`, `reply` |
-| `zttp:compose` | `guard`, `pipe` |
-| `zttp:scope` | `scope`, `using`, `ensure` |
-| `zttp:url` | `urlParse`, `urlSearchParams`, `urlEncode`, `urlDecode` |
-| `zttp:id` | `uuid`, `ulid`, `nanoid` |
-| `zttp:http` | `parseCookies`, `setCookie`, `negotiate`, `parseContentType`, `cors` |
-| `zttp:log` | `logDebug`, `logInfo`, `logWarn`, `logError` |
-| `zttp:text` | `escapeHtml`, `unescapeHtml`, `slugify`, `truncate`, `mask` |
-| `zttp:time` | `formatIso`, `formatHttp`, `parseIso`, `addSeconds` |
-| `zttp:ratelimit` | `rateCheck`, `rateReset` |
+For the module list and every export, read `packages/zts/src/builtin_modules.zig`.
 
 ## JavaScript Subset
 

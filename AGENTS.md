@@ -1,18 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `build.zig` is the root orchestrator that wires package dependencies into executables and test steps.
-- `packages/runtime/` contains the HTTP server and runtime (`main.zig`, `server.zig`, `handler_instance.zig`); `zruntime_tests.zig` is the end-to-end test root behind `zig build test-zruntime`.
-- `packages/zts/` is the pure-Zig JavaScript engine (parser, VM, GC, value system, modules).
-- `packages/modules/` is the peer package implementing most virtual modules (`zttp:env`, `zttp:crypto`, `zttp:router`, `zttp:auth`, `zttp:validate`, `zttp:cache`, and more), organized under `data/`, `http/`, `net/`, `platform/`, `security/`, `workflow/`, with module specs under `module-specs/` generated from the Zig bindings by `zttp module-spec-render`.
-- `packages/zts/src/modules/` holds the engine-coupled workflow modules (`io`, `scope`, `durable`, `workflow`, `queue`) plus adapter shims and module-graph internals.
-- `packages/pi/` contains the interactive expert agent; `packages/proof-review/` contains the proof-review tooling.
-- `packages/zts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
-- `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zts_cli.zig` for the compiler CLI).
-- `packages/zttp-sdk/` contains the extension SDK.
-- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`, `durable/`, `workflow/`, `fetch/`, `hypermedia/`, `patterns/`, `system/`, `autoloop/`).
-- `scripts/` contains shell scripts for build and setup.
-- `docs/` contains user-facing documentation (see Documentation section below).
+- `packages/runtime/zruntime_tests.zig` is the end-to-end test root behind `zig build test-zruntime`, not a peer of the unit tests beside the code.
 - `zig-out/` and `.zig-cache/` are generated output directories; do not edit or commit them.
 
 ## Documentation
@@ -33,21 +22,7 @@
 | `docs/solutions/` | Categorized solutions to past bugs and engineering problems, searchable by YAML frontmatter (`module`, `tags`, `problem_type`); relevant when implementing or debugging in documented areas |
 | `CONCEPTS.md` | Shared domain vocabulary - entities, named processes, and status concepts with project-specific meaning; relevant when orienting to the codebase or discussing domain concepts |
 
-## Build, Test, and Development Commands
-- `zig build` - debug build.
-- `zig build -Doptimize=ReleaseFast` - optimized release build.
-- `zig build -Doptimize=ReleaseFast -Dhandler=handler.jsx` - production build with embedded bytecode.
-- `zig build run -- -e "function handler(r) { return Response.json({ok:true}) }"` - run with inline handler.
-- `zig build run -- examples/handler/handler.ts -p 3000` - run a file-based handler.
-- `zig build test` - all tests.
-- `zig build test-zts` - JS engine tests only.
-- `zig build test-zruntime` - runtime tests only.
-- `zig build bench` - Zig-native benchmark suite.
-
 ## Coding Style & Naming Conventions
-- Format Zig code with `zig fmt` and follow existing patterns.
-- Zig identifiers: types in `UpperCamelCase`, functions and variables in `lowerCamelCase`.
-- Files are short, descriptive, and lowercase (e.g., `server.zig`, `handler_instance.zig`).
 - Keep APIs explicit: the engine/runtime use native Zig error unions (`!T`); `Result<T>` is a user-facing JS/verification construct in handlers, not a Zig engine pattern.
 - Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 
