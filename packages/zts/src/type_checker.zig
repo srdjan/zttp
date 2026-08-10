@@ -5728,6 +5728,44 @@ test "a Bytes arm narrows in the arm it guards and not in the others" {
     );
 }
 
+test "the request readers are typed, and their parameter is a Request" {
+    // They are globals, so their signatures live in the same name-keyed map
+    // the module exports use. Without that a call to one would infer nothing,
+    // which is the state `Request` itself was in before this phase.
+    try checkTypedSource(
+        \\import { bytesLength } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: bytesLength(requestBody(req)) });
+        \\}
+    ,
+        0,
+        null,
+    );
+
+    // The return type is `Bytes`, which the encodability rule then refuses to
+    // send - two rules meeting on one value, which is the check that the
+    // reader's declared type is real rather than absent.
+    try checkTypedSourceSaying(
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ raw: requestBody(req) });
+        \\}
+    ,
+        1,
+        "Bytes is not a JSON value",
+    );
+
+    // The parameter is a `Request` and nothing else.
+    try checkTypedSourceSaying(
+        \\import { bytesLength } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ n: bytesLength(requestBody("nope")) });
+        \\}
+    ,
+        1,
+        "expected Request",
+    );
+}
+
 test "Response.json refuses a payload JSON cannot carry" {
     // The failure exists today and has nowhere to go: `http.zig` calls
     // `valueToJsonString` with `try`, so a function-valued field throws, and

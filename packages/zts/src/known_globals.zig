@@ -34,6 +34,9 @@ pub const names = [_][]const u8{
     "race",
     "range",
     "renderToString",
+    "requestBody",
+    "requestJson",
+    "requestText",
     "resource",
 };
 

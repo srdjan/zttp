@@ -325,6 +325,13 @@ fn parseJsonNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyer
 /// The JSON half, shared by both entry points so `parseJsonBytes` applies the
 /// same rules rather than a second copy of them - which is the whole content
 /// of spec 6.4's "and then applies the same JSON rules".
+/// The same JSON half, for the ABI reader `requestJson`. Exported rather than
+/// copied so a request body and a `parseJson` call cannot drift on limits,
+/// duplicate keys, or wire order.
+pub fn parseTextForAbi(ctx: *context.Context, text: []const u8) anyerror!JSValue {
+    return parseText(ctx, text);
+}
+
 fn parseText(ctx: *context.Context, text: []const u8) anyerror!JSValue {
     if (text.len > limits.max_input_bytes) {
         return failure(ctx, .{ .kind = .size_limit, .limit = limits.max_input_bytes });

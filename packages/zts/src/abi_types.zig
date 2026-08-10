@@ -88,6 +88,7 @@ pub fn populateHandlerAbiTypes(env: *TypeEnv, pool: *TypePool, allocator: std.me
     env.putTypeAlias(RESPONSE_TYPE_NAME, response);
 
     populateRequestType(env, pool, allocator);
+    populateRequestReaders(env, pool, allocator);
 }
 
 /// `Request` was a `known_globals` name resolving to a bare `t_ref`, so every
@@ -143,6 +144,56 @@ fn populateRequestType(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Alloca
 /// The registered `Request` type, or `null_type_idx` when nothing registered it.
 pub fn requestType(env: *const TypeEnv) TypeIndex {
     return env.getTypeAlias(REQUEST_TYPE_NAME) orelse null_type_idx;
+}
+
+/// The three body readers of spec 7.2, typed. They are globals, so their
+/// signatures go in the same `fn_sigs_by_name` map the module exports use -
+/// `callableSignatureForBinding` falls back to it by name, which is what gives
+/// an unimported global a type at all.
+///
+/// Two of the three are typed less precisely than section 7.2 spells them, and
+/// the gap is in the type system rather than in these declarations. The spec
+/// writes `Result<string, BodyError>` and `Result<JsonValue, JsonError |
+/// BodyError>`; the checker's `Result` is one fixed record shared by every
+/// fallible export, with `value: unknown` and no type parameters, so both
+/// collapse to it. The runtime error records carry the spec's taxonomy exactly
+/// and are pinned by test there. The precise spelling waits on the
+/// parameterized `Result` that phase 7's cutover brings, alongside
+/// `responseJson`, which is deferred there for the same kind of reason.
+///
+/// `requestBody` needs none of that: `Bytes` exists and the operation is
+/// total, so its declaration is the spec's.
+fn populateRequestReaders(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
+    const request = requestType(env);
+    if (request == null_type_idx) return;
+
+    // The same four-field record every fallible module export returns, built
+    // the same way `module_types.populateModuleTypes` builds it. A reader with
+    // a shape of its own would make `result.ok` and `result.value` mean
+    // something different depending on which call produced them.
+    const ok_n = pool.addName(allocator, "ok");
+    const val_n = pool.addName(allocator, "value");
+    const err_n = pool.addName(allocator, "error");
+    const errs_n = pool.addName(allocator, "errors");
+    const result_record = pool.addRecord(allocator, &.{
+        .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
+        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_unknown, .optional = true },
+        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_unknown, .optional = true },
+        .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
+    });
+    if (result_record == null_type_idx) return;
+
+    registerReader(env, "requestBody", request, pool.idx_bytes);
+    registerReader(env, "requestText", request, result_record);
+    registerReader(env, "requestJson", request, result_record);
+}
+
+fn registerReader(env: *TypeEnv, name: []const u8, request: TypeIndex, returns: TypeIndex) void {
+    var sig = type_env_mod.FunctionSig{};
+    sig.param_count = 1;
+    sig.param_types[0] = request;
+    sig.return_type = returns;
+    env.fn_sigs_by_name.put(env.allocator, env.internName(name), sig) catch {};
 }
 
 /// The registered `Response` type, or `null_type_idx` when nothing registered

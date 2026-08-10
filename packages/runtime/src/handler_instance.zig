@@ -597,9 +597,35 @@ pub const HandlerInstance = struct {
         response_ctor_unowned = false;
         try self.ctx.setGlobal(.Response, response_ctor.toValue());
 
+        // The spec 7.2 body readers, installed here for the same reason the
+        // Response constructors are: the engine's own installer runs for
+        // analysis, and this one runs for serving. A reader typed by the
+        // checker and missing at run time would be the worst of both.
+        try self.installGlobalFunction("requestBody", zq.http.requestBody, 1);
+        try self.installGlobalFunction("requestText", zq.http.requestText, 1);
+        try self.installGlobalFunction("requestJson", zq.http.requestJson, 1);
+
         self.request_prototype = request_proto;
         self.response_prototype = response_proto;
         self.headers_prototype = headers_proto;
+    }
+
+    fn installGlobalFunction(self: *Self, name: []const u8, func: zq.NativeFn, arg_count: u8) !void {
+        const pool = self.ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+        const atom = try self.ctx.atoms.intern(name);
+        const fn_obj = try zq.JSObject.createNativeFunction(
+            self.allocator,
+            pool,
+            self.ctx.root_class_idx,
+            func,
+            atom,
+            arg_count,
+        );
+        var unowned = true;
+        errdefer if (unowned) fn_obj.destroyBuiltin(self.allocator, pool);
+        try self.ctx.builtin_objects.append(self.allocator, fn_obj);
+        unowned = false;
+        try self.ctx.setGlobal(atom, fn_obj.toValue());
     }
 
     fn addMethod(self: *Self, obj: *zq.JSObject, atom: zq.Atom, func: zq.NativeFn, arg_count: u8) !void {

@@ -278,6 +278,18 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, response_ctor, root_class_idx, .rawJson, http.responseRawJson, 1);
     try ctx.setGlobal(.Response, response_ctor.toValue());
 
+    // The spec 7.2 body readers. Globals beside `Response`, because a request
+    // is a global the runtime hands the handler.
+    const request_body_atom = try ctx.atoms.intern("requestBody");
+    const request_body_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.requestBody, request_body_atom, 1);
+    try ctx.setGlobal(request_body_atom, request_body_fn.toValue());
+    const request_text_atom = try ctx.atoms.intern("requestText");
+    const request_text_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.requestText, request_text_atom, 1);
+    try ctx.setGlobal(request_text_atom, request_text_fn.toValue());
+    const request_json_atom = try ctx.atoms.intern("requestJson");
+    const request_json_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.requestJson, request_json_atom, 1);
+    try ctx.setGlobal(request_json_atom, request_json_fn.toValue());
+
     // JSX: h(), renderToString(), Fragment
     const h_atom: object.Atom = .h;
     const h_fn = try createBuiltinNativeFunction(ctx, pool, root_class_idx, http.h, h_atom, 2);

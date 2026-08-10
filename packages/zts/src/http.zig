@@ -12,6 +12,9 @@ const object = @import("object.zig");
 const context = @import("context.zig");
 const string = @import("string.zig");
 const util = @import("modules/internal/util.zig");
+const bytes_mod = @import("bytes.zig");
+const helpers = @import("builtins/helpers.zig");
+const json_mod = @import("modules/data/json_mod.zig");
 
 // ============================================================================
 // Function Component Callback
@@ -36,6 +39,84 @@ pub fn clearCallFunctionCallback(ctx: *context.Context) void {
 // ============================================================================
 // Request Object
 // ============================================================================
+
+/// The body readers spec 7.2 names. They are globals rather than module
+/// exports because a request is a global the runtime hands the handler, and
+/// because minting the `Bytes` `requestBody` returns needs
+/// `Context.createBytes`, which the SDK cannot reach - the same reason
+/// `zttp:bytes` lives in the engine tier.
+///
+/// `BodyError` is the one type in section 7.2 the spec names and never
+/// defines. Two members, chosen here and recorded rather than assumed:
+/// `absent`, because the runtime writes `undefined` for a request that
+/// carries no body, and `invalid-encoding`, reusing the shape and field names
+/// `zttp:bytes` already uses for the same failure - a body arrives as octets
+/// and nothing upstream validates that they are UTF-8.
+const BODY_ABSENT = "absent";
+const BODY_INVALID_ENCODING = "invalid-encoding";
+
+/// The body string of a request, or null when it carries none. `undefined` is
+/// what the runtime writes for an absent body, so that is the one reading; a
+/// non-string body is treated the same way rather than coerced.
+fn requestBodyText(ctx: *context.Context, args: []const value.JSValue) ?[]const u8 {
+    if (args.len == 0 or !args[0].isObject()) return null;
+    const req = object.JSObject.fromValue(args[0]);
+    const pool = ctx.hidden_class_pool orelse return null;
+    const body_val = req.getProperty(pool, object.Atom.body) orelse return null;
+    if (body_val.isUndefined() or body_val.isNull()) return null;
+    return helpers.getStringDataCtx(body_val, ctx);
+}
+
+/// `{ kind, ... }` wrapped as the error arm of a `Result`.
+fn bodyFailure(ctx: *context.Context, kind: []const u8, offset: ?usize) value.JSValue {
+    const pool = ctx.hidden_class_pool orelse return helpers.createResultErr(ctx, value.JSValue.undefined_val);
+    const obj = ctx.createObject(null) catch return helpers.createResultErr(ctx, value.JSValue.undefined_val);
+
+    const kind_atom = ctx.atoms.intern("kind") catch return helpers.createResultErr(ctx, value.JSValue.undefined_val);
+    const kind_text = ctx.createString(kind) catch return helpers.createResultErr(ctx, value.JSValue.undefined_val);
+    obj.setProperty(ctx.allocator, pool, kind_atom, kind_text) catch {};
+
+    if (offset) |at| {
+        const enc_atom = ctx.atoms.intern("encoding") catch return helpers.createResultErr(ctx, value.JSValue.undefined_val);
+        const enc_text = ctx.createString("utf-8") catch return helpers.createResultErr(ctx, value.JSValue.undefined_val);
+        obj.setProperty(ctx.allocator, pool, enc_atom, enc_text) catch {};
+        const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, value.JSValue.undefined_val);
+        obj.setProperty(ctx.allocator, pool, off_atom, value.JSValue.fromInt(@intCast(at))) catch {};
+    }
+    return helpers.createResultErr(ctx, value.JSValue.fromPtr(obj));
+}
+
+/// `requestBody(request): Bytes` - total. An absent body and an empty body are
+/// both zero octets, so there is nothing for this to fail on; the distinction
+/// between them is what `requestText` reports.
+pub fn requestBody(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx = util.castContext(ctx_ptr);
+    const text = requestBodyText(ctx, args) orelse "";
+    const out = try bytes_mod.fromSlice(ctx, text);
+    return value.JSValue.fromPtr(out);
+}
+
+/// `requestText(request): Result<string, BodyError>`.
+pub fn requestText(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx = util.castContext(ctx_ptr);
+    const text = requestBodyText(ctx, args) orelse return bodyFailure(ctx, BODY_ABSENT, null);
+    if (bytes_mod.firstInvalidUtf8(text)) |offset| {
+        return bodyFailure(ctx, BODY_INVALID_ENCODING, offset);
+    }
+    return helpers.createResultOk(ctx, try ctx.createString(text));
+}
+
+/// `requestJson(request): Result<JsonValue, JsonError | BodyError>` - the body
+/// rules first, then spec 6.4's JSON rules, unchanged and shared with
+/// `parseJson` rather than restated.
+pub fn requestJson(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const ctx = util.castContext(ctx_ptr);
+    const text = requestBodyText(ctx, args) orelse return bodyFailure(ctx, BODY_ABSENT, null);
+    if (bytes_mod.firstInvalidUtf8(text)) |offset| {
+        return bodyFailure(ctx, BODY_INVALID_ENCODING, offset);
+    }
+    return json_mod.parseTextForAbi(ctx, text);
+}
 
 // ============================================================================
 // Response Object
@@ -1421,6 +1502,132 @@ test "Response helpers normalize invalid status" {
     const redirect_status = redirect_status_opt.?;
     try std.testing.expect(redirect_status.isInt());
     try std.testing.expectEqual(@as(i32, 500), redirect_status.getInt());
+}
+
+const ReaderHarness = struct {
+    arena: std.heap.ArenaAllocator,
+    gc: @import("gc.zig").GC,
+    ctx: *context.Context,
+
+    fn deinit(self: *ReaderHarness) void {
+        self.ctx.deinit();
+        self.gc.deinit();
+        self.arena.deinit();
+    }
+};
+
+fn readerHarness() !*ReaderHarness {
+    const gc = @import("gc.zig");
+    const rh = try std.testing.allocator.create(ReaderHarness);
+    rh.arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const allocator = rh.arena.allocator();
+    rh.gc = try gc.GC.init(allocator, .{ .nursery_size = 8192 });
+    rh.ctx = try context.Context.init(allocator, &rh.gc, .{});
+    return rh;
+}
+
+fn releaseReaderHarness(rh: *ReaderHarness) void {
+    rh.deinit();
+    std.testing.allocator.destroy(rh);
+}
+
+/// A request-shaped object carrying `body`, or carrying none when `body` is
+/// null - which is what the runtime writes for a request without one.
+fn fakeRequest(rh: *ReaderHarness, body: ?[]const u8) !value.JSValue {
+    const pool = rh.ctx.hidden_class_pool.?;
+    const req = try rh.ctx.createObject(null);
+    const body_val: value.JSValue = if (body) |text|
+        try rh.ctx.createString(text)
+    else
+        value.JSValue.undefined_val;
+    try req.setProperty(rh.ctx.allocator, pool, object.Atom.body, body_val);
+    return req.toValue();
+}
+
+fn readerField(rh: *ReaderHarness, result: value.JSValue, name: []const u8) !value.JSValue {
+    const outer = object.JSObject.fromValue(result);
+    const payload = outer.inline_slots[object.JSObject.Slots.RESULT_VALUE];
+    if (!payload.isObject()) return error.TestExpectedErrorRecord;
+    const pool = rh.ctx.hidden_class_pool.?;
+    const atom = try rh.ctx.atoms.intern(name);
+    return object.JSObject.fromValue(payload).getProperty(pool, atom) orelse value.JSValue.undefined_val;
+}
+
+fn isOk(result: value.JSValue) bool {
+    return object.JSObject.fromValue(result).inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue();
+}
+
+test "requestBody is total and an absent body is zero octets" {
+    const rh = try readerHarness();
+    defer releaseReaderHarness(rh);
+
+    const bytes = @import("bytes.zig");
+    const with_body = try requestBody(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{try fakeRequest(rh, "hi")});
+    try std.testing.expectEqualSlices(u8, "hi", bytes.data(bytes.asBytes(with_body).?));
+
+    // Absent and empty are both zero octets, which is why this one cannot
+    // fail: the distinction between them is what `requestText` reports.
+    const absent = try requestBody(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{try fakeRequest(rh, null)});
+    try std.testing.expect(bytes.isBytes(absent));
+    try std.testing.expectEqual(@as(u32, 0), bytes.length(bytes.asBytes(absent).?));
+}
+
+test "requestText names an absent body and an undecodable one" {
+    const rh = try readerHarness();
+    defer releaseReaderHarness(rh);
+
+    const ok = try requestText(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{try fakeRequest(rh, "hello")});
+    try std.testing.expect(isOk(ok));
+
+    const absent = try requestText(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{try fakeRequest(rh, null)});
+    try std.testing.expect(!isOk(absent));
+    try std.testing.expectEqualStrings(
+        "absent",
+        helpers.getStringDataCtx(try readerField(rh, absent, "kind"), rh.ctx).?,
+    );
+
+    // Nothing upstream validates that a body is UTF-8, so this arm is
+    // reachable, and it reports where the sequence fails rather than at 0.
+    const bad = try requestText(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{
+        try fakeRequest(rh, &[_]u8{ 'o', 'k', 0x80 }),
+    });
+    try std.testing.expect(!isOk(bad));
+    try std.testing.expectEqualStrings(
+        "invalid-encoding",
+        helpers.getStringDataCtx(try readerField(rh, bad, "kind"), rh.ctx).?,
+    );
+    try std.testing.expectEqualStrings(
+        "utf-8",
+        helpers.getStringDataCtx(try readerField(rh, bad, "encoding"), rh.ctx).?,
+    );
+    try std.testing.expectEqual(@as(i32, 2), (try readerField(rh, bad, "offset")).getInt());
+}
+
+test "requestJson applies the body rules first and the JSON rules after" {
+    const rh = try readerHarness();
+    defer releaseReaderHarness(rh);
+
+    const ok = try requestJson(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{
+        try fakeRequest(rh, "{\"a\":1}"),
+    });
+    try std.testing.expect(isOk(ok));
+
+    // An absent body is a BodyError, before any parse is attempted.
+    const absent = try requestJson(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{try fakeRequest(rh, null)});
+    try std.testing.expect(!isOk(absent));
+    try std.testing.expectEqualStrings(
+        "absent",
+        helpers.getStringDataCtx(try readerField(rh, absent, "kind"), rh.ctx).?,
+    );
+
+    // A present body that is not JSON is a JsonError, from spec 6.4's own
+    // rules - the same `parseJson` runs, not a second copy of them.
+    const bad = try requestJson(@ptrCast(rh.ctx), value.JSValue.undefined_val, &.{try fakeRequest(rh, "{oops}")});
+    try std.testing.expect(!isOk(bad));
+    try std.testing.expectEqualStrings(
+        "invalid-syntax",
+        helpers.getStringDataCtx(try readerField(rh, bad, "kind"), rh.ctx).?,
+    );
 }
 
 test "escapeHtml" {

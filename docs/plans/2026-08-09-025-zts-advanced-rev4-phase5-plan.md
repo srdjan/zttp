@@ -253,12 +253,43 @@ so a payload that would throw is refused at compile time wherever `T` decides
 it. `Response.rawJson` is typed rather than left off the list; a constructor the
 contract builder knows and the checker does not is a gap in the wrong direction.
 
-**Tests:** a header read off a `Request` types; a `Request` is not assignable to
-`object`; `requestJson`'s error arm includes both `JsonError` and `BodyError`;
-`Response.json` of a function-valued field is refused by the checker rather than
-at runtime; `Response.json` of an encodable record still passes; `rawJson`
-appears in `RESPONSE_CONSTRUCTORS` and types; a binding with a declared signature
-parses with no fallback to `unknown`; the corpus digest is re-pinned.
+**Tests:** a header read off a `Request` types; `Response.json` of a
+function-valued or `Bytes` field is refused by the checker rather than at
+runtime; `Response.json` of an encodable record still passes; `rawJson`
+appears in `RESPONSE_CONSTRUCTORS` and types; a binding with a declared
+signature parses with no fallback to `unknown`; the corpus digest is re-pinned;
+the three readers type and refuse a non-`Request` argument, and their error
+taxonomy is pinned at run time.
+
+Four expectations written here before measurement did not hold, recorded rather
+than forced.
+
+A `Request` **is** assignable to `object`. `object` means object-like and a
+request is an object; refusing would make every `object`-typed parameter reject
+a request for no property the caller could name. The brand still refuses a
+`Response`, a `Bytes`, and a record carrying one of its fields.
+
+`requestJson`'s error arm cannot be spelled as `JsonError | BodyError`. The
+checker's `Result` is one fixed record shared by every fallible export, with
+`value: unknown` and no type parameters, so `Result<string, BodyError>` and
+`Result<JsonValue, JsonError | BodyError>` both collapse to it. The runtime
+error records carry the spec's taxonomy exactly and are pinned by test there.
+The precise spelling waits on the parameterized `Result` that phase 7's cutover
+brings, alongside `responseJson`, which is deferred there already.
+
+`BodyError` has no definition in spec 7.2 - the section names the type and
+never lists its members. Two are chosen here and recorded at the site:
+`absent`, because the runtime writes `undefined` for a request without a body,
+and `invalid-encoding` with the encoding and offset, reusing the shape
+`zttp:bytes` uses for the same failure, because nothing upstream validates that
+a body is UTF-8.
+
+The encodability rule runs the opposite way from spec 6.4's phrasing. The spec
+admits only scalars, arrays, tuples, records, and string-keyed `Dict`; the
+checker refuses what is definitely wrong and stays quiet otherwise. The
+difference is `unknown`, which the strict reading rejects and which is what a
+`Result` payload and a parsed document type as today - so the strict reading
+would refuse `Response.json(parsed.value)` in every handler that has one.
 
 ### Task 6: `zttp:fetch` re-typed
 

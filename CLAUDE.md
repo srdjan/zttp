@@ -107,7 +107,9 @@ ES5 + arrow functions, template literals, destructuring, spread, `for...of` (arr
 
 Not supported (detected at parse time with suggestions): classes, async/await, Promises, `var`, `while`, `switch`, `this`, `new`, `try/catch`, regex, `==`, `++`. `null` is admitted as explicit data and is permitted only where the type names it; `undefined` stays the absence sentinel. See [docs/feature-detection.md](docs/feature-detection.md).
 
-Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Response.redirect()`.
+Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Response.redirect()`, `Response.rawJson()`. `Response.json` refuses a payload whose type JSON cannot carry (ZTS213); `Response.text` is the total constructor.
+
+Request body readers (globals): `requestBody(req)` returns `Bytes` and is total, `requestText(req)` and `requestJson(req)` return a `Result` whose error names `absent`, `invalid-encoding`, or spec 6.4's JSON taxonomy.
 
 TS and TSX files work directly through the native type stripper. JSX is parsed by the zts parser and rendered via `h()` and `renderToString()` in `packages/zts/src/http.zig`. `comptime()` evaluates expressions at load time. See [docs/typescript.md](docs/typescript.md).
 
