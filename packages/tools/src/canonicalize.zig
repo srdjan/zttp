@@ -2077,9 +2077,21 @@ pub const ResidualDiagnostic = struct {
 
 /// Normalize a handler file: read it, then drive `normalizeSource`.
 pub fn normalize(allocator: std.mem.Allocator, file: []const u8) !NormalizeResult {
+    return normalizeWithSchema(allocator, file, null);
+}
+
+/// `normalize` for a handler whose analysis needs a SQL schema. A `zttp:sql`
+/// query is type-checked against the schema, so without one every pass fails
+/// with `MissingSqlSchema` and the file cannot be normalized at all - it is not
+/// that the file resists rewriting, it is that the analysis never ran.
+pub fn normalizeWithSchema(
+    allocator: std.mem.Allocator,
+    file: []const u8,
+    sql_schema_path: ?[]const u8,
+) !NormalizeResult {
     const source = try zts.file_io.readFile(allocator, file, 10 * 1024 * 1024);
     defer allocator.free(source);
-    return normalizeSource(allocator, source, file);
+    return normalizeSourceWithSchema(allocator, source, file, sql_schema_path);
 }
 
 /// Reduce `source` to its Canonical Normal Form by applying every available
@@ -2094,6 +2106,15 @@ pub fn normalizeSource(
     source: []const u8,
     virtual_path: []const u8,
 ) !NormalizeResult {
+    return normalizeSourceWithSchema(allocator, source, virtual_path, null);
+}
+
+pub fn normalizeSourceWithSchema(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    virtual_path: []const u8,
+    sql_schema_path: ?[]const u8,
+) !NormalizeResult {
     var current = try allocator.dupe(u8, source);
     errdefer allocator.free(current);
     var trace: std.ArrayListUnmanaged(RepairIntent) = .empty;
@@ -2102,7 +2123,7 @@ pub fn normalizeSource(
     var iterations: u32 = 0;
     var converged = false;
     while (iterations < max_normalize_iterations) {
-        var check = try precompile.runCheckOnlyFromSource(allocator, current, virtual_path, null, true, null, false);
+        var check = try precompile.runCheckOnlyFromSource(allocator, current, virtual_path, sql_schema_path, true, null, false);
         defer check.deinit(allocator);
         const cur_band = countBand(check.json_diagnostics.items);
 
@@ -2166,7 +2187,7 @@ pub fn normalizeSource(
         // unmasks are deliberately ignored: they are latent properties of the
         // handler, not introduced by the rewrite, and removing the masking
         // strict error is exactly the canonicalization we want.
-        var next_check = try precompile.runCheckOnlyFromSource(allocator, next, virtual_path, null, true, null, false);
+        var next_check = try precompile.runCheckOnlyFromSource(allocator, next, virtual_path, sql_schema_path, true, null, false);
         const hard_errors = next_check.parse_errors + next_check.type_errors + next_check.bool_errors;
         const next_band = countBand(next_check.json_diagnostics.items);
         next_check.deinit(allocator);
@@ -2196,7 +2217,7 @@ pub fn normalizeSource(
         iterations += 1;
     }
 
-    var residual_diagnostics = try collectCanonicalResidualDiagnostics(allocator, current, virtual_path);
+    var residual_diagnostics = try collectCanonicalResidualDiagnostics(allocator, current, virtual_path, sql_schema_path);
     errdefer {
         for (residual_diagnostics.items) |*diag| diag.deinit(allocator);
         residual_diagnostics.deinit(allocator);
@@ -2227,8 +2248,9 @@ fn collectCanonicalResidualDiagnostics(
     allocator: std.mem.Allocator,
     source: []const u8,
     virtual_path: []const u8,
+    sql_schema_path: ?[]const u8,
 ) !std.ArrayListUnmanaged(ResidualDiagnostic) {
-    var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, null, true, null, false);
+    var check = try precompile.runCheckOnlyFromSource(allocator, source, virtual_path, sql_schema_path, true, null, false);
     defer check.deinit(allocator);
 
     var out: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty;
@@ -2336,13 +2358,20 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
     var write_mode = false;
     var check_mode = false;
     var json_mode = false;
-    for (argv) |arg| {
+    var sql_schema_path: ?[]const u8 = null;
+    var i: usize = 0;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
         if (std.mem.eql(u8, arg, "--write")) {
             write_mode = true;
         } else if (std.mem.eql(u8, arg, "--check")) {
             check_mode = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
+        } else if (std.mem.eql(u8, arg, "--sql-schema")) {
+            i += 1;
+            if (i >= argv.len) return error.InvalidArgument;
+            sql_schema_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--help")) {
             printNormalizeHelp();
             return;
@@ -2353,13 +2382,13 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         }
     }
     const path = file orelse {
-        const usage = "Usage: zts normalize <file> [--write] [--check] [--json]\n";
+        const usage = "Usage: zts normalize <file> [--write] [--check] [--json] [--sql-schema <path>]\n";
         _ = std.c.write(std.c.STDERR_FILENO, usage.ptr, usage.len);
         std.process.exit(1);
     };
     if (write_mode and check_mode) return error.InvalidArgument;
 
-    var nr = try normalize(allocator, path);
+    var nr = try normalizeWithSchema(allocator, path, sql_schema_path);
     defer nr.deinit(allocator);
 
     if (json_mode) {
@@ -2410,12 +2439,13 @@ fn printNormalizeHelp() void {
     const help =
         \\zts normalize - rewrite a handler into Canonical Normal Form
         \\
-        \\Usage: zts normalize <file> [--write] [--check] [--json]
+        \\Usage: zts normalize <file> [--write] [--check] [--json] [--sql-schema <path>]
         \\
-        \\  (default)  print the canonical source to stdout
-        \\  --write    rewrite the file in place (refuses unless fully canonical)
-        \\  --check    exit 1 if the file is not already canonical (CI gate)
-        \\  --json     emit a structured envelope with the rewrite trace
+        \\  (default)      print the canonical source to stdout
+        \\  --write        rewrite the file in place (refuses unless fully canonical)
+        \\  --check        exit 1 if the file is not already canonical (CI gate)
+        \\  --json         emit a structured envelope with the rewrite trace
+        \\  --sql-schema   schema a `zttp:sql` handler is type-checked against
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);

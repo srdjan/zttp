@@ -281,7 +281,7 @@ zttp edit-simulate [handler.ts] [--before old.ts]
 zttp review-patch <file> [--before old.ts] [--json]
 zttp gen-tests [handler.ts] [-o output.jsonl]
 zttp canonicalize <file> --json
-zttp normalize <file> [--write] [--check] [--json]
+zttp normalize <file> [--write] [--check] [--json] [--sql-schema <path>]
 zttp features [--json]
 zttp modules [--json]
 zttp restrictions [--json] [--by proof|class]
@@ -363,7 +363,9 @@ zttp describe-rule --hash
 
 `normalize --check` exits non-zero when the file is not already canonical. It
 is the right CI gate when a project wants canonical form enforced before
-review.
+review. A handler that queries `zttp:sql` needs `--sql-schema`, the same schema
+`check` takes: its queries are type-checked against the schema, so without one
+the analysis never runs and every pass refuses.
 
 Canonical code reduces the number of equivalent shapes the analyzer and the
 expert agent must handle. A handler with no ZTS6xx diagnostics carries the
