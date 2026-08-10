@@ -548,10 +548,9 @@ ceiling that the inferred row makes mandatory, and a second exported helper that
 the handler does not call declares one too - which is the observable for task 9's
 first half and would report nothing before it.
 
-The re-typed `examples/fetch/`, `examples/websocket/chat.ts`, and the queue
-example are the roadmap's named exit and are checked in the same gate. The gate
-says plainly that websocket coverage is one example, because a count is what a
-reader will assume otherwise.
+The re-typed `examples/fetch/` and the queue example are the roadmap's named
+exit and are checked in the same gate. There is no websocket example to count:
+task 7 removed the subsystem rather than re-typing it.
 
 Floor assertions: an empty body and a zero-length octet list each fail rather
 than passing over nothing; deleting the defaulted call from the example makes the
@@ -561,6 +560,50 @@ grep over its output.
 
 `docs/coverage.md` and `docs/convergence.md` are regenerated in the same commit
 as whatever changes them.
+
+The gate is `examples/patterns/bytes-boundary.ts` with an eleven-case behavioral
+suite, wired into `scripts/test-examples.sh` beside the other pattern examples.
+It checks clean and every advertised property is PROVEN. What the writing of it
+found:
+
+**The first floor probe did not fail, and the probe was wrong rather than the
+gate.** Replacing the omitted argument with the default's own value spelled
+explicitly left all eleven cases passing - correctly, because both programs
+produce the same bytes. The assertion pinned the value, not the omission
+producing it. Changing the default's value is the probe that separates them, and
+it fails exactly one case. A test that pins a default by naming that default's
+value would pass for a program in which no default is ever selected, and that
+class is worth naming: it is the same shape as a gate asserting a difference
+from the values it excluded rather than the value it expects.
+
+**An explicit `undefined` selects the default at run time and cannot be written
+in typed source.** `label("scalar", undefined)` reports `expected string, got
+undefined`, because the parameter's declared type is `string` and `undefined` is
+not one. The lowering does treat omission and an explicit `undefined`
+identically - the interpreter test pins that, and it is what makes the two
+indistinguishable to the body - but the call site can reach the default only by
+omitting the argument. That is the stricter rule and the profile's own stance:
+`undefined` is the absence sentinel, not a value an author writes. The task 8
+test that names an explicit `undefined` therefore lives at the interpreter level
+and not in a typed example, and the example says so by not containing one.
+
+**The match dispatches over `unknown` with a `default` arm.** `parseJsonBytes`
+returns a `Result` whose value type the checker does not carry - recorded under
+task 6 - so the parsed document arrives as `unknown` rather than as a closed
+six-member union, and `unknown` being open is what requires the seventh arm. The
+six type tests are all present and `when Bytes:` is among them; the no-`default`
+spelling of a closed union is `recursive-json-value.ts`, where the union is
+declared rather than parsed. Both spellings exist in the corpus, which is the
+honest coverage: a parameterized `Result` is what would let one file show both.
+
+**Zero-length is a real body, not a missing one.** An empty body reaches the
+handler as a zero-length `Bytes` with `bytesLength` 0, fails at `parseJsonBytes`
+with `invalid-syntax`, and returns 400 carrying `"size":0`. The floor holds:
+nothing passes over nothing.
+
+The re-typed `examples/fetch/` handlers and the workflow queue suites are
+checked in the same gate and were already wired into it. There is no websocket
+example to count: the subsystem was removed in task 7 rather than re-typed.
 
 ---
 

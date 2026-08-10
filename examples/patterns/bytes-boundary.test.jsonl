@@ -1,0 +1,33 @@
+{"type":"test","name":"an object body reaches the Dict arm"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"a\":1}"}
+{"type":"expect","status":200,"bodyContains":"\"documentKind\":\"dict\""}
+{"type":"test","name":"an array body reaches the array arm"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"[1,2]"}
+{"type":"expect","status":200,"bodyContains":"\"documentKind\":\"array\""}
+{"type":"test","name":"a number body reaches the number arm"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"42"}
+{"type":"expect","status":200,"bodyContains":"\"documentKind\":\"number\""}
+{"type":"test","name":"a string body reaches the string arm"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"\"hi\""}
+{"type":"expect","status":200,"bodyContains":"\"documentKind\":\"string\""}
+{"type":"test","name":"a boolean body reaches the boolean arm"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"true"}
+{"type":"expect","status":200,"bodyContains":"\"documentKind\":\"boolean\""}
+{"type":"test","name":"the raw body is Bytes whatever it decodes to"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"a\":1}"}
+{"type":"expect","status":200,"bodyContains":"\"octetKind\":\"bytes\""}
+{"type":"test","name":"re-encoding a string gives Bytes back"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"a\":1}"}
+{"type":"expect","status":200,"bodyContains":"\"reEncoded\":\"bytes\""}
+{"type":"test","name":"an omitted trailing argument selects the declared default"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"a\":1}"}
+{"type":"expect","status":200,"bodyContains":"\"named\":\"payload:dict\""}
+{"type":"test","name":"a supplied trailing argument overrides the default"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"{\"a\":1}"}
+{"type":"expect","status":200,"bodyContains":"\"overridden\":\"body:dict\""}
+{"type":"test","name":"an empty body fails rather than passing over nothing"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":""}
+{"type":"expect","status":400,"bodyContains":"\"size\":0"}
+{"type":"test","name":"a body that is not JSON fails and says which rule it broke"}
+{"type":"request","method":"POST","url":"/","headers":{},"body":"hello"}
+{"type":"expect","status":400,"bodyContains":"\"error\":\"invalid-syntax\""}

@@ -868,10 +868,32 @@ construction is a module call. The form fails the build rather than evaluating
 to something else, which is the part that had to be checked: it exists for a
 duplicate-key discharge, so a silent answer would be worse than none.
 
+Phase 5 is closed, and its plan is
+[docs/plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md).
+Four of its ten tasks found an expectation that measurement did not support,
+and each is recorded there beside the work rather than resolved silently.
+
+The exit gate is `examples/patterns/bytes-boundary.ts`: a body read as `Bytes`,
+decoded, parsed with `parseJsonBytes`, dispatched through the six type tests
+including `when Bytes:`, labelled by a helper with a trailing default, and
+returned through a constructor the encodability rule admits. Its floor was
+probed rather than assumed. Changing the default's value fails exactly one test;
+dropping the ceiling from the exported helper the handler never calls raises
+ZTS610, which reported nothing before this phase; deleting that helper leaves
+the file clean.
+
+The first floor probe did not fail, and that is the finding worth carrying.
+Replacing the omitted argument with the default's own value spelled explicitly
+left every test passing, because the assertion was on the value produced rather
+than on the omission producing it. A test that pins a default by naming the
+default's value passes for a program that never selects a default. What
+distinguishes them is changing the default itself, which is the probe that
+belongs in the gate.
+
 | Phase | Scope | Exit |
 |---|---|---|
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |
-| 5. Bytes, ABI re-typing, defaults, Effects ceiling | [`Bytes` and `zttp:bytes`](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md); the HTTP, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText` (the WebSocket subsystem was removed rather than re-typed); trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. Planning measured that the ceiling rule already ships both halves at severity `error` with the repair computed from the row, so what is left there is the `handler_reachable` qualifier spec 5.7 does not contain and D2's function-type ceilings. | fetch and queue examples re-typed; ceiling-rule repair tests. |
+| 5. Bytes, ABI re-typing, defaults, Effects ceiling | [`Bytes` and `zttp:bytes`](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md); the HTTP, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText` (the WebSocket subsystem was removed rather than re-typed); trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch and queue examples re-typed; ceiling-rule repair tests. **Done**, with the function-type ceiling landed for the empty row and blocked for a nonempty one - a function type whose return carries a capsule does not survive the checker, which is a type-representation fix recorded in the plan. |
 | 6. Full idiom table, validators, gate-complete protocol | The remaining idiom rows; equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
 | 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies every reachable node and opcode; paired live-model flows preserve behavior, intent, proofs, and reached-green convergence. |
 
