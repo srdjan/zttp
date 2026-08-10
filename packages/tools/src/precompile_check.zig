@@ -20,6 +20,11 @@ pub const CheckResult = struct {
     type_errors: u32 = 0,
     strict_errors: u32 = 0,
     strict_warnings: u32 = 0,
+    /// Idiom-channel diagnostics: a better spelling for code that is already
+    /// correct. Counted apart from warnings and reported apart from them,
+    /// because a warning sets a non-zero exit code and spec 4.2.1 says a
+    /// non-idiomatic spelling never fails a build.
+    strict_advisories: u32 = 0,
     is_typescript: bool = false,
     verify_ran: bool = false,
     verify_errors: u32 = 0,
@@ -515,7 +520,14 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         }
     }
 
-    writer.print("\n  {d} errors, {d} warnings\n", .{ r.totalErrors(), r.totalWarnings() }) catch return;
+    if (r.strict_advisories > 0) {
+        writer.print(
+            "\n  {d} errors, {d} warnings, {d} advisories\n",
+            .{ r.totalErrors(), r.totalWarnings(), r.strict_advisories },
+        ) catch return;
+    } else {
+        writer.print("\n  {d} errors, {d} warnings\n", .{ r.totalErrors(), r.totalWarnings() }) catch return;
+    }
 }
 
 /// Human-readable message for a spec/Effects diagnostic, mirroring the JSON

@@ -234,7 +234,7 @@ const property_info = [_]PropertyInfo{
     .{
         .name = "canonical",
         .family = .structural,
-        .passing = "The handler is in Canonical Normal Form: zero ZTS6xx canonical-profile diagnostics.",
+        .passing = "The handler is in Canonical Normal Form: zero ZTS6xx canonical-profile errors. A non-idiomatic spelling is reported at advisory severity and does not deny this property.",
         .failing = "A non-canonical construct remains; run `zts normalize` to rewrite it.",
     },
     .{

@@ -368,9 +368,13 @@ review. A handler that queries `zttp:sql` needs `--sql-schema`, the same schema
 the analysis never runs and every pass refuses.
 
 Canonical code reduces the number of equivalent shapes the analyzer and the
-expert agent must handle. A handler with no ZTS6xx diagnostics carries the
+expert agent must handle. A handler with no ZTS6xx errors carries the
 `canonical` proof property, and `Response & Spec<"canonical">` can discharge
-against it.
+against it. An advisory in the same band does not deny it: an idiom row reports
+a preference about a program that is already correct, and a row whose
+precondition fails emits no rewrite, so there would be nothing to act on.
+Advisories are counted and printed apart from warnings for the same reason -
+they never change an exit code.
 
 ## Expert Mode
 

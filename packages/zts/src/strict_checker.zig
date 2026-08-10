@@ -1004,8 +1004,13 @@ pub const StrictChecker = struct {
         // site), assume it's read and bail. This walks the body once.
         if (self.bindingReadInBody(for_iter.body, index_elem.binding)) return;
 
+        // Advisory, not an error: this is spec 4.2.1's `element iteration` row,
+        // and a non-idiomatic spelling "is never an error and never fails a
+        // build". It was the one idiom row with a wired rewrite and the only
+        // one reporting at `error`, so the row that could be repaired
+        // mechanically was also the row that failed the build.
         self.addDiagnostic(.{
-            .severity = self.canonicalSeverity(),
+            .severity = .advisory,
             .kind = .canonical_unused_index_alias,
             .node = node,
             .message = "for-of binds an index alias that is never read",

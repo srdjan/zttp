@@ -1360,7 +1360,23 @@ fn runCheckOnStrippedSource(
     if (resolved.strict_checker != null) {
         const strict_diags = resolved.strictDiagnostics();
         result.strict_errors = @intCast(resolved.strict_error_count);
-        result.strict_warnings = @intCast(strict_diags.len -| result.strict_errors);
+        // Count by severity rather than by subtraction. `len - errors` folded
+        // advisories into the warning count, and a warning sets exit code 2, so
+        // a non-idiomatic spelling changed the exit code of a build - which
+        // spec 4.2.1 forbids in the same sentence that admits the row. The
+        // severity set is closed and ordered: only `.err` may fail a check, and
+        // `.advisory` is strictly weaker than `.warning`.
+        var strict_warnings: u32 = 0;
+        var strict_advisories: u32 = 0;
+        for (strict_diags) |diag| {
+            switch (diag.severity) {
+                .err => {},
+                .warning => strict_warnings += 1,
+                .advisory => strict_advisories += 1,
+            }
+        }
+        result.strict_warnings = strict_warnings;
+        result.strict_advisories = strict_advisories;
         if (strict_diags.len > 0) {
             for (strict_diags) |diag| {
                 if (json_diag.fromCheckerDiagnostic(allocator, .strict, diag, ir_view, handler_path)) |jd| {
@@ -4703,6 +4719,71 @@ test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
 
     try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+}
+
+test "an idiom advisory is neither an error nor a warning" {
+    // Spec 4.2.1: a non-idiomatic spelling "is never an error and never fails a
+    // build". A warning is a build failure on this CLI - it sets exit code 2 -
+    // so folding advisories into the warning count made the idiom channel
+    // change a program's verdict. The counts are asserted by value here, not as
+    // a difference from the error count, because subtraction is exactly what
+    // produced the defect.
+    const source =
+        \\function handler(req: Request): Response & Spec<"canonical"> {
+        \\  const items = ["a", "b"];
+        \\  const out = [];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    out.push(item);
+        \\  }
+        \\  return Response.json({ out: out });
+        \\}
+    ;
+
+    // The same program in its idiomatic spelling. Every count the build reads
+    // must agree between the two; only the advisory count may differ.
+    const idiomatic =
+        \\function handler(req: Request): Response & Spec<"canonical"> {
+        \\  const items = ["a", "b"];
+        \\  const out = [];
+        \\  for (const item of items) {
+        \\    out.push(item);
+        \\  }
+        \\  return Response.json({ out: out });
+        \\}
+    ;
+
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+    var clean = try runCheckOnlyFromSource(std.testing.allocator, idiomatic, "handler.ts", null, true, null, false);
+    defer clean.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.strict_advisories);
+    try std.testing.expectEqual(@as(u32, 0), clean.strict_advisories);
+    try std.testing.expectEqual(@as(u32, 0), result.strict_warnings);
+    try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(clean.totalErrors(), result.totalErrors());
+
+    // The alias program does carry one warning the idiomatic one does not, and
+    // it is not this channel: the destructure binds an index nobody reads, so
+    // the unused-binding rule fires on `_i`. That is a real observation about
+    // the program and it survives; what must not happen is the advisory adding
+    // a second one. The strict channel's own warning count above is the
+    // assertion that says so.
+    try std.testing.expectEqual(@as(u32, 0), clean.totalWarnings());
+    try std.testing.expectEqual(@as(u32, 1), result.totalWarnings());
+
+    // And it is still reported: silencing it would satisfy the counts above for
+    // the wrong reason.
+    var saw_advisory = false;
+    for (result.json_diagnostics.items) |diag| {
+        if (std.mem.eql(u8, diag.code, "ZTS619")) {
+            try std.testing.expectEqualStrings("advisory", diag.severity);
+            saw_advisory = true;
+        }
+    }
+    try std.testing.expect(saw_advisory);
 }
 
 test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {

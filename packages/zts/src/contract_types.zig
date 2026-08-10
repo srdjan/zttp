@@ -624,11 +624,18 @@ pub const HandlerProperties = struct {
     post_only: bool = false,
     // --- Canonical normal form (from the strict_checker ZTS6xx gate) ---
     /// The handler source is in Canonical Normal Form: zero canonical-profile
-    /// (ZTS6xx) diagnostics. Because those diagnostics are hard `check` errors,
-    /// a contract is only ever built for an already-canonical handler, so the
-    /// contract builder sets this true unconditionally. The chip makes the
-    /// always-on gate explicit and attestable; `Spec<"canonical">` discharges
-    /// against it.
+    /// (ZTS6xx) diagnostics at `error` severity. Those are hard `check` errors,
+    /// so a contract is only ever built for a handler carrying none of them,
+    /// and the contract builder sets this true unconditionally. The chip makes
+    /// the always-on gate explicit and attestable; `Spec<"canonical">`
+    /// discharges against it.
+    ///
+    /// An advisory in the same band does not deny it, and that is the rule
+    /// rather than an omission: spec 4.2.1's idiom rows report a preference
+    /// about a program that is already correct, and a row whose precondition
+    /// fails emits no rewrite, so there is nothing an author could do to clear
+    /// it. `no ZTS6xx diagnostics` was the old wording and it stopped being
+    /// true when the first idiom row started reporting.
     canonical: bool = false,
     /// The handler's total cost bound is expressible (constant or linear):
     /// no unbounded loop over an unidentifiable source, and path enumeration

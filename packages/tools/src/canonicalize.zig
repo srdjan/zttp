@@ -2032,17 +2032,29 @@ pub const NormalizeResult = struct {
     /// True when the loop reached a fixed point (no refactor fired) rather than
     /// hitting the iteration cap or aborting on a per-pass gate.
     converged: bool,
-    /// True iff zero canonical-band diagnostics remain in `canonical_source`.
-    /// Distinct from `converged`: a handler with an unrewritten ternary
-    /// converges (no refactor fires) yet is not fully canonical.
+    /// True iff zero canonical-band diagnostics at `error` severity remain in
+    /// `canonical_source`. Distinct from `converged`: a handler with an
+    /// unrewritten ternary converges (no refactor fires) yet is not fully
+    /// canonical.
+    ///
+    /// Advisories do not deny it. Spec 4.2.1: a non-idiomatic spelling "is
+    /// never an error and never fails a build", and a row whose precondition
+    /// fails emits no rewrite, so a file carrying one has nothing left to
+    /// apply - which is what Canonical Normal Form means. Counting advisories
+    /// here made `--write` refuse a legal program for a preference it could
+    /// not act on. The progress measure inside the loop (`countBand`) still
+    /// counts every band diagnostic, because a rewrite that clears an advisory
+    /// has made progress and the loop must not read it as a stall.
     fully_canonical: bool,
     /// Passes actually run.
     iterations: u32,
-    /// Canonical-band diagnostics still present after normalization (0 when
-    /// `fully_canonical`).
+    /// Canonical-band diagnostics at `error` severity still present after
+    /// normalization (0 when `fully_canonical`).
     residual: u32,
-    /// Owned details for the remaining canonical-profile diagnostics. Empty
-    /// when `fully_canonical`.
+    /// Owned details for every remaining canonical-profile diagnostic,
+    /// advisories included. This is the reporting channel, so it is wider than
+    /// `residual`: a client that reads only the count would never learn the
+    /// preference the profile named.
     residual_diagnostics: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty,
 
     pub fn deinit(self: *NormalizeResult, allocator: std.mem.Allocator) void {
@@ -2222,7 +2234,10 @@ pub fn normalizeSourceWithSchema(
         for (residual_diagnostics.items) |*diag| diag.deinit(allocator);
         residual_diagnostics.deinit(allocator);
     }
-    const residual: u32 = @intCast(residual_diagnostics.items.len);
+    var residual: u32 = 0;
+    for (residual_diagnostics.items) |diag| {
+        if (std.mem.eql(u8, diag.severity, "error")) residual += 1;
+    }
     return .{
         .canonical_source = current,
         .rewrite_trace = trace,
@@ -2234,7 +2249,11 @@ pub fn normalizeSourceWithSchema(
     };
 }
 
-/// Count the canonical-band diagnostics in a diagnostic set.
+/// Count the canonical-band diagnostics in a diagnostic set, at every
+/// severity. This is the normalize loop's progress measure and not its verdict:
+/// a pass that turns an advisory into its idiomatic spelling has made progress,
+/// and a measure blind to advisories would read that pass as a stall and stop
+/// the loop. The verdict - `fully_canonical` - counts errors only.
 fn countBand(diagnostics: []const precompile.json_diag.JsonDiagnostic) u32 {
     var n: u32 = 0;
     for (diagnostics) |diag| {
@@ -4029,10 +4048,25 @@ test "normalizeSource refuses entries alias rewrite when pair binding is still r
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.converged);
-    try std.testing.expect(!nr.fully_canonical);
-    try std.testing.expect(nr.residual >= 1);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "for (const pair of items.entries())") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "Response.text(pair[1]);") != null);
+
+    // The row still reports and still declines to rewrite, and the file is
+    // still canonical: ZTS619 is spec 4.2.1's `element iteration` row, so it
+    // reports at advisory severity and does not deny Canonical Normal Form.
+    // This assertion used to read `!fully_canonical` and `residual >= 1`, which
+    // were standing in for "a diagnostic remains" - so it is made to say that
+    // instead of a verdict the advisory no longer moves.
+    try std.testing.expect(nr.fully_canonical);
+    try std.testing.expectEqual(@as(u32, 0), nr.residual);
+    var saw_advisory = false;
+    for (nr.residual_diagnostics.items) |diag| {
+        if (std.mem.eql(u8, diag.code, "ZTS619")) {
+            try std.testing.expectEqualStrings("advisory", diag.severity);
+            saw_advisory = true;
+        }
+    }
+    try std.testing.expect(saw_advisory);
 }
 
 test "compoundAssignReplacement parenthesizes a compound rhs to preserve precedence" {
