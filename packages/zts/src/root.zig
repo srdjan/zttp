@@ -89,6 +89,7 @@ pub const parser = engine.parser;
 // Note: Legacy single-pass parser removed; use parser/root.zig
 pub const pool = engine.pool;
 pub const http = engine.http;
+pub const bytes = engine.bytes;
 pub const stripper = engine.stripper;
 pub const comptime_eval = engine.comptime_eval;
 pub const bytecode_cache = engine.bytecode_cache;

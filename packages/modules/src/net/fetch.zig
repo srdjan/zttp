@@ -40,15 +40,23 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object },
-            // The shape the runtime actually hands back, spelled here rather
-            // than assembled in `module_types.zig` behind an `is_fetch`
-            // branch. That branch also truncated the parameter list to one,
-            // so `init` typed as nothing; declaring both positions is what
-            // ends the truncation. Phase 5 task 6 replaces the second
-            // parameter with spec 7.2's `FetchOptions` and the return with
-            // `Result<Response, FetchError>`.
+            // The shape the runtime actually hands back and the options it
+            // actually reads, spelled here rather than assembled in
+            // `module_types.zig` behind an `is_fetch` branch that also
+            // truncated the parameter list to one - so `init` typed as
+            // nothing at all.
+            //
+            // The return is not spec 7.2's `Result<Response, FetchError>`,
+            // and the reason is the type system rather than this binding: the
+            // checker's `Result` is one fixed record with no type parameters,
+            // so `Result<Response, FetchError>` collapses to it and loses
+            // both arms. Phase 7's parameterized `Result` is where that
+            // lands, alongside `responseJson` and `requestJson`, which are
+            // deferred there for the same reason. Until then the precise
+            // response record is strictly more than the coarse `.object` this
+            // export declared before.
             .signature = .{
-                .params = &.{ "string", "object" },
+                .params = &.{ "string", "FetchOptions" },
                 .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
             },
             .return_labels = .{ .external = true },
@@ -64,6 +72,16 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object, .object },
+            // The same options and the same response. The third argument
+            // keeps its coarse `object`: its four retry fields are read by
+            // `fetchWithRetryImpl` here rather than by the runtime, and
+            // spec 7.2 does not name a type for them. `return_labels` stay
+            // `.external`, which is correct and unaffected - a response body
+            // is data from the host, not from the arguments.
+            .signature = .{
+                .params = &.{ "string", "FetchOptions", "object" },
+                .returns = "{ ok: boolean; status: number; statusText: string; body: string; headers: { get: (name: string) => string | undefined; has: (name: string) => boolean }; json: () => unknown; text: () => string }",
+            },
             .return_labels = .{ .external = true },
             .contract_extractions = &.{
                 .{ .arg_position = 0, .category = .fetch_host, .transform = .extract_host },

@@ -671,9 +671,16 @@ fn parseFetchInitOptions(
     if (getObjectProperty(rt.ctx, init, pool, zq.Atom.body, "body")) |body_val| {
         if (body_val.isNull() or body_val.isUndefined()) {
             options.body = null;
+        } else if (zq.bytes.asBytes(body_val)) |raw| {
+            // Spec 7.2 types the body `string | Bytes`. A Bytes sends its
+            // octets unchanged, which is the whole reason to pass one rather
+            // than a string: a string here would have to be text, and binary
+            // that survives a round trip through one is binary that happened
+            // to be valid UTF-8.
+            options.body = zq.bytes.data(raw);
         } else {
             options.body = getStringData(body_val) orelse {
-                return fetchInitError(rt, allocator, &options, "InvalidBody", "body must be string|null");
+                return fetchInitError(rt, allocator, &options, "InvalidBody", "body must be string|Bytes|null");
             };
         }
     }

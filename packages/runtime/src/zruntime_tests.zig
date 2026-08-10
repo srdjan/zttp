@@ -2799,6 +2799,58 @@ test "fetchSync returns structured errors for invalid init and allowlist failure
     try std.testing.expectEqualStrings("HostNotAllowed", obj.get("hostBlockedError").?.string);
 }
 
+test "a Bytes body is accepted where a number is InvalidBody" {
+    // The replay path stubs `fetch` before the init is parsed, so a handler
+    // test cannot reach this. `fetchSync` against a host with nothing
+    // listening does: the init is parsed first, and only then does the
+    // connection fail - so `InvalidBody` and everything else are
+    // distinguishable at the error string.
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "localhost",
+    });
+    defer rt.deinit();
+
+    const handler_code =
+        \\import { encodeUtf8 } from "zttp:bytes";
+        \\function handler(req) {
+        \\  return Response.json({
+        \\    bytesBodyError: fetchSync("http://localhost:9", { body: encodeUtf8("hi") }).json().error,
+        \\    numberBodyError: fetchSync("http://localhost:9", { body: 42 }).json().error,
+        \\  });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<fetchsync-bytes-body>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+
+    // The number is still refused, which is the control: without it a run in
+    // which neither body reached the parser would satisfy the assertion below.
+    try std.testing.expectEqualStrings("InvalidBody", obj.get("numberBodyError").?.string);
+
+    // The Bytes is not. It gets past the init and fails on the connection,
+    // which is a different error entirely.
+    const bytes_error = obj.get("bytesBodyError").?.string;
+    try std.testing.expect(!std.mem.eql(u8, "InvalidBody", bytes_error));
+}
+
 test "fetchSync respects embedded capability policy host allowlist" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

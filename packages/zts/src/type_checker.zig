@@ -3805,9 +3805,14 @@ pub const TypeChecker = struct {
     /// parameter type and the actual argument type. Same ownership rule as
     /// `addArgCountMismatch`: the detail goes in `.message`, not `.help`.
     fn addArgTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
-        var buf: [256]u8 = undefined;
-        const expected_str = self.env.pool.formatType(expected, buf[0..128]);
-        const got_str = self.env.pool.formatType(got, buf[128..256]);
+        // A kilobyte a side, not 128 bytes. `formatType` answers "?" when its
+        // buffer is too small, so a record with more than a couple of fields
+        // printed as `expected ?, got ?` - a diagnostic that names neither
+        // type, on exactly the mismatches that are hardest to read from the
+        // source. Found when `FetchOptions` became a five-field record.
+        var buf: [2048]u8 = undefined;
+        const expected_str = self.env.pool.formatType(expected, buf[0..1024]);
+        const got_str = self.env.pool.formatType(got, buf[1024..2048]);
         const msg = std.fmt.allocPrint(
             self.allocator,
             "argument type does not match parameter type: expected {s}, got {s}",

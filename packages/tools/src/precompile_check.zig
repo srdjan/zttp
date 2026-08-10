@@ -784,9 +784,9 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
     try std.testing.expectEqual(@as(usize, 0), ctx.unparsed);
     try std.testing.expectEqual(@as(usize, 0), ctx.fallback_unknown);
 
-    // Two names in the corpus do not resolve *in this pool*, and both are
-    // pinned by exact set rather than tolerated: a third appearing in the
-    // surface fails here.
+    // Three names in the corpus do not resolve *in this pool*, pinned by
+    // exact set rather than tolerated: a fourth appearing in the surface
+    // fails here.
     //
     // `Record`, which `.object` and `.optional_object` emit as
     // `Record<string, unknown>`. The pool has no index-signature type, so the
@@ -794,19 +794,23 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
     //
     // `object`, from a declared signature that spells the coarse object type
     // by its own name. It is unresolved only here: this gate parses each text
-    // in a fresh pool with no environment, and `TypeEnv.isAssignableTo` gives
-    // `object` a rule of its own (`isObjectLike`), so the checker resolves it
-    // where it matters. The gap between the two pipelines is the reason this
-    // set is asserted exactly rather than counted.
-    try std.testing.expectEqual(@as(usize, 2), ctx.unresolved.items.len);
-    var saw_record = false;
-    var saw_object = false;
-    for (ctx.unresolved.items) |name| {
-        if (std.mem.eql(u8, name, "Record")) saw_record = true;
-        if (std.mem.eql(u8, name, "object")) saw_object = true;
+    // in a fresh pool with no environment, and `TypePool.assignableStep` gives
+    // `object` a rule of its own, so the checker resolves it where it matters.
+    //
+    // `FetchOptions`, for the same reason and one step further: it is a real
+    // registered alias that `module_types.populateModuleTypes` builds before
+    // the export loop, so it resolves everywhere the checker runs and nowhere
+    // in this environment-free pool. The gap between the two pipelines is why
+    // this set is asserted exactly rather than counted.
+    const expected_unresolved = [_][]const u8{ "Record", "object", "FetchOptions" };
+    try std.testing.expectEqual(expected_unresolved.len, ctx.unresolved.items.len);
+    for (expected_unresolved) |want| {
+        var seen = false;
+        for (ctx.unresolved.items) |name| {
+            if (std.mem.eql(u8, name, want)) seen = true;
+        }
+        try std.testing.expect(seen);
     }
-    try std.testing.expect(saw_record);
-    try std.testing.expect(saw_object);
 
     var out: [32]u8 = undefined;
     hasher.final(&out);
@@ -815,7 +819,7 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 
 /// The committed digest of the whole signature surface. Regenerate deliberately:
 /// a diff here is a change to what every handler sees from `zttp:*`.
-const frozen_signature_digest = "57e37055b254d9edf731c9605fc7839a171aab3b6841455fc47bff4a63063301";
+const frozen_signature_digest = "a021b5684946392fe0fee428a5af316e9c630432784ddab836cc66aa70ceb450";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,

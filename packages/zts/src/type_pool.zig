@@ -1597,6 +1597,18 @@ pub const TypePool = struct {
             return false;
         }
 
+        // `object` is a name with a rule rather than a definition: it means
+        // object-like, and nothing registers it as an alias. `TypeEnv` held
+        // that rule and applied it only at the top of a comparison, so a
+        // record reaching an `object`-typed *field* was refused while the
+        // same record reaching an `object`-typed parameter was admitted. The
+        // rule lives here now, where every depth of the walk passes through
+        // it. Found by declaring `FetchOptions` with an `object`-typed
+        // `headers` field, which then refused every handler that sets one.
+        if (tgt_tag == .t_ref and std.mem.eql(u8, self.getRefName(target), "object")) {
+            return self.isObjectLikeIn(ctx, source, 0);
+        }
+
         // D1 amendment A1 is applied: an unresolved name reaching here is not
         // assignable, and the two lines that used to answer true for a `t_ref`
         // or a `t_generic_param` on either side are gone. `firstUnresolvedName`
@@ -1626,6 +1638,42 @@ pub const TypePool = struct {
         // `scripts/test-examples.sh` - that script is `set -e` and stops at the
         // third orchestrator, reporting four where seven exist.
         return false;
+    }
+
+    /// Whether `source` is the kind of value the name `object` admits: a
+    /// record, an array, a tuple, a function, or a union of those. `never` is
+    /// the bottom type and passes; a scalar does not.
+    ///
+    /// An unresolved name passes, which over-accepts an alias like
+    /// `type Foo = string` that no resolver knows. That is the same trade
+    /// `TypeEnv.isObjectLike` made when it owned this rule, kept deliberately:
+    /// a nominal ABI type has no definition in the alias table, and refusing
+    /// it here would reject a `Request` from an `object` position.
+    fn isObjectLikeIn(self: *const TypePool, ctx: *AssignCtx, source: TypeIndex, depth: u8) bool {
+        if (depth >= 8) return true;
+        const source_tag = self.getTag(source) orelse return false;
+        return switch (source_tag) {
+            .t_never => true,
+            .t_record, .t_array, .t_tuple, .t_function, .t_dict => true,
+            .t_ref => blk: {
+                const resolver = ctx.resolver orelse break :blk true;
+                const resolved = resolver.apply(source);
+                if (resolved != source) break :blk self.isObjectLikeIn(ctx, resolved, depth + 1);
+                break :blk true;
+            },
+            .t_union => blk: {
+                const members = self.getUnionMembers(source);
+                if (members.len == 0) break :blk false;
+                for (members) |member| {
+                    if (!self.isObjectLikeIn(ctx, member, depth)) break :blk false;
+                }
+                break :blk true;
+            },
+            // exhaustive: every remaining tag is a scalar, a literal, an
+            // absence, or `unknown`. None of them is an object value, and
+            // admitting one would make `object` mean nothing at all.
+            else => false,
+        };
     }
 
     /// The first unresolved name reachable from `idx`, or null when every leaf
@@ -3596,6 +3644,48 @@ test "a string is not a Bytes and a Bytes is not a string" {
     try std.testing.expect(pool.isAssignableTo(blob_again, blob));
     // And the brand is still one-way.
     try std.testing.expect(!pool.isAssignableTo(pool.idx_bytes, blob));
+}
+
+test "object is object-like at every depth, not only at the top" {
+    // `TypeEnv` held this rule and applied it only at the top of a
+    // comparison, so a record reaching an `object`-typed field was refused
+    // while the same record reaching an `object`-typed parameter was
+    // admitted. Found by giving `FetchOptions` an `object`-typed `headers`
+    // field, which then refused every handler that sets one.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const object_ref = pool.addRef(allocator, "object");
+    const inner = pool.addRecord(allocator, &.{
+        .{
+            .name_start = pool.addName(allocator, "Accept").start,
+            .name_len = 6,
+            .type_idx = pool.idx_string,
+            .optional = false,
+        },
+    });
+
+    // Top level, which held before.
+    try std.testing.expect(pool.isAssignableTo(inner, object_ref));
+
+    // Nested in a field, which did not.
+    const h = pool.addName(allocator, "headers");
+    const target = pool.addRecord(allocator, &.{
+        .{ .name_start = h.start, .name_len = h.len, .type_idx = object_ref, .optional = true },
+    });
+    const source = pool.addRecord(allocator, &.{
+        .{ .name_start = h.start, .name_len = h.len, .type_idx = inner, .optional = false },
+    });
+    try std.testing.expect(pool.isAssignableTo(source, target));
+
+    // And it still means something: a scalar is not object-like, at either
+    // depth. Without this half the rule would read as "admit everything".
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_number, object_ref));
+    const scalar_source = pool.addRecord(allocator, &.{
+        .{ .name_start = h.start, .name_len = h.len, .type_idx = pool.idx_number, .optional = false },
+    });
+    try std.testing.expect(!pool.isAssignableTo(scalar_source, target));
 }
 
 test "Bytes is not assignable to object" {

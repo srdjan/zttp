@@ -58,6 +58,71 @@ fn mapReturnKind(
     };
 }
 
+/// `FetchOptions` (spec 7.2), registered before the export loop so a declared
+/// signature naming it resolves, and put in the alias table so a handler can
+/// annotate with it.
+///
+/// It is not section 7.2's shape verbatim, and the two differences are
+/// measured rather than chosen.
+///
+/// `timeoutMs` is absent. Section 7.2 names it and `runtime_http.zig` reads no
+/// such field, so declaring it would type a value that does nothing - a type
+/// that lies about the runtime is worse than one that omits a feature.
+///
+/// `query` and `maxResponseBytes` are present and the spec omits them. Both
+/// ship and both are read; `query` in particular is what keeps an egress host
+/// a compile-time literal while its values vary per request, which is the
+/// property `examples/fetch/weather-app.ts` exists to prove. Refusing them
+/// would delete a working contract guarantee to match a shorter list.
+///
+/// `body` is `string | Bytes`, which is section 7.2's own type and was a lie
+/// until this commit: the runtime answered `InvalidBody` for a Bytes. It
+/// accepts one now and sends its octets unchanged.
+///
+/// `headers` is the opaque `object` where section 7.2 writes `Dict<string,
+/// string>`. `runtime_http.zig` reads the header map by walking an object's
+/// properties and has no Dict path, so the spec's type would refuse the
+/// object-literal form every handler uses and admit a Dict the runtime would
+/// ignore - wrong in both directions at once. Aligning the two ends is a
+/// runtime change and belongs with the phase 7 pass that also closes
+/// `timeoutMs`.
+fn registerFetchOptions(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
+    if (env.getTypeAlias("FetchOptions") != null) return;
+
+    const methods = [_][]const u8{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
+    var method_literals: [methods.len]TypeIndex = undefined;
+    for (methods, 0..) |name, i| {
+        method_literals[i] = pool.addLiteralString(allocator, name);
+    }
+    const method_union = pool.addUnion(allocator, &method_literals);
+    const body_type = pool.addUnion(allocator, &.{ pool.idx_string, pool.idx_bytes });
+
+    const options = pool.addRecord(allocator, &.{
+        optionalField(pool, allocator, "method", method_union),
+        optionalField(pool, allocator, "headers", object_refFor(pool, allocator)),
+        optionalField(pool, allocator, "body", body_type),
+        optionalField(pool, allocator, "query", object_refFor(pool, allocator)),
+        optionalField(pool, allocator, "maxResponseBytes", pool.idx_number),
+        optionalField(pool, allocator, "durable", object_refFor(pool, allocator)),
+    });
+    if (options == null_type_idx) return;
+    env.putTypeAlias("FetchOptions", options);
+}
+
+fn object_refFor(pool: *TypePool, allocator: std.mem.Allocator) TypeIndex {
+    return pool.addRef(allocator, "object");
+}
+
+fn optionalField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, type_idx: TypeIndex) type_pool_mod.RecordField {
+    const n = pool.addName(allocator, name);
+    return .{
+        .name_start = n.start,
+        .name_len = n.len,
+        .type_idx = type_idx,
+        .optional = true,
+    };
+}
+
 fn addParam(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, type_idx: TypeIndex) FuncParam {
     const n = pool.addName(allocator, name);
     return .{
@@ -136,6 +201,8 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);
+
+    registerFetchOptions(env, pool, allocator);
 
     // Register all function signatures from the module registry
     for (builtin_modules.all) |binding| {
@@ -276,6 +343,68 @@ test "the bytes return kind maps to the Bytes primitive" {
     // Not the coarse `object` a binding would otherwise have had to declare -
     // which is the difference that makes a Bytes parameter refuse a record.
     try std.testing.expect(idx != object_ref);
+}
+
+test "FetchOptions names what the runtime reads, and only that" {
+    // The list is measured against `runtime_http.zig`, not copied from spec
+    // 7.2: the spec omits `query`, `maxResponseBytes`, and `durable`, all of
+    // which ship and are read, and names `timeoutMs`, which nothing reads.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateModuleTypes(&env, &pool, allocator);
+
+    const options = env.getTypeAlias("FetchOptions") orelse return error.MissingFetchOptions;
+    const expected = [_][]const u8{ "method", "headers", "body", "query", "maxResponseBytes", "durable" };
+    const fields = pool.getRecordFields(options);
+    try std.testing.expectEqual(expected.len, fields.len);
+    for (expected, fields) |name, field| {
+        try std.testing.expectEqualStrings(name, pool.getName(field.name_start, field.name_len));
+        // Every field is optional: `fetch(url, {})` is a valid call.
+        try std.testing.expect(field.optional);
+    }
+
+    // `timeoutMs` is absent on purpose. A field the runtime never reads would
+    // be a type that lies about what the call does.
+    for (fields) |field| {
+        try std.testing.expect(!std.mem.eql(u8, "timeoutMs", pool.getName(field.name_start, field.name_len)));
+    }
+
+    // The method is the seven literals spec 7.2 lists, so an eighth is a
+    // compile-time refusal rather than an `InvalidMethod` at run time.
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, pool.getTag(fields[0].type_idx).?);
+    try std.testing.expectEqual(@as(usize, 7), pool.getUnionMembers(fields[0].type_idx).len);
+
+    // The body is spec 7.2's own `string | Bytes`, which the runtime now
+    // accepts - it answered `InvalidBody` for a Bytes before this commit.
+    const body = fields[2].type_idx;
+    try std.testing.expect(env.isAssignableTo(pool.idx_string, body));
+    try std.testing.expect(env.isAssignableTo(pool.idx_bytes, body));
+    try std.testing.expect(!env.isAssignableTo(pool.idx_number, body));
+}
+
+test "fetch reads FetchOptions at its second position" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateModuleTypes(&env, &pool, allocator);
+
+    const options = env.getTypeAlias("FetchOptions") orelse return error.MissingFetchOptions;
+    const fetch_sig = env.getFnSigByName("fetch") orelse return error.MissingFetch;
+    try std.testing.expectEqual(@as(u8, 2), fetch_sig.param_count);
+    try std.testing.expectEqual(options, fetch_sig.param_types[1]);
+
+    // `fetchWithRetry` shares it and keeps its third argument.
+    const retry_sig = env.getFnSigByName("fetchWithRetry") orelse return error.MissingFetchWithRetry;
+    try std.testing.expectEqual(@as(u8, 3), retry_sig.param_count);
+    try std.testing.expectEqual(options, retry_sig.param_types[1]);
+    try std.testing.expectEqual(@as(u8, 1), retry_sig.required_param_count orelse retry_sig.param_count);
 }
 
 test "a declared signature builds the precise type, and fetch is its first customer" {
