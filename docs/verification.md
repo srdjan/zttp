@@ -297,7 +297,7 @@ the handler's budget already bounds it.
 The budget and every ceiling are discharged only against inferred facts
 from real function bodies, never an assumed claim. The opt-in
 `zts check --require-export-capsules` docs mode additionally warns
-(**ZTS507** / **ZTS508**) when an exported helper carries no capsule.
+(**ZTS508**) when an exported helper carries no `Proof<...>` capsule.
 
 ### Runtime Optimizations from Verification
 

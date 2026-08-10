@@ -242,8 +242,9 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     };
     defer result.deinit(allocator);
 
-    // Opt-in docs mode: ask exported helpers to carry explicit capsules
-    // (ZTS507 / ZTS508). Warning-only; never changes the exit code.
+    // Opt-in docs mode: ask exported helpers to carry an explicit Proof<...>
+    // capsule (ZTS508). Warning-only; never changes the exit code. The effects
+    // half retired when ZTS610 widened to cover the same helpers.
     if (require_export_capsules) {
         precompile.appendExportCapsuleDiagnostics(allocator, &result, target);
     }
@@ -301,7 +302,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     if (require_export_capsules) {
         for (result.json_diagnostics.items) |d| {
-            if (!std.mem.eql(u8, d.code, "ZTS507") and !std.mem.eql(u8, d.code, "ZTS508")) continue;
+            if (!std.mem.eql(u8, d.code, "ZTS508")) continue;
             std.debug.print("  {s} (warning) {s}:{d}  {s}\n", .{ d.code, d.file, d.line, d.message });
         }
     }
@@ -579,8 +580,8 @@ fn printCheckHelp() void {
         \\  --sql-schema P   SQLite schema file for query validation
         \\  --system P       system.json for internal serviceCall typing
         \\  --require-export-capsules
-        \\                   Docs mode: warn (ZTS507/ZTS508) when an exported
-        \\                   helper carries no Effects<...> / Proof<...> capsule
+        \\                   Docs mode: warn (ZTS508) when an exported helper
+        \\                   carries no Proof<...> capsule
         \\
         \\If no handler is specified, uses the entry from zttp.json.
         \\

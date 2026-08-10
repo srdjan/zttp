@@ -1,6 +1,6 @@
 {
   "corpusVersion": "760bc9965c6735565a5d3c7850f1c2156f0013b76d7fe9c12c6dfc0a55c23ef0",
-  "rulesTotal": 75,
+  "rulesTotal": 74,
   "rulesTripped": 7,
   "tripped": [
     "ZTS305",
@@ -54,7 +54,6 @@
     "ZTS504",
     "ZTS505",
     "ZTS506",
-    "ZTS507",
     "ZTS508",
     "ZTS607",
     "ZTS509",

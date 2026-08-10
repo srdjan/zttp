@@ -84,7 +84,7 @@ pub const CheckResult = struct {
     }
 
     /// Warning-severity spec diagnostics: ZTS505 over-declaration and the
-    /// docs-mode ZTS507/508 missing-capsule prompts.
+    /// docs-mode ZTS508 missing-capsule prompt.
     fn specWarnings(self: *const CheckResult) u32 {
         const contract = if (self.contract) |*c| c else return 0;
         var n: u32 = 0;
@@ -187,33 +187,22 @@ pub fn appendSpecDiagnosticsJson(
 }
 
 /// Opt-in docs mode: ask every exported helper to carry an explicit
-/// `Effects<...>` capsule (ZTS507) and `Proof<...>` capsule (ZTS508). Off by
-/// default and warning-only - it never fails a build. Diagnostics are
-/// appended to `result.json_diagnostics`; non-exported helpers are untouched.
+/// `Proof<...>` capsule (ZTS508). Off by default and warning-only - it never
+/// fails a build. Diagnostics are appended to `result.json_diagnostics`;
+/// non-exported helpers are untouched.
+///
+/// The effects half is gone. It asked for a ceiling on exactly the helpers
+/// ZTS610 already refuses - exported, undeclared, nonempty inferred row - once
+/// `handler_reachable` came off ZTS610, so it added a warning behind a flag
+/// where an unconditional error already stood. The proof half stays because
+/// ZTS611 fires only when the handler declares a proof-supported `Spec<...>`
+/// and this fires whether or not it does.
 pub fn appendExportCapsuleDiagnostics(
     allocator: std.mem.Allocator,
     result: *CheckResult,
     handler_path: []const u8,
 ) void {
     const contract = if (result.contract) |*c| c else return;
-    for (contract.function_effect_capsules.items) |cap| {
-        if (!cap.exported or cap.declared.items.len > 0) continue;
-        // A helper that reaches nothing has no ceiling to declare. Asking for
-        // one anyway contradicts the always-on rule beside it, which fires
-        // only on a nonempty row, and the annotation it asks for would draw a
-        // ZTS505 over-declaration warning the moment it was written.
-        const repair = computedCapsuleRepair(allocator, "Effects", cap.inferred.items) orelse continue;
-        result.json_diagnostics.append(allocator, .{
-            .code = SpecDiagnostic.Kind.missing_effects_capsule.code(),
-            .severity = "warning",
-            .message = "exported helper carries no Effects<...> capsule",
-            .file = handler_path,
-            .line = cap.line,
-            .column = 0,
-            .suggestion = repair,
-            .suggestion_owned = true,
-        }) catch allocator.free(repair);
-    }
     for (contract.function_capsules.items) |cap| {
         if (!cap.exported or cap.declared.items.len > 0) continue;
         var proven_buf: [4][]const u8 = undefined;
@@ -289,8 +278,13 @@ pub fn appendCanonicalPublicHelperDiagnostics(
 ) void {
     const contract = if (result.contract) |*c| c else return;
 
+    // Spec 5.7 conditions this on export and a nonempty inferred row, and on
+    // nothing else. A `handler_reachable` qualifier used to stand here, which
+    // let an exported helper the handler never calls declare nothing and report
+    // nothing - the export is the promise, and who happens to call it today
+    // does not change what the module's public surface owes its callers.
     for (contract.function_effect_capsules.items) |cap| {
-        if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0 or cap.inferred.items.len == 0) continue;
+        if (!cap.exported or cap.declared.items.len > 0 or cap.inferred.items.len == 0) continue;
         const repair = computedCapsuleRepair(allocator, "Effects", cap.inferred.items);
         result.json_diagnostics.append(allocator, .{
             .code = zts.DiagnosticProjection.code(.strict, .canonical_public_helper_effects),
@@ -326,8 +320,10 @@ pub fn appendCanonicalPublicHelperDiagnostics(
     }
 
     if (!declaresProofSupportedSpec(contract.declared_specs.items)) return;
+    // Same reading as the effects half above: export is the condition, not
+    // reachability from this handler.
     for (contract.function_capsules.items) |cap| {
-        if (!cap.exported or !cap.handler_reachable or cap.declared.items.len > 0) continue;
+        if (!cap.exported or cap.declared.items.len > 0) continue;
         var proven_buf: [4][]const u8 = undefined;
         const repair = computedCapsuleRepair(allocator, "Proof", provenPropertyNames(cap, &proven_buf));
         result.json_diagnostics.append(allocator, .{
@@ -542,7 +538,6 @@ fn specDiagnosticMessage(diag: zts.SpecDiagnostic) []const u8 {
         .effect_over_declared => "declared capability is never reached by the function",
         .budget_exceeded => "handler reaches a capability outside its declared Effects<...> budget",
         .helper_budget_exceeded => "helper reaches a capability outside the handler's Effects<...> budget",
-        .missing_effects_capsule => "exported helper carries no Effects<...> capsule",
         .missing_proof_capsule_export => "exported helper carries no Proof<...> capsule",
         .workflow_call_in_step => "workflow.call/saga/fanout/follow used inside a step() callback silently loses durability",
         .saga_step_missing_compensate => "a non-last saga step has no compensate, leaving a partial-rollback hole",

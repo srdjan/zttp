@@ -895,11 +895,15 @@ pub const SpecDiagnostic = struct {
         /// ZTS607: a handler-reachable helper reaches a capability outside
         /// the handler's declared `Effects<...>` budget.
         helper_budget_exceeded,
-        /// ZTS507 (warning): an exported helper carries no `Effects<...>`
-        /// capsule. Emitted only under the opt-in docs mode.
-        missing_effects_capsule,
         /// ZTS508 (warning): an exported helper carries no `Proof<...>`
         /// capsule. Emitted only under the opt-in docs mode.
+        ///
+        /// There is no effects counterpart. ZTS507 held that place until
+        /// phase 5 dropped `handler_reachable` from ZTS610, at which point the
+        /// two predicates - exported, undeclared, nonempty inferred row - were
+        /// the same one, and the warning was a quieter duplicate of an error.
+        /// This one survives because ZTS611 requires the handler to declare a
+        /// proof-supported `Spec<...>` and this does not.
         missing_proof_capsule_export,
         /// ZTS509: `workflow.call`/`saga`/`fanout`/`follow` is used inside a
         /// `durable.step()` callback. These exports only durably record at
@@ -939,7 +943,6 @@ pub const SpecDiagnostic = struct {
                 .effect_over_declared => "ZTS505",
                 .budget_exceeded => "ZTS506",
                 .helper_budget_exceeded => "ZTS607",
-                .missing_effects_capsule => "ZTS507",
                 .missing_proof_capsule_export => "ZTS508",
                 .workflow_call_in_step => "ZTS509",
                 .saga_step_missing_compensate => "ZTS510",
@@ -953,7 +956,6 @@ pub const SpecDiagnostic = struct {
         pub fn severity(self: Kind) Severity {
             return switch (self) {
                 .effect_over_declared,
-                .missing_effects_capsule,
                 .missing_proof_capsule_export,
                 => .warn,
                 else => .err,

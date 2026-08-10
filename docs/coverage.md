@@ -7,7 +7,7 @@ What the offline suite proves, and what it does not.
 > The offline suite proves two things. The harness is faithful: recorder capture
 > and replay, the loop, veto, apply, retry, salvage, compiler repair, and the
 > hole loop execute correctly over their declared fixtures. And the
-> corpus is load-bearing: of the compiler's 75 advertised rules,
+> corpus is load-bearing: of the compiler's 74 advertised rules,
 > 7 are tripped by at least one case. It proves nothing about what a
 > model will draft. First-draft pass rate, median round-trips, and intent pass
 > exist only as recordings of a live model, an offline run is structurally unable
@@ -40,7 +40,7 @@ whatever moved it, and `git log docs/coverage.json` is the history.
 
 | Rules advertised | Tripped by at least one case | Untripped |
 |---|---|---|
-| 75 | 7 | 68 |
+| 74 | 7 | 67 |
 
 Tripped: `ZTS305`, `ZTS400`, `ZTS401`, `ZTS407`, `ZTS500`, `ZTS502`, `ZTS600`
 
@@ -55,7 +55,7 @@ was wrong the first time the count moved. Nothing in this section restates a
 number the generator computes; the codes are printed, and a reader who wants the
 breakdown reads them.
 
-Untripped: `ZTS300`, `ZTS301`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS306`, `ZTS307`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS601`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS615`, `ZTS616`, `ZTS617`, `ZTS618`, `ZTS619`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS507`, `ZTS508`, `ZTS607`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `POL001`, `POL002`, `POL003`, `POL004`, `POL005`, `POL006`, `POL007`, `POL008`, `PROP01`, `PROP02`, `PROP03`, `PROP04`, `PROP05`, `PROP06`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`
+Untripped: `ZTS300`, `ZTS301`, `ZTS302`, `ZTS303`, `ZTS304`, `ZTS306`, `ZTS307`, `ZTS308`, `ZTS309`, `ZTS310`, `ZTS501`, `ZTS601`, `ZTS602`, `ZTS603`, `ZTS604`, `ZTS605`, `ZTS608`, `ZTS609`, `ZTS610`, `ZTS623`, `ZTS611`, `ZTS612`, `ZTS621`, `ZTS613`, `ZTS614`, `ZTS615`, `ZTS616`, `ZTS617`, `ZTS618`, `ZTS619`, `ZTS620`, `ZTS622`, `ZTS625`, `ZTS626`, `ZTS627`, `ZTS628`, `ZTS624`, `ZTS606`, `ZTS503`, `ZTS504`, `ZTS505`, `ZTS506`, `ZTS508`, `ZTS607`, `ZTS509`, `ZTS510`, `ZTS511`, `ZTS512`, `POL001`, `POL002`, `POL003`, `POL004`, `POL005`, `POL006`, `POL007`, `POL008`, `PROP01`, `PROP02`, `PROP03`, `PROP04`, `PROP05`, `PROP06`, `ZTS402`, `ZTS403`, `ZTS404`, `ZTS405`, `ZTS406`
 
 ## Codes the registry does not carry
 

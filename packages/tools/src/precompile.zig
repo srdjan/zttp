@@ -3872,8 +3872,11 @@ test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
     try std.testing.expect(result.totalErrors() > 0);
 }
 
-test "runCheckOnlyFromSource: proof capsule diagnostic ignores unreachable exported helper" {
+test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exported helper" {
     const allocator = std.testing.allocator;
+    // `unrelated` is exported and the handler never calls it. Export is what
+    // the rule conditions on: the module's public surface owes its callers a
+    // capsule whether or not this handler is one of them.
     const source =
         \\export function unrelated(s: string): string {
         \\  return s;
@@ -3892,10 +3895,12 @@ test "runCheckOnlyFromSource: proof capsule diagnostic ignores unreachable expor
     });
     defer result.deinit(allocator);
 
+    var saw_611 = false;
     for (result.json_diagnostics.items) |d| {
-        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS611"));
+        if (std.mem.eql(u8, d.code, "ZTS611")) saw_611 = true;
     }
-    try std.testing.expectEqual(@as(u32, 0), result.canonical_errors);
+    try std.testing.expect(saw_611);
+    try std.testing.expect(result.canonical_errors > 0);
 }
 
 test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs" {
@@ -4368,42 +4373,11 @@ test "ZTS623: dropping the internal ceiling satisfies the placement rule" {
     }
 }
 
-test "appendExportCapsuleDiagnostics: a capability-free export owes no Effects capsule" {
+test "appendExportCapsuleDiagnostics: the docs mode asks only for a Proof capsule" {
     const allocator = std.testing.allocator;
-    // `clean` reaches nothing, so there is no ceiling for it to declare.
-    // Asking for one contradicted the always-on rule beside it, which fires
-    // only on a nonempty row, and the annotation would have drawn a ZTS505
-    // over-declaration warning the moment it was written. ZTS508 still fires:
-    // the helper does have proven properties to document.
-    const source =
-        \\export function clean(s: string): string {
-        \\  return s;
-        \\}
-        \\
-        \\function handler(req: Request): Response {
-        \\  return Response.text(clean("x"));
-        \\}
-    ;
-    var result = try runCheckOnlyFromSource(allocator, source, "docs.ts", null, true, null, false);
-    defer result.deinit(allocator);
-
-    appendExportCapsuleDiagnostics(allocator, &result, "docs.ts");
-
-    var saw_507 = false;
-    var saw_508 = false;
-    for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS507")) saw_507 = true;
-        if (std.mem.eql(u8, d.code, "ZTS508")) saw_508 = true;
-    }
-    try std.testing.expect(!saw_507);
-    try std.testing.expect(saw_508);
-}
-
-test "appendExportCapsuleDiagnostics: ZTS507 names the capabilities it wants declared" {
-    const allocator = std.testing.allocator;
-    // `region` reaches zttp:env, so it does have a ceiling to declare, and the
-    // suggestion is computed from the inferred row rather than left as a
-    // placeholder the author has to re-derive.
+    // The effects half of this mode retired with ZTS507: once ZTS610 stopped
+    // testing `handler_reachable`, it refused exactly the helpers the warning
+    // asked about, so the flag now covers the proof half alone.
     const source =
         \\import { env } from "zttp:env";
         \\
@@ -4420,12 +4394,21 @@ test "appendExportCapsuleDiagnostics: ZTS507 names the capabilities it wants dec
 
     appendExportCapsuleDiagnostics(allocator, &result, "docs.ts");
 
-    var suggestion: ?[]const u8 = null;
+    var saw_507 = false;
+    var saw_508 = false;
     for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS507")) suggestion = d.suggestion;
+        if (std.mem.eql(u8, d.code, "ZTS507")) saw_507 = true;
+        if (std.mem.eql(u8, d.code, "ZTS508")) saw_508 = true;
     }
-    const text = suggestion orelse return error.MissingZts507;
-    try std.testing.expect(std.mem.indexOf(u8, text, "\"env\"") != null);
+    try std.testing.expect(!saw_507);
+    try std.testing.expect(saw_508);
+    // The capability that would have been ZTS507's subject is still reported,
+    // unconditionally and as an error, by the always-on rule.
+    var saw_610 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS610")) saw_610 = true;
+    }
+    try std.testing.expect(saw_610);
 }
 
 test "buildTestContractForSource marks durable workflow partial for dynamic signal name" {
@@ -4565,6 +4548,35 @@ test "runCheckOnlyFromSource: ZTS202 arg-count message survives json capture wit
         try std.testing.expect(std.mem.indexOf(u8, d.message, "wrong number of arguments") != null);
     }
     try std.testing.expect(saw_202);
+}
+
+test "an unreached exported helper with a nonempty row reports ZTS610" {
+    const allocator = std.testing.allocator;
+    // Spec 5.7 says "an exported function with a nonempty inferred effect row
+    // MUST declare" with no reachability condition. `unused` is never called
+    // from the handler and still owes a ceiling.
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\export function unused(): string | undefined {
+        \\  return env("API_KEY");
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "unreached-helper.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    var repair: ?[]const u8 = null;
+    for (result.json_diagnostics.items) |d| {
+        if (!std.mem.eql(u8, d.code, "ZTS610")) continue;
+        repair = d.suggestion;
+    }
+    const found = repair orelse return error.MissingZTS610;
+    // The repair is computed from the inferred row, not a fixed string.
+    try std.testing.expect(std.mem.indexOf(u8, found, "env") != null);
 }
 
 test "a call may omit a trailing defaulted argument" {

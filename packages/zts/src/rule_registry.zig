@@ -583,14 +583,6 @@ const capsule_meta = [_]struct {
         .repair = .add_capability_declaration,
     },
     .{
-        .name = "missing_effects_capsule",
-        .code = "ZTS507",
-        .description = "An exported helper carries no Effects<...> capsule. Emitted only under the opt-in docs mode.",
-        .example = "export function load(s: string): string { return env(s); }",
-        .help = "Annotate the exported helper's return type with `Effects<T, \"...\">` to document its capability ceiling.",
-        .repair = .add_capability_declaration,
-    },
-    .{
         .name = "missing_proof_capsule_export",
         .code = "ZTS508",
         .description = "An exported helper carries no Proof<...> capsule. Emitted only under the opt-in docs mode.",

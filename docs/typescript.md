@@ -164,11 +164,14 @@ function bodies - an annotation never substitutes for a proof.
 **Docs mode (`--require-export-capsules`):**
 
 `zts check --require-export-capsules` is an opt-in, warning-only mode
-that asks every *exported* helper to carry an explicit capsule:
-ZTS507 when an exported helper has no `Effects<...>`, ZTS508 when it has
-no `Proof<...>`. It is off by default, never touches non-exported
+that asks every *exported* helper to carry an explicit `Proof<...>`
+capsule (ZTS508). It is off by default, never touches non-exported
 helpers, and never changes the exit code - it documents a package's
 public API surface.
+
+There is no `Effects<...>` counterpart in this mode. ZTS610 refuses an
+exported helper with a nonempty inferred row unconditionally and as an
+error, so a warning behind a flag would have covered the same helpers.
 
 ### Examples
 

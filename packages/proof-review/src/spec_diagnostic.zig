@@ -64,7 +64,6 @@ fn specDiagnosticMessage(d: zts.SpecDiagnostic) []const u8 {
         .effect_over_declared => d.suggestion orelse "declared capability is never reached",
         .budget_exceeded => d.suggestion orelse "capability reached outside the handler's Effects<...> budget",
         .helper_budget_exceeded => d.suggestion orelse "helper reaches a capability outside the handler's budget",
-        .missing_effects_capsule => d.suggestion orelse "exported helper has no Effects<...> capsule",
         .missing_proof_capsule_export => d.suggestion orelse "exported helper has no Proof<...> capsule",
         .workflow_call_in_step => d.suggestion orelse "workflow.call/saga/fanout/follow used inside step() silently loses durability",
         .saga_step_missing_compensate => d.suggestion orelse "a non-last saga step has no compensate",
