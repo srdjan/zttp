@@ -1023,12 +1023,6 @@ fn buildStatementRewrites(
                 else => return err,
             };
             try appendStatementRewriteUnique(allocator, result, rw);
-        } else if (std.mem.eql(u8, diag.code, "ZTS617")) {
-            const rw = defaultParamLiftRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
-                error.UnsupportedRefactor => continue,
-                else => return err,
-            };
-            try appendStatementRewriteUnique(allocator, result, rw);
         } else if (std.mem.eql(u8, diag.code, "ZTS618")) {
             const rw = nestedDestructureRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
@@ -1576,227 +1570,11 @@ fn prefixOpensFunctionScope(prefix: []const u8) bool {
     return false;
 }
 
-/// ZTS617 canonical_default_parameter: remove a simple signature-site default
-/// and make the fallback a first statement in the function body.
-///
-/// Supported shape is deliberately narrow:
-///   `function f(name: T = expr): R {`
-///   `function f(name = expr) {`
-///
-/// The opening brace must end the physical line so inserting the guard cannot
-/// reorder an existing same-line statement. The parameter must be a simple
-/// identifier. When an explicit type annotation is present, the type is widened
-/// to include `undefined`. The body starts with `if (name === undefined) {
-/// name = expr; }`, preserving the runtime behavior of omitted/undefined
-/// arguments while moving the default into visible statement position.
-fn defaultParamLiftRewrite(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    line: u32,
-    column: u32,
-) !StatementRewrite {
-    const param_pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
-    const line_start = lineStartOffset(source, param_pos);
-    const line_end = lineEndOffset(source, param_pos);
-    if (param_pos >= line_end) return error.UnsupportedRefactor;
-
-    const param_open = findByteBack(source, param_pos, line_start, '(') orelse return error.UnsupportedRefactor;
-    const param_close = matchingDelimiter(source, param_open, '(', ')', line_end) orelse return error.UnsupportedRefactor;
-    const brace = std.mem.indexOfScalarPos(u8, source, param_close, '{') orelse return error.UnsupportedRefactor;
-    if (brace >= line_end) return error.UnsupportedRefactor;
-    if (std.mem.trim(u8, source[brace + 1 .. line_end], " \t").len != 0) return error.UnsupportedRefactor;
-
-    const line_text = source[line_start..line_end];
-    const indent = line_text[0..leadingSpaces(line_text)];
-
-    var params: std.ArrayListUnmanaged(CanonicalParam) = .empty;
-    defer {
-        for (params.items) |*param| param.deinit(allocator);
-        params.deinit(allocator);
-    }
-    try collectCanonicalParams(allocator, source, param_open + 1, param_close, &params);
-
-    var default_count: usize = 0;
-    for (params.items) |param| {
-        if (param.default_expr != null) default_count += 1;
-    }
-    if (default_count == 0) return error.UnsupportedRefactor;
-
-    var out: std.ArrayList(u8) = .empty;
-    defer out.deinit(allocator);
-    try out.appendSlice(allocator, source[line_start .. param_open + 1]);
-    for (params.items, 0..) |param, idx| {
-        if (idx > 0) try out.appendSlice(allocator, ", ");
-        try out.appendSlice(allocator, param.canonical);
-    }
-    try out.appendSlice(allocator, source[param_close .. brace + 1]);
-    for (params.items) |param| {
-        const default_expr = param.default_expr orelse continue;
-        try out.append(allocator, '\n');
-        try out.appendSlice(allocator, indent);
-        try out.appendSlice(allocator, "  if (");
-        try out.appendSlice(allocator, param.name);
-        try out.appendSlice(allocator, " === undefined) { ");
-        try out.appendSlice(allocator, param.name);
-        try out.appendSlice(allocator, " = ");
-        try out.appendSlice(allocator, default_expr);
-        try out.appendSlice(allocator, "; }");
-    }
-
-    const replacement = try out.toOwnedSlice(allocator);
-    errdefer allocator.free(replacement);
-    const original = try allocator.dupe(u8, source[line_start..line_end]);
-    errdefer allocator.free(original);
-
-    return .{
-        .intent = .lift_default_to_body,
-        .start_offset = line_start,
-        .end_offset = line_end,
-        .replacement = replacement,
-        .original = original,
-    };
-}
-
-const CanonicalParam = struct {
-    name: []u8,
-    canonical: []u8,
-    default_expr: ?[]u8 = null,
-
-    fn deinit(self: *CanonicalParam, allocator: std.mem.Allocator) void {
-        allocator.free(self.name);
-        allocator.free(self.canonical);
-        if (self.default_expr) |expr| allocator.free(expr);
-        self.* = undefined;
-    }
-};
-
-fn collectCanonicalParams(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    params_start: usize,
-    params_end: usize,
-    out: *std.ArrayListUnmanaged(CanonicalParam),
-) !void {
-    var start = params_start;
-    while (start <= params_end) {
-        const end = nextParamEnd(source, start, params_end) orelse return error.UnsupportedRefactor;
-        const raw = std.mem.trim(u8, source[start..end], " \t");
-        if (raw.len == 0) return error.UnsupportedRefactor;
-        var param = try canonicalParamFromText(allocator, raw);
-        errdefer param.deinit(allocator);
-        try out.append(allocator, param);
-        if (end == params_end) break;
-        start = end + 1;
-    }
-}
-
-/// True when `type_text` already has a top-level `undefined` union member, so
-/// the canonical optional form needs no extra `| undefined`. Splits on `|` at
-/// bracket/angle depth 0 only and matches the member exactly, so an identifier
-/// that merely contains the run `undefined` (e.g. `undefinedish`) and a nested
-/// `Array<T | undefined>` (an array of optionals, not itself optional) are
-/// correctly treated as not-yet-optional.
-fn typeIsAlreadyOptional(type_text: []const u8) bool {
-    var depth: i32 = 0;
-    var seg_start: usize = 0;
-    var i: usize = 0;
-    while (i <= type_text.len) : (i += 1) {
-        if (i == type_text.len or (type_text[i] == '|' and depth == 0)) {
-            const seg = std.mem.trim(u8, type_text[seg_start..i], " \t");
-            if (std.mem.eql(u8, seg, "undefined")) return true;
-            seg_start = i + 1;
-            continue;
-        }
-        switch (type_text[i]) {
-            '<', '(', '[', '{' => depth += 1,
-            '>', ')', ']', '}' => if (depth > 0) {
-                depth -= 1;
-            },
-            else => {},
-        }
-    }
-    return false;
-}
-
-fn canonicalParamFromText(allocator: std.mem.Allocator, raw: []const u8) !CanonicalParam {
-    const eq = findTopLevelChar(raw, 0, raw.len, '=');
-    const head = std.mem.trim(u8, if (eq) |idx| raw[0..idx] else raw, " \t");
-    if (head.len == 0) return error.UnsupportedRefactor;
-
-    const name_end = scanIdentEnd(head, 0, head.len) orelse return error.UnsupportedRefactor;
-    const name = head[0..name_end];
-    if (!isSimpleIdentifier(name)) return error.UnsupportedRefactor;
-    const after_name = std.mem.trim(u8, head[name_end..], " \t");
-
-    var canonical: []u8 = undefined;
-    if (after_name.len == 0) {
-        canonical = try allocator.dupe(u8, name);
-    } else {
-        if (after_name[0] != ':') return error.UnsupportedRefactor;
-        const type_text = std.mem.trim(u8, after_name[1..], " \t");
-        if (type_text.len == 0) return error.UnsupportedRefactor;
-        // Only widen the annotation to `T | undefined` for a parameter whose
-        // default is actually being lifted (eq != null). A required, no-default
-        // typed param must keep its annotation verbatim -- widening it would let
-        // `f(undefined, ...)` type-check and mark the param nullable to flow
-        // analysis, a strictly weaker contract the author never wrote.
-        if (eq == null or typeIsAlreadyOptional(type_text)) {
-            canonical = try std.fmt.allocPrint(allocator, "{s}: {s}", .{ name, type_text });
-        } else {
-            canonical = try std.fmt.allocPrint(allocator, "{s}: {s} | undefined", .{ name, type_text });
-        }
-    }
-    errdefer allocator.free(canonical);
-
-    const default_expr = if (eq) |idx| blk: {
-        const expr = std.mem.trim(u8, raw[idx + 1 ..], " \t");
-        if (expr.len == 0) return error.UnsupportedRefactor;
-        break :blk try allocator.dupe(u8, expr);
-    } else null;
-    errdefer if (default_expr) |expr| allocator.free(expr);
-
-    return .{
-        .name = try allocator.dupe(u8, name),
-        .canonical = canonical,
-        .default_expr = default_expr,
-    };
-}
-
-fn nextParamEnd(source: []const u8, start: usize, end: usize) ?usize {
-    var i = start;
-    var depth: i32 = 0;
-    while (i < end) {
-        const c = source[i];
-        switch (c) {
-            '(', '[', '{' => {
-                depth += 1;
-                i += 1;
-            },
-            ')', ']', '}' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                i += 1;
-            },
-            ',' => {
-                if (depth == 0) return i;
-                i += 1;
-            },
-            '"', '\'', '`' => {
-                const after = scanStringForward(source, i, c) orelse return null;
-                if (after > end) return null;
-                i = after;
-            },
-            else => i += 1,
-        }
-    }
-    return end;
-}
-
 /// True when `text` has balanced `()`, `[]`, and `{}` delimiters and no
 /// unterminated string/template literal. Used to detect an expression that does
 /// not finish on its own line, so a single-line rewrite refuses it instead of
-/// silently truncating. Strings are skipped with the same `scanStringForward`
-/// idiom `nextParamEnd` uses, so a delimiter inside a literal does not count.
+/// silently truncating. Strings are skipped with the `scanStringForward`
+/// idiom, so a delimiter inside a literal does not count.
 fn delimitersBalanced(text: []const u8) bool {
     var depth: i32 = 0;
     var i: usize = 0;
@@ -1934,15 +1712,6 @@ fn unusedIndexAliasRewrite(
 
 fn lineEndOffset(source: []const u8, pos: usize) usize {
     return std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
-}
-
-fn findByteBack(source: []const u8, pos: usize, min: usize, target: u8) ?usize {
-    var i = pos;
-    while (i > min) {
-        i -= 1;
-        if (source[i] == target) return i;
-    }
-    return null;
 }
 
 fn scanIdentEnd(source: []const u8, start: usize, end: usize) ?usize {
@@ -4004,76 +3773,6 @@ test "normalizeSource reports dynamic computed access as residual diagnostic" {
     try std.testing.expectEqualStrings("ZTS605", residual.items[0].object.get("code").?.string);
 }
 
-test "normalizeSource lifts a simple default parameter into the body" {
-    const source =
-        \\function greet(name = "world") {
-        \\  return name;
-        \\}
-        \\function handler(req) {
-        \\  const msg = greet(undefined);
-        \\  return Response.text(msg);
-        \\}
-    ;
-    var nr = try normalizeSource(std.testing.allocator, source, "handler.js");
-    defer nr.deinit(std.testing.allocator);
-    try std.testing.expect(nr.converged);
-    try std.testing.expect(nr.fully_canonical);
-    try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "function greet(name) {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "if (name === undefined) { name = \"world\"; }") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "function greet(name =") == null);
-
-    var found = false;
-    for (nr.rewrite_trace.items) |intent| {
-        if (intent == .lift_default_to_body) found = true;
-    }
-    try std.testing.expect(found);
-}
-
-test "normalizeSource preserves default-parameter guard order" {
-    const source =
-        \\function pick(a = "first", b = a) {
-        \\  return b;
-        \\}
-        \\function handler(req) {
-        \\  return Response.text(pick(undefined, undefined));
-        \\}
-    ;
-    var nr = try normalizeSource(std.testing.allocator, source, "handler.js");
-    defer nr.deinit(std.testing.allocator);
-    try std.testing.expect(nr.converged);
-    try std.testing.expect(nr.fully_canonical);
-    try std.testing.expectEqual(@as(u32, 0), nr.residual);
-
-    const first = std.mem.indexOf(u8, nr.canonical_source, "if (a === undefined)") orelse return error.MissingFirstDefaultGuard;
-    const second = std.mem.indexOf(u8, nr.canonical_source, "if (b === undefined)") orelse return error.MissingSecondDefaultGuard;
-    try std.testing.expect(first < second);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "function pick(a =") == null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, ", b =") == null);
-}
-
-test "normalizeSource does not widen a required typed param when lifting a sibling default" {
-    // Regression: the default-lift rewrote EVERY typed param to `T | undefined`,
-    // not just the one with a default, weakening a required param's contract
-    // (`f(undefined, "x")` would then type-check). A no-default typed param must
-    // keep its annotation verbatim.
-    const source =
-        \\function f(a: number, b: string = "x") {
-        \\  return b;
-        \\}
-        \\function handler(req) {
-        \\  return Response.text(f(1, undefined));
-        \\}
-    ;
-    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
-    defer nr.deinit(std.testing.allocator);
-    // Required, no-default param keeps its exact annotation (not widened).
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "a: number | undefined") == null);
-    // The lifted default param is widened and guarded.
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "b: string | undefined") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "if (b === undefined) { b = \"x\"; }") != null);
-}
-
 test "normalizeSource flattens a simple nested object destructure" {
     const source =
         \\function handler(req: Request): Response {
@@ -4354,18 +4053,6 @@ test "delimitersBalanced detects expressions that do not finish on the line" {
     try std.testing.expect(!delimitersBalanced("makeUser("));
     try std.testing.expect(!delimitersBalanced("{"));
     try std.testing.expect(!delimitersBalanced("f(\"unterminated"));
-}
-
-test "typeIsAlreadyOptional matches only an exact top-level undefined member" {
-    try std.testing.expect(typeIsAlreadyOptional("undefined"));
-    try std.testing.expect(typeIsAlreadyOptional("string | undefined"));
-    try std.testing.expect(typeIsAlreadyOptional("undefined | string"));
-    // A substring of an identifier is not a match (the prior bug).
-    try std.testing.expect(!typeIsAlreadyOptional("undefinedish"));
-    try std.testing.expect(!typeIsAlreadyOptional("string | undefinedValue"));
-    // A nested optional is not a top-level optional.
-    try std.testing.expect(!typeIsAlreadyOptional("Array<T | undefined>"));
-    try std.testing.expect(!typeIsAlreadyOptional("number"));
 }
 
 test "nestedDestructureRewrite refuses a multiline right-hand side" {

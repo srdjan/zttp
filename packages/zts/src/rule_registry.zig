@@ -327,10 +327,10 @@ const strict_meta = [_]struct {
     .{
         .kind = .canonical_default_parameter,
         .code = "ZTS617",
-        .description = "Default parameter values are not part of canonical ZigTS.",
-        .example = "function greet(name: string = \"world\") { /* ... */ }",
-        .help = "Accept `(a: T | undefined)` and resolve the default in the body: `const resolved = a === undefined ? DEFAULT : a;`",
-        .repair = .lift_default_to_body,
+        .description = "A parameter default must be trailing and a compile-time scalar.",
+        .example = "function greet(name: string = someCall(), loud: boolean) { /* ... */ }",
+        .help = "Put the defaulted parameters last, and give each one `null`, a boolean, a finite number, or a string - or fold the expression first with `comptime(...)`.",
+        .repair = null,
     },
     .{
         .kind = .canonical_destructure_depth,

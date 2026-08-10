@@ -1770,6 +1770,10 @@ pub const CodeGen = struct {
         self.max_stack_depth = 0;
         self.current_stack_depth = 0;
 
+        // Select trailing parameter defaults before the body runs, so the body
+        // sees the declared type rather than the omission sentinel.
+        try self.emitParamDefaults(func);
+
         // Compile function body
         try self.emitNode(func.body);
         try self.emit(.ret_undefined);
@@ -2089,6 +2093,26 @@ pub const CodeGen = struct {
             },
         }
         self.pushStack(1);
+    }
+
+    /// Select the declared default for every parameter that carries one.
+    ///
+    /// `callBytecodeFunction` fills the locals of omitted arguments with
+    /// `undefined`, so omission and an explicit `undefined` arrive identically
+    /// and the same `=== undefined` test resolves both. The default is a
+    /// compile-time scalar (`strict_checker` refuses the rest), so this reads
+    /// the slot, selects, and writes the slot back with no allocation and no
+    /// call. Nothing is emitted for a function without defaults.
+    fn emitParamDefaults(self: *CodeGen, func: Node.FunctionExpr) !void {
+        if (!func.flags.has_default_params) return;
+        for (0..func.params_count) |i| {
+            const param_idx = self.ir.getListIndex(func.params_start, @intCast(i));
+            const elem = self.ir.getPatternElem(param_idx) orelse continue;
+            if (elem.default_value == null_node) continue;
+            try self.emitIdentifier(elem.binding);
+            try self.emitDefaultValue(elem.default_value);
+            try self.emitSetBinding(elem.binding);
+        }
     }
 
     fn emitDefaultValue(self: *CodeGen, default_value: NodeIndex) !void {

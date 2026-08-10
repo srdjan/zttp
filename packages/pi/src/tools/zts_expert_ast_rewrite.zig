@@ -34,7 +34,7 @@ pub const tool: registry_mod.ToolDef = .{
     \\replace_arrow_with_function, replace_export_arrow_with_function,
     \\replace_compound_assign_with_explicit, drop_redundant_bool_compare,
     \\canonicalize_capability_key_alias, replace_ternary_with_if,
-    \\name_const_above_template, lift_default_to_body, flatten_destructure,
+    \\name_const_above_template, flatten_destructure,
     \\drop_unused_index_alias.
     \\The tool never writes files; it returns the proposed content and an
     \\edit_simulate veto verdict.
@@ -56,7 +56,6 @@ const SupportedKind = enum {
     canonicalize_capability_key_alias,
     replace_ternary_with_if,
     name_const_above_template,
-    lift_default_to_body,
     flatten_destructure,
     drop_unused_index_alias,
 
@@ -71,7 +70,6 @@ const SupportedKind = enum {
             .canonicalize_capability_key_alias => .canonicalize_capability_key_alias,
             .replace_ternary_with_if => .replace_ternary_with_if,
             .name_const_above_template => .name_const_above_template,
-            .lift_default_to_body => .lift_default_to_body,
             .flatten_destructure => .flatten_destructure,
             .drop_unused_index_alias => .drop_unused_index_alias,
             else => null,
@@ -90,7 +88,6 @@ const SupportedKind = enum {
             .canonicalize_capability_key_alias,
             .replace_ternary_with_if,
             .name_const_above_template,
-            .lift_default_to_body,
             .flatten_destructure,
             .drop_unused_index_alias,
             => true,
@@ -219,7 +216,6 @@ fn produceProposed(
         }),
         .replace_ternary_with_if,
         .name_const_above_template,
-        .lift_default_to_body,
         .flatten_destructure,
         .drop_unused_index_alias,
         => try repair_apply.applyStatementIntent(allocator, source, absolute, kind.asString(), line),

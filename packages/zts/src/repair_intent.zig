@@ -16,7 +16,6 @@ const std = @import("std");
 pub const RepairIntent = enum {
     // ZTS6xx — canonical ZigTS profile (strict_checker)
     replace_ternary_with_if,
-    lift_default_to_body,
     name_const_above_template,
     replace_let_with_const,
     replace_arrow_with_function,

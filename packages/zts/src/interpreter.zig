@@ -4753,3 +4753,88 @@ test "End-to-end: nested destructuring with a default binds from the default" {
     try std.testing.expect(result_opt.?.isInt());
     try std.testing.expectEqual(@as(i32, 5), result_opt.?.getInt());
 }
+
+/// Run `source` and return the integer left in the global named `result`.
+///
+/// The arena owns everything the run allocates, so a caller only has to keep
+/// the arena alive for the duration of its assertions.
+fn runSourceForIntGlobal(arena: *std.heap.ArenaAllocator, source: []const u8) !i32 {
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const parser_mod = @import("parser/root.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    defer p.deinit();
+
+    const code = try p.parse();
+    if (code.len == 0) return error.EmptyProgram;
+
+    const shapes = p.getShapes();
+    if (shapes.len > 0) {
+        try ctx.materializeShapes(shapes);
+    }
+
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&func);
+
+    const result_atom = try ctx.atoms.intern("result");
+    const result_val = ctx.getGlobal(result_atom) orelse return error.MissingResult;
+    if (!result_val.isInt()) return error.ResultNotInt;
+    return result_val.getInt();
+}
+
+test "End-to-end: an omitted trailing argument sees the declared default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const result = try runSourceForIntGlobal(&arena,
+        \\function step(base, delta = 5) { return base + delta; }
+        \\let result = step(1);
+    );
+    try std.testing.expectEqual(@as(i32, 6), result);
+}
+
+test "End-to-end: a supplied trailing argument overrides the declared default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const result = try runSourceForIntGlobal(&arena,
+        \\function step(base, delta = 5) { return base + delta; }
+        \\let result = step(1, 2);
+    );
+    try std.testing.expectEqual(@as(i32, 3), result);
+}
+
+test "End-to-end: an explicit undefined selects the declared default" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const result = try runSourceForIntGlobal(&arena,
+        \\function step(base, delta = 5) { return base + delta; }
+        \\let result = step(1, undefined);
+    );
+    try std.testing.expectEqual(@as(i32, 6), result);
+}

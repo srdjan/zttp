@@ -120,22 +120,38 @@ return send(args[0], args[1], args[2]);
 // or widen the signature: function send(args: SendArgs): Response
 ```
 
-### Default parameter value (ZTS617)
+### Non-trailing or non-scalar parameter default (ZTS617)
+
+A trailing parameter may declare a default when the default is a compile-time
+scalar: `null`, a boolean, a finite number, or a string. Omitting the argument
+selects it, and so does passing `undefined`.
+
 ```ts
-// before
+// admitted
 function greet(name: string = "world"): string {
   return `hello ${name}`;
 }
+```
 
-// after - resolve the default in the body without using a ternary
-function greet(name: string | undefined): string {
+Two shapes stay refused. A default in a non-trailing position cannot be reached
+by omitting arguments, and a default computed at run time would put evaluation
+order in front of the body.
+
+```ts
+// before - the default is unreachable, and the second one calls a function
+function greet(name: string = "world", loud: boolean): string { /* ... */ }
+function pick(fallback: string = readEnv()): string { /* ... */ }
+
+// after - defaulted parameters last, and the computed value resolved in the body
+function greet(loud: boolean, name: string = "world"): string { /* ... */ }
+function pick(fallback: string | undefined): string {
   let resolved: string;
-  if (name === undefined) {
-    resolved = "world";
+  if (fallback === undefined) {
+    resolved = readEnv();
   } else {
-    resolved = name;
+    resolved = fallback;
   }
-  return `hello ${resolved}`;
+  return resolved;
 }
 ```
 

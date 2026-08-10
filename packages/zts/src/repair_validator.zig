@@ -159,12 +159,6 @@ pub const rows = [_]Row{
         .precondition = "the extracted expression is pure and evaluated exactly once",
     },
     .{
-        .intent = .lift_default_to_body,
-        .method = .kernel_identity,
-        .status = .planned,
-        .precondition = "the default expression is pure",
-    },
-    .{
         .intent = .lead_with_spread,
         .method = .kernel_identity,
         .status = .planned,

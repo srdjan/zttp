@@ -223,7 +223,7 @@ The strict checker enforces the **canonical ZigTS profile** on every `zttp check
 | `ZTS614` | non-leading object spread `{x: 1, ...base}` | leading spread: `{...base, x: 1}` |
 | `ZTS615` | complex template interpolation `${getX()}` | hoist into a `const` above the template |
 | `ZTS616` | call-site spread `f(...args)` | positional args or widen the helper signature |
-| `ZTS617` | default parameter value `(a = v)` | accept `T \| undefined` and resolve in the body |
+| `ZTS617` | a default in a non-trailing position, or one that is not a compile-time scalar | put the defaulted parameters last; give each `null`, a boolean, a finite number, or a string, or fold it first with `comptime(...)` |
 | `ZTS618` | nested destructuring `{a: {b}}` | drill in with follow-up `const` bindings |
 | `ZTS619` | unused index alias in `for...of` | iterate the array directly; drop `.entries()` and the destructure |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |

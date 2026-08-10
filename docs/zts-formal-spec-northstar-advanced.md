@@ -2576,9 +2576,9 @@ The corpus MUST include:
 - binding fields and type-test patterns in `match`
 - the closed narrowing rule list
 - decidable branch-choice and iteration-choice rules
-- trailing parameters with closed compile-time scalar defaults - the engine
-  currently rejects every parameter default as ZTS617, so this item reverses a
-  shipped restriction rather than filling an empty space
+- trailing parameters with closed compile-time scalar defaults - shipped in
+  phase 5; ZTS617 narrowed from every parameter default to a non-trailing one
+  and to one that is not a compile-time scalar
 - contractive recursive aliases
 - precise `Result<T, E>` with effect-row polymorphic combinators,
   `unwrapOr`, `orElse`, and `collectAll`

@@ -4567,6 +4567,67 @@ test "runCheckOnlyFromSource: ZTS202 arg-count message survives json capture wit
     try std.testing.expect(saw_202);
 }
 
+test "a call may omit a trailing defaulted argument" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function step(base: number, delta: number = 5): number {
+        \\  return base + delta;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(`${step(1)}`);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "trailing-default.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    for (result.json_diagnostics.items) |d| {
+        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS202"));
+    }
+}
+
+test "a call omitting a non-defaulted position still reports the arity error" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function step(base: number, delta: number = 5): number {
+        \\  return base + delta;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(`${step()}`);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "missing-required.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    var saw_202 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS202")) saw_202 = true;
+    }
+    try std.testing.expect(saw_202);
+}
+
+test "a default not assignable to the declared parameter type is rejected" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function step(base: number, delta: number = "five"): number {
+        \\  return base;
+        \\}
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(`${step(1)}`);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "default-mismatch.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    var saw_mismatch = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS200")) saw_mismatch = true;
+    }
+    try std.testing.expect(saw_mismatch);
+}
+
 test "zts check --types path rejects exported handler local mismatch" {
     const source =
         \\export function handler(req: Request): Response {

@@ -414,6 +414,41 @@ omitting a non-defaulted position still reports the arity error; the recorded
 minimum and maximum arity appear in the contract; the canonical corpus trips the
 narrowed ZTS617 on its three remaining cases and is silent on the admitted form.
 
+Four of this task's expectations did not survive measurement, and each is
+recorded rather than worked around.
+
+**The remaining cases are two, not three.** A rest parameter never reached
+ZTS617: `parse.zig:844` and `parse.zig:2971` refuse `...args` at parse time with
+their own message. What ZTS617 now covers is a non-trailing default and a
+default that is not a compile-time scalar. The rest refusal is unchanged and was
+confirmed still in place rather than re-implemented.
+
+**No opcode landed, so the semantics pin does not move.** Selection composes
+from `get_loc`, `push_undefined`, `strict_eq`, `if_false`, `goto`, and
+`put_loc`, which is the same shape `emitDefaultValue` already emitted for a
+destructuring default. The prologue reuses that function; only the load and
+store around it are new. `semantics.zig`'s `node_rules` covers a slice of tags
+that contains neither `pattern_element` nor any function form, so this task adds
+no row there.
+
+**Arity is recorded on the signature, not in the contract.** `contract.json`
+carries `version`, `handler`, `routes`, `modules`, `sandbox`, and the analysis
+sections; it has no per-function inventory for an arity pair to join. The pair
+is recorded where the arity rule reads it - minimum in
+`FunctionSig.required_param_count`, maximum in its `param_count` - set from the
+IR by a pre-pass in the type checker, because the signature scan reads
+annotation text and a default is not in the annotation. Adding a contract
+section for a fact nothing consumes was declined; a consumer is what would
+justify it.
+
+**The canonical corpus does not trip ZTS617, before or after.**
+`docs/coverage.md` lists it untripped, and no tracked `.ts`, `.tsx`, `.js`, or
+`.jsx` file declares a parameter default. The corpus is therefore silent on both
+the admitted form and the refused ones, and re-running `update-coverage.sh`
+after the change produced no diff. The two refusals and the admitted form are
+covered by unit tests in `strict_checker.zig` instead, which is what the corpus
+row would have asserted had the corpus contained the form.
+
 ### Task 9: the ceiling rule's two open halves
 
 **Files:** `packages/tools/src/precompile_check.zig`, `contract_builder.zig`,

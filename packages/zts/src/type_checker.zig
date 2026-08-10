@@ -213,6 +213,9 @@ pub const TypeChecker = struct {
     /// Run the checker on the given root node. Returns the number of errors.
     pub fn check(self: *TypeChecker, root: NodeIndex) !u32 {
         try self.ensureHealthy();
+        // Before the main walk, so a call to a function declared later in the
+        // file is checked against the arity that function actually accepts.
+        self.recordDefaultArity(root, 0);
         // Before the main walk, so a call to a predicate declared later in the
         // file still narrows. A predicate whose body is not an admitted test is
         // rejected here and installs nothing anywhere.
@@ -659,6 +662,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
+                self.checkParamDefaults(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
             },
@@ -679,6 +683,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
+                self.checkParamDefaults(func, sig orelse .{});
                 self.walkStmt(func.body);
                 self.current_return_type = saved_return;
             },
@@ -1797,6 +1802,52 @@ pub const TypeChecker = struct {
 
     /// Walk declarations looking for type predicates, admitting the ones whose
     /// bodies check out and reporting the ones that do not.
+    /// Record every source function's minimum arity before any call is
+    /// checked, so a call that omits a trailing defaulted argument is not
+    /// reported against the declared parameter count.
+    ///
+    /// The signature scan builds its parameter list from annotation text,
+    /// which carries no default, so this is the only place the two facts meet.
+    fn recordDefaultArity(self: *TypeChecker, node: NodeIndex, depth: u8) void {
+        if (depth > 32) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                for (0..block.stmts_count) |i| {
+                    self.recordDefaultArity(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), depth + 1);
+                }
+            },
+            .export_decl => {
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.recordDefaultArity(export_decl.declaration, depth + 1);
+            },
+            .function_decl => self.recordOneDefaultArity(node),
+            // exhaustive: only a named function declaration carries a
+            // signature a call resolves by name. Anything else records nothing.
+            else => {},
+        }
+    }
+
+    fn recordOneDefaultArity(self: *TypeChecker, node: NodeIndex) void {
+        const decl = self.ir_view.getVarDecl(node) orelse return;
+        const func = self.ir_view.getFunction(decl.init) orelse return;
+        if (!func.flags.has_default_params) return;
+        const fn_name = self.resolveAtomName(decl.binding.name_atom) orelse return;
+        const loc = self.ir_view.getLoc(decl.init) orelse return;
+
+        // The first defaulted position bounds the minimum arity. A default in
+        // any earlier position is refused by ZTS617, and reading only the
+        // first one keeps this pass from claiming an arity that rule denies.
+        var required: u8 = 0;
+        while (required < func.params_count) : (required += 1) {
+            const param_idx = self.ir_view.getListIndex(func.params_start, required);
+            const elem = self.ir_view.getPatternElem(param_idx) orelse return;
+            if (elem.default_value != null_node) break;
+        }
+        self.env.setRequiredParamCount(fn_name, loc.line, required);
+    }
+
     fn admitTypePredicates(self: *TypeChecker, node: NodeIndex, depth: u8) void {
         if (depth > 32) return;
         const tag = self.ir_view.getTag(node) orelse return;
@@ -2946,6 +2997,26 @@ pub const TypeChecker = struct {
             const key = bindingKey(binding);
             self.param_types.put(self.allocator, key, param_type) catch self.markAllocationFailure();
             self.env.bindVarType(binding.scope_id, binding.name_atom, param_type) catch self.markAllocationFailure();
+        }
+    }
+
+    /// Check every declared parameter default against the parameter's declared
+    /// type. Omission selects the default, so a default the type does not admit
+    /// is a value the body would see under a type that denies it.
+    fn checkParamDefaults(self: *TypeChecker, func: ir.Node.FunctionExpr, sig: type_env_mod.FunctionSig) void {
+        if (!func.flags.has_default_params) return;
+        for (0..func.params_count) |i| {
+            if (i >= sig.param_count) return;
+            const declared = sig.param_types[i];
+            if (declared == null_type_idx) continue;
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            const elem = self.ir_view.getPatternElem(param_idx) orelse continue;
+            if (elem.default_value == null_node) continue;
+            const inferred = self.inferType(elem.default_value);
+            if (inferred == null_type_idx) continue;
+            if (!self.env.isAssignableTo(inferred, declared)) {
+                self.addTypeMismatch(elem.default_value, declared, inferred);
+            }
         }
     }
 

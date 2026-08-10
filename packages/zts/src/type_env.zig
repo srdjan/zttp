@@ -1334,6 +1334,20 @@ pub const TypeEnv = struct {
         return self.source_fn_sigs_by_name.get(name);
     }
 
+    /// Record the minimum arity of a source function: the number of leading
+    /// parameters that declare no default, and so cannot be omitted.
+    ///
+    /// The signature scan reads annotation text and never sees a default, so
+    /// the count comes from the IR after parse. The maximum arity is
+    /// `param_count`, which the scan already carries. Both keys are updated
+    /// because a call resolves the signature by name and a function expression
+    /// resolves it by declaration line.
+    pub fn setRequiredParamCount(self: *TypeEnv, name: []const u8, line: u32, required: u8) void {
+        if (self.fn_sigs_by_name.getPtr(name)) |sig| sig.required_param_count = required;
+        if (self.source_fn_sigs_by_name.getPtr(name)) |sig| sig.required_param_count = required;
+        if (self.fn_signatures.getPtr(line)) |sig| sig.required_param_count = required;
+    }
+
     /// Look up a type alias by name.
     pub fn getTypeAlias(self: *const TypeEnv, name: []const u8) ?TypeIndex {
         return self.type_aliases.get(name);
