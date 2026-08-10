@@ -463,6 +463,10 @@ pub fn build(b: *std.Build) void {
     const docs_drift_step = b.step("test-docs-drift", "Check docs against current registry and build paths");
     docs_drift_step.dependOn(&docs_drift.step);
 
+    const idiom_table = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-idiom-table.sh" });
+    const idiom_table_step = b.step("test-idiom-table", "Check spec 4.2.1's idiom table against the registry");
+    idiom_table_step.dependOn(&idiom_table.step);
+
     const doc_links = b.addSystemCommand(&.{ "/bin/bash", "scripts/audit-docs.sh" });
     const doc_links_step = b.step("test-doc-links", "Check docs for broken relative links");
     doc_links_step.dependOn(&doc_links.step);

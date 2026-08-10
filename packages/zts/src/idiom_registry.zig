@@ -7,12 +7,17 @@
 //! `advisory` severity, rewritten where the rewrite is provable, and otherwise
 //! left alone.
 //!
-//! Phase 0 seeds only the rows that need no language the engine lacks today.
-//! The Result, fold, and search-loop rows arrive with the features they
-//! describe (master plan phases 4 and 6); the Dict rows arrived with `Dict`.
+//! The table is complete against spec 4.2.1: 24 rows, in the document's own
+//! order, held there by `scripts/check-idiom-table.sh`. Phase 0 seeded the rows
+//! that needed no language the engine lacked; the Dict rows arrived with
+//! `Dict`; the `Result`, selection, record-update, fold, and search-loop rows
+//! arrived in phase 6, once phase 4 had shipped the features they describe.
+//!
 //! `rewrite_rule` names the canonicalize rewrite that implements the row; it
 //! stays null until that rewrite is wired, and a row with no rewrite is
-//! advisory-only.
+//! advisory-only. Completeness of the table is not completeness of the rewrite
+//! lane: one row names a rewrite today, and the other 23 are preferences the
+//! profile reports or stays quiet about.
 //!
 //! Three of the four Dict rows are also reported: `dictionary map` and
 //! `dictionary filter` share ZTS627 - one round trip, two destinations,
@@ -57,6 +62,22 @@ pub const entries = [_]IdiomEntry{
         .idiomatic = "x?.f",
         .superseded = "x === undefined ? undefined : x.f",
         .precondition = "operand type excludes null and is neither a generic parameter nor unknown",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.two-way-pure-selection",
+        .operation = "two-way pure selection",
+        .idiomatic = "c ? a : b",
+        .superseded = "a two-arm match over a boolean scrutinee whose arms are both pure",
+        .precondition = "none",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.record-update",
+        .operation = "record update",
+        .idiomatic = "an explicit literal",
+        .superseded = "a leading spread that overrides every field",
+        .precondition = "the spread operand is pure",
         .rewrite_rule = null,
     },
     .{
@@ -124,6 +145,22 @@ pub const entries = [_]IdiomEntry{
         .rewrite_rule = null,
     },
     .{
+        .id = "idiom.result-default",
+        .operation = "Result default",
+        .idiomatic = "unwrapOr(r, d)",
+        .superseded = "r.ok ? r.value : d, a two-arm match whose arms are the value and a constant",
+        .precondition = "d is assignable to T",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.result-sequence",
+        .operation = "Result sequence",
+        .idiomatic = "collectAll(rs)",
+        .superseded = "a reduce over Result values whose body is andThen",
+        .precondition = "the fold has no other accumulator",
+        .rewrite_rule = null,
+    },
+    .{
         .id = "idiom.dictionary-map",
         .operation = "dictionary map",
         .idiomatic = "dictMapValues(d, f)",
@@ -145,6 +182,22 @@ pub const entries = [_]IdiomEntry{
         .idiomatic = "dictFold(d, f, init)",
         .superseded = "dictEntries(d).reduce(...)",
         .precondition = "the fold has one accumulator",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.pure-single-accumulator-fold",
+        .operation = "pure single-accumulator fold",
+        .idiomatic = "map, then filter, then some, then every, then find, then findIndex, then reduce: the first that fits",
+        .superseded = "let plus for...of with no break, continue, or effect",
+        .precondition = "the body is pure and the loop head is already idiomatic under the element-iteration row",
+        .rewrite_rule = null,
+    },
+    .{
+        .id = "idiom.pure-search-loop",
+        .operation = "pure search loop",
+        .idiomatic = "find, findIndex, some, or every, by what the loop yields and whether its flag starts false or true",
+        .superseded = "let plus for...of whose only early exit is break",
+        .precondition = "the body is pure, carries one accumulator, uses no continue, and the loop head is already idiomatic under the element-iteration row",
         .rewrite_rule = null,
     },
     .{
@@ -183,11 +236,12 @@ pub const entries = [_]IdiomEntry{
         .id = "idiom.element-iteration",
         .operation = "element iteration",
         .idiomatic = "for (const item of items)",
-        // The second spelling is beyond spec 4.2.1's table, which lists only the
-        // range-index form. The repo has rewritten the entries-alias form since
-        // before this program (ZTS619), and it supersedes the same idiomatic
-        // spelling for the same operation, so it belongs on this row. Spec edit
-        // owed: add it to the table's non-idiomatic column.
+        // The second spelling was beyond spec 4.2.1's table, which listed only
+        // the range-index form. The repo has rewritten the entries-alias form
+        // since before this program (ZTS619), and it supersedes the same
+        // idiomatic spelling for the same operation, so it belongs on this row.
+        // The owed spec edit was paid in phase 6 task 2, and the drift gate
+        // now holds the two texts together.
         .superseded = "for...of over range(items.length) whose body only indexes items, for...of over items.entries() whose index alias is never read",
         .precondition = "none",
         .rewrite_rule = "drop_unused_index_alias",
@@ -267,7 +321,11 @@ test "idiom registry has unique stable ids" {
             try std.testing.expect(!std.mem.eql(u8, entry.id, other.id));
         }
     }
-    try std.testing.expect(entries.len >= 8);
+    // The count spec 4.2.1's table carries. A row added to the document and not
+    // here fails `scripts/check-idiom-table.sh`; a row added here and not there
+    // fails it too. This asserts the number itself so a same-size swap of one
+    // row for another still has to face the text comparison.
+    try std.testing.expectEqual(@as(usize, 24), entries.len);
 }
 
 test "idiom registry rows are fully populated" {

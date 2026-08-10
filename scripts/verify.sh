@@ -64,6 +64,9 @@ bash scripts/test-examples.sh
 step "bash scripts/check-normalize-idempotent.sh  (double-normalize byte-idempotence)"
 bash scripts/check-normalize-idempotent.sh
 
+step "bash scripts/check-idiom-table.sh  (spec 4.2.1 table against the registry)"
+bash scripts/check-idiom-table.sh
+
 step "bash scripts/check-agent-determinism.sh  (v2 agent transport determinism)"
 bash scripts/check-agent-determinism.sh
 

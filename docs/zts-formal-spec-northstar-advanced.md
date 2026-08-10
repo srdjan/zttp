@@ -351,7 +351,7 @@ registry-generated and drift-gated; this document is its readable view.
 | multi-field read | `const { id, name } = user;`, or `const [first, second] = pair;` for a tuple | two or more member or fixed-tuple index reads of the same binding in one block | the binding's type is a single record type or a fixed tuple, and no narrowing guard separates the reads |
 | matched field read | a binding pattern field | a `match` arm that reads the field off the scrutinee | none |
 | binding field name | shorthand `{ value }` | `{ value: value }` | none |
-| element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items` | none |
+| element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items`, `for...of` over `items.entries()` whose index alias is never read | none |
 
 Three entries are declared preferences rather than derivations, recorded here
 so no reader has to infer them:
