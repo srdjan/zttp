@@ -310,10 +310,37 @@ body is data from the host, not from the arguments.
 The three `examples/fetch/` handlers are re-typed in the same commit, since they
 are half of the roadmap's exit sentence.
 
-**Tests:** an options object with a bad method literal is refused; a `Bytes` body
-is admitted and a number body is not; the error arm is reachable and its members
-are the declared ones; the three examples check clean and their recorded I/O
-fixtures still replay.
+**Tests:** an options object with a bad method literal is refused; a `Bytes`
+body is admitted and a number body is not, measured through `fetchSync` because
+the replay path stubs `fetch` before its init is parsed; `FetchOptions` names
+what the runtime reads and not `timeoutMs`; the three examples check clean and
+their recorded I/O fixtures still replay.
+
+`FetchOptions` is not section 7.2's shape verbatim, and every difference is
+measured against `runtime_http.zig` rather than chosen.
+
+`timeoutMs` is absent: the spec names it and nothing reads it, so declaring it
+would type a value that does nothing.
+
+`query`, `maxResponseBytes`, and `durable` are present and the spec omits all
+three. Each ships and each is read. `query` in particular is what keeps an
+egress host a compile-time literal while its values vary per request, which is
+the property `examples/fetch/weather-app.ts` exists to prove.
+
+`headers` is the opaque `object` where the spec writes `Dict<string, string>`.
+The runtime walks an object's properties and has no Dict path, so the spec's
+type would refuse the object-literal form every handler uses and admit a Dict
+the runtime would ignore - wrong in both directions at once. Aligning the two
+ends is a runtime change and belongs with the phase 7 pass that also closes
+`timeoutMs`.
+
+`body` is `string | Bytes`, the spec's own type, and it was a lie until this
+task: the runtime answered `InvalidBody` for a Bytes. It accepts one now.
+
+The return stays the precise response record rather than `Result<Response,
+FetchError>`, for the reason already recorded under task 5: the checker's
+`Result` has no type parameters, so both arms collapse. Phase 7's parameterized
+`Result` is where that lands, alongside `responseJson` and `requestJson`.
 
 ### Task 7: WebSocket and queue re-typed
 
