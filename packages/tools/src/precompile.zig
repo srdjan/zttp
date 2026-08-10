@@ -5093,24 +5093,6 @@ test "writeCapabilityPolicy emits zig-fmt stable empty allowlists" {
     try std.testing.expect(std.mem.indexOf(u8, output.items, ".values = &[_][]const u8{\n        },") == null);
 }
 
-test "generated types expose the executable WebSocket contract" {
-    const allocator = std.testing.allocator;
-
-    var output = std.ArrayList(u8).empty;
-    defer output.deinit(allocator);
-    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
-
-    generateTypeDefs(&aw.writer);
-    output = aw.toArrayList();
-
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        output.items,
-        "export function setAutoResponse(arg0: Record<string, unknown>, arg1: string, arg2: string): void;",
-    ) != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "roomFromPath") == null);
-}
-
 test {
     _ = @import("precompile_args.zig");
     _ = @import("transpiler.zig");

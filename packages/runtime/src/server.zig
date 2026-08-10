@@ -27,10 +27,6 @@ const fault_explain = @import("fault_explain.zig");
 const incident_log = @import("incident_log.zig");
 const RuntimeContract = contract_runtime.RuntimeContract;
 const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
-const ws_gateway = @import("ws_gateway.zig");
-const ws_frame_loop = @import("ws_frame_loop.zig");
-const websocket_pool = @import("websocket_pool.zig");
-const websocket_workers = @import("websocket_workers.zig");
 const in_process_dispatch = @import("in_process_dispatch.zig");
 const SystemRuntime = in_process_dispatch.SystemRuntime;
 const actor_queue = @import("actor_queue.zig");
@@ -60,7 +56,6 @@ const createUnixSocketPair = io_mod.createUnixSocketPair;
 const writevAllFd = io_mod.writevAllFd;
 const defaultPoolSize = io_mod.defaultPoolSize;
 const initIoBackend = io_mod.initIoBackend;
-const requestIsWebSocketUpgrade = http_types.requestIsWebSocketUpgrade;
 const etagMatchesIfNoneMatch = http_types.etagMatchesIfNoneMatch;
 const findHeaderValue = http_types.findHeaderValue;
 const formatETag = response_mod.formatETag;
@@ -631,29 +626,6 @@ const ConnectionPool = struct {
             return outcome_if_alive;
         }
 
-        // WebSocket upgrade: if the handler contract advertises an
-        // onMessage export and the request carries an RFC 6455 upgrade,
-        // hand the fd off to the ws frame-loop thread. `.transferred`
-        // signals the outer loop to skip the fd close — the frame loop
-        // owns the socket lifecycle from here on.
-        if (self.server.contract) |*contract| {
-            if (contract.websocket().on_message and requestIsWebSocketUpgrade(request.headers.items)) {
-                const request_view = HttpRequestView{
-                    .method = request.method,
-                    .url = request.url,
-                    .path = request.path,
-                    .query_params = request.query_params,
-                    .headers = request.headers,
-                    .body = request.body,
-                };
-                return self.handleWebSocketUpgradeSync(fd, &request_view, req_allocator, &access_status) catch |err| ret: {
-                    std.log.warn("websocket upgrade failed: {}", .{err});
-                    access_status = 500;
-                    break :ret .close;
-                };
-            }
-        }
-
         // Handle static files
         if (self.server.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.path, "/static/")) {
@@ -1121,132 +1093,6 @@ const ConnectionPool = struct {
         try writeAllFd(fd, response);
     }
 
-    /// Drive ws_gateway.upgrade for a single request. Capacity and a joinable
-    /// worker are secured before the 101 response is written. The worker stays
-    /// gated until that write succeeds, preventing onOpen/frame output from
-    /// racing ahead of the HTTP handshake.
-    fn handleWebSocketUpgradeSync(
-        self: *ConnectionPool,
-        fd: std.posix.fd_t,
-        request: *const HttpRequestView,
-        req_allocator: std.mem.Allocator,
-        status_out: *u16,
-    ) !RequestOutcome {
-        var reservation = self.server.ws_workers.reserve() catch |err| switch (err) {
-            error.AtCapacity, error.Stopping => {
-                status_out.* = 503;
-                try self.sendErrorSync(fd, 503, "WebSocket Capacity Reached");
-                return .close;
-            },
-            error.OutOfMemory => return error.OutOfMemory,
-        };
-        defer reservation.cancel();
-
-        const pool = try self.ensureWebSocketPool();
-
-        var buf: std.ArrayList(u8) = .empty;
-        defer buf.deinit(req_allocator);
-        var aw: std.Io.Writer.Allocating = .fromArrayList(req_allocator, &buf);
-
-        const upgrade_outcome = try ws_gateway.upgrade(pool, &aw.writer, fd, request, unixMillisNow());
-        buf = aw.toArrayList();
-
-        switch (upgrade_outcome) {
-            .ok => |id| {
-                // ws_gateway has validated and registered the fd but only wrote
-                // the handshake into the staging buffer. Spawn the gated worker
-                // now so thread creation failure still leaves the real socket in
-                // HTTP ownership and no 101 has reached the peer.
-                const worker = self.spawnFrameLoop(&reservation, pool, fd, id) catch |err| {
-                    std.log.warn("ws frame-loop spawn failed: {}", .{err});
-                    pool.unregister(id);
-                    return .close;
-                };
-
-                writeAllFd(fd, buf.items) catch |err| {
-                    std.log.warn("ws upgrade handshake write failed: {}", .{err});
-                    self.server.ws_workers.cancel(worker);
-                    // The joinable worker owns and will close the fd; returning
-                    // transferred prevents the HTTP defer from closing it twice.
-                    return .transferred;
-                };
-                status_out.* = 101;
-                if (!self.server.ws_workers.start(worker)) return .transferred;
-                return .transferred;
-            },
-            .reject => |reason| {
-                status_out.* = reason.status;
-                if (reason.wants_version_header) {
-                    var out_buf: [256]u8 = undefined;
-                    const response = std.fmt.bufPrint(
-                        &out_buf,
-                        "HTTP/1.1 {d} {s}\r\nSec-WebSocket-Version: 13\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                        .{ reason.status, reason.reason },
-                    ) catch return .close;
-                    try writeAllFd(fd, response);
-                } else {
-                    try self.sendErrorSync(fd, reason.status, reason.reason);
-                }
-                return .close;
-            },
-        }
-    }
-
-    /// Spawn a server-owned, joinable frame-loop worker in its gated state.
-    /// Inbound frames are routed to the handler's JS `onMessage` export when
-    /// the handler pool is live; tests/degraded boot retain codec-level echo.
-    fn spawnFrameLoop(
-        self: *ConnectionPool,
-        reservation: *websocket_workers.Reservation,
-        pool: *websocket_pool.Pool,
-        fd: std.posix.fd_t,
-        id: websocket_pool.ConnectionId,
-    ) !websocket_workers.WorkerHandle {
-        const handler_pool_ptr: ?*HandlerPool = if (self.server.pool) |*p| p else null;
-        const cfg = ws_frame_loop.Config{
-            .pool = pool,
-            .io = self.server.io_backend.io(),
-            .fd = fd,
-            .id = id,
-            .alloc = self.server.allocator,
-            .echo = handler_pool_ptr == null,
-            .handler_pool = handler_pool_ptr,
-            // Let WS dispatches participate in the live-reload drain so a swap's
-            // generation-retirement cannot free a dev policy an in-flight
-            // onMessage still borrows (SR1).
-            .contract_lock = &self.server.contract_lock,
-            .reload_active = &self.server.reload_active,
-            .shutdown_deadline_ns = &self.server.ws_shutdown_deadline_ns,
-        };
-        return self.server.ws_workers.spawn(reservation, cfg);
-    }
-
-    /// Get (or lazily initialise) the server's WebSocket connection
-    /// pool. When `--durable` is set, the pool's attachments dir is
-    /// wired up so `serializeAttachment` writes land under
-    /// `<durable>/ws/` and survive restarts. Fails hard on persistence
-    /// setup errors: a misconfigured durable dir should not silently
-    /// degrade to in-memory behaviour.
-    fn ensureWebSocketPool(self: *ConnectionPool) !*websocket_pool.Pool {
-        self.server.ws_pool_mutex.lock();
-        defer self.server.ws_pool_mutex.unlock();
-        if (self.server.ws_pool == null) {
-            var pool = websocket_pool.Pool.initWithLimit(
-                self.server.allocator,
-                self.server.config.max_websocket_connections,
-            );
-            errdefer pool.deinit();
-            if (self.server.config.runtime_config.durable_oplog_dir) |dir| {
-                var store = durable_store_mod.DurableStore.initFs(self.server.allocator, dir);
-                const ws_dir = try store.subtreeDir(self.server.allocator, "ws");
-                defer self.server.allocator.free(ws_dir);
-                try pool.setAttachmentsDir(ws_dir);
-            }
-            self.server.ws_pool = pool;
-        }
-        return &self.server.ws_pool.?;
-    }
-
     fn serveStaticFileSync(
         self: *ConnectionPool,
         fd: std.posix.fd_t,
@@ -1374,9 +1220,6 @@ pub const ServerConfig = struct {
 
     /// Number of runtime instances in pool (0 = auto)
     pool_size: usize = 0,
-
-    /// Maximum live WebSocket connections. Zero disables WebSocket upgrades.
-    max_websocket_connections: usize = 1024,
 
     /// Log requests to stdout
     log_requests: bool = true,
@@ -1629,16 +1472,6 @@ pub const Server = struct {
     /// The HUD's "Caller view" lens consumes this; verifiers can pin it
     /// with `zttp verify --trust-key <hex>`.
     signer_fingerprint_hex: ?[64]u8,
-    /// WebSocket connection registry. Initialised lazily on the first
-    /// upgrade attempt; a handler with no WS exports pays zero cost.
-    ws_pool: ?websocket_pool.Pool = null,
-    /// Guards ws_pool lazy initialisation against concurrent upgrade attempts.
-    ws_pool_mutex: engine.Mutex = .{},
-    /// Joinable WebSocket worker ownership and admission accounting.
-    ws_workers: websocket_workers.Registry,
-    /// Absolute monotonic deadline for WebSocket callbacks that begin while
-    /// graceful shutdown is joining frame-loop workers. Zero while serving.
-    ws_shutdown_deadline_ns: std.atomic.Value(u64) = .init(0),
     /// Co-located sub-handler registry for in-process `zttp:workflow.call`,
     /// built from `--system <manifest>` in `start()`. Each pooled orchestrator
     /// runtime references it via `RuntimeConfig.system_registry`. Null when no
@@ -1723,21 +1556,12 @@ pub const Server = struct {
             .attestation_headers = null,
             .well_known_doc = null,
             .signer_fingerprint_hex = null,
-            .ws_pool = null,
-            .ws_workers = websocket_workers.Registry.init(allocator, cfg.max_websocket_connections),
-            .ws_shutdown_deadline_ns = .init(0),
         };
     }
 
     pub fn deinit(self: *Self) void {
-        // Prevent new upgrade reservations before connection workers finish.
-        self.ws_workers.stopAccepting();
         // Stop connection pool first (if using thread pool mode)
         if (self.conn_pool) |cp| cp.deinit();
-
-        // Frame loops borrow handler/ws pools, reload state, and io_backend.
-        // Join every loop before any of those objects are destroyed.
-        self.ws_workers.deinit();
 
         if (self.pool) |*p| p.deinit();
         // Pool drained: no runtime can still be writing to the incident log fd.
@@ -1747,7 +1571,6 @@ pub const Server = struct {
         if (self.system_runtime) |*sr| sr.deinit();
         if (self.actor_queue) |*q| q.deinit();
         if (self.proof_cache) |*pc| pc.deinit();
-        if (self.ws_pool) |*wsp| wsp.deinit();
         if (self.contract) |*c| c.deinit();
         if (self.attestation_headers) |*ah| ah.deinit(self.allocator);
         if (self.well_known_doc) |*wkd| wkd.deinit(self.allocator);
@@ -2467,10 +2290,6 @@ pub const Server = struct {
     /// `request_timeout_ms` bounds it.
     pub fn shutdown(self: *Self, grace_ms: u32) void {
         self.running = false;
-        const now_ns = engine.monotonicNowNs() catch 0;
-        const grace_ns = @as(u64, grace_ms) * std.time.ns_per_ms;
-        const deadline_ns = std.math.add(u64, now_ns, grace_ns) catch std.math.maxInt(u64);
-        self.ws_shutdown_deadline_ns.store(deadline_ns, .release);
         // Close listener so a blocked accept() wakes immediately.
         if (self.evented_ready) {
             const io = self.io_backend.io();
@@ -2479,7 +2298,6 @@ pub const Server = struct {
                 self.listener = null;
             }
         }
-        self.ws_workers.stopAndJoin();
         // Drain: wait up to grace_ms for active JS executions to finish.
         // std.time.sleep/milliTimestamp do not exist in Zig 0.16; poll with
         // std.c.nanosleep (same pattern as fetchWithRetry in modules/net/fetch.zig).
@@ -2491,11 +2309,6 @@ pub const Server = struct {
                 waited_ms += 5;
             }
         }
-    }
-
-    /// Snapshot WebSocket admission pressure for tests and embedding hosts.
-    pub fn websocketWorkerStats(self: *Self) websocket_workers.Stats {
-        return self.ws_workers.stats();
     }
 
     /// Parse HTTP request from a pre-read buffer (synchronous path for thread pool).

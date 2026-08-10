@@ -19,7 +19,6 @@ comptime {
     assertOrdinal(sdk.EffectClass.none, internal.EffectClass.none, "EffectClass");
     assertOrdinal(sdk.ReturnKind.result, internal.ReturnKind.result, "ReturnKind");
     assertOrdinal(sdk.FailureSeverity.none, internal.FailureSeverity.none, "FailureSeverity");
-    assertOrdinal(sdk.ModuleCapability.websocket, internal.ModuleCapability.websocket, "ModuleCapability");
     assertOrdinal(sdk.ContractCategory.extension_specific, internal.ContractCategory.extension_specific, "ContractCategory");
     assertOrdinal(sdk.LawKind.absorbing, internal.LawKind.absorbing, "LawKind");
 }

@@ -39,7 +39,6 @@ pub const DurableWorkflowProperties = contract_types.DurableWorkflowProperties;
 pub const DurableWorkflow = contract_types.DurableWorkflow;
 pub const DurableInfo = contract_types.DurableInfo;
 pub const ScopeInfo = contract_types.ScopeInfo;
-pub const WebSocketInfo = contract_types.WebSocketInfo;
 pub const ApiSchemaInfo = contract_types.ApiSchemaInfo;
 pub const ApiRequestInfo = contract_types.ApiRequestInfo;
 pub const ApiAuthInfo = contract_types.ApiAuthInfo;

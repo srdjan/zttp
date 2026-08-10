@@ -16,7 +16,6 @@ pub const ModuleCapability = enum {
     filesystem,
     network,
     policy_check,
-    websocket,
 };
 
 /// Borrowed authorization metadata for the module call currently executing in

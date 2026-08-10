@@ -112,7 +112,6 @@ zts modules/internal/resolver.zig
 zts modules/internal/util.zig
 zts modules/net/fetch.zig
 zts modules/net/service.zig
-zts modules/net/websocket.zig
 zts modules/root.zig
 zts modules/workflow/durable.zig
 zts modules/data/bytes_mod.zig
@@ -200,7 +199,6 @@ zts-compiler type_env.zig
 zts-compiler type_key.zig
 zts-compiler type_pool.zig
 zts-compiler witness_corpus.zig
-zts-compiler ws_consistency.zig
 
 # zts-umbrella
 # root.zig is the module every consumer imports. It re-exports the four tiers

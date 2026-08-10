@@ -64,7 +64,6 @@ pub const ModuleCapability = enum {
     filesystem,
     network,
     policy_check,
-    websocket,
 };
 
 pub const ModuleCapabilityError = error{

@@ -10,7 +10,6 @@ const compat = zq.compat;
 const contract_runtime = @import("contract_runtime.zig");
 const durable_store_mod = @import("durable_store.zig");
 const durable_fetch = @import("durable_fetch.zig");
-const websocket_pool = @import("websocket_pool.zig");
 const http_types = @import("http_types.zig");
 const embedded_handler = @import("embedded_handler");
 

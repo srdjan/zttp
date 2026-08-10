@@ -84,7 +84,6 @@ Import via `import { fn } from "zttp:module"`. Most implementations live in `pac
 | `zttp:sql` | `sql`, `sqlOne`, `sqlMany`, `sqlExec` |
 | `zttp:service` | `serviceCall` |
 | `zttp:fetch` | `fetch(url, options?: FetchOptions)`, `fetchWithRetry` |
-| `zttp:websocket` | `send`, `close`, `serializeAttachment`, `deserializeAttachment`, `getWebSockets`, `setAutoResponse` |
 | `zttp:io` | `parallel`, `race` |
 | `zttp:durable` | `run`, `step`, `stepWithTimeout`, `sleep`, `sleepUntil`, `waitSignal`, `signal`, `signalAt` |
 | `zttp:workflow` | `call`, `saga`, `fanout`, `follow` |

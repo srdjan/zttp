@@ -81,16 +81,6 @@ pub const ProvenFacts = struct {
     durable_workflow_idempotent: bool = false,
     durable_workflow_fault_covered: bool = false,
 
-    // WebSocket event exports. When any is true the handler upgrades
-    // incoming `Upgrade: websocket` requests and dispatches through
-    // zttp:websocket. Deploy targets that need a different binding
-    // (e.g. Cloudflare Durable Objects) can branch on `has_websocket`.
-    has_websocket: bool = false,
-    websocket_on_open: bool = false,
-    websocket_on_message: bool = false,
-    websocket_on_close: bool = false,
-    websocket_on_error: bool = false,
-
     // `zttp:fetch` host set. Populated from the contract's egress
     // hosts when the handler imports `zttp:fetch`. Rendered as a
     // separate allow-list so targets can distinguish "fetchSync
@@ -175,8 +165,6 @@ pub fn extractProvenFacts(
     const imports_fetch = containsString(contract.modules.items, "zttp:fetch");
     const fetch_hosts: []const []const u8 = if (imports_fetch) contract.egress.hosts.items else &.{};
 
-    const ws = contract.websocket;
-    const has_ws = ws.on_open or ws.on_message or ws.on_close or ws.on_error;
     const cost_total: ?handler_contract.Bound = if (contract.cost_envelope) |envelope| envelope.total else null;
 
     return .{
@@ -214,11 +202,6 @@ pub fn extractProvenFacts(
             .durable_workflow_retry_safe = contract.durable.workflow.properties.retry_safe,
             .durable_workflow_idempotent = contract.durable.workflow.properties.idempotent,
             .durable_workflow_fault_covered = contract.durable.workflow.properties.fault_covered,
-            .has_websocket = has_ws,
-            .websocket_on_open = ws.on_open,
-            .websocket_on_message = ws.on_message,
-            .websocket_on_close = ws.on_close,
-            .websocket_on_error = ws.on_error,
             .fetch_hosts = fetch_hosts,
         },
         .checks_buf = checks_buf,
@@ -326,17 +309,6 @@ fn renderAws(allocator: std.mem.Allocator, facts: *const ProvenFacts) ![]const R
     try w.writeAll(" }");
     if (!facts.env_proven) {
         try w.writeAll(",\n      \"envReview\": \"handler uses dynamic env access - additional vars may be needed\"");
-    }
-    if (facts.has_websocket) {
-        try w.writeAll(",\n      \"websocket\": { \"onOpen\": ");
-        try w.writeAll(if (facts.websocket_on_open) "true" else "false");
-        try w.writeAll(", \"onMessage\": ");
-        try w.writeAll(if (facts.websocket_on_message) "true" else "false");
-        try w.writeAll(", \"onClose\": ");
-        try w.writeAll(if (facts.websocket_on_close) "true" else "false");
-        try w.writeAll(", \"onError\": ");
-        try w.writeAll(if (facts.websocket_on_error) "true" else "false");
-        try w.writeAll(" }");
     }
     if (facts.fetch_hosts.len > 0) {
         try w.writeAll(",\n      \"fetchHosts\": [");
@@ -1484,39 +1456,6 @@ test "writeSanitizedId converts route pattern" {
     try std.testing.expectEqualStrings("RouteApiUsers", output.items);
 }
 
-test "renderAws exposes websocket metadata when the handler has ws events" {
-    const allocator = std.testing.allocator;
-
-    const facts = ProvenFacts{
-        .handler_name = "chat",
-        .handler_path = "examples/websocket/chat.ts",
-        .env_vars = &.{},
-        .env_proven = true,
-        .egress_hosts = &.{},
-        .egress_proven = true,
-        .cache_namespaces = &.{},
-        .cache_proven = true,
-        .routes = &.{},
-        .proof_level = .none,
-        .checks_passed = &.{},
-        .has_websocket = true,
-        .websocket_on_open = true,
-        .websocket_on_message = true,
-        .websocket_on_close = true,
-    };
-
-    const outputs = try renderAws(allocator, &facts);
-    defer {
-        for (outputs) |o| allocator.free(o.content);
-        allocator.free(outputs);
-    }
-
-    const content = outputs[0].content;
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"websocket\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"onMessage\": true") != null);
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"onError\": false") != null);
-}
-
 test "renderAws exposes fetchHosts when the handler imports zttp:fetch" {
     const allocator = std.testing.allocator;
 
@@ -1637,7 +1576,7 @@ test "renderCloudflareWorkers omits routes and vars blocks when neither is prese
     try std.testing.expect(std.mem.indexOf(u8, content, "fetch_hosts") == null);
 }
 
-test "renderAws omits websocket and fetch blocks when absent" {
+test "renderAws omits the fetch block when absent" {
     const allocator = std.testing.allocator;
 
     const facts = ProvenFacts{
@@ -1661,6 +1600,5 @@ test "renderAws omits websocket and fetch blocks when absent" {
     }
 
     const content = outputs[0].content;
-    try std.testing.expect(std.mem.indexOf(u8, content, "\"websocket\"") == null);
     try std.testing.expect(std.mem.indexOf(u8, content, "\"fetchHosts\"") == null);
 }

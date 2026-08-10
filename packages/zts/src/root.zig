@@ -134,7 +134,6 @@ pub const idiom_registry = compiler.idiom_registry;
 pub const restriction_registry = compiler.restriction_registry;
 pub const repair_intent = compiler.repair_intent;
 pub const repair_validator = compiler.repair_validator;
-pub const ws_consistency = compiler.ws_consistency;
 pub const spec_discharge = compiler.spec_discharge;
 pub const function_specs = compiler.function_specs;
 pub const module_binding = engine.module_binding;

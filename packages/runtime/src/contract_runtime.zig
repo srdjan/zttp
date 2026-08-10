@@ -81,20 +81,6 @@ pub fn derivePoolingPolicy(contract: ?*const ValidatedRuntimeContract) PoolingPo
 
 /// Runtime view of the proven contract.
 /// Owns all allocated memory; call deinit() when done.
-/// Mirrors `handler_contract.WebSocketInfo` for the parsed runtime
-/// contract. The server consults `on_message` at accept time to decide
-/// whether to look for an RFC 6455 Upgrade header on incoming requests.
-pub const WebSocketInfo = struct {
-    on_open: bool = false,
-    on_message: bool = false,
-    on_close: bool = false,
-    on_error: bool = false,
-
-    pub fn any(self: WebSocketInfo) bool {
-        return self.on_open or self.on_message or self.on_close or self.on_error;
-    }
-};
-
 pub const RuntimeContract = struct {
     env_vars: []const []const u8,
     env_dynamic: bool,
@@ -110,7 +96,6 @@ pub const RuntimeContract = struct {
     reads_request_state: bool = false,
     properties: Properties,
     durable_workflow_properties: DurableWorkflowProperties = .{},
-    websocket: WebSocketInfo = .{},
     /// Null when the embedded contract did not emit a sandbox block (old
     /// contract, or contract parse fell through). A non-null matrix with
     /// len == 0 is a legitimate state for handlers that import only
@@ -232,10 +217,6 @@ pub const ValidatedRuntimeContract = struct {
 
     pub fn durableWorkflowProperties(self: *const ValidatedRuntimeContract) DurableWorkflowProperties {
         return self.inner.durable_workflow_properties;
-    }
-
-    pub fn websocket(self: *const ValidatedRuntimeContract) WebSocketInfo {
-        return self.inner.websocket;
     }
 
     pub fn hasCapability(self: *const ValidatedRuntimeContract, cap: ModuleCapability) bool {
@@ -463,12 +444,6 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
             .idempotent = hc.durable.workflow.properties.idempotent,
             .fault_covered = hc.durable.workflow.properties.fault_covered,
         },
-        .websocket = .{
-            .on_open = hc.websocket.on_open,
-            .on_message = hc.websocket.on_message,
-            .on_close = hc.websocket.on_close,
-            .on_error = hc.websocket.on_error,
-        },
         .capabilities = hc.capabilities,
         .artifact_sha256 = hc.artifact_sha256,
         .policy_hash = hc.policy_hash,
@@ -524,79 +499,6 @@ pub fn verifyArtifactHash(contract: *const RuntimeContract, bytecode: ?[]const u
 // ============================================================================
 // Tests
 // ============================================================================
-
-test "parseContractJson extracts websocket event presence flags" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\{
-        \\  "version": 14,
-        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
-        \\  "routes": [],
-        \\  "modules": [],
-        \\  "functions": {},
-        \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
-        \\  "serviceCalls": [],
-        \\  "cache": {"namespaces": [], "dynamic": false},
-        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
-        \\  "durable": {"used": false, "keys": {"literal": [], "dynamic": false}, "steps": [], "timers": false, "signals": {"literal": [], "dynamic": false}, "producerKeys": {"literal": [], "dynamic": false}},
-        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [], "schemasDynamic": false, "routesDynamic": false},
-        \\  "verification": null,
-        \\  "websocket": {"onOpen": true, "onMessage": true, "onClose": true, "onError": false},
-        \\  "aot": null,
-        \\  "faultCoverage": null,
-        \\  "rateLimiting": null,
-        \\  "properties": null,
-        \\  "behaviors": [],
-        \\  "behaviorsExhaustive": false
-        \\}
-    ;
-    var raw = try parseContractJson(allocator, source);
-    defer raw.deinit();
-    const contract = &raw.inner;
-
-    try std.testing.expect(contract.websocket.on_open);
-    try std.testing.expect(contract.websocket.on_message);
-    try std.testing.expect(contract.websocket.on_close);
-    try std.testing.expect(!contract.websocket.on_error);
-    try std.testing.expect(contract.websocket.any());
-}
-
-test "parseContractJson defaults websocket to all-false when section absent" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\{
-        \\  "version": 14,
-        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
-        \\  "routes": [],
-        \\  "modules": [],
-        \\  "functions": {},
-        \\  "env": {"literal": [], "dynamic": false},
-        \\  "egress": {"hosts": [], "dynamic": false},
-        \\  "serviceCalls": [],
-        \\  "cache": {"namespaces": [], "dynamic": false},
-        \\  "sql": {"backend": "sqlite", "queries": [], "dynamic": false},
-        \\  "durable": {"used": false, "keys": {"literal": [], "dynamic": false}, "steps": [], "timers": false, "signals": {"literal": [], "dynamic": false}, "producerKeys": {"literal": [], "dynamic": false}},
-        \\  "api": {"schemas": [], "requests": {"schemaRefs": [], "dynamic": false}, "auth": {"bearer": false, "jwt": false}, "routes": [], "schemasDynamic": false, "routesDynamic": false},
-        \\  "verification": null,
-        \\  "aot": null,
-        \\  "faultCoverage": null,
-        \\  "rateLimiting": null,
-        \\  "properties": null,
-        \\  "behaviors": [],
-        \\  "behaviorsExhaustive": false
-        \\}
-    ;
-    var raw = try parseContractJson(allocator, source);
-    defer raw.deinit();
-    const contract = &raw.inner;
-
-    try std.testing.expect(!contract.websocket.on_open);
-    try std.testing.expect(!contract.websocket.on_message);
-    try std.testing.expect(!contract.websocket.on_close);
-    try std.testing.expect(!contract.websocket.on_error);
-    try std.testing.expect(!contract.websocket.any());
-}
 
 test "parseContractJson minimal" {
     const allocator = std.testing.allocator;
@@ -938,11 +840,6 @@ test "fromHandlerContract converts properties and env vars" {
     hc.durable.workflow.properties.retry_safe = true;
     hc.durable.workflow.properties.idempotent = true;
     hc.durable.workflow.properties.fault_covered = true;
-    hc.websocket = .{
-        .on_open = true,
-        .on_message = true,
-        .on_close = true,
-    };
 
     var raw = try fromHandlerContract(allocator, &hc);
     defer raw.deinit();
@@ -958,10 +855,6 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(rc.durable_workflow_properties.retry_safe);
     try std.testing.expect(rc.durable_workflow_properties.idempotent);
     try std.testing.expect(rc.durable_workflow_properties.fault_covered);
-    try std.testing.expect(rc.websocket.on_open);
-    try std.testing.expect(rc.websocket.on_message);
-    try std.testing.expect(rc.websocket.on_close);
-    try std.testing.expect(!rc.websocket.on_error);
 }
 
 // Drift guard: parseContractJson is a second, hand-rolled reader of the contract

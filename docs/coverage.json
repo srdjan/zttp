@@ -1,6 +1,6 @@
 {
-  "corpusVersion": "04d2e920b07f38033ec1a7b1be5efdfbbe205a842ab1533c9c4d83f049277569",
-  "rulesTotal": 77,
+  "corpusVersion": "760bc9965c6735565a5d3c7850f1c2156f0013b76d7fe9c12c6dfc0a55c23ef0",
+  "rulesTotal": 75,
   "rulesTripped": 7,
   "tripped": [
     "ZTS305",
@@ -22,8 +22,6 @@
     "ZTS308",
     "ZTS309",
     "ZTS310",
-    "ZTS320",
-    "ZTS321",
     "ZTS501",
     "ZTS601",
     "ZTS602",
@@ -89,5 +87,5 @@
     "ZTS203",
     "ZTS211"
   ],
-  "recorded": "2026-08-09"
+  "recorded": "2026-08-10"
 }

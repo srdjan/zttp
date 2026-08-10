@@ -64,7 +64,6 @@ pub const semantics_render = @import("semantics_render.zig");
 pub const pipeline = @import("pipeline.zig");
 pub const system_linker = @import("system_linker.zig");
 pub const sql_analysis = @import("sql_analysis.zig");
-pub const ws_consistency = @import("ws_consistency.zig");
 pub const api_schema = @import("api_schema.zig");
 
 test {

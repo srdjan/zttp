@@ -158,8 +158,6 @@ fn verifierCode(kind: handler_verifier.DiagnosticKind) []const u8 {
         .unchecked_optional_use => "ZTS308",
         .unchecked_optional_access => "ZTS309",
         .module_scope_mutation => "ZTS310",
-        .websocket_import_without_events => "ZTS320",
-        .websocket_events_without_import => "ZTS321",
         .spec_not_discharged => "ZTS500",
         .spec_incompatible_with_import => "ZTS501",
         .spec_unknown_name => "ZTS502",
@@ -250,7 +248,7 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    try std.testing.expectEqual(@as(usize, 71), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 69), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

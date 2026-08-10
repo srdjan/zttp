@@ -17,7 +17,6 @@ pub const ModuleClass = enum {
     sql,
     service,
     fetch,
-    websocket,
     io,
     durable,
     compose,
@@ -94,7 +93,6 @@ test "classForSpecifier maps builtin specifiers and defaults to other" {
     try std.testing.expectEqual(ModuleClass.sql, comptime classForSpecifier("zttp:sql"));
     try std.testing.expectEqual(ModuleClass.service, comptime classForSpecifier("zttp:service"));
     try std.testing.expectEqual(ModuleClass.fetch, comptime classForSpecifier("zttp:fetch"));
-    try std.testing.expectEqual(ModuleClass.websocket, comptime classForSpecifier("zttp:websocket"));
     try std.testing.expectEqual(ModuleClass.io, comptime classForSpecifier("zttp:io"));
     try std.testing.expectEqual(ModuleClass.durable, comptime classForSpecifier("zttp:durable"));
     try std.testing.expectEqual(ModuleClass.compose, comptime classForSpecifier("zttp:compose"));

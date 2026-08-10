@@ -268,21 +268,6 @@ test "putHeader accepts normal values" {
 // file owns, and have nothing to do with file descriptors.
 // ---------------------------------------------------------------------------
 
-/// True when a request's `Upgrade` header advertises a WebSocket upgrade.
-/// Tolerant of multi-token upgrade values (rare, but legal per RFC 7230).
-pub fn requestIsWebSocketUpgrade(headers: []const HttpHeader) bool {
-    for (headers) |h| {
-        if (std.ascii.eqlIgnoreCase(h.key, "upgrade")) {
-            var it = std.mem.splitScalar(u8, h.value, ',');
-            while (it.next()) |token| {
-                const trimmed = std.mem.trim(u8, token, " \t");
-                if (std.ascii.eqlIgnoreCase(trimmed, "websocket")) return true;
-            }
-        }
-    }
-    return false;
-}
-
 /// True when `If-None-Match` header value matches `etag_hex`. Tolerant of
 /// `W/` weak-validator prefix and surrounding double quotes per RFC 9110.
 pub fn etagMatchesIfNoneMatch(if_none_match: ?[]const u8, etag_hex: []const u8) bool {

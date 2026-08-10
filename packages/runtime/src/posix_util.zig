@@ -1,8 +1,8 @@
 //! Thin OS-facing helpers: raw file-descriptor writes, a socket pair, the
 //! wall clock, the default pool size, and I/O backend init.
 //!
-//! Free functions with no Server struct coupling, which is why the WebSocket
-//! codec, the WebSocket pool, and the edge server reach them directly rather
+//! Free functions with no Server struct coupling, which is why the edge
+//! server reaches them directly rather
 //! than through server.zig. It was called `server_io.zig` while it also held
 //! HTTP header helpers; those moved to http_types.zig, next to the
 //! `HttpHeader` type they read, and the name now says what is left.

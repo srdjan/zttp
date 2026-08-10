@@ -487,15 +487,15 @@ fn parseCapabilityDeclaration(
 /// writer emits at the top level, not just the existing module bindings,
 /// so partners cannot collide with `egress`, `properties`, etc.
 const reserved_contract_sections = [_][]const u8{
-    "handler",         "version",             "routes",
-    "modules",         "sandbox",             "functions",
-    "env",             "egress",              "serviceCalls",
-    "workflowCalls",   "cache",               "sql",
-    "durable",         "scope",               "api",
-    "verification",    "websocket",           "aot",
-    "faultCoverage",   "rateLimiting",        "properties",
-    "behaviors",       "behaviorsExhaustive", "declaredSpecs",
-    "specDiagnostics", "extensions",
+    "handler",             "version",       "routes",
+    "modules",             "sandbox",       "functions",
+    "env",                 "egress",        "serviceCalls",
+    "workflowCalls",       "cache",         "sql",
+    "durable",             "scope",         "api",
+    "verification",        "aot",           "faultCoverage",
+    "rateLimiting",        "properties",    "behaviors",
+    "behaviorsExhaustive", "declaredSpecs", "specDiagnostics",
+    "extensions",
 };
 
 fn reservedContractSectionName(raw: []const u8) bool {
@@ -626,7 +626,7 @@ test "parse manifest captures contractSection when set" {
 }
 
 test "parse manifest rejects contractSection that collides with a built-in" {
-    const reserved = [_][]const u8{ "cache", "functions", "modules", "websocket", "aot" };
+    const reserved = [_][]const u8{ "cache", "functions", "modules", "aot" };
     for (reserved) |section| {
         const json = try std.fmt.allocPrint(
             std.testing.allocator,

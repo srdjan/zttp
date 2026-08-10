@@ -20,7 +20,6 @@ Read this end-to-end before adding a new virtual module.
 | `filesystem` | Reading files from disk outside the sandbox root (service contracts, request fixtures). |
 | `network` | Making outbound network calls. |
 | `policy_check` | Consulting the handler's derived `RuntimePolicy` to authorize a resource access before it happens. |
-| `websocket` | Touching WebSocket gateway state and hibernated attachment state. |
 
 These are governance metadata for the module internals. They do not affect handler-level effect classification (`deterministic`, `read_only`, etc.) or `RuntimePolicy` derivation; those are separate analyses driven by the `effect` annotation on each exported function.
 
@@ -73,7 +72,6 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 | `zttp:scope` | `runtime_callback` | Request-scoped lifecycle hooks call back into the runtime at request end. |
 | `zttp:service` | `network`, `filesystem`, `runtime_callback` | Reads cross-handler service contracts from disk and dispatches via the runtime. |
 | `zttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
-| `zttp:websocket` | `clock`, `runtime_callback`, `network`, `filesystem`, `policy_check`, `websocket` | Sends frames, manages rooms, and serializes hibernated attachment state through the gateway. |
 | `zttp:workflow` | `runtime_callback` | `call`, `follow`, `fanout`, and `saga` dispatch to co-located sub-handlers through the runtime. |
 
 ### Modules that declare no capabilities

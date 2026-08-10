@@ -65,7 +65,6 @@ const RouteInfo = contract_types.RouteInfo;
 const SqlQueryInfo = contract_types.SqlQueryInfo;
 const DurableWorkflow = contract_types.DurableWorkflow;
 const DurableWorkflowNodeKind = contract_types.DurableWorkflowNodeKind;
-const WebSocketInfo = contract_types.WebSocketInfo;
 const ApiSchemaInfo = contract_types.ApiSchemaInfo;
 const ApiParamInfo = contract_types.ApiParamInfo;
 const SchemaSpec = contract_types.SchemaSpec;
@@ -133,7 +132,6 @@ pub const ContractBuilder = struct {
     scope_names: std.ArrayList([]const u8),
     scope_dynamic: bool,
     scope_max_depth: u32 = 0,
-    websocket: WebSocketInfo = .{},
     durable_used: bool,
     durable_key_literals: std.ArrayList([]const u8),
     durable_key_dynamic: bool,
@@ -363,16 +361,6 @@ pub const ContractBuilder = struct {
         try self.scanCallSites();
         if (self.type_checker) |tc| try tc.ensureHealthy();
 
-        // Phase 2b: Scan top-level function declarations for WebSocket event
-        // exports (onOpen/onMessage/onClose/onError).
-        try self.scanWebSocketExports();
-
-        // Phase 2c: Run module-level WebSocket consistency checks
-        // (ZTS320, ZTS321). Warnings go to stderr so `zig build` users
-        // see them in the build log; errors do not abort the contract
-        // build — the downstream verifier owns the hard-fail policy.
-        try self.emitWebSocketConsistencyDiagnostics();
-
         // Author-declared intent assertions. Extraction is strict and
         // fails to `intent.dynamic = true` on any non-literal form rather
         // than degrading, preserving the deterministic-extraction line.
@@ -543,7 +531,6 @@ pub const ContractBuilder = struct {
                 .dynamic = self.scope_dynamic,
                 .max_depth = self.scope_max_depth,
             },
-            .websocket = self.websocket,
             .api = .{
                 .schemas = self.api_schemas,
                 .requests = .{
@@ -1421,66 +1408,6 @@ pub const ContractBuilder = struct {
     // -----------------------------------------------------------------
     // Phase 1: Import scanning
     // -----------------------------------------------------------------
-
-    /// Scan top-level function declarations for the four reserved WebSocket
-    /// event names. A match sets the corresponding `websocket` flag so the
-    /// contract's downstream consumers (runtime gateway, deploy manifest)
-    /// can decide whether WebSocket support is needed without re-parsing.
-    fn scanWebSocketExports(self: *ContractBuilder) !void {
-        const node_count = self.ir_view.nodeCount();
-        var idx_usize: usize = 0;
-        while (idx_usize < node_count) : (idx_usize += 1) {
-            const idx: NodeIndex = @intCast(idx_usize);
-            const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .function_decl and tag != .var_decl) continue;
-
-            const decl = self.ir_view.getVarDecl(idx) orelse continue;
-            if (decl.binding.kind != .global) continue;
-
-            const init_tag = self.ir_view.getTag(decl.init) orelse continue;
-            if (init_tag != .function_expr and init_tag != .arrow_function) continue;
-
-            const name = self.resolveAtomName(decl.binding.name_atom) orelse continue;
-            if (std.mem.eql(u8, name, "onOpen")) {
-                self.websocket.on_open = true;
-            } else if (std.mem.eql(u8, name, "onMessage")) {
-                self.websocket.on_message = true;
-            } else if (std.mem.eql(u8, name, "onClose")) {
-                self.websocket.on_close = true;
-            } else if (std.mem.eql(u8, name, "onError")) {
-                self.websocket.on_error = true;
-            }
-        }
-    }
-
-    fn emitWebSocketConsistencyDiagnostics(self: *ContractBuilder) !void {
-        const ws_consistency = @import("ws_consistency.zig");
-        const inputs = ws_consistency.Inputs{
-            .imports_websocket_module = containsString(self.factsRef().modules.items, "zttp:websocket"),
-            .exports_on_open = self.websocket.on_open,
-            .exports_on_message = self.websocket.on_message,
-            .exports_on_close = self.websocket.on_close,
-            .exports_on_error = self.websocket.on_error,
-        };
-
-        var findings: std.ArrayList(ws_consistency.Finding) = .empty;
-        defer findings.deinit(self.allocator);
-        try ws_consistency.check(self.allocator, inputs, &findings);
-
-        for (findings.items) |f| {
-            const code: []const u8 = switch (f.kind) {
-                .websocket_import_without_events => "ZTS320",
-                .websocket_events_without_import => "ZTS321",
-                else => "ZTS???",
-            };
-            std.log.warn("{s} [{s}]: {s} ({s})", .{
-                f.severity.label(),
-                code,
-                f.message,
-                f.help,
-            });
-        }
-    }
 
     // -----------------------------------------------------------------
     // Phase 2: Call site scanning

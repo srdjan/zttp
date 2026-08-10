@@ -42,7 +42,6 @@ const ported = struct {
 const sql_mod = @import("modules/data/sql.zig");
 const service_mod = @import("modules/net/service.zig");
 const fetch_mod = @import("modules/net/fetch.zig");
-const websocket_mod = @import("modules/net/websocket.zig");
 
 // Coupled to zts internals: io installs Context-owned state read by fetchSync;
 // scope manipulates GC roots directly. durable is pending further work.
@@ -85,7 +84,6 @@ pub const builtins = [_]ModuleBinding{
     ported.ratelimit,
     service_mod.binding,
     fetch_mod.binding,
-    websocket_mod.binding,
 };
 
 /// Unified module registry: core built-ins plus explicitly registered extensions.
@@ -128,7 +126,6 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:ratelimit", .module_path = "packages/modules/src/data/ratelimit.zig", .spec_path = "packages/modules/module-specs/data/ratelimit.json" },
     .{ .specifier = "zttp:service", .module_path = "packages/modules/src/net/service.zig", .spec_path = "packages/modules/module-specs/net/service.json" },
     .{ .specifier = "zttp:fetch", .module_path = "packages/modules/src/net/fetch.zig", .spec_path = "packages/modules/module-specs/net/fetch.json" },
-    .{ .specifier = "zttp:websocket", .module_path = "packages/modules/src/net/websocket.zig", .spec_path = "packages/modules/module-specs/net/websocket.json" },
 };
 
 comptime {
@@ -355,7 +352,7 @@ test "governance entries stay aligned with public built-ins" {
     try std.testing.expectEqualStrings("zttp:env", entries[0].specifier);
     try std.testing.expectEqualStrings("packages/modules/src/platform/env.zig", entries[0].module_path);
     try std.testing.expectEqualStrings("packages/modules/module-specs/platform/env.json", entries[0].spec_path);
-    try std.testing.expectEqualStrings("zttp:websocket", entries[entries.len - 1].specifier);
+    try std.testing.expectEqualStrings("zttp:fetch", entries[entries.len - 1].specifier);
 }
 
 /// Union `required_capabilities` across every module resolved from

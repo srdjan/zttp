@@ -118,7 +118,6 @@ const capability_rules = [_]CapabilityRule{
     .{ .capability = "filesystem", .helpers = &.{"readFileChecked"} },
     .{ .capability = "network", .helpers = &.{"requireCapability(handle, .network)"} },
     .{ .capability = "policy_check", .helpers = &.{ "allowsEnvChecked", "allowsEnvForActiveModule", "allowsCacheNamespaceChecked", "allowsCacheNamespaceForActiveModule", "allowsSqlQueryChecked", "allowsSqlQueryForActiveModule", "allowsSqlWriteChecked", "allowsSqlWriteForActiveModule" } },
-    .{ .capability = "websocket", .helpers = &.{"WebSocketCallbacks"} },
 };
 
 const forbidden_patterns = [_]ForbiddenPattern{

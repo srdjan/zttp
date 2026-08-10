@@ -10,7 +10,7 @@
 - `packages/zts/src/parser/` contains the Pratt parser, tokenizer, IR, bytecode codegen, and scope tracking.
 - `packages/tools/` contains build-time tooling (`precompile.zig` for handler bytecode embedding, `zts_cli.zig` for the compiler CLI).
 - `packages/zttp-sdk/` contains the extension SDK.
-- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`, `durable/`, `workflow/`, `websocket/`, `fetch/`, `hypermedia/`, `patterns/`, `system/`, `autoloop/`).
+- `examples/` holds runnable handlers and demos, organized by topic (`handler/`, `jsx/`, `modules/`, `routing/`, `parallel/`, `sql/`, `durable/`, `workflow/`, `fetch/`, `hypermedia/`, `patterns/`, `system/`, `autoloop/`).
 - `scripts/` contains shell scripts for build and setup.
 - `docs/` contains user-facing documentation (see Documentation section below).
 - `zig-out/` and `.zig-cache/` are generated output directories; do not edit or commit them.

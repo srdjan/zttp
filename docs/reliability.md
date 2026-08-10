@@ -12,7 +12,6 @@ reported.
 | Handler execution timeout | 30 seconds | Set with `ServerConfig.timeout_ms` or edge `timeoutMs`. Slow handlers return `504 Gateway Timeout` and invalidate the pool slot. |
 | JavaScript memory | no explicit limit | Set per runtime with `-m` / `--memory`. |
 | Runtime pool size | `cpu_count * 2`, clamped 8-128 | Set with `-n` / `--pool`. |
-| Live WebSocket connections | 1,024 | Set with `--max-websocket-connections`; `0` disables upgrades. Capacity is reserved before the `101` response and excess upgrades return `503`. |
 | Value stack | 1 MB | 131,072 JSValue slots. |
 | Call-stack depth | 1,024 frames | Deep recursion raises a typed error. |
 | Saved-state depth | 1,024 | Exceeding the cap raises a typed error. |
@@ -43,7 +42,6 @@ key, user, or route.
   the step deadline expires. Timers and signal waits inside that step obey the
   same deadline.
 - Exhausted runtime pools return `503`.
-- WebSocket upgrades above the configured live-connection cap return `503`
   before protocol ownership transfers. Each accepted connection currently owns
   one joinable kernel thread; graceful shutdown wakes and joins those workers
   before destroying handler or room state.
@@ -121,7 +119,7 @@ short token-like value; malformed, empty, or oversized values are logged as `-`.
 
 ## Health And Readiness Probes
 
-The server answers two built-in paths before the handler and before WebSocket
+The server answers two built-in paths before the handler and before
 upgrade:
 
 | Path | Meaning |

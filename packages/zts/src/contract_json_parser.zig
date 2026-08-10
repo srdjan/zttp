@@ -243,13 +243,6 @@ const VerificationWire = struct {
     bytecodeVerified: bool = false,
 };
 
-const WebSocketWire = struct {
-    onOpen: bool = false,
-    onMessage: bool = false,
-    onClose: bool = false,
-    onError: bool = false,
-};
-
 const FaultCoverageWire = struct {
     totalFailable: WireU32 = .{ .value = null },
     covered: WireU32 = .{ .value = null },
@@ -413,7 +406,6 @@ const ContractWire = struct {
     scope: ScopeWire = .{},
     api: ApiWire = .{},
     verification: ?VerificationWire = null,
-    websocket: ?WebSocketWire = null,
     faultCoverage: ?FaultCoverageWire = null,
     rateLimiting: ?RateLimitWire = null,
     properties: ?PropertiesWire = null,
@@ -466,7 +458,6 @@ fn projectContract(
     try projectScope(allocator, &wire.scope, &contract);
     try projectApi(allocator, &wire.api, &contract);
     projectVerification(wire.verification, &contract);
-    projectWebSocket(wire.websocket, &contract);
     projectFaultCoverage(wire.faultCoverage, &contract);
     projectProperties(wire.properties, &contract);
     contract.declared_specs = try projectStringList(allocator, wire.declaredSpecs);
@@ -994,18 +985,6 @@ fn projectVerification(
         .unreachable_code = value.unreachableCode,
         .bytecode_verified = value.bytecodeVerified,
     } else null;
-}
-
-fn projectWebSocket(
-    wire: ?WebSocketWire,
-    contract: *HandlerContract,
-) void {
-    contract.websocket = if (wire) |value| .{
-        .on_open = value.onOpen,
-        .on_message = value.onMessage,
-        .on_close = value.onClose,
-        .on_error = value.onError,
-    } else .{};
 }
 
 fn projectFaultCoverage(

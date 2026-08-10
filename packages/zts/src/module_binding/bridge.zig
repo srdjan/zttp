@@ -124,7 +124,7 @@ pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
 /// emit every declared bridge symbol.
 pub const sdk_bridge = struct {
     pub export fn zttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
-        if (capability_tag > @intFromEnum(ModuleCapability.websocket)) return false;
+        if (capability_tag > @intFromEnum(ModuleCapability.policy_check)) return false;
         const capability: ModuleCapability = @enumFromInt(capability_tag);
         return hasCapability(handle, capability);
     }

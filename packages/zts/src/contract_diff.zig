@@ -227,8 +227,6 @@ pub const ContractDiff = struct {
     /// A WebSocket event export (onOpen/onMessage/onClose/onError) was removed:
     /// a live capability disappeared, which is breaking. Added exports are
     /// additive (tracked separately).
-    websocket_capability_removed: bool = false,
-    websocket_capability_added: bool = false,
     /// A durable step was removed or reordered (breaking - durable replay is
     /// position-sensitive) or purely appended (additive).
     durable_steps_breaking: bool = false,
@@ -326,8 +324,6 @@ pub const ContractDiff = struct {
         if (self.costWidenedToUnbounded()) return .breaking;
         if (self.costWidened()) has_added = true;
         // A removed WebSocket event export is a removed live capability.
-        if (self.websocket_capability_removed) return .breaking;
-        if (self.websocket_capability_added) has_added = true;
         // A removed/reordered durable step changes recovery semantics.
         if (self.durable_steps_breaking) return .breaking;
         if (self.durable_steps_added) has_added = true;
@@ -703,14 +699,6 @@ pub fn diffContracts(
         .behavior_diff = behavior_diff,
         .routes_became_dynamic = (new.api.routes_dynamic and !old.api.routes_dynamic) or
             (new.api.schemas_dynamic and !old.api.schemas_dynamic),
-        .websocket_capability_removed = (old.websocket.on_open and !new.websocket.on_open) or
-            (old.websocket.on_message and !new.websocket.on_message) or
-            (old.websocket.on_close and !new.websocket.on_close) or
-            (old.websocket.on_error and !new.websocket.on_error),
-        .websocket_capability_added = (new.websocket.on_open and !old.websocket.on_open) or
-            (new.websocket.on_message and !old.websocket.on_message) or
-            (new.websocket.on_close and !old.websocket.on_close) or
-            (new.websocket.on_error and !old.websocket.on_error),
         .durable_steps_breaking = durableStepsChange(old.durable.steps.items, new.durable.steps.items) == .breaking,
         .durable_steps_added = durableStepsChange(old.durable.steps.items, new.durable.steps.items) == .added,
         .cost_class_old = old_cost_class,
@@ -2602,39 +2590,6 @@ test "diffContracts changing a shared ref schema shape is breaking" {
     defer diff.deinit(allocator);
 
     try std.testing.expectEqual(Classification.breaking, diff.classify());
-}
-
-test "diffContracts removing a WebSocket event export is breaking" {
-    const allocator = std.testing.allocator;
-
-    var old = try makeTestContract(allocator);
-    defer old.deinit(allocator);
-    old.websocket.on_message = true;
-
-    var new = try makeTestContract(allocator);
-    defer new.deinit(allocator);
-    new.websocket.on_message = false;
-
-    var diff = try diffContracts(allocator, &old, &new);
-    defer diff.deinit(allocator);
-
-    try std.testing.expectEqual(Classification.breaking, diff.classify());
-}
-
-test "diffContracts adding a WebSocket event export is additive" {
-    const allocator = std.testing.allocator;
-
-    var old = try makeTestContract(allocator);
-    defer old.deinit(allocator);
-
-    var new = try makeTestContract(allocator);
-    defer new.deinit(allocator);
-    new.websocket.on_message = true;
-
-    var diff = try diffContracts(allocator, &old, &new);
-    defer diff.deinit(allocator);
-
-    try std.testing.expectEqual(Classification.additive, diff.classify());
 }
 
 test "diffContracts api response going dynamic is breaking" {

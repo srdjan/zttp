@@ -542,15 +542,6 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("  \"verification\": null,\n");
     }
 
-    // websocket: always present for shape stability — handlers without
-    // any ws event exports still emit the section with all flags false.
-    try writer.writeAll("  \"websocket\": {");
-    try writer.print("\"onOpen\": {s}, ", .{if (contract.websocket.on_open) "true" else "false"});
-    try writer.print("\"onMessage\": {s}, ", .{if (contract.websocket.on_message) "true" else "false"});
-    try writer.print("\"onClose\": {s}, ", .{if (contract.websocket.on_close) "true" else "false"});
-    try writer.print("\"onError\": {s}", .{if (contract.websocket.on_error) "true" else "false"});
-    try writer.writeAll("},\n");
-
     // aot (optional)
     if (contract.aot) |a| {
         try writer.writeAll("  \"aot\": {\n");

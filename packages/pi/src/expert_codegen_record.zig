@@ -687,38 +687,6 @@ const record_corpus = [_]RecordCase{
         .expect_first_draft_pass = true,
     },
     .{
-        .name = "websocket-echo",
-        // The runtime owns the upgrade, not the handler: server.zig:634-635
-        // upgrades only when the request carries an RFC 6455 upgrade and the
-        // contract exports onMessage, and it writes the 101 itself
-        // (server.zig:1173). A header-less GET never upgrades, so it reaches
-        // the handler.
-        //
-        // This check used to send `"headers":{}` and assert 101, which only a
-        // handler hardcoding `{ status: 101 }` could satisfy - claiming a
-        // protocol switch on every plain GET. It rewarded a bug, and nothing
-        // model-facing taught 101: it appears only in docs/reliability.md and
-        // an archived plan, and the websocket example is not among the four
-        // vendored under skills/zts-expert/examples. A recorded pass on it was
-        // luck.
-        //
-        // The non-upgrade status is a convention, so the prompt states it
-        // rather than leaving the model to guess. 404 matches
-        // examples/websocket/chat.ts:48.
-        .prompt = "Create a WebSocket echo handler in handler.ts using zttp:websocket that " ++
-            "echoes every received message back to the sending client. " ++
-            "Return 404 for a request that is not a WebSocket upgrade.",
-        .intent = .{
-            .tests_jsonl =
-            \\{"type":"test","name":"a non-upgrade request does not claim a protocol switch"}
-            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
-            \\{"type":"expect","status":404}
-            \\
-            ,
-        },
-        .expect_first_draft_pass = true,
-    },
-    .{
         .name = "durable-order",
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow: a `reserve` step then a `charge` step, via run() and step().",

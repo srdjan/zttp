@@ -151,22 +151,6 @@ const verifier_meta = [_]struct {
         .repair = null,
     },
     .{
-        .kind = .websocket_import_without_events,
-        .code = "ZTS320",
-        .description = "Handler imports zttp:websocket but exports no WebSocket event handlers.",
-        .example = "import { send } from 'zttp:websocket'; // no onMessage/onOpen/onClose",
-        .help = "Export at least onMessage(ws, data, room) to handle inbound frames, or remove the import.",
-        .repair = null,
-    },
-    .{
-        .kind = .websocket_events_without_import,
-        .code = "ZTS321",
-        .description = "Handler exports WebSocket event functions but does not import zttp:websocket.",
-        .example = "export function onMessage(ws, data, room) { send(ws, data); } // send undefined",
-        .help = "Add `import { send, close, ... } from 'zttp:websocket';` so event handlers can reply.",
-        .repair = null,
-    },
-    .{
         .kind = .spec_not_discharged,
         .code = "ZTS500",
         .description = "Handler declared a Spec<\"name\"> obligation but the inferred property is false.",

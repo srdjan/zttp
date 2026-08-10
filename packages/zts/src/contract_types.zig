@@ -276,25 +276,6 @@ pub const ScopeInfo = struct {
     }
 };
 
-/// WebSocket event-export presence. When a handler module exports any of
-/// `onOpen`, `onMessage`, `onClose`, or `onError` as top-level named
-/// functions, the contract records which ones are present. The runtime
-/// uses this to decide whether to enable the WebSocket gateway at
-/// startup; deploy manifests use it to emit per-platform WS routing.
-/// All fields are zero-initialised, so a handler with no WS exports
-/// produces `{on_open:false, on_message:false, on_close:false, on_error:false}`
-/// — the section is always present for shape stability.
-pub const WebSocketInfo = struct {
-    on_open: bool = false,
-    on_message: bool = false,
-    on_close: bool = false,
-    on_error: bool = false,
-
-    pub fn any(self: WebSocketInfo) bool {
-        return self.on_open or self.on_message or self.on_close or self.on_error;
-    }
-};
-
 pub const ApiSchemaInfo = struct {
     name: []const u8, // owned
     schema_json: []const u8, // owned JSON source
@@ -1756,7 +1737,6 @@ pub const HandlerContract = struct {
     sql: SqlInfo,
     durable: DurableInfo,
     scope: ScopeInfo,
-    websocket: WebSocketInfo = .{},
     api: ApiInfo,
     verification: ?VerificationInfo,
     aot: ?AotInfo,

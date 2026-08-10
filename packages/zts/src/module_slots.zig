@@ -14,7 +14,8 @@ pub const Slot = enum(u4) {
     service = 9,
     scope = 10,
     fetch = 11,
-    websocket = 12,
+    // 12 was `websocket`, removed with the subsystem. The number stays
+    // reserved so the slots after it keep their identity.
     workflow = 13,
     queue = 14,
 };
@@ -30,7 +31,6 @@ pub fn ownerSpecifier(slot: usize) ?[]const u8 {
         @intFromEnum(Slot.service) => "zttp:service",
         @intFromEnum(Slot.scope) => "zttp:scope",
         @intFromEnum(Slot.fetch) => "zttp:fetch",
-        @intFromEnum(Slot.websocket) => "zttp:websocket",
         @intFromEnum(Slot.workflow) => "zttp:workflow",
         @intFromEnum(Slot.queue) => "zttp:queue",
         else => null,

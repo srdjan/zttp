@@ -57,8 +57,6 @@ const bytecode_cache = zq.bytecode_cache;
 
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
-const websocket_pool = @import("websocket_pool.zig");
-const ws_callbacks = @import("ws_runtime_callbacks.zig");
 const queue_callbacks = @import("queue_runtime_callbacks.zig");
 const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
@@ -161,8 +159,6 @@ pub const HandlerInstance = struct {
     /// dispatch. Stays null on runtimes that never see a WS event.
     /// Read by the WS module's send/close callbacks via
     /// `wsPoolFromRuntime`. See `installWebSocketModuleState`.
-    ws_pool_ref: ?*websocket_pool.Pool = null,
-
     /// Co-located sub-handler registry for in-process `zttp:workflow.call`
     /// dispatch. Server-owned (one instance per process), referenced by every
     /// pooled orchestrator runtime. Set from `config.system_registry` at init
@@ -333,7 +329,6 @@ pub const HandlerInstance = struct {
             .pending_durable_recovery = null,
             .arena_state = arena_state,
             .hybrid_state = hybrid_state,
-            .ws_pool_ref = null,
             .system_registry_ref = systemRegistryFromConfig(config),
             .queue_system_ref = queueSystemFromConfig(config),
         };
@@ -406,7 +401,6 @@ pub const HandlerInstance = struct {
             // Pool runtimes manage their own hybrid allocation
             .arena_state = null,
             .hybrid_state = null,
-            .ws_pool_ref = null,
             .system_registry_ref = systemRegistryFromConfig(config),
             .queue_system_ref = queueSystemFromConfig(config),
         };
@@ -944,25 +938,6 @@ pub const HandlerInstance = struct {
 
     fn installFetchModuleState(self: *Self) !void {
         try zq.modules.fetch.installState(self.ctx, self, fetchModuleCallback);
-    }
-
-    /// Install the WebSocket callback table on this runtime, pointed at
-    /// the server-owned connection pool. Called by the frame loop on
-    /// every WS dispatch — the re-install is idempotent and lets a
-    /// freshly recycled runtime (post hot reload) pick up the pool
-    /// without an extra acquire-time hook. Runtimes that never see a
-    /// WS event dispatch skip this entirely and pay no cost.
-    pub fn installWebSocketModuleState(self: *Self, pool: *websocket_pool.Pool) !void {
-        self.ws_pool_ref = pool;
-        try zq.modules.websocket.installState(self.ctx, .{
-            .runtime_ptr = self,
-            .send_fn = ws_callbacks.wsSendCallback,
-            .close_fn = ws_callbacks.wsCloseCallback,
-            .serialize_attachment_fn = ws_callbacks.wsSerializeAttachmentCallback,
-            .deserialize_attachment_fn = ws_callbacks.wsDeserializeAttachmentCallback,
-            .get_web_sockets_fn = ws_callbacks.wsGetWebSocketsCallback,
-            .set_auto_response_fn = ws_callbacks.wsSetAutoResponseCallback,
-        });
     }
 
     fn verifyBytecodeRecursive(func: *const zq.FunctionBytecode) !void {

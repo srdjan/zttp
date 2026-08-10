@@ -41,7 +41,6 @@ const bytecode_cache = zq.bytecode_cache;
 
 // HTTP protocol types (shared with server layer)
 const http_types = @import("http_types.zig");
-const websocket_pool = @import("websocket_pool.zig");
 const HttpRequestView = http_types.HttpRequestView;
 const HttpRequestOwned = http_types.HttpRequestOwned;
 
@@ -633,10 +632,6 @@ fn seedIncompleteDurableRandomStep(
 test {
     _ = @import("handler_loader.zig");
     _ = @import("replay_runner.zig");
-    _ = @import("websocket_codec.zig");
-    _ = @import("websocket_pool.zig");
-    _ = @import("ws_gateway.zig");
-    _ = @import("ws_frame_loop.zig");
     _ = @import("durable_fetch.zig");
     _ = @import("retry_backoff.zig");
     _ = @import("handler_corpus.zig");

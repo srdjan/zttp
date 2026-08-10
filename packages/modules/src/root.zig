@@ -37,7 +37,6 @@ pub const data = struct {
 pub const net = struct {
     pub const fetch = @import("net/fetch.zig");
     pub const service = @import("net/service.zig");
-    pub const websocket = @import("net/websocket.zig");
 };
 
 pub const workflow = struct {
@@ -66,7 +65,6 @@ pub const catalog = struct {
 
     pub const fetch = net.fetch.binding;
     pub const service = net.service.binding;
-    pub const websocket = net.websocket.binding;
 
     pub const compose = workflow.compose.binding;
 };
@@ -89,7 +87,6 @@ pub const all_bindings = [_]sdk.ModuleBinding{
     catalog.sql,
     catalog.fetch,
     catalog.service,
-    catalog.websocket,
     catalog.compose,
 };
 
@@ -117,6 +114,5 @@ test {
     _ = data.sql;
     _ = net.fetch;
     _ = net.service;
-    _ = net.websocket;
     _ = workflow.compose;
 }

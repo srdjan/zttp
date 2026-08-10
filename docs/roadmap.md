@@ -12,7 +12,6 @@ behavior lives in [User Guide](user-guide.md).
 - Threaded HTTP/1.1 server with per-request runtime isolation and decoded
   `Content-Length` or `Transfer-Encoding: chunked` request bodies.
 - Restricted JS/TS/TSX handler execution through `zts`.
-- WebSocket gateway support with parsed peer close-code metadata.
 - The five core `zttp` commands: `init`, `dev`, `test`, `expert`, `deploy`.
 - Local self-contained deploy artifacts with default-on attestation.
 - Compile-time checks for response paths, Result and optional handling,
@@ -588,9 +587,7 @@ authority and never widen it, and `module-spec-render` publishes the per-export 
 
 Eight of the 24 modules are tightened, each verified against its implementation rather
 than its comment: `zttp:auth` (parseBearer and timingSafeEqual reach neither crypto nor
-clock), `zttp:id` (only ulid reads the clock), `zttp:websocket` (traced through dispatch
-to the runtime callbacks and the connection pool: only send and close write to the
-socket, only serializeAttachment can touch disk), `zttp:ratelimit` (rateReset removes a
+clock), `zttp:id` (only ulid reads the clock), `zttp:ratelimit` (rateReset removes a
 map entry and reads no clock), `zttp:sql` (`sql()` registers a statement in a map and
 opens no database), `zttp:crypto` (base64 is a transport encoding: both impls are
 `std.base64` over the module allocator and reach no gated helper), `zttp:cache`
@@ -617,13 +614,10 @@ a `.read` effect - which no capability set can express. Written up as
 Note the original observable named `escapeHtml`, which cannot demonstrate anything:
 `zttp:text` declares no capabilities at all, so the test would pass before the change as
 readily as after. The modules where the union actually over-approximates are
-`zttp:websocket` (six capabilities over six exports), `zttp:auth`, `zttp:id`, and
-`zttp:sql`. `zttp:websocket` was the largest and the audit is done: `.clock`,
-`.policy_check`, and `.websocket` are reached by no export path, since the only
-`requireCapability` in the module is `.runtime_callback` in dispatch. They stay in the
-module set, which is what the sandbox grants and what the frame loop and hibernation
-paths run under - per-export declarations are analysis-side only, because
-`wrapToNativeFn` builds the runtime's active-context capabilities from the module set.
+`zttp:auth`, `zttp:id`, and `zttp:sql`. (`zttp:websocket` was the largest and its audit
+is recorded in the history; the module was removed in phase 5.) Per-export declarations
+are analysis-side only, because `wrapToNativeFn` builds the runtime's active-context
+capabilities from the module set.
 
 Observable: a test proving a `zttp:auth` bearer-token parse under a ceiling that excludes
 the module's crypto and clock capabilities. It is `a tightened export carries only what
@@ -877,7 +871,7 @@ duplicate-key discharge, so a silent answer would be worse than none.
 | Phase | Scope | Exit |
 |---|---|---|
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |
-| 5. Bytes, ABI re-typing, defaults, Effects ceiling | [`Bytes` and `zttp:bytes`](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md); the HTTP, WebSocket, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText`; trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. Planning measured that the ceiling rule already ships both halves at severity `error` with the repair computed from the row, so what is left there is the `handler_reachable` qualifier spec 5.7 does not contain and D2's function-type ceilings. | fetch, websocket, and queue examples re-typed; ceiling-rule repair tests. |
+| 5. Bytes, ABI re-typing, defaults, Effects ceiling | [`Bytes` and `zttp:bytes`](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md); the HTTP, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText` (the WebSocket subsystem was removed rather than re-typed); trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. Planning measured that the ceiling rule already ships both halves at severity `error` with the repair computed from the row, so what is left there is the `handler_reachable` qualifier spec 5.7 does not contain and D2's function-type ceilings. | fetch and queue examples re-typed; ceiling-rule repair tests. |
 | 6. Full idiom table, validators, gate-complete protocol | The remaining idiom rows; equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
 | 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies every reachable node and opcode; paired live-model flows preserve behavior, intent, proofs, and reached-green convergence. |
 
