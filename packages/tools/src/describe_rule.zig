@@ -228,6 +228,7 @@ const type_checker_rules = [_]TypeCheckerRule{
     .{ .name = "type_constraint_violation", .code = "ZTS209", .description = "A type argument is outside the `extends` bound its type parameter declares." },
     .{ .name = "type_argument_count_mismatch", .code = "ZTS210", .description = "A call gives a different number of explicit type arguments than the signature declares type parameters." },
     .{ .name = "non_contractive_alias", .code = "ZTS212", .description = "A recursive type alias has a cycle that no record, tuple, or array constructor guards, so it describes an infinite type rather than a finite one." },
+    .{ .name = "unencodable_json_payload", .code = "ZTS213", .description = "A `Response.json` payload has a type JSON cannot carry - a function, or a `Bytes`. The encoder would throw at run time, and the subset has no `try/catch` to handle it." },
     .{ .name = "invalid_type_predicate", .code = "ZTS211", .description = "A `value is T` predicate is not verified by its body; only a single return of admitted narrowing tests over the named parameter installs a guard." },
 };
 

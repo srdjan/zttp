@@ -75,6 +75,7 @@ pub const DiagnosticKind = enum {
     type_constraint_violation, // a type argument outside its `extends` bound
     type_argument_count_mismatch, // explicit type arguments, wrong count
     non_contractive_alias, // a recursive alias whose cycle no data constructor guards
+    unencodable_json_payload, // a `Response.json` payload whose type cannot be JSON
 };
 
 pub const Diagnostic = struct {
@@ -3460,9 +3461,113 @@ pub const TypeChecker = struct {
     // Call argument checking
     // -------------------------------------------------------------------
 
+    /// The first member of `idx` that JSON cannot carry, or null when nothing
+    /// in it is definitely unencodable.
+    ///
+    /// Spec 6.4 states the rule the other way round - admit only scalars,
+    /// arrays, tuples, fixed records, and string-keyed `Dict` - and this
+    /// refuses what is definitely wrong instead. The difference is `unknown`,
+    /// which the strict reading rejects and which is what a `Result` payload
+    /// and a parsed document both type as today. Rejecting it would refuse
+    /// `Response.json(parsed.value)` in every handler that has one, so the
+    /// checker takes the direction that cannot reject a true program: it
+    /// reports where it knows, and stays quiet where it does not. Phase 7's
+    /// cutover can tighten this once those positions carry real types.
+    ///
+    /// A function is the case worth catching. `valueToJsonString` throws on
+    /// one, `http.zig` calls it with `try`, and the subset has no `try/catch` -
+    /// so the failure that exists today has no way to be handled, which is the
+    /// concrete argument for deciding it at compile time.
+    fn firstUnencodable(self: *const TypeChecker, idx: TypeIndex, depth: u8) ?TypeIndex {
+        if (idx == null_type_idx or depth >= 16) return null;
+        const pool = self.env.pool;
+        const tag = pool.getTag(idx) orelse return null;
+        return switch (tag) {
+            .t_function => idx,
+            // A Bytes is an octet buffer, not a JSON value. Spec 6.3 keeps the
+            // two apart, and `encodeBase64` is the conversion an author writes
+            // when they mean to send one.
+            .t_bytes => idx,
+            .t_array => self.firstUnencodable(pool.getArrayElement(idx), depth + 1),
+            .t_nullable => self.firstUnencodable(pool.getNullableInner(idx), depth + 1),
+            .t_dict => self.firstUnencodable(pool.getDictValue(idx), depth + 1),
+            .t_record => blk: {
+                for (pool.getRecordFields(idx)) |field| {
+                    if (self.firstUnencodable(field.type_idx, depth + 1)) |bad| break :blk bad;
+                }
+                break :blk null;
+            },
+            .t_tuple => blk: {
+                for (pool.getTupleElements(idx)) |element| {
+                    if (self.firstUnencodable(element, depth + 1)) |bad| break :blk bad;
+                }
+                break :blk null;
+            },
+            .t_union => blk: {
+                for (pool.getUnionMembers(idx)) |member| {
+                    if (self.firstUnencodable(member, depth + 1)) |bad| break :blk bad;
+                }
+                break :blk null;
+            },
+            // exhaustive: every remaining tag is a JSON scalar, a literal, a
+            // name the pool did not resolve, or `unknown`. The scalars and
+            // literals encode; the other two are types this walk has no
+            // information about, and reporting one would refuse a program on
+            // the absence of knowledge rather than on knowledge. Refusing what
+            // is definitely wrong is the direction this rule takes, so an
+            // unmodelled tag arriving here is admitted and reported by
+            // whatever does know it.
+            else => null,
+        };
+    }
+
+    /// `Response.json(payload)`: refuse a payload whose type JSON cannot carry.
+    ///
+    /// Spec 7.2 wants `responseJson<T>` to return `Result<Response, JsonError>`
+    /// so the failure is handled rather than thrown. Making the shipped global
+    /// fallible rewrites the return statement of every handler in the
+    /// repository, which is what phase 7's direct cutover is for. This is the
+    /// half that costs no migration and closes the same hole wherever `T`
+    /// decides it; the residual - the size limit, which no payload type
+    /// discharges - stays a run-time fault.
+    fn checkResponseJsonPayload(self: *TypeChecker, call: Node.CallExpr) void {
+        const callee = self.ir_view.getMember(call.callee) orelse return;
+        if (self.ir_view.getTag(callee.object) != .identifier) return;
+        const object_binding = self.ir_view.getBinding(callee.object) orelse return;
+        const object_name = self.resolveAtomName(object_binding.name_atom) orelse return;
+        if (!std.mem.eql(u8, object_name, abi_types.RESPONSE_TYPE_NAME)) return;
+        // A shadowed `Response` is a different value, the same way
+        // `inferResponseConstructorType` leaves one alone.
+        if (self.binding_types.get(bindingKey(object_binding)) != null) return;
+        const method = self.resolveAtomName(callee.property) orelse return;
+        if (!std.mem.eql(u8, method, "json")) return;
+        if (call.args_count == 0) return;
+
+        const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
+        const arg_type = self.inferType(arg_idx);
+        const bad = self.firstUnencodable(arg_type, 0) orelse return;
+
+        var buf: [256]u8 = undefined;
+        const bad_str = self.env.pool.formatType(bad, buf[0..128]);
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "Response.json cannot encode this payload: {s} is not a JSON value",
+            .{bad_str},
+        ) catch "Response.json cannot encode this payload";
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unencodable_json_payload,
+            .node = arg_idx,
+            .message = msg,
+            .help = "JSON carries scalars, arrays, tuples, records, and string-keyed Dict values. Encode a Bytes with encodeBase64, and call a function rather than sending it.",
+            .allocated = !std.mem.eql(u8, msg, "Response.json cannot encode this payload"),
+        });
+    }
+
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         if (callee_tag == .member_access) {
+            self.checkResponseJsonPayload(call);
             const callee_type = self.inferType(call.callee);
             const tag = self.env.pool.getTag(callee_type) orelse return;
             if (tag == .t_function) {
@@ -5620,6 +5725,111 @@ test "a Bytes arm narrows in the arm it guards and not in the others" {
     ,
         1,
         "expected Bytes",
+    );
+}
+
+test "Response.json refuses a payload JSON cannot carry" {
+    // The failure exists today and has nowhere to go: `http.zig` calls
+    // `valueToJsonString` with `try`, so a function-valued field throws, and
+    // the subset has no `try/catch`. Deciding it from the type is what turns a
+    // run-time throw into a diagnostic.
+    try checkTypedSourceSaying(
+        \\function helper(n: number): number {
+        \\    return n;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const f: (n: number) => number = helper;
+        \\    return Response.json({ f });
+        \\}
+    ,
+        1,
+        "is not a JSON value",
+    );
+
+    // A whole request, whose `text` and `json` fields are functions. Sending
+    // one would throw at the first of them.
+    try checkTypedSourceSaying(
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ r: req });
+        \\}
+    ,
+        1,
+        "is not a JSON value",
+    );
+
+    // A Bytes is an octet buffer, not a JSON value.
+    try checkTypedSourceSaying(
+        \\import { encodeUtf8 } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ raw: encodeUtf8("hi") });
+        \\}
+    ,
+        1,
+        "is not a JSON value",
+    );
+
+    // And nested, because a payload is usually a record of records.
+    try checkTypedSourceSaying(
+        \\import { encodeUtf8 } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ outer: { inner: [encodeUtf8("hi")] } });
+        \\}
+    ,
+        1,
+        "is not a JSON value",
+    );
+}
+
+test "a bare function name in an object literal is not caught, and that is inference" {
+    // Measured, not assumed: `{ f: helper }` where `helper` is a plain
+    // declaration infers a record whose field has no type, so the rule has
+    // nothing to refuse. The limit is in what an object literal infers for a
+    // bare callable identifier, not in the encodability walk - the same
+    // program with the function bound to a declared function type reports.
+    //
+    // Recorded rather than worked around: making the walk guess from a name
+    // would be the rule claiming knowledge the type system did not give it.
+    try checkTypedSource(
+        \\function helper(n: number): number {
+        \\    return n;
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return Response.json({ f: helper });
+        \\}
+    ,
+        0,
+        null,
+    );
+}
+
+test "Response.json still admits every payload JSON can carry" {
+    // The other half. Without it the test above passes for a checker that
+    // refuses everything, and the rule would be unusable rather than wrong.
+    try checkTypedSource(
+        \\import { encodeBase64, encodeUtf8 } from "zttp:bytes";
+        \\function handler(req: Request): Response {
+        \\    const nested = { id: "a", counts: [1, 2, 3], flag: true, missing: null };
+        \\    return Response.json({ nested, encoded: encodeBase64(encodeUtf8("hi")), n: 1 });
+        \\}
+    ,
+        0,
+        null,
+    );
+
+    // `unknown` is admitted deliberately: it is what a `Result` payload types
+    // as, and refusing it would reject `Response.json(parsed.value)` in every
+    // handler that has one. The checker reports where it knows and stays quiet
+    // where it does not.
+    try checkTypedSource(
+        \\import { parseJson } from "zttp:json";
+        \\function handler(req: Request): Response {
+        \\    const parsed = parseJson("{}");
+        \\    if (!parsed.ok) return Response.json({ error: parsed.error });
+        \\    return Response.json({ data: parsed.value });
+        \\}
+    ,
+        0,
+        null,
     );
 }
 

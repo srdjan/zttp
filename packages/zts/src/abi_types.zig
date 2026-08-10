@@ -29,9 +29,20 @@ pub const RESPONSE_TYPE_NAME = "Response";
 /// The name a handler writes to annotate its parameter.
 pub const REQUEST_TYPE_NAME = "Request";
 
-/// The four constructors on the `Response` global. Each returns a `Response`,
-/// and there is no other way for a handler to make one.
-pub const RESPONSE_CONSTRUCTORS = [_][]const u8{ "json", "text", "html", "redirect" };
+/// The constructors on the `Response` global. Each returns a `Response`, and
+/// there is no other way for a handler to make one.
+///
+/// `rawJson` was missing from this list while `object.Atom.rawJson` existed,
+/// `contract_builder.zig` handled it, and `handler_analyzer.zig` matched it in
+/// four places - so the checker did not know a constructor the contract
+/// builder did, and a handler returning one inferred nothing where the other
+/// four inferred `Response`. That is the fail-open direction: the return check
+/// compares nothing when either side is absent.
+///
+/// `text` is the total constructor spec 7.2 names `responseText`: a handler
+/// always has an infallible way to build the error arm of a fallible one. That
+/// is why the encodability rule below applies to `json` and not to it.
+pub const RESPONSE_CONSTRUCTORS = [_][]const u8{ "json", "text", "html", "redirect", "rawJson" };
 
 fn addField(
     pool: *TypePool,
@@ -302,8 +313,15 @@ test "the Request brand refuses what is not one" {
     try std.testing.expect(env.isAssignableTo(request, object_ref));
 }
 
-test "isResponseConstructor names only the four constructors" {
-    try std.testing.expect(isResponseConstructor("json"));
-    try std.testing.expect(isResponseConstructor("redirect"));
+test "isResponseConstructor names every constructor the runtime installs" {
+    // Five, and the fifth is the point: `rawJson` was known to
+    // `object.Atom`, to `contract_builder.zig`, and to `handler_analyzer.zig`
+    // in four places, and not to the checker - so a handler returning one
+    // inferred nothing where the other four inferred `Response`, and the
+    // return check compared nothing.
+    try std.testing.expectEqual(@as(usize, 5), RESPONSE_CONSTRUCTORS.len);
+    for ([_][]const u8{ "json", "text", "html", "redirect", "rawJson" }) |name| {
+        try std.testing.expect(isResponseConstructor(name));
+    }
     try std.testing.expect(!isResponseConstructor("clone"));
 }
