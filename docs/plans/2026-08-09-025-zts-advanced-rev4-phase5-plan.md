@@ -486,6 +486,52 @@ typed `Effects<T, "clock">` contributes clock and not the whole set; a genuinely
 unresolvable callee still sets `lower_bound` and reports ZTS512; the ceiling
 repair text names the exact capabilities and parses back as a valid annotation.
 
+What this task measured, in the order the three parts landed.
+
+**The reachability qualifier came off and the corpus did not move.** All 46
+example suites pass unchanged after the widening, which reads as every exported
+helper in the corpus with a nonempty row either declaring a ceiling already or
+being reachable already. The plan anticipated a mechanical fix-up round; there
+was nothing to fix up. `docs/verification.md` and `docs/typescript.md` had
+already stated the rule without the qualifier, so this made the code match the
+documentation rather than the other way round.
+
+**ZTS507 is a deletion, as the plan expected, and ZTS508 is not.** After the
+qualifier came off, ZTS507's predicate - exported, undeclared, nonempty inferred
+row - is character for character ZTS610's, so the opt-in warning covered exactly
+the helpers an unconditional error refuses. ZTS508 survives on a measured
+difference: on a handler declaring `Spec<"canonical">`, ZTS508 fires and ZTS611
+does not, because ZTS611 requires a proof-supported spec and ZTS508 does not.
+
+**The function-type ceiling landed for the empty row and is blocked for a
+nonempty one.** A call through a parameter whose declared type is a function
+type now contributes that type's declared row instead of setting `lower_bound`.
+For a function type with no capsule that row is empty - spec 6.5's pure callback
+- and that half is shipped and tested: `apply(f: (n: number) => number, x:
+number): Effects<number, "clock">` reported ZTS512 before and now reports ZTS505
+over-declaration, which is a real answer about the program where there had been
+a refusal to answer.
+
+The nonempty half has a prerequisite the plan did not see. A function type whose
+return carries a capsule - `(n: number) => Effects<number, "clock">` - does not
+survive the checker: a function returning that call's result reports ZTS204
+against its own declared return type. The plain forms both check clean, so the
+defect is in the nested position specifically. The code path that reads such a
+row is written and reached; what it cannot be handed is a type the annotation
+cannot express. That is a type-representation fix and belongs beside the
+type-text parser, not in the effect analyzer, so it is recorded here rather than
+worked around with a second extraction path.
+
+The assignment-direction check - a pure-typed callback parameter rejecting an
+effectful function assigned to it - waits on the same representation. Checking
+row subset against a ceiling the annotation cannot carry would only ever compare
+against the empty row, which is a check that passes for the wrong reason.
+
+`lower_bound` and ZTS512 are unchanged for the genuinely unresolvable callee.
+The unit test at `effect_inference.zig` that pins an unannotated `f` to
+`lower_bound` runs with no type env and still passes, which is the floor: this
+change adds an answer where a declared type supplies one and takes none away.
+
 ### Task 10: the exit gate
 
 **Files:** a new example under `examples/patterns/`, plus the tests that pin it,

@@ -354,6 +354,9 @@ pub const ContractBuilder = struct {
         // `self` is a stable address for the duration of `build`, so the borrow
         // outlives the analyzer.
         effects.facts = self.factsRef();
+        // Lets a call through a function-typed parameter contribute that type's
+        // declared ceiling instead of defeating the row (D2 section 4, I3).
+        effects.type_env = self.type_env;
         defer effects.deinit();
         try effects.analyze(root);
 

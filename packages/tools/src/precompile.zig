@@ -4550,6 +4550,35 @@ test "runCheckOnlyFromSource: ZTS202 arg-count message survives json capture wit
     try std.testing.expect(saw_202);
 }
 
+test "a pure-typed callback parameter contributes the empty row" {
+    const allocator = std.testing.allocator;
+    // D2 section 4's I3: a function type with no capsule declares the empty
+    // row - spec 6.5's "its callback MUST be pure" made representable. The
+    // call through `f` used to defeat the row entirely and report ZTS512.
+    const source =
+        \\export function apply(f: (n: number) => number, x: number): Effects<number, "clock"> {
+        \\  return f(x);
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "pure-callback.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    var saw_512 = false;
+    var saw_505 = false;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, "ZTS512")) saw_512 = true;
+        if (std.mem.eql(u8, d.code, "ZTS505")) saw_505 = true;
+    }
+    try std.testing.expect(!saw_512);
+    // The row is empty, so declaring "clock" is over-declaration - a real
+    // answer about the program where there had been a refusal to answer.
+    try std.testing.expect(saw_505);
+}
+
 test "an unreached exported helper with a nonempty row reports ZTS610" {
     const allocator = std.testing.allocator;
     // Spec 5.7 says "an exported function with a nonempty inferred effect row

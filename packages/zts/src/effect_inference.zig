@@ -18,6 +18,8 @@ const module_binding = @import("zts-engine").module_binding;
 const builtin_modules = @import("zts-engine").builtin_modules;
 const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
+const type_env_mod = @import("type_env.zig");
+const type_pool_mod = @import("type_pool.zig");
 const bool_checker = @import("bool_checker.zig");
 const known_globals = @import("zts-base").known_globals;
 
@@ -139,6 +141,11 @@ pub const Analyzer = struct {
     /// tests and any un-migrated caller do.
     facts: ?*const module_facts_mod.ModuleFacts = null,
     owned_facts: ?module_facts_mod.ModuleFacts = null,
+    /// Type environment for reading a function-typed parameter's declared
+    /// ceiling. Borrowed and optional: without it a call through a parameter
+    /// stays a lower bound, which is the conservative answer this had before
+    /// the type env was available at all.
+    type_env: ?*const type_env_mod.TypeEnv = null,
     /// Map binding slot to index into `functions`. Used to resolve identifier
     /// callees back to a user-defined function.
     user_fn_by_slot: std.AutoHashMapUnmanaged(u16, usize),
@@ -660,7 +667,86 @@ pub const Analyzer = struct {
         // Returning here left the row untouched, which reads downstream as
         // "this callee contributes nothing" - an under-approximation stated
         // with the confidence of a proof.
-        if (self.calleeIsUnresolvable(binding)) row.lower_bound = true;
+        if (!self.calleeIsUnresolvable(binding)) return;
+        if (try self.contributeDeclaredCallbackRow(binding, owner, row)) return;
+        row.lower_bound = true;
+    }
+
+    /// D2 section 4's I3: a function type carries an effect ceiling, so a call
+    /// through a value of that type contributes the type's declared row rather
+    /// than defeating the analysis.
+    ///
+    /// A function type with no capsule declares the empty row - spec 6.5's
+    /// "its callback MUST be pure" made representable - so a pure-typed
+    /// callback contributes nothing and is not a lower bound. Returns true when
+    /// the declared type answered; false leaves the caller to fail closed.
+    fn contributeDeclaredCallbackRow(
+        self: *Analyzer,
+        binding: ir.BindingRef,
+        owner: usize,
+        row: *EffectRow,
+    ) WalkError!bool {
+        if (binding.kind != .argument) return false;
+        const env = self.type_env orelse return false;
+        const param_type = self.declaredParamType(env, binding, owner) orelse return false;
+        if (env.pool.getTag(param_type) != .t_function) return false;
+
+        const ret = env.pool.getFunctionInfo(param_type).ret;
+        if (ret == type_pool_mod.null_type_idx) return true; // no capsule: empty row
+
+        var names: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer names.deinit(self.allocator);
+        const status = try env.extractEffectMembers(ret, &names);
+        // A payload that is not a closed union of string literals recovers no
+        // names, which is indistinguishable from no annotation. ZTS511 exists
+        // because that difference matters; fail closed rather than read the
+        // empty list as a pure callback.
+        if (status.non_literal) return false;
+
+        if (names.items.len == 0) return true; // no capsule: the empty row
+
+        const before = row.capabilities;
+        for (names.items) |name| {
+            const cap = std.meta.stringToEnum(Capability, name) orelse return false;
+            row.capabilities.insert(cap);
+        }
+        // Same demotions a direct module call makes: reaching a capability is
+        // not pure, and reaching the clock or the RNG is not deterministic.
+        const added = row.capabilities.differenceWith(before);
+        if (added.contains(.clock) or added.contains(.random)) row.deterministic = false;
+        row.pure = false;
+        return true;
+    }
+
+    /// The declared type of `binding`, which names a parameter of the function
+    /// at `owner`. Read from the owner's signature rather than the binding
+    /// table, so it does not depend on the type checker's parameter pass
+    /// having run.
+    fn declaredParamType(
+        self: *const Analyzer,
+        env: *const type_env_mod.TypeEnv,
+        binding: ir.BindingRef,
+        owner: usize,
+    ) ?type_pool_mod.TypeIndex {
+        if (owner >= self.functions.items.len) return null;
+        const decl_node = self.functions.items[owner].decl_node;
+        const line = (self.ir_view.getLoc(decl_node) orelse return null).line;
+        const sig = env.getFnSigByLoc(line) orelse return null;
+
+        const fn_node = blk: {
+            const tag = self.ir_view.getTag(decl_node) orelse return null;
+            if (tag == .function_expr or tag == .arrow_function) break :blk decl_node;
+            break :blk (self.ir_view.getVarDecl(decl_node) orelse return null).init;
+        };
+        const func = self.ir_view.getFunction(fn_node) orelse return null;
+
+        for (0..func.params_count) |i| {
+            if (i >= sig.param_count) return null;
+            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+            const pb = self.ir_view.paramBinding(param_idx) orelse continue;
+            if (pb.slot == binding.slot) return sig.param_types[i];
+        }
+        return null;
     }
 
     /// Record a call-graph edge for a bare identifier passed as an argument
