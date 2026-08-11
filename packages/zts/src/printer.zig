@@ -1123,28 +1123,49 @@ const Renderer = struct {
         switch (g.kind) {
             .block => try self.renderBlock(g, indent),
             .match_body => try self.renderMatchBody(g, indent),
-            .call_args => if (soleGroupArgument(g.children)) |inner|
-                try self.renderHugged(g, inner, indent)
+            .call_args => if (self.huggable(g.children)) |hug|
+                try self.renderHugged(hug, indent)
             else
                 try self.renderList(g, indent),
             else => try self.renderList(g, indent),
         }
     }
 
-    /// A call whose only argument is a record, an array, or a block keeps the
-    /// bracket on the call's line and breaks the argument itself. The
+    /// A call whose last argument is a record, an array, or a block keeps the
+    /// brackets on the call's line and breaks that argument itself. The
     /// alternative indents the same content twice and buys two lines of
     /// punctuation for it. D3 section 2 does not name this case; it is added
-    /// here because the corpus is full of `Response.json({ ... })`.
-    fn renderHugged(self: *Renderer, g: *Group, inner: *Group, indent: u32) Error!void {
+    /// here because the corpus is full of `Response.json({ ... })` and
+    /// `resource(order, { ... })`.
+    fn huggable(self: *Renderer, children: []const Chunk) ?Hug {
+        const hug = huggableCall(children) orelse return null;
+        if (hug.head.len == 0) return hug;
+        const head_flat = flatText(self.p.arena, self.p.options, hug.head) catch return null;
+        if (std.mem.indexOfScalar(u8, head_flat, '\n') != null) return null;
+        // `(`, the arguments before the last, and the bracket that opens it.
+        if (self.p.col + 3 + firstLineWidth(head_flat) > self.width) return null;
+        return hug;
+    }
+
+    fn renderHugged(self: *Renderer, hug: Hug, indent: u32) Error!void {
         const opener = TokenInfo{
             .tok = .{ .type = .lparen, .start = 0, .len = 1, .line = 0, .column = 0 },
             .text = "(",
         };
         try self.p.emitToken(opener, true);
-        try self.renderGroup(inner, indent, 1);
+        if (hug.head.len > 0) {
+            // `head` stops before the comma that separates it from the hugged
+            // argument, because the flat writer drops a comma that ends its
+            // chunk list - that is the trailing-comma rule, and here the comma
+            // is a separator. Writing it back is what keeps the token stream
+            // whole; the self-check caught its absence.
+            try writeChunksFlat(self.p, hug.head);
+            try self.p.writeRaw(",");
+            self.p.left = .{ .kind = .comma };
+        }
+        try self.renderGroup(hug.tail, indent, 1);
         try self.p.writeRaw(")");
-        self.p.left = .{ .kind = closerType(g.kind) };
+        self.p.left = .{ .kind = .rparen };
     }
 
     fn writeFlatGroup(self: *Renderer, g: *Group, flat: []const u8) Error!void {
@@ -1434,28 +1455,58 @@ fn armColon(arm: []const Chunk) ?usize {
     return null;
 }
 
-/// The one argument a call can hug: a record, an array, or a block, alone.
-fn soleGroupArgument(children: []const Chunk) ?*Group {
-    var only: ?*Group = null;
-    for (children) |c| {
-        switch (c) {
-            .blank => {},
+const Hug = struct {
+    /// The arguments before the last one, without the comma that separates
+    /// them from it. Printed flat on the call's own line.
+    head: []const Chunk,
+    /// The last argument, which is what breaks.
+    tail: *Group,
+};
+
+/// The argument a call can hug: the last one, when it is a record, an array,
+/// or a block, and everything before it is plain enough to print flat.
+fn huggableCall(children: []const Chunk) ?Hug {
+    var end = children.len;
+    while (end > 0) {
+        switch (children[end - 1]) {
+            .blank => end -= 1,
+            // A trailing comma belongs to the layout, not to the argument list.
             .tok => |t| if (t.tok.type == .comma) {
-                // A trailing comma is still one argument; a separating comma
-                // is two, and two do not hug.
-                if (only == null) return null;
+                end -= 1;
             } else return null,
-            .group => |g| {
-                if (only != null) return null;
-                switch (g.kind) {
-                    .object, .array, .block, .match_body => only = g,
-                    else => return null,
-                }
-            },
-            else => return null,
+            else => break,
         }
     }
-    return only;
+    if (end == 0) return null;
+    const last = children[end - 1];
+    if (last != .group) return null;
+    switch (last.group.kind) {
+        .object, .array, .block, .match_body => {},
+        else => return null,
+    }
+
+    var head = children[0 .. end - 1];
+    if (head.len > 0) {
+        // The head has to end at an argument boundary, and it has to be
+        // printable on one line: a comment or a group that must break in it
+        // would have nowhere to go.
+        const last_head = head[head.len - 1];
+        if (last_head != .tok or last_head.tok.tok.type != .comma) return null;
+        if (hasMustBreak(head)) return null;
+        // Only a plain argument list hugs. `f({ ... }, { ... })` would hug the
+        // second record onto the line the first one already fills, which reads
+        // worse than one argument per line - and the corpus writes those the
+        // other way.
+        for (head) |c| {
+            if (c != .group) continue;
+            switch (c.group.kind) {
+                .object, .array, .block, .match_body => return null,
+                else => {},
+            }
+        }
+        head = head[0 .. head.len - 1];
+    }
+    return .{ .head = head, .tail = last.group };
 }
 
 fn hasMustBreak(chunks: []const Chunk) bool {
@@ -1727,8 +1778,7 @@ test "a record one column under the target keeps its line, semicolon included" {
 }
 
 test "an import clause that does not fit takes one specifier per line" {
-    try expectPrints(
-        "import { alpha, beta, gamma, delta, epsilon, zeta, eta, theta, iota } from \"zttp:env\";\n",
+    try expectPrints("import { alpha, beta, gamma, delta, epsilon, zeta, eta, theta, iota } from \"zttp:env\";\n",
         \\import {
         \\  alpha,
         \\  beta,
@@ -1745,13 +1795,32 @@ test "an import clause that does not fit takes one specifier per line" {
 }
 
 test "match arms take one line each, and the expression drops when it does not fit" {
-    try expectPrints(
-        "const r = match (v) { when string: \"s\" when number: \"n\" default: \"o\" };\n",
+    try expectPrints("const r = match (v) { when string: \"s\" when number: \"n\" default: \"o\" };\n",
         \\const r = match (v) {
         \\  when string: "s"
         \\  when number: "n"
         \\  default: "o"
         \\};
+        \\
+    );
+}
+
+test "a call hugs a record last argument instead of indenting it twice" {
+    try expectPrints("const r = resource(order, { self: { href: \"/orders/42\" }, cancel: { method: \"DELETE\" } });\n",
+        \\const r = resource(order, {
+        \\  self: { href: "/orders/42" },
+        \\  cancel: { method: "DELETE" },
+        \\});
+        \\
+    );
+}
+
+test "two record arguments do not hug: only the last one can break" {
+    try expectPrints("const r = respond({ error: \"aaaaaaaa\", size: 11111, kind: \"bbbbbbbb\" }, { status: 400111 });\n",
+        \\const r = respond(
+        \\  { error: "aaaaaaaa", size: 11111, kind: "bbbbbbbb" },
+        \\  { status: 400111 },
+        \\);
         \\
     );
 }
