@@ -2473,6 +2473,22 @@ pub const TypeChecker = struct {
 
         for (0..obj.properties_count) |i| {
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+            // A spread element carries its operand where a property carries its
+            // key, so reading it as a property named the operand `base` a field
+            // and dropped every field `base` actually had. Its fields belong
+            // here, in source order: a later key of the same name overrides an
+            // earlier one, which is what `addRecord` does with duplicates.
+            if (self.ir_view.getTag(prop_idx) == .object_spread) {
+                const operand = self.ir_view.getOptValue(prop_idx) orelse continue;
+                const spread_type = self.inferType(operand);
+                for (self.env.pool.getRecordFields(spread_type)) |field| {
+                    fields_buf.append(self.allocator, field) catch {
+                        @constCast(self).markAllocationFailure();
+                        return null_type_idx;
+                    };
+                }
+                continue;
+            }
             const prop = self.ir_view.getProperty(prop_idx) orelse continue;
             // The key is a node index (identifier, string, or computed); extract atom from it
             const key_tag = self.ir_view.getTag(prop.key) orelse continue;
@@ -4298,6 +4314,40 @@ test "narrowing: a bare boolean discriminant read, and its negation" {
         \\  return r.error;
         \\}
     , 0, null);
+}
+
+test "an object spread contributes the spread record's fields" {
+    // `{ ...base, port: 8080 }` typed as `{ base: unknown; port: 8080 }`: a
+    // spread node stores its operand where a property stores its key, so the
+    // operand's NAME became a field and the operand's fields were dropped. Every
+    // spread object therefore failed to satisfy the record type it was written
+    // to produce, which is the whole use of the form.
+    try checkTypedSource(
+        \\type Config = { host: string, port: number };
+        \\function defaults(): Config {
+        \\  return { host: "localhost", port: 80 };
+        \\}
+        \\function configured(): Config {
+        \\  const base: Config = defaults();
+        \\  return { ...base, port: 8080 };
+        \\}
+    , 0, null);
+}
+
+test "an object spread does not invent fields the spread record lacks" {
+    // The floor. Merging the spread's fields must not turn the check off: a
+    // field the target type requires and neither side provides is still a
+    // mismatch.
+    try checkTypedSourceSaying(
+        \\type Config = { host: string, port: number };
+        \\function partial(): { port: number } {
+        \\  return { port: 80 };
+        \\}
+        \\function configured(): Config {
+        \\  const base: { port: number } = partial();
+        \\  return { ...base, port: 8080 };
+        \\}
+    , 1, "return type does not match declared return type");
 }
 
 test "an annotated let keeps its declared type, so it can be reassigned" {
