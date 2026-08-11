@@ -387,11 +387,11 @@ Lower more `RepairIntent` variants to real source edits, starting with the span-
 rewrites. Implement validator M2, parse identity, from
 [D3](plans/2026-07-30-016-d3-canonical-form-wire-design.md); it does not need the
 canonical formatter. Grade each lowering intent with it and flip `repair_available` on
-the wire for graded intents only. (M2 was built in phase 6 and grades none of them:
-parse identity holds only where the tree does not move, and every lowering rewrite
-moves it. The intents that became gradable did so under M4, a declared law that
-re-derives the rewrite and its precondition. M2's consumer is the semicolon-insertion
-repair that ASI removal needs.) Add `input_validated` and `pii_contained` to
+the wire for graded intents only. (M2 was built in phase 6, measured to grade none of
+them, and deleted in the same phase: parse identity holds only where the tree does not
+move, and every lowering rewrite moves it. The intents that became gradable did so
+under M4, a declared law that re-derives the rewrite and its precondition. M2 returns
+with its consumer, the semicolon-insertion repair that ASI removal needs.) Add `input_validated` and `pii_contained` to
 `supported_goals` in `packages/pi/src/property_goals.zig`, widening the autoloop from
 three driveable properties to five; the counterexample solver already models both.
 
@@ -431,8 +431,10 @@ M4, declared law with a carried precondition, is the family for the canonicaliza
 rewrites. The other four are ruled out by evidence rather than preference. M2 is parse
 identity and discharges none of them - every repair changes the IR tree, which is the
 point; even `let` to `const` fails it, since the declaration node distinguishes the two
-kinds. M1 needs the canonical formatter and M3 needs the semantic kernel, and neither
-exists; `semantics.zig` is explicitly a partial slice with statements structural-only.
+kinds. That was measured with a working M2 and is why its code no longer ships. M1 is
+strictly weaker than M2 and went the same way; M3 needs the semantic kernel, which does
+not exist - `semantics.zig` is explicitly a partial slice with statements
+structural-only.
 M5 is advisory-only by construction and can never justify the flag. M4's machinery is the
 one that already runs: `semantics_smt.encodeEquivalence` under z3, live in
 `scripts/verify.sh`. Its published shape - a law plus preconditions carried on the row -

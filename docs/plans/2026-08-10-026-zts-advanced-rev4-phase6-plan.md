@@ -420,15 +420,21 @@ validator discharges this, and it never does. `repair_validator.zig`'s own
 header had already recorded the fact ("M2 discharges none: every one changes the
 IR tree") before the plan contradicted it.
 
-Both validators are built, because both are needed and neither is discharged by
-guessing. M1 prints both sides and compares bytes. M2 lives in a new
-`packages/zts/src/ir_identity.zig`, whose tag switch is exhaustive with no
-`else`, so a new `NodeTag` fails the build rather than defaulting to
-"identical". 50 of the 82 tags are compared and 32 answer `unmodeled`; most of
-the 32 name constructs the parser refuses, so they cannot appear in a tree.
-Neither method discharges a row today. Their consumer is task 13: the
-semicolon-insertion repair moves a token without moving structure, which is
-exactly M2's shape.
+Both validators were built and run, because the claim "M2 discharges none of
+these" is a measurement and not a preference. M1 printed both sides and compared
+bytes. M2 lived in `packages/zts/src/ir_identity.zig`, whose tag switch was
+exhaustive with no `else`, so a new `NodeTag` failed the build rather than
+defaulting to "identical"; 50 of the 82 tags were compared and 32 answered
+`unmodeled`, most of them naming constructs the parser refuses.
+
+Both were then deleted, in the same phase, once the measurement was in. Neither
+discharged a row, no row named either, and the two dischargers were what made
+`validateApplication` allocating and fallible - an allocator parameter and an
+error union carried through three call sites for a path none of them could
+reach. Task 13 is where the semicolon-insertion repair arrives, and that is
+where M2 comes back with a consumer. The catalog keeps the `layout_identity` and
+`parse_identity` entries so the published method vocabulary still spans M1 to
+M5; what went is the code behind them.
 
 The two rows are `.implemented` under M4 instead, with a region-local law
 skeleton beside the line-local one, because their rewrites replace a run of

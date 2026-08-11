@@ -1060,7 +1060,7 @@ fn runApplyRepair(
             else => return err,
         };
 
-        switch (try repairPolicy.validateApplication(allocator, r.intent, current, next, r.line)) {
+        switch (repairPolicy.validateApplication(r.intent, current, next, r.line)) {
             .equivalent => {},
             .not_law_shape => |why| {
                 allocator.free(next);

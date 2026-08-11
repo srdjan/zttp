@@ -2943,8 +2943,7 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         const repaired = try applyRepairs(allocator, fixture.source, &one);
         defer allocator.free(repaired);
 
-        switch (try repairPolicy.validateApplication(
-            allocator,
+        switch (repairPolicy.validateApplication(
             fixture.intent,
             fixture.source,
             repaired,

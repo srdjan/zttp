@@ -53,7 +53,6 @@ pub const restriction_registry = @import("restriction_registry.zig");
 pub const repair_intent = @import("repair_intent.zig");
 pub const repair_plan = @import("repair_plan.zig");
 pub const repair_validator = @import("repair_validator.zig");
-pub const ir_identity = @import("ir_identity.zig");
 
 pub const semantics = @import("semantics.zig");
 pub const semantics_check = @import("semantics_check.zig");

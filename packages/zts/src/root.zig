@@ -605,13 +605,12 @@ pub const RepairPolicy = struct {
     }
 
     pub fn validateApplication(
-        allocator: std.mem.Allocator,
         intent: RepairIntent,
         original: []const u8,
         repaired: []const u8,
         line: u32,
-    ) error{OutOfMemory}!Discharge {
-        return repair_validator.validateApplication(allocator, intent, original, repaired, line);
+    ) Discharge {
+        return repair_validator.validateApplication(intent, original, repaired, line);
     }
 
     /// True when anything outside the named span of lines binds `ident`.
@@ -646,8 +645,7 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
     try std.testing.expect(RepairPolicy.isGradable(.replace_let_with_const));
     try std.testing.expect(!RepairPolicy.isGradable(.add_trailing_return));
 
-    const accepted: RepairPolicy.Discharge = try RepairPolicy.validateApplication(
-        std.testing.allocator,
+    const accepted: RepairPolicy.Discharge = RepairPolicy.validateApplication(
         .replace_let_with_const,
         "let value = 1;\n",
         "const value = 1;\n",
@@ -655,8 +653,7 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
     );
     try std.testing.expectEqual(RepairPolicy.Discharge.equivalent, accepted);
 
-    const refused = try RepairPolicy.validateApplication(
-        std.testing.allocator,
+    const refused = RepairPolicy.validateApplication(
         .replace_let_with_const,
         "let value = 1;\n",
         "let value = 2;\n",
@@ -667,8 +664,7 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
         else => return error.TestExpectedRepairRefusal,
     }
 
-    const unimplemented = try RepairPolicy.validateApplication(
-        std.testing.allocator,
+    const unimplemented = RepairPolicy.validateApplication(
         .add_trailing_return,
         "function handler() {}\n",
         "function handler() { return null; }\n",

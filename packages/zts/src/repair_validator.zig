@@ -17,20 +17,20 @@
 //! classification, not a gap waiting to be closed.
 //!
 //! Second, for the rewrites that are equivalences, which method discharges
-//! them? M1 and M2 both run now - `dischargeLayoutIdentity` prints both sides
-//! with the canonical formatter and compares bytes, `ir_identity.compare`
-//! parses both and compares the trees - and neither discharges a single row,
-//! which is a measurement rather than a gap. Every rewrite here changes the
-//! tree: `flatten_destructure` turns one statement into two and
-//! `drop_unused_index_alias` turns two into one, so parse identity refuses
-//! both, and layout identity is strictly weaker than parse identity. The two
-//! methods exist for the rewrite that moves a token without moving structure,
-//! which is the semicolon spec 5.5 forbids ASI from inserting. M3 needs the
-//! semantic kernel, which spec section 10 defers. M5 is advisory-only by
-//! construction. That leaves M4, declared law, whose machinery already runs
-//! under z3 in `scripts/verify.sh` - and whose published shape, a law plus
-//! "the law's own preconditions carried into the row's precondition column",
-//! is the shape these rewrites need.
+//! them? M4, declared law, for every one of them, and the catalog says why the
+//! other four do not. M1 and M2 were built and measured: layout identity prints
+//! both sides and compares bytes, parse identity compares trees, and neither
+//! discharged a single row. Every rewrite here changes the tree -
+//! `flatten_destructure` turns one statement into two, `drop_unused_index_alias`
+//! turns two into one - so parse identity refuses them all, and layout identity
+//! is strictly weaker than parse identity. Their case is the rewrite that moves
+//! a token without moving structure, which is the semicolon spec 5.5 forbids
+//! ASI from inserting; the code went out with the measurement rather than being
+//! carried against a rewrite that does not exist yet. M3 needs the semantic
+//! kernel, which spec section 10 defers. M5 is advisory-only by construction.
+//! That leaves M4, whose machinery already runs under z3 in `scripts/verify.sh`
+//! and whose published shape - a law plus "the law's own preconditions carried
+//! into the row's precondition column" - is the shape these rewrites need.
 //!
 //! Where a precondition comes from is part of the row. For most it is the
 //! checker: the rewrite is sound exactly where the diagnostic that requested it
@@ -61,8 +61,6 @@
 
 const std = @import("std");
 const repair_intent = @import("repair_intent.zig");
-const ir_identity = @import("ir_identity.zig");
-const printer = @import("zts-engine").printer;
 
 pub const RepairIntent = repair_intent.RepairIntent;
 
@@ -72,9 +70,11 @@ pub const Method = enum {
     /// so there is nothing for an equivalence validator to discharge.
     none,
     /// M1 - layout identity. Print both sides with the canonical formatter;
-    /// equivalent iff the bytes match.
+    /// equivalent iff the bytes match. Catalog entry only: it was implemented,
+    /// discharged no row, and the implementation went out with that result.
     layout_identity,
     /// M2 - parse identity. IR trees identical modulo positions and trivia.
+    /// Catalog entry only, for the same reason as M1.
     parse_identity,
     /// M3 - kernel-IR identity. Both sides elaborate to the same semantic
     /// kernel term after normalization.
@@ -264,10 +264,15 @@ pub const Discharge = union(enum) {
     /// This intent has no implemented validator. Distinct from a refusal: the
     /// edit was never examined.
     no_validator,
-    /// The validator ran and formed no answer - the printer refused a
-    /// construct, or a tree carried a form the comparison does not model.
-    /// Distinct from both a refusal and an acceptance, and every caller must
-    /// treat it as a reason not to apply: "undecided" is not "equivalent".
+    /// The validator ran and formed no answer. Distinct from both a refusal
+    /// and an acceptance, and every caller must treat it as a reason not to
+    /// apply: "undecided" is not "equivalent".
+    ///
+    /// No implemented method produces it today - it was M1's and M2's answer
+    /// for a source the printer refused or a tree the comparison did not
+    /// model, and both went out with them. It stays because it is the answer
+    /// the next whole-program method will need, and because the wire publishes
+    /// `undecided_equivalence` as a refusal reason a client already handles.
     undecided: []const u8,
 };
 
@@ -278,91 +283,43 @@ pub const Discharge = union(enum) {
 /// the region starting at that line (a validator that only checked content
 /// would accept a rewrite that also deleted a function three lines down), and
 /// that region's new content must be what the law produces from its old
-/// content. M1 and M2 do not use the line: they compare whole programs.
+/// content.
 ///
-/// `error.OutOfMemory` is the only failure. Everything else is a verdict,
-/// including "the printer refused this construct", which is an answer about
-/// the input rather than a fault in the check.
+/// Total: every outcome is a verdict. It allocates nothing and cannot fail,
+/// because the one method that runs re-derives the rewrite into a stack buffer
+/// and refuses a line too long to hold rather than growing one.
 pub fn validateApplication(
-    allocator: std.mem.Allocator,
     intent: RepairIntent,
     original: []const u8,
     repaired: []const u8,
     line: u32,
-) error{OutOfMemory}!Discharge {
+) Discharge {
     const row = find(intent) orelse return .no_validator;
     if (row.status != .implemented) return .no_validator;
-    return dischargeByMethod(allocator, row.method, intent, original, repaired, line);
+    return dischargeByMethod(row.method, intent, original, repaired, line);
 }
 
-/// The method table, split out so a row that names M1 or M2 tomorrow runs the
-/// same path a test can exercise today. A row with no implemented method never
-/// reaches here through `validateApplication`: it returns first.
+/// The method table. A row with no implemented method never reaches here
+/// through `validateApplication`: it returns first.
 pub fn dischargeByMethod(
-    allocator: std.mem.Allocator,
     method: Method,
     intent: RepairIntent,
     original: []const u8,
     repaired: []const u8,
     line: u32,
-) error{OutOfMemory}!Discharge {
+) Discharge {
     return switch (method) {
-        .layout_identity => dischargeLayoutIdentity(allocator, original, repaired),
-        .parse_identity => dischargeParseIdentity(allocator, original, repaired),
         .declared_law => dischargeDeclaredLaw(intent, original, repaired, line),
-        // M3 has no kernel to elaborate into and M5 never auto-applies, so
-        // neither can be implemented; `.none` claims no equivalence at all.
-        .kernel_identity, .contract_equivalence, .none => .no_validator,
-    };
-}
-
-/// M1, layout identity: print both sides in canonical form and compare bytes.
-/// Two sources that print the same differ only in what the printer decides,
-/// which is whitespace.
-fn dischargeLayoutIdentity(
-    allocator: std.mem.Allocator,
-    original: []const u8,
-    repaired: []const u8,
-) error{OutOfMemory}!Discharge {
-    // The refusal reason is not carried into the verdict: `Discharge` holds
-    // static strings and naming the construct would mean allocating one, which
-    // changes who owns the message. Which side refused is the part a caller
-    // acts on, and that is in the message.
-    const before = printer.print(allocator, original, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.UnprintableConstruct => return .{ .undecided = "the printer refused the original, so layout identity was not decided" },
-    };
-    defer allocator.free(before);
-
-    const after = printer.print(allocator, repaired, .{}) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.UnprintableConstruct => return .{ .undecided = "the printer refused the repaired source, so layout identity was not decided" },
-    };
-    defer allocator.free(after);
-
-    if (!std.mem.eql(u8, before, after)) {
-        return .{ .not_law_shape = "the two sources do not print to the same canonical bytes" };
-    }
-    return .equivalent;
-}
-
-/// M2, parse identity: the two trees agree modulo positions and trivia.
-fn dischargeParseIdentity(
-    allocator: std.mem.Allocator,
-    original: []const u8,
-    repaired: []const u8,
-) error{OutOfMemory}!Discharge {
-    return switch (try ir_identity.compare(allocator, original, repaired, .{})) {
-        .identical => .equivalent,
-        .differs => |why| .{ .not_law_shape = why },
-        // A repaired source that does not parse is not the same program as one
-        // that does, and saying so is the whole answer. An original that does
-        // not parse leaves nothing to compare against.
-        .unparsable => |side| switch (side) {
-            .original => .{ .undecided = "the original does not parse, so there is no tree to compare against" },
-            .repaired => .{ .not_law_shape = "the repaired source does not parse" },
-        },
-        .unmodeled => .{ .undecided = "the tree carries a construct parse identity does not model" },
+        // Nothing else discharges anything today. M1 and M2 were built, ran,
+        // and discharged no row - see the header - so they went out with the
+        // measurement. M3 has no kernel to elaborate into and M5 never
+        // auto-applies. `.none` claims no equivalence at all.
+        .layout_identity,
+        .parse_identity,
+        .kernel_identity,
+        .contract_equivalence,
+        .none,
+        => .no_validator,
     };
 }
 
@@ -1402,15 +1359,19 @@ test "every gradable row has a law, and every law has a gradable row" {
         if (row.gradable()) {
             gradable_count += 1;
             // What `implemented` has to mean: `dischargeByMethod` reaches
-            // something for this row's method. M4 needs a law of its own; M1
-            // and M2 compare whole programs and always run. The other three
-            // answer `.no_validator` there, so a row naming one of them and
-            // claiming `implemented` advertises a repair the apply path then
-            // refuses with `ungraded_intent`.
+            // something for this row's method. M4 is the only one that does,
+            // and it needs a law of its own. Every other method answers
+            // `.no_validator` there, so a row naming one and claiming
+            // `implemented` advertises a repair the apply path then refuses
+            // with `ungraded_intent`.
             const dischargeable = switch (row.method) {
                 .declared_law => has_law,
-                .layout_identity, .parse_identity => true,
-                .kernel_identity, .contract_equivalence, .none => false,
+                .layout_identity,
+                .parse_identity,
+                .kernel_identity,
+                .contract_equivalence,
+                .none,
+                => false,
             };
             if (!dischargeable) {
                 std.debug.print("row {s} is implemented with nothing to discharge it\n", .{@tagName(row.intent)});
@@ -1427,17 +1388,16 @@ test "every gradable row has a law, and every law has a gradable row" {
 test "let becomes const, and the for-of form is a different law" {
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .replace_let_with_const, "  let n = 1;\n", "  const n = 1;\n", 1),
+        validateApplication(.replace_let_with_const, "  let n = 1;\n", "  const n = 1;\n", 1),
     );
     // Indentation is preserved verbatim, so a reflowed line is not the law.
-    const reflowed = try validateApplication(std.testing.allocator, .replace_let_with_const, "  let n = 1;\n", "const n = 1;\n", 1);
+    const reflowed = validateApplication(.replace_let_with_const, "  let n = 1;\n", "const n = 1;\n", 1);
     try std.testing.expect(reflowed == .not_law_shape);
 
     // The producer handles both from one function; the two intents are
     // separate here so a misclassified diagnostic cannot discharge against the
     // wrong law.
-    const wrong_law = try validateApplication(
-        std.testing.allocator,
+    const wrong_law = validateApplication(
         .replace_let_with_const,
         "  for (let x of xs) {\n",
         "  for (const x of xs) {\n",
@@ -1446,7 +1406,7 @@ test "let becomes const, and the for-of form is a different law" {
     try std.testing.expect(wrong_law == .not_law_shape);
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .canonicalize_for_of_const, "  for (let x of xs) {\n", "  for (const x of xs) {\n", 1),
+        validateApplication(.canonicalize_for_of_const, "  for (let x of xs) {\n", "  for (const x of xs) {\n", 1),
     );
 }
 
@@ -1455,8 +1415,7 @@ test "a compound assignment must parenthesize a compound right-hand side" {
     // tax)`; without the parens it reassociates to `(total - fee) + tax` and
     // computes something else, so accepting the unparenthesized form would
     // grade a value-changing edit as an equivalence.
-    const unparenthesized = try validateApplication(
-        std.testing.allocator,
+    const unparenthesized = validateApplication(
         .replace_compound_assign_with_explicit,
         "  total -= fee + tax;\n",
         "  total = total - fee + tax;\n",
@@ -1466,8 +1425,7 @@ test "a compound assignment must parenthesize a compound right-hand side" {
 
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(
-            std.testing.allocator,
+        validateApplication(
             .replace_compound_assign_with_explicit,
             "  total -= fee + tax;\n",
             "  total = total - (fee + tax);\n",
@@ -1479,10 +1437,9 @@ test "a compound assignment must parenthesize a compound right-hand side" {
     // accepting either spelling.
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .replace_compound_assign_with_explicit, "  n += 1;\n", "  n = n + 1;\n", 1),
+        validateApplication(.replace_compound_assign_with_explicit, "  n += 1;\n", "  n = n + 1;\n", 1),
     );
-    const over_parenthesized = try validateApplication(
-        std.testing.allocator,
+    const over_parenthesized = validateApplication(
         .replace_compound_assign_with_explicit,
         "  n += 1;\n",
         "  n = n + (1);\n",
@@ -1494,8 +1451,7 @@ test "a compound assignment must parenthesize a compound right-hand side" {
 test "an arrow becomes a function, expression body wrapped in a return" {
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(
-            std.testing.allocator,
+        validateApplication(
             .replace_arrow_with_function,
             "const parse = (x: number): number => x;\n",
             "function parse(x: number): number { return x; }\n",
@@ -1504,8 +1460,7 @@ test "an arrow becomes a function, expression body wrapped in a return" {
     );
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(
-            std.testing.allocator,
+        validateApplication(
             .replace_export_arrow_with_function,
             "export const load = (id: string): Response => Response.text(id);\n",
             "export function load(id: string): Response { return Response.text(id); }\n",
@@ -1515,8 +1470,7 @@ test "an arrow becomes a function, expression body wrapped in a return" {
 
     // Dropping `export` changes what the module exports. A rewrite that did it
     // would still type-check inside the file and is not this law.
-    const dropped_export = try validateApplication(
-        std.testing.allocator,
+    const dropped_export = validateApplication(
         .replace_export_arrow_with_function,
         "export const load = (id: string): Response => Response.text(id);\n",
         "function load(id: string): Response { return Response.text(id); }\n",
@@ -1550,7 +1504,7 @@ test "the law's own rewrite discharges" {
     ;
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 2),
+        validateApplication(.drop_redundant_bool_compare, original, repaired, 2),
     );
 }
 
@@ -1559,7 +1513,7 @@ test "the negated form discharges" {
     const repaired = "const blocked = !flag;";
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1),
+        validateApplication(.drop_redundant_bool_compare, original, repaired, 1),
     );
 }
 
@@ -1568,7 +1522,7 @@ test "a rewrite that is not the law is refused" {
     // point of re-deriving rather than diffing is that this is caught.
     const original = "const ready = flag === true;";
     const repaired = "const ready = !flag;";
-    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
+    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1581,14 +1535,14 @@ test "an edit outside the diagnostic's line is refused" {
         \\const ready = flag;
         \\const other = 2;
     ;
-    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
+    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
 test "two candidates on one line refuse rather than guess" {
     const original = "const both = a === true && b === true;";
     const repaired = "const both = a && b === true;";
-    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
+    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1596,84 +1550,8 @@ test "a planned intent has no validator" {
     // Distinct from a refusal: the edit is never examined. `lead_with_spread`
     // names M3 and nothing runs it, so an edit carrying it gets no verdict
     // rather than a negative one.
-    const answer = try validateApplication(std.testing.allocator, .lead_with_spread, "const a = {...b, c};", "const a = {...b, c};", 1);
+    const answer = validateApplication(.lead_with_spread, "const a = {...b, c};", "const a = {...b, c};", 1);
     try std.testing.expect(answer == .no_validator);
-}
-
-test "M2 accepts a rewrite that changes bytes and not structure" {
-    // Comments, quoting, and whitespace are all trivia, and none of them
-    // reaches the tree. This is the shape the semicolon-insertion repair will
-    // carry when ASI is removed.
-    const original =
-        \\function handler(req: Request): Response {
-        \\  const n = 1;
-        \\  return Response.text("ok");
-        \\}
-    ;
-    const repaired =
-        \\// added by the repair
-        \\function handler(req: Request): Response {
-        \\    const n   =   1;
-        \\    return Response.text('ok');
-        \\}
-    ;
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try dischargeByMethod(std.testing.allocator, .parse_identity, .replace_let_with_const, original, repaired, 1),
-    );
-}
-
-test "M2 rejects a rewrite that changes structure" {
-    const original =
-        \\function handler(req: Request): Response {
-        \\  return Response.text("ok");
-        \\}
-    ;
-    const repaired =
-        \\function handler(req: Request): Response {
-        \\  return Response.json("ok");
-        \\}
-    ;
-    const answer = try dischargeByMethod(std.testing.allocator, .parse_identity, .replace_let_with_const, original, repaired, 1);
-    try std.testing.expect(answer == .not_law_shape);
-}
-
-test "M1 accepts a layout-only difference and rejects a token change" {
-    const original =
-        \\export function handler(req: Request): Response {
-        \\  const n = 1;
-        \\  return Response.text("ok");
-        \\}
-    ;
-    const reindented =
-        \\export function handler(req: Request): Response {
-        \\        const n = 1;
-        \\        return Response.text("ok");
-        \\}
-    ;
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try dischargeByMethod(std.testing.allocator, .layout_identity, .replace_let_with_const, original, reindented, 1),
-    );
-
-    const retokenized =
-        \\export function handler(req: Request): Response {
-        \\  const n = 2;
-        \\  return Response.text("ok");
-        \\}
-    ;
-    const answer = try dischargeByMethod(std.testing.allocator, .layout_identity, .replace_let_with_const, original, retokenized, 1);
-    try std.testing.expect(answer == .not_law_shape);
-}
-
-test "a validator that forms no answer says so rather than accepting" {
-    // The printer refuses a statement with no semicolon, because ASI would
-    // terminate where the printer would close the line up. M1 then has no
-    // canonical bytes to compare and must not report an equivalence: an
-    // undecided validator is a reason to refuse the apply, not to allow it.
-    const unprintable = "const n = 1\n";
-    const answer = try dischargeByMethod(std.testing.allocator, .layout_identity, .replace_let_with_const, unprintable, unprintable, 1);
-    try std.testing.expect(answer == .undecided);
 }
 
 test "no planned row can advertise a repair" {
@@ -1684,7 +1562,7 @@ test "no planned row can advertise a repair" {
         if (row.status == .implemented) continue;
         try std.testing.expect(!row.gradable());
         try std.testing.expect(!gradable(row.intent));
-        const answer = try validateApplication(std.testing.allocator, row.intent, "const a = 1;\n", "const a = 1;\n", 1);
+        const answer = validateApplication(row.intent, "const a = 1;\n", "const a = 1;\n", 1);
         try std.testing.expect(answer == .no_validator);
     }
 }
@@ -1707,7 +1585,7 @@ test "a nested destructure flattens, and a capture is refused" {
     ;
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 3),
+        validateApplication(.flatten_destructure, original, repaired, 3),
     );
 
     // The precondition, re-derived here rather than trusted: the rewrite
@@ -1730,7 +1608,7 @@ test "a nested destructure flattens, and a capture is refused" {
         \\  return Response.text(name);
         \\}
     ;
-    const refused = try validateApplication(std.testing.allocator, .flatten_destructure, captures, captured, 4);
+    const refused = validateApplication(.flatten_destructure, captures, captured, 4);
     try std.testing.expect(refused == .not_law_shape);
 }
 
@@ -1756,7 +1634,7 @@ test "an unused index alias collapses, and a live name is refused" {
     ;
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .drop_unused_index_alias, original, repaired, 3),
+        validateApplication(.drop_unused_index_alias, original, repaired, 3),
     );
 
     // The index alias is what the loop drops. A body that reads it is left
@@ -1781,7 +1659,7 @@ test "an unused index alias collapses, and a live name is refused" {
         \\  return Response.text("done");
         \\}
     ;
-    const refused_index = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_index, dropped_index, 3);
+    const refused_index = validateApplication(.drop_unused_index_alias, reads_index, dropped_index, 3);
     try std.testing.expect(refused_index == .not_law_shape);
 
     // Same for the pair binding, which nothing but the producer ever checked.
@@ -1804,7 +1682,7 @@ test "an unused index alias collapses, and a live name is refused" {
         \\  return Response.text("done");
         \\}
     ;
-    const refused_pair = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_pair, dropped_pair, 3);
+    const refused_pair = validateApplication(.drop_unused_index_alias, reads_pair, dropped_pair, 3);
     try std.testing.expect(refused_pair == .not_law_shape);
 }
 
@@ -1824,7 +1702,7 @@ test "a region edit outside the reported line is refused" {
         \\  return Response.text(name);
         \\}
     ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
+    const answer = validateApplication(.flatten_destructure, original, repaired, 2);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1855,7 +1733,7 @@ test "a binding wrapped across lines still refuses the flatten" {
         \\  return Response.text(name + user);
         \\}
     ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 6);
+    const answer = validateApplication(.flatten_destructure, original, repaired, 6);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1881,7 +1759,7 @@ test "a parameter list wrapped across lines still refuses the flatten" {
         \\  return Response.text(name + user);
         \\}
     ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 5);
+    const answer = validateApplication(.flatten_destructure, original, repaired, 5);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1904,6 +1782,6 @@ test "an object-literal right-hand side that runs past the line refuses" {
         \\  return Response.text(name);
         \\}
     ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
+    const answer = validateApplication(.flatten_destructure, original, repaired, 2);
     try std.testing.expect(answer == .not_law_shape);
 }

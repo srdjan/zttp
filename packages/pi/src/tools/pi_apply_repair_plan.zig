@@ -109,7 +109,7 @@ pub fn execute(
     try w.writeAll(",\"proposed_content\":");
     try writeJsonString(w, proposed);
     try w.writeAll(",\"equivalence\":");
-    try writeEquivalenceJson(w, allocator, intent, source, proposed);
+    try writeEquivalenceJson(w, intent, source, proposed);
     try w.writeAll(",\"verification\":");
     try edit_simulate.writeResultJson(w, &result);
     try w.writeByte('}');
@@ -156,7 +156,6 @@ pub fn execute(
 /// keys on rather than a clean simulate.
 fn writeEquivalenceJson(
     w: anytype,
-    allocator: std.mem.Allocator,
     intent: RepairIntent,
     source: []const u8,
     proposed: []const u8,
@@ -170,7 +169,7 @@ fn writeEquivalenceJson(
         return;
     };
 
-    switch (try repairPolicy.validateApplication(allocator, typed, source, proposed, intent.line)) {
+    switch (repairPolicy.validateApplication(typed, source, proposed, intent.line)) {
         .no_validator => try w.writeAll("null"),
         .equivalent => {
             try w.writeAll("{\"method\":");
