@@ -1510,6 +1510,11 @@ pub const TypePool = struct {
 
         // Literal types are assignable to their base types
         if (src_tag == .t_literal_string and tgt_tag == .t_string) return true;
+        // A template literal type is a pattern over strings, so every value it
+        // admits is one. Without this the type could be declared and never
+        // used: returning a `` `/api/${string}` `` from a function declared
+        // `: string` was refused, and so was binding one to a `string`.
+        if (src_tag == .t_template_literal and tgt_tag == .t_string) return true;
         if (src_tag == .t_literal_number and tgt_tag == .t_number) return true;
         if (src_tag == .t_literal_bool and tgt_tag == .t_boolean) return true;
 
@@ -3947,6 +3952,30 @@ test "parseTypeExpr keeps template literal parts wider than sixteen parts" {
     const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
     try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 36), pool.getTemplateParts(idx).len);
+}
+
+test "a template literal type is assignable to string" {
+    // Every value of `` `/api/${string}` `` is a string, so the pattern type is
+    // a subtype of `string`. Without this the type could be constructed and not
+    // used: returning one from a function declared `: string`, or binding one
+    // to a `string`, was refused as "type '`/api/${string}`' is not assignable
+    // to type 'string'". The reverse direction stays refused - a bare string
+    // does not match the pattern.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const route = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(route).?);
+
+    try std.testing.expect(pool.isAssignableTo(route, pool.idx_string));
+    try std.testing.expect(!pool.isAssignableTo(pool.idx_string, route));
+
+    // The rule is about `string` and nothing wider: a pattern type is not a
+    // number, and it does not become assignable to some other pattern.
+    try std.testing.expect(!pool.isAssignableTo(route, pool.idx_number));
+    const other = parseTypeExpr(&pool, allocator, "`/v2/${string}`");
+    try std.testing.expect(!pool.isAssignableTo(route, other));
 }
 
 test "instantiate substitutes through a function type" {
