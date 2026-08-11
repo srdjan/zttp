@@ -372,12 +372,13 @@ one was silent about a case the corpus is full of.**
 
 **Corpus measurement, 2026-08-11.** 58 tracked files, 2331 lines. 53 print, 5
 refuse, and every refusal is the same construct: JSX and TSX, which a bare
-tokenizer run cannot read because only the parser turns JSX mode on. 47 of the
-53 changed, 1174 diff lines, dominated by the 4-to-2-space reflow. The
-diagnostic code multiset of `zts check` is identical before and after printing
-for 49 of 53; the four that differ are the rewrite loop's own doing (a
-canonical-band code it cleared, and one `ZTS500` the cleared ternary unmasked),
-not the layout's.
+tokenizer run cannot read because only the parser turns JSX mode on. Of the 53,
+6 were already canonical, 4 are left in the author's layout because they need a
+rewrite that would delete what they demonstrate, and 42 were reformatted: 556
+lines added, 459 removed, dominated by the 4-to-2-space reflow. The diagnostic
+code multiset of `zts check` is identical before and after printing for 49 of
+53; the four that differ are the rewrite loop's own doing (a canonical-band code
+it cleared, and one `ZTS500` the cleared ternary unmasked), not the layout's.
 
 `scripts/check-normalize-idempotent.sh` names each unprinted file and carries a
 ceiling of 5 that may fall and may not rise, next to the floor of 58 it already
