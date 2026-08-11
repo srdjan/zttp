@@ -410,6 +410,50 @@ walking the table rather than by naming one row; `apply_repair` now accepts
 the coverage test that proves the intent enum and the row table cannot drift
 still passes.
 
+**The paragraph above was wrong about M2, and this is what shipped instead.**
+M2 is IR-tree identity. `flatten_destructure` turns one statement into two and
+`drop_unused_index_alias` turns two into one, so both change the tree and a real
+M2 refuses both. Moving them to `.implemented` under M2 would have advertised
+`repair_available` on two intents whose every application then refused - which
+is the same shape as a gate that counts nothing, one layer up: the row says a
+validator discharges this, and it never does. `repair_validator.zig`'s own
+header had already recorded the fact ("M2 discharges none: every one changes the
+IR tree") before the plan contradicted it.
+
+Both validators are built, because both are needed and neither is discharged by
+guessing. M1 prints both sides and compares bytes. M2 lives in a new
+`packages/zts/src/ir_identity.zig`, whose tag switch is exhaustive with no
+`else`, so a new `NodeTag` fails the build rather than defaulting to
+"identical". 50 of the 82 tags are compared and 32 answer `unmodeled`; most of
+the 32 name constructs the parser refuses, so they cannot appear in a tree.
+Neither method discharges a row today. Their consumer is task 13: the
+semicolon-insertion repair moves a token without moving structure, which is
+exactly M2's shape.
+
+The two rows are `.implemented` under M4 instead, with a region-local law
+skeleton beside the line-local one, because their rewrites replace a run of
+lines with a different-length run. Each law re-derives the replacement text
+from the original region and also re-derives the precondition that makes the
+rewrite an equivalence: for the flatten, that nothing else in the file binds the
+name the rewrite introduces; for the index alias, that neither the pair binding
+nor the index alias is read after the loop header. Those two facts are not the
+checker's - the producer established them for itself - and a validator that
+borrowed the producer's check would agree with the producer by construction. The
+re-derivation is deliberately conservative in both: a refusal costs a repair,
+and a wrong acceptance grades a program-changing edit as an equivalence.
+
+`Discharge` gains `.undecided`. A validator that formed no answer - the printer
+refused the construct, the tree carries a form M2 does not model - is neither an
+acceptance nor a refusal of the edit, and `apply_repair` reports it under its own
+`undecided_equivalence` code rather than folding it into `not_law_shape`.
+
+`validateApplication` now takes an allocator and returns `error{OutOfMemory}!`,
+since printing and parsing allocate. Three call sites and the `RepairPolicy`
+surface in `root.zig` move with it.
+
+Measured after: 8 gradable rows, up from 6. The ZTS619 rewrite trace now grades
+`mechanical_repair`, which is the outcome the paragraph above wanted.
+
 ### Task 9: the three meta rows that already have a source
 
 **Files:** `packages/tools/src/agent_protocol.zig`,

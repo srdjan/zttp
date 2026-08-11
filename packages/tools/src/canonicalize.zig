@@ -1639,7 +1639,12 @@ fn nestedDestructureRewrite(
     const colon = topLevelColon(pattern) orelse return error.UnsupportedRefactor;
     const outer = std.mem.trim(u8, pattern[0..colon], " \t");
     if (!isSimpleIdentifier(outer)) return error.UnsupportedRefactor;
-    if (bindingDeclaredBefore(source, line_start, outer)) return error.UnsupportedRefactor;
+    // The rewrite introduces `outer` as a binding, so nothing else in the file
+    // may bind it. Asked through the validator's own predicate rather than
+    // re-derived here: a producer that refused on a weaker condition would
+    // advertise `repair_available` for an edit `validateApplication` then
+    // refuses, and `apply_repair` drops the whole batch on one refusal.
+    if (repairPolicy.bindsOutsideLines(source, line, 1, outer)) return error.UnsupportedRefactor;
 
     const nested = std.mem.trim(u8, pattern[colon + 1 ..], " \t");
     if (nested.len < 2 or nested[0] != '{' or nested[nested.len - 1] != '}') return error.UnsupportedRefactor;
@@ -1689,8 +1694,12 @@ fn unusedIndexAliasRewrite(
         destructure_end + 1
     else
         destructure_end;
-    const loop_close = matchingDelimiter(source, for_start + (std.mem.indexOfScalar(u8, for_line, '{') orelse return error.UnsupportedRefactor), '{', '}', source.len) orelse return error.UnsupportedRefactor;
-    if (identifierTokenAppears(source[span_end..loop_close], for_shape.binding)) return error.UnsupportedRefactor;
+    // Both dropped names must be dead from here on. The loop body is not the
+    // whole obligation: `repair_validator.lawDropUnusedIndexAlias` re-derives
+    // this over everything after the region, so checking only as far as the
+    // closing brace would advertise a repair the validator then refuses.
+    if (identifierTokenAppears(source[span_end..], for_shape.binding)) return error.UnsupportedRefactor;
+    if (identifierTokenAppears(source[span_end..], destructure.index)) return error.UnsupportedRefactor;
 
     const replacement = try std.fmt.allocPrint(
         allocator,
@@ -1742,44 +1751,6 @@ fn identifierTokenAppears(source: []const u8, ident: []const u8) bool {
         while (i < source.len and isIdentContinue(source[i])) i += 1;
         if (std.mem.eql(u8, source[start..i], ident)) return true;
     }
-    return false;
-}
-
-fn bindingDeclaredBefore(source: []const u8, stop: usize, ident: []const u8) bool {
-    var line_start: usize = 0;
-    while (line_start < stop) {
-        const raw_end = std.mem.indexOfScalarPos(u8, source, line_start, '\n') orelse stop;
-        const line_end = @min(raw_end, stop);
-        if (lineDeclaresIdentifier(source[line_start..line_end], ident)) return true;
-        if (raw_end >= stop) break;
-        line_start = raw_end + 1;
-    }
-    return false;
-}
-
-fn lineDeclaresIdentifier(line: []const u8, ident: []const u8) bool {
-    var trimmed = trimLeft(line, " \t");
-    if (std.mem.startsWith(u8, trimmed, "export ")) trimmed = trimLeft(trimmed["export ".len..], " \t");
-
-    inline for (.{ "const ", "let ", "var " }) |kw| {
-        if (std.mem.startsWith(u8, trimmed, kw)) {
-            const decl_start = kw.len;
-            const eq = findTopLevelChar(trimmed, decl_start, trimmed.len, '=') orelse trimmed.len;
-            return identifierTokenAppears(trimmed[decl_start..eq], ident);
-        }
-    }
-
-    if (std.mem.startsWith(u8, trimmed, "function ")) {
-        const rest = trimmed["function ".len..];
-        const name_end = scanIdentEnd(rest, 0, rest.len);
-        if (name_end) |end| {
-            if (std.mem.eql(u8, rest[0..end], ident)) return true;
-        }
-        const open = std.mem.indexOfScalar(u8, rest, '(') orelse return false;
-        const close = std.mem.indexOfScalarPos(u8, rest, open + 1, ')') orelse return false;
-        return identifierTokenAppears(rest[open + 1 .. close], ident);
-    }
-
     return false;
 }
 
@@ -1911,6 +1882,9 @@ fn parseForEntriesLine(line: []const u8) ?ForEntriesLine {
 
 const IndexAliasDestructure = struct {
     value: []const u8,
+    /// The alias the rewrite drops. The caller re-derives that it is dead
+    /// rather than trusting the diagnostic that reported it unused.
+    index: []const u8,
 };
 
 fn parseIndexAliasDestructure(line: []const u8, pair_binding: []const u8) ?IndexAliasDestructure {
@@ -1929,7 +1903,7 @@ fn parseIndexAliasDestructure(line: []const u8, pair_binding: []const u8) ?Index
     if (tail.len == 0 or tail[0] != '=') return null;
     tail = std.mem.trim(u8, tail[1..], " \t;");
     if (!std.mem.eql(u8, tail, pair_binding)) return null;
-    return .{ .value = value_name };
+    return .{ .value = value_name, .index = index_name };
 }
 
 fn appendSpanRepairUnique(
@@ -2915,14 +2889,43 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         \\  return Response.json({ ok: false });
         \\}
         },
+        // The two region rewrites. Their laws re-derive a replacement spanning
+        // more than one line and re-derive their own preconditions, so this
+        // pairing is the only place either is checked against the rewriter that
+        // produces it.
+        .{ .intent = .flatten_destructure, .source =
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(name);
+        \\}
+        },
+        .{ .intent = .drop_unused_index_alias, .source =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    Response.text(item);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+        },
     };
 
     var checked: usize = 0;
     for (fixtures) |fixture| {
         if (!repairPolicy.isGradable(fixture.intent)) continue;
 
-        var result = try collectFromSource(allocator, fixture.source, "handler.ts");
+        // Both builders, not just the line-keyed one. `collectFromSource` runs
+        // `buildLineRepairs` alone, so driving this test off it would have left
+        // every span-keyed rewrite - which is every multi-line one - collecting
+        // nothing and reporting a pass over the rows it did reach.
+        var check = try precompile.runCheckOnlyFromSource(allocator, fixture.source, "handler.ts", null, true, null, false);
+        defer check.deinit(allocator);
+        var result = Result{ .file = "handler.ts" };
         defer result.deinit(allocator);
+        try buildLineRepairs(allocator, fixture.source, check.json_diagnostics.items, &result);
+        try buildSpanRepairs(allocator, fixture.source, check.json_diagnostics.items, &result);
 
         var found: ?Repair = null;
         for (result.repairs.items) |r| {
@@ -2940,7 +2943,8 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         const repaired = try applyRepairs(allocator, fixture.source, &one);
         defer allocator.free(repaired);
 
-        switch (repairPolicy.validateApplication(
+        switch (try repairPolicy.validateApplication(
+            allocator,
             fixture.intent,
             fixture.source,
             repaired,
@@ -2953,6 +2957,10 @@ test "every graded rewrite this rewriter emits discharges against its law" {
             },
             .no_validator => {
                 std.debug.print("{s} is gradable and has no validator\n", .{@tagName(fixture.intent)});
+                return error.TestFailed;
+            },
+            .undecided => |why| {
+                std.debug.print("{s}: its validator formed no answer: {s}\n", .{ @tagName(fixture.intent), why });
                 return error.TestFailed;
             },
         }
@@ -4439,6 +4447,8 @@ pub const rewrite_row_intents = [_]RepairIntent{
     .canonicalize_for_of_const,
     .replace_let_with_const,
     .drop_redundant_bool_compare,
+    .flatten_destructure,
+    .drop_unused_index_alias,
 };
 
 /// Apply only the refactors of one row kind, to a fixed point.
@@ -4457,8 +4467,18 @@ fn normalizeOnlyIntent(
 
     var pass: u32 = 0;
     while (pass < max_normalize_iterations) : (pass += 1) {
-        var result = collectFromSource(allocator, current, virtual_path) catch break;
+        // Both builders, not just the line-keyed one. `collectFromSource` runs
+        // `buildLineRepairs` alone, so driving the pairs off it would leave
+        // every span-keyed row - `flatten_destructure` and
+        // `drop_unused_index_alias`, the two multi-line ones - selecting
+        // nothing, joining unchanged text against unchanged text, and reporting
+        // a pass over a pair it never formed.
+        var check = precompile.runCheckOnlyFromSource(allocator, current, virtual_path, null, true, null, false) catch break;
+        defer check.deinit(allocator);
+        var result = Result{ .file = virtual_path };
         defer result.deinit(allocator);
+        try buildLineRepairs(allocator, current, check.json_diagnostics.items, &result);
+        try buildSpanRepairs(allocator, current, check.json_diagnostics.items, &result);
 
         var selected: std.ArrayListUnmanaged(Repair) = .empty;
         defer selected.deinit(allocator);
@@ -4554,7 +4574,92 @@ test "rewrite rows join in either order" {
             \\
             ,
         },
+        .{
+            .name = "nested destructure beside a let-const",
+            .source =
+            \\function handler(req: Request): Response {
+            \\  let payload = { data: { name: "ada" } };
+            \\  const {data: {name}} = payload;
+            \\  return Response.text(name);
+            \\}
+            \\
+            ,
+        },
+        .{
+            .name = "unused index alias beside a let-const",
+            .source =
+            \\function handler(req: Request): Response {
+            \\  let items = ["a", "b"];
+            \\  let out = "";
+            \\  for (const pair of items.entries()) {
+            \\    const [_i, item] = pair;
+            \\    out = out + item;
+            \\  }
+            \\  return Response.text(out);
+            \\}
+            \\
+            ,
+        },
+        .{
+            .name = "arrow to function beside a let-const",
+            .source =
+            \\const parse = (x: number): number => x;
+            \\function handler(req: Request): Response {
+            \\  let total = 0;
+            \\  const a = parse(1);
+            \\  const b = parse(2);
+            \\  return Response.json({ total, a, b });
+            \\}
+            \\
+            ,
+        },
+        .{
+            .name = "export arrow to function beside a let-const",
+            .source =
+            \\export const load = (id: string): Response => Response.text(id);
+            \\function handler(req: Request): Response {
+            \\  let id = "x";
+            \\  return load(id);
+            \\}
+            \\
+            ,
+        },
+        .{
+            .name = "capability key alias beside a redundant bool compare",
+            .source =
+            \\import { env } from "zttp:env";
+            \\function handler(req: Request): Response {
+            \\  let key = "API_KEY";
+            \\  const ready = env(key) !== "";
+            \\  if (ready === true) { return Response.text("a"); }
+            \\  return Response.text("b");
+            \\}
+            \\
+            ,
+        },
     };
+
+    // The floor, asserted before anything the pair loop reports is believed. A
+    // row that fires on no fixture is paired over unchanged text against
+    // unchanged text: every such pair joins trivially and `non_joining` stays
+    // 0, so the count reads as coverage of rows the harness never drove. This
+    // is the check that catches it - delete a fixture and the row it carries
+    // fails here rather than passing silently.
+    for (rewrite_row_intents) |intent| {
+        var fired = false;
+        for (fixtures) |fixture| {
+            const only = try normalizeOnlyIntent(allocator, fixture.source, "conf.ts", intent);
+            defer allocator.free(only);
+            if (!std.mem.eql(u8, only, fixture.source)) {
+                fired = true;
+                break;
+            }
+        }
+        if (!fired) {
+            std.debug.print("[confluence] no fixture drives {s}\n", .{@tagName(intent)});
+            return error.TestFailed;
+        }
+    }
 
     var non_joining: usize = 0;
     var matched_known: usize = 0;

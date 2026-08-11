@@ -605,12 +605,29 @@ pub const RepairPolicy = struct {
     }
 
     pub fn validateApplication(
+        allocator: std.mem.Allocator,
         intent: RepairIntent,
         original: []const u8,
         repaired: []const u8,
         line: u32,
-    ) Discharge {
-        return repair_validator.validateApplication(intent, original, repaired, line);
+    ) error{OutOfMemory}!Discharge {
+        return repair_validator.validateApplication(allocator, intent, original, repaired, line);
+    }
+
+    /// True when anything outside the named span of lines binds `ident`.
+    ///
+    /// Exposed because the producer of a rewrite that introduces a binding has
+    /// to refuse on the same condition the validator re-derives. Two spellings
+    /// of "is this name free" drift apart, and the drift is not symmetric: the
+    /// weaker one advertises `repair_available` for an edit the stricter one
+    /// then refuses, and the whole apply batch is dropped.
+    pub fn bindsOutsideLines(
+        source: []const u8,
+        first_line: u32,
+        line_count: u32,
+        ident: []const u8,
+    ) bool {
+        return repair_validator.bindsOutsideLines(source, first_line, line_count, ident);
     }
 };
 
@@ -629,7 +646,8 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
     try std.testing.expect(RepairPolicy.isGradable(.replace_let_with_const));
     try std.testing.expect(!RepairPolicy.isGradable(.add_trailing_return));
 
-    const accepted: RepairPolicy.Discharge = RepairPolicy.validateApplication(
+    const accepted: RepairPolicy.Discharge = try RepairPolicy.validateApplication(
+        std.testing.allocator,
         .replace_let_with_const,
         "let value = 1;\n",
         "const value = 1;\n",
@@ -637,7 +655,8 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
     );
     try std.testing.expectEqual(RepairPolicy.Discharge.equivalent, accepted);
 
-    const refused = RepairPolicy.validateApplication(
+    const refused = try RepairPolicy.validateApplication(
+        std.testing.allocator,
         .replace_let_with_const,
         "let value = 1;\n",
         "let value = 2;\n",
@@ -648,7 +667,8 @@ test "stable RepairPolicy exposes validator catalog and discharge" {
         else => return error.TestExpectedRepairRefusal,
     }
 
-    const unimplemented = RepairPolicy.validateApplication(
+    const unimplemented = try RepairPolicy.validateApplication(
+        std.testing.allocator,
         .add_trailing_return,
         "function handler() {}\n",
         "function handler() { return null; }\n",

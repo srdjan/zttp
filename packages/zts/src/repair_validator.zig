@@ -17,14 +17,30 @@
 //! classification, not a gap waiting to be closed.
 //!
 //! Second, for the rewrites that are equivalences, which method discharges
-//! them? M2 (parse identity) discharges none: every one changes the IR tree.
-//! M1 needs the canonical formatter and M3 needs the semantic kernel, neither
-//! of which exists. M5 is advisory-only by construction. That leaves M4,
-//! declared law, whose machinery already runs under z3 in `scripts/verify.sh` -
-//! and whose published shape, a law plus "the law's own preconditions carried
-//! into the row's precondition column", is the shape these rewrites need. The
-//! precondition source here is the checker: the rewrite is sound exactly where
-//! the diagnostic that requested it fired.
+//! them? M1 and M2 both run now - `dischargeLayoutIdentity` prints both sides
+//! with the canonical formatter and compares bytes, `ir_identity.compare`
+//! parses both and compares the trees - and neither discharges a single row,
+//! which is a measurement rather than a gap. Every rewrite here changes the
+//! tree: `flatten_destructure` turns one statement into two and
+//! `drop_unused_index_alias` turns two into one, so parse identity refuses
+//! both, and layout identity is strictly weaker than parse identity. The two
+//! methods exist for the rewrite that moves a token without moving structure,
+//! which is the semicolon spec 5.5 forbids ASI from inserting. M3 needs the
+//! semantic kernel, which spec section 10 defers. M5 is advisory-only by
+//! construction. That leaves M4, declared law, whose machinery already runs
+//! under z3 in `scripts/verify.sh` - and whose published shape, a law plus
+//! "the law's own preconditions carried into the row's precondition column",
+//! is the shape these rewrites need.
+//!
+//! Where a precondition comes from is part of the row. For most it is the
+//! checker: the rewrite is sound exactly where the diagnostic that requested it
+//! fired. For the two multi-line laws it is not, because the fact that makes
+//! them equivalences - no live binding is captured, no dropped name is read -
+//! is one the producer established for itself, and a validator that trusted the
+//! producer's own check would be checking nothing. Those two re-derive their
+//! preconditions here, from the original source, conservatively: a refusal
+//! costs a repair, and an acceptance that should have been a refusal grades a
+//! program-changing edit as an equivalence.
 //!
 //! `status` is what keeps the advertisement honest. A row may name M4 and still
 //! be `.planned`, meaning the method is right but nothing runs it yet. Only an
@@ -45,6 +61,8 @@
 
 const std = @import("std");
 const repair_intent = @import("repair_intent.zig");
+const ir_identity = @import("ir_identity.zig");
+const printer = @import("zts-engine").printer;
 
 pub const RepairIntent = repair_intent.RepairIntent;
 
@@ -164,17 +182,21 @@ pub const rows = [_]Row{
         .status = .planned,
         .precondition = "no later key collides with a spread key",
     },
+    // These two named M2 and could not be discharged by it: one turns a
+    // statement into two and the other turns two into one, so the trees differ
+    // by construction and parse identity refuses both. M4 is the method that
+    // fits, and its precondition column carries the fact the law re-derives.
     .{
         .intent = .flatten_destructure,
-        .method = .parse_identity,
-        .status = .planned,
-        .precondition = "the destructure binds exactly one field",
+        .method = .declared_law,
+        .status = .implemented,
+        .precondition = "the destructure binds exactly one field through one level, and nothing else in the file binds the name the rewrite introduces",
     },
     .{
         .intent = .drop_unused_index_alias,
-        .method = .parse_identity,
-        .status = .planned,
-        .precondition = "the alias is never read",
+        .method = .declared_law,
+        .status = .implemented,
+        .precondition = "neither the pair binding nor the index alias is read after the loop header",
     },
     .{
         .intent = .widen_signature_drop_spread,
@@ -242,26 +264,124 @@ pub const Discharge = union(enum) {
     /// This intent has no implemented validator. Distinct from a refusal: the
     /// edit was never examined.
     no_validator,
+    /// The validator ran and formed no answer - the printer refused a
+    /// construct, or a tree carried a form the comparison does not model.
+    /// Distinct from both a refusal and an acceptance, and every caller must
+    /// treat it as a reason not to apply: "undecided" is not "equivalent".
+    undecided: []const u8,
 };
 
-/// Discharge one applied repair against its row's declared law.
+/// Discharge one applied repair by its row's method.
 ///
-/// `line` is the 1-based line the diagnostic reported. Two obligations, and
-/// both are needed: the edit must be confined to that line (a validator that
-/// only checked the line's content would accept a rewrite that also deleted a
-/// function three lines down), and the line's new content must be what the law
-/// produces from its old content.
+/// `line` is the 1-based line the diagnostic reported. For a declared law two
+/// obligations are checked, and both are needed: the edit must be confined to
+/// the region starting at that line (a validator that only checked content
+/// would accept a rewrite that also deleted a function three lines down), and
+/// that region's new content must be what the law produces from its old
+/// content. M1 and M2 do not use the line: they compare whole programs.
+///
+/// `error.OutOfMemory` is the only failure. Everything else is a verdict,
+/// including "the printer refused this construct", which is an answer about
+/// the input rather than a fault in the check.
 pub fn validateApplication(
+    allocator: std.mem.Allocator,
+    intent: RepairIntent,
+    original: []const u8,
+    repaired: []const u8,
+    line: u32,
+) error{OutOfMemory}!Discharge {
+    const row = find(intent) orelse return .no_validator;
+    if (row.status != .implemented) return .no_validator;
+    return dischargeByMethod(allocator, row.method, intent, original, repaired, line);
+}
+
+/// The method table, split out so a row that names M1 or M2 tomorrow runs the
+/// same path a test can exercise today. A row with no implemented method never
+/// reaches here through `validateApplication`: it returns first.
+pub fn dischargeByMethod(
+    allocator: std.mem.Allocator,
+    method: Method,
+    intent: RepairIntent,
+    original: []const u8,
+    repaired: []const u8,
+    line: u32,
+) error{OutOfMemory}!Discharge {
+    return switch (method) {
+        .layout_identity => dischargeLayoutIdentity(allocator, original, repaired),
+        .parse_identity => dischargeParseIdentity(allocator, original, repaired),
+        .declared_law => dischargeDeclaredLaw(intent, original, repaired, line),
+        // M3 has no kernel to elaborate into and M5 never auto-applies, so
+        // neither can be implemented; `.none` claims no equivalence at all.
+        .kernel_identity, .contract_equivalence, .none => .no_validator,
+    };
+}
+
+/// M1, layout identity: print both sides in canonical form and compare bytes.
+/// Two sources that print the same differ only in what the printer decides,
+/// which is whitespace.
+fn dischargeLayoutIdentity(
+    allocator: std.mem.Allocator,
+    original: []const u8,
+    repaired: []const u8,
+) error{OutOfMemory}!Discharge {
+    // The refusal reason is not carried into the verdict: `Discharge` holds
+    // static strings and naming the construct would mean allocating one, which
+    // changes who owns the message. Which side refused is the part a caller
+    // acts on, and that is in the message.
+    const before = printer.print(allocator, original, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnprintableConstruct => return .{ .undecided = "the printer refused the original, so layout identity was not decided" },
+    };
+    defer allocator.free(before);
+
+    const after = printer.print(allocator, repaired, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.UnprintableConstruct => return .{ .undecided = "the printer refused the repaired source, so layout identity was not decided" },
+    };
+    defer allocator.free(after);
+
+    if (!std.mem.eql(u8, before, after)) {
+        return .{ .not_law_shape = "the two sources do not print to the same canonical bytes" };
+    }
+    return .equivalent;
+}
+
+/// M2, parse identity: the two trees agree modulo positions and trivia.
+fn dischargeParseIdentity(
+    allocator: std.mem.Allocator,
+    original: []const u8,
+    repaired: []const u8,
+) error{OutOfMemory}!Discharge {
+    return switch (try ir_identity.compare(allocator, original, repaired, .{})) {
+        .identical => .equivalent,
+        .differs => |why| .{ .not_law_shape = why },
+        // A repaired source that does not parse is not the same program as one
+        // that does, and saying so is the whole answer. An original that does
+        // not parse leaves nothing to compare against.
+        .unparsable => |side| switch (side) {
+            .original => .{ .undecided = "the original does not parse, so there is no tree to compare against" },
+            .repaired => .{ .not_law_shape = "the repaired source does not parse" },
+        },
+        .unmodeled => .{ .undecided = "the tree carries a construct parse identity does not model" },
+    };
+}
+
+/// M4, declared law: re-derive the rewrite from the original and require the
+/// edit to be exactly it.
+///
+/// Two skeletons, because the rewrites come in two shapes. A line-local law
+/// replaces one line with one line. A region law replaces a run of lines with
+/// a different-length run, which is what flattening a destructure (one line
+/// becomes two) and collapsing an index alias (two become one) do.
+fn dischargeDeclaredLaw(
     intent: RepairIntent,
     original: []const u8,
     repaired: []const u8,
     line: u32,
 ) Discharge {
-    const row = find(intent) orelse return .no_validator;
-    if (row.status != .implemented) return .no_validator;
-
-    const law = lawFor(intent) orelse return .no_validator;
-    return dischargeLineLocal(law, original, repaired, line);
+    if (lawFor(intent)) |law| return dischargeLineLocal(law, original, repaired, line);
+    if (regionLawFor(intent)) |law| return dischargeRegionLocal(law, original, repaired, line);
+    return .no_validator;
 }
 
 /// A law, as a function from the line it applies to onto the line it produces.
@@ -271,6 +391,27 @@ pub fn validateApplication(
 /// says another, and splicing on a partial match is the failure a validator is
 /// here to prevent.
 const LawFn = *const fn (before: []const u8, buf: []u8) ?[]const u8;
+
+/// A law over a run of lines rather than one line.
+///
+/// `source` is the whole original file, which these laws need: their
+/// preconditions are facts about the rest of the program - whether a name the
+/// rewrite introduces is already bound, whether a name it drops is read later -
+/// and neither is visible in the region alone.
+const RegionLawFn = *const fn (
+    source: []const u8,
+    region: Region,
+    before: []const u8,
+    buf: []u8,
+) ?[]const u8;
+
+fn regionLawFor(intent: RepairIntent) ?RegionLawFn {
+    return switch (intent) {
+        .flatten_destructure => lawFlattenDestructure,
+        .drop_unused_index_alias => lawDropUnusedIndexAlias,
+        else => null,
+    };
+}
 
 fn lawFor(intent: RepairIntent) ?LawFn {
     return switch (intent) {
@@ -319,6 +460,118 @@ fn dischargeLineLocal(
         return .{ .not_law_shape = "the new line is not the law's rewrite of the old one" };
     }
     return .equivalent;
+}
+
+/// The run of lines an edit changed, as 1-based line numbers and counts.
+const Region = struct {
+    /// First changed line, 1-based.
+    first_line: u32,
+    /// How many lines the region covers in the original.
+    original_lines: u32,
+    /// How many it covers in the repaired source.
+    repaired_lines: u32,
+};
+
+/// The region skeleton: the same two obligations as `dischargeLineLocal`, for
+/// a rewrite whose output is a different number of lines than its input.
+fn dischargeRegionLocal(
+    law: RegionLawFn,
+    original: []const u8,
+    repaired: []const u8,
+    line: u32,
+) Discharge {
+    const region = changedRegion(original, repaired) orelse
+        return .{ .not_law_shape = "the edit changes nothing" };
+    if (region.first_line != line) {
+        return .{ .not_law_shape = "the changed region does not start at the line the diagnostic reported" };
+    }
+
+    const before = lineSpan(original, region.first_line, region.original_lines) orelse
+        return .{ .not_law_shape = "the reported region runs past the end of the original" };
+    const after = lineSpan(repaired, region.first_line, region.repaired_lines) orelse
+        return .{ .not_law_shape = "the reported region runs past the end of the repaired source" };
+
+    var buf: [8192]u8 = undefined;
+    const expected = law(original, region, before, &buf) orelse
+        return .{ .not_law_shape = "the original region is not the shape this law rewrites, or its precondition does not hold" };
+
+    if (!std.mem.eql(u8, expected, after)) {
+        return .{ .not_law_shape = "the new region is not the law's rewrite of the old one" };
+    }
+    return .equivalent;
+}
+
+/// The one contiguous run of lines that differs, or null when nothing does.
+///
+/// Computed as the lines between the common prefix and the common suffix, so
+/// an edit that adds or removes lines is located as precisely as one that
+/// replaces them. An edit that touches two separate places collapses into one
+/// region spanning both, and the law then refuses it for not being its shape.
+/// Both scans walk the sources rather than materializing a line table: this
+/// runs on the request path, and one array per side big enough for any handler
+/// is a quarter megabyte of stack for a comparison that needs none.
+fn changedRegion(original: []const u8, repaired: []const u8) ?Region {
+    const a_count = countLines(original);
+    const b_count = countLines(repaired);
+
+    var prefix: u32 = 0;
+    var a_it = std.mem.splitScalar(u8, original, '\n');
+    var b_it = std.mem.splitScalar(u8, repaired, '\n');
+    while (prefix < a_count and prefix < b_count) : (prefix += 1) {
+        if (!std.mem.eql(u8, a_it.next().?, b_it.next().?)) break;
+    }
+    if (prefix == a_count and prefix == b_count) return null;
+
+    var suffix: u32 = 0;
+    var a_end: usize = original.len;
+    var b_end: usize = repaired.len;
+    while (suffix < a_count - prefix and suffix < b_count - prefix) : (suffix += 1) {
+        const a_start = if (std.mem.lastIndexOfScalar(u8, original[0..a_end], '\n')) |i| i + 1 else 0;
+        const b_start = if (std.mem.lastIndexOfScalar(u8, repaired[0..b_end], '\n')) |i| i + 1 else 0;
+        if (!std.mem.eql(u8, original[a_start..a_end], repaired[b_start..b_end])) break;
+        a_end = if (a_start == 0) 0 else a_start - 1;
+        b_end = if (b_start == 0) 0 else b_start - 1;
+    }
+
+    return .{
+        .first_line = prefix + 1,
+        .original_lines = a_count - prefix - suffix,
+        .repaired_lines = b_count - prefix - suffix,
+    };
+}
+
+/// Lines are newline-separated, so a source with no newline is one line and a
+/// source ending in one has a final empty line. `lineSpan` counts the same way.
+fn countLines(source: []const u8) u32 {
+    var n: u32 = 1;
+    for (source) |c| {
+        if (c == '\n') n += 1;
+    }
+    return n;
+}
+
+/// The bytes of `count` lines starting at 1-based `first`, without the newline
+/// that ends the last of them. A zero count is the empty slice at that point,
+/// which is what a pure insertion or deletion needs.
+fn lineSpan(source: []const u8, first: u32, count: u32) ?[]const u8 {
+    if (first == 0) return null;
+    var start: usize = 0;
+    var n: u32 = 1;
+    while (n < first) : (n += 1) {
+        start = (std.mem.indexOfScalarPos(u8, source, start, '\n') orelse return null) + 1;
+    }
+    if (count == 0) return source[start..start];
+    var end = start;
+    var seen: u32 = 0;
+    while (seen < count) : (seen += 1) {
+        const nl = std.mem.indexOfScalarPos(u8, source, end, '\n');
+        if (seen + 1 == count) {
+            end = nl orelse source.len;
+            break;
+        }
+        end = (nl orelse return null) + 1;
+    }
+    return source[start..end];
 }
 
 // ---------------------------------------------------------------------------
@@ -462,6 +715,380 @@ fn lawArrowToFunction(before: []const u8, buf: []u8) ?[]const u8 {
         std.fmt.bufPrint(buf, "{s}function {s}{s} {{ return {s}; }}", .{ export_prefix, name, signature, body }) catch null;
 }
 
+/// ZTS618. `const {outer: {inner}} = rhs;` becomes
+/// `const {outer} = rhs;` followed by `const {inner} = outer;`.
+///
+/// The rewrite introduces a binding the program did not have, which is the
+/// only way it can stop being an equivalence: if `outer` already names
+/// something the rest of the file uses, the new declaration shadows it. That
+/// precondition is re-derived here rather than taken from the producer, and it
+/// is deliberately conservative - any binding of the name anywhere outside the
+/// rewritten line refuses, whether or not it is in scope, and the scan works in
+/// logical lines so a declaration head or parameter list broken across physical
+/// lines cannot hide one.
+fn lawFlattenDestructure(
+    source: []const u8,
+    region: Region,
+    before: []const u8,
+    buf: []u8,
+) ?[]const u8 {
+    if (region.original_lines != 1 or region.repaired_lines != 2) return null;
+
+    const indent_len = leadingBlankLen(before);
+    const rest = before[indent_len..];
+    if (!std.mem.startsWith(u8, rest, "const ")) return null;
+
+    const open = std.mem.indexOfScalar(u8, before, '{') orelse return null;
+    const close = matchingBrace(before, open) orelse return null;
+    const eq = topLevelEquals(before, close + 1) orelse return null;
+
+    const rhs = trimBlank(before[eq + 1 ..]);
+    if (rhs.len == 0) return null;
+    // An expression that does not finish on this line would be truncated by a
+    // two-line replacement, so the law does not describe it.
+    if (!delimitersBalanced(rhs)) return null;
+
+    const pattern = trimBlank(before[open + 1 .. close]);
+    const colon = topLevelColon(pattern) orelse return null;
+    const outer = trimBlank(pattern[0..colon]);
+    if (!isSimpleIdentifier(outer)) return null;
+
+    const nested = trimBlank(pattern[colon + 1 ..]);
+    if (nested.len < 2 or nested[0] != '{' or nested[nested.len - 1] != '}') return null;
+    const inner = trimBlank(nested[1 .. nested.len - 1]);
+    if (!isFlatIdentifierList(inner)) return null;
+
+    // The precondition. `outer` becomes a binding here, so nothing else may
+    // bind it.
+    if (bindsOutsideRegion(source, region, outer)) return null;
+
+    const indent = before[0..indent_len];
+    return std.fmt.bufPrint(buf, "{s}const {{{s}}} = {s}\n{s}const {{{s}}} = {s};", .{
+        indent, outer, rhs, indent, inner, outer,
+    }) catch null;
+}
+
+/// ZTS619. A for-of over `xs.entries()` whose body opens by destructuring the
+/// pair into `[index, value]` becomes a for-of over `xs` binding `value`.
+///
+/// Two names disappear: the pair and the index. The rewrite is an equivalence
+/// only where neither is read afterwards, and both halves are re-derived here.
+/// The checker establishes the index is unread inside the loop, and nothing
+/// establishes the pair is - the producer checks that for itself, which is
+/// exactly the check a validator must not borrow.
+fn lawDropUnusedIndexAlias(
+    source: []const u8,
+    region: Region,
+    before: []const u8,
+    buf: []u8,
+) ?[]const u8 {
+    if (region.original_lines != 2 or region.repaired_lines != 1) return null;
+
+    const split = std.mem.indexOfScalar(u8, before, '\n') orelse return null;
+    const for_line = before[0..split];
+    const destructure_line = before[split + 1 ..];
+
+    const indent_len = leadingBlankLen(for_line);
+    const indent = for_line[0..indent_len];
+    var rest = for_line[indent_len..];
+
+    const prefix = "for (const ";
+    if (!std.mem.startsWith(u8, rest, prefix)) return null;
+    rest = rest[prefix.len..];
+    const binding_end = identEnd(rest) orelse return null;
+    const binding = rest[0..binding_end];
+    rest = trimLeadingBlank(rest[binding_end..]);
+    if (!std.mem.startsWith(u8, rest, "of ")) return null;
+    rest = trimLeadingBlank(rest["of ".len..]);
+
+    const entries = std.mem.lastIndexOf(u8, rest, ".entries()") orelse return null;
+    const iterable = trimBlank(rest[0..entries]);
+    if (iterable.len == 0) return null;
+    var tail = trimLeadingBlank(rest[entries + ".entries()".len ..]);
+    if (tail.len == 0 or tail[0] != ')') return null;
+    tail = trimLeadingBlank(tail[1..]);
+    if (tail.len == 0 or tail[0] != '{') return null;
+    if (trimBlank(tail[1..]).len != 0) return null;
+
+    // `const [index, value] = binding;`
+    var d = trimLeadingBlank(destructure_line);
+    if (!std.mem.startsWith(u8, d, "const [")) return null;
+    d = d["const [".len..];
+    const bracket = std.mem.indexOfScalar(u8, d, ']') orelse return null;
+    const elements = d[0..bracket];
+    const comma = std.mem.indexOfScalar(u8, elements, ',') orelse return null;
+    if (std.mem.indexOfScalarPos(u8, elements, comma + 1, ',') != null) return null;
+    const index_name = trimBlank(elements[0..comma]);
+    const value_name = trimBlank(elements[comma + 1 ..]);
+    if (!isSimpleIdentifier(index_name) or !isSimpleIdentifier(value_name)) return null;
+
+    var after_bracket = trimLeadingBlank(d[bracket + 1 ..]);
+    if (after_bracket.len == 0 or after_bracket[0] != '=') return null;
+    after_bracket = std.mem.trim(u8, after_bracket[1..], " \t\r;");
+    if (!std.mem.eql(u8, after_bracket, binding)) return null;
+
+    // The preconditions. Both dropped names must be dead from here on.
+    if (readAfterRegion(source, region, binding)) return null;
+    if (readAfterRegion(source, region, index_name)) return null;
+
+    return std.fmt.bufPrint(buf, "{s}for (const {s} of {s}) {{", .{
+        indent, value_name, iterable,
+    }) catch null;
+}
+
+/// True when any binding outside the changed region binds `ident`.
+///
+/// The unit is the logical line, not the physical one: a declaration head or a
+/// parameter list broken across lines is examined as the one declaration it is.
+/// A physical-line scan sees `const {`, then `  user,`, then `} = cfg;` and
+/// finds no line that declares `user`, and the same for a parameter on its own
+/// line - so it answers "nothing binds this" for two forms that do, and the
+/// caller then grades a capture as an equivalence.
+///
+/// Over-approximates otherwise. It covers the binding forms the language has -
+/// `const`/`let` declarations including destructuring heads, arrow and function
+/// parameters, a for-of binding, and an import specifier - and it does not ask
+/// whether the binding is in scope at the rewrite site. A refusal costs a
+/// repair; a miss is unsound.
+pub fn bindsOutsideLines(
+    source: []const u8,
+    first_line: u32,
+    line_count: u32,
+    ident: []const u8,
+) bool {
+    var i: usize = 0;
+    var line_no: u32 = 1;
+    while (i < source.len) {
+        const start_line = line_no;
+        const end = logicalLineEnd(source, i, &line_no);
+        const inside = start_line >= first_line and start_line < first_line + line_count;
+        if (!inside and lineBinds(source[i..end], ident)) return true;
+        if (end >= source.len) break;
+        line_no += 1;
+        i = end + 1;
+    }
+    return false;
+}
+
+fn bindsOutsideRegion(source: []const u8, region: Region, ident: []const u8) bool {
+    return bindsOutsideLines(source, region.first_line, region.original_lines, ident);
+}
+
+/// Index of the newline that ends the logical line starting at `start`, or the
+/// length of the source. `line_no` is advanced past every newline swallowed.
+///
+/// A line continues into the next while a `(` or `[` it opened is still open,
+/// and - only for a declaration head - while a `{` is. The brace case is
+/// restricted that way because an unrestricted one would swallow a function
+/// body whole: `function f() {` opens a brace that closes pages later, and the
+/// whole body would then read as one declaration naming everything in it.
+fn logicalLineEnd(source: []const u8, start: usize, line_no: *u32) usize {
+    const first_line_end = std.mem.indexOfScalarPos(u8, source, start, '\n') orelse source.len;
+    const head = trimLeadingBlank(source[start..first_line_end]);
+    const decl_head = std.mem.startsWith(u8, head, "const ") or
+        std.mem.startsWith(u8, head, "let ") or
+        std.mem.startsWith(u8, head, "var ") or
+        std.mem.startsWith(u8, head, "import ") or
+        std.mem.startsWith(u8, head, "export const ") or
+        std.mem.startsWith(u8, head, "export let ");
+
+    var round: i32 = 0;
+    var curly: i32 = 0;
+    var i = start;
+    while (i < source.len) : (i += 1) {
+        switch (source[i]) {
+            // Bounded to the line: a literal that does not close on its own
+            // line is malformed, and following it further would swallow lines
+            // whose bindings this scan exists to find.
+            '"', '\'', '`' => {
+                const line_end = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse source.len;
+                if (skipStringLiteral(source[0..line_end], i)) |close| i = close;
+            },
+            '(', '[' => round += 1,
+            ')', ']' => {
+                if (round > 0) round -= 1;
+            },
+            '{' => curly += 1,
+            '}' => {
+                if (curly > 0) curly -= 1;
+            },
+            '\n' => {
+                if (round == 0 and (curly == 0 or !decl_head)) return i;
+                line_no.* += 1;
+            },
+            else => {},
+        }
+    }
+    return source.len;
+}
+
+/// True when `ident` appears as a token on any line after the changed region.
+fn readAfterRegion(source: []const u8, region: Region, ident: []const u8) bool {
+    var it = std.mem.splitScalar(u8, source, '\n');
+    var n: u32 = 0;
+    while (it.next()) |line| {
+        n += 1;
+        if (n < region.first_line + region.original_lines) continue;
+        if (tokenAppears(line, ident)) return true;
+    }
+    return false;
+}
+
+/// True when the logical line declares `ident`. Written against a span that may
+/// carry newlines: every scan below is by index, not by line.
+fn lineBinds(line: []const u8, ident: []const u8) bool {
+    var t = trimLeadingBlank(line);
+    if (std.mem.startsWith(u8, t, "export ")) t = trimLeadingBlank(t["export ".len..]);
+
+    // `const x = ...`, `let {a, b} = ...`: everything left of the binding `=`.
+    inline for (.{ "const ", "let " }) |kw| {
+        if (std.mem.startsWith(u8, t, kw)) {
+            const eq = topLevelEquals(t, kw.len) orelse t.len;
+            if (tokenAppears(t[kw.len..eq], ident)) return true;
+        }
+    }
+    // An arrow's parameters sit left of the `=>`, whichever declaration the
+    // line opens with.
+    if (std.mem.indexOf(u8, t, "=>")) |arrow| {
+        if (tokenAppears(t[0..arrow], ident)) return true;
+    }
+    // A function's name and parameter list.
+    if (std.mem.indexOf(u8, t, "function ")) |at| {
+        if (tokenAppears(t[at..], ident)) return true;
+    }
+    // A for-of binding.
+    if (std.mem.indexOf(u8, t, "for (")) |at| {
+        const head = t[at..];
+        const of = std.mem.indexOf(u8, head, " of ") orelse head.len;
+        if (tokenAppears(head[0..of], ident)) return true;
+    }
+    // An import clause binds every name it lists.
+    if (std.mem.startsWith(u8, t, "import ")) {
+        if (tokenAppears(t, ident)) return true;
+    }
+    return false;
+}
+
+fn tokenAppears(text: []const u8, ident: []const u8) bool {
+    if (ident.len == 0) return false;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (!isIdentStart(text[i])) {
+            i += 1;
+            continue;
+        }
+        const start = i;
+        i += 1;
+        while (i < text.len and isIdentContinue(text[i])) i += 1;
+        if (std.mem.eql(u8, text[start..i], ident)) return true;
+    }
+    return false;
+}
+
+fn identEnd(s: []const u8) ?usize {
+    if (s.len == 0 or !isIdentStart(s[0])) return null;
+    var i: usize = 1;
+    while (i < s.len and isIdentContinue(s[i])) i += 1;
+    return i;
+}
+
+fn isSimpleIdentifier(s: []const u8) bool {
+    if (s.len == 0 or !isIdentStart(s[0])) return false;
+    for (s[1..]) |c| {
+        if (!isIdentContinue(c)) return false;
+    }
+    return true;
+}
+
+/// `a, b, c` - the only inner pattern the flatten law rewrites, because a
+/// nested or renamed field would need a second level of rewriting.
+fn isFlatIdentifierList(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var it = std.mem.splitScalar(u8, s, ',');
+    while (it.next()) |part| {
+        if (!isSimpleIdentifier(trimBlank(part))) return false;
+    }
+    return true;
+}
+
+fn trimLeadingBlank(s: []const u8) []const u8 {
+    return s[leadingBlankLen(s)..];
+}
+
+/// Index of the `}` closing the `{` at `open`, within one line, ignoring
+/// brackets inside string literals.
+fn matchingBrace(line: []const u8, open: usize) ?usize {
+    if (open >= line.len or line[open] != '{') return null;
+    var depth: i32 = 0;
+    var i = open;
+    while (i < line.len) : (i += 1) {
+        switch (line[i]) {
+            '"', '\'', '`' => i = skipStringLiteral(line, i) orelse return null,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Index of the first `=` at nesting depth zero at or after `from`, skipping
+/// `==`, `=>`, and the comparison operators.
+fn topLevelEquals(line: []const u8, from: usize) ?usize {
+    var depth: i32 = 0;
+    var i = from;
+    while (i < line.len) : (i += 1) {
+        switch (line[i]) {
+            '"', '\'', '`' => i = skipStringLiteral(line, i) orelse return null,
+            '{', '[', '(' => depth += 1,
+            '}', ']', ')' => depth -= 1,
+            '=' => {
+                if (depth != 0) continue;
+                if (i + 1 < line.len and (line[i + 1] == '=' or line[i + 1] == '>')) continue;
+                if (i > from and (line[i - 1] == '=' or line[i - 1] == '!' or line[i - 1] == '<' or line[i - 1] == '>')) continue;
+                return i;
+            },
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Index of the first `:` at nesting depth zero, which is the field separator
+/// of a one-level destructuring pattern.
+fn topLevelColon(pattern: []const u8) ?usize {
+    var depth: i32 = 0;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        switch (pattern[i]) {
+            '"', '\'', '`' => i = skipStringLiteral(pattern, i) orelse return null,
+            '{', '[', '(' => depth += 1,
+            '}', ']', ')' => depth -= 1,
+            ':' => if (depth == 0) return i,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Index of the closing quote of the literal opening at `start`, or null when
+/// it does not close on this line.
+fn skipStringLiteral(text: []const u8, start: usize) ?usize {
+    const quote = text[start];
+    var i = start + 1;
+    while (i < text.len) : (i += 1) {
+        if (text[i] == '\\') {
+            i += 1;
+            continue;
+        }
+        if (text[i] == quote) return i;
+    }
+    return null;
+}
+
 fn leadingBlankLen(line: []const u8) usize {
     var i: usize = 0;
     while (i < line.len and (line[i] == ' ' or line[i] == '\t')) : (i += 1) {}
@@ -486,20 +1113,28 @@ fn isAtomicRhs(expr: []const u8) bool {
     return true;
 }
 
+/// True when the expression opens and closes every delimiter it uses, and every
+/// string literal in it finishes.
+///
+/// Braces count for the same reason parentheses do. A two-line replacement
+/// splices a declaration in after this line, so an object literal or a template
+/// that continues onto the next line would be cut in half by the splice, and a
+/// balance check blind to `{` would call that shape finished.
 fn delimitersBalanced(expr: []const u8) bool {
-    var paren: i32 = 0;
-    var bracket: i32 = 0;
-    for (expr) |c| {
-        switch (c) {
-            '(' => paren += 1,
-            ')' => paren -= 1,
-            '[' => bracket += 1,
-            ']' => bracket -= 1,
+    var depth: i32 = 0;
+    var i: usize = 0;
+    while (i < expr.len) : (i += 1) {
+        switch (expr[i]) {
+            '"', '\'', '`' => i = skipStringLiteral(expr, i) orelse return false,
+            '(', '[', '{' => depth += 1,
+            ')', ']', '}' => {
+                depth -= 1;
+                if (depth < 0) return false;
+            },
             else => {},
         }
-        if (paren < 0 or bracket < 0) return false;
     }
-    return paren == 0 and bracket == 0;
+    return depth == 0;
 }
 
 /// Index of the `=` that binds the declaration, skipping `=>` and `==`.
@@ -757,13 +1392,28 @@ test "every gradable row has a law, and every law has a gradable row" {
     // now asserts the two directions that actually matter: a row cannot claim
     // `implemented` without a law behind it, and a law cannot exist for a row
     // that still says `planned`. Either drift is a lie in a published field.
+    //
+    // "A law" means either skeleton: a line-local one, or the region-local one
+    // the two multi-line rewrites use. A row served by neither and still
+    // claiming M4 is the drift being caught.
     var gradable_count: usize = 0;
     for (rows) |row| {
-        const has_law = lawFor(row.intent) != null;
+        const has_law = lawFor(row.intent) != null or regionLawFor(row.intent) != null;
         if (row.gradable()) {
             gradable_count += 1;
-            if (!has_law) {
-                std.debug.print("row {s} is implemented with no law\n", .{@tagName(row.intent)});
+            // What `implemented` has to mean: `dischargeByMethod` reaches
+            // something for this row's method. M4 needs a law of its own; M1
+            // and M2 compare whole programs and always run. The other three
+            // answer `.no_validator` there, so a row naming one of them and
+            // claiming `implemented` advertises a repair the apply path then
+            // refuses with `ungraded_intent`.
+            const dischargeable = switch (row.method) {
+                .declared_law => has_law,
+                .layout_identity, .parse_identity => true,
+                .kernel_identity, .contract_equivalence, .none => false,
+            };
+            if (!dischargeable) {
+                std.debug.print("row {s} is implemented with nothing to discharge it\n", .{@tagName(row.intent)});
                 return error.TestFailed;
             }
         } else if (has_law) {
@@ -771,22 +1421,23 @@ test "every gradable row has a law, and every law has a gradable row" {
             return error.TestFailed;
         }
     }
-    try std.testing.expectEqual(@as(usize, 6), gradable_count);
+    try std.testing.expectEqual(@as(usize, 8), gradable_count);
 }
 
 test "let becomes const, and the for-of form is a different law" {
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.replace_let_with_const, "  let n = 1;\n", "  const n = 1;\n", 1),
+        try validateApplication(std.testing.allocator, .replace_let_with_const, "  let n = 1;\n", "  const n = 1;\n", 1),
     );
     // Indentation is preserved verbatim, so a reflowed line is not the law.
-    const reflowed = validateApplication(.replace_let_with_const, "  let n = 1;\n", "const n = 1;\n", 1);
+    const reflowed = try validateApplication(std.testing.allocator, .replace_let_with_const, "  let n = 1;\n", "const n = 1;\n", 1);
     try std.testing.expect(reflowed == .not_law_shape);
 
     // The producer handles both from one function; the two intents are
     // separate here so a misclassified diagnostic cannot discharge against the
     // wrong law.
-    const wrong_law = validateApplication(
+    const wrong_law = try validateApplication(
+        std.testing.allocator,
         .replace_let_with_const,
         "  for (let x of xs) {\n",
         "  for (const x of xs) {\n",
@@ -795,7 +1446,7 @@ test "let becomes const, and the for-of form is a different law" {
     try std.testing.expect(wrong_law == .not_law_shape);
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.canonicalize_for_of_const, "  for (let x of xs) {\n", "  for (const x of xs) {\n", 1),
+        try validateApplication(std.testing.allocator, .canonicalize_for_of_const, "  for (let x of xs) {\n", "  for (const x of xs) {\n", 1),
     );
 }
 
@@ -804,7 +1455,8 @@ test "a compound assignment must parenthesize a compound right-hand side" {
     // tax)`; without the parens it reassociates to `(total - fee) + tax` and
     // computes something else, so accepting the unparenthesized form would
     // grade a value-changing edit as an equivalence.
-    const unparenthesized = validateApplication(
+    const unparenthesized = try validateApplication(
+        std.testing.allocator,
         .replace_compound_assign_with_explicit,
         "  total -= fee + tax;\n",
         "  total = total - fee + tax;\n",
@@ -814,7 +1466,8 @@ test "a compound assignment must parenthesize a compound right-hand side" {
 
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(
+        try validateApplication(
+            std.testing.allocator,
             .replace_compound_assign_with_explicit,
             "  total -= fee + tax;\n",
             "  total = total - (fee + tax);\n",
@@ -826,9 +1479,10 @@ test "a compound assignment must parenthesize a compound right-hand side" {
     // accepting either spelling.
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.replace_compound_assign_with_explicit, "  n += 1;\n", "  n = n + 1;\n", 1),
+        try validateApplication(std.testing.allocator, .replace_compound_assign_with_explicit, "  n += 1;\n", "  n = n + 1;\n", 1),
     );
-    const over_parenthesized = validateApplication(
+    const over_parenthesized = try validateApplication(
+        std.testing.allocator,
         .replace_compound_assign_with_explicit,
         "  n += 1;\n",
         "  n = n + (1);\n",
@@ -840,7 +1494,8 @@ test "a compound assignment must parenthesize a compound right-hand side" {
 test "an arrow becomes a function, expression body wrapped in a return" {
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(
+        try validateApplication(
+            std.testing.allocator,
             .replace_arrow_with_function,
             "const parse = (x: number): number => x;\n",
             "function parse(x: number): number { return x; }\n",
@@ -849,7 +1504,8 @@ test "an arrow becomes a function, expression body wrapped in a return" {
     );
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(
+        try validateApplication(
+            std.testing.allocator,
             .replace_export_arrow_with_function,
             "export const load = (id: string): Response => Response.text(id);\n",
             "export function load(id: string): Response { return Response.text(id); }\n",
@@ -859,7 +1515,8 @@ test "an arrow becomes a function, expression body wrapped in a return" {
 
     // Dropping `export` changes what the module exports. A rewrite that did it
     // would still type-check inside the file and is not this law.
-    const dropped_export = validateApplication(
+    const dropped_export = try validateApplication(
+        std.testing.allocator,
         .replace_export_arrow_with_function,
         "export const load = (id: string): Response => Response.text(id);\n",
         "function load(id: string): Response { return Response.text(id); }\n",
@@ -893,7 +1550,7 @@ test "the law's own rewrite discharges" {
     ;
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.drop_redundant_bool_compare, original, repaired, 2),
+        try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 2),
     );
 }
 
@@ -902,7 +1559,7 @@ test "the negated form discharges" {
     const repaired = "const blocked = !flag;";
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.drop_redundant_bool_compare, original, repaired, 1),
+        try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1),
     );
 }
 
@@ -911,7 +1568,7 @@ test "a rewrite that is not the law is refused" {
     // point of re-deriving rather than diffing is that this is caught.
     const original = "const ready = flag === true;";
     const repaired = "const ready = !flag;";
-    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
+    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -924,14 +1581,14 @@ test "an edit outside the diagnostic's line is refused" {
         \\const ready = flag;
         \\const other = 2;
     ;
-    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
+    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
 test "two candidates on one line refuse rather than guess" {
     const original = "const both = a === true && b === true;";
     const repaired = "const both = a && b === true;";
-    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
+    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -939,6 +1596,314 @@ test "a planned intent has no validator" {
     // Distinct from a refusal: the edit is never examined. `lead_with_spread`
     // names M3 and nothing runs it, so an edit carrying it gets no verdict
     // rather than a negative one.
-    const answer = validateApplication(.lead_with_spread, "const a = {...b, c};", "const a = {...b, c};", 1);
+    const answer = try validateApplication(std.testing.allocator, .lead_with_spread, "const a = {...b, c};", "const a = {...b, c};", 1);
     try std.testing.expect(answer == .no_validator);
+}
+
+test "M2 accepts a rewrite that changes bytes and not structure" {
+    // Comments, quoting, and whitespace are all trivia, and none of them
+    // reaches the tree. This is the shape the semicolon-insertion repair will
+    // carry when ASI is removed.
+    const original =
+        \\function handler(req: Request): Response {
+        \\  const n = 1;
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const repaired =
+        \\// added by the repair
+        \\function handler(req: Request): Response {
+        \\    const n   =   1;
+        \\    return Response.text('ok');
+        \\}
+    ;
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try dischargeByMethod(std.testing.allocator, .parse_identity, .replace_let_with_const, original, repaired, 1),
+    );
+}
+
+test "M2 rejects a rewrite that changes structure" {
+    const original =
+        \\function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const repaired =
+        \\function handler(req: Request): Response {
+        \\  return Response.json("ok");
+        \\}
+    ;
+    const answer = try dischargeByMethod(std.testing.allocator, .parse_identity, .replace_let_with_const, original, repaired, 1);
+    try std.testing.expect(answer == .not_law_shape);
+}
+
+test "M1 accepts a layout-only difference and rejects a token change" {
+    const original =
+        \\export function handler(req: Request): Response {
+        \\  const n = 1;
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const reindented =
+        \\export function handler(req: Request): Response {
+        \\        const n = 1;
+        \\        return Response.text("ok");
+        \\}
+    ;
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try dischargeByMethod(std.testing.allocator, .layout_identity, .replace_let_with_const, original, reindented, 1),
+    );
+
+    const retokenized =
+        \\export function handler(req: Request): Response {
+        \\  const n = 2;
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const answer = try dischargeByMethod(std.testing.allocator, .layout_identity, .replace_let_with_const, original, retokenized, 1);
+    try std.testing.expect(answer == .not_law_shape);
+}
+
+test "a validator that forms no answer says so rather than accepting" {
+    // The printer refuses a statement with no semicolon, because ASI would
+    // terminate where the printer would close the line up. M1 then has no
+    // canonical bytes to compare and must not report an equivalence: an
+    // undecided validator is a reason to refuse the apply, not to allow it.
+    const unprintable = "const n = 1\n";
+    const answer = try dischargeByMethod(std.testing.allocator, .layout_identity, .replace_let_with_const, unprintable, unprintable, 1);
+    try std.testing.expect(answer == .undecided);
+}
+
+test "no planned row can advertise a repair" {
+    // Walked over the table rather than asserted for one row: the property is
+    // about the registry, and naming a row here would keep passing after that
+    // row changed and a different one went wrong.
+    for (rows) |row| {
+        if (row.status == .implemented) continue;
+        try std.testing.expect(!row.gradable());
+        try std.testing.expect(!gradable(row.intent));
+        const answer = try validateApplication(std.testing.allocator, row.intent, "const a = 1;\n", "const a = 1;\n", 1);
+        try std.testing.expect(answer == .no_validator);
+    }
+}
+
+test "a nested destructure flattens, and a capture is refused" {
+    const original =
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(name);
+        \\}
+    ;
+    const repaired =
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user} = payload;
+        \\  const {name} = user;
+        \\  return Response.text(name);
+        \\}
+    ;
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 3),
+    );
+
+    // The precondition, re-derived here rather than trusted: the rewrite
+    // introduces a binding named `user`, and this file already has one. The
+    // two-statement form would shadow it, which is a different program.
+    const captures =
+        \\const user = "global";
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(name);
+        \\}
+    ;
+    const captured =
+        \\const user = "global";
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user} = payload;
+        \\  const {name} = user;
+        \\  return Response.text(name);
+        \\}
+    ;
+    const refused = try validateApplication(std.testing.allocator, .flatten_destructure, captures, captured, 4);
+    try std.testing.expect(refused == .not_law_shape);
+}
+
+test "an unused index alias collapses, and a live name is refused" {
+    const original =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    return Response.text(item);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    const repaired =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const item of items) {
+        \\    return Response.text(item);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try validateApplication(std.testing.allocator, .drop_unused_index_alias, original, repaired, 3),
+    );
+
+    // The index alias is what the loop drops. A body that reads it is left
+    // naming something the rewrite deleted, so the law refuses even though the
+    // text of the header rewrite is exactly right.
+    const reads_index =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    return Response.text(item + _i);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    const dropped_index =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const item of items) {
+        \\    return Response.text(item + _i);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    const refused_index = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_index, dropped_index, 3);
+    try std.testing.expect(refused_index == .not_law_shape);
+
+    // Same for the pair binding, which nothing but the producer ever checked.
+    const reads_pair =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const pair of items.entries()) {
+        \\    const [_i, item] = pair;
+        \\    return Response.text(item + pair[0]);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    const dropped_pair =
+        \\function handler(req: Request): Response {
+        \\  const items = ["a", "b"];
+        \\  for (const item of items) {
+        \\    return Response.text(item + pair[0]);
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    ;
+    const refused_pair = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_pair, dropped_pair, 3);
+    try std.testing.expect(refused_pair == .not_law_shape);
+}
+
+test "a region edit outside the reported line is refused" {
+    const original =
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(name);
+        \\}
+    ;
+    const repaired =
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user} = payload;
+        \\  const {name} = user;
+        \\  return Response.text(name);
+        \\}
+    ;
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
+    try std.testing.expect(answer == .not_law_shape);
+}
+
+test "a binding wrapped across lines still refuses the flatten" {
+    // The capture the line-oriented scan used to miss. `user` is bound by a
+    // destructuring head split over three lines, so no single line reads as a
+    // declaration of it, and the rewrite's `const {user} = payload;` shadows
+    // the outer binding: `name + user` would read the new object rather than
+    // the one line 2 bound.
+    const original =
+        \\const {
+        \\  user,
+        \\} = config;
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(name + user);
+        \\}
+    ;
+    const repaired =
+        \\const {
+        \\  user,
+        \\} = config;
+        \\function handler(req: Request): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user} = payload;
+        \\  const {name} = user;
+        \\  return Response.text(name + user);
+        \\}
+    ;
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 6);
+    try std.testing.expect(answer == .not_law_shape);
+}
+
+test "a parameter list wrapped across lines still refuses the flatten" {
+    // The same capture through the other multi-line form: the parameter sits
+    // on its own line, so the line carrying `function` does not name it.
+    const original =
+        \\function outer(
+        \\  user: string,
+        \\): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user: {name}} = payload;
+        \\  return Response.text(name + user);
+        \\}
+    ;
+    const repaired =
+        \\function outer(
+        \\  user: string,
+        \\): Response {
+        \\  const payload = { user: { name: "ada" } };
+        \\  const {user} = payload;
+        \\  const {name} = user;
+        \\  return Response.text(name + user);
+        \\}
+    ;
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 5);
+    try std.testing.expect(answer == .not_law_shape);
+}
+
+test "an object-literal right-hand side that runs past the line refuses" {
+    // `delimitersBalanced` used to count only `()` and `[]`, so an object
+    // literal continuing onto the next line read as finished and the law
+    // spliced `const {name} = user;` into the middle of it.
+    const original =
+        \\function handler(req: Request): Response {
+        \\  const {user: {name}} = { user: { name: "ada" },
+        \\    other: 1 };
+        \\  return Response.text(name);
+        \\}
+    ;
+    const repaired =
+        \\function handler(req: Request): Response {
+        \\  const {user} = { user: { name: "ada" },
+        \\  const {name} = user;
+        \\    other: 1 };
+        \\  return Response.text(name);
+        \\}
+    ;
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
+    try std.testing.expect(answer == .not_law_shape);
 }

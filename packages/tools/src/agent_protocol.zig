@@ -1060,7 +1060,7 @@ fn runApplyRepair(
             else => return err,
         };
 
-        switch (repairPolicy.validateApplication(r.intent, current, next, r.line)) {
+        switch (try repairPolicy.validateApplication(allocator, r.intent, current, next, r.line)) {
             .equivalent => {},
             .not_law_shape => |why| {
                 allocator.free(next);
@@ -1069,6 +1069,14 @@ fn runApplyRepair(
             .no_validator => {
                 allocator.free(next);
                 return try writeApplyRefusal(json, file_rel, before_digest, "ungraded_intent", "no validator discharges this intent");
+            },
+            // The validator ran and formed no answer. That is its own refusal
+            // code rather than one of the two above: the edit was neither
+            // graded wrong nor left ungraded, and folding it into either would
+            // tell the client something that did not happen.
+            .undecided => |why| {
+                allocator.free(next);
+                return try writeApplyRefusal(json, file_rel, before_digest, "undecided_equivalence", why);
             },
         }
 
@@ -1701,10 +1709,13 @@ fn writeCheckPayload(
 /// equivalence validator exists, so the flag is true exactly when this
 /// diagnostic's repair intent has a row whose method is implemented.
 ///
-/// One row is: `drop_redundant_bool_compare` (ZTS620), discharged by
-/// `repair_validator.validateApplication` re-deriving the declared law's
-/// rewrite from the original line and requiring the candidate to match it byte
-/// for byte. Every other row is still `planned` and still answers false.
+/// Eight rows answer true, every one of them under M4: the validator
+/// re-derives the declared law's rewrite from the original and requires the
+/// candidate to match it byte for byte. Six are line-local, and two -
+/// `flatten_destructure` (ZTS618) and `drop_unused_index_alias` (ZTS619) -
+/// replace a run of lines and also re-derive the precondition that makes the
+/// rewrite an equivalence. Every other row is still `planned` and answers
+/// false.
 fn writeDiagnostic(
     json: *std.json.Stringify,
     allocator: std.mem.Allocator,
@@ -2991,6 +3002,55 @@ test "apply_repair accepts a repair keyed on a byte span" {
     try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
 }
 
+test "apply_repair accepts the one wired idiom row" {
+    // ZTS619 is spec 4.2.1's `element iteration` row and the only idiom row
+    // with a rewrite behind it. Its validator row said M2, which cannot
+    // discharge a rewrite that deletes a statement, so the repair was
+    // advertised as a proposal and this operation refused it. Under the M4 law
+    // it is applied, and the law re-derives both the header rewrite and the
+    // two facts that make it an equivalence.
+    const a = testing.allocator;
+    const source =
+        \\export function handler(req: Request): Response {
+        \\    const arr = [10, 20];
+        \\    const out = [];
+        \\    for (const pair of arr.entries()) {
+        \\        const [_i, x] = pair;
+        \\        out.push(x);
+        \\    }
+        \\    return Response.json({ out });
+        \\}
+        \\
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const target = "    for (const pair of arr.entries()) {\n        const [_i, x] = pair;\n";
+    const start = std.mem.indexOf(u8, source, target).?;
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"drop_unused_index_alias","span":{{"start":{d},"end":{d}}},"original":"    for (const pair of arr.entries()) {{\n        const [_i, x] = pair;\n","replacement":"    for (const x of arr) {{\n"}}]}}}}
+    , .{ root, start, start + target.len });
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("success").?.bool);
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 1), payload.get("applied").?.integer);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "for (const x of arr) {") != null);
+    try testing.expect(std.mem.indexOf(u8, on_disk, ".entries()") == null);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "const [_i, x]") == null);
+}
+
 test "apply_repair refuses a span outside the file" {
     // The floor under the test above: a span the client made up is refused
     // rather than clamped, so "the span form works" is not satisfied by an
@@ -3773,9 +3833,13 @@ test "normalize maps an applied intent back to the idiom row it realizes" {
     const entry = trace.items[0].object;
     try testing.expectEqualStrings("drop_unused_index_alias", entry.get("intent").?.string);
     try testing.expectEqualStrings("idiom.element-iteration", entry.get("idiom_id").?.string);
-    // The other side of the same rule: `drop_unused_index_alias` names M2,
-    // which discharges nothing, so it stays a proposal however well it works.
-    try testing.expectEqualStrings("proposed_refactor", entry.get("grade").?.string);
+    // The other side of the same rule. This row named M2 and could not be
+    // discharged by it - the rewrite deletes a statement, so the trees differ
+    // by construction - and it now names M4 with a law that re-derives both the
+    // header rewrite and the two preconditions the producer used to check for
+    // itself. The one idiom row with a wired rewrite is therefore gradable, and
+    // `apply_repair` will take it.
+    try testing.expectEqualStrings("mechanical_repair", entry.get("grade").?.string);
 }
 
 fn metaPayload(a: std.mem.Allocator, out: *[]u8) !std.json.Parsed(std.json.Value) {

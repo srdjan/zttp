@@ -109,7 +109,7 @@ pub fn execute(
     try w.writeAll(",\"proposed_content\":");
     try writeJsonString(w, proposed);
     try w.writeAll(",\"equivalence\":");
-    try writeEquivalenceJson(w, intent, source, proposed);
+    try writeEquivalenceJson(w, allocator, intent, source, proposed);
     try w.writeAll(",\"verification\":");
     try edit_simulate.writeResultJson(w, &result);
     try w.writeByte('}');
@@ -156,6 +156,7 @@ pub fn execute(
 /// keys on rather than a clean simulate.
 fn writeEquivalenceJson(
     w: anytype,
+    allocator: std.mem.Allocator,
     intent: RepairIntent,
     source: []const u8,
     proposed: []const u8,
@@ -169,7 +170,7 @@ fn writeEquivalenceJson(
         return;
     };
 
-    switch (repairPolicy.validateApplication(typed, source, proposed, intent.line)) {
+    switch (try repairPolicy.validateApplication(allocator, typed, source, proposed, intent.line)) {
         .no_validator => try w.writeAll("null"),
         .equivalent => {
             try w.writeAll("{\"method\":");
@@ -178,7 +179,11 @@ fn writeEquivalenceJson(
             try writeJsonString(w, row.precondition orelse "");
             try w.writeByte('}');
         },
-        .not_law_shape => |why| {
+        // Both of these report `discharged:false`, and they are different
+        // facts: one is "the edit is not the law's rewrite", the other is "the
+        // validator formed no answer". Neither is an equivalence, so neither
+        // may read as one, and the reason string is what separates them.
+        .not_law_shape, .undecided => |why| {
             try w.writeAll("{\"method\":");
             try writeJsonString(w, row.method.id());
             try w.writeAll(",\"discharged\":false,\"reason\":");

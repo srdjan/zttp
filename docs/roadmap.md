@@ -387,20 +387,26 @@ Lower more `RepairIntent` variants to real source edits, starting with the span-
 rewrites. Implement validator M2, parse identity, from
 [D3](plans/2026-07-30-016-d3-canonical-form-wire-design.md); it does not need the
 canonical formatter. Grade each lowering intent with it and flip `repair_available` on
-the wire for graded intents only. Add `input_validated` and `pii_contained` to
+the wire for graded intents only. (M2 was built in phase 6 and grades none of them:
+parse identity holds only where the tree does not move, and every lowering rewrite
+moves it. The intents that became gradable did so under M4, a declared law that
+re-derives the rewrite and its precondition. M2's consumer is the semicolon-insertion
+repair that ASI removal needs.) Add `input_validated` and `pii_contained` to
 `supported_goals` in `packages/pi/src/property_goals.zig`, widening the autoloop from
 three driveable properties to five; the counterexample solver already models both.
 
 Why: every intent that lowers and validates pulls a rejected program into the provable
 set with zero model tokens. That is convergence driven from the compiler side, and the
-`compiler_authored_apply` counter already measures it. 18 variants are declared in
-`packages/zts/src/repair_intent.zig`; 13 now reach a source edit, and the autoloop
+`compiler_authored_apply` counter already measures it. 17 variants are declared in
+`packages/zts/src/repair_intent.zig`; 12 now reach a source edit, and the autoloop
 drives 5 properties rather than 3.
 
 The count moved from 8 to 13 by wiring up rewrites that already existed. Five intents -
 `replace_ternary_with_if`, `name_const_above_template`, `lift_default_to_body`,
 `flatten_destructure`, `drop_unused_index_alias` - had builders in the canonicalizer
-reachable only through the normalize loop, which rewrites a whole file.
+reachable only through the normalize loop, which rewrites a whole file. It is 12 rather
+than 13 now: the ZTS617 rule change retired `lift_default_to_body` along with its
+rewriter, so both the variant and the edit it reached are gone.
 `canonicalize.applyStatementIntent` asks the narrow question a repair client actually
 has: build this pass's rewrites, keep the one carrying this intent at this line, splice
 it. It refuses on two matches rather than guessing, because `Intent` carries no column,
