@@ -110,13 +110,6 @@ pub fn print(allocator: std.mem.Allocator, source: []const u8, options: Options)
     return allocator.dupe(u8, printed);
 }
 
-/// True when `source` is already in canonical form.
-pub fn isCanonical(allocator: std.mem.Allocator, source: []const u8, options: Options) Error!bool {
-    const printed = try print(allocator, source, options);
-    defer allocator.free(printed);
-    return std.mem.eql(u8, printed, source);
-}
-
 fn refuse(options: Options, reason: Refusal) Error {
     if (options.reason_out) |out| out.* = reason;
     return error.UnprintableConstruct;
@@ -1575,7 +1568,7 @@ fn printInto(
     try renderer.renderStatements(chunks, 0);
 
     const out = p.out.items;
-    if (self_check) try verify(arena, source, out, options);
+    if (self_check) try verify(arena, trivia_items, source, out, options);
     return out;
 }
 
@@ -1585,6 +1578,7 @@ fn printInto(
 /// before the comparison.
 fn verify(
     arena: std.mem.Allocator,
+    source_trivia: []const trivia.Trivia,
     source: []const u8,
     printed: []const u8,
     options: Options,
@@ -1597,8 +1591,10 @@ fn verify(
         if (!std.mem.eql(u8, a.text, b.text)) return refuse(options, .self_check);
     }
 
-    const before_comments = try commentTexts(arena, source);
-    const after_comments = try commentTexts(arena, printed);
+    // The input's trivia was collected to build the chunks; collecting it a
+    // second time here would answer a question this function was handed.
+    const before_comments = try commentTexts(arena, source, source_trivia);
+    const after_comments = try commentTexts(arena, printed, null);
     if (before_comments.len != after_comments.len) return refuse(options, .self_check);
     for (before_comments, after_comments) |a, b| {
         if (!std.mem.eql(u8, a, b)) return refuse(options, .self_check);
@@ -1630,8 +1626,13 @@ fn significantTokens(
     return out.toOwnedSlice(arena);
 }
 
-fn commentTexts(arena: std.mem.Allocator, source: []const u8) Error![][]const u8 {
-    const items = trivia.collect(arena, source) catch return error.OutOfMemory;
+fn commentTexts(
+    arena: std.mem.Allocator,
+    source: []const u8,
+    collected: ?[]const trivia.Trivia,
+) Error![][]const u8 {
+    const items = collected orelse
+        trivia.collect(arena, source) catch return error.OutOfMemory;
     var out: std.ArrayListUnmanaged([]const u8) = .empty;
     for (items) |item| {
         if (item.kind == .blank_line_run) continue;

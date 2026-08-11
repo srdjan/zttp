@@ -126,7 +126,7 @@ fn scanGap(
             break;
         }
 
-        try flushBlankRun(allocator, out, out_line(line, pending_newlines), run_start, i, &pending_newlines);
+        try flushBlankRun(allocator, out, outLine(line, pending_newlines), run_start, i, &pending_newlines);
 
         const own_line = i == start or firstOnLine(source, i);
         if (i + 1 < end and source[i + 1] == '/') {
@@ -165,12 +165,12 @@ fn scanGap(
         break;
     }
 
-    try flushBlankRun(allocator, out, out_line(line, pending_newlines), run_start, i, &pending_newlines);
+    try flushBlankRun(allocator, out, outLine(line, pending_newlines), run_start, i, &pending_newlines);
     return line;
 }
 
 /// The line a pending blank run started on.
-fn out_line(current_line: u32, pending: u32) u32 {
+fn outLine(current_line: u32, pending: u32) u32 {
     return if (current_line > pending) current_line - pending else 1;
 }
 
