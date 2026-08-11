@@ -180,7 +180,14 @@ pub fn runVetoWithSchema(
         allocator.free(rewrite_trace);
     }
     if (result.new_count > 0) {
-        if (canonicalize.normalizeSource(allocator, edit.content, edit.file)) |nr_value| {
+        // Rewrites only. The salvage writes its result back as the model's
+        // edit, so the canonical formatter running here would return a
+        // whole-file reindent for one `let` the model should have written
+        // `const` - and the "the bytes changed" guard below, which means "a
+        // rewrite fired", would be true for almost every file.
+        if (canonicalize.normalizeSourceWithOptions(allocator, edit.content, edit.file, .{
+            .layout = false,
+        })) |nr_value| {
             var nr = nr_value;
             defer nr.deinit(allocator);
             if (nr.converged and nr.fully_canonical and !std.mem.eql(u8, nr.canonical_source, edit.content)) {

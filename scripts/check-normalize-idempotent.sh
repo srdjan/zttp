@@ -46,6 +46,13 @@ MIN_CHECKED=58
 # a bare tokenizer run cannot read.
 MAX_REFUSED=5
 
+# The ceiling above is counted by grepping stderr for one literal string, and a
+# ceiling on a count that stopped being produced is satisfied by silence: a
+# renamed message, or a formatter that stopped running at all, would report
+# zero refusals and pass. MIN_PRINTED is the floor under it - the files that
+# actually came back printed and reformatted.
+MIN_PRINTED=53
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
@@ -53,6 +60,7 @@ checked=0
 skipped=0
 failed=0
 refused=0
+printed=0
 
 while IFS= read -r -d '' file; do
   # A `zttp:sql` handler is type-checked against its schema. Without one every
@@ -78,6 +86,8 @@ while IFS= read -r -d '' file; do
   if grep -q "printer refused" "$work/err"; then
     echo "UNPRINTED $(sed -n 's/^normalize: printer refused //p' "$work/err" | head -n 1)" >&2
     refused=$((refused + 1))
+  else
+    printed=$((printed + 1))
   fi
 
   # Pass 2: normalize that output into `twice`. Keep the extension so the
@@ -120,8 +130,15 @@ if [ "$refused" -gt "$MAX_REFUSED" ]; then
   exit 1
 fi
 
+if [ "$printed" -lt "$MIN_PRINTED" ]; then
+  echo "normalize idempotence: the formatter printed $printed files, floor is $MIN_PRINTED" >&2
+  echo "  the refusal ceiling above counts a message; without this floor, a message that" >&2
+  echo "  stopped being printed reads as full coverage" >&2
+  exit 1
+fi
+
 if [ "$skipped" -gt 0 ]; then
-  echo "normalize idempotence OK ($checked files, $skipped skipped, $refused unprinted; each reason above)"
+  echo "normalize idempotence OK ($checked files, $skipped skipped, $printed printed, $refused unprinted; each reason above)"
 else
-  echo "normalize idempotence OK ($checked files, no skips, $refused unprinted)"
+  echo "normalize idempotence OK ($checked files, no skips, $printed printed, $refused unprinted)"
 fi

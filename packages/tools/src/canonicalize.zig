@@ -2146,12 +2146,39 @@ pub fn normalizeSource(
     return normalizeSourceWithSchema(allocator, source, virtual_path, null);
 }
 
+/// What a caller wants out of a normalize run.
+pub const NormalizeOptions = struct {
+    sql_schema_path: ?[]const u8 = null,
+    /// Run the canonical formatter over the rewrite fixed point.
+    ///
+    /// A caller that presents the result as its own edit turns this off. The
+    /// pi veto's salvage-on-reject is that caller: it normalizes only a
+    /// would-be-reject and writes the result back as the model's edit, so with
+    /// layout on, one `let` the model should have written `const` came back as
+    /// a whole-file reindent. Its own comment calls the salvage surgical, and
+    /// the guard it uses to detect one - the bytes changed - is true for
+    /// almost every file once layout runs.
+    layout: bool = true,
+};
+
 pub fn normalizeSourceWithSchema(
     allocator: std.mem.Allocator,
     source: []const u8,
     virtual_path: []const u8,
     sql_schema_path: ?[]const u8,
 ) !NormalizeResult {
+    return normalizeSourceWithOptions(allocator, source, virtual_path, .{
+        .sql_schema_path = sql_schema_path,
+    });
+}
+
+pub fn normalizeSourceWithOptions(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    virtual_path: []const u8,
+    options: NormalizeOptions,
+) !NormalizeResult {
+    const sql_schema_path = options.sql_schema_path;
     var current = try allocator.dupe(u8, source);
     errdefer allocator.free(current);
     var trace: std.ArrayListUnmanaged(RepairIntent) = .empty;
@@ -2259,18 +2286,26 @@ pub fn normalizeSourceWithSchema(
     // its coverage leaves the rewritten bytes exactly as they are.
     var refusal: zts.printer.Refusal = undefined;
     var printed = false;
-    if (zts.printer.print(allocator, current, .{
-        .jsx = isJsxLike(virtual_path),
-        .reason_out = &refusal,
-    })) |formatted| {
-        allocator.free(current);
-        current = formatted;
-        printed = true;
-    } else |err| switch (err) {
-        error.UnprintableConstruct => {},
-        error.OutOfMemory => return err,
+    if (options.layout) {
+        if (zts.printer.print(allocator, current, .{
+            .jsx = isJsxLike(virtual_path),
+            .reason_out = &refusal,
+        })) |formatted| {
+            allocator.free(current);
+            current = formatted;
+            printed = true;
+        } else |err| switch (err) {
+            error.UnprintableConstruct => {},
+            error.OutOfMemory => return err,
+        }
     }
 
+    // Collected over `current`, which is what this call emits: the canonical
+    // source on stdout, or the bytes `--write` puts on disk. So a residual
+    // diagnostic's line and column index the canonical source and not the file
+    // as it stands before the run, even though `file` names that path. The
+    // alternative - measuring the input - would report diagnostics the rewrite
+    // loop has already cleared.
     var residual_diagnostics = try collectCanonicalResidualDiagnostics(allocator, current, virtual_path, sql_schema_path);
     errdefer {
         for (residual_diagnostics.items) |*diag| diag.deinit(allocator);
@@ -2289,7 +2324,8 @@ pub fn normalizeSourceWithSchema(
         .residual = residual,
         .residual_diagnostics = residual_diagnostics,
         .printed = printed,
-        .printer_refusal = if (printed) null else refusal,
+        // No refusal to report when the formatter was never asked to run.
+        .printer_refusal = if (printed or !options.layout) null else refusal,
         .changed = !std.mem.eql(u8, source, current),
     };
 }
@@ -2459,7 +2495,16 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
         var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-        try writeNormalizeJson(&aw.writer, path, &nr, write_mode and nr.fully_canonical and nr.converged);
+        // `written` is the machine channel's answer to "is the file on disk
+        // canonical now", so it has to agree with every condition the write
+        // path checks - the formatter refusal included. It reported true for a
+        // file the refusal then declined to write.
+        try writeNormalizeJson(
+            &aw.writer,
+            path,
+            &nr,
+            write_mode and nr.fully_canonical and nr.converged and nr.printed,
+        );
         buf = aw.toArrayList();
         if (buf.items.len > 0) _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
     }
@@ -2472,7 +2517,13 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         // diagnostic remains. The measure is the bytes, not the pass count: a
         // file no rewrite fires on can still be laid out differently, and an
         // iteration count cannot see that.
-        if (nr.changed or !nr.fully_canonical) {
+        //
+        // A file the formatter refused is not canonical either, and reporting
+        // it clean made the CI gate green over every file that was never laid
+        // out - it is `--write`'s exit 1 and `--check`'s exit 0 disagreeing
+        // about one file. A refusal leaves the bytes untouched, so `changed`
+        // is false and cannot carry this on its own.
+        if (nr.changed or !nr.fully_canonical or !nr.printed) {
             if (!json_mode) {
                 _ = std.c.write(std.c.STDERR_FILENO, path.ptr, path.len);
                 _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
@@ -3518,6 +3569,64 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(req.method === \"GET\"))") != null);
     // The broken precedence form must never appear.
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "!!req.method") == null);
+}
+
+test "a file the formatter refuses reports it, and its bytes do not move" {
+    // The two verdicts `--check` and `--write` read. A refusal leaves the
+    // bytes where they were, so `changed` is false, and `--check` calling that
+    // canonical was the gate reporting green over files that were never laid
+    // out.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  return <div>hello</div>;
+        \\}
+    ;
+    var nr = try normalizeSource(allocator, source, "handler.tsx");
+    defer nr.deinit(allocator);
+
+    try std.testing.expect(!nr.printed);
+    try std.testing.expectEqual(zts.printer.Refusal.jsx_source, nr.printer_refusal.?);
+    try std.testing.expect(!nr.changed);
+}
+
+test "layout off returns the rewrite fixed point in the author's whitespace" {
+    // The pi veto writes this result back as the model's own edit, so a
+    // salvage that reindented the file would land a whole-file diff for one
+    // rewritten token.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\        let total = 1;
+        \\        total += 2;
+        \\        return Response.json({ total });
+        \\}
+    ;
+    var nr = try normalizeSourceWithOptions(allocator, source, "handler.ts", .{ .layout = false });
+    defer nr.deinit(allocator);
+
+    try std.testing.expect(!nr.printed);
+    try std.testing.expect(nr.printer_refusal == null);
+    // The rewrite fired: `+=` is not canonical.
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "total = total + 2;") != null);
+    // The author's eight-space indent is still there.
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "\n        return Response.json") != null);
+}
+
+test "layout on lays the same source out" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\        let total = 1;
+        \\        total += 2;
+        \\        return Response.json({ total });
+        \\}
+    ;
+    var nr = try normalizeSource(allocator, source, "handler.ts");
+    defer nr.deinit(allocator);
+
+    try std.testing.expect(nr.printed);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "\n  return Response.json") != null);
 }
 
 test "normalizeSource is idempotent on a reused arrow helper" {

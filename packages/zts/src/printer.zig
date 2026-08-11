@@ -186,6 +186,9 @@ const TokenInfo = struct {
     unary: bool = false,
     /// `?` opening a ternary, and the `:` that closes one.
     ternary: bool = false,
+    /// A property name: the token before it is `.` or `?.`. A keyword there is
+    /// a name, and binds to what follows it.
+    property: bool = false,
 };
 
 const Group = struct {
@@ -349,13 +352,7 @@ fn unsupported(t: TokenType) bool {
     };
 }
 
-const Lexed = struct {
-    tokens: []Token,
-    /// Byte offset of the first token, used to place leading trivia.
-    first_offset: u32,
-};
-
-fn lex(arena: std.mem.Allocator, source: []const u8, options: Options) Error!Lexed {
+fn lex(arena: std.mem.Allocator, source: []const u8, options: Options) Error![]Token {
     var tokens: std.ArrayListUnmanaged(Token) = .empty;
     var tz = Tokenizer.init(source);
     while (true) {
@@ -385,11 +382,7 @@ fn lex(arena: std.mem.Allocator, source: []const u8, options: Options) Error!Lex
         }
         try tokens.append(arena, tok);
     }
-    const items = try tokens.toOwnedSlice(arena);
-    return .{
-        .tokens = items,
-        .first_offset = if (items.len > 0) items[0].start else 0,
-    };
+    return tokens.toOwnedSlice(arena);
 }
 
 // ---------------------------------------------------------------------------
@@ -491,9 +484,10 @@ const Builder = struct {
         kids: []const Chunk,
     ) Error!GroupKind {
         _ = self;
+        const property = lastTokenIsProperty(before);
         return switch (open.type) {
-            .lparen => if (callLike(head)) .call_args else if (hasTopLevelComma(kids)) .call_args else .paren,
-            .lbracket => if (callLike(head)) .index else .array,
+            .lparen => if (callLike(head, property)) .call_args else if (hasTopLevelComma(kids)) .call_args else .paren,
+            .lbracket => if (callLike(head, property)) .index else .array,
             else => blk: {
                 if (isMatchBody(before)) break :blk .match_body;
                 if (holdsStatements(kids)) break :blk .block;
@@ -542,17 +536,13 @@ fn lastTokenType(chunks: []const Chunk) ?TokenType {
     return null;
 }
 
-/// A `(` or `[` directly after an operand is a call or an index; after
-/// anything else it opens a list, a group, or a literal.
-fn callLike(head: ?TokenType) bool {
-    const t = head orelse return false;
+/// A keyword the grammar also admits as a property name. After a `.` it is a
+/// name and binds to what follows it; anywhere else it is the keyword and
+/// stands apart. Treating the two the same printed `for (const i of[0, 1, 2])`
+/// and `when[1, 2]:` - every token preserved, so the self-check passed, and
+/// the spelling mangled.
+fn nameOnlyAfterDot(t: TokenType) bool {
     return switch (t) {
-        .identifier,
-        .rparen,
-        .rbracket,
-        .string_literal,
-        .template_literal,
-        .template_tail,
         .kw_get,
         .kw_set,
         .kw_of,
@@ -564,6 +554,45 @@ fn callLike(head: ?TokenType) bool {
         => true,
         else => false,
     };
+}
+
+/// A `(` or `[` directly after an operand is a call or an index; after
+/// anything else it opens a list, a group, or a literal.
+fn callLike(head: ?TokenType, property: bool) bool {
+    const t = head orelse return false;
+    if (nameOnlyAfterDot(t)) return property;
+    return switch (t) {
+        .identifier,
+        .rparen,
+        .rbracket,
+        .string_literal,
+        .template_literal,
+        .template_tail,
+        => true,
+        else => false,
+    };
+}
+
+/// True when the last token of `chunks` is a property name: the token before
+/// it is the `.` or `?.` that made it one.
+fn lastTokenIsProperty(chunks: []const Chunk) bool {
+    var seen = false;
+    var i = chunks.len;
+    while (i > 0) {
+        i -= 1;
+        switch (chunks[i]) {
+            .comment, .blank => continue,
+            .tok => |t| {
+                if (!seen) {
+                    seen = true;
+                    continue;
+                }
+                return t.tok.type == .dot or t.tok.type == .question_dot;
+            },
+            else => return false,
+        }
+    }
+    return false;
 }
 
 fn isMatchBody(before: []const Chunk) bool {
@@ -642,6 +671,7 @@ fn markContext(chunks: []Chunk, options: Options) Error!void {
             .verbatim => prev = .identifier,
             .comment, .blank => {},
             .tok => |*info| {
+                info.property = prev == .dot or prev == .question_dot;
                 switch (info.tok.type) {
                     .plus, .minus, .bang, .tilde => {
                         info.unary = !endsOperand(prev);
@@ -795,6 +825,9 @@ const Left = struct {
     /// The left side is a type annotation or type declaration printed
     /// verbatim, whose last byte is not necessarily an identifier byte.
     verbatim: bool = false,
+    /// The left side is a property name: a `.` or `?.` put it there, so a
+    /// keyword in that position is a name and binds like one.
+    property: bool = false,
 };
 
 fn spaceBetween(left: Left, right: TokenInfo, right_is_opener: bool) bool {
@@ -817,8 +850,8 @@ fn spaceBetween(left: Left, right: TokenInfo, right_is_opener: bool) bool {
 
     if (right_is_opener) {
         return switch (r) {
-            .lparen => !callLike(l) and !left.verbatim,
-            .lbracket => !callLike(l) and !left.verbatim,
+            .lparen => !callLike(l, left.property) and !left.verbatim,
+            .lbracket => !callLike(l, left.property) and !left.verbatim,
             // A brace always stands away from what precedes it, except after
             // an opener or `(`.
             else => l != .lparen and l != .lbracket and l != .lbrace,
@@ -886,7 +919,12 @@ const Printer = struct {
         const text = try normalizedTokenText(self.arena, info);
         try self.writeRaw(text);
         self.at_line_start = false;
-        self.left = .{ .kind = info.tok.type, .unary = info.unary, .ternary = info.ternary };
+        self.left = .{
+            .kind = info.tok.type,
+            .unary = info.unary,
+            .ternary = info.ternary,
+            .property = info.property,
+        };
     }
 
     fn emitVerbatim(self: *Printer, text: []const u8) Error!void {
@@ -1203,6 +1241,7 @@ const Renderer = struct {
 
         var start: usize = 0;
         var i: usize = 0;
+        var wrote_any = false;
         while (i <= g.children.len) : (i += 1) {
             const at_end = i == g.children.len;
             const starts_arm = !at_end and g.children[i] == .tok and switch (g.children[i].tok.tok.type) {
@@ -1212,14 +1251,30 @@ const Renderer = struct {
             if (!at_end and !starts_arm) continue;
             if (i == start) continue;
 
-            const arm = g.children[start..i];
-            start = i;
+            // An own-line comment written above the next arm sits at the tail
+            // of this slice, because `when` is what ends an arm. It documents
+            // what follows it, so the boundary moves back over it and the next
+            // arm carries it as leading trivia. Left here it was dropped, and
+            // the self-check turned the loss into a whole-file refusal that
+            // named a re-lex mismatch instead of the comment.
+            var arm_end = i;
+            while (arm_end > start) : (arm_end -= 1) {
+                switch (g.children[arm_end - 1]) {
+                    .blank => {},
+                    .comment => |cm| if (!cm.own_line) break,
+                    else => break,
+                }
+            }
+
+            const arm = g.children[start..arm_end];
+            start = arm_end;
             if (onlyTrivia(arm)) {
                 try self.emitLooseTrivia(arm, indent + 1);
                 continue;
             }
-            try self.emitLeadingTrivia(arm, indent + 1);
+            try self.emitLeadingTrivia(arm, indent + 1, !wrote_any);
             try self.renderArm(stripTrivia(arm), indent + 1);
+            wrote_any = true;
             try self.emitTrailingComment(arm);
             try self.p.newline();
         }
@@ -1259,29 +1314,28 @@ const Renderer = struct {
         }
         try self.p.newline();
 
-        var start: usize = 0;
-        var i: usize = 0;
-        while (i <= g.children.len) : (i += 1) {
-            const at_end = i == g.children.len;
-            const is_comma = !at_end and g.children[i] == .tok and
-                g.children[i].tok.tok.type == .comma;
-            if (!at_end and !is_comma) continue;
-
-            const element = g.children[start..i];
-            start = i + 1;
+        const elements = try splitOnCommas(self.p.arena, g.children);
+        var wrote_any = false;
+        for (elements, 0..) |element, ei| {
             if (onlyTrivia(element)) {
+                // A comment that shared a line with the element before it was
+                // already emitted there; what is left is own-line.
                 try self.emitLooseTrivia(element, indent + 1);
                 continue;
             }
-            try self.emitLeadingTrivia(element, indent + 1);
+            try self.emitLeadingTrivia(element, indent + 1, !wrote_any);
             try self.p.writeIndent(indent + 1);
             try self.renderRun(stripTrivia(element), indent + 1);
-            const last = at_end or i + 1 >= g.children.len;
+            wrote_any = true;
+            const last = ei + 1 == elements.len or onlyTrailingTrivia(elements[ei + 1 ..]);
             if (!last or g.kind.takesTrailingComma()) {
                 try self.p.writeRaw(",");
                 self.p.left = .{ .kind = .comma };
             }
             try self.emitTrailingComment(element);
+            // The comma separates this element from the next, so a comment
+            // the author put after the comma is still on this line.
+            if (ei + 1 < elements.len) try self.emitInlineComment(elements[ei + 1]);
             try self.p.newline();
         }
         try self.p.writeIndent(indent);
@@ -1289,7 +1343,11 @@ const Renderer = struct {
         self.p.left = .{ .kind = closerType(g.kind) };
     }
 
-    fn emitLeadingTrivia(self: *Renderer, element: []const Chunk, indent: u32) Error!void {
+    /// The comments and blank lines an element carries before its first token.
+    /// `first` suppresses a blank line at the top of the group, where it would
+    /// separate an element from the bracket rather than from another element.
+    fn emitLeadingTrivia(self: *Renderer, element: []const Chunk, indent: u32, first: bool) Error!void {
+        var at_start = first;
         for (element) |c| {
             switch (c) {
                 .comment => |cm| {
@@ -1297,22 +1355,50 @@ const Renderer = struct {
                     try self.p.writeIndent(indent);
                     try self.p.writeRaw(cm.text);
                     try self.p.newline();
+                    at_start = false;
                 },
-                .blank => {},
+                // A blank line between two fields is how a large record is
+                // grouped, and dropping it here erased that grouping under a
+                // command whose commit message says blank-line runs are
+                // retained.
+                .blank => if (!at_start) try self.p.newline(),
                 else => return,
             }
         }
     }
 
+    /// An element made only of trivia: what sits between the last comma and
+    /// the closing bracket, or between two commas. A comment that shared its
+    /// line with the element before it was emitted there by
+    /// `emitInlineComment`, so only own-line comments are left.
     fn emitLooseTrivia(self: *Renderer, element: []const Chunk, indent: u32) Error!void {
         for (element) |c| {
             switch (c) {
                 .comment => |cm| {
+                    if (!cm.own_line) continue;
                     try self.p.writeIndent(indent);
                     try self.p.writeRaw(cm.text);
                     try self.p.newline();
                 },
                 else => {},
+            }
+        }
+    }
+
+    /// The comment the author wrote after the separating comma, which shares
+    /// its line with the element that comma follows.
+    fn emitInlineComment(self: *Renderer, next: []const Chunk) Error!void {
+        for (next) |c| {
+            switch (c) {
+                .comment => |cm| {
+                    if (!cm.own_line) {
+                        try self.p.writeRaw(" ");
+                        try self.p.writeRaw(cm.text);
+                    }
+                    return;
+                },
+                .blank => return,
+                else => return,
             }
         }
     }
@@ -1513,6 +1599,30 @@ fn hasMustBreak(chunks: []const Chunk) bool {
     return false;
 }
 
+/// Split a group's children at its own commas. The commas themselves are
+/// dropped: the layout decides where a separator goes, and the trailing-comma
+/// rule is what decides whether the last one is written at all.
+fn splitOnCommas(arena: std.mem.Allocator, children: []const Chunk) Error![][]const Chunk {
+    var out: std.ArrayListUnmanaged([]const Chunk) = .empty;
+    var start: usize = 0;
+    for (children, 0..) |c, i| {
+        if (c != .tok or c.tok.tok.type != .comma) continue;
+        try out.append(arena, children[start..i]);
+        start = i + 1;
+    }
+    try out.append(arena, children[start..]);
+    return out.toOwnedSlice(arena);
+}
+
+/// True when nothing but trivia follows: the elements left carry no token, so
+/// the element before them is the last one and owns the trailing comma.
+fn onlyTrailingTrivia(rest: []const []const Chunk) bool {
+    for (rest) |element| {
+        if (!onlyTrivia(element)) return false;
+    }
+    return true;
+}
+
 fn onlyTrivia(chunks: []const Chunk) bool {
     for (chunks) |c| {
         switch (c) {
@@ -1546,8 +1656,12 @@ fn printInto(
         return refuse(options, .carriage_return);
     }
 
-    const lexed = try lex(arena, source, options);
-    if (lexed.tokens.len == 0) return "";
+    const tokens = try lex(arena, source, options);
+    // A file with no tokens is not an empty file. It is a file of comments,
+    // and returning "" here - above the self-check, which would have compared
+    // the comment lists and refused - printed a license header as zero bytes
+    // and let `--write` truncate it with exit 0.
+    if (source.len == 0) return "";
 
     const regions = try collectRegions(arena, source, options);
     const trivia_items = trivia.collect(arena, source) catch return error.OutOfMemory;
@@ -1556,7 +1670,7 @@ fn printInto(
         .arena = arena,
         .source = source,
         .options = options,
-        .tokens = lexed.tokens,
+        .tokens = tokens,
         .regions = regions,
         .trivia_items = trivia_items,
     };
@@ -1712,6 +1826,69 @@ test "a newline after return is refused rather than closed up" {
     // ASI terminates the statement at the newline, so joining the two lines
     // would keep every token and return a different value.
     try expectRefusal("function f() {\n  return\n  1;\n}\n", .missing_semicolon);
+}
+
+test "a file of nothing but comments keeps them" {
+    // The empty-token early return sat above the self-check, so the comment
+    // comparison that would have caught this never ran and `--write`
+    // truncated a license header to zero bytes with exit 0.
+    try expectPrints("// just a note\n// and another\n", "// just a note\n// and another\n");
+}
+
+test "an empty file prints as an empty file" {
+    try expectPrints("", "");
+}
+
+test "a keyword is not glued to the bracket after it" {
+    // `of` and `when` are also property names, and treating them as one
+    // everywhere printed `for (const i of[0, 1, 2])`: every token preserved,
+    // so the self-check passed and the spelling was mangled.
+    try expectPrints(
+        "for (const i of [0, 1, 2]) {\n  f(i);\n}\n",
+        "for (const i of [0, 1, 2]) {\n  f(i);\n}\n",
+    );
+}
+
+test "a keyword used as a property name still binds to its call" {
+    try expectPrints("const x = a.of(1);\n", "const x = a.of(1);\n");
+}
+
+test "a blank line between record fields is kept" {
+    const source =
+        \\const r = {
+        \\  alphaAlphaAlpha: 111111111,
+        \\
+        \\  betaBetaBeta: 222222222,
+        \\  gammaGammaGamma: 333333333,
+        \\};
+        \\
+    ;
+    try expectPrints(source, source);
+}
+
+test "a comment above a match arm stays above it" {
+    const source =
+        \\const r = match (v) {
+        \\  when string: "s"
+        \\  // the numeric arm
+        \\  when number: "n"
+        \\  default: "o"
+        \\};
+        \\
+    ;
+    try expectPrints(source, source);
+}
+
+test "a trailing comment after the last element stays on its line" {
+    const source =
+        \\const items = [
+        \\  alphaAlphaAlphaAlpha,
+        \\  betaBetaBetaBetaBeta,
+        \\  gammaGammaGammaGamma, // the third one
+        \\];
+        \\
+    ;
+    try expectPrints(source, source);
 }
 
 test "a JSX source is refused" {
