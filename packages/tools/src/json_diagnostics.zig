@@ -31,6 +31,11 @@ pub const JsonDiagnostic = struct {
     file: []const u8,
     line: u32,
     column: u32,
+    /// Half-open byte span of the token the diagnostic points at, in the bytes
+    /// the source digest covers. Zero and zero when the producer had no offset
+    /// to report; `start == end` is a point, not a range.
+    start_offset: u32 = 0,
+    end_offset: u32 = 0,
     suggestion: ?[]const u8,
     /// True when `message` is a heap copy owned by this diagnostic (duped at
     /// capture time so it outlives the checker allocator that produced it).
@@ -135,6 +140,8 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
             .file = file,
             .line = err.location.line,
             .column = err.location.column,
+            .start_offset = err.location.span().start,
+            .end_offset = err.location.span().end,
             .suggestion = parts.suggestion,
         };
     }
@@ -146,6 +153,8 @@ pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
         .file = file,
         .line = err.location.line,
         .column = err.location.column,
+        .start_offset = err.location.span().start,
+        .end_offset = err.location.span().end,
         .suggestion = err.expected,
     };
 }
@@ -206,6 +215,8 @@ pub fn fromCheckerDiagnostic(
         .file = file,
         .line = projected.line,
         .column = projected.column,
+        .start_offset = projected.start_offset,
+        .end_offset = projected.end_offset,
         .suggestion = projected.suggestion,
         .message_owned = owned_msg != null,
     };

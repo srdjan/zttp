@@ -11,6 +11,7 @@ const flow_checker = @import("flow_checker.zig");
 const handler_verifier = @import("handler_verifier.zig");
 const strict_checker = @import("strict_checker.zig");
 const type_checker = @import("type_checker.zig");
+const SourceLocation = @import("zts-engine").parser.SourceLocation;
 
 pub const Source = enum {
     boolean,
@@ -40,6 +41,12 @@ pub const Diagnostic = struct {
     message: []const u8,
     line: u32,
     column: u32,
+    /// Half-open byte span of the token this diagnostic points at, in the
+    /// bytes the source digest covers. `start == end` means the producer's
+    /// location carried no extent (a synthetic or fallback position), and is
+    /// reported as a point rather than padded to a width nothing measured.
+    start_offset: u32,
+    end_offset: u32,
     suggestion: ?[]const u8,
 };
 
@@ -70,12 +77,15 @@ pub fn code(comptime source: Source, kind: anytype) []const u8 {
 
 pub fn project(comptime source: Source, diagnostic: anytype, ir_view: anytype) ?Diagnostic {
     const location = ir_view.getLoc(diagnostic.node) orelse return null;
+    const bytes = location.span();
     return .{
         .code = code(source, diagnostic.kind),
         .severity = projectSeverity(source, diagnostic.severity),
         .message = diagnostic.message,
         .line = location.line,
         .column = location.column,
+        .start_offset = bytes.start,
+        .end_offset = bytes.end,
         .suggestion = diagnostic.help,
     };
 }
@@ -266,11 +276,10 @@ test "checker diagnostic codes are globally unique" {
 }
 
 test "project returns a borrowed diagnostic with source location" {
-    const Location = struct { line: u32, column: u32 };
     const FakeIrView = struct {
-        fn getLoc(_: @This(), node: u32) ?Location {
+        fn getLoc(_: @This(), node: u32) ?SourceLocation {
             if (node != 7) return null;
-            return .{ .line = 11, .column = 13 };
+            return .{ .line = 11, .column = 13, .offset = 40, .end_offset = 43 };
         }
     };
     const diagnostic: bool_checker.Diagnostic = .{
@@ -287,6 +296,8 @@ test "project returns a borrowed diagnostic with source location" {
     try std.testing.expectEqualStrings("comparison is constant", projected.message);
     try std.testing.expectEqual(@as(u32, 11), projected.line);
     try std.testing.expectEqual(@as(u32, 13), projected.column);
+    try std.testing.expectEqual(@as(u32, 40), projected.start_offset);
+    try std.testing.expectEqual(@as(u32, 43), projected.end_offset);
     try std.testing.expectEqualStrings("remove the comparison", projected.suggestion.?);
 
     var missing = diagnostic;

@@ -128,7 +128,6 @@ pub const deferred_sections = [_]DeferredSection{
     .{ .name = "ambient_names", .note = "phase 4: the section 6 ambient table lands with Dict, JSON, and Bytes" },
     .{ .name = "type_serialization", .note = "phase 2: the canonical type serialization is D1's artifact" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
-    .{ .name = "diagnostic_span", .note = "phase 6: JsonDiagnostic carries line and column and no byte range, so a diagnostic publishes an exact byte_offset and no half-open span. Threading offsets through every producer lands with the repair vocabulary" },
     .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
     .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
     .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
@@ -1689,9 +1688,13 @@ fn writeCheckPayload(
 
 /// One source-bound diagnostic.
 ///
-/// One deliberate absence, published in `meta.deferred_sections`: no `span`,
-/// because no producer computes a half-open byte range and inventing an end
-/// would be a lie of precision.
+/// `span` is the half-open byte range of the token the diagnostic points at,
+/// carried from the producer's own location. It is the token's extent and not
+/// the enclosing construct's - a diagnostic about a `let` binding spans `let`
+/// and not the statement - because that is what the parser knows without a
+/// second pass, and a wider span nothing computes would be a lie of precision.
+/// `start == end` means the producer's position carried no extent at all,
+/// which a synthetic or fallback location does.
 ///
 /// `repair_available` answers from `meta.validators` rather than a constant.
 /// Spec 4.8 permits advertising an exact repair only when a registered
@@ -1746,7 +1749,19 @@ fn writeDiagnostic(
     try json.objectField("column");
     try json.write(diag.column);
     try json.objectField("byte_offset");
+    // Derived from the reported line and column, independently of the span
+    // below, which the producer carries from the token's own extent. Two
+    // derivations of one number, and a test pins them equal: a disagreement
+    // means a producer's position and the source it was computed against have
+    // drifted apart, which is the failure this field would otherwise hide.
     try json.write(byteOffsetOf(source, diag.line, diag.column));
+    try json.objectField("span");
+    try json.beginObject();
+    try json.objectField("start");
+    try json.write(diag.start_offset);
+    try json.objectField("end");
+    try json.write(diag.end_offset);
+    try json.endObject();
     try json.objectField("suggestion");
     if (diag.suggestion) |sug| try json.write(sug) else try json.write(null);
     try json.objectField("repair_available");
@@ -2800,18 +2815,20 @@ test "check on a clean handler succeeds with no diagnostics" {
     try testing.expectEqual(@as(i64, 0), payload.get("counts").?.object.get("errors").?.integer);
 }
 
+const ternary_chain_handler =
+    \\export function handler(req: Request): Response {
+    \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
+    \\  return Response.json({ n });
+    \\}
+    \\
+;
+
 test "check on a rejected handler binds every diagnostic to the digest" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     // A chained ternary: ZTS621, an error-severity canonical-profile rule.
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
-        \\export function handler(req: Request): Response {
-        \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
-        \\  return Response.json({ n });
-        \\}
-        \\
-    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = ternary_chain_handler });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
@@ -2840,12 +2857,26 @@ test "check on a rejected handler binds every diagnostic to the digest" {
         try testing.expectEqualStrings(digest, d.get("source_digest").?.string);
         try testing.expectEqualStrings("h.ts", d.get("file").?.string);
         try testing.expect(!d.get("repair_available").?.bool);
-        try testing.expect(d.get("span") == null);
+        // The span is a half-open byte range into the bytes the digest covers,
+        // and its start is the same number `byte_offset` reaches from the line
+        // and column. The two are computed independently - the producer carries
+        // the span off the token, the writer walks the source for the offset -
+        // so equality here is a cross-check and not a restatement.
+        const span = d.get("span").?.object;
+        const start: usize = @intCast(span.get("start").?.integer);
+        const end: usize = @intCast(span.get("end").?.integer);
+        try testing.expectEqual(@as(i64, @intCast(start)), d.get("byte_offset").?.integer);
+        try testing.expect(end >= start);
+        try testing.expect(end <= ternary_chain_handler.len);
         if (std.mem.eql(u8, d.get("code").?.string, "ZTS621")) {
             found_chain = true;
             try testing.expectEqualStrings("canonical_ternary_chain", d.get("rule_id").?.string);
             try testing.expectEqualStrings("error", d.get("severity").?.string);
             try testing.expect(d.get("byte_offset").?.integer > 0);
+            // A range, not a point: the diagnostic names the token it points
+            // at. An empty span here would mean the producer had no extent,
+            // which is the state this task closed.
+            try testing.expect(end > start);
         }
     }
     try testing.expect(found_chain);
@@ -3398,6 +3429,68 @@ test "meta publishes the verifier registry it will answer about" {
     // The section retires in the same change that makes it answerable.
     for (parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section| {
         try testing.expect(!std.mem.eql(u8, section.object.get("name").?.string, "verifiers"));
+    }
+}
+
+test "every diagnostic publishes a span, and it is not vacuous" {
+    // The floor under the span field. A producer that filled `end` with `start`
+    // everywhere would satisfy "every diagnostic has a span" while publishing
+    // no range at all, so the assertion is on the range being real - and on the
+    // bytes it names being the ones the message is about.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
+        \\export function handler(req: Request): Response {
+        \\  let name = "world";
+        \\  return Response.json({ name: name });
+        \\}
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const diags = parsed.value.object.get("diagnostics").?.array;
+    try testing.expect(diags.items.len >= 1);
+
+    var saw_let = false;
+    for (diags.items) |item| {
+        const d = item.object;
+        const span = d.get("span").?.object;
+        const start: usize = @intCast(span.get("start").?.integer);
+        const end: usize = @intCast(span.get("end").?.integer);
+        try testing.expect(end > start);
+        if (std.mem.eql(u8, d.get("code").?.string, "ZTS604")) {
+            saw_let = true;
+            const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+            defer a.free(on_disk);
+            // The avoidable-let rule points at the `let` keyword, so that is
+            // exactly what its span must cover.
+            try testing.expectEqualStrings("let", on_disk[start..end]);
+        }
+    }
+    try testing.expect(saw_let);
+
+    // The section retires in the same change that makes it answerable.
+    const meta_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"meta","project_root":"{s}","input":{{}}}}
+    , .{root});
+    defer a.free(meta_req);
+    const meta_out = try respond(a, meta_req);
+    defer a.free(meta_out);
+    var meta_parsed = try parse(a, meta_out);
+    defer meta_parsed.deinit();
+    for (meta_parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section| {
+        try testing.expect(!std.mem.eql(u8, section.object.get("name").?.string, "diagnostic_span"));
     }
 }
 

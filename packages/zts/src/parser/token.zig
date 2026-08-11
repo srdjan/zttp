@@ -173,6 +173,26 @@ pub const SourceLocation = struct {
     line: u32,
     column: u32,
     offset: u32,
+    /// Exclusive end of the token this location names, so a location is a
+    /// half-open byte span and not only a point (spec 4.8's diagnostic shape).
+    ///
+    /// It is the token's own extent, not the enclosing construct's: a node
+    /// takes the location of the token that opened it, so a diagnostic about a
+    /// `let` binding spans `let` and not the statement. That is what the parser
+    /// knows without a second pass, and naming it exactly is better than a
+    /// wider span nothing computes.
+    ///
+    /// A value at or below `offset` means the extent is unknown, which is what
+    /// a synthetic or fallback location carries. `span()` reports those as
+    /// empty at the point rather than inventing a width.
+    end_offset: u32 = 0,
+
+    pub fn span(self: SourceLocation) struct { start: u32, end: u32 } {
+        return .{
+            .start = self.offset,
+            .end = if (self.end_offset > self.offset) self.end_offset else self.offset,
+        };
+    }
 
     pub fn format(self: SourceLocation, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         try writer.print("{}:{}", .{ self.line, self.column });
@@ -205,6 +225,7 @@ pub const Token = struct {
             .line = self.line,
             .column = self.column,
             .offset = self.start,
+            .end_offset = self.start + self.len,
         };
     }
 
