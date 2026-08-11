@@ -86,6 +86,7 @@ pub const operations = [_]OperationSpec{
         "severities",            "idioms",            "limits",
         "module_catalog",        "deferred_sections", "validators",
         "verifiers",             "ambient_names",     "type_serialization",
+        "grammar",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -123,7 +124,6 @@ pub const operations = [_]OperationSpec{
 pub const DeferredSection = struct { name: []const u8, note: []const u8 };
 
 pub const deferred_sections = [_]DeferredSection{
-    .{ .name = "grammar", .note = "phase 6: section 8 lives in spec prose, with no machine-readable production table to generate from" },
     .{ .name = "examples", .note = "phase 6: no per-form example registry exists" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
@@ -668,6 +668,36 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
             try json.endObject();
         }
         try json.endArray();
+        try json.endObject();
+    }
+    try json.endArray();
+
+    // Spec section 8's grammar, production for production, in document order.
+    // `scripts/check-grammar-drift.sh` compares the registry behind this to the
+    // document itself, so what a client reads here is the section.
+    //
+    // Every row carries its enforcement point. The section is a structural
+    // over-approximation by its own preamble - several productions admit forms
+    // the prose excludes - and a grammar published without that distinction
+    // would teach an agent to write programs this compiler refuses.
+    try json.objectField("grammar");
+    try json.beginArray();
+    for (zts.GrammarCatalog.productions()) |p| {
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write(p.name);
+        try json.objectField("rhs");
+        try json.write(p.rhs);
+        try json.objectField("enforcement");
+        try json.write(p.enforcement.id());
+        // The rule that refuses what the production over-admits, where that
+        // rule is a member of the policy-hashed registry.
+        try json.objectField("rule_code");
+        if (p.rule_code) |code| try json.write(code) else try json.write(null);
+        // Set instead of `rule_code` when the refusal comes from a band the
+        // registry does not cover, so the row still says who answers.
+        try json.objectField("note");
+        if (p.note) |note| try json.write(note) else try json.write(null);
         try json.endObject();
     }
     try json.endArray();
@@ -3998,6 +4028,73 @@ test "meta publishes the built-in module catalog from the bindings" {
         try testing.expect(std.mem.startsWith(u8, module.get("specifier").?.string, "zttp:"));
         try testing.expect(module.get("exports").?.array.items.len >= 1);
         try testing.expect(module.get("required_capabilities").? == .array);
+    }
+}
+
+test "meta publishes section 8's grammar production for production, in order" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const rows = parsed.value.object.get("payload").?.object.get("grammar").?.array;
+    const table = zts.GrammarCatalog.productions();
+    try testing.expectEqual(table.len, rows.items.len);
+
+    // Order is part of the published artifact: the document reads top down, and
+    // the drift gate compares the two in that order.
+    for (rows.items, table) |item, p| {
+        const row = item.object;
+        try testing.expectEqualStrings(p.name, row.get("name").?.string);
+        try testing.expectEqualStrings(p.rhs, row.get("rhs").?.string);
+        try testing.expectEqualStrings(p.enforcement.id(), row.get("enforcement").?.string);
+    }
+    try testing.expectEqualStrings("Module", rows.items[0].object.get("name").?.string);
+}
+
+test "a production that over-admits says which rule refuses the excess" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const rows = parsed.value.object.get("payload").?.object.get("grammar").?.array;
+
+    var check_rows: usize = 0;
+    for (rows.items) |item| {
+        const row = item.object;
+        const has_code = row.get("rule_code").? != .null;
+        const has_note = row.get("note").? != .null;
+        if (std.mem.eql(u8, row.get("enforcement").?.string, "parse_time")) {
+            try testing.expect(!has_code and !has_note);
+            continue;
+        }
+        check_rows += 1;
+        // Exactly one of the two, on the wire as well as in the table: a row
+        // that says "something else refuses this" and names nothing is not
+        // actionable by the client reading it.
+        try testing.expect(has_code != has_note);
+        if (has_code) {
+            const code = row.get("rule_code").?.string;
+            try testing.expect(zts.PolicyCatalog.findByCode(code) != null);
+        }
+    }
+    // The floor. A payload of nothing but parse_time rows would satisfy the
+    // loop while publishing the over-approximation as if it were exact.
+    try testing.expect(check_rows >= 10);
+}
+
+test "the grammar section stops being deferred" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    for (parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section| {
+        try testing.expect(!std.mem.eql(u8, section.object.get("name").?.string, "grammar"));
     }
 }
 

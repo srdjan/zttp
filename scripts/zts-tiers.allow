@@ -168,6 +168,7 @@ zts-compiler fanout_extractor.zig
 zts-compiler fault_coverage.zig
 zts-compiler flow_checker.zig
 zts-compiler function_specs.zig
+zts-compiler grammar_registry.zig
 zts-compiler handler_verifier.zig
 zts-compiler idiom_registry.zig
 zts-compiler intent_extractor.zig

@@ -179,6 +179,17 @@ budget is a client's loop policy: nothing in this compiler runs that loop, so a
 number published here would be enforced by nobody. Every other entry names the
 phase that builds it.
 
+`grammar` publishes spec section 8 production for production, in document
+order, and `scripts/check-grammar-drift.sh` compares the registry behind it to
+the document itself with a floor under both extractions. Section 8 is a
+structural over-approximation by its own preamble, so every row also carries
+where its enforcement happens: `parse_time` when the parser admits exactly the
+production, `check_time` when the parser admits more and a later pass refuses
+the excess. A `check_time` row names the rule that refuses - a registry code
+where one exists, and otherwise a note naming the band that answers, which today
+is `TypeDecl` and ZTS212. Each enforcement point was measured by running
+`zts check` on a program that exercises the wider form, not reasoned about.
+
 `ambient_names` and `type_serialization` were stale deferrals whose mechanisms
 had landed in earlier phases, and both now ship. `ambient_names` publishes the
 type and value names a handler writes without importing them; every type row is

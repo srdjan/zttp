@@ -467,6 +467,10 @@ pub fn build(b: *std.Build) void {
     const idiom_table_step = b.step("test-idiom-table", "Check spec 4.2.1's idiom table against the registry");
     idiom_table_step.dependOn(&idiom_table.step);
 
+    const grammar_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-grammar-drift.sh" });
+    const grammar_drift_step = b.step("test-grammar-drift", "Check spec section 8's grammar against the registry");
+    grammar_drift_step.dependOn(&grammar_drift.step);
+
     const doc_links = b.addSystemCommand(&.{ "/bin/bash", "scripts/audit-docs.sh" });
     const doc_links_step = b.step("test-doc-links", "Check docs for broken relative links");
     doc_links_step.dependOn(&doc_links.step);

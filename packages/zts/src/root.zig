@@ -428,6 +428,32 @@ pub const AmbientCatalog = struct {
     }
 };
 
+/// Borrowed, read-only access to spec section 8's grammar. Each production
+/// carries where its enforcement happens, because the section is a structural
+/// over-approximation by its own preamble and a client reading only the
+/// productions would write programs this compiler refuses.
+pub const GrammarCatalog = struct {
+    pub const Production = compiler.grammar_registry.Production;
+    pub const Enforcement = compiler.grammar_registry.Enforcement;
+
+    pub fn productions() []const Production {
+        return &compiler.grammar_registry.productions;
+    }
+
+    pub fn findByName(name: []const u8) ?*const Production {
+        return compiler.grammar_registry.findByName(name);
+    }
+};
+
+test "stable GrammarCatalog exposes the productions and their enforcement points" {
+    const rows = GrammarCatalog.productions();
+    try std.testing.expectEqual(compiler.grammar_registry.productions.len, rows.len);
+    const match_expr = GrammarCatalog.findByName("MatchExpr") orelse
+        return error.TestExpectedProduction;
+    try std.testing.expectEqual(GrammarCatalog.Enforcement.check_time, match_expr.enforcement);
+    try std.testing.expect(GrammarCatalog.findByName("NotAProduction") == null);
+}
+
 /// The canonical type serialization's published identity: what a client needs
 /// to know before it caches a type digest and compares it to a later one. The
 /// digest itself is `typeDigest` above.
