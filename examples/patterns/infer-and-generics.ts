@@ -22,18 +22,18 @@ type Guardrails = Spec<
 
 // Generic helper: annotate the boundary once, reuse for any element type.
 function first<T>(xs: T[]): T | undefined {
-    for (const x of xs) {
-        return x;
-    }
-    return undefined;
+  for (const x of xs) {
+    return x;
+  }
+  return undefined;
 }
 
 function handler(req: Request): Response & Guardrails {
-    const names: string[] = ["alice", "bob", "carol"];
-    // Locals infer from their initializers; the helper is reused via `first<string>`.
-    const head: string | undefined = first<string>(names);
-    if (head === undefined) {
-        return Response.json({ count: 0 }, { status: 404 });
-    }
-    return Response.json({ first: head, count: names.length });
+  const names: string[] = ["alice", "bob", "carol"];
+  // Locals infer from their initializers; the helper is reused via `first<string>`.
+  const head: string | undefined = first<string>(names);
+  if (head === undefined) {
+    return Response.json({ count: 0 }, { status: 404 });
+  }
+  return Response.json({ first: head, count: names.length });
 }

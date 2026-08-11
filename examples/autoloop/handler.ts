@@ -25,6 +25,6 @@
 import { env } from "zttp:env";
 
 function handler(req: Request): Response {
-    const secret = env("SECRET_KEY");
-    return Response.json({ secret: secret });
+  const secret = env("SECRET_KEY");
+  return Response.json({ secret: secret });
 }

@@ -23,12 +23,13 @@ type Guardrails = Spec<"deterministic" | "no_secret_leakage" | "no_credential_le
 function createOrder(req: Request): Response {
   const reserved = call("inventory", { method: "GET", path: "/reserve" });
   const shipped = call("inventory", { method: "GET", path: "/ship" });
-  return Response.json({ reservedStatus: reserved.status, shippedStatus: shipped.status });
+  return Response.json({
+    reservedStatus: reserved.status,
+    shippedStatus: shipped.status,
+  });
 }
 
-const routes = {
-  "POST /orders": createOrder,
-};
+const routes = { "POST /orders": createOrder };
 
 function handler(req: Request): Response & Guardrails {
   const found = routerMatch(routes, req);

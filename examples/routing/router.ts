@@ -6,34 +6,34 @@ import { sha256 } from "zttp:crypto";
 import { env } from "zttp:env";
 
 function getHome(req: Request): Response {
-    return Response.json({ name: env("APP_NAME"), status: "ok" });
+  return Response.json({ name: env("APP_NAME"), status: "ok" });
 }
 
 function getHealth(req: Request): Response {
-    return Response.json({ healthy: true });
+  return Response.json({ healthy: true });
 }
 
 function getUser(req: Request): Response {
-    return Response.json({ id: req.params.id, hash: sha256(req.params.id) });
+  return Response.json({ id: req.params.id, hash: sha256(req.params.id) });
 }
 
 function postEcho(req: Request): Response {
-    const body = req.body ?? "";
-    return Response.json({ received: body, hash: sha256(body) });
+  const body = req.body ?? "";
+  return Response.json({ received: body, hash: sha256(body) });
 }
 
 const routes = {
-    "GET /": getHome,
-    "GET /health": getHealth,
-    "GET /users/:id": getUser,
-    "POST /echo": postEcho,
+  "GET /": getHome,
+  "GET /health": getHealth,
+  "GET /users/:id": getUser,
+  "POST /echo": postEcho,
 };
 
 function handler(req: Request): Response {
-    const found = routerMatch(routes, req);
-    if (found !== undefined) {
-        req.params = found.params;
-        return found.handler(req);
-    }
-    return Response.json({ error: "Not Found" }, { status: 404 });
+  const found = routerMatch(routes, req);
+  if (found !== undefined) {
+    req.params = found.params;
+    return found.handler(req);
+  }
+  return Response.json({ error: "Not Found" }, { status: 404 });
 }

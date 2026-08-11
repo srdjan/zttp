@@ -13,14 +13,24 @@ import { run, signal, signalAt, waitSignal } from "zttp:durable";
 function handler(req: Request): Response {
   const key = req.headers.get("idempotency-key") ?? "approval-demo";
   if (req.path === "/signal") {
-    return Response.json({ delivered: signal(key, "approved", { approved: true }) });
+    return Response.json({
+      delivered: signal(key, "approved", { approved: true }),
+    });
   }
   if (req.path === "/schedule") {
     const atMs = Date.now() - 1000; // already due, so recovery resumes it promptly
-    return Response.json({ scheduled: signalAt(key, "approved", atMs, { approved: true, scheduled: true }) });
+    return Response.json({
+      scheduled: signalAt(key, "approved", atMs, {
+        approved: true,
+        scheduled: true,
+      }),
+    });
   }
-  return run(key, () => {
-    const approval = waitSignal("approved");
-    return Response.json({ resumed: true, approval });
-  });
+  return run(
+    key,
+    () => {
+      const approval = waitSignal("approved");
+      return Response.json({ resumed: true, approval });
+    },
+  );
 }

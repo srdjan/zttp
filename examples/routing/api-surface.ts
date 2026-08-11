@@ -2,46 +2,46 @@ import { routerMatch } from "zttp:router";
 import { schemaCompile } from "zttp:validate";
 import { decodeJson, decodeQuery } from "zttp:decode";
 
-schemaCompile("profile.update", JSON.stringify({
+schemaCompile(
+  "profile.update",
+  JSON.stringify({
     type: "object",
-    properties: {
-        displayName: { type: "string" },
-    },
+    properties: { displayName: { type: "string" } },
     required: ["displayName"],
-}));
+  }),
+);
 
-schemaCompile("profile.query", JSON.stringify({
+schemaCompile(
+  "profile.query",
+  JSON.stringify({
     type: "object",
-    properties: {
-        verbose: { type: "boolean" },
-    },
-}));
+    properties: { verbose: { type: "boolean" } },
+  }),
+);
 
 function updateProfile(req: Request): Response {
-    const parsed = decodeJson("profile.update", req.body ?? "{}");
-    const body = parsed.ok ? parsed.value : { displayName: "anonymous" };
-    const query = decodeQuery("profile.query", req.query ?? {});
-    const verbose = query.ok ? (query.value.verbose ?? false) : false;
-    const clientId = req.headers.get("x-client-id") ?? "anonymous";
+  const parsed = decodeJson("profile.update", req.body ?? "{}");
+  const body = parsed.ok ? parsed.value : { displayName: "anonymous" };
+  const query = decodeQuery("profile.query", req.query ?? {});
+  const verbose = query.ok ? (query.value.verbose ?? false) : false;
+  const clientId = req.headers.get("x-client-id") ?? "anonymous";
 
-    return Response.json({
-        id: req.params.id,
-        clientId: clientId,
-        verbose: verbose,
-        displayName: body.displayName,
-    });
+  return Response.json({
+    id: req.params.id,
+    clientId: clientId,
+    verbose: verbose,
+    displayName: body.displayName,
+  });
 }
 
-const routes = {
-    "POST /profiles/:id": updateProfile,
-};
+const routes = { "POST /profiles/:id": updateProfile };
 
 function handler(req: Request): Response {
-    const found = routerMatch(routes, req);
-    if (found !== undefined) {
-        req.params = found.params;
-        return found.handler(req);
-    }
+  const found = routerMatch(routes, req);
+  if (found !== undefined) {
+    req.params = found.params;
+    return found.handler(req);
+  }
 
-    return Response.json({ error: "Not Found" }, { status: 404 });
+  return Response.json({ error: "Not Found" }, { status: 404 });
 }

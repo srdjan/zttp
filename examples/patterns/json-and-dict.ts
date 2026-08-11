@@ -36,30 +36,32 @@ type Guardrails = Spec<
 >;
 
 function handler(req: Request): Response & Guardrails {
-    const parsed = parseJson("{\"name\":\"ada\",\"tags\":[1,null,true],\"ok\":true}");
-    if (!parsed.ok) {
-        return Response.json({ error: parsed.error.kind }, { status: 400 });
-    }
+  const parsed = parseJson(
+    "{\"name\":\"ada\",\"tags\":[1,null,true],\"ok\":true}",
+  );
+  if (!parsed.ok) {
+    return Response.json({ error: parsed.error.kind }, { status: 400 });
+  }
 
-    const document = parsed.value;
-    if (!isDict(document)) {
-        return Response.json({ error: "not-an-object" }, { status: 400 });
-    }
+  const document = parsed.value;
+  if (!isDict(document)) {
+    return Response.json({ error: "not-an-object" }, { status: 400 });
+  }
 
-    const duplicate = parseJson("{\"a\":1,\"a\":2}");
-    const malformed = parseJson("{oops}");
-    const encoded = stringifyJson(document);
-    if (!encoded.ok) {
-        return Response.json({ error: encoded.error.kind }, { status: 500 });
-    }
+  const duplicate = parseJson("{\"a\":1,\"a\":2}");
+  const malformed = parseJson("{oops}");
+  const encoded = stringifyJson(document);
+  if (!encoded.ok) {
+    return Response.json({ error: encoded.error.kind }, { status: 500 });
+  }
 
-    return Response.json({
-        name: dictGet(document, "name"),
-        entries: dictEntries(document),
-        roundTrip: encoded.value,
-        duplicateKind: duplicate.error.kind,
-        duplicateKey: duplicate.error.key,
-        malformedKind: malformed.error.kind,
-        malformedOffset: malformed.error.offset,
-    });
+  return Response.json({
+    name: dictGet(document, "name"),
+    entries: dictEntries(document),
+    roundTrip: encoded.value,
+    duplicateKind: duplicate.error.kind,
+    duplicateKey: duplicate.error.key,
+    malformedKind: malformed.error.kind,
+    malformedOffset: malformed.error.offset,
+  });
 }

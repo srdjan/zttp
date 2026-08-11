@@ -44,10 +44,10 @@ const patch: UserPatch = { name: "Hedy" };
 const config: Config = { host: "0.0.0.0", port: 8080 };
 
 function handler(req: Request): Response & Guardrails {
-    return Response.json({
-        summary: summary,
-        safe: safe,
-        patch: patch,
-        config: config,
-    });
+  return Response.json({
+    summary: summary,
+    safe: safe,
+    patch: patch,
+    config: config,
+  });
 }

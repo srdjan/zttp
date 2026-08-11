@@ -16,5 +16,9 @@ function handler(req) {
     { name: "greet", path: "/b" },
     { name: "greet", path: "/c" },
   ]);
-  return Response.json({ n: rs.length, first: rs[0].json(), last: rs[2].json() });
+  return Response.json({
+    n: rs.length,
+    first: rs[0].json(),
+    last: rs[2].json(),
+  });
 }

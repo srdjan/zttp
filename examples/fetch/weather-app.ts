@@ -106,10 +106,13 @@ function handler(req: Request): Response & WeatherProof {
   const lat = req.query.latitude;
   const lng = req.query.longitude;
   if (lat === undefined || lng === undefined) {
-    return Response.json({
-      error: "missing_coordinates",
-      hint: "provide latitude and longitude query params",
-    }, { status: 400 });
+    return Response.json(
+      {
+        error: "missing_coordinates",
+        hint: "provide latitude and longitude query params",
+      },
+      { status: 400 },
+    );
   }
 
   // The fetch URL is a compile-time literal, so the contract proves the egress
@@ -127,20 +130,17 @@ function handler(req: Request): Response & WeatherProof {
   });
 
   if (!upstream.ok) {
-    return Response.json({
-      error: "weather_unavailable",
-      upstreamStatus: upstream.status,
-    }, { status: 502 });
+    return Response.json(
+      { error: "weather_unavailable", upstreamStatus: upstream.status },
+      { status: 502 },
+    );
   }
 
   const f = upstream.json();
   return Response.json({
     app: "Weather Forecast",
     source: "open-meteo",
-    coordinates: {
-      latitude: f.latitude,
-      longitude: f.longitude,
-    },
+    coordinates: { latitude: f.latitude, longitude: f.longitude },
     timezone: f.timezone,
     current: {
       time: f.current.time,

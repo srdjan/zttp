@@ -8,5 +8,5 @@ import type { Spec } from "zttp:types";
 type Guardrails = Spec<"idempotent" | "deterministic">;
 
 function handler(req: Request): Response & Guardrails {
-    return Response.json({ now: Date.now() });
+  return Response.json({ now: Date.now() });
 }

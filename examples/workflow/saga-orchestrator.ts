@@ -29,27 +29,54 @@ import { call, saga } from "zttp:workflow";
 function handler(req) {
   const key = req.headers.get("idempotency-key") ?? "saga-demo";
   if (req.url === "/compensation-fails") {
-    return run(key, () =>
-      saga([
-        { name: "reserve", run: () => call("greet", { path: "/reserve" }), compensate: () => call("greet", { path: "/decline" }) },
-        { name: "charge", run: () => call("greet", { path: "/decline" }), compensate: () => call("greet", { path: "/refund" }) },
+    return run(
+      key,
+      () => saga([
+        {
+          name: "reserve",
+          run: () => call("greet", { path: "/reserve" }),
+          compensate: () => call("greet", { path: "/decline" }),
+        },
+        {
+          name: "charge",
+          run: () => call("greet", { path: "/decline" }),
+          compensate: () => call("greet", { path: "/refund" }),
+        },
         { name: "ship", run: () => call("greet", { path: "/ship" }) },
       ]),
     );
   }
   if (req.url === "/fail") {
-    return run(key, () =>
-      saga([
-        { name: "reserve", run: () => call("greet", { path: "/reserve" }), compensate: () => call("greet", { path: "/release" }) },
-        { name: "charge", run: () => call("greet", { path: "/decline" }), compensate: () => call("greet", { path: "/refund" }) },
+    return run(
+      key,
+      () => saga([
+        {
+          name: "reserve",
+          run: () => call("greet", { path: "/reserve" }),
+          compensate: () => call("greet", { path: "/release" }),
+        },
+        {
+          name: "charge",
+          run: () => call("greet", { path: "/decline" }),
+          compensate: () => call("greet", { path: "/refund" }),
+        },
         { name: "ship", run: () => call("greet", { path: "/ship" }) },
       ]),
     );
   }
-  return run(key, () =>
-    saga([
-      { name: "reserve", run: () => call("greet", { path: "/reserve" }), compensate: () => call("greet", { path: "/release" }) },
-      { name: "charge", run: () => call("greet", { path: "/charge" }), compensate: () => call("greet", { path: "/refund" }) },
+  return run(
+    key,
+    () => saga([
+      {
+        name: "reserve",
+        run: () => call("greet", { path: "/reserve" }),
+        compensate: () => call("greet", { path: "/release" }),
+      },
+      {
+        name: "charge",
+        run: () => call("greet", { path: "/charge" }),
+        compensate: () => call("greet", { path: "/refund" }),
+      },
       { name: "ship", run: () => call("greet", { path: "/ship" }) },
     ]),
   );

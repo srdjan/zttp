@@ -9,8 +9,15 @@ import { call } from "zttp:workflow";
 
 function handler(req: Request): Response {
   const key = req.headers.get("idempotency-key") ?? "queued-demo";
-  return run(key, () => {
-    const res = call("greet", { method: "GET", path: "/queued" });
-    return Response.json({ queued: true, subStatus: res.status, sub: res.json() });
-  });
+  return run(
+    key,
+    () => {
+      const res = call("greet", { method: "GET", path: "/queued" });
+      return Response.json({
+        queued: true,
+        subStatus: res.status,
+        sub: res.json(),
+      });
+    },
+  );
 }

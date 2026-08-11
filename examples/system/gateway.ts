@@ -25,7 +25,10 @@ function handler(req: Request): Response {
     params: { id: auth.value.sub },
   });
   if (user.status !== 200) {
-    return Response.json({ error: "user service unavailable" }, { status: 502 });
+    return Response.json(
+      { error: "user service unavailable" },
+      { status: 502 },
+    );
   }
 
   return Response.json({ user: user.json() });

@@ -20,5 +20,5 @@ type Guardrails = Spec<
 >;
 
 function handler(req: Request): Response & Guardrails {
-    return Response.json({ ok: true });
+  return Response.json({ ok: true });
 }

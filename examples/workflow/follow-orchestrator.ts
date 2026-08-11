@@ -11,9 +11,9 @@
 import { follow } from "zttp:workflow";
 
 function handler(req) {
-  const home = resource({ service: "orchestrator" }, {
-    self: { href: "/" },
-    greeting: { href: "/greet", method: "GET" },
-  });
+  const home = resource(
+    { service: "orchestrator" },
+    { self: { href: "/" }, greeting: { href: "/greet", method: "GET" } },
+  );
   return follow(home, "greeting");
 }

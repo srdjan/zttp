@@ -17,14 +17,14 @@
 
 import type { Spec } from "zttp:types";
 import {
-    andThen,
-    collectAll,
-    err,
-    mapError,
-    mapResult,
-    ok,
-    orElse,
-    unwrapOr,
+  andThen,
+  collectAll,
+  err,
+  mapError,
+  mapResult,
+  ok,
+  orElse,
+  unwrapOr,
 } from "zttp:result";
 
 type Guardrails = Spec<
@@ -46,28 +46,28 @@ type Guardrails = Spec<
 >;
 
 function handler(req: Request): Response & Guardrails {
-    // A chain: transform the value, then the failure, then recover from it.
-    const doubled = mapResult(ok(21), (n) => n * 2);
-    const chained = andThen(doubled, (n) => ok(n + 1));
-    const relabelled = mapError(err("boom"), (e) => `${e}-relabelled`);
-    const recovered = orElse(relabelled, (e) => ok(`recovered from ${e}`));
+  // A chain: transform the value, then the failure, then recover from it.
+  const doubled = mapResult(ok(21), (n) => n * 2);
+  const chained = andThen(doubled, (n) => ok(n + 1));
+  const relabelled = mapError(err("boom"), (e) => `${e}-relabelled`);
+  const recovered = orElse(relabelled, (e) => ok(`recovered from ${e}`));
 
-    // Consumption rule 1: the site's type is the value type and the error arm
-    // supplies a constant of it.
-    const value = unwrapOr(chained, 0);
-    const fallback = unwrapOr(err("gone"), -1);
+  // Consumption rule 1: the site's type is the value type and the error arm
+  // supplies a constant of it.
+  const value = unwrapOr(chained, 0);
+  const fallback = unwrapOr(err("gone"), -1);
 
-    // First error wins, and the errors after it are never looked at.
-    const collected = collectAll([ok(1), ok(2), ok(3)]);
-    const failed = collectAll([ok(1), err("first"), err("second")]);
-    const empty = collectAll([]);
+  // First error wins, and the errors after it are never looked at.
+  const collected = collectAll([ok(1), ok(2), ok(3)]);
+  const failed = collectAll([ok(1), err("first"), err("second")]);
+  const empty = collectAll([]);
 
-    return Response.json({
-        value: value,
-        fallback: fallback,
-        recovered: unwrapOr(recovered, "never"),
-        collected: unwrapOr(collected, []),
-        firstError: unwrapOr(orElse(failed, (e) => ok(e)), "none"),
-        emptyOk: empty.ok,
-    });
+  return Response.json({
+    value: value,
+    fallback: fallback,
+    recovered: unwrapOr(recovered, "never"),
+    collected: unwrapOr(collected, []),
+    firstError: unwrapOr(orElse(failed, (e) => ok(e)), "none"),
+    emptyOk: empty.ok,
+  });
 }

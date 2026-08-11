@@ -26,14 +26,11 @@ interface ResponseData {
 }
 
 function processData(data: RequestData): ResponseData {
-    return {
-        message: "Hello, " + data.name,
-        timestamp: Date.now()
-    };
+  return { message: "Hello, " + data.name, timestamp: Date.now() };
 }
 
 function handler(req: Request): Response & Guardrails {
-    const data: RequestData = { name: "World", count: 42 };
-    const result: ResponseData = processData(data);
-    return Response.json(result);
+  const data: RequestData = { name: "World", count: 42 };
+  const result: ResponseData = processData(data);
+  return Response.json(result);
 }

@@ -49,66 +49,76 @@ type Guardrails = Spec<
 // The six type tests, one arm each. `Bytes` is among them, which is what makes
 // an octet value dispatchable rather than opaque.
 function kindOf(value: unknown): string {
-    return match (value) {
-        when boolean: "boolean"
-        when number: "number"
-        when string: "string"
-        when array: "array"
-        when Dict: "dict"
-        when Bytes: "bytes"
-        default: "other"
-    };
+  return match (value) {
+    when boolean: "boolean"
+    when number: "number"
+    when string: "string"
+    when array: "array"
+    when Dict: "dict"
+    when Bytes: "bytes"
+    default: "other"
+  };
 }
 
 // The trailing default: `label(k)` selects "payload", `label(k, "body")`
 // overrides it.
 function label(kind: string, prefix: string = "payload"): string {
-    return `${prefix}:${kind}`;
+  return `${prefix}:${kind}`;
 }
 
 // Exported, never called from this handler, and still owing a ceiling.
-export function describeOctets(raw: Bytes): Effects<string, "env" | "policy_check"> & Proof<string, "total" | "read_only" | "deterministic"> {
-    const scope = env("BYTES_SCOPE");
-    const kind = kindOf(raw);
-    if (scope === undefined) {
-        return label(kind);
-    }
-    return label(kind, scope);
+export function describeOctets(
+  raw: Bytes,
+): Effects<string, "env" | "policy_check"> & Proof<string, "total" | "read_only" | "deterministic"> {
+  const scope = env("BYTES_SCOPE");
+  const kind = kindOf(raw);
+  if (scope === undefined) {
+    return label(kind);
+  }
+  return label(kind, scope);
 }
 
-function handler(req: Request): Effects<Response, "env" | "policy_check"> & Guardrails {
-    const body = requestBody(req);
-    const size = bytesLength(body);
-    const octetKind = kindOf(body);
+function handler(
+  req: Request,
+): Effects<Response, "env" | "policy_check"> & Guardrails {
+  const body = requestBody(req);
+  const size = bytesLength(body);
+  const octetKind = kindOf(body);
 
-    const text = decodeUtf8(body);
-    if (!text.ok) {
-        return Response.json({ error: text.error.kind, size, octetKind }, { status: 400 });
-    }
+  const text = decodeUtf8(body);
+  if (!text.ok) {
+    return Response.json(
+      { error: text.error.kind, size, octetKind },
+      { status: 400 },
+    );
+  }
 
-    const parsed = parseJsonBytes(body);
-    if (!parsed.ok) {
-        return Response.json({ error: parsed.error.kind, size, octetKind }, { status: 400 });
-    }
+  const parsed = parseJsonBytes(body);
+  if (!parsed.ok) {
+    return Response.json(
+      { error: parsed.error.kind, size, octetKind },
+      { status: 400 },
+    );
+  }
 
-    const scope = env("BYTES_SCOPE");
-    const documentKind = kindOf(parsed.value);
-    if (scope === undefined) {
-        return Response.json({
-            size,
-            octetKind,
-            documentKind,
-            named: label(documentKind),
-            overridden: label(documentKind, "body"),
-            reEncoded: kindOf(encodeUtf8(documentKind)),
-        });
-    }
+  const scope = env("BYTES_SCOPE");
+  const documentKind = kindOf(parsed.value);
+  if (scope === undefined) {
     return Response.json({
-        size,
-        octetKind,
-        documentKind,
-        named: label(documentKind, scope),
-        overridden: label(documentKind, "body"),
-        reEncoded: kindOf(encodeUtf8(documentKind)),
+      size,
+      octetKind,
+      documentKind,
+      named: label(documentKind),
+      overridden: label(documentKind, "body"),
+      reEncoded: kindOf(encodeUtf8(documentKind)),
     });
+  }
+  return Response.json({
+    size,
+    octetKind,
+    documentKind,
+    named: label(documentKind, scope),
+    overridden: label(documentKind, "body"),
+    reEncoded: kindOf(encodeUtf8(documentKind)),
+  });
 }

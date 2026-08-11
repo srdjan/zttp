@@ -27,7 +27,7 @@ const defaultMethod: Method = "GET";
 const defaultRoute: ApiRoute = "/api/health";
 
 function handler(req: Request): Response & Guardrails {
-    const method: Method = defaultMethod;
-    const route: ApiRoute = defaultRoute;
-    return Response.json({ method: method, route: route });
+  const method: Method = defaultMethod;
+  const route: ApiRoute = defaultRoute;
+  return Response.json({ method: method, route: route });
 }

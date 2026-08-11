@@ -27,14 +27,17 @@ type WorkflowDslGuarantees = Spec<
 
 function handler(req: Request): Response & WorkflowDslGuarantees {
   const key = req.headers.get("idempotency-key") ?? "workflow-dsl-demo";
-  return run(key, () => {
-    const res = call("greet", { method: "GET", path: "/workflow-dsl" });
-    return Response.json({
-      workflowDsl: true,
-      runKey: key,
-      childBoundary: "workflow.call:greet",
-      subStatus: res.status,
-      sub: res.json(),
-    });
-  });
+  return run(
+    key,
+    () => {
+      const res = call("greet", { method: "GET", path: "/workflow-dsl" });
+      return Response.json({
+        workflowDsl: true,
+        runKey: key,
+        childBoundary: "workflow.call:greet",
+        subStatus: res.status,
+        sub: res.json(),
+      });
+    },
+  );
 }

@@ -33,17 +33,9 @@ function handler(req: Request): Response & WebhookProof {
   const body = req.text();
   const receipt = fetch("http://billing.example/charge", {
     method: "POST",
-    headers: {
-      "Idempotency-Key": key,
-      "Content-Type": "application/json",
-    },
+    headers: { "Idempotency-Key": key, "Content-Type": "application/json" },
     body: body,
-    durable: {
-      key: key,
-      retries: 3,
-      backoff: "exponential",
-      ttl_s: 3600,
-    },
+    durable: { key: key, retries: 3, backoff: "exponential", ttl_s: 3600 },
   });
   if (!receipt.ok) {
     return Response.text("retry later", { status: 503 });

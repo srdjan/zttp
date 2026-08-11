@@ -27,8 +27,8 @@ type Guardrails = Spec<
 const config: Config = { port: 8080, host: "0.0.0.0", version: "1.0" };
 
 function handler(req: Request): Response & Guardrails {
-    const port: number = config.port;
-    const host: string = config.host;
-    const version: string = config.version;
-    return Response.json({ port: port, host: host, version: version });
+  const port: number = config.port;
+  const host: string = config.host;
+  const version: string = config.version;
+  return Response.json({ port: port, host: host, version: version });
 }

@@ -21,8 +21,8 @@ import type { Effects, Spec } from "zttp:types";
 import { sha256 } from "zttp:crypto";
 
 function digest(s: string): string {
-    sha256(s);
-    return s;
+  sha256(s);
+  return s;
 }
 
 // The two capsules compose on one return type. `Effects<...>` bounds the
@@ -49,5 +49,5 @@ type Guardrails = Spec<
 >;
 
 function handler(req: Request): Effects<Response, "crypto"> & Guardrails {
-    return Response.text(digest("zttp"));
+  return Response.text(digest("zttp"));
 }

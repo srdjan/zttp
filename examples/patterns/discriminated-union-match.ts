@@ -25,15 +25,13 @@ type Guardrails = Spec<
 >;
 
 function run(cmd: Command): string {
-    return match (cmd) {
-        when { kind: "echo", text }:
-            text
-        when { kind: "ping" }:
-            "pong"
-    };
+  return match (cmd) {
+    when { kind: "echo", text }: text
+    when { kind: "ping" }: "pong"
+  };
 }
 
 function handler(req: Request): Response & Guardrails {
-    const cmd: Command = { kind: "echo", text: "hi" };
-    return Response.json({ result: run(cmd) });
+  const cmd: Command = { kind: "echo", text: "hi" };
+  return Response.json({ result: run(cmd) });
 }

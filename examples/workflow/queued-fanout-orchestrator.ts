@@ -13,11 +13,18 @@ import { fanout } from "zttp:workflow";
 
 function handler(req: Request): Response {
   const key = req.headers.get("idempotency-key") ?? "queued-fanout-demo";
-  return run(key, () => {
-    const rs = fanout([
-      { name: "greet", path: "/a" },
-      { name: "greet", path: "/b" },
-    ]);
-    return Response.json({ n: rs.length, first: rs[0].json(), last: rs[1].json() });
-  });
+  return run(
+    key,
+    () => {
+      const rs = fanout([
+        { name: "greet", path: "/a" },
+        { name: "greet", path: "/b" },
+      ]);
+      return Response.json({
+        n: rs.length,
+        first: rs[0].json(),
+        last: rs[1].json(),
+      });
+    },
+  );
 }

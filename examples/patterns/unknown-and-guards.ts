@@ -20,13 +20,13 @@ type Guardrails = Spec<
 >;
 
 function handler(req: Request): Response & Guardrails {
-    const body: unknown = req.body;
+  const body: unknown = req.body;
 
-    // `body` is `unknown` here; the `typeof` check narrows it to `string`
-    // inside the branch, where `.length` is valid.
-    if (typeof body === "string") {
-        return Response.json({ length: body.length });
-    }
+  // `body` is `unknown` here; the `typeof` check narrows it to `string`
+  // inside the branch, where `.length` is valid.
+  if (typeof body === "string") {
+    return Response.json({ length: body.length });
+  }
 
-    return Response.json({ error: "expected string body" }, { status: 400 });
+  return Response.json({ error: "expected string body" }, { status: 400 });
 }

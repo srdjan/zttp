@@ -41,17 +41,17 @@ type Guardrails = Spec<
 >;
 
 function kindOf(value: JsonValue): string {
-    return match (value) {
-        when null: "null"
-        when boolean: "boolean"
-        when number: "number"
-        when string: "string"
-        when array: "array"
-    };
+  return match (value) {
+    when null: "null"
+    when boolean: "boolean"
+    when number: "number"
+    when string: "string"
+    when array: "array"
+  };
 }
 
 function handler(req: Request): Response & Guardrails {
-    const document: JsonValue = [1, "two", true, null, [3]];
-    const kinds = document.map(kindOf);
-    return Response.json({ outer: kindOf(document), kinds });
+  const document: JsonValue = [1, "two", true, null, [3]];
+  const kinds = document.map(kindOf);
+  return Response.json({ outer: kindOf(document), kinds });
 }

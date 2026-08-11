@@ -10,5 +10,9 @@ import { call } from "zttp:workflow";
 function handler(req: Request): Response {
   const subPath = req.url === "/panic" ? "/boom" : "/greet";
   const res = call("greet", { method: "GET", path: subPath });
-  return Response.json({ orchestrated: true, subStatus: res.status, sub: res.json() });
+  return Response.json({
+    orchestrated: true,
+    subStatus: res.status,
+    sub: res.json(),
+  });
 }

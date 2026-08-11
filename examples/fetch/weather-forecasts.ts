@@ -22,18 +22,16 @@ function handler(req: Request): Response & WeatherProof {
     return Response.json({ error: "not_found" }, { status: 404 });
   }
 
-  const upstream = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto", {
-    headers: {
-      "Accept": "application/json",
-    },
-    maxResponseBytes: 65536,
-  });
+  const upstream = fetch(
+    "https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto",
+    { headers: { "Accept": "application/json" }, maxResponseBytes: 65536 },
+  );
 
   if (!upstream.ok) {
-    return Response.json({
-      error: "weather_unavailable",
-      upstreamStatus: upstream.status,
-    }, { status: 502 });
+    return Response.json(
+      { error: "weather_unavailable", upstreamStatus: upstream.status },
+      { status: 502 },
+    );
   }
 
   const forecast = upstream.json();
@@ -41,10 +39,7 @@ function handler(req: Request): Response & WeatherProof {
     app: "Weather Forecasts",
     source: "open-meteo",
     upstreamRequestId: upstream.headers.get("x-request-id") ?? "none",
-    coordinates: {
-      latitude: forecast.latitude,
-      longitude: forecast.longitude,
-    },
+    coordinates: { latitude: forecast.latitude, longitude: forecast.longitude },
     timezone: forecast.timezone,
     current: {
       time: forecast.current.time,

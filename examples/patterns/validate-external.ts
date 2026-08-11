@@ -9,7 +9,7 @@
 import { schemaCompile, validateJson } from "zttp:validate";
 import type { Spec } from "zttp:types";
 
-schemaCompile("todo", '{"type":"object","required":["title"]}');
+schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
 
 type Guardrails = Spec<
     | "deterministic"
@@ -23,9 +23,9 @@ type Guardrails = Spec<
 >;
 
 function handler(req: Request): Response & Guardrails {
-    const parsed = validateJson("todo", req.body ?? "");
-    if (!parsed.ok) {
-        return Response.json({ error: "invalid body" }, { status: 400 });
-    }
-    return Response.json(parsed.value, { status: 201 });
+  const parsed = validateJson("todo", req.body ?? "");
+  if (!parsed.ok) {
+    return Response.json({ error: "invalid body" }, { status: 400 });
+  }
+  return Response.json(parsed.value, { status: 201 });
 }
