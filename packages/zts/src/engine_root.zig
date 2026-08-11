@@ -43,6 +43,7 @@ pub const parser = @import("parser/root.zig");
 pub const pool = @import("pool.zig");
 pub const http = @import("http.zig");
 pub const stripper = @import("stripper.zig");
+pub const printer = @import("printer.zig");
 pub const node_types = @import("node_types.zig");
 pub const comptime_eval = @import("comptime.zig");
 pub const bytecode_cache = @import("bytecode_cache.zig");

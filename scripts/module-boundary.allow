@@ -67,6 +67,7 @@ tools module_spec_render
 tools modules
 tools parser
 tools pipeline
+tools printer
 tools proof_trace
 tools property_diagnostics
 tools semantics

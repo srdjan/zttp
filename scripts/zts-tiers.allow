@@ -135,7 +135,9 @@ zts parser/root.zig
 zts parser/scope.zig
 zts parser/token.zig
 zts parser/tokenizer.zig
+zts parser/trivia.zig
 zts policy.zig
+zts printer.zig
 zts pool.zig
 zts security_events.zig
 zts sqlite.zig

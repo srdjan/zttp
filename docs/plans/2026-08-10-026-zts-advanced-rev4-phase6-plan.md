@@ -328,6 +328,62 @@ than approximate bytes; a comment survives a print and stays attached to the
 same declaration; the corpus churn measurement is recorded, file count and line
 count.
 
+Four of this task's expectations did not survive measurement.
+
+**The IR cannot print this repository's sources, because it does not hold
+them.** `stripper.strip` blanks every type annotation before `JsParser` sees
+the text, so the parsed IR is type-erased. A printer over it would delete every
+`: T`, every `type` and `interface` declaration, and the `import type` clause of
+23 of the 58 tracked example files - and `TypeMapKind` has no member for a
+type-only import, so that last loss is not recoverable from the side table
+either. What landed prints from the token stream of the source as written, plus
+the trivia pass from task 6 and the stripper's type map. Every token is carried
+through verbatim and only the whitespace between tokens is decided, so
+annotations, `import type`, `0xff`, and a template literal's interior survive by
+construction rather than by a rule that remembers them.
+
+**Fail closed is enforced rather than declared.** The printer re-lexes its own
+output and compares the token sequence, and the comment sequence, against its
+input; a mismatch is `error.UnprintableConstruct`, not a written file. The one
+difference the layout rules may make - a trailing comma before a closer - is
+normalized on both sides before the comparison. Two hazards the token
+comparison cannot see are refused up front instead: a statement that ends
+without `;`, and a newline after `return`, `break`, `continue`, or `throw`,
+both of which ASI terminates where a printer would close them up.
+
+**Types are opaque, which is a rule this plan did not have.** A type
+annotation, a type argument list, and a whole type declaration print as the
+bytes the author wrote. The stripper already decided where each starts and
+stops; re-deciding it here would be a second answer to a settled question. The
+canonical form of this phase therefore does not canonicalize type layout, the
+same way it does not reflow a comment. It also takes the `<` ambiguity out of
+the layout engine: a `<` the stripper did not record is a comparison and prints
+spaced like one.
+
+**Two of D3 section 2's layout rules were wrong about the corpus they cite, and
+one was silent about a case the corpus is full of.**
+
+| Rule as written | Measured | What shipped |
+|---|---|---|
+| 2-space indent, "chosen to match the repo's existing `.ts` sources" | 52 of 58 corpus files are 4-space | The rule stands and the corpus moved to it, which is the decision recorded here rather than left implicit: the canonical form is normative and the corpus is its output. Docs fences already lean 2-space, 289 lines to 260 |
+| "exactly one blank line between top-level declarations" | Applied literally this inserts a blank between every consecutive `import` | Changed: a blank-line run collapses to one and is preserved where the author put one; none at file start, exactly one newline at file end |
+| `match`: one arm per line | Arms carry no separator at all - `when P:` and `default:` are what end the previous arm, and the rewriter's own output uses commas | Both shapes lay out; splitting the body on commas the way a list is split put every arm of the corpus onto one line, which is how the shape was found |
+| (silent) | The corpus is full of `Response.json({ ... })` | Added: a call whose only argument is a record, array, or block hugs it, keeping the bracket on the call's line. Without it the same content is indented twice for two lines of punctuation |
+
+**Corpus measurement, 2026-08-11.** 58 tracked files, 2331 lines. 53 print, 5
+refuse, and every refusal is the same construct: JSX and TSX, which a bare
+tokenizer run cannot read because only the parser turns JSX mode on. 47 of the
+53 changed, 1174 diff lines, dominated by the 4-to-2-space reflow. The
+diagnostic code multiset of `zts check` is identical before and after printing
+for 49 of 53; the four that differ are the rewrite loop's own doing (a
+canonical-band code it cleared, and one `ZTS500` the cleared ternary unmasked),
+not the layout's.
+
+`scripts/check-normalize-idempotent.sh` names each unprinted file and carries a
+ceiling of 5 that may fall and may not rise, next to the floor of 58 it already
+had. Double-normalize byte-identity holds over all 58, printer included: the
+phase's exit clause.
+
 ### Task 8: the M1 and M2 validators
 
 **Files:** `packages/zts/src/repair_validator.zig`,

@@ -2031,6 +2031,12 @@ fn isCanonicalBandCode(code: []const u8) bool {
     return zts.PolicyCatalog.isCanonicalProfileCode(code);
 }
 
+/// JSX and TSX sources are outside the formatter's coverage: a bare tokenizer
+/// run is not in JSX mode, so element text would be re-read as code.
+fn isJsxLike(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".tsx") or std.mem.endsWith(u8, path, ".jsx");
+}
+
 pub const NormalizeResult = struct {
     /// The handler source after reaching the rewrite fixed point. Owned.
     canonical_source: []u8,
@@ -2063,6 +2069,18 @@ pub const NormalizeResult = struct {
     /// `residual`: a client that reads only the count would never learn the
     /// preference the profile named.
     residual_diagnostics: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty,
+    /// True when the canonical formatter printed `canonical_source`. A false
+    /// here is not a rewrite failure: the printer covers constructs one at a
+    /// time and refuses the rest, so the bytes are the rewrite fixed point in
+    /// the layout the author wrote.
+    printed: bool,
+    /// Why the formatter refused, when it did. Reported rather than dropped so
+    /// a gate names the construct instead of the file alone.
+    printer_refusal: ?zts.printer.Refusal = null,
+    /// True when `canonical_source` differs from the bytes handed in. The
+    /// verdict `--check` reads: a file that needed no rewrite can still need a
+    /// layout, and an iteration count cannot see that.
+    changed: bool,
 
     pub fn deinit(self: *NormalizeResult, allocator: std.mem.Allocator) void {
         allocator.free(self.canonical_source);
@@ -2235,6 +2253,24 @@ pub fn normalizeSourceWithSchema(
         iterations += 1;
     }
 
+    // The layout pass runs last, over the rewrite fixed point, so a rewrite
+    // never has to produce canonical whitespace and the printer never has to
+    // understand a half-applied rewrite. It fails closed: a construct outside
+    // its coverage leaves the rewritten bytes exactly as they are.
+    var refusal: zts.printer.Refusal = undefined;
+    var printed = false;
+    if (zts.printer.print(allocator, current, .{
+        .jsx = isJsxLike(virtual_path),
+        .reason_out = &refusal,
+    })) |formatted| {
+        allocator.free(current);
+        current = formatted;
+        printed = true;
+    } else |err| switch (err) {
+        error.UnprintableConstruct => {},
+        error.OutOfMemory => return err,
+    }
+
     var residual_diagnostics = try collectCanonicalResidualDiagnostics(allocator, current, virtual_path, sql_schema_path);
     errdefer {
         for (residual_diagnostics.items) |*diag| diag.deinit(allocator);
@@ -2252,6 +2288,9 @@ pub fn normalizeSourceWithSchema(
         .iterations = iterations,
         .residual = residual,
         .residual_diagnostics = residual_diagnostics,
+        .printed = printed,
+        .printer_refusal = if (printed) null else refusal,
+        .changed = !std.mem.eql(u8, source, current),
     };
 }
 
@@ -2425,12 +2464,15 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
         if (buf.items.len > 0) _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
     }
 
+    if (!nr.printed) reportPrinterRefusal(path, nr.printer_refusal);
+
     if (check_mode) {
         // gofmt -l semantics: the file is "clean" only if it is ALREADY in
-        // canonical form, i.e. normalize changed nothing (iterations == 0) and
-        // no canonical-band diagnostic remains. A file that normalizes cleanly
-        // but needed rewrites is still reported as not-canonical (exit 1).
-        if (nr.iterations > 0 or !nr.fully_canonical) {
+        // canonical form, i.e. normalize changed nothing and no canonical-band
+        // diagnostic remains. The measure is the bytes, not the pass count: a
+        // file no rewrite fires on can still be laid out differently, and an
+        // iteration count cannot see that.
+        if (nr.changed or !nr.fully_canonical) {
             if (!json_mode) {
                 _ = std.c.write(std.c.STDERR_FILENO, path.ptr, path.len);
                 _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
@@ -2451,6 +2493,15 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
             }
             std.process.exit(1);
         }
+        // A file the formatter refused would be written in the author's
+        // layout under a name that claims canonical form. Decline instead.
+        if (!nr.printed) {
+            if (!json_mode) {
+                const msg = "normalize: the canonical formatter refused this file; refusing --write\n";
+                _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
+            }
+            std.process.exit(1);
+        }
         try zts.file_io.writeFile(allocator, path, nr.canonical_source);
         return;
     }
@@ -2458,6 +2509,18 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
     if (!json_mode and nr.canonical_source.len > 0) {
         _ = std.c.write(std.c.STDOUT_FILENO, nr.canonical_source.ptr, nr.canonical_source.len);
     }
+}
+
+/// Name the construct on stderr. A refusal that printed nothing would be read
+/// as coverage, and the gate over the corpus is what widens the printer.
+fn reportPrinterRefusal(path: []const u8, reason: ?zts.printer.Refusal) void {
+    const head = "normalize: printer refused ";
+    _ = std.c.write(std.c.STDERR_FILENO, head.ptr, head.len);
+    _ = std.c.write(std.c.STDERR_FILENO, path.ptr, path.len);
+    const text = if (reason) |r| r.text() else "unknown";
+    _ = std.c.write(std.c.STDERR_FILENO, ": ", 2);
+    _ = std.c.write(std.c.STDERR_FILENO, text.ptr, text.len);
+    _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
 }
 
 fn printNormalizeHelp() void {
@@ -3421,7 +3484,12 @@ test "normalizeSource: ternary is rewritten to an expression-position match and 
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expect(nr.iterations >= 1);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(ok)) { when true: 200, default: fallbackStatus() }") != null);
+    // The canonical formatter lays a `match` body out one arm per line, so the
+    // rewrite is asserted arm by arm rather than as the one line it used to
+    // print on.
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(ok)) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: 200,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: fallbackStatus()") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "?") == null);
 
     var found = false;
@@ -3666,11 +3734,9 @@ test "normalizeSource unchains a right-associative nested ternary and stops" {
     try std.testing.expect(nr.converged);
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        nr.canonical_source,
-        "match (!!(a)) { when true: 200, default: b ? 201 : 500 }",
-    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(a)) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: 200,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: b ? 201 : 500") != null);
 
     // Idempotence: the normalized output is a fixed point.
     var again = try normalizeSource(std.testing.allocator, nr.canonical_source, "handler.ts");
@@ -3709,11 +3775,9 @@ test "normalizeSource ternary inside an object-literal value is rewritten in pla
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        nr.canonical_source,
-        "code: match (!!(ok)) { when true: 200, default: fallbackStatus() }, ok",
-    ) != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "code: match (!!(ok)) {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: 200,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: fallbackStatus()") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -3939,8 +4003,8 @@ test "normalizeSource flattens a simple nested object destructure" {
     try std.testing.expect(nr.converged);
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const {user} = payload;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const {name} = user;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const { user } = payload;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const { name } = user;") != null);
 
     var found = false;
     for (nr.rewrite_trace.items) |intent| {
@@ -3963,7 +4027,7 @@ test "normalizeSource refuses nested destructure flattening that would shadow a 
     try std.testing.expect(nr.converged);
     try std.testing.expect(!nr.fully_canonical);
     try std.testing.expect(nr.residual >= 1);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const {user: {name}} = payload;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const { user: { name } } = payload;") != null);
 }
 
 // One non-canonical source per rewrite the normalizer can apply. Spec 4.2.1

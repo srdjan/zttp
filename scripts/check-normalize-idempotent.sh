@@ -39,12 +39,20 @@ fi
 # The count measured on 2026-08-10, after the SQL handler stopped being skipped.
 MIN_CHECKED=58
 
+# The canonical formatter fails closed and widens construct by construct, so a
+# file it refuses is named here rather than passing as though it were printed.
+# This is a ceiling, not a floor: the number may fall as coverage widens and
+# must never rise. Measured on 2026-08-11 - the five JSX and TSX sources, which
+# a bare tokenizer run cannot read.
+MAX_REFUSED=5
+
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 checked=0
 skipped=0
 failed=0
+refused=0
 
 while IFS= read -r -d '' file; do
   # A `zttp:sql` handler is type-checked against its schema. Without one every
@@ -62,6 +70,14 @@ while IFS= read -r -d '' file; do
     echo "SKIP $file: ${reason:-normalize refused with no message}" >&2
     skipped=$((skipped + 1))
     continue
+  fi
+
+  # A printer refusal leaves the rewrite fixed point in the author's layout.
+  # That is still idempotent, so the file is checked either way - but it is
+  # named, because a refusal nothing prints is read as coverage.
+  if grep -q "printer refused" "$work/err"; then
+    echo "UNPRINTED $(sed -n 's/^normalize: printer refused //p' "$work/err" | head -n 1)" >&2
+    refused=$((refused + 1))
   fi
 
   # Pass 2: normalize that output into `twice`. Keep the extension so the
@@ -98,8 +114,14 @@ if [ "$checked" -lt "$MIN_CHECKED" ]; then
   exit 1
 fi
 
+if [ "$refused" -gt "$MAX_REFUSED" ]; then
+  echo "normalize idempotence: the formatter refused $refused files, ceiling is $MAX_REFUSED" >&2
+  echo "  each refusal is named above; coverage may widen, it may not narrow" >&2
+  exit 1
+fi
+
 if [ "$skipped" -gt 0 ]; then
-  echo "normalize idempotence OK ($checked files, $skipped skipped; each reason above)"
+  echo "normalize idempotence OK ($checked files, $skipped skipped, $refused unprinted; each reason above)"
 else
-  echo "normalize idempotence OK ($checked files, no skips)"
+  echo "normalize idempotence OK ($checked files, no skips, $refused unprinted)"
 fi

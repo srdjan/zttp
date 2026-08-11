@@ -91,6 +91,7 @@ pub const pool = engine.pool;
 pub const http = engine.http;
 pub const bytes = engine.bytes;
 pub const stripper = engine.stripper;
+pub const printer = engine.printer;
 pub const comptime_eval = engine.comptime_eval;
 pub const bytecode_cache = engine.bytecode_cache;
 pub const bytecode_opt = engine.bytecode_opt;
