@@ -367,6 +367,17 @@ review. A handler that queries `zttp:sql` needs `--sql-schema`, the same schema
 `check` takes: its queries are type-checked against the schema, so without one
 the analysis never runs and every pass refuses.
 
+Canonical form is the rewrite fixed point in canonical layout: 2-space indent,
+an 80-column soft target, double quotes, trailing commas in multi-line lists
+only, records and arrays on one line when they fit, one `match` arm per line.
+Comments keep their own lines and are never reflowed, and a type annotation or
+declaration prints as written - the formatter lays out code, not types.
+
+The formatter fails closed. A construct it does not cover leaves the file in
+the layout its author wrote, `normalize` says so on stderr, and `--write`
+declines rather than write bytes that claim a canonical form they do not have.
+JSX and TSX are the current refusal.
+
 Canonical code reduces the number of equivalent shapes the analyzer and the
 expert agent must handle. A handler with no ZTS6xx errors carries the
 `canonical` proof property, and `Response & Spec<"canonical">` can discharge
