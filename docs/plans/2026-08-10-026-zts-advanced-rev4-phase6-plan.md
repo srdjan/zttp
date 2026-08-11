@@ -554,6 +554,52 @@ published example parses, checks, and exercises the form it names; deleting a
 form's example fails rather than shrinking the list silently; the drift gate
 fails on an empty extraction.
 
+**What shipped, and what the examples registry found.** The grammar half landed
+as planned: `packages/zts/src/grammar_registry.zig` carries all 69 productions
+in document order, `scripts/check-grammar-drift.sh` compares them to the
+document with a floor under both extractions, and every row carries its
+enforcement point. Eleven rows are `check_time` with a registry code and one -
+`TypeDecl` - carries a note, because ZTS212 is the type-checker band and the
+policy-hashed registry does not cover it. Each enforcement point was measured by
+running `zts check` on a program exercising the wider form rather than reasoned
+about.
+
+The examples registry lives in `packages/tools/src/example_registry.zig`, not
+`packages/zts/src`. Its key set is `json_diagnostics.allowed_feature_names` and
+its legality gate is `precompile.runCheckOnlyFromSource`; both are in `tools`,
+and nothing in `zts` consumes the examples. Putting the rows beside the table
+they are keyed to costs one fewer boundary widening than the reverse.
+
+23 examples, one per admitted form, each a whole handler that reports nothing at
+any severity. Each row also carries evidence that the example exercises the form
+it names: a node tag or a type-map kind wherever either records the form, and a
+source match for the four that leave no trace - the pipe folds into a call,
+`comptime()` is folded by the stripper, and `readonly` and a template literal
+pattern are modifiers inside a type alias the map records as one annotation.
+
+Writing the examples found five defects, each fixed with a failing test first
+and its own commit:
+
+- ZTS604 fired on every `let` in an exported function. `collectAssignments` had
+  no `export_decl` arm while `walkStmt` did, so no assignment inside an exported
+  function was recorded.
+- An annotated `let` took its initializer's literal type, so every reassignment
+  was refused. The satisfies-like narrowing is right for `const` and now applies
+  only there.
+- An object spread contributed its operand's NAME as a field rather than the
+  operand's fields, because a spread stores its operand where a property stores
+  its key. The same misreading in the dead-variable rule made a binding read
+  only through a spread look unused.
+- A destructuring declaration registered one dead-variable candidate - its own
+  synthetic binding, which nothing references - so every `const { x, y } = ...`
+  warned. Candidates are now per pattern element.
+- A template literal type was not assignable to `string`, so the type could be
+  declared and never used.
+
+Three of the five made an advertised admitted form unwritable. None was caught
+by the corpus, and the gate that found them is the one whose whole purpose is to
+compile what the profile claims to admit.
+
 ### Task 11: decisions, contract body, and extension manifests
 
 **Files:** a new `packages/zts/src/decision_registry.zig`,

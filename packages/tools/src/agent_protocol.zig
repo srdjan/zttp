@@ -19,6 +19,7 @@ const edit_simulate = @import("edit_simulate.zig");
 const json_diagnostics = @import("json_diagnostics.zig");
 const precompile = @import("precompile.zig");
 const canonicalize = @import("canonicalize.zig");
+const example_registry = @import("example_registry.zig");
 
 const policy_catalog = zts.PolicyCatalog;
 const idiomCatalog = zts.IdiomCatalog;
@@ -86,7 +87,7 @@ pub const operations = [_]OperationSpec{
         "severities",            "idioms",            "limits",
         "module_catalog",        "deferred_sections", "validators",
         "verifiers",             "ambient_names",     "type_serialization",
-        "grammar",
+        "grammar",               "examples",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -124,7 +125,6 @@ pub const operations = [_]OperationSpec{
 pub const DeferredSection = struct { name: []const u8, note: []const u8 };
 
 pub const deferred_sections = [_]DeferredSection{
-    .{ .name = "examples", .note = "phase 6: no per-form example registry exists" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
     .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
@@ -698,6 +698,23 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
         // registry does not cover, so the row still says who answers.
         try json.objectField("note");
         if (p.note) |note| try json.write(note) else try json.write(null);
+        try json.endObject();
+    }
+    try json.endArray();
+
+    // One canonical minimal example per admitted surface form (spec 4.8), so
+    // an agent learns the ZTS-specific spellings here rather than from hidden
+    // instructions. Every example is checked by the test that publishes it and
+    // must report nothing at any severity, so a form that stops being legal
+    // fails the build instead of teaching a program the compiler refuses.
+    try json.objectField("examples");
+    try json.beginArray();
+    for (&example_registry.examples) |entry| {
+        try json.beginObject();
+        try json.objectField("feature");
+        try json.write(entry.feature);
+        try json.objectField("source");
+        try json.write(entry.source);
         try json.endObject();
     }
     try json.endArray();
@@ -2235,9 +2252,12 @@ test "meta payload publishes every operation and its status" {
         }
         try testing.expectEqual(@as(usize, 1), seen);
     }
-    // The sections no registry can generate are named, not stubbed.
+    // The sections no registry can generate are named, not stubbed. Counted
+    // against the table rather than a floor: the floor was a stand-in for "the
+    // list is populated" and had to be edited down every time a section closed,
+    // which is a number drifting behind the thing it describes.
     const sections = payload.get("deferred_sections").?.array;
-    try testing.expect(sections.items.len >= 6);
+    try testing.expectEqual(deferred_sections.len, sections.items.len);
     for (sections.items) |s| {
         try testing.expect(payload.get(s.object.get("name").?.string) == null);
     }
@@ -4028,6 +4048,153 @@ test "meta publishes the built-in module catalog from the bindings" {
         try testing.expect(std.mem.startsWith(u8, module.get("specifier").?.string, "zttp:"));
         try testing.expect(module.get("exports").?.array.items.len >= 1);
         try testing.expect(module.get("required_capabilities").? == .array);
+    }
+}
+
+test "every admitted surface form has an example, and every example names one" {
+    // Both directions over the feature table. A form with no example is a hole
+    // an agent has to guess its way across; an example naming a form the
+    // profile does not admit teaches a program the compiler refuses.
+    for (json_diagnostics.allowed_feature_names) |name| {
+        if (example_registry.findByFeature(name) == null) {
+            std.debug.print("admitted form has no example: {s}\n", .{name});
+            return error.MissingExample;
+        }
+    }
+    for (&example_registry.examples) |entry| {
+        var admitted = false;
+        for (json_diagnostics.allowed_feature_names) |name| {
+            if (std.mem.eql(u8, name, entry.feature)) admitted = true;
+        }
+        if (!admitted) {
+            std.debug.print("example names a form that is not admitted: {s}\n", .{entry.feature});
+            return error.UnknownExampleFeature;
+        }
+    }
+    try testing.expectEqual(json_diagnostics.allowed_feature_names.len, example_registry.examples.len);
+}
+
+test "every published example checks clean, at every severity" {
+    // The legality gate. `runCheckOnlyFromSource` is the same path `zts check`
+    // takes, so an example that stops being legal fails here rather than
+    // teaching a form this compiler now refuses. Warnings count: an example
+    // that checks with a warning is one an agent would copy into a warning.
+    const a = testing.allocator;
+    for (&example_registry.examples) |entry| {
+        var result = try precompile.runCheckOnlyFromSource(a, entry.source, "example.ts", null, true, null, false);
+        defer result.deinit(a);
+        for (result.json_diagnostics.items) |diag| {
+            std.debug.print(
+                "example for {s} reports {s} ({s}): {s}\n",
+                .{ entry.feature, diag.code, diag.severity, diag.message },
+            );
+        }
+        try testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    }
+}
+
+test "every published example exercises the form it names" {
+    // A clean example that no longer contains its form still checks clean, so
+    // legality alone would let an edit hollow one out. The evidence is read
+    // from the parse tree or the stripper's type map wherever either records
+    // the form, and from the source only for the three that leave no trace.
+    const a = testing.allocator;
+    for (&example_registry.examples) |entry| {
+        var strip_result = try zts.strip(a, entry.source, .{ .enable_comptime = true, .comptime_env = .{} });
+        defer strip_result.deinit();
+
+        var parser = try zts.parser.JsParser.init(a, strip_result.code);
+        defer parser.deinit();
+        const root = try parser.parse();
+        _ = root;
+        const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+        const found = switch (entry.evidence) {
+            .node => |tag| blk: {
+                var i: zts.parser.NodeIndex = 0;
+                while (i < view.nodeCount()) : (i += 1) {
+                    if (view.getTag(i) == tag) break :blk true;
+                }
+                break :blk false;
+            },
+            .var_kind => |kind| blk: {
+                var i: zts.parser.NodeIndex = 0;
+                while (i < view.nodeCount()) : (i += 1) {
+                    if (view.getTag(i) != .var_decl) continue;
+                    const decl = view.getVarDecl(i) orelse continue;
+                    if (decl.kind == kind) break :blk true;
+                }
+                break :blk false;
+            },
+            .binary_operator => |op| blk: {
+                var i: zts.parser.NodeIndex = 0;
+                while (i < view.nodeCount()) : (i += 1) {
+                    if (view.getTag(i) != .binary_op) continue;
+                    const bin = view.getBinary(i) orelse continue;
+                    if (bin.op == op) break :blk true;
+                }
+                break :blk false;
+            },
+            .type_annotation => |kind| blk: {
+                for (strip_result.type_map.entries.items) |item| {
+                    if (item.kind == kind) break :blk true;
+                }
+                break :blk false;
+            },
+            .source_text => |text| std.mem.indexOf(u8, entry.source, text.needle) != null,
+        };
+
+        if (!found) {
+            std.debug.print("example for {s} does not exercise the form it names\n", .{entry.feature});
+            return error.ExampleDoesNotExerciseItsForm;
+        }
+    }
+}
+
+test "the example evidence check can fail, so its verdict means something" {
+    // The floor under the gate above. A walk that answered true for everything
+    // would pass every row while proving nothing, so this asks it for a form
+    // no example contains: `while` is refused by this profile and appears in
+    // none of them.
+    const a = testing.allocator;
+    const entry = example_registry.findByFeature("match expression") orelse
+        return error.TestExpectedExample;
+
+    var strip_result = try zts.strip(a, entry.source, .{});
+    defer strip_result.deinit();
+    var parser = try zts.parser.JsParser.init(a, strip_result.code);
+    defer parser.deinit();
+    _ = try parser.parse();
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+    var saw_while = false;
+    var saw_match = false;
+    var i: zts.parser.NodeIndex = 0;
+    while (i < view.nodeCount()) : (i += 1) {
+        const tag = view.getTag(i) orelse continue;
+        if (tag == .while_stmt) saw_while = true;
+        if (tag == .match_expr) saw_match = true;
+    }
+    try testing.expect(saw_match);
+    try testing.expect(!saw_while);
+}
+
+test "the examples section stops being deferred" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const payload = parsed.value.object.get("payload").?.object;
+    const rows = payload.get("examples").?.array;
+    try testing.expectEqual(example_registry.examples.len, rows.items.len);
+    for (rows.items, &example_registry.examples) |item, entry| {
+        try testing.expectEqualStrings(entry.feature, item.object.get("feature").?.string);
+        try testing.expectEqualStrings(entry.source, item.object.get("source").?.string);
+    }
+    for (payload.get("deferred_sections").?.array.items) |section| {
+        try testing.expect(!std.mem.eql(u8, section.object.get("name").?.string, "examples"));
     }
 }
 

@@ -190,6 +190,22 @@ where one exists, and otherwise a note naming the band that answers, which today
 is `TypeDecl` and ZTS212. Each enforcement point was measured by running
 `zts check` on a program that exercises the wider form, not reasoned about.
 
+`examples` publishes one canonical minimal example per admitted surface form,
+keyed to the same feature table the `features` operation publishes and compared
+to it in both directions, so an admitted form with no example fails and an
+example naming no admitted form fails. Each example is a whole handler rather
+than a snippet, is run through the same check `zts check` runs and must report
+nothing at any severity, and carries evidence that it exercises the form it
+names - a node tag or a type-map kind wherever either records the form, and a
+source match only for the pipe, `comptime()`, `readonly`, and template literal
+types, which leave no trace after parsing or stripping.
+
+Writing those examples found five defects, all now fixed: ZTS604 fired on every
+`let` in an exported function, an annotated `let` took its initializer's literal
+type, an object spread contributed its operand's name instead of its fields to
+both the inferred type and the dead-variable rule, a used destructured binding
+read as unused, and a template literal type was not assignable to `string`.
+
 `ambient_names` and `type_serialization` were stale deferrals whose mechanisms
 had landed in earlier phases, and both now ship. `ambient_names` publishes the
 type and value names a handler writes without importing them; every type row is
