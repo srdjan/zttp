@@ -475,10 +475,18 @@ pub const TypeChecker = struct {
                     // literal. This gives `: Type` satisfies-like semantics for primitives.
                     // For unions and compound annotations, keep the declared type since
                     // the annotation carries semantic intent for exhaustiveness checking.
+                    //
+                    // Only for `const`. A `let` exists to be reassigned, and
+                    // binding it to its initializer's literal type refused every
+                    // reassignment as "type '7' is not assignable to type '0'":
+                    // the narrower type is sound for a value that cannot change
+                    // and is a refusal of the form for one that must.
+                    //
                     // For let bindings without explicit type annotations, widen
                     // literal types to their base type so reassignment works.
                     var effective = blk: {
                         if (declared != null_type_idx and inferred != null_type_idx) {
+                            if (vd.kind != .@"const") break :blk declared;
                             const dt = self.env.pool.getTag(declared) orelse break :blk declared;
                             const it = self.env.pool.getTag(inferred) orelse break :blk declared;
                             const is_literal_of_base =
@@ -4290,6 +4298,51 @@ test "narrowing: a bare boolean discriminant read, and its negation" {
         \\  return r.error;
         \\}
     , 0, null);
+}
+
+test "an annotated let keeps its declared type, so it can be reassigned" {
+    // `let total: number = 0` bound the binding to the literal type `0`, from
+    // the satisfies-like rule below that keeps a literal under a base-primitive
+    // annotation. That rule is right for `const`, whose value cannot change,
+    // and wrong for `let`, whose only reason to exist is that it changes: every
+    // reassignment of an annotated `let` was refused as "type '7' is not
+    // assignable to type '0'". `let` had no legal spelling with a literal
+    // initializer.
+    try checkTypedSource(
+        \\function counter(): number {
+        \\  let total: number = 0;
+        \\  total = 7;
+        \\  return total;
+        \\}
+    , 0, null);
+}
+
+test "an annotated let still refuses a value its declared type does not admit" {
+    // The floor. Widening the binding to its annotation must not stop the
+    // assignment check, only stop it comparing against the initializer.
+    try checkTypedSourceSaying(
+        \\function counter(): number {
+        \\  let total: number = 0;
+        \\  total = "seven";
+        \\  return total;
+        \\}
+    , 1, "not assignable");
+}
+
+test "an annotated const still keeps the narrower literal type" {
+    // The other side of the same rule, pinned so the fix above cannot be
+    // widened into `const`. A `const` under a base-primitive annotation keeps
+    // its literal type, which is what makes a match over it exhaustive without
+    // a default; widening it to `string` would make the same match
+    // non-exhaustive and warn.
+    try checkTypedSource(
+        \\function label(): number {
+        \\  const k: string = "a";
+        \\  return match (k) {
+        \\    when "a": 1,
+        \\  };
+        \\}
+    , 0, 0);
 }
 
 test "narrowing: typeof reaches the authoritative system" {
