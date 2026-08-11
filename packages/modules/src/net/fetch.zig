@@ -37,6 +37,12 @@ pub const binding = sdk.ModuleBinding{
             .name = "fetch",
             .module_func = fetchImpl,
             .arg_count = 2,
+            // A GET is written `fetch(url)`, and `fetchImpl` only refuses
+            // `args.len == 0`. The `is_fetch` branch this binding replaced
+            // truncated the parameter list to one, which made the init object
+            // optional by accident; naming both parameters made it required by
+            // accident. It is optional on purpose.
+            .required_arg_count = 1,
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object },

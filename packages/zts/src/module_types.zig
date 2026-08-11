@@ -472,6 +472,26 @@ test "a declared signature builds the precise type, and fetch is its first custo
     try std.testing.expectEqual(pool.idx_string, sha.return_type);
 }
 
+test "fetch takes its init object optionally, the way a GET is written" {
+    // The `is_fetch` branch that used to build this signature truncated the
+    // parameter list to one, so `fetch(url)` type-checked by accident. Spelling
+    // both parameters in the binding raised the arity to two and left a plain
+    // GET failing with "expected 2, got 1" - a program the runtime accepts and
+    // the checker refused.
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+
+    populateModuleTypes(&env, &pool, allocator);
+
+    const sig = env.getFnSigByName("fetch") orelse return error.MissingFetch;
+    try std.testing.expectEqual(@as(u8, 2), sig.param_count);
+    try std.testing.expectEqual(@as(u8, 1), sig.required_param_count orelse sig.param_count);
+}
+
 test "populateModuleTypes keeps fetchWithRetry options optional" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);

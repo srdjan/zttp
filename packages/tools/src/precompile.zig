@@ -2352,7 +2352,28 @@ fn validateVirtualModuleImports(
 
         const import_decl = view.getImportDecl(node_idx) orelse continue;
         const module_str = view.getString(import_decl.module_idx) orelse continue;
-        const binding = zts.builtin_modules.fromSpecifier(module_str) orelse continue;
+        const binding = zts.builtin_modules.fromSpecifier(module_str) orelse {
+            // A specifier in the built-in namespace that resolves to nothing
+            // is an import of a module that does not exist, and it used to
+            // pass with no diagnostic at all: `fromSpecifier` returning null
+            // skipped the declaration entirely, so this function only ever
+            // checked the exports of modules that were there. Removing
+            // `zttp:websocket` is what made the hole visible - every handler
+            // still importing it reported clean. Spec rev 4 4.5 has the rule:
+            // an unknown module makes the certified build fail closed.
+            //
+            // `zttp-ext:` is a different namespace, resolved against the
+            // session's manifest registry rather than the comptime table, and
+            // is deliberately not judged here.
+            if (std.mem.startsWith(u8, module_str, "zttp:")) {
+                if (!builtin.is_test) debugPrint(
+                    "import error: unknown module '{s}'\n  --> {s}\n  run `zttp modules` for the modules that exist\n",
+                    .{ module_str, filename },
+                );
+                return error.UnknownVirtualModule;
+            }
+            continue;
+        };
 
         var name_buf: [32][]const u8 = undefined;
         var name_count: usize = 0;
@@ -4643,6 +4664,27 @@ test "a call may omit a trailing defaulted argument" {
     }
 }
 
+test "a const-bound arrow's trailing default is honored at its call sites" {
+    // The arity pass walked program, block, export_decl and function_decl, so
+    // a default on a function bound to a `const` recorded nothing and every
+    // call was measured against the full parameter list: `step(1)` reported
+    // "expected 2, got 1" for a call the runtime completes.
+    const allocator = std.testing.allocator;
+    const source =
+        \\const step = (base: number, delta: number = 5): number => base + delta;
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(`${step(1)}`);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "arrow-default.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    for (result.json_diagnostics.items) |d| {
+        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS202"));
+    }
+}
+
 test "a call omitting a non-defaulted position still reports the arity error" {
     const allocator = std.testing.allocator;
     const source =
@@ -5000,6 +5042,25 @@ test "compileHandler rejects invalid virtual-module imports" {
 
     try std.testing.expectError(
         error.InvalidImportSpecifier,
+        compileHandler(allocator, source, "handler.js", .{}),
+    );
+}
+
+test "compileHandler rejects an import of a module that does not exist" {
+    // The export check only ever ran for modules the table knows, so an import
+    // of a module that is not there at all reported clean. `zttp:websocket`
+    // was removed in this beta and every handler still importing it passed.
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { send } from "zttp:websocket";
+        \\
+        \\function handler(req) {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+
+    try std.testing.expectError(
+        error.UnknownVirtualModule,
         compileHandler(allocator, source, "handler.js", .{}),
     );
 }

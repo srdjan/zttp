@@ -1822,15 +1822,36 @@ pub const TypeChecker = struct {
                 const export_decl = self.ir_view.getExportDecl(node) orelse return;
                 self.recordDefaultArity(export_decl.declaration, depth + 1);
             },
-            .function_decl => self.recordOneDefaultArity(node),
-            // exhaustive: only a named function declaration carries a
-            // signature a call resolves by name. Anything else records nothing.
+            // A function bound to a `const` resolves by name at its call sites
+            // exactly as a declared one does, and its default was measured
+            // against the full parameter list until this arm existed:
+            // `const step = (base, delta = 5) => ...` reported "expected 2,
+            // got 1" for `step(1)`. `recordOneDefaultArity` reads the
+            // initializer, so a binding whose initializer is not a function
+            // records nothing and costs one lookup.
+            .function_decl, .var_decl => self.recordOneDefaultArity(node),
+            // exhaustive: anything else carries no name a call resolves.
             else => {},
         }
     }
 
     fn recordOneDefaultArity(self: *TypeChecker, node: NodeIndex) void {
         const decl = self.ir_view.getVarDecl(node) orelse return;
+        if (decl.init == null_node) return;
+        // `getFunction` reads the node's payload without consulting its tag,
+        // so asking it about `const x = 1;` returns a function-shaped view of
+        // an integer: a parameter list at a nonsense offset, and a
+        // `has_default_params` bit that is whatever that memory held. The tag
+        // is the check. Without it this pass walked a bound literal's
+        // "parameters" and panicked on an invalid enum value.
+        switch (self.ir_view.getTag(decl.init) orelse return) {
+            .function_expr, .arrow_function, .function_decl => {},
+            // exhaustive: every other initializer binds a value that is not a
+            // function, and a value has no parameters to record an arity for.
+            // Recording nothing leaves the call site measured against its
+            // declared signature, which is the answer for a non-function.
+            else => return,
+        }
         const func = self.ir_view.getFunction(decl.init) orelse return;
         if (!func.flags.has_default_params) return;
         const fn_name = self.resolveAtomName(decl.binding.name_atom) orelse return;
@@ -1842,7 +1863,10 @@ pub const TypeChecker = struct {
         var required: u8 = 0;
         while (required < func.params_count) : (required += 1) {
             const param_idx = self.ir_view.getListIndex(func.params_start, required);
-            const elem = self.ir_view.getPatternElem(param_idx) orelse return;
+            // A parameter that is not a pattern element carries no default, so
+            // it is required and the scan continues past it.
+            if (self.ir_view.getTag(param_idx) != .pattern_element) continue;
+            const elem = self.ir_view.getPatternElem(param_idx) orelse continue;
             if (elem.default_value != null_node) break;
         }
         self.env.setRequiredParamCount(fn_name, loc.line, required);
