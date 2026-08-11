@@ -487,6 +487,47 @@ identical types serialize identically; the `deferred_sections` list shrinks by
 exactly the rows this task closes; `meta`'s advertised key set and its emitted
 key set still agree key for key.
 
+**The paragraph above was wrong about `ambient_names`, and this is what shipped
+instead.** `known_globals.names` is 26 **value** names. Spec section 6 requires
+the closed table of ambient **type and value** names, and the type half had no
+list anywhere: an ambient type name resolves at one of four sites - the
+primitive chain in `type_pool.resolveIdentType`, `Dict<K, V>` in
+`parseGenericApp`, the capsule aliases in `type_env.registerBuiltins`, and the
+two nominal aliases in `abi_types.populateHandlerAbiTypes`. Publishing only the
+value half under a key named `ambient_names` is the shape this repository keeps
+being bitten by: a section that answers less than its own name.
+
+A new `packages/zts/src/ambient_names.zig` publishes both. The value half is
+`known_globals.names` by reference, not by copy. The type half is 15 rows, each
+with its origin and its arity, and every row is resolved through
+`TypeEnv.resolveType` - the checker's own entry - in the environment the
+pipeline builds, so a row naming a type the checker would refuse fails the
+build. That direction is the one that costs a reader something: an agent writes
+the names this table gives it. The reverse direction is provable only where the
+source set is enumerable, and it is asserted there: the two alias tables are
+compared key for key, so a capsule or ABI alias registered without being
+published fails. The primitive chain has no enumeration, and the file says so
+rather than implying a completeness it cannot check.
+
+Measurement moved two rows out and two more into a pinned exclusion. Spec 6
+lists `Result` and `HtmlNode` as ambient types; neither resolves. `Result` is
+declared by the handler or imported from the module that exports it, and
+`HtmlNode` appears nowhere in `packages/` - JSX is typed through `h` and
+`renderToString` with no published node type. Both are unpublished with a test
+that fails when either becomes ambient. `bool`, `Array<T>`, `ReadonlyArray<T>`
+and `Readonly<T>` do resolve and are deliberately unpublished, also pinned by a
+test: unpublished-but-accepted costs a reader nothing, while published-but-
+refused would teach code the compiler rejects.
+
+`type_serialization` and `repair_budget` shipped as written. `type_key` gained
+`serialization_version` (1, never moved) and `digest_algorithm`, and `max_depth`
+became public; the section publishes those three plus the digest encoding.
+`repair_budget` stays deferred, and its note changed from a phase schedule to
+the decision: nothing in this compiler runs the repair loop, so a number
+published here would be enforced by nobody.
+
+Measured after: `deferred_sections` is 7 rows, down from 10.
+
 ### Task 10: the grammar and examples registries
 
 **Files:** a new `packages/zts/src/grammar_registry.zig`, a new

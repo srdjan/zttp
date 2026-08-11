@@ -153,6 +153,7 @@ zts wasm/root.zig
 
 # zts-compiler
 zts-compiler abi_types.zig
+zts-compiler ambient_names.zig
 zts-compiler api_schema.zig
 zts-compiler compiler_root.zig
 zts-compiler behavior_canonical.zig

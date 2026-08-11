@@ -170,11 +170,25 @@ measurement that says why it cannot exist. A client reads one machine-readable
 list instead of discovering absence key by key. Nothing is stubbed with prose:
 a section that cannot be generated is absent.
 
-One entry is a finding rather than a schedule. `rule_severity` says severity is
+Two entries are findings rather than schedules. `rule_severity` says severity is
 chosen at each emission site, not stored per rule: `handler_verifier` emits
 ZTS305 as a warning and ZTS500 as an error from one category, so no table can
 answer what severity a rule emits, and `describe_rule` publishes none rather
-than a derived guess. Every other entry names the phase that builds it.
+than a derived guess. `repair_budget` says the repair-iteration and tool-call
+budget is a client's loop policy: nothing in this compiler runs that loop, so a
+number published here would be enforced by nobody. Every other entry names the
+phase that builds it.
+
+`ambient_names` and `type_serialization` were stale deferrals whose mechanisms
+had landed in earlier phases, and both now ship. `ambient_names` publishes the
+type and value names a handler writes without importing them; every type row is
+resolved through the checker's own entry by a gate, so a published name is a
+name the compiler admits. Two names spec section 6 lists are absent, measured
+rather than assumed: `Result` is declared or imported rather than ambient, and
+`HtmlNode` exists nowhere in the compiler - JSX is typed through `h` and
+`renderToString`. `type_serialization` publishes the canonical type
+serialization's version, digest algorithm, and depth bound, which is what a
+client needs before it caches a type digest and compares it to a later one.
 
 `extension_manifests` is the one worth knowing about early: no `zttp-ext:`
 manifest is authenticated yet, so every extension specifier is reported under

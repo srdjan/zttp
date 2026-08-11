@@ -46,6 +46,7 @@ pub const spec_discharge = @import("spec_discharge.zig");
 pub const property_diagnostics = @import("property_diagnostics.zig");
 pub const diagnostic_projection = @import("diagnostic_projection.zig");
 
+pub const ambient_names = @import("ambient_names.zig");
 pub const rule_registry = @import("rule_registry.zig");
 pub const idiom_registry = @import("idiom_registry.zig");
 pub const restriction_registry = @import("restriction_registry.zig");

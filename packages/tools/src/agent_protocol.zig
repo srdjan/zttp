@@ -85,7 +85,7 @@ pub const operations = [_]OperationSpec{
         "builtin_registry_hash", "operations",        "error_codes",
         "severities",            "idioms",            "limits",
         "module_catalog",        "deferred_sections", "validators",
-        "verifiers",
+        "verifiers",             "ambient_names",     "type_serialization",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -125,13 +125,11 @@ pub const DeferredSection = struct { name: []const u8, note: []const u8 };
 pub const deferred_sections = [_]DeferredSection{
     .{ .name = "grammar", .note = "phase 6: section 8 lives in spec prose, with no machine-readable production table to generate from" },
     .{ .name = "examples", .note = "phase 6: no per-form example registry exists" },
-    .{ .name = "ambient_names", .note = "phase 4: the section 6 ambient table lands with Dict, JSON, and Bytes" },
-    .{ .name = "type_serialization", .note = "phase 2: the canonical type serialization is D1's artifact" },
     .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
     .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
     .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
-    .{ .name = "repair_budget", .note = "phase 6: the repair-iteration and tool-call budget is a loop policy no code implements" },
+    .{ .name = "repair_budget", .note = "decided rather than scheduled: the repair-iteration and tool-call budget is a client's loop policy, and nothing in this compiler runs that loop or could enforce a number published here. It closes when a loop lands that enforces one, not before" },
 };
 
 /// True when the operation reads a source file, and therefore binds the digest
@@ -673,6 +671,53 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
         try json.endObject();
     }
     try json.endArray();
+
+    // The ambient table (spec 6): the names a handler writes without importing
+    // them. Both halves are registry-generated - the values are the
+    // `known_globals` list the checker itself reads, and every type row is
+    // resolved through the checker's own entry by a gate in `ambient_names`, so
+    // a name published here is a name the compiler admits.
+    try json.objectField("ambient_names");
+    try json.beginObject();
+    try json.objectField("types");
+    try json.beginArray();
+    for (zts.AmbientCatalog.typeNames()) |entry| {
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write(entry.name);
+        // Where the name gets its meaning, which is also whether a later
+        // declaration can shadow it.
+        try json.objectField("origin");
+        try json.write(entry.origin.id());
+        // Type arguments the name requires. `Dict` is written `Dict<K, V>` and
+        // nothing else, so the name alone is half a spelling.
+        try json.objectField("arity");
+        try json.write(entry.arity);
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.objectField("values");
+    try json.beginArray();
+    for (zts.AmbientCatalog.valueNames()) |name| try json.write(name);
+    try json.endArray();
+    try json.endObject();
+
+    // The canonical type serialization (spec 5.4). A type digest is an identity
+    // a client may cache; the version is what tells it whether a cached
+    // identity still applies after a compiler upgrade.
+    try json.objectField("type_serialization");
+    try json.beginObject();
+    try json.objectField("version");
+    try json.write(zts.TypeSerialization.version);
+    try json.objectField("digest_algorithm");
+    try json.write(zts.TypeSerialization.digest_algorithm);
+    try json.objectField("digest_encoding");
+    try json.write("lowercase hex");
+    try json.objectField("max_depth");
+    try json.write(zts.TypeSerialization.max_depth);
+    try json.objectField("note");
+    try json.write("the digest is sha256 over one canonical string per type; two structurally identical types serialize identically and a type graph deeper than max_depth has no identity");
+    try json.endObject();
 
     // The equivalence-validator registry (D3 section 4). Published so a client
     // can read why a repair is or is not advertised, rather than inferring it
@@ -3953,6 +3998,110 @@ test "meta publishes the built-in module catalog from the bindings" {
         try testing.expect(std.mem.startsWith(u8, module.get("specifier").?.string, "zttp:"));
         try testing.expect(module.get("exports").?.array.items.len >= 1);
         try testing.expect(module.get("required_capabilities").? == .array);
+    }
+}
+
+test "meta publishes the ambient value names as the known-globals list itself" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const ambient = parsed.value.object.get("payload").?.object.get("ambient_names").?.object;
+    const values = ambient.get("values").?.array;
+
+    // Both directions against the source list: a global the checker knows and
+    // this does not publish teaches an agent to import a name it need not, and
+    // a name published here that the checker does not know teaches it to call
+    // one that does not exist.
+    const known = zts.AmbientCatalog.valueNames();
+    try testing.expectEqual(known.len, values.items.len);
+    for (known, 0..) |name, i| {
+        try testing.expectEqualStrings(name, values.items[i].string);
+    }
+}
+
+test "every published ambient type name carries its origin and its arity" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const ambient = parsed.value.object.get("payload").?.object.get("ambient_names").?.object;
+    const rows = ambient.get("types").?.array;
+    const table = zts.AmbientCatalog.typeNames();
+    try testing.expectEqual(table.len, rows.items.len);
+
+    var saw_generic = false;
+    for (rows.items, table) |item, entry| {
+        const row = item.object;
+        try testing.expectEqualStrings(entry.name, row.get("name").?.string);
+        try testing.expectEqualStrings(entry.origin.id(), row.get("origin").?.string);
+        try testing.expectEqual(@as(i64, entry.arity), row.get("arity").?.integer);
+        if (entry.arity > 0) saw_generic = true;
+    }
+    // The floor for the arity field: a table of arity-zero rows would satisfy
+    // the loop above while proving nothing about the field.
+    try testing.expect(saw_generic);
+
+    // `Dict` is the value kind spec 6.2 names, and it is written with two type
+    // arguments or not at all.
+    var dict_arity: ?u8 = null;
+    for (table) |entry| {
+        if (std.mem.eql(u8, entry.name, "Dict")) dict_arity = entry.arity;
+    }
+    try testing.expectEqual(@as(?u8, 2), dict_arity);
+}
+
+test "meta publishes the type serialization version a cached digest is valid under" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const section = parsed.value.object.get("payload").?.object.get("type_serialization").?.object;
+    try testing.expectEqual(@as(i64, zts.TypeSerialization.version), section.get("version").?.integer);
+    try testing.expectEqualStrings("sha256", section.get("digest_algorithm").?.string);
+    try testing.expectEqual(@as(i64, zts.TypeSerialization.max_depth), section.get("max_depth").?.integer);
+}
+
+test "two independently parsed identical types serialize to one digest" {
+    // What the published version is a version OF. Without this the section
+    // would advertise a stable identity that nothing had measured.
+    const a = testing.allocator;
+    var pool = zts.TypePool.init(a);
+    defer pool.deinit(a);
+
+    const source = "{ id: string, tags: string[] }";
+    const first = zts.parseTypeExpr(&pool, a, source);
+    const second = zts.parseTypeExpr(&pool, a, source);
+    try testing.expect(first != second); // the pool does not intern
+
+    const digest_a = try zts.typeDigest(&pool, a, first);
+    const digest_b = try zts.typeDigest(&pool, a, second);
+    try testing.expectEqualSlices(u8, &digest_a, &digest_b);
+
+    // The floor: a different type gets a different digest, so the equality
+    // above is the encoding's doing and not a constant.
+    const other = zts.parseTypeExpr(&pool, a, "{ id: number, tags: string[] }");
+    const digest_c = try zts.typeDigest(&pool, a, other);
+    try testing.expect(!std.mem.eql(u8, &digest_a, &digest_c));
+}
+
+test "the two sections this change makes answerable stop being deferred" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    for (parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section| {
+        const name = section.object.get("name").?.string;
+        try testing.expect(!std.mem.eql(u8, name, "ambient_names"));
+        try testing.expect(!std.mem.eql(u8, name, "type_serialization"));
     }
 }
 

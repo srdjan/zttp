@@ -412,6 +412,47 @@ test "stable policy metadata catalogs expose borrowed queries and hashes" {
     );
 }
 
+/// Borrowed, read-only access to the ambient name table: the type and value
+/// names a handler writes without importing them. Spec section 6 requires an
+/// agent to be able to read this rather than memorize it.
+pub const AmbientCatalog = struct {
+    pub const Type = compiler.ambient_names.AmbientType;
+    pub const Origin = compiler.ambient_names.TypeOrigin;
+
+    pub fn typeNames() []const Type {
+        return &compiler.ambient_names.types;
+    }
+
+    pub fn valueNames() []const []const u8 {
+        return compiler.ambient_names.values;
+    }
+};
+
+/// The canonical type serialization's published identity: what a client needs
+/// to know before it caches a type digest and compares it to a later one. The
+/// digest itself is `typeDigest` above.
+pub const TypeSerialization = struct {
+    pub const version = type_key.serialization_version;
+    pub const digest_algorithm = type_key.digest_algorithm;
+    pub const max_depth = type_key.max_depth;
+
+    /// The canonical string a digest is taken over. Owned by the pool.
+    pub const key = type_key.typeKey;
+};
+
+test "stable AmbientCatalog and TypeSerialization publish the registries behind them" {
+    const type_names = AmbientCatalog.typeNames();
+    try std.testing.expectEqual(compiler.ambient_names.types.len, type_names.len);
+    try std.testing.expect(type_names.len > 0);
+    const values = AmbientCatalog.valueNames();
+    try std.testing.expectEqual(compiler.ambient_names.values.len, values.len);
+    try std.testing.expect(values.len > 0);
+
+    try std.testing.expectEqual(type_key.serialization_version, TypeSerialization.version);
+    try std.testing.expectEqualStrings("sha256", TypeSerialization.digest_algorithm);
+    try std.testing.expectEqual(type_key.max_depth, TypeSerialization.max_depth);
+}
+
 pub const DiagnosticProjection = diagnostic_projection;
 
 test "DiagnosticProjection exposes stable tagged checker codes" {

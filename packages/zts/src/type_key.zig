@@ -55,7 +55,23 @@ pub const KeyError = error{
 /// Bounds the walk independently of the cycle guard: a node reachable by two
 /// paths is not a cycle and is encoded twice, so a wide DAG can still cost more
 /// than the pool's node count.
-const max_depth: usize = 64;
+pub const max_depth: usize = 64;
+
+/// The version of the encoding below, published through
+/// `meta.payload.type_serialization`.
+///
+/// A type digest is an identity a client may cache and compare across runs, and
+/// two builds that disagree about the encoding hand the same type two
+/// identities. The version is what lets a client tell the two cases apart, so it
+/// moves whenever a byte of the encoding moves: a new tag, a changed prefix, a
+/// changed field order. It has never moved - the encoding shipped as version 1
+/// and the three extensions in the header above were part of that shipment.
+pub const serialization_version: u32 = 1;
+
+/// The hash `typeDigest` applies to the canonical string. Published beside the
+/// version because a client that recomputes a digest needs both, and neither is
+/// derivable from the other.
+pub const digest_algorithm: []const u8 = "sha256";
 
 // ---------------------------------------------------------------------------
 // Encoder
