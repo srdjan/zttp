@@ -261,6 +261,44 @@ comment's bytes are retained verbatim; two blank lines between declarations are
 retained as a run rather than as two facts; a file with no comments produces an
 empty trivia table and no allocation growth per parse.
 
+Two of this task's expectations did not survive measurement, and the shape
+changed with them.
+
+**The parser is the wrong place to retain trivia, for two reasons neither of
+which is style.** The tokenizer backtracks: `saveState` and `restoreState`
+re-scan the same bytes, so a sink filled inside `skipWhitespaceAndComments`
+would record a comment once per lookahead and need a high-water mark to undo
+what the design created. And `Parser.initWithProfile` returns the parser by
+value after consuming the first token, so a sink pointer taken inside it either
+dangles or misses the leading trivia of the file.
+
+What landed instead is `parser/trivia.zig`, which drives the tokenizer over the
+source a second time and reads the gaps between consecutive tokens. That is
+exact rather than approximate, and it is the reason the pass rides the tokenizer
+at all: the bytes between one token's end and the next token's start are
+whitespace and comments by construction, so the gap scanner needs no string,
+template, or regex handling to avoid reading `"// not a comment"` as a comment.
+A byte scanner would have deleted half a string literal, and there is a test
+that says so.
+
+**Attachment is a query, not a field.** The IR pin is not moved and no node
+grows a pointer: a node carries the byte span of the token that opened it, so
+"the comments directly above this node" and "the comment on this node's line"
+are both answerable from the trivia list and the node's own offset.
+`leadingFor` and `trailingOn` are those two queries.
+
+One limitation is named rather than left to be found: a bare tokenizer run is
+not in JSX mode, since only the parser turns that on, so a gap inside JSX text
+is reported as whitespace. No layout rule reads JSX text yet, and the printer
+will need its own answer when it covers JSX.
+
+The gate under all of it is that the tests run at all. The first probe of them
+passed while asserting nonsense, because the probe's own edit did not match the
+text it meant to change - the test file was never recompiled. Re-probed against
+the actual assertion, the suite fails and names
+`trivia.test.two blank lines are one run, not two facts`, which is what makes
+the passing run mean something.
+
 ### Task 7: the canonical formatter, fail closed
 
 **Files:** a new `packages/zts/src/printer.zig`,

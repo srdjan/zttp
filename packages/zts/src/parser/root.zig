@@ -44,6 +44,10 @@ pub const SourceLocation = @import("token.zig").SourceLocation;
 
 pub const Tokenizer = @import("tokenizer.zig").Tokenizer;
 
+pub const trivia = @import("trivia.zig");
+pub const Trivia = @import("trivia.zig").Trivia;
+pub const TriviaKind = @import("trivia.zig").Kind;
+
 pub const Node = @import("ir.zig").Node;
 pub const NodeTag = @import("ir.zig").NodeTag;
 pub const NodeIndex = @import("ir.zig").NodeIndex;
@@ -345,6 +349,7 @@ test "root module imports" {
 // Pull in tests from submodules
 test {
     _ = @import("ir_opt.zig");
+    _ = @import("trivia.zig");
 }
 
 test "legacy Parser API" {
