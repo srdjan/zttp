@@ -1814,6 +1814,15 @@ pub const StrictChecker = struct {
                     self.collectAssignments(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
                 }
             },
+            .export_decl => {
+                // Every handler a user writes is `export function handler`, and
+                // without this arm no assignment inside one was ever recorded:
+                // `walkStmt` descended through the export and this walk did
+                // not, so a reassigned `let` there reported `avoidable_let` at
+                // error severity.
+                const export_decl = self.ir_view.getExportDecl(node) orelse return;
+                self.collectAssignments(export_decl.declaration);
+            },
             .assignment => {
                 const assign = self.ir_view.getAssignment(node) orelse return;
                 if (self.ir_view.getTag(assign.target) == .identifier) {
@@ -2218,6 +2227,44 @@ test "strict checker accepts reassigned let" {
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .avoidable_let);
     }
+}
+
+test "strict checker accepts reassigned let inside an exported function" {
+    // The test above passes with a bare `function handler`, and every handler
+    // a user writes is `export function handler`. `collectAssignments` had no
+    // `export_decl` arm - `walkStmt` did - so no assignment inside an exported
+    // function was ever recorded and every `let` there read as never
+    // reassigned, at error severity. `let` is an advertised admitted form with
+    // no legal spelling until this descends.
+    const source = "export function handler(req) { let x = 1; x = 2; return Response.json({x}); }";
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
+    defer checker.deinit();
+    _ = try checker.check(root);
+    for (checker.getDiagnostics()) |diag| {
+        try testing.expect(diag.kind != .avoidable_let);
+    }
+}
+
+test "an exported function's let that is never reassigned is still flagged" {
+    // The floor under the fix above: descending through `export_decl` must not
+    // turn the rule off, only stop it firing on a binding that is assigned.
+    const source = "export function handler(req) { let x = 1; return Response.json({x}); }";
+    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var checker = StrictChecker.init(testing.allocator, view, null, null, null);
+    defer checker.deinit();
+    _ = try checker.check(root);
+    var saw_let = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == .avoidable_let) saw_let = true;
+    }
+    try testing.expect(saw_let);
 }
 
 test "canonical profile warns on reused arrow helper" {
