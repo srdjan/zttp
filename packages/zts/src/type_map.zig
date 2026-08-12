@@ -14,9 +14,9 @@ const std = @import("std");
 
 /// Classification of type annotation sites.
 pub const TypeMapKind = enum(u8) {
-    /// `type Foo = { ... }` - type alias declaration
+    /// `structural Foo = { ... }` - type alias declaration
     type_alias,
-    /// `distinct type Foo = string` - nominal/branded type declaration
+    /// `nominal Foo = string` - nominal/branded type declaration
     distinct_type,
     /// `const x: Type = ...` or `let x: Type = ...` - variable annotation
     var_annotation,
@@ -26,7 +26,7 @@ pub const TypeMapKind = enum(u8) {
     return_annotation,
     /// `function f(x: unknown): x is string` - type guard return annotation
     type_guard_annotation,
-    /// `function f<T, U>(...)` or `type Foo<T> = ...` - generic parameters
+    /// `function f<T, U>(...)` or `structural Foo<T> = ...` - generic parameters
     generic_params,
     /// `first<string>(xs)` - explicit type arguments at a call site.
     /// Distinct from `generic_params` because the two are otherwise
@@ -137,19 +137,21 @@ test "TypeMap basic operations" {
 
 test "TypeMap type alias" {
     const allocator = std.testing.allocator;
-    const source = "type Config = { port: number; host: string };";
+    const source = "structural Config = { port: number; host: string };";
 
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
+    const body_at: u32 = @intCast(std.mem.indexOf(u8, source, "{ port").?);
+    const name_at: u32 = @intCast(std.mem.indexOf(u8, source, "Config").?);
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 14, // "{ port: number; host: string }"
-        .source_end = 44,
+        .source_start = body_at, // "{ port: number; host: string }"
+        .source_end = body_at + 30,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "Config"
-        .name_end = 11,
+        .name_start = name_at, // "Config"
+        .name_end = name_at + 6,
     });
 
     try std.testing.expectEqualStrings("{ port: number; host: string }", tm.getTypeText(tm.entries.items[0]));

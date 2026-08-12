@@ -401,7 +401,7 @@ directly in the return type:
 ```typescript
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<"idempotent" | "deterministic" | "no_secret_leakage">;
+structural Guardrails = Spec<"idempotent" | "deterministic" | "no_secret_leakage">;
 
 function handler(req: Request): Response & Guardrails {
     // ...

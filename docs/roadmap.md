@@ -998,6 +998,45 @@ unknown identifier and sends the reader looking for a typo. The mapping is
 equally wrong for `new` and `while` on the rows beside it and predates this
 change; correcting it means re-pinning every row that reaches it.
 
+`type` and `distinct type` went next, and with them the declaration keywords
+are settled: `structural` and `nominal` are the only spellings. 65 declarations
+across 50 tracked handlers migrated, plus 88 in Zig-embedded test sources, and
+all 65 were top-level and unexported, so the rewrite was one shape. `import
+type` and `export type { ... }` keep the keyword - each names a declaration
+made elsewhere rather than making one, and the stripper handles both before the
+declaration path. The old spellings report ZTS050 and ZTS051 at the
+declaration's span with the exact repair, recognition-only and recording no
+type-map entry.
+
+Two files a keyword sweep must not take, both caught by their own gates and
+both the same lesson: a `.ts` file is not necessarily zts source.
+`generateTypeDefs` emits `zttp.d.ts` for `tsc`, which has no `structural`
+keyword. The other is a digest-pinned recorded model turn, where an edit is an
+edit to the measurement.
+
+**Owed, and this is the debt the cutover has been accumulating toward.** The
+recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases
+write `type X =`, so `zig build test` now fails two of them: `weather-egress`
+loses its recorded first-draft pass to ZTS050, and `jwt-auth` exhausts its
+16-step cassette because the veto retry consumes steps it does not have. The
+ratchet is right and the pins are right - what changed is the compiler under a
+dated recording. Neither can be re-pinned honestly: `expect_first_draft_pass`
+records what a model did, not what today's fence says about it.
+
+Two ways out, and phase 7's plan names the first. An exact repair for the alias
+keywords would cost no model turn, which is what "exact alias and syntax
+repairs consume no model turn" requires of the cutover; the lane does not exist
+yet, because ZTS050 fires in the stripper, before the parse the `canonicalize`
+repair path operates on. The second is a live re-record, which is owed anyway:
+the plan wants paired pre-cutover and post-cutover flows, and only a recorded
+live model can publish that row.
+
+Left alone deliberately: the normative sections of
+[the northstar spec](zts-formal-spec-northstar-advanced.md) still describe
+`type`, `distinct type`, `interface`, and `|>`. It specifies `zts-advanced-1`,
+which is what `profile_id` still publishes, and amending it is its own step in
+the phase's delivery order rather than something to do a form at a time.
+
 The last thing the compose import held up was rate limiting. `detectRateLimiting`
 required that import plus a `cacheIncr` call, and no handler in the repository
 ever satisfied both, so `rate_limiting` and the deploy manifest's

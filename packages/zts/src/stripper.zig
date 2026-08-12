@@ -44,6 +44,10 @@ pub const StripError = error{
     NominalBaseNotScalar,
     /// `interface` is not a declaration form in this profile
     InterfaceDeclaration,
+    /// `type` is not a declaration form in this profile
+    TypeAliasDeclaration,
+    /// `distinct type` is not a declaration form in this profile
+    DistinctTypeDeclaration,
 };
 
 /// Kind of unsupported-TypeScript construct rejected by the stripper. Each
@@ -66,6 +70,15 @@ pub const StripDiagnosticKind = enum {
     /// then refused: the body is scanned so the span is known, and no type-map
     /// entry is recorded, so nothing downstream resolves it.
     interface_declaration,
+    /// A `type` alias declaration, refused the same way and for the same reason
+    /// as `interface`: one declaration keyword per identity kind. `import type`
+    /// and `export type { ... }` are separate forms handled before this path
+    /// and keep the keyword.
+    type_alias_declaration,
+    /// A `distinct type` declaration. Its own kind rather than one shared with
+    /// the alias, because the repair differs by more than a word: the
+    /// replacement is `nominal`, and `nominal` admits only a scalar base.
+    distinct_type_declaration,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -75,6 +88,8 @@ pub const StripDiagnosticKind = enum {
             .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",
             .nominal_base_not_scalar => "a nominal declaration carries scalar identity only; its base must be `string` or `number`",
             .interface_declaration => "`interface` is not a declaration form in this profile; write `structural Name = { ... };`",
+            .type_alias_declaration => "`type` is not a declaration form in this profile; write `structural Name = ...;`",
+            .distinct_type_declaration => "`distinct type` is not a declaration form in this profile; write `nominal Name = string;`",
         };
     }
 };
@@ -1441,7 +1456,10 @@ const Stripper = struct {
         // checker cannot name, and the published grammar has always said
         // `ScalarType` here - it was the enforcement that was missing, so
         // `distinct type Bad = { a: number }` checked clean.
-        if (is_distinct and !isScalarBaseText(self.source[type_body_start..type_body_end])) {
+        // Skipped for the legacy spelling, which is refused below whatever its
+        // base is. Reporting both would hand the author two diagnostics for one
+        // line and put the one naming the real repair second.
+        if (is_distinct and !keyword_is_type and !isScalarBaseText(self.source[type_body_start..type_body_end])) {
             if (self.report_errors) {
                 std.log.err("{}:{}: {s}", .{
                     body_line,
@@ -1469,16 +1487,26 @@ const Stripper = struct {
         // The body above was scanned, so the span is known and the repair can be
         // exact; the declaration is then refused rather than recorded, and no
         // type-map entry means nothing downstream resolves an interface.
-        if (is_interface) {
+        if (is_interface or keyword_is_type) {
+            const refusal: StripDiagnosticKind = if (is_interface)
+                .interface_declaration
+            else if (is_distinct)
+                .distinct_type_declaration
+            else
+                .type_alias_declaration;
             if (self.report_errors) {
                 std.log.err("{}:{}: {s}", .{
                     span_start_line,
                     span_start_col,
-                    StripDiagnosticKind.interface_declaration.message(),
+                    refusal.message(),
                 });
             }
-            self.recordDiagnosticAt(.interface_declaration, span_start_line, span_start_col);
-            if (!self.collect_all_diagnostics) return StripError.InterfaceDeclaration;
+            self.recordDiagnosticAt(refusal, span_start_line, span_start_col);
+            if (!self.collect_all_diagnostics) return switch (refusal) {
+                .interface_declaration => StripError.InterfaceDeclaration,
+                .distinct_type_declaration => StripError.DistinctTypeDeclaration,
+                else => StripError.TypeAliasDeclaration,
+            };
             self.blankSpan(span_start, self.pos);
             return true;
         }
@@ -2945,7 +2973,7 @@ test "passthrough with comments" {
 }
 
 test "type alias stripped" {
-    const result = try strip(std.testing.allocator, "type X = number;", .{});
+    const result = try strip(std.testing.allocator, "structural X = number;", .{});
     defer @constCast(&result).deinit();
     // Should be all spaces/newlines
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
@@ -3041,7 +3069,7 @@ test "the same refusal reaches the distinct type spelling" {
     // The two spellings share one path, so the rule cannot hold for one and not
     // the other. This is what the published grammar has claimed since it was
     // written: `DistinctDecl ::= "distinct" "type" Ident "=" ScalarType ";"`.
-    const result = strip(std.testing.allocator, "distinct type Bad = { a: number };", .{});
+    const result = strip(std.testing.allocator, "nominal Bad = { a: number };", .{});
     try std.testing.expectError(StripError.NominalBaseNotScalar, result);
 }
 
@@ -3073,7 +3101,7 @@ test "semicolon-less generic type alias does not swallow next statement" {
     // multilineTypeContinues must NOT treat that `>` as a `=>`-style line
     // continuation, otherwise the following statement is scanned into the
     // alias span and silently blanked (a miscompile with data loss).
-    const result = try strip(std.testing.allocator, "type Pair = Foo<Bar>\nconst y = doWork();\n", .{});
+    const result = try strip(std.testing.allocator, "structural Pair = Foo<Bar>\nconst y = doWork();\n", .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const y") != null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "doWork") != null);
@@ -3084,7 +3112,7 @@ test "semicolon-less generic type alias does not swallow next statement" {
 test "multiline function-type alias continuation still preserved" {
     // The `>` of `=>` at end-of-line is a genuine continuation; the alias body
     // wraps to the next line and the following statement must survive.
-    const result = try strip(std.testing.allocator, "type F = () =>\n  string\nconst z = 1;\n", .{});
+    const result = try strip(std.testing.allocator, "structural F = () =>\n  string\nconst z = 1;\n", .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const z") != null);
     // The whole alias, including the wrapped `string`, is stripped.
@@ -3095,7 +3123,7 @@ test "indexed-access type wrapping after a closing generic is not truncated" {
     // `type T = Foo<Bar>` wrapping onto a `[`-leading line (indexed access) must
     // still read as ONE alias. Narrowing the trailing-`>` continuation to only
     // `=>` must not split it; the next-line `[` carries the continuation.
-    const result = try strip(std.testing.allocator, "type T = Foo<Bar>\n  ['key']\nconst y = doWork();\n", .{});
+    const result = try strip(std.testing.allocator, "structural T = Foo<Bar>\n  ['key']\nconst y = doWork();\n", .{});
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, "const y") != null);
     // The whole alias, including the wrapped index, is stripped.
@@ -3284,7 +3312,7 @@ test "public label allowed" {
 }
 
 test "line preservation" {
-    const input = "type X = number;\nlet x = 1;\nconsole.log(x);";
+    const input = "structural X = number;\nlet x = 1;\nconsole.log(x);";
     const result = try strip(std.testing.allocator, input, .{});
     defer @constCast(&result).deinit();
 
@@ -3301,7 +3329,7 @@ test "line preservation" {
 }
 
 test "type with usage preserved" {
-    const input = "type User = { id: number };\nlet u = { id: 1 };";
+    const input = "structural User = { id: number };\nlet u = { id: 1 };";
     const result = try strip(std.testing.allocator, input, .{});
     defer @constCast(&result).deinit();
 
@@ -3534,14 +3562,14 @@ test "generic function stripped" {
 }
 
 test "generic type alias stripped" {
-    const result = try strip(std.testing.allocator, "type Box<T> = { value: T };", .{});
+    const result = try strip(std.testing.allocator, "structural Box<T> = { value: T };", .{});
     defer @constCast(&result).deinit();
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
 test "function type alias stripped" {
-    const result = try strip(std.testing.allocator, "type HandlerFn = (req: Request) => Response;", .{});
+    const result = try strip(std.testing.allocator, "structural HandlerFn = (req: Request) => Response;", .{});
     defer @constCast(&result).deinit();
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
@@ -3580,7 +3608,7 @@ test "full handler example" {
     defer @constCast(&result).deinit();
 
     // Should not contain type annotations
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "type RequestData") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "structural RequestData") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "structural ResponseData") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": RequestData") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": ResponseData") == null);
@@ -3900,7 +3928,7 @@ test "TypeMap records variable annotation" {
 }
 
 test "TypeMap records type alias" {
-    const source = "type Config = { port: number };";
+    const source = "structural Config = { port: number };";
     const result = try strip(std.testing.allocator, source, .{});
     defer @constCast(&result).deinit();
 
@@ -4034,7 +4062,7 @@ test "type guard annotation detected" {
 
 test "distinct type declaration stripped" {
     const allocator = std.testing.allocator;
-    const source = "distinct type UserId = string;";
+    const source = "nominal UserId = string;";
     var result = try strip(allocator, source, .{});
     defer result.deinit();
 
@@ -4118,7 +4146,7 @@ test "type annotation with object-typed value still strips" {
 
 test "export distinct type stripped" {
     const allocator = std.testing.allocator;
-    const source = "export distinct type UserId = string;";
+    const source = "export nominal UserId = string;";
     var result = try strip(allocator, source, .{});
     defer result.deinit();
 

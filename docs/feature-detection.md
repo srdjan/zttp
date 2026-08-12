@@ -52,11 +52,14 @@ found it writing semicolons onto the wrong line and into trailing comments.
 |---|---|---|
 | `nominal Bad = { a: number };` - a nominal base that is not scalar | ZTS048 | A nominal declaration carries scalar identity only, so its base is `string` or `number`. Use `structural` for a record, a tuple, a union, or a function |
 | `interface X { ... }` | ZTS049 | Write `structural X = { ... };`. The `export` form is refused the same way |
+| `type X = ...;` | ZTS050 | Write `structural X = ...;`. `import type` and `export type { ... }` keep the keyword |
+| `distinct type X = string;` | ZTS051 | Write `nominal X = string;` |
 
-The nominal rule reaches the older `distinct type Bad = { ... }` spelling too,
-which shares the same path. The published grammar has always said `ScalarType`
-at that position; until this rule existed nothing enforced it, and a nominal
-type over a record checked clean.
+The published grammar has always said `ScalarType` at that position; until this
+rule existed nothing enforced it, and a nominal type over a record checked
+clean. The rule ran on the older `distinct type` spelling too, which shared the
+path. That spelling is refused outright now, so its base is no longer reached:
+one line gets one diagnostic, and it is the one naming the repair.
 
 `interface` is recognized rather than merely rejected: the body is scanned so
 the span is known and the repair is exact, and no type-map entry is recorded,

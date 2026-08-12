@@ -3124,7 +3124,7 @@ test "a reduce over a filtered entry list is not the fold row" {
 // ---------------------------------------------------------------------------
 
 const command_union_source =
-    "type Command =\n  | { kind: \"echo\"; text: string }\n  | { kind: \"ping\" };\n";
+    "structural Command =\n  | { kind: \"echo\"; text: string }\n  | { kind: \"ping\" };\n";
 
 test "a pattern field renamed to its own name is advised to the shorthand" {
     var h = try checkStripped(command_union_source ++
@@ -3170,19 +3170,19 @@ test "a const initialized from a two-way effectful match passes the profile" {
 test "dropping one arm leaves the JsonValue match non-exhaustive" {
     // The floor under the phase 3 exit gate: a coverage check that answered
     // "exhaustive" for everything would pass the gate without measuring it.
-    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
 
 test "the five arms cover JsonValue without a default" {
-    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n    when array: 2\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
+    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[];\nfunction depth(value: JsonValue): number {\n  return match (value) {\n    when null: 1\n    when boolean: 1\n    when number: 1\n    when string: 1\n    when array: 2\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ d: depth([1]) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
 
 test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
-    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3190,7 +3190,7 @@ test "dropping the Dict arm leaves the six-kind JsonValue non-exhaustive" {
 test "a union carrying Bytes is exhaustive with its Bytes arm" {
     // Spec 5.5's type tests are six now, and `when Bytes:` is the sixth. A
     // union covered member by member needs no `default`.
-    var h = try checkStripped("type Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when Bytes: \"bytes\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkStripped("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when Bytes: \"bytes\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }
@@ -3198,13 +3198,13 @@ test "a union carrying Bytes is exhaustive with its Bytes arm" {
 test "dropping the Bytes arm leaves that union non-exhaustive" {
     // The half that makes the test above mean something: without it, a checker
     // that ignored the arm entirely would pass the covered case too.
-    var h = try checkStripped("type Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkStripped("structural Payload = boolean | number | string | Bytes;\nfunction kindOf(value: Payload): string {\n  return match (value) {\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .non_exhaustive_profile_match);
 }
 
 test "the six arms cover it" {
-    var h = try checkStripped("type JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
+    var h = try checkStripped("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
 }

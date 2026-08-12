@@ -357,27 +357,6 @@ pub const examples = [_]Example{
         ,
     },
     .{
-        .feature = "distinct type",
-        .evidence = .{ .type_annotation = .distinct_type },
-        .source =
-        \\import type { Spec } from "zttp:types";
-        \\
-        \\structural Guard = Spec<"state_isolated">;
-        \\
-        \\nominal UserId = string;
-        \\
-        \\function label(id: UserId): string {
-        \\  return id;
-        \\}
-        \\
-        \\export function handler(req: Request): Response & Guard {
-        \\  const id: UserId = UserId("u-1");
-        \\  return Response.text(label(id));
-        \\}
-        \\
-        ,
-    },
-    .{
         .feature = "structural",
         .evidence = .{ .source_text = .{
             .needle = "structural Point",
@@ -405,7 +384,7 @@ pub const examples = [_]Example{
         .feature = "nominal",
         .evidence = .{ .source_text = .{
             .needle = "nominal OrderId",
-            .reason = "the same reason the `structural` row gives: `nominal` and `distinct type` are one path and one `distinct_type` map kind, so the kind cannot separate the spelling this row exists to teach",
+            .reason = "the same reason the `structural` row gives: the map kind is `distinct_type` whatever the source spelled, so a kind-based row would be satisfied by an example that never wrote the keyword",
         } },
         .source =
         \\import type { Spec } from "zttp:types";

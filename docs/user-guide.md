@@ -171,7 +171,7 @@ arm-scoped `const` that carries the field's narrowed type, so an arm reads the
 field by naming it in the pattern rather than off the scrutinee.
 
 ```ts
-type Command =
+structural Command =
     | { kind: "echo"; text: string }
     | { kind: "ping" };
 
@@ -212,7 +212,7 @@ recursion.
 ```ts
 import type { Spec } from "zttp:types";
 
-type Safe = Spec<"deterministic" | "state_isolated">;
+structural Safe = Spec<"deterministic" | "state_isolated">;
 
 function handler(req: Request): Response & Safe {
     return Response.json({ ok: true });

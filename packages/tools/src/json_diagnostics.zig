@@ -186,6 +186,10 @@ fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
         // far enough to name the exact repair and then refused, so the fault is
         // the declaration form, not an unexpected token.
         .interface_declaration => "ZTS049",
+        // One code each rather than one shared with `interface`: a client keys
+        // on the code to pick a repair, and the three repairs differ.
+        .type_alias_declaration => "ZTS050",
+        .distinct_type_declaration => "ZTS051",
         // The parser band's existing code for the same fault. The stripper
         // reaches it first, so the code is shared rather than minted: a client
         // that handles ZTS008 handles it wherever it was raised.
@@ -672,10 +676,8 @@ const allowed_features = [_]Feature{
     .{ .name = "assert statement", .status = .allowed, .alternative = null },
     .{ .name = "import/export", .status = .allowed, .alternative = null },
     .{ .name = "type annotations", .status = .allowed, .alternative = null },
-    .{ .name = "distinct type", .status = .allowed, .alternative = null },
-    // Phase 7's spellings of the two rows above them. They are separate rows
-    // rather than a renaming because both spellings are admitted during the
-    // cutover, and a client reading this table has to be able to write either.
+    // Phase 7's spellings. `type` and `distinct type` were rows here beside
+    // them through the cutover, and are gone with the forms.
     .{ .name = "structural", .status = .allowed, .alternative = null },
     .{ .name = "nominal", .status = .allowed, .alternative = null },
     .{ .name = "readonly fields", .status = .allowed, .alternative = null },

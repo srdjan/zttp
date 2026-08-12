@@ -20,9 +20,9 @@ The type stripper (`packages/zts/src/stripper.zig`) removes TypeScript syntax be
 ### Supported Subset
 
 **Type declarations** (stripped entirely):
-- `type` and `structural` aliases (including ADT unions)
-- `distinct type` and `nominal` declarations (nominal/branded types)
-- `export type ...` / `export structural ...` / `export nominal ...` / `import type ...`
+- `structural` aliases (including ADT unions)
+- `nominal` declarations (nominal/branded types)
+- `export structural ...` / `export nominal ...` / `import type ...`
 
 **Type annotations** (stripped in place):
 - Variable annotations: `const x: T = ...` or reassigned `let x: T = ...`
@@ -43,8 +43,8 @@ The type stripper (`packages/zts/src/stripper.zig`) removes TypeScript syntax be
 Generic type aliases like `type Result<T> = { ok: boolean; value: T }` are stripped at load time and resolved by the type checker. When the alias is used in an annotation (`const x: Result<string>`), the type checker instantiates the body by substituting the type parameters with the provided arguments, producing a concrete record type for structural checking.
 
 ```typescript
-type Result<T> = { ok: boolean; value: T; error: string };
-type Pair<A, B> = { first: A; second: B };
+structural Result<T> = { ok: boolean; value: T; error: string };
+structural Pair<A, B> = { first: A; second: B };
 
 const auth: Result<object> = jwtVerify(token, secret);  // checked as { ok: boolean; value: object; error: string }
 const pair: Pair<string, number> = { first: "a", second: 1 };
@@ -66,7 +66,7 @@ type:
 ```typescript
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "idempotent"
     | "deterministic"
     | "no_secret_leakage"
@@ -176,7 +176,7 @@ error, so a warning behind a flag would have covered the same helpers.
 
 ```typescript
 // Input
-type User = { id: number; name: string };
+structural User = { id: number; name: string };
 let u: User = { id: 1, name: "a" };
 function add(a: number, b: number): number { return a + b; }
 const x = (foo as number) + 1;
@@ -218,7 +218,7 @@ The type checker (`packages/zts/src/type_checker.zig`) validates type annotation
 - Property access on known record types (including `readonly` enforcement)
 - Virtual module function signatures (argument count and types)
 - Discriminated union narrowing in `match` expressions and `if` conditions
-- Nominal type safety for `distinct type` declarations
+- Nominal type safety for `nominal` declarations
 - Template literal type pattern matching
 - Type guard narrowing (`x is T`) in `if` branches and `assert` statements
 
@@ -253,7 +253,7 @@ if (val !== undefined) {
 Discriminated unions narrow through `if` conditions on tag fields:
 
 ```typescript
-type Result = { kind: "ok", value: string } | { kind: "err", error: string };
+structural Result = { kind: "ok", value: string } | { kind: "err", error: string };
 
 if (r.kind === "err") {
     return Response.json({ error: r.error }, { status: 400 });
@@ -285,13 +285,13 @@ assert isString(name), Response.json({ error: "name required" }, { status: 400 }
 
 When `assert` fails with no error expression, the handler halts. With an explicit error expression, that value is returned.
 
-### Distinct Types
+### Nominal Types
 
-`distinct type` creates nominal types that prevent accidental cross-assignment:
+`nominal` creates types that prevent accidental cross-assignment:
 
 ```typescript
-distinct type UserId = string;
-distinct type SessionId = string;
+nominal UserId = string;
+nominal SessionId = string;
 
 const uid: UserId = UserId("usr_123");     // constructor wraps the base type
 const sid: SessionId = SessionId("sess");
@@ -312,10 +312,10 @@ record that needs a name is a `structural` alias.
 
 ### Structural And Nominal
 
-`structural` and `nominal` are the declaration keywords the model-minimal
-profile uses, and both are admitted now. `structural` is `type` and `nominal`
-is `distinct type`; each pair is one code path, so the two spellings behave
-identically and can be mixed in one file during the migration.
+`structural` and `nominal` are the only declaration keywords. They replaced
+`type` and `distinct type`, which are refused with ZTS050 and ZTS051 and carry
+the exact repair. `import type` and `export type { ... }` keep the keyword:
+each names a declaration made elsewhere rather than making one.
 
 ```typescript
 structural Point = { x: number; y: number };
@@ -333,7 +333,7 @@ and `interface` goes with them.
 The `readonly` modifier prevents assignment to record fields:
 
 ```typescript
-type Config = { readonly port: number; host: string };
+structural Config = { readonly port: number; host: string };
 const cfg: Config = { port: 3000, host: "localhost" };
 cfg.host = "other";  // OK
 cfg.port = 8080;     // ERROR: cannot assign to readonly property
@@ -348,12 +348,12 @@ so a field stays declared in a single source type instead of being copied into
 hand-written aliases that drift:
 
 ```typescript
-type User = { id: number; name: string; email: string };
+structural User = { id: number; name: string; email: string };
 
-type Summary = Pick<User, "id" | "name">; // keep only id and name
-type Safe = Omit<User, "email">;          // drop email
-type UserPatch = Partial<User>;           // every field optional
-type FullUser = Required<UserPatch>;      // every field required again
+structural Summary = Pick<User, "id" | "name">; // keep only id and name
+structural Safe = Omit<User, "email">;          // drop email
+structural UserPatch = Partial<User>;           // every field optional
+structural FullUser = Required<UserPatch>;      // every field required again
 ```
 
 `Pick<T, Keys>` and `Omit<T, Keys>` filter fields by a string-literal key (or a
@@ -366,7 +366,7 @@ an inline object literal, alongside `Readonly<T>`.
 Template literal types validate string patterns at build time:
 
 ```typescript
-type ApiRoute = `/api/${string}`;
+structural ApiRoute = `/api/${string}`;
 const good: ApiRoute = "/api/users";   // OK
 const bad: ApiRoute = "/other";        // ERROR
 ```
@@ -539,7 +539,7 @@ finite set of values is a union of string literals joined with `|`, which the
 compiler can check for exhaustiveness in a `match`.
 
 ```typescript
-type Method = "GET" | "POST" | "DELETE";
+structural Method = "GET" | "POST" | "DELETE";
 
 const defaultMethod: Method = "GET";
 ```
@@ -571,7 +571,7 @@ states unrepresentable. There is one absent-value sentinel, `undefined`, never
 `null`.
 
 ```typescript
-type Result = { kind: "ok", value: string } | { kind: "err", error: string };
+structural Result = { kind: "ok", value: string } | { kind: "err", error: string };
 
 if (r.kind === "err") {
     return Response.json({ error: r.error }, { status: 400 });
@@ -659,7 +659,7 @@ Idiom: constrain a string to a pattern with a template literal type, checked at
 build time.
 
 ```typescript
-type ApiRoute = `/api/${string}`;
+structural ApiRoute = `/api/${string}`;
 
 const defaultRoute: ApiRoute = "/api/health";
 ```
@@ -681,10 +681,10 @@ just an inline object, joining the already-supported `Readonly<T>` (see
 "Readonly Fields" in [TypeScript](typescript.md)).
 
 ```typescript
-type User = { id: number; name: string; email: string; age: number };
-type Summary = Pick<User, "id" | "name">; // { id: number; name: string }
-type Safe = Omit<User, "email">;          // id, name, age
-type UserPatch = Partial<User>;           // every field optional
+structural User = { id: number; name: string; email: string; age: number };
+structural Summary = Pick<User, "id" | "name">; // { id: number; name: string }
+structural Safe = Omit<User, "email">;          // id, name, age
+structural UserPatch = Partial<User>;           // every field optional
 ```
 
 See [derive-types.ts](../examples/patterns/derive-types.ts). Intersection (`&`)
@@ -709,7 +709,7 @@ checks the literal against `Config` and keeps its narrow type, which is what
 `satisfies` was for.
 
 ```typescript
-type Config = { port: number; host: string; readonly version: string };
+structural Config = { port: number; host: string; readonly version: string };
 const config: Config = { port: 8080, host: "0.0.0.0", version: "1.0" };
 ```
 

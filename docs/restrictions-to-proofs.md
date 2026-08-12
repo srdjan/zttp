@@ -3,7 +3,7 @@
 Generated from `packages/zts/src/restriction_registry.zig`, the machine-readable
 form of the spec's restriction matrix. Each row pairs a refused construct with
 the boundary the refusal protects. `zttp restrictions` prints the frozen
-version-1 rows; the version-2 `restrictions` operation returns all 35.
+version-1 rows; the version-2 `restrictions` operation returns all 37.
 
 Every entry is a deliberate cut from JavaScript or TypeScript. The rows that
 predate the version-1 freeze name the failure class the cut removes and the
@@ -66,6 +66,8 @@ clients through the version-2 `restrictions` operation rather than through
 | multiple record spreads | fixed-shape elaboration without field-presence tests | `canonical_simplicity` | `ZTS614` |
 | fallback `assert` | one explicit early-return spelling | `canonical_simplicity` | `ZTS002` |
 | interface | one closed data and module model | `language_simplicity` | `ZTS049` |
+| `type` declaration | one closed data and module model | `language_simplicity` | `ZTS050` |
+| `distinct type` declaration | one closed data and module model | `language_simplicity` | `ZTS051` |
 | `\|>`, `pipe()`, `guard()` | one spelling for calling a function | `language_simplicity` | `ZTS001` |
 | object methods, getters, setters | explicit functions and effects | `language_simplicity` | `ZTS001` |
 
@@ -112,5 +114,7 @@ Per-restriction rationale, one sentence each.
 - **multiple record spreads** - canonical simplicity; write explicit fields over one base
 - **fallback `assert`** - use `if` plus `return`
 - **interface** - write `structural Name = { ... };`
+- **`type` declaration** - write `structural Name = ...;`
+- **`distinct type` declaration** - write `nominal Name = string;`
 - **`|>`, `pipe()`, `guard()`** - write the call directly; run guards by explicit early return
 - **object methods, getters, setters** - language-simplicity choice

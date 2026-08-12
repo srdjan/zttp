@@ -4189,7 +4189,7 @@ test "check never answers success false with an empty diagnostics array" {
         "export function handler(req) { return Response.json({ ok: true }); }\n",
         // And one that does not fail at all, so the assertion below is about
         // the pairing rather than about everything being broken.
-        "import type { Spec } from \"zttp:types\";\ntype G = Spec<\"state_isolated\">;\nexport function handler(req: Request): Response & G {\n  return Response.json({ ok: true });\n}\n",
+        "import type { Spec } from \"zttp:types\";\nstructural G = Spec<\"state_isolated\">;\nexport function handler(req: Request): Response & G {\n  return Response.json({ ok: true });\n}\n",
     };
 
     var saw_failure = false;

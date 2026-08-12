@@ -227,7 +227,7 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 | Assignment | `=` `+=` `-=` `*=` `/=` `%=` `**=` |
 | Modules | `import { x } from "zttp:mod"`, `import { x } from "./local"`, `export` |
 | Special | `match` expression, `comptime()` |
-| Types | `structural` and `nominal` declarations (and the `type` and `distinct type` they replace), annotations, `readonly` fields, type guards (`x is T`), template literal types |
+| Types | `structural` and `nominal` declarations, annotations, `readonly` fields, type guards (`x is T`), template literal types |
 
 ### What's Blocked (and Why)
 
@@ -251,6 +251,8 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 | `delete` | New object literal with only the keys you keep |
 | `\|>`, `pipe()`, `guard()` | Call directly; run guards by explicit early return |
 | `interface` | `structural Name = { ... };` |
+| `type X = ...` | `structural X = ...;` |
+| `distinct type X = string` | `nominal X = string;` |
 
 ### Error Handling
 
@@ -300,7 +302,7 @@ Without an error expression, `assert` halts. With one, it returns that value.
 Unions with a tag field narrow through `if` conditions:
 
 ```typescript
-type Result = { kind: "ok", value: string } | { kind: "err", error: string };
+structural Result = { kind: "ok", value: string } | { kind: "err", error: string };
 
 if (r.kind === "err") {
     return Response.json({ error: r.error }, { status: 400 });
@@ -310,11 +312,11 @@ if (r.kind === "err") {
 
 ### Distinct Types
 
-`distinct type` creates nominal types. Values of different distinct types are incompatible even if they share the same base:
+`nominal` creates a distinct scalar identity. Values of different nominal types are incompatible even if they share the same base:
 
 ```typescript
-distinct type UserId = string;
-distinct type SessionId = string;
+nominal UserId = string;
+nominal SessionId = string;
 
 const uid: UserId = UserId("usr_123");
 const sid: SessionId = SessionId("sess");
@@ -326,14 +328,14 @@ const sid: SessionId = SessionId("sess");
 `readonly` fields reject assignment at compile time:
 
 ```typescript
-type Config = { readonly port: number; host: string };
+structural Config = { readonly port: number; host: string };
 cfg.port = 8080;  // ERROR
 ```
 
 Template literal types validate string patterns:
 
 ```typescript
-type ApiRoute = `/api/${string}`;
+structural ApiRoute = `/api/${string}`;
 const good: ApiRoute = "/api/users";   // OK
 const bad: ApiRoute = "/other";        // ERROR
 ```
@@ -496,7 +498,7 @@ If `zts check --json` returns an error with a suggestion, **use the suggestion**
 Use `.tsx` files for server-side HTML rendering. There is no client-side hydration. `renderToString` is the only rendering entry point.
 
 ```tsx
-type Todo = { id: number; text: string; done: boolean };
+structural Todo = { id: number; text: string; done: boolean };
 
 function TodoItem(props: { todo: Todo }): JSX.Element {
     const cls = props.todo.done ? "done" : "pending";

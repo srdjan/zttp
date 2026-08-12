@@ -1030,7 +1030,7 @@ pub fn synthesizeRoute(
     const has_router = std.mem.indexOf(u8, source, "zttp:router") != null;
     const has_routes = std.mem.indexOf(u8, source, "const routes = {") != null;
     const has_spec_import = std.mem.indexOf(u8, source, "from \"zttp:types\"") != null;
-    const has_guardrails_alias = std.mem.indexOf(u8, source, "type Guardrails =") != null;
+    const has_guardrails_alias = std.mem.indexOf(u8, source, "structural Guardrails =") != null;
 
     if (!has_router) {
         if (!has_spec_import) try out.appendSlice(allocator, "import type { Spec } from \"zttp:types\";\n");

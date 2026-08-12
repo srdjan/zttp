@@ -437,6 +437,25 @@ pub const entries = [_]RestrictionEntry{
         .enforced_by = &.{"ZTS049"},
     },
     .{
+        .id = "restriction.type-alias",
+        .feature = "`type` declaration",
+        .boundary = "one closed data and module model",
+        .nature = .language_simplicity,
+        // `import type` and `export type { ... }` keep the keyword: both name
+        // a declaration made elsewhere rather than making one, and the
+        // stripper handles them before the declaration path.
+        .note = "write `structural Name = ...;`",
+        .enforced_by = &.{"ZTS050"},
+    },
+    .{
+        .id = "restriction.distinct-type",
+        .feature = "`distinct type` declaration",
+        .boundary = "one closed data and module model",
+        .nature = .language_simplicity,
+        .note = "write `nominal Name = string;`",
+        .enforced_by = &.{"ZTS051"},
+    },
+    .{
         .id = "restriction.pipe-operator",
         .feature = "`|>`, `pipe()`, `guard()`",
         .boundary = "one spelling for calling a function",

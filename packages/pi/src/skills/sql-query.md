@@ -13,7 +13,7 @@ Add a SQL query using `zttp:sql`:
 import type { Spec } from "zttp:types";
 import { sql, sqlOne, sqlExec } from "zttp:sql";
 
-type SqlWriteSpec = Spec<"deterministic" | "state_isolated" | "fault_covered" | "canonical">;
+structural SqlWriteSpec = Spec<"deterministic" | "state_isolated" | "fault_covered" | "canonical">;
 
 sql("getUser", "SELECT id, name FROM users WHERE id = :id");
 sql("touchUser", "UPDATE users SET seen = 1 WHERE id = :id");

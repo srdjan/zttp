@@ -1,7 +1,7 @@
 //! Type Environment: resolves type names to TypePool indices.
 //!
 //! Populated from TypeMap entries extracted by the stripper. Provides:
-//! - Type alias resolution (type Foo = ...)
+//! - Type alias resolution (structural Foo = ...)
 //! - Interface resolution (interface Bar { ... })
 //! - Variable type annotations (const x: Type = ...)
 //! - Function signatures (params + return types)
@@ -224,7 +224,7 @@ pub fn parseTypePredicate(text: []const u8) ?struct { param_name: []const u8, ty
 }
 
 // ---------------------------------------------------------------------------
-// Generic type alias (type Result<T> = ...)
+// Generic type alias (structural Result<T> = ...)
 // ---------------------------------------------------------------------------
 
 pub const GenericAlias = struct {
@@ -384,7 +384,7 @@ pub const TypeEnv = struct {
     non_contractive_aliases: std.StringHashMapUnmanaged(void),
     /// The same aliases by the index their name resolves to. An annotation is
     /// resolved before the checker sees it, and only a name with no definition
-    /// at all survives as a `t_ref` - `type U = number | U` arrives as the
+    /// at all survives as a `t_ref` - `structural U = number | U` arrives as the
     /// union itself, so a name-only lookup would miss every alias that has a
     /// body, which is every one that matters.
     non_contractive_indices: std.AutoHashMapUnmanaged(TypeIndex, void),
@@ -988,7 +988,7 @@ pub const TypeEnv = struct {
                     const src = self.resolveRefToRecord(self.tryInstantiateGenericApp(raw_args[0]));
                     if (src == null_type_idx) return idx;
                     // Resolve the keys argument through the alias map too, so
-                    // `type K = "id" | "name"; Pick<User, K>` sees the literal
+                    // `structural K = "id" | "name"; Pick<User, K>` sees the literal
                     // union instead of an unresolved t_ref (which collectStringKeys
                     // reads as zero keys, silently returning the full source - an
                     // unsound over-accept).
@@ -1093,7 +1093,7 @@ pub const TypeEnv = struct {
     /// Spec 5.7: a recursive alias is contractive when every cycle passes
     /// through a record, tuple, or array constructor - `Dict` joins that list
     /// in phase 4. Union and intersection edges do not guard recursion, so
-    /// `type Loop = Loop`, `type U = number | U`, and a cycle through a
+    /// `structural Loop = Loop`, `structural U = number | U`, and a cycle through a
     /// function parameter are all errors rather than infinite types.
     ///
     /// Decided per alias by walking its body and stopping at the first
@@ -1169,7 +1169,7 @@ pub const TypeEnv = struct {
     }
 
     /// Follow a t_ref through the alias then interface map to its underlying
-    /// type, chasing chains (`type A = B; type B = {...}` stores A as t_ref(B))
+    /// type, chasing chains (`structural A = B; structural B = {...}` stores A as t_ref(B))
     /// up to a small depth with a self-reference guard. Non-ref types and
     /// unresolved refs pass through unchanged.
     fn resolveRef(self: *const TypeEnv, idx: TypeIndex) TypeIndex {
@@ -1237,7 +1237,7 @@ pub const TypeEnv = struct {
                 // Request/WebSocket-style nominal refs have no definition in
                 // TypeEnv, so unresolved named refs are pragmatically object-like.
                 // This over-accepts an unresolved primitive alias such as
-                // `type Foo = string`; aliases present in TypeEnv resolve above.
+                // `structural Foo = string`; aliases present in TypeEnv resolve above.
                 break :blk true;
             },
             .t_union => blk: {
@@ -1321,7 +1321,7 @@ pub const TypeEnv = struct {
 
     /// Register a type alias that no source text declares. The runtime's own
     /// globals arrive this way: a handler writes `: Response` and there is no
-    /// `type Response = ...` anywhere to read it from.
+    /// `structural Response = ...` anywhere to read it from.
     pub fn putTypeAlias(self: *TypeEnv, name: []const u8, type_idx: TypeIndex) void {
         const owned_name = self.internName(name);
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
@@ -1536,7 +1536,7 @@ pub const TypeEnv = struct {
                 }
             },
             .t_ref => {
-                // An aliased capability set (`type Caps = "clock" | "crypto";`
+                // An aliased capability set (`structural Caps = "clock" | "crypto";`
                 // used as `Effects<Response, Caps>`) reaches here as a t_ref.
                 // Resolve through the alias/interface chain and recurse so the
                 // literal names are recovered; without this the budget extracts
@@ -1643,6 +1643,16 @@ fn installTestBoxGenericAlias(env: *TypeEnv) !void {
     });
 }
 
+/// Byte span of `needle` inside `haystack`, for tests that hand-build a
+/// `TypeMap` instead of running the stripper. They used to hardcode the
+/// offsets, which made every one of them a hostage to the width of the
+/// declaration keyword: renaming `type` to `structural` moved each span by
+/// six bytes and failed seven tests that have nothing to do with keywords.
+fn testSpan(haystack: []const u8, needle: []const u8) struct { start: u32, end: u32 } {
+    const at = std.mem.indexOf(u8, haystack, needle).?;
+    return .{ .start = @intCast(at), .end = @intCast(at + needle.len) };
+}
+
 test "TypeEnv basic type alias resolution" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
@@ -1651,19 +1661,22 @@ test "TypeEnv basic type alias resolution" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: type Config = { port: number }
-    const source = "type Config = { port: number };";
+    // Simulate: structural Config = { port: number }
+    const source = "structural Config = { port: number };";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
+    const body_span = testSpan(source, "{ port: number }");
+    const name_span = testSpan(source, "Config");
+
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 14, // "{ port: number }"
-        .source_end = 30,
+        .source_start = body_span.start, // "{ port: number }"
+        .source_end = body_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "Config"
-        .name_end = 11,
+        .name_start = name_span.start, // "Config"
+        .name_end = name_span.end,
     });
 
     env.populateFromTypeMap(&tm);
@@ -1727,28 +1740,34 @@ test "TypeEnv resolves type aliases in annotations" {
     defer env.deinit();
 
     // First: define a type alias
-    const source = "type Status = number;const code: Status = 200;";
+    const source = "structural Status = number;const code: Status = 200;";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
+    const body_span = testSpan(source, "number");
+    const name_span = testSpan(source, "Status");
+
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 14, // "number"
-        .source_end = 20,
+        .source_start = body_span.start, // "number"
+        .source_end = body_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "Status"
-        .name_end = 11,
+        .name_start = name_span.start, // "Status"
+        .name_end = name_span.end,
     });
+
+    const ann_span = testSpan(source, "Status = 200");
+    const code_span = testSpan(source, "code");
 
     try tm.addEntry(allocator, .{
         .kind = .var_annotation,
-        .source_start = 33, // "Status"
-        .source_end = 39,
+        .source_start = ann_span.start, // "Status"
+        .source_end = ann_span.start + 6,
         .context_line = 1,
         .context_col = 22,
-        .name_start = 27, // "code"
-        .name_end = 31,
+        .name_start = code_span.start, // "code"
+        .name_end = code_span.end,
     });
 
     env.populateFromTypeMap(&tm);
@@ -1849,43 +1868,49 @@ test "TypeEnv generic type alias Result<string>" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: type Result<T> = { ok: boolean; value: T; error: string }
+    // Simulate: structural Result<T> = { ok: boolean; value: T; error: string }
     //           const auth: Result<object> = jwtVerify(token, secret);
-    const source = "type Result<T> = { ok: boolean; value: T; error: string };const auth: Result<object> = jwtVerify();";
+    const source = "structural Result<T> = { ok: boolean; value: T; error: string };const auth: Result<object> = jwtVerify();";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
+
+    const body_span = testSpan(source, "{ ok: boolean; value: T; error: string }");
+    const name_span = testSpan(source, "Result");
 
     // type_alias entry: body is "{ ok: boolean; value: T; error: string }"
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 17, // "{ ok: boolean; value: T; error: string }"
-        .source_end = 57,
+        .source_start = body_span.start, // "{ ok: boolean; value: T; error: string }"
+        .source_end = body_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "Result"
-        .name_end = 11,
+        .name_start = name_span.start, // "Result"
+        .name_end = name_span.end,
     });
 
     // generic_params entry: "T" (same name range as the alias)
+    const param_span = testSpan(source, "T>");
     try tm.addEntry(allocator, .{
         .kind = .generic_params,
-        .source_start = 12, // "T"
-        .source_end = 13,
+        .source_start = param_span.start, // "T"
+        .source_end = param_span.start + 1,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "Result"
-        .name_end = 11,
+        .name_start = name_span.start, // "Result"
+        .name_end = name_span.end,
     });
 
     // var annotation: auth: Result<object>
+    const ann_span = testSpan(source, "Result<object>");
+    const auth_span = testSpan(source, "auth");
     try tm.addEntry(allocator, .{
         .kind = .var_annotation,
-        .source_start = 70, // "Result<object>"
-        .source_end = 84,
+        .source_start = ann_span.start, // "Result<object>"
+        .source_end = ann_span.end,
         .context_line = 1,
         .context_col = 58,
-        .name_start = 64, // "auth"
-        .name_end = 68,
+        .name_start = auth_span.start, // "auth"
+        .name_end = auth_span.end,
     });
 
     env.populateFromTypeMap(&tm);
@@ -1918,40 +1943,46 @@ test "TypeEnv generic alias with multiple params" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: type Pair<A, B> = { first: A; second: B }
+    // Simulate: structural Pair<A, B> = { first: A; second: B }
     //           const p: Pair<string, number> = ...
-    const source = "type Pair<A, B> = { first: A; second: B };const p: Pair<string, number> = x;";
+    const source = "structural Pair<A, B> = { first: A; second: B };const p: Pair<string, number> = x;";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
+    const body_span = testSpan(source, "{ first: A; second: B }");
+    const name_span = testSpan(source, "Pair");
+
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 18, // "{ first: A; second: B }"
-        .source_end = 41,
+        .source_start = body_span.start, // "{ first: A; second: B }"
+        .source_end = body_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "Pair"
-        .name_end = 9,
+        .name_start = name_span.start, // "Pair"
+        .name_end = name_span.end,
     });
 
+    const param_span = testSpan(source, "A, B");
     try tm.addEntry(allocator, .{
         .kind = .generic_params,
-        .source_start = 10, // "A, B"
-        .source_end = 14,
+        .source_start = param_span.start, // "A, B"
+        .source_end = param_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5,
-        .name_end = 9,
+        .name_start = name_span.start,
+        .name_end = name_span.end,
     });
 
+    const ann_span = testSpan(source, "Pair<string, number>");
+    const p_span = testSpan(source, "p: Pair<");
     try tm.addEntry(allocator, .{
         .kind = .var_annotation,
-        .source_start = 51, // "Pair<string, number>"
-        .source_end = 71,
+        .source_start = ann_span.start, // "Pair<string, number>"
+        .source_end = ann_span.end,
         .context_line = 1,
         .context_col = 42,
-        .name_start = 48, // "p"
-        .name_end = 49,
+        .name_start = p_span.start, // "p"
+        .name_end = p_span.start + 1,
     });
 
     env.populateFromTypeMap(&tm);
@@ -2120,22 +2151,25 @@ test "TypeEnv intersection alias type AB = A & B" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Simulate: type AB = A & B;
+    // Simulate: structural AB = A & B;
     // Names A and B stay as t_ref inside the intersection (resolveType only
     // substitutes alias names when the entire annotation text matches; nested
     // identifiers in compound expressions remain refs - same behaviour as union).
-    const source = "type AB = A & B;";
+    const source = "structural AB = A & B;";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
+    const body_span = testSpan(source, "A & B");
+    const name_span = testSpan(source, "AB");
+
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 10, // "A & B"
-        .source_end = 15,
+        .source_start = body_span.start, // "A & B"
+        .source_end = body_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "AB"
-        .name_end = 7,
+        .name_start = name_span.start, // "AB"
+        .name_end = name_span.end,
     });
 
     env.populateFromTypeMap(&tm);
@@ -2235,7 +2269,7 @@ test "resolveType Required<A> follows a forward alias chain to the record" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // `type A = B` (forward) stores A as a t_ref(B); B is the record. Previously
+    // `structural A = B` (forward) stores A as a t_ref(B); B is the record. Previously
     // resolveRefToRecord returned the t_ref unchanged, so Required<A> no-op'd and
     // accepted any record. It must now chase the chain and clear `host?`.
     const b = parseTypeExpr(&pool, allocator, "{ host?: string }");
@@ -2402,29 +2436,32 @@ test "extractSpecMembers walks intersection through alias to literal union" {
     defer env.deinit();
 
     // Simulate:
-    //     type Guardrails = Spec<"idempotent" | "deterministic">;
+    //     structural Guardrails = Spec<"idempotent" | "deterministic">;
     //     function handler(): Response & Guardrails { ... }
     const source =
-        "type Guardrails = Spec<\"idempotent\" | \"deterministic\">;" ++
+        "structural Guardrails = Spec<\"idempotent\" | \"deterministic\">;" ++
         "function handler(): Response & Guardrails { return null; }";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
     // Guardrails alias body: Spec<"idempotent" | "deterministic">
+    const body_span = testSpan(source, "Spec<\"idempotent\" | \"deterministic\">");
+    const name_span = testSpan(source, "Guardrails");
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 18,
-        .source_end = 54,
+        .source_start = body_span.start,
+        .source_end = body_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5,
-        .name_end = 15,
+        .name_start = name_span.start,
+        .name_end = name_span.end,
     });
     // Return annotation: Response & Guardrails
+    const ret_span = testSpan(source, "Response & Guardrails");
     try tm.addEntry(allocator, .{
         .kind = .return_annotation,
-        .source_start = 75,
-        .source_end = 96,
+        .source_start = ret_span.start,
+        .source_end = ret_span.end,
         .context_line = 7,
         .context_col = 1,
         .name_start = 0,
@@ -2769,19 +2806,22 @@ test "TypeEnv leading-pipe union literal" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // type Names = | "a" | "b" | "c"
-    const source = "type Names = | \"a\" | \"b\" | \"c\";";
+    // structural Names = | "a" | "b" | "c"
+    const source = "structural Names = | \"a\" | \"b\" | \"c\";";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
+    const body_span = testSpan(source, "| \"a\" | \"b\" | \"c\"");
+    const name_span = testSpan(source, "Names");
+
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
-        .source_start = 13, // "| \"a\" | \"b\" | \"c\""
-        .source_end = 30,
+        .source_start = body_span.start,
+        .source_end = body_span.end,
         .context_line = 1,
         .context_col = 1,
-        .name_start = 5, // "Names"
-        .name_end = 10,
+        .name_start = name_span.start,
+        .name_end = name_span.end,
     });
 
     env.populateFromTypeMap(&tm);
@@ -2841,7 +2881,7 @@ test "a generic alias instantiates through the stripper's own recording" {
     const allocator = std.testing.allocator;
     var strip_result = try @import("zts-engine").stripper.strip(
         allocator,
-        "type Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n",
+        "structural Box<V> = { v: V };\nconst b: Box<string> = { v: \"x\" };\n",
         .{},
     );
     defer strip_result.deinit();
@@ -2934,7 +2974,7 @@ test "readonly on an array alias survives to the resolved type" {
     const allocator = std.testing.allocator;
     var strip_result = try @import("zts-engine").stripper.strip(
         allocator,
-        "type Items = string[];\nconst f: readonly Items = [\"a\"];\n",
+        "structural Items = string[];\nconst f: readonly Items = [\"a\"];\n",
         .{},
     );
     defer strip_result.deinit();
