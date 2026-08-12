@@ -17,12 +17,28 @@ const CapabilityMatrix = contract_types.CapabilityMatrix;
 
 const writeJsonString = json_utils.writeJsonString;
 
+const JsonVersion = enum { v1, v2 };
+
 /// Write the contract as JSON to a writer.
 pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !void {
+    return writeContractJsonVersion(.v1, contract, writer);
+}
+
+/// Version 2: the same contract, snake_case keys, for the version-2 agent wire.
+pub fn writeContractJsonV2(contract: *const HandlerContract, writer: anytype) !void {
+    return writeContractJsonVersion(.v2, contract, writer);
+}
+
+fn writeContractJsonVersion(
+    comptime json_version: JsonVersion,
+    contract: *const HandlerContract,
+    writer: anytype,
+) !void {
+    @setEvalBranchQuota(10_000);
     try writer.writeAll("{\n");
 
     // version
-    try writer.print("  \"version\": {d},\n", .{contract.version});
+    try writer.print("  \"version\": {d},\n", .{if (json_version == .v1) contract.version else 2});
 
     // handler
     try writer.writeAll("  \"handler\": {\n");
@@ -48,7 +64,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, route.field);
         try writer.writeAll(",\n");
         try writer.print("      \"status\": {d},\n", .{route.status});
-        try writer.writeAll("      \"contentType\": ");
+        try writer.writeAll("      \"" ++ comptime contractKey(json_version, "contentType") ++ "\": ");
         try writeJsonString(writer, route.content_type);
         try writer.writeAll(",\n");
         try writer.print("      \"aot\": {s}\n", .{if (route.aot) "true" else "false"});
@@ -81,22 +97,22 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, @tagName(cap));
     }
     try writer.writeAll("],\n");
-    try writer.writeAll("    \"capabilityHash\": ");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "capabilityHash") ++ "\": ");
     try json_utils.writeJsonHex(writer, caps.hash);
     try writer.writeAll(",\n");
-    try writer.writeAll("    \"declaredBudget\": [");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "declaredBudget") ++ "\": [");
     for (contract.capability_budget.slice(), 0..) |cap, i| {
         if (i > 0) try writer.writeAll(", ");
         try writeJsonString(writer, @tagName(cap));
     }
     try writer.writeAll("],\n");
-    try writer.writeAll("    \"policyHash\": ");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "policyHash") ++ "\": ");
     try json_utils.writeJsonHex(writer, contract.policy_hash);
     try writer.writeAll(",\n");
-    try writer.writeAll("    \"wasmPolicyHash\": ");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "wasmPolicyHash") ++ "\": ");
     try json_utils.writeJsonHex(writer, contract.wasm_policy_hash);
     try writer.writeAll(",\n");
-    try writer.writeAll("    \"artifactSha256\": ");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "artifactSha256") ++ "\": ");
     try json_utils.writeJsonHex(writer, contract.artifact_sha256);
     try writer.writeAll("\n");
     try writer.writeAll("  },\n");
@@ -150,7 +166,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("  },\n");
 
     // serviceCalls
-    try writer.writeAll("  \"serviceCalls\": [");
+    try writer.writeAll("  \"" ++ comptime contractKey(json_version, "serviceCalls") ++ "\": [");
     for (contract.service_calls.items, 0..) |service_call, i| {
         if (i > 0) try writer.writeAll(",");
         try writer.writeAll("\n    {\n");
@@ -161,11 +177,11 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, service_call.route_pattern);
         try writer.writeAll(",\n");
         try writer.print("      \"dynamic\": {s},\n", .{if (service_call.dynamic) "true" else "false"});
-        try writeKnownListJson(writer, "pathParams", "pathParamsDynamic", service_call.path_params);
-        try writeKnownListJson(writer, "queryKeys", "queryDynamic", service_call.query_keys);
-        try writeKnownListJson(writer, "headerKeys", "headerDynamic", service_call.header_keys);
-        try writer.print("      \"hasBody\": {s},\n", .{if (service_call.body.isPresent()) "true" else "false"});
-        try writer.print("      \"bodyDynamic\": {s}\n", .{if (service_call.body.isDynamic()) "true" else "false"});
+        try writeKnownListJson(json_version, writer, "pathParams", "pathParamsDynamic", service_call.path_params);
+        try writeKnownListJson(json_version, writer, "queryKeys", "queryDynamic", service_call.query_keys);
+        try writeKnownListJson(json_version, writer, "headerKeys", "headerDynamic", service_call.header_keys);
+        try writer.print("      \"" ++ comptime contractKey(json_version, "hasBody") ++ "\": {s},\n", .{if (service_call.body.isPresent()) "true" else "false"});
+        try writer.print("      \"" ++ comptime contractKey(json_version, "bodyDynamic") ++ "\": {s}\n", .{if (service_call.body.isDynamic()) "true" else "false"});
         try writer.writeAll("    }");
     }
     if (contract.service_calls.items.len > 0) {
@@ -174,7 +190,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("],\n");
 
     // workflowCalls (zttp:workflow call/saga/fanout targets resolved by the system linker)
-    try writer.writeAll("  \"workflowCalls\": [");
+    try writer.writeAll("  \"" ++ comptime contractKey(json_version, "workflowCalls") ++ "\": [");
     for (contract.workflow_calls.items, 0..) |wc, i| {
         if (i > 0) try writer.writeAll(",");
         try writer.writeAll("\n    {\n");
@@ -214,7 +230,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("\n  ");
     }
     try writer.writeAll("],\n");
-    try writer.print("  \"affordancesDynamic\": {s},\n", .{if (contract.affordances_dynamic) "true" else "false"});
+    try writer.print("  \"" ++ comptime contractKey(json_version, "affordancesDynamic") ++ "\": {s},\n", .{if (contract.affordances_dynamic) "true" else "false"});
 
     // cache
     try writer.writeAll("  \"cache\": {\n");
@@ -288,7 +304,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("],\n");
     try writer.print("      \"dynamic\": {s}\n", .{if (contract.durable.signals.dynamic) "true" else "false"});
     try writer.writeAll("    },\n");
-    try writer.writeAll("    \"producerKeys\": {\n");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "producerKeys") ++ "\": {\n");
     try writer.writeAll("      \"literal\": [");
     for (contract.durable.producer_keys.literal.items, 0..) |key, i| {
         if (i > 0) try writer.writeAll(", ");
@@ -298,20 +314,20 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.print("      \"dynamic\": {s}\n", .{if (contract.durable.producer_keys.dynamic) "true" else "false"});
     try writer.writeAll("    },\n");
     try writer.writeAll("    \"workflow\": {\n");
-    try writer.writeAll("      \"workflowId\": ");
+    try writer.writeAll("      \"" ++ comptime contractKey(json_version, "workflowId") ++ "\": ");
     if (contract.durable.workflow.workflow_id) |workflow_id| {
         try writeJsonString(writer, workflow_id);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
-    try writer.writeAll("      \"proofLevel\": ");
+    try writer.writeAll("      \"" ++ comptime contractKey(json_version, "proofLevel") ++ "\": ");
     try writeJsonString(writer, contract.durable.workflow.proof_level.toString());
     try writer.writeAll(",\n");
     try writer.writeAll("      \"properties\": {\n");
-    try writer.print("        \"retrySafe\": {s},\n", .{if (contract.durable.workflow.properties.retry_safe) "true" else "false"});
+    try writer.print("        \"" ++ comptime contractKey(json_version, "retrySafe") ++ "\": {s},\n", .{if (contract.durable.workflow.properties.retry_safe) "true" else "false"});
     try writer.print("        \"idempotent\": {s},\n", .{if (contract.durable.workflow.properties.idempotent) "true" else "false"});
-    try writer.print("        \"faultCovered\": {s},\n", .{if (contract.durable.workflow.properties.fault_covered) "true" else "false"});
+    try writer.print("        \"" ++ comptime contractKey(json_version, "faultCovered") ++ "\": {s},\n", .{if (contract.durable.workflow.properties.fault_covered) "true" else "false"});
     try writer.writeAll("        \"reasons\": [");
     for (contract.durable.workflow.properties.reasons.items, 0..) |reason, i| {
         if (i > 0) try writer.writeAll(", ");
@@ -386,7 +402,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     }
     try writer.writeAll("],\n");
     try writer.print("    \"dynamic\": {s},\n", .{if (contract.scope.dynamic) "true" else "false"});
-    try writer.print("    \"maxDepth\": {d}\n", .{contract.scope.max_depth});
+    try writer.print("    \"" ++ comptime contractKey(json_version, "maxDepth") ++ "\": {d}\n", .{contract.scope.max_depth});
     try writer.writeAll("  },\n");
 
     // api
@@ -409,7 +425,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     try writer.writeAll("],\n");
 
     try writer.writeAll("    \"requests\": {\n");
-    try writer.writeAll("      \"schemaRefs\": [");
+    try writer.writeAll("      \"" ++ comptime contractKey(json_version, "schemaRefs") ++ "\": [");
     for (contract.api.requests.schema_refs.items, 0..) |schema_ref, i| {
         if (i > 0) try writer.writeAll(", ");
         try writeJsonString(writer, schema_ref);
@@ -433,16 +449,16 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("        \"path\": ");
         try writeJsonString(writer, route.path);
         try writer.writeAll(",\n");
-        try writer.writeAll("        \"requestSchemaRefs\": [");
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "requestSchemaRefs") ++ "\": [");
         for (route.request_schema_refs.items, 0..) |schema_ref, j| {
             if (j > 0) try writer.writeAll(", ");
             try writeJsonString(writer, schema_ref);
         }
         try writer.writeAll("],\n");
-        try writer.print("        \"requestSchemaDynamic\": {s},\n", .{if (route.request_schema_dynamic) "true" else "false"});
-        try writer.print("        \"requiresBearer\": {s},\n", .{if (route.requires_bearer) "true" else "false"});
-        try writer.print("        \"requiresJwt\": {s},\n", .{if (route.requires_jwt) "true" else "false"});
-        try writer.writeAll("        \"pathParams\": [");
+        try writer.print("        \"" ++ comptime contractKey(json_version, "requestSchemaDynamic") ++ "\": {s},\n", .{if (route.request_schema_dynamic) "true" else "false"});
+        try writer.print("        \"" ++ comptime contractKey(json_version, "requiresBearer") ++ "\": {s},\n", .{if (route.requires_bearer) "true" else "false"});
+        try writer.print("        \"" ++ comptime contractKey(json_version, "requiresJwt") ++ "\": {s},\n", .{if (route.requires_jwt) "true" else "false"});
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "pathParams") ++ "\": [");
         for (route.path_params.items, 0..) |param, j| {
             if (j > 0) try writer.writeAll(",");
             try writeApiParamJson(writer, &param);
@@ -451,7 +467,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writer.writeAll("\n        ");
         }
         try writer.writeAll("],\n");
-        try writer.writeAll("        \"queryParams\": [");
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "queryParams") ++ "\": [");
         for (route.query_params.items, 0..) |param, j| {
             if (j > 0) try writer.writeAll(",");
             try writeApiParamJson(writer, &param);
@@ -460,7 +476,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writer.writeAll("\n        ");
         }
         try writer.writeAll("],\n");
-        try writer.writeAll("        \"headerParams\": [");
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "headerParams") ++ "\": [");
         for (route.header_params.items, 0..) |param, j| {
             if (j > 0) try writer.writeAll(",");
             try writeApiParamJson(writer, &param);
@@ -469,74 +485,74 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writer.writeAll("\n        ");
         }
         try writer.writeAll("],\n");
-        try writer.print("        \"queryParamsDynamic\": {s},\n", .{if (route.query_params_dynamic) "true" else "false"});
-        try writer.print("        \"headerParamsDynamic\": {s},\n", .{if (route.header_params_dynamic) "true" else "false"});
-        try writer.writeAll("        \"requestBodies\": [");
+        try writer.print("        \"" ++ comptime contractKey(json_version, "queryParamsDynamic") ++ "\": {s},\n", .{if (route.query_params_dynamic) "true" else "false"});
+        try writer.print("        \"" ++ comptime contractKey(json_version, "headerParamsDynamic") ++ "\": {s},\n", .{if (route.header_params_dynamic) "true" else "false"});
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "requestBodies") ++ "\": [");
         for (route.request_bodies.items, 0..) |body, j| {
             if (j > 0) try writer.writeAll(",");
-            try writeApiBodyJson(writer, &body);
+            try writeApiBodyJson(json_version, writer, &body);
         }
         if (route.request_bodies.items.len > 0) {
             try writer.writeAll("\n        ");
         }
         try writer.writeAll("],\n");
-        try writer.print("        \"requestBodiesDynamic\": {s},\n", .{if (route.request_bodies_dynamic) "true" else "false"});
+        try writer.print("        \"" ++ comptime contractKey(json_version, "requestBodiesDynamic") ++ "\": {s},\n", .{if (route.request_bodies_dynamic) "true" else "false"});
         try writer.writeAll("        \"responses\": [");
         for (route.responses.items, 0..) |response, j| {
             if (j > 0) try writer.writeAll(",");
-            try writeApiResponseJson(writer, &response);
+            try writeApiResponseJson(json_version, writer, &response);
         }
         if (route.responses.items.len > 0) {
             try writer.writeAll("\n        ");
         }
         try writer.writeAll("],\n");
-        try writer.print("        \"responsesDynamic\": {s},\n", .{if (route.responses_dynamic) "true" else "false"});
-        try writer.writeAll("        \"responseStatus\": ");
+        try writer.print("        \"" ++ comptime contractKey(json_version, "responsesDynamic") ++ "\": {s},\n", .{if (route.responses_dynamic) "true" else "false"});
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseStatus") ++ "\": ");
         if (route.response_status) |status| {
             try writer.print("{d}", .{status});
         } else {
             try writer.writeAll("null");
         }
         try writer.writeAll(",\n");
-        try writer.writeAll("        \"responseContentType\": ");
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseContentType") ++ "\": ");
         if (route.response_content_type) |content_type| {
             try writeJsonString(writer, content_type);
         } else {
             try writer.writeAll("null");
         }
         try writer.writeAll(",\n");
-        try writer.writeAll("        \"responseSchemaRef\": ");
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseSchemaRef") ++ "\": ");
         if (route.response_schema_ref) |schema_ref| {
             try writeJsonString(writer, schema_ref);
         } else {
             try writer.writeAll("null");
         }
         try writer.writeAll(",\n");
-        try writer.writeAll("        \"responseSchema\": ");
+        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseSchema") ++ "\": ");
         if (route.response_schema_json) |schema_json| {
             try writer.writeAll(schema_json);
         } else {
             try writer.writeAll("null");
         }
         try writer.writeAll(",\n");
-        try writer.print("        \"responseSchemaDynamic\": {s}\n", .{if (route.response_schema_dynamic) "true" else "false"});
+        try writer.print("        \"" ++ comptime contractKey(json_version, "responseSchemaDynamic") ++ "\": {s}\n", .{if (route.response_schema_dynamic) "true" else "false"});
         try writer.writeAll("      }");
     }
     if (contract.api.routes.items.len > 0) {
         try writer.writeAll("\n    ");
     }
     try writer.writeAll("],\n");
-    try writer.print("    \"schemasDynamic\": {s},\n", .{if (contract.api.schemas_dynamic) "true" else "false"});
-    try writer.print("    \"routesDynamic\": {s}\n", .{if (contract.api.routes_dynamic) "true" else "false"});
+    try writer.print("    \"" ++ comptime contractKey(json_version, "schemasDynamic") ++ "\": {s},\n", .{if (contract.api.schemas_dynamic) "true" else "false"});
+    try writer.print("    \"" ++ comptime contractKey(json_version, "routesDynamic") ++ "\": {s}\n", .{if (contract.api.routes_dynamic) "true" else "false"});
     try writer.writeAll("  },\n");
 
     // verification (optional)
     if (contract.verification) |v| {
         try writer.writeAll("  \"verification\": {\n");
-        try writer.print("    \"exhaustiveReturns\": {s},\n", .{if (v.exhaustive_returns) "true" else "false"});
-        try writer.print("    \"resultsSafe\": {s},\n", .{if (v.results_safe) "true" else "false"});
-        try writer.print("    \"unreachableCode\": {s},\n", .{if (v.unreachable_code) "true" else "false"});
-        try writer.print("    \"bytecodeVerified\": {s}\n", .{if (v.bytecode_verified) "true" else "false"});
+        try writer.print("    \"" ++ comptime contractKey(json_version, "exhaustiveReturns") ++ "\": {s},\n", .{if (v.exhaustive_returns) "true" else "false"});
+        try writer.print("    \"" ++ comptime contractKey(json_version, "resultsSafe") ++ "\": {s},\n", .{if (v.results_safe) "true" else "false"});
+        try writer.print("    \"" ++ comptime contractKey(json_version, "unreachableCode") ++ "\": {s},\n", .{if (v.unreachable_code) "true" else "false"});
+        try writer.print("    \"" ++ comptime contractKey(json_version, "bytecodeVerified") ++ "\": {s}\n", .{if (v.bytecode_verified) "true" else "false"});
         try writer.writeAll("  },\n");
     } else {
         try writer.writeAll("  \"verification\": null,\n");
@@ -545,8 +561,8 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     // aot (optional)
     if (contract.aot) |a| {
         try writer.writeAll("  \"aot\": {\n");
-        try writer.print("    \"patternCount\": {d},\n", .{a.pattern_count});
-        try writer.print("    \"hasDefault\": {s}\n", .{if (a.has_default) "true" else "false"});
+        try writer.print("    \"" ++ comptime contractKey(json_version, "patternCount") ++ "\": {d},\n", .{a.pattern_count});
+        try writer.print("    \"" ++ comptime contractKey(json_version, "hasDefault") ++ "\": {s}\n", .{if (a.has_default) "true" else "false"});
         try writer.writeAll("  },\n");
     } else {
         try writer.writeAll("  \"aot\": null,\n");
@@ -554,35 +570,35 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
 
     // faultCoverage (optional)
     if (contract.fault_coverage) |fc| {
-        try writer.writeAll("  \"faultCoverage\": {\n");
-        try writer.print("    \"totalFailable\": {d},\n", .{fc.total_failable});
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "faultCoverage") ++ "\": {\n");
+        try writer.print("    \"" ++ comptime contractKey(json_version, "totalFailable") ++ "\": {d},\n", .{fc.total_failable});
         try writer.print("    \"covered\": {d},\n", .{fc.covered});
         try writer.print("    \"warnings\": {d},\n", .{fc.warnings});
-        try writer.print("    \"isCovered\": {s}\n", .{if (fc.isCovered()) "true" else "false"});
+        try writer.print("    \"" ++ comptime contractKey(json_version, "isCovered") ++ "\": {s}\n", .{if (fc.isCovered()) "true" else "false"});
         try writer.writeAll("  },\n");
     } else {
-        try writer.writeAll("  \"faultCoverage\": null,\n");
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "faultCoverage") ++ "\": null,\n");
     }
 
     // rateLimiting (optional)
     if (contract.rate_limiting) |rl| {
-        try writer.writeAll("  \"rateLimiting\": {\n");
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "rateLimiting") ++ "\": {\n");
         try writer.writeAll("    \"namespace\": ");
         try writeJsonString(writer, rl.namespace);
         try writer.print(",\n    \"dynamic\": {s}\n", .{if (rl.dynamic) "true" else "false"});
         try writer.writeAll("  },\n");
     } else {
-        try writer.writeAll("  \"rateLimiting\": null,\n");
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "rateLimiting") ++ "\": null,\n");
     }
 
     // properties (optional)
     if (contract.properties) |p| {
         try writer.writeAll("  \"properties\": {\n");
-        try writeBooleanProperties(p, writer);
+        try writeBooleanProperties(json_version, p, writer);
         if (p.max_io_depth) |depth| {
-            try writer.print("    \"maxIoDepth\": {d}\n", .{depth});
+            try writer.print("    \"" ++ comptime contractKey(json_version, "maxIoDepth") ++ "\": {d}\n", .{depth});
         } else {
-            try writer.writeAll("    \"maxIoDepth\": null\n");
+            try writer.writeAll("    \"" ++ comptime contractKey(json_version, "maxIoDepth") ++ "\": null\n");
         }
         try writer.writeAll("  },\n");
 
@@ -592,7 +608,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         // stays for backwards-compat consumers.
         var spec_buf: [contract_types.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
         const proven_count = p.provenSpecNames(&spec_buf);
-        try writer.writeAll("  \"provenSpecs\": [");
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "provenSpecs") ++ "\": [");
         for (spec_buf[0..proven_count], 0..) |name_opt, i| {
             if (name_opt) |nm| {
                 if (i > 0) try writer.writeAll(", ");
@@ -602,7 +618,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writer.writeAll("],\n");
     } else {
         try writer.writeAll("  \"properties\": null,\n");
-        try writer.writeAll("  \"provenSpecs\": [],\n");
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "provenSpecs") ++ "\": [],\n");
     }
 
     // intent (optional) - author-declared assertions outside the proof boundary
@@ -619,19 +635,19 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writeJsonString(writer, assertion.method);
             try writer.writeAll(",\n        \"path\": ");
             try writeJsonString(writer, assertion.path);
-            try writer.writeAll(",\n        \"requestBodyJson\": ");
+            try writer.writeAll(",\n        \"" ++ comptime contractKey(json_version, "requestBodyJson") ++ "\": ");
             if (assertion.request_body_json) |b| {
                 try writeJsonString(writer, b);
             } else try writer.writeAll("null");
-            try writer.writeAll(",\n        \"expectedStatus\": ");
+            try writer.writeAll(",\n        \"" ++ comptime contractKey(json_version, "expectedStatus") ++ "\": ");
             if (assertion.expected_status) |s| {
                 try writer.print("{d}", .{s});
             } else try writer.writeAll("null");
-            try writer.writeAll(",\n        \"expectedBodyJson\": ");
+            try writer.writeAll(",\n        \"" ++ comptime contractKey(json_version, "expectedBodyJson") ++ "\": ");
             if (assertion.expected_body_json) |b| {
                 try writeJsonString(writer, b);
             } else try writer.writeAll("null");
-            try writer.writeAll(",\n        \"expectedHeaders\": [");
+            try writer.writeAll(",\n        \"" ++ comptime contractKey(json_version, "expectedHeaders") ++ "\": [");
             for (assertion.expected_headers.items, 0..) |h, j| {
                 if (j > 0) try writer.writeAll(", ");
                 try writer.writeAll("{\"name\": ");
@@ -641,8 +657,8 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
                 try writer.writeByte('}');
             }
             try writer.writeAll("],");
-            try writer.print("\n        \"sourceLine\": {d},", .{assertion.source_line});
-            try writer.print("\n        \"sourceColumn\": {d}", .{assertion.source_column});
+            try writer.print("\n        \"" ++ comptime contractKey(json_version, "sourceLine") ++ "\": {d},", .{assertion.source_line});
+            try writer.print("\n        \"" ++ comptime contractKey(json_version, "sourceColumn") ++ "\": {d}", .{assertion.source_column});
             try writer.writeAll("\n      }");
         }
         if (intent.assertions.items.len > 0) try writer.writeByte('\n');
@@ -660,17 +676,17 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         if (i > 0) try writer.writeAll(", ");
         try writer.writeAll("\n    {\n");
         try writer.print("      \"dynamic\": {s},\n", .{if (saga.dynamic) "true" else "false"});
-        try writer.print("      \"compensationProven\": {s},\n", .{if (saga.compensationProven()) "true" else "false"});
+        try writer.print("      \"" ++ comptime contractKey(json_version, "compensationProven") ++ "\": {s},\n", .{if (saga.compensationProven()) "true" else "false"});
         try writer.writeAll("      \"steps\": [");
         for (saga.steps.items, 0..) |step, j| {
             if (j > 0) try writer.writeAll(", ");
             try writer.writeAll("{\"name\": ");
             try writeJsonString(writer, step.name);
-            try writer.print(", \"hasCompensate\": {s}}}", .{if (step.has_compensate) "true" else "false"});
+            try writer.print(", \"" ++ comptime contractKey(json_version, "hasCompensate") ++ "\": {s}}}", .{if (step.has_compensate) "true" else "false"});
         }
         try writer.writeAll("],\n");
-        try writer.print("      \"sourceLine\": {d},\n", .{saga.source_line});
-        try writer.print("      \"sourceColumn\": {d}\n", .{saga.source_column});
+        try writer.print("      \"" ++ comptime contractKey(json_version, "sourceLine") ++ "\": {d},\n", .{saga.source_line});
+        try writer.print("      \"" ++ comptime contractKey(json_version, "sourceColumn") ++ "\": {d}\n", .{saga.source_column});
         try writer.writeAll("    }");
     }
     if (contract.sagas.items.len > 0) try writer.writeByte('\n');
@@ -689,8 +705,8 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writeJsonString(writer, path.route_pattern);
             try writer.writeAll(",\n");
             try writer.print("      \"status\": {d},\n", .{path.response_status});
-            try writer.print("      \"ioDepth\": {d},\n", .{path.io_depth});
-            try writer.print("      \"failurePath\": {s},\n", .{if (path.is_failure_path) "true" else "false"});
+            try writer.print("      \"" ++ comptime contractKey(json_version, "ioDepth") ++ "\": {d},\n", .{path.io_depth});
+            try writer.print("      \"" ++ comptime contractKey(json_version, "failurePath") ++ "\": {s},\n", .{if (path.is_failure_path) "true" else "false"});
 
             // conditions
             try writer.writeAll("      \"conditions\": [");
@@ -715,7 +731,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writer.writeAll("],\n");
 
             // io_sequence
-            try writer.writeAll("      \"ioSequence\": [");
+            try writer.writeAll("      \"" ++ comptime contractKey(json_version, "ioSequence") ++ "\": [");
             for (path.io_sequence.items, 0..) |io, j| {
                 if (j > 0) try writer.writeAll(", ");
                 try writer.writeAll("{\"module\": ");
@@ -732,15 +748,15 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
             try writer.writeAll("    }");
         }
         try writer.writeAll("\n  ],\n");
-        try writer.print("  \"behaviorsExhaustive\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
+        try writer.print("  \"" ++ comptime contractKey(json_version, "behaviorsExhaustive") ++ "\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
     } else {
         try writer.writeAll("  \"behaviors\": [],\n");
-        try writer.print("  \"behaviorsExhaustive\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
+        try writer.print("  \"" ++ comptime contractKey(json_version, "behaviorsExhaustive") ++ "\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
     }
 
     // declaredSpecs: effective active spec names. Source `Spec<...>`
     // narrows this set; without one it contains every supported v1 spec.
-    try writer.writeAll("  \"declaredSpecs\": [");
+    try writer.writeAll("  \"" ++ comptime contractKey(json_version, "declaredSpecs") ++ "\": [");
     for (contract.declared_specs.items, 0..) |s, i| {
         if (i > 0) try writer.writeAll(", ");
         try writeJsonString(writer, s);
@@ -750,7 +766,7 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
     // specDiagnostics: per-spec discharge results emitted by the
     // verifier (ZTS500/501/502). Empty when every declared spec is
     // satisfied.
-    try writer.writeAll("  \"specDiagnostics\": [");
+    try writer.writeAll("  \"" ++ comptime contractKey(json_version, "specDiagnostics") ++ "\": [");
     for (contract.spec_diagnostics.items, 0..) |d, i| {
         if (i > 0) try writer.writeAll(", ");
         try writer.writeAll("\n    {");
@@ -758,14 +774,14 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
         try writeJsonString(writer, @tagName(d.kind));
         try writer.writeAll(",\n      \"code\": ");
         try writeJsonString(writer, d.kind.code());
-        try writer.writeAll(",\n      \"specName\": ");
+        try writer.writeAll(",\n      \"" ++ comptime contractKey(json_version, "specName") ++ "\": ");
         try writeJsonString(writer, d.spec_name);
         if (d.function) |func| {
             try writer.writeAll(",\n      \"function\": ");
             try writeJsonString(writer, func);
         }
         if (d.incompatible_module) |module_name| {
-            try writer.writeAll(",\n      \"incompatibleModule\": ");
+            try writer.writeAll(",\n      \"" ++ comptime contractKey(json_version, "incompatibleModule") ++ "\": ");
             try writeJsonString(writer, module_name);
         }
         if (d.suggestion) |suggestion| {
@@ -779,27 +795,28 @@ pub fn writeContractJson(contract: *const HandlerContract, writer: anytype) !voi
 
     // costEnvelope (optional)
     if (contract.cost_envelope) |*envelope| {
-        try writeCostEnvelopeJson(writer, envelope);
+        try writeCostEnvelopeJson(json_version, writer, envelope);
     } else {
-        try writer.writeAll("  \"costEnvelope\": null,\n");
+        try writer.writeAll("  \"" ++ comptime contractKey(json_version, "costEnvelope") ++ "\": null,\n");
     }
 
-    try writeExtensionsJson(writer, contract);
-    try writePartnerContractSections(writer, contract);
+    try writeExtensionsJson(json_version, writer, contract);
+    try writePartnerContractSections(json_version, writer, contract);
 
     try writer.writeAll("\n}\n");
 }
 
 fn writeCostEnvelopeJson(
+    comptime json_version: JsonVersion,
     writer: anytype,
     envelope: *const contract_types.CostEnvelope,
 ) !void {
-    try writer.writeAll("  \"costEnvelope\": {\n");
+    try writer.writeAll("  \"" ++ comptime contractKey(json_version, "costEnvelope") ++ "\": {\n");
     try writer.print("    \"exhaustive\": {s},\n", .{if (envelope.exhaustive) "true" else "false"});
     try writer.writeAll("    \"total\": ");
     try writeBoundJson(writer, envelope.total);
     try writer.writeAll(",\n");
-    try writer.writeAll("    \"perModule\": [");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "perModule") ++ "\": [");
     for (envelope.entries.items, 0..) |entry, i| {
         if (i > 0) try writer.writeAll(", ");
         try writer.writeAll("\n      { \"module\": ");
@@ -842,6 +859,7 @@ fn writeProvenanceJson(writer: anytype, provenance: contract_types.BoundProvenan
 /// deterministic. Always emitted, even when empty, so downstream readers
 /// don't need a presence check.
 fn writeExtensionsJson(
+    comptime json_version: JsonVersion,
     writer: anytype,
     contract: *const HandlerContract,
 ) !void {
@@ -861,13 +879,13 @@ fn writeExtensionsJson(
         if (i > 0) try writer.writeAll(",");
         try writer.writeAll("\n    ");
         try writeJsonString(writer, spec);
-        try writer.writeAll(": {\n      \"egressHosts\": [");
+        try writer.writeAll(": {\n      \"" ++ comptime contractKey(json_version, "egressHosts") ++ "\": [");
         for (ext.egress_hosts.items, 0..) |host, j| {
             if (j > 0) try writer.writeAll(", ");
             try writeJsonString(writer, host);
         }
         try writer.writeAll("],\n");
-        try writer.print("      \"egressDynamic\": {s},\n", .{if (ext.egress_dynamic) "true" else "false"});
+        try writer.print("      \"" ++ comptime contractKey(json_version, "egressDynamic") ++ "\": {s},\n", .{if (ext.egress_dynamic) "true" else "false"});
         try writer.writeAll("      \"categories\": {");
 
         const tag_keys = try sortedHashMapKeys(a, &ext.categories);
@@ -888,7 +906,7 @@ fn writeExtensionsJson(
         try writer.writeAll("}");
 
         if (ext.contract_section) |section| {
-            try writer.writeAll(",\n      \"contractSection\": ");
+            try writer.writeAll(",\n      \"" ++ comptime contractKey(json_version, "contractSection") ++ "\": ");
             try writeJsonString(writer, section);
         }
 
@@ -903,6 +921,7 @@ fn writeExtensionsJson(
 /// partner audit tools parity with built-in sections like `cache` and
 /// `durable` without forcing them to crawl the `extensions` namespace.
 fn writePartnerContractSections(
+    comptime json_version: JsonVersion,
     writer: anytype,
     contract: *const HandlerContract,
 ) !void {
@@ -919,7 +938,7 @@ fn writePartnerContractSections(
 
         try writer.writeAll(",\n  ");
         try writeJsonString(writer, section);
-        try writer.writeAll(": {\n    \"sourceSpecifier\": ");
+        try writer.writeAll(": {\n    \"" ++ comptime contractKey(json_version, "sourceSpecifier") ++ "\": ");
         try writeJsonString(writer, spec);
         try writer.writeAll(",\n    \"categories\": {");
 
@@ -981,12 +1000,13 @@ fn writeApiParamJson(writer: anytype, param: *const ApiParamInfo) !void {
 /// wire-format compatibility with older contract.json readers. `.dynamic`
 /// writes an empty array and dynamic=true.
 fn writeKnownListJson(
+    comptime json_version: JsonVersion,
     writer: anytype,
     comptime field: []const u8,
     comptime dynamic_field: []const u8,
     list: ServiceCallInfo.KnownList,
 ) !void {
-    try writer.writeAll("      \"" ++ field ++ "\": [");
+    try writer.writeAll("      \"" ++ comptime contractKey(json_version, field) ++ "\": [");
     switch (list) {
         .complete => |entries| for (entries.items, 0..) |name, j| {
             if (j > 0) try writer.writeAll(", ");
@@ -995,19 +1015,19 @@ fn writeKnownListJson(
         .dynamic => {},
     }
     try writer.writeAll("],\n");
-    try writer.print("      \"" ++ dynamic_field ++ "\": {s},\n", .{if (list.isDynamic()) "true" else "false"});
+    try writer.print("      \"" ++ comptime contractKey(json_version, dynamic_field) ++ "\": {s},\n", .{if (list.isDynamic()) "true" else "false"});
 }
 
-fn writeApiBodyJson(writer: anytype, body: *const ApiBodyInfo) !void {
+fn writeApiBodyJson(comptime json_version: JsonVersion, writer: anytype, body: *const ApiBodyInfo) !void {
     try writer.writeAll("\n          {\n");
-    try writer.writeAll("            \"contentType\": ");
+    try writer.writeAll("            \"" ++ comptime contractKey(json_version, "contentType") ++ "\": ");
     if (body.content_type) |content_type| {
         try writeJsonString(writer, content_type);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
-    try writer.writeAll("            \"schemaRef\": ");
+    try writer.writeAll("            \"" ++ comptime contractKey(json_version, "schemaRef") ++ "\": ");
     if (body.schema.schemaRef()) |schema_ref| {
         try writeJsonString(writer, schema_ref);
     } else {
@@ -1025,7 +1045,7 @@ fn writeApiBodyJson(writer: anytype, body: *const ApiBodyInfo) !void {
     try writer.writeAll("          }");
 }
 
-fn writeApiResponseJson(writer: anytype, response: *const ApiResponseInfo) !void {
+fn writeApiResponseJson(comptime json_version: JsonVersion, writer: anytype, response: *const ApiResponseInfo) !void {
     try writer.writeAll("\n          {\n");
     try writer.writeAll("            \"status\": ");
     if (response.status) |status| {
@@ -1034,14 +1054,14 @@ fn writeApiResponseJson(writer: anytype, response: *const ApiResponseInfo) !void
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
-    try writer.writeAll("            \"contentType\": ");
+    try writer.writeAll("            \"" ++ comptime contractKey(json_version, "contentType") ++ "\": ");
     if (response.content_type) |content_type| {
         try writeJsonString(writer, content_type);
     } else {
         try writer.writeAll("null");
     }
     try writer.writeAll(",\n");
-    try writer.writeAll("            \"schemaRef\": ");
+    try writer.writeAll("            \"" ++ comptime contractKey(json_version, "schemaRef") ++ "\": ");
     if (response.schema.schemaRef()) |schema_ref| {
         try writeJsonString(writer, schema_ref);
     } else {
@@ -1059,17 +1079,371 @@ fn writeApiResponseJson(writer: anytype, response: *const ApiResponseInfo) !void
     try writer.writeAll("          }");
 }
 
-/// Emit every boolean field of `HandlerProperties` as `"<camelCase>": true|false,\n`.
-/// `maxIoDepth` is written separately by the caller because it is an optional
-/// integer rather than a bool. Driven by `@typeInfo`, so adding a boolean
-/// property field automatically appears in the JSON output; the camelCase
-/// key comes from `HandlerProperties.camelKeyFor`.
-fn writeBooleanProperties(p: contract_types.HandlerProperties, writer: anytype) !void {
+/// Emit every boolean field of `HandlerProperties` using the selected wire
+/// spelling. Version 1 uses `HandlerProperties.camelKeyFor`; version 2 uses
+/// the struct's snake_case field name. `max_io_depth` is emitted separately.
+fn writeBooleanProperties(
+    comptime json_version: JsonVersion,
+    p: contract_types.HandlerProperties,
+    writer: anytype,
+) !void {
     inline for (@typeInfo(contract_types.HandlerProperties).@"struct".fields) |field| {
         if (field.type == bool) {
-            const camel = comptime contract_types.HandlerProperties.camelKeyFor(field.name).?;
+            const key = comptime switch (json_version) {
+                .v1 => contract_types.HandlerProperties.camelKeyFor(field.name) orelse
+                    @compileError("missing HandlerProperties camel-case key: " ++ field.name),
+                .v2 => field.name,
+            };
             const value = @field(p, field.name);
-            try writer.print("    \"{s}\": {s},\n", .{ camel, if (value) "true" else "false" });
+            try writer.print("    \"{s}\": {s},\n", .{ key, if (value) "true" else "false" });
         }
     }
+}
+
+fn contractKey(comptime json_version: JsonVersion, comptime legacy_key: []const u8) []const u8 {
+    comptime {
+        if (json_version == .v1) return legacy_key;
+        return camelToSnake(legacy_key);
+    }
+}
+
+fn camelToSnake(comptime camel: []const u8) []const u8 {
+    comptime {
+        var uppercase_count: usize = 0;
+        for (camel) |byte| {
+            if (std.ascii.isUpper(byte)) uppercase_count += 1;
+        }
+
+        var buffer: [camel.len + uppercase_count]u8 = undefined;
+        var len: usize = 0;
+        for (camel) |byte| {
+            if (std.ascii.isUpper(byte)) {
+                buffer[len] = '_';
+                len += 1;
+                buffer[len] = std.ascii.toLower(byte);
+            } else {
+                buffer[len] = byte;
+            }
+            len += 1;
+        }
+        const result = buffer[0..len].*;
+        return &result;
+    }
+}
+
+fn expectSnakeCaseKeys(value: *const std.json.Value, visited: *usize) !void {
+    switch (value.*) {
+        .object => |object| {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                visited.* += 1;
+                for (entry.key_ptr.*) |byte| {
+                    try std.testing.expect(
+                        std.ascii.isLower(byte) or
+                            std.ascii.isDigit(byte) or
+                            byte == '_',
+                    );
+                }
+                try expectSnakeCaseKeys(entry.value_ptr, visited);
+            }
+        },
+        .array => |array| for (array.items) |*item| {
+            try expectSnakeCaseKeys(item, visited);
+        },
+        else => {},
+    }
+}
+
+fn writeTestContractJson(
+    allocator: std.mem.Allocator,
+    contract: *const HandlerContract,
+    comptime json_version: JsonVersion,
+) ![]u8 {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    errdefer output.deinit();
+    switch (json_version) {
+        .v1 => try writeContractJson(contract, &output.writer),
+        .v2 => try writeContractJsonV2(contract, &output.writer),
+    }
+    return output.toOwnedSlice();
+}
+
+fn appendTestString(
+    allocator: std.mem.Allocator,
+    list: *std.ArrayList([]const u8),
+    value: []const u8,
+) !void {
+    const owned = try allocator.dupe(u8, value);
+    errdefer allocator.free(owned);
+    try list.append(allocator, owned);
+}
+
+fn appendTestFunction(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    const module = try allocator.dupe(u8, "workflow");
+    errdefer allocator.free(module);
+    var names: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (names.items) |name| allocator.free(name);
+        names.deinit(allocator);
+    }
+    try appendTestString(allocator, &names, "call");
+    try contract.functions.append(allocator, .{ .module = module, .names = names });
+}
+
+fn appendTestWorkflowCall(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    const target = try allocator.dupe(u8, "billing");
+    errdefer allocator.free(target);
+    const route = try allocator.dupe(u8, "POST /charge");
+    errdefer allocator.free(route);
+    try contract.workflow_calls.append(allocator, .{
+        .target = target,
+        .route_pattern = route,
+        .dynamic = false,
+    });
+}
+
+fn populateVersionTwoTestContract(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+) !void {
+    contract.version = 2;
+    contract.handler.line = 7;
+    contract.handler.column = 3;
+
+    {
+        const route_pattern = try allocator.dupe(u8, "/orders/:id");
+        errdefer allocator.free(route_pattern);
+        try contract.routes.append(allocator, .{
+            .pattern = route_pattern,
+            .route_type = "exact",
+            .field = "path",
+            .status = 202,
+            .content_type = "application/json",
+            .aot = true,
+        });
+    }
+    try appendTestString(allocator, &contract.modules, "zttp:workflow");
+    try appendTestFunction(allocator, contract);
+    try appendTestString(allocator, &contract.env.literal, "ORDERS_TOKEN");
+    contract.env.dynamic = true;
+    try appendTestString(allocator, &contract.egress.hosts, "api.example.com");
+    try appendTestString(allocator, &contract.egress.urls, "https://api.example.com/orders");
+    contract.egress.dynamic = true;
+    try appendTestWorkflowCall(allocator, contract);
+    contract.durable.used = true;
+    try appendTestString(allocator, &contract.durable.keys.literal, "order:42");
+    try appendTestString(allocator, &contract.durable.steps, "charge");
+    try appendTestString(allocator, &contract.durable.signals.literal, "approved");
+    try appendTestString(allocator, &contract.durable.producer_keys.literal, "approval:42");
+    contract.durable.workflow.workflow_id = try allocator.dupe(u8, "workflow.ts:handler:7:3");
+    contract.durable.workflow.proof_level = .complete;
+    contract.durable.workflow.properties.retry_safe = true;
+    contract.durable.workflow.properties.idempotent = true;
+    contract.durable.workflow.properties.fault_covered = true;
+    try appendTestString(
+        allocator,
+        &contract.durable.workflow.properties.reasons,
+        "stable workflow keys",
+    );
+    contract.aot = .{ .pattern_count = 1, .has_default = true };
+    contract.properties = .{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = true,
+        .idempotent = true,
+        .max_io_depth = 2,
+        .fault_covered = true,
+        .result_safe = true,
+        .optional_safe = true,
+        .canonical = true,
+        .cost_bounded = true,
+    };
+    try appendTestString(allocator, &contract.declared_specs, "retry_safe");
+    try appendTestString(allocator, &contract.declared_specs, "idempotent");
+
+    var capabilities = CapabilityMatrix.empty;
+    capabilities.items[0] = .clock;
+    capabilities.len = 1;
+    capabilities.hash[0] = 1;
+    contract.capabilities = capabilities;
+    var capability_budget = CapabilityMatrix.empty;
+    capability_budget.items[0] = .network;
+    capability_budget.len = 1;
+    contract.capability_budget = capability_budget;
+}
+
+test "version 2 writes only snake_case keys" {
+    const allocator = std.testing.allocator;
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    try populateVersionTwoTestContract(allocator, &contract);
+
+    const output = try writeTestContractJson(allocator, &contract, .v2);
+    defer allocator.free(output);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, output, .{});
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |object| object,
+        else => return error.TestUnexpectedResult,
+    };
+    const version = root.get("version") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(i64, 2), version.integer);
+
+    var visited: usize = 0;
+    try expectSnakeCaseKeys(&parsed.value, &visited);
+    try std.testing.expect(visited >= 50);
+}
+
+test "version 1 keeps its version and camelCase keys" {
+    const allocator = std.testing.allocator;
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    contract.version = 1;
+
+    const output = try writeTestContractJson(allocator, &contract, .v1);
+    defer allocator.free(output);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"version\": 1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output, "\"serviceCalls\": []") != null);
+}
+
+/// Collect every object key in `value`, in document order, including nested
+/// objects and objects inside arrays.
+fn collectJsonKeys(
+    allocator: std.mem.Allocator,
+    value: *const std.json.Value,
+    out: *std.ArrayList([]const u8),
+) !void {
+    switch (value.*) {
+        .object => |object| {
+            var iterator = object.iterator();
+            while (iterator.next()) |entry| {
+                try out.append(allocator, entry.key_ptr.*);
+                try collectJsonKeys(allocator, entry.value_ptr, out);
+            }
+        },
+        .array => |array| for (array.items) |*item| {
+            try collectJsonKeys(allocator, item, out);
+        },
+        // exhaustive: a scalar carries no keys, so there is nothing here to
+        // collect and nothing this walk owes it.
+        else => {},
+    }
+}
+
+fn keysOf(
+    allocator: std.mem.Allocator,
+    contract: *const HandlerContract,
+    comptime json_version: JsonVersion,
+    parsed_out: *std.json.Parsed(std.json.Value),
+    keys_out: *std.ArrayList([]const u8),
+) !void {
+    const output = try writeTestContractJson(allocator, contract, json_version);
+    defer allocator.free(output);
+    parsed_out.* = try std.json.parseFromSlice(std.json.Value, allocator, output, .{});
+    try collectJsonKeys(allocator, &parsed_out.value, keys_out);
+}
+
+test "version 1 never emits a snake_case key" {
+    // Version 1 and version 2 are one traversal parameterized by a comptime
+    // key mapping, not two writers, so the promise that version 1 is frozen
+    // rests on tests rather than on the two never sharing a line. The goldens
+    // pin the bytes of four fixture handlers; this pins the CONVENTION over a
+    // contract populated across every section, which is what an accidental
+    // `contractKey(.v1, ...)` typo would break first.
+    const allocator = std.testing.allocator;
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    try populateVersionTwoTestContract(allocator, &contract);
+    contract.version = 1;
+
+    var parsed: std.json.Parsed(std.json.Value) = undefined;
+    var keys: std.ArrayList([]const u8) = .empty;
+    defer keys.deinit(allocator);
+    try keysOf(allocator, &contract, .v1, &parsed, &keys);
+    defer parsed.deinit();
+
+    for (keys.items) |key| {
+        if (std.mem.indexOfScalar(u8, key, '_') != null) {
+            std.debug.print("version 1 emitted a snake_case key: {s}\n", .{key});
+            return error.VersionOneKeyWentSnakeCase;
+        }
+    }
+    // The floor: a walk that visited nothing would satisfy the loop above.
+    try std.testing.expect(keys.items.len >= 50);
+}
+
+test "version 2's key set is exactly the snake_case image of version 1's" {
+    // The other half of the same guard. A key added to one version and not the
+    // other, or mapped to a name the reverse mapping does not produce, fails
+    // here rather than reaching a client as a field it cannot find.
+    const allocator = std.testing.allocator;
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    try populateVersionTwoTestContract(allocator, &contract);
+
+    var v1_parsed: std.json.Parsed(std.json.Value) = undefined;
+    var v1_keys: std.ArrayList([]const u8) = .empty;
+    defer v1_keys.deinit(allocator);
+    try keysOf(allocator, &contract, .v1, &v1_parsed, &v1_keys);
+    defer v1_parsed.deinit();
+
+    var v2_parsed: std.json.Parsed(std.json.Value) = undefined;
+    var v2_keys: std.ArrayList([]const u8) = .empty;
+    defer v2_keys.deinit(allocator);
+    try keysOf(allocator, &contract, .v2, &v2_parsed, &v2_keys);
+    defer v2_parsed.deinit();
+
+    try std.testing.expectEqual(v1_keys.items.len, v2_keys.items.len);
+    try std.testing.expect(v1_keys.items.len >= 50);
+
+    // Document order is the same traversal on both sides, so the images line
+    // up index for index and a mismatch names the key that moved.
+    for (v1_keys.items, v2_keys.items) |v1_key, v2_key| {
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(allocator);
+        for (v1_key) |byte| {
+            if (std.ascii.isUpper(byte)) {
+                try expected.append(allocator, '_');
+                try expected.append(allocator, std.ascii.toLower(byte));
+            } else {
+                try expected.append(allocator, byte);
+            }
+        }
+        if (!std.mem.eql(u8, expected.items, v2_key)) {
+            std.debug.print(
+                "key mismatch: version 1 `{s}` maps to `{s}`, version 2 emitted `{s}`\n",
+                .{ v1_key, expected.items, v2_key },
+            );
+            return error.VersionKeySetsDisagree;
+        }
+    }
+}
+
+test "version 2 round-trips a populated contract field for field" {
+    const allocator = std.testing.allocator;
+    var original = handler_contract.emptyContract(try allocator.dupe(u8, "workflow.ts"));
+    defer original.deinit(allocator);
+    try populateVersionTwoTestContract(allocator, &original);
+
+    const version_one_before = try writeTestContractJson(allocator, &original, .v1);
+    defer allocator.free(version_one_before);
+    const version_two = try writeTestContractJson(allocator, &original, .v2);
+    defer allocator.free(version_two);
+
+    var parsed = try handler_contract.parseFromJson(allocator, version_two);
+    defer parsed.deinit(allocator);
+    const version_one_after = try writeTestContractJson(allocator, &parsed, .v1);
+    defer allocator.free(version_one_after);
+
+    try std.testing.expectEqualStrings(version_one_before, version_one_after);
 }

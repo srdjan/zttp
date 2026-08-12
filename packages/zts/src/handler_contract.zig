@@ -114,6 +114,7 @@ pub fn extractHost(url: []const u8) []const u8 {
 // Re-exports from contract_json_parser.zig and contract_json_writer.zig
 pub const parseFromJson = contract_json_parser.parseFromJson;
 pub const writeContractJson = contract_json_writer.writeContractJson;
+pub const writeContractJsonV2 = contract_json_writer.writeContractJsonV2;
 pub const writeBoundJson = contract_json_writer.writeBoundJson;
 
 pub fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {

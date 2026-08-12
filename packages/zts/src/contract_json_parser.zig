@@ -79,6 +79,24 @@ const ExtensionWire = struct {
 };
 
 const ExtensionMap = json_wire.RawArrayHashMap(ExtensionWire);
+const FunctionObjectMap = json_wire.RawArrayHashMap([]const WireString);
+
+const FunctionMap = struct {
+    entries: []const FunctionObjectMap.Entry = &.{},
+
+    pub fn jsonParse(
+        allocator: std.mem.Allocator,
+        source: anytype,
+        options: std.json.ParseOptions,
+    ) !@This() {
+        if (try source.peekNextTokenType() == .array_begin) {
+            try source.skipValue();
+            return .{};
+        }
+        const object = try std.json.innerParse(FunctionObjectMap, allocator, source, options);
+        return .{ .entries = object.entries };
+    }
+};
 
 const ServiceCallWire = struct {
     service: WireString = .{ .bytes = "" },
@@ -150,6 +168,8 @@ const DurableWorkflowWire = struct {
     edges: []const DurableWorkflowEdgeWire = &.{},
 };
 
+const DurableWorkflowSectionWire = json_wire.MergedOptional(DurableWorkflowWire);
+
 const DurableWire = struct {
     used: bool = false,
     keys: DynamicWire = .{},
@@ -157,7 +177,7 @@ const DurableWire = struct {
     timers: bool = false,
     signals: DynamicWire = .{},
     producerKeys: DynamicWire = .{},
-    workflow: json_wire.MergedOptional(DurableWorkflowWire) = .{},
+    workflow: DurableWorkflowSectionWire = .{},
 };
 
 const ScopeWire = struct {
@@ -249,6 +269,11 @@ const FaultCoverageWire = struct {
     warnings: WireU32 = .{ .value = null },
 };
 
+const AotWire = struct {
+    patternCount: WireU32 = .{ .value = null },
+    hasDefault: bool = false,
+};
+
 const RateLimitWire = struct {
     namespace: WireString = .{ .bytes = "" },
     dynamic: bool = true,
@@ -286,19 +311,25 @@ const SpecDiagnosticWire = struct {
     function: ?WireString = null,
 };
 
+const SpecDiagnosticsWire = json_wire.AppendedOptional(SpecDiagnosticWire);
+
 const SandboxWire = struct {
     capabilities: json_wire.AppendedNonNull(WireString) = .{},
     capabilityHash: json_wire.OptionalNonNull(WireString) = .{},
+    declaredBudget: json_wire.AppendedNonNull(WireString) = .{},
     policyHash: json_wire.OptionalNonNull(WireString) = .{},
     wasmPolicyHash: json_wire.OptionalNonNull(WireString) = .{},
     artifactSha256: json_wire.OptionalNonNull(WireString) = .{},
 };
+
+const SandboxSectionWire = json_wire.FoldedOptional(SandboxWire, combineSandboxWire);
 
 fn combineSandboxWire(previous: *SandboxWire, next: SandboxWire) void {
     if (next.capabilities.value != null) {
         previous.capabilities = next.capabilities;
         previous.capabilityHash = next.capabilityHash;
     }
+    if (next.declaredBudget.value != null) previous.declaredBudget = next.declaredBudget;
     if (next.policyHash.value != null) previous.policyHash = next.policyHash;
     if (next.wasmPolicyHash.value != null) previous.wasmPolicyHash = next.wasmPolicyHash;
     if (next.artifactSha256.value != null) previous.artifactSha256 = next.artifactSha256;
@@ -326,6 +357,8 @@ const BehaviorWire = struct {
     conditions: []const BehaviorConditionWire = &.{},
     ioSequence: []const BehaviorIoWire = &.{},
 };
+
+const BehaviorsWire = json_wire.AppendedOptional(BehaviorWire);
 
 const IntentHeaderWire = struct {
     name: WireString = .{ .bytes = "" },
@@ -391,6 +424,7 @@ const ContractWire = struct {
     handler: HandlerWire = .{},
     routes: []const RouteWire = &.{},
     modules: []const WireString = &.{},
+    functions: FunctionMap = .{},
     env: DynamicWire = .{},
     egress: EgressWire = .{},
     serviceCalls: []const ServiceCallWire = &.{},
@@ -406,19 +440,193 @@ const ContractWire = struct {
     scope: ScopeWire = .{},
     api: ApiWire = .{},
     verification: ?VerificationWire = null,
+    aot: ?AotWire = null,
     faultCoverage: ?FaultCoverageWire = null,
     rateLimiting: ?RateLimitWire = null,
     properties: ?PropertiesWire = null,
     declaredSpecs: []const WireString = &.{},
-    specDiagnostics: json_wire.AppendedOptional(SpecDiagnosticWire) = .{},
-    sandbox: json_wire.FoldedOptional(SandboxWire, combineSandboxWire) = .{},
+    specDiagnostics: SpecDiagnosticsWire = .{},
+    sandbox: SandboxSectionWire = .{},
     intent: ?IntentWire = null,
     sagas: []const SagaWire = &.{},
-    behaviors: json_wire.AppendedOptional(BehaviorWire) = .{},
+    behaviors: BehaviorsWire = .{},
     behaviorsExhaustive: bool = false,
     costEnvelope: ?CostEnvelopeWire = null,
     extensions: ExtensionMap = .{},
 };
+
+fn parseV2Value(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) anyerror!T {
+    if (T == ExtensionMap) {
+        return parseV2ExtensionMap(allocator, source, options);
+    }
+    if (T == DurableWorkflowSectionWire) {
+        if (try source.peekNextTokenType() == .null) {
+            _ = try source.next();
+            return .{};
+        }
+        return .{ .value = try parseV2Value(DurableWorkflowWire, allocator, source, options) };
+    }
+    if (T == SpecDiagnosticsWire) {
+        if (try source.peekNextTokenType() == .null) {
+            _ = try source.next();
+            return .{};
+        }
+        return .{ .value = try parseV2Value([]const SpecDiagnosticWire, allocator, source, options) };
+    }
+    if (T == SandboxSectionWire) {
+        if (try source.peekNextTokenType() == .null) {
+            _ = try source.next();
+            return .{};
+        }
+        return .{ .value = try parseV2Value(SandboxWire, allocator, source, options) };
+    }
+    if (T == BehaviorsWire) {
+        if (try source.peekNextTokenType() == .null) {
+            _ = try source.next();
+            return .{};
+        }
+        return .{ .value = try parseV2Value([]const BehaviorWire, allocator, source, options) };
+    }
+
+    return switch (@typeInfo(T)) {
+        .@"struct" => if (@hasDecl(T, "jsonParse"))
+            std.json.innerParse(T, allocator, source, options)
+        else blk: {
+            var value: T = .{};
+            try parseV2StructInto(T, allocator, source, options, &value);
+            break :blk value;
+        },
+        .optional => |optional| blk: {
+            if (try source.peekNextTokenType() == .null) {
+                _ = try source.next();
+                break :blk null;
+            }
+            break :blk try parseV2Value(optional.child, allocator, source, options);
+        },
+        .pointer => |pointer| blk: {
+            if (pointer.size != .slice or pointer.child == u8) {
+                break :blk try std.json.innerParse(T, allocator, source, options);
+            }
+            if (try source.next() != .array_begin) return error.UnexpectedToken;
+            var values: std.ArrayList(pointer.child) = .empty;
+            while (try source.peekNextTokenType() != .array_end) {
+                try values.append(allocator, try parseV2Value(pointer.child, allocator, source, options));
+            }
+            _ = try source.next();
+            break :blk try values.toOwnedSlice(allocator);
+        },
+        else => std.json.innerParse(T, allocator, source, options),
+    };
+}
+
+fn parseV2StructInto(
+    comptime T: type,
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+    value: *T,
+) anyerror!void {
+    if (try source.next() != .object_begin) return error.UnexpectedToken;
+    const fields = std.meta.fields(T);
+    var seen = [_]bool{false} ** fields.len;
+    while (try source.peekNextTokenType() != .object_end) {
+        const key = try WireString.jsonParse(allocator, source, options);
+        var matched = false;
+        inline for (fields, 0..) |field, field_index| {
+            if (!matched and v2KeyMatches(field.name, key.bytes)) {
+                if (seen[field_index] and options.duplicate_field_behavior == .use_first) {
+                    try source.skipValue();
+                } else {
+                    if (seen[field_index] and options.duplicate_field_behavior == .@"error") {
+                        return error.DuplicateField;
+                    }
+                    @field(value, field.name) = try parseV2Value(field.type, allocator, source, options);
+                }
+                seen[field_index] = true;
+                matched = true;
+            }
+        }
+        if (!matched) try source.skipValue();
+    }
+    _ = try source.next();
+}
+
+fn v2KeyMatches(comptime legacy_key: []const u8, key: []const u8) bool {
+    if (std.mem.eql(u8, legacy_key, key)) return true;
+
+    var key_index: usize = 0;
+    for (legacy_key) |byte| {
+        if (std.ascii.isUpper(byte)) {
+            if (key_index >= key.len or key[key_index] != '_') return false;
+            key_index += 1;
+            if (key_index >= key.len or key[key_index] != std.ascii.toLower(byte)) return false;
+        } else {
+            if (key_index >= key.len or key[key_index] != byte) return false;
+        }
+        key_index += 1;
+    }
+    return key_index == key.len;
+}
+
+fn parseV2ExtensionMap(
+    allocator: std.mem.Allocator,
+    source: anytype,
+    options: std.json.ParseOptions,
+) anyerror!ExtensionMap {
+    if (try source.next() != .object_begin) return error.UnexpectedToken;
+
+    var entries: std.ArrayList(ExtensionMap.Entry) = .empty;
+    var entry_indexes: std.StringHashMapUnmanaged(usize) = .empty;
+    defer entry_indexes.deinit(allocator);
+    while (try source.peekNextTokenType() != .object_end) {
+        const key = try WireString.jsonParse(allocator, source, options);
+        const value = try parseV2Value(ExtensionWire, allocator, source, options);
+        const indexed = try entry_indexes.getOrPut(allocator, key.bytes);
+        if (indexed.found_existing) {
+            const entry = &entries.items[indexed.value_ptr.*];
+            switch (options.duplicate_field_behavior) {
+                .use_first => {},
+                .@"error" => return error.DuplicateField,
+                .use_last => entry.value = value,
+            }
+        } else {
+            indexed.value_ptr.* = entries.items.len;
+            try entries.append(allocator, .{ .key = key, .value = value });
+        }
+    }
+    _ = try source.next();
+    return .{ .entries = try entries.toOwnedSlice(allocator) };
+}
+
+fn parseV2ContractWire(
+    allocator: std.mem.Allocator,
+    json_bytes: []const u8,
+) error{ InvalidJson, OutOfMemory }!std.json.Parsed(ContractWire) {
+    var scanner = std.json.Scanner.initCompleteInput(allocator, json_bytes);
+    defer scanner.deinit();
+
+    const arena = allocator.create(std.heap.ArenaAllocator) catch return error.OutOfMemory;
+    errdefer allocator.destroy(arena);
+    arena.* = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+
+    const options: std.json.ParseOptions = .{
+        .duplicate_field_behavior = .use_last,
+        .ignore_unknown_fields = true,
+        .max_value_len = json_bytes.len,
+        .allocate = .alloc_if_needed,
+    };
+    const value = parseV2Value(ContractWire, arena.allocator(), &scanner, options) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.InvalidJson,
+    };
+    return .{ .arena = arena, .value = value };
+}
 
 /// Parse a HandlerContract from JSON into an independently owned domain graph.
 pub fn parseFromJson(
@@ -426,6 +634,12 @@ pub fn parseFromJson(
     json_bytes: []const u8,
 ) !HandlerContract {
     var parsed = try json_wire.parse(ContractWire, allocator, json_bytes);
+    if ((parsed.value.version.value orelse 0) == 2) {
+        parsed.deinit();
+        var version_two = try parseV2ContractWire(allocator, json_bytes);
+        defer version_two.deinit();
+        return projectContract(allocator, &version_two.value);
+    }
     defer parsed.deinit();
     return projectContract(allocator, &parsed.value);
 }
@@ -442,6 +656,7 @@ fn projectContract(
 
     contract.routes = try projectRoutes(allocator, wire.routes);
     contract.modules = try projectStringList(allocator, wire.modules);
+    try projectFunctions(allocator, &wire.functions, &contract);
     contract.env.literal = try projectStringList(allocator, wire.env.literal);
     contract.env.dynamic = wire.env.dynamic;
     contract.egress.hosts = try projectStringList(allocator, wire.egress.hosts);
@@ -458,6 +673,7 @@ fn projectContract(
     try projectScope(allocator, &wire.scope, &contract);
     try projectApi(allocator, &wire.api, &contract);
     projectVerification(wire.verification, &contract);
+    projectAot(wire.aot, &contract);
     projectFaultCoverage(wire.faultCoverage, &contract);
     projectProperties(wire.properties, &contract);
     contract.declared_specs = try projectStringList(allocator, wire.declaredSpecs);
@@ -576,6 +792,24 @@ fn projectRoutes(
         });
     }
     return result;
+}
+
+fn projectFunctions(
+    allocator: std.mem.Allocator,
+    wire: *const FunctionMap,
+    contract: *HandlerContract,
+) !void {
+    try contract.functions.ensureTotalCapacity(allocator, wire.entries.len);
+    for (wire.entries) |entry| {
+        const module = try dupeWireString(allocator, entry.key);
+        errdefer allocator.free(module);
+        var names = try projectStringList(allocator, entry.value);
+        errdefer deinitStringList(allocator, &names);
+        contract.functions.appendAssumeCapacity(.{
+            .module = module,
+            .names = names,
+        });
+    }
 }
 
 fn projectServiceCalls(
@@ -987,6 +1221,16 @@ fn projectVerification(
     } else null;
 }
 
+fn projectAot(
+    wire: ?AotWire,
+    contract: *HandlerContract,
+) void {
+    contract.aot = if (wire) |value| .{
+        .pattern_count = value.patternCount.value orelse 0,
+        .has_default = value.hasDefault,
+    } else null;
+}
+
 fn projectFaultCoverage(
     wire: ?FaultCoverageWire,
     contract: *HandlerContract,
@@ -1063,18 +1307,7 @@ fn projectSandbox(
 ) !void {
     const sandbox = wire orelse return;
     if (sandbox.capabilities.value) |names| {
-        var seen = [_]bool{false} ** capability_count;
-        for (names) |name| {
-            const capability = std.meta.stringToEnum(ModuleCapability, name.bytes) orelse continue;
-            seen[@intFromEnum(capability)] = true;
-        }
-        var matrix: CapabilityMatrix = .{};
-        for (std.enums.values(ModuleCapability)) |capability| {
-            if (seen[@intFromEnum(capability)]) {
-                matrix.items[matrix.len] = capability;
-                matrix.len += 1;
-            }
-        }
+        var matrix = capabilityMatrixFromWire(names);
         var have_hash = false;
         if (sandbox.capabilityHash.value) |hash| {
             have_hash = try parseOptionalHash(&matrix.hash, hash.bytes);
@@ -1084,9 +1317,30 @@ fn projectSandbox(
         }
         contract.capabilities = matrix;
     }
+    if (sandbox.declaredBudget.value) |names| {
+        contract.capability_budget = capabilityMatrixFromWire(names);
+    }
     if (sandbox.policyHash.value) |hash| _ = try parseOptionalHash(&contract.policy_hash, hash.bytes);
     if (sandbox.wasmPolicyHash.value) |hash| _ = try parseOptionalHash(&contract.wasm_policy_hash, hash.bytes);
     if (sandbox.artifactSha256.value) |hash| _ = try parseOptionalHash(&contract.artifact_sha256, hash.bytes);
+}
+
+fn capabilityMatrixFromWire(names: []const WireString) CapabilityMatrix {
+    var seen = [_]bool{false} ** capability_count;
+    for (names) |name| {
+        const capability = std.meta.stringToEnum(ModuleCapability, name.bytes) orelse continue;
+        seen[@intFromEnum(capability)] = true;
+    }
+
+    var matrix: CapabilityMatrix = .{};
+    for (std.enums.values(ModuleCapability)) |capability| {
+        if (seen[@intFromEnum(capability)]) {
+            matrix.items[matrix.len] = capability;
+            matrix.len += 1;
+        }
+    }
+    matrix.hash = module_binding.capabilityHash(matrix.slice());
+    return matrix;
 }
 
 fn parseOptionalHash(target: *[32]u8, raw: []const u8) !bool {
@@ -1384,6 +1638,54 @@ test "parseFromJson surfaces InvalidJson on adversarial deep nesting" {
     defer allocator.free(buffer);
     @memset(buffer, '[');
     try std.testing.expectError(error.InvalidJson, parseFromJson(allocator, buffer));
+}
+
+test "parseFromJson reads version 2 snake_case fields" {
+    const json =
+        \\{
+        \\  "version": 2,
+        \\  "handler": { "path": "handler.ts", "line": 4, "column": 2 },
+        \\  "routes": [
+        \\    { "pattern": "/orders", "type": "exact", "field": "path", "status": 202, "content_type": "application/json", "aot": true }
+        \\  ],
+        \\  "modules": ["zttp:service"],
+        \\  "env": { "literal": ["TOKEN"], "dynamic": false },
+        \\  "egress": { "hosts": ["api.example.com"], "urls": [], "dynamic": false },
+        \\  "service_calls": [{
+        \\    "service": "orders", "route": "POST /orders", "dynamic": false,
+        \\    "path_params": ["id"], "path_params_dynamic": false,
+        \\    "query_keys": [], "query_dynamic": false,
+        \\    "header_keys": [], "header_dynamic": false,
+        \\    "has_body": true, "body_dynamic": false
+        \\  }]
+        \\}
+    ;
+
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 2), contract.version);
+    try std.testing.expectEqualStrings("application/json", contract.routes.items[0].content_type);
+    try std.testing.expectEqual(@as(usize, 1), contract.service_calls.items.len);
+    try std.testing.expectEqualStrings("id", contract.service_calls.items[0].path_params.items()[0]);
+    try std.testing.expect(contract.service_calls.items[0].body.isPresent());
+}
+
+test "parseFromJson still reads a version 1 document" {
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "handler": { "path": "legacy.ts", "line": 3, "column": 1 },
+        \\  "routes": [
+        \\    { "pattern": "/legacy", "type": "exact", "field": "path", "status": 200, "contentType": "text/plain; charset=utf-8", "aot": false }
+        \\  ]
+        \\}
+    ;
+
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), contract.version);
+    try std.testing.expectEqualStrings("legacy.ts", contract.handler.path);
+    try std.testing.expectEqualStrings("text/plain; charset=utf-8", contract.routes.items[0].content_type);
 }
 
 test "parseFromJson compatibility matrix preserves unknown fields and enum fallbacks" {

@@ -97,7 +97,7 @@ pub const operations = [_]OperationSpec{
         "graph", "builtins", "extensions", "rejected", "module_graph_hash",
     } },
     .{ .op = .check, .status = .implemented, .input_fields = &.{"file"}, .payload_fields = &.{
-        "file", "source_digest", "counts", "properties", "paths", "contract_available",
+        "file", "source_digest", "counts", "properties", "paths", "contract_available", "contract_body",
     } },
     .{ .op = .canonicalize, .status = .implemented, .input_fields = &.{ "file", "simulate" }, .payload_fields = &.{
         "file", "source_digest", "candidates", "simulation",
@@ -126,7 +126,6 @@ pub const operations = [_]OperationSpec{
 pub const DeferredSection = struct { name: []const u8, note: []const u8 };
 
 pub const deferred_sections = [_]DeferredSection{
-    .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
     .{ .name = "extension_manifests", .note = "waits on a trust policy, not on a phase: a manifest is authenticated only against trusted issuers, pinned or transparent keys, rotation, and revocation (spec 13.4), and a self-asserted manifest is not proof (13.5). Until then every zttp-ext specifier is reported under `rejected` as unavailable rather than silently resolved, and the extensions list is empty" },
     .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
     .{ .name = "repair_budget", .note = "decided rather than scheduled: the repair-iteration and tool-call budget is a client's loop policy, and nothing in this compiler runs that loop or could enforce a number published here. It closes when a loop lands that enforces one, not before" },
@@ -1818,6 +1817,15 @@ fn writeCheckPayload(
     try json.objectField("contract_available");
     try json.write(if (result) |r| r.contract != null else false);
 
+    try json.objectField("contract_body");
+    if (result) |r| {
+        if (r.contract) |*contract| {
+            try json.beginWriteRaw();
+            try zts.handler_contract.writeContractJsonV2(contract, json.writer);
+            json.endWriteRaw();
+        } else try json.write(null);
+    } else try json.write(null);
+
     try json.endObject();
 }
 
@@ -2954,6 +2962,39 @@ test "check on a clean handler succeeds with no diagnostics" {
     try testing.expectEqualStrings("h.ts", payload.get("file").?.string);
     try testing.expectEqual(@as(usize, 64), payload.get("source_digest").?.string.len);
     try testing.expectEqual(@as(i64, 0), payload.get("counts").?.object.get("errors").?.integer);
+    const contract_body = payload.get("contract_body") orelse return error.TestUnexpectedResult;
+    try testing.expect(contract_body == .object);
+    const contract_version = contract_body.object.get("version") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(i64, 2), contract_version.integer);
+    try testing.expect(contract_body.object.get("service_calls") != null);
+    try testing.expect(contract_body.object.get("serviceCalls") == null);
+}
+
+test "check publishes a null contract_body when no contract exists" {
+    const allocator = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "module.ts",
+        .data = "export function handler(\n",
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+
+    const request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"module.ts"}}}}
+    , .{root});
+    defer allocator.free(request);
+    const response = try respond(allocator, request);
+    defer allocator.free(response);
+
+    var parsed = try parse(allocator, response);
+    defer parsed.deinit();
+    const payload_value = parsed.value.object.get("payload") orelse return error.TestUnexpectedResult;
+    const contract_available = payload_value.object.get("contract_available") orelse return error.TestUnexpectedResult;
+    const contract_body = payload_value.object.get("contract_body") orelse return error.TestUnexpectedResult;
+    try testing.expect(!contract_available.bool);
+    try testing.expect(contract_body == .null);
 }
 
 const ternary_chain_handler =
