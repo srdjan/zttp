@@ -49,12 +49,18 @@ pub const StripDiagnosticKind = enum {
     any_type,
     as_assertion,
     satisfies_assertion,
+    /// A string literal that reaches the end of its line. Raised here rather
+    /// than by the parser because stripping runs first and cannot tell where
+    /// the literal was meant to end; without a diagnostic the caller answered
+    /// `success:false` with nothing in `diagnostics`.
+    unterminated_string,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
             .any_type => "'any' type is not supported; use specific types (string, number, object) or union types instead",
             .as_assertion => "'as' type assertion is not supported; use type-safe patterns instead",
             .satisfies_assertion => "'satisfies' type assertion is not supported; use type-safe patterns instead",
+            .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",
         };
     }
 };
@@ -281,6 +287,11 @@ pub fn strip(allocator: std.mem.Allocator, source: []const u8, options: StripOpt
     errdefer stripper.output.deinit(allocator);
     errdefer stripper.diagnostics.deinit(allocator);
     errdefer stripper.span_edits.deinit(allocator);
+    // The type map is handed to the caller inside `StripResult` on success and
+    // owned by nobody on failure. Every annotation recorded before the fault
+    // leaked, which nothing noticed while no test drove a strip failure past
+    // the first annotation.
+    errdefer stripper.type_map.deinit(allocator);
     defer stripper.brace_stack.deinit(allocator);
     defer stripper.paren_cf_stack.deinit(allocator);
     defer stripper.binding_name_ordinals.deinit(allocator);
@@ -2677,6 +2688,7 @@ const Stripper = struct {
                     continue;
                 }
                 if (c == '\n') {
+                    self.recordDiagnostic(.unterminated_string);
                     return StripError.UnterminatedString;
                 }
                 self.pos += 1;

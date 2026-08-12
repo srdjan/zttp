@@ -174,6 +174,10 @@ fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
         .any_type => "ZTS041",
         .as_assertion => "ZTS042",
         .satisfies_assertion => "ZTS043",
+        // The parser band's existing code for the same fault. The stripper
+        // reaches it first, so the code is shared rather than minted: a client
+        // that handles ZTS008 handles it wherever it was raised.
+        .unterminated_string => "ZTS008",
     };
 }
 
@@ -1120,6 +1124,18 @@ test "every diagnostic code names exactly one diagnostic" {
         try seen.put(std.testing.allocator, entry.code, entry.kind);
     }
 
+    // One code may be reached from two kinds only when the two name the SAME
+    // fault at different stages, so a client reading the code learns the same
+    // thing either way and needs no way to tell them apart. Each pair is listed
+    // here with the fault it names; anything unlisted still fails.
+    //
+    // `unterminated_string`: the stripper runs before the parser and hits an
+    // unterminated literal first, so it raises the parser band's existing
+    // ZTS008 rather than a second code for one fault.
+    const shared_codes = [_]struct { code: []const u8, kinds: [2][]const u8 }{
+        .{ .code = "ZTS008", .kinds = .{ "unterminated_string", "unterminated_string" } },
+    };
+
     const mappers = .{
         .{ ErrorKind, parserErrorCode },
         .{ zts.StripDiagnosticKind, stripErrorCode },
@@ -1132,11 +1148,31 @@ test "every diagnostic code names exactly one diagnostic" {
             const kind: Kind = @enumFromInt(field.value);
             const code = codeOf(kind);
             if (seen.get(code)) |owner| {
-                std.debug.print("{s} names both {s} and {s}\n", .{ code, owner, field.name });
-                return error.DuplicateDiagnosticCode;
+                var allowed = false;
+                for (shared_codes) |shared| {
+                    if (!std.mem.eql(u8, shared.code, code)) continue;
+                    // Both sides of the pair must match, so a listed code does
+                    // not become a hole any future kind can slip through.
+                    if (std.mem.eql(u8, shared.kinds[0], owner) and
+                        std.mem.eql(u8, shared.kinds[1], field.name))
+                    {
+                        allowed = true;
+                    }
+                }
+                if (!allowed) {
+                    std.debug.print("{s} names both {s} and {s}\n", .{ code, owner, field.name });
+                    return error.DuplicateDiagnosticCode;
+                }
+            } else {
+                try seen.put(std.testing.allocator, code, field.name);
             }
-            try seen.put(std.testing.allocator, code, field.name);
         }
+    }
+
+    // The floor under the allowance: every listed pair must actually be a
+    // sharing that happens, or the list is a hole nothing closes.
+    for (shared_codes) |shared| {
+        try std.testing.expect(seen.get(shared.code) != null);
     }
 }
 

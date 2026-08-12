@@ -4127,6 +4127,64 @@ test "meta publishes the built-in module catalog from the bindings" {
     }
 }
 
+test "check never answers success false with an empty diagnostics array" {
+    // The property, not the one input that motivated it. An unterminated string
+    // was raised by the stripper before the parser ran, and `check --json`
+    // answered `success:false` with no diagnostics at all: a machine client was
+    // told the file failed and told nothing about why, which is the one shape a
+    // diagnostic wire must never take.
+    const a = testing.allocator;
+    const sources = [_][]const u8{
+        // The motivating input.
+        "export function handler(req) {\n  const s = \"unterminated;\n  return Response.text(s);\n}\n",
+        // A file that fails in the stripper for a different reason.
+        "export function handler(req: Request): any {\n  return Response.text(\"x\");\n}\n",
+        // A file that fails in the parser rather than the stripper.
+        "export function handler(req) {\n  const n = 0x;\n  return Response.json({ n });\n}\n",
+        // A file that fails after parsing, in the checker.
+        "export function handler(req) { return Response.json({ ok: true }); }\n",
+        // And one that does not fail at all, so the assertion below is about
+        // the pairing rather than about everything being broken.
+        "import type { Spec } from \"zttp:types\";\ntype G = Spec<\"state_isolated\">;\nexport function handler(req: Request): Response & G {\n  return Response.json({ ok: true });\n}\n",
+    };
+
+    var saw_failure = false;
+    var saw_success = false;
+    for (sources) |source| {
+        var tmp = std.testing.tmpDir(.{});
+        defer tmp.cleanup();
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
+        const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+        defer a.free(root);
+
+        const req = try std.fmt.allocPrint(a,
+            \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
+        , .{root});
+        defer a.free(req);
+        const out = try respond(a, req);
+        defer a.free(out);
+        var parsed = try parse(a, out);
+        defer parsed.deinit();
+
+        const success = parsed.value.object.get("success").?.bool;
+        const diagnostics = parsed.value.object.get("diagnostics").?.array;
+        if (success) {
+            saw_success = true;
+        } else {
+            saw_failure = true;
+            if (diagnostics.items.len == 0) {
+                std.debug.print("check answered success:false with no diagnostics for:\n{s}\n", .{source});
+                return error.FailureWithoutDiagnostic;
+            }
+        }
+    }
+    // The floor, both ways: a run where nothing failed would satisfy the loop
+    // without testing the property, and one where nothing succeeded would mean
+    // the fixtures stopped being a mix.
+    try testing.expect(saw_failure);
+    try testing.expect(saw_success);
+}
+
 test "meta publishes every decision kind a refusal can carry, with its next action" {
     const a = testing.allocator;
     var raw: []u8 = undefined;
