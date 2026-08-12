@@ -2379,6 +2379,15 @@ pub const Parser = struct {
             return error.InvalidNumber;
         }
 
+        // D3 section 1's three numeric divergences, refused before the parse
+        // fallbacks below can swallow them. `parseInt` fails on `0x` and
+        // `parseFloat` fails after it, and the float path ended `catch 0.0`, so
+        // a malformed literal became the number zero with no diagnostic at all.
+        if (numericFault(text)) |fault| {
+            self.errors.addError(.invalid_number, loc, fault);
+            return error.InvalidNumber;
+        }
+
         // Try to parse as integer first
         if (std.fmt.parseInt(i32, text, 0)) |int_val| {
             return try self.nodes.add(Node.litInt(loc, int_val));
@@ -2392,6 +2401,46 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .float_idx = float_idx },
         });
+    }
+
+    /// The message for a malformed numeric literal, or null when the text is a
+    /// form this profile admits. Reads the token's own bytes, which is where
+    /// the fault lives: the tokenizer scans a radix prefix and an exponent
+    /// marker whether or not digits follow them.
+    fn numericFault(text: []const u8) ?[]const u8 {
+        if (text.len >= 2 and text[0] == '0') {
+            const marker = text[1];
+            const radix_digits = text[2..];
+            if (marker == 'x' or marker == 'X') {
+                if (radix_digits.len == 0) return "hexadecimal literal has no digits after `0x`";
+            } else if (marker == 'b' or marker == 'B') {
+                if (radix_digits.len == 0) return "binary literal has no digits after `0b`";
+            } else if (marker == 'o' or marker == 'O') {
+                if (radix_digits.len == 0) return "octal literal has no digits after `0o`";
+            } else if (std.ascii.isDigit(marker)) {
+                // Legacy octal. `0755` is 493 to a reader who knows the C
+                // convention and 755 to everyone else, which is why the form is
+                // refused rather than assigned one of the two meanings. The
+                // code is `invalid_number`; this message is what names the
+                // fault, since the code is shared with the cases above.
+                return "legacy octal literals are not supported; write `0o755` for octal, or drop the leading zero for decimal";
+            }
+            // A radix literal has no exponent, so the scan below does not apply.
+            if (marker == 'x' or marker == 'X' or marker == 'b' or marker == 'B' or marker == 'o' or marker == 'O') {
+                return null;
+            }
+        }
+
+        // An exponent marker with no digits after it, with or without a sign.
+        if (std.mem.indexOfAny(u8, text, "eE")) |at| {
+            var i = at + 1;
+            if (i < text.len and (text[i] == '+' or text[i] == '-')) i += 1;
+            if (i >= text.len) return "exponent has no digits";
+            while (i < text.len) : (i += 1) {
+                if (!std.ascii.isDigit(text[i])) return "exponent has no digits";
+            }
+        }
+        return null;
     }
 
     fn parseComptimeNumber(self: *Parser, loc: SourceLocation, text: []const u8) anyerror!NodeIndex {
@@ -4869,6 +4918,56 @@ test "comptime numeric separators remain isolated from normal parsing" {
     const errors = program_parser.getErrors();
     try std.testing.expect(errors.len >= 1);
     try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
+}
+
+test "a radix prefix with no digits is refused" {
+    // `0x` parsed as an integer, failed, fell through to `parseFloat`, failed,
+    // and became 0.0. The handler ran with a number the author never wrote.
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "const n = 0x;", "const n = 0b;", "const n = 0o;" }) |source| {
+        var parser = try Parser.init(allocator, source);
+        defer parser.deinit();
+        try std.testing.expectError(error.InvalidNumber, parser.parse());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len >= 1);
+        try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
+    }
+}
+
+test "an exponent with no digits is refused" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "const n = 1e;", "const n = 1e+;", "const n = 1E-;" }) |source| {
+        var parser = try Parser.init(allocator, source);
+        defer parser.deinit();
+        try std.testing.expectError(error.InvalidNumber, parser.parse());
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len >= 1);
+        try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
+    }
+}
+
+test "a legacy octal literal is refused, and the message names it" {
+    // `0755` is 493 to one reader and 755 to another. The code is reused; the
+    // message is what tells the two apart, so the message is what is asserted.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "const mode = 0755;");
+    defer parser.deinit();
+    try std.testing.expectError(error.InvalidNumber, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expect(errors.len >= 1);
+    try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, errors[0].message, "octal") != null);
+}
+
+test "the legal numeric forms still parse" {
+    // The floor under all three refusals above.
+    const allocator = std.testing.allocator;
+    const legal = "const a = 0; const b = 0x1F; const c = 0b1010; const d = 0o17; " ++
+        "const e = 1e3; const f = 1.5e-3; const g = 0.5; const h = 42;";
+    var parser = try Parser.init(allocator, legal);
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "an unknown escape is refused rather than copied" {
