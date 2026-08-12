@@ -126,6 +126,11 @@ pub const ContractBuilder = struct {
     affordances_dynamic: bool,
     cache_namespaces: std.ArrayList([]const u8),
     cache_dynamic: bool,
+    /// Keys passed to `zttp:ratelimit`'s `rateCheck`. The module declares the
+    /// `rate_limit_key` extraction on argument 0, and this is the bucket that
+    /// extraction writes to.
+    rate_limit_keys: std.ArrayList([]const u8) = .empty,
+    rate_limit_key_dynamic: bool = false,
     sql_queries: std.ArrayList(SqlQueryInfo),
     sql_dynamic: bool,
     scope_used: bool,
@@ -294,6 +299,8 @@ pub const ContractBuilder = struct {
         self.affordances.deinit(self.allocator);
         for (self.cache_namespaces.items) |s| self.allocator.free(s);
         self.cache_namespaces.deinit(self.allocator);
+        for (self.rate_limit_keys.items) |s| self.allocator.free(s);
+        self.rate_limit_keys.deinit(self.allocator);
         for (self.sql_queries.items) |*query| query.deinit(self.allocator);
         self.sql_queries.deinit(self.allocator);
         for (self.scope_names.items) |s| self.allocator.free(s);
@@ -390,8 +397,15 @@ pub const ContractBuilder = struct {
         // Phase 3: Compute handler effect properties.
         const properties = try self.computeProperties(effects.lookup("handler"), handler_fn);
 
-        // Phase 3b: Detect rate limiting (guard composition + cacheIncr)
-        const rate_limiting = self.detectRateLimiting();
+        // Phase 3b: Detect rate limiting. The namespace is duped because
+        // `rate_limit_keys` stays with the builder, unlike `cache_namespaces`,
+        // which the contract takes ownership of below.
+        const rate_limit_namespace: ?[]const u8 = if (self.rate_limit_keys.items.len > 0)
+            try self.allocator.dupe(u8, self.rate_limit_keys.items[0])
+        else
+            null;
+        errdefer if (rate_limit_namespace) |ns| self.allocator.free(ns);
+        const rate_limiting = self.detectRateLimiting(rate_limit_namespace);
 
         // Build routes from dispatch table
         var routes: std.ArrayList(RouteInfo) = .empty;
@@ -551,6 +565,7 @@ pub const ContractBuilder = struct {
             .verification = verification,
             .aot = aot_info,
             .rate_limiting = rate_limiting,
+            .owned_rate_limit_namespace = rate_limit_namespace,
             .properties = properties,
             .intent = intent_value,
             .sagas = saga_calls,
@@ -1868,7 +1883,8 @@ pub const ContractBuilder = struct {
             .request_schema => .{ .list = &self.api_request_schema_refs, .dynamic = &self.api_request_schema_dynamic },
             .fetch_host => .{ .list = &self.egress_hosts, .dynamic = &self.egress_dynamic },
             // Custom categories are dispatched directly, not via generic target
-            .sql_registration, .schema_compile, .route_pattern, .service_call, .workflow_call, .cookie_name, .cors_origin, .rate_limit_key => null,
+            .rate_limit_key => .{ .list = &self.rate_limit_keys, .dynamic = &self.rate_limit_key_dynamic },
+            .sql_registration, .schema_compile, .route_pattern, .service_call, .workflow_call, .cookie_name, .cors_origin => null,
             // Partner-declared categories route through the extensions store, not the built-in target table.
             .extension_specific => null,
         };
@@ -4436,34 +4452,26 @@ pub const ContractBuilder = struct {
         };
     }
 
-    /// Detect rate limiting: guard composition + cacheIncr usage.
-    /// When a handler uses zttp:compose and calls cacheIncr, the cache
-    /// namespace is extracted as rate limiting metadata.
-    /// Guard composition with cacheIncr indicates rate limiting: guards
-    /// short-circuit before the handler, and cacheIncr atomically increments
-    /// a counter - the standard rate-limit-and-reject flow.
-    fn detectRateLimiting(self: *const ContractBuilder) ?RateLimitInfo {
-        if (!containsString(self.factsRef().modules.items, "zttp:compose")) return null;
-
-        var uses_cache_incr = false;
-        for (self.factsRef().functions.items) |entry| {
-            if (std.mem.eql(u8, entry.module, "zttp:cache") and containsString(entry.names.items, "cacheIncr")) {
-                uses_cache_incr = true;
-                break;
-            }
-        }
-        if (!uses_cache_incr) return null;
-
-        if (self.cache_namespaces.items.len > 0) {
-            return .{
-                .namespace = self.cache_namespaces.items[0],
-                .dynamic = self.cache_dynamic,
-            };
-        }
-
+    /// Detect rate limiting from the primitive that declares it: a
+    /// `zttp:ratelimit` `rateCheck` call, whose first argument the module's
+    /// own `rate_limit_key` extraction rule puts in `rate_limit_keys`.
+    ///
+    /// What this replaced answered from two proxies ANDed together: a
+    /// `zttp:compose` import and a `cacheIncr` call somewhere. Neither names
+    /// rate limiting. A composition import says the author chained guards,
+    /// which any middleware does, and an incremented counter is a counter -
+    /// a page-view tally increments one too. The conjunction was narrow
+    /// enough that no handler in the repository ever satisfied it, so the
+    /// field it feeds was never once produced by a compile.
+    ///
+    /// `dynamic` means the key is computed rather than literal, which is the
+    /// common shape (`ip + ":" + path`). The detection still fires: a
+    /// deployment rate-limits either way, and only the namespace is unknown.
+    fn detectRateLimiting(self: *const ContractBuilder, owned_namespace: ?[]const u8) ?RateLimitInfo {
+        if (self.rate_limit_keys.items.len == 0 and !self.rate_limit_key_dynamic) return null;
         return .{
-            .namespace = "",
-            .dynamic = true,
+            .namespace = owned_namespace orelse "",
+            .dynamic = self.rate_limit_key_dynamic,
         };
     }
 };
@@ -5527,6 +5535,60 @@ test "workflow call init recognizes body and headers as presence-only" {
     try std.testing.expectEqual(@as(usize, 1), contract.workflow_calls.items.len);
     try std.testing.expect(!contract.workflow_calls.items[0].dynamic);
     try std.testing.expectEqualStrings("POST /reserve", contract.workflow_calls.items[0].route_pattern);
+}
+
+test "a literal rateCheck key becomes the rate-limit namespace" {
+    const source =
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  const allowed = rateCheck("login-attempts", 5, 60);
+        \\  if (!allowed.ok) return Response.json({ error: "slow down" }, { status: 429 });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const rl = contract.rate_limiting orelse return error.MissingRateLimit;
+    try std.testing.expectEqualStrings("login-attempts", rl.namespace);
+    try std.testing.expect(!rl.dynamic);
+}
+
+test "a computed rateCheck key still detects rate limiting, with no namespace" {
+    // The common production shape. Firing here is the point: a deployment
+    // rate-limits whether or not the compiler can name the bucket.
+    const source =
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  const key = req.headers["x-forwarded-for"] ?? "anon";
+        \\  const allowed = rateCheck(key, 5, 60);
+        \\  if (!allowed.ok) return Response.json({ error: "slow down" }, { status: 429 });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    const rl = contract.rate_limiting orelse return error.MissingRateLimit;
+    try std.testing.expectEqualStrings("", rl.namespace);
+    try std.testing.expect(rl.dynamic);
+}
+
+test "an incremented counter alone is not rate limiting" {
+    // The signal the old detector half-rested on. A page-view tally is a
+    // counter, and calling it a rate limit would put a namespace the
+    // deployment must provision into the manifest of a handler that has none.
+    const source =
+        \\import { cacheIncr } from "zttp:cache";
+        \\function handler(req) {
+        \\  const views = cacheIncr("page-views", 1);
+        \\  return Response.json({ views: views });
+        \\}
+    ;
+    var contract = try buildTestContract(source);
+    defer contract.deinit(std.testing.allocator);
+
+    try std.testing.expect(contract.rate_limiting == null);
 }
 
 test "post_only is proven for static POST-only routerMatch tables" {
