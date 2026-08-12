@@ -307,6 +307,28 @@ lookup("raw");  // ERROR: string is not assignable to UserId
 uid.toUpperCase();  // operations unwrap to base type
 ```
 
+The base must be `string` or `number`. A nominal declaration over a record, a
+union, or a function is refused with ZTS048: nominal identity is scalar, and a
+record that needs a name is a `structural` alias.
+
+### Structural And Nominal
+
+`structural` and `nominal` are the declaration keywords the model-minimal
+profile uses, and both are admitted now. `structural` is `type` and `nominal`
+is `distinct type`; each pair is one code path, so the two spellings behave
+identically and can be mixed in one file during the migration.
+
+```typescript
+structural Point = { x: number; y: number };
+structural Boxed<T> = { value: T };
+
+nominal OrderId = string;
+nominal RetryCount = number;
+```
+
+The older spellings still work. They are removed when the profile cuts over,
+and `interface` goes with them.
+
 ### Readonly Fields
 
 The `readonly` modifier prevents assignment to record fields:

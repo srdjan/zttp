@@ -46,6 +46,17 @@ The last one is a statement-termination rule rather than a lexical one. It has
 no mechanical repair today: the one that shipped was withdrawn after a review
 found it writing semicolons onto the wrong line and into trailing comments.
 
+## Declaration Rules
+
+| Form | Code | What it does instead |
+|---|---|---|
+| `nominal Bad = { a: number };` - a nominal base that is not scalar | ZTS048 | A nominal declaration carries scalar identity only, so its base is `string` or `number`. Use `structural` for a record, a tuple, a union, or a function |
+
+The rule reaches the older `distinct type Bad = { ... }` spelling too, which
+shares the same path. The published grammar has always said `ScalarType` at
+that position; until this rule existed nothing enforced it, and a nominal type
+over a record checked clean.
+
 ## Supported Module Syntax
 
 The parser supports ES6 `import`/`export` syntax for built-in virtual modules

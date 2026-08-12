@@ -40,6 +40,8 @@ pub const StripError = error{
     UnsupportedAsAssertion,
     /// 'satisfies' type assertion is not supported
     UnsupportedSatisfiesAssertion,
+    /// A nominal declaration's base is not `string` or `number`
+    NominalBaseNotScalar,
 };
 
 /// Kind of unsupported-TypeScript construct rejected by the stripper. Each
@@ -54,6 +56,10 @@ pub const StripDiagnosticKind = enum {
     /// the literal was meant to end; without a diagnostic the caller answered
     /// `success:false` with nothing in `diagnostics`.
     unterminated_string,
+    /// A `nominal` or `distinct type` declaration over anything but `string` or
+    /// `number`. Raised here because the declaration is blanked before the
+    /// parser sees it, so this is the last pass that holds its source location.
+    nominal_base_not_scalar,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -61,6 +67,7 @@ pub const StripDiagnosticKind = enum {
             .as_assertion => "'as' type assertion is not supported; use type-safe patterns instead",
             .satisfies_assertion => "'satisfies' type assertion is not supported; use type-safe patterns instead",
             .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",
+            .nominal_base_not_scalar => "a nominal declaration carries scalar identity only; its base must be `string` or `number`",
         };
     }
 };
@@ -1313,10 +1320,11 @@ const Stripper = struct {
         return self.stripTypeOrInterfaceBody(self.pos, self.line, self.col);
     }
 
-    /// Shared body for stripping [distinct] type/interface declarations.
+    /// Shared body for stripping [distinct] type/interface declarations, and
+    /// their model-1 spellings `structural` and `nominal`.
     /// `span_start` marks where blanking begins (before any `export` prefix).
     fn stripTypeOrInterfaceBody(self: *Self, span_start: usize, span_start_line: u32, span_start_col: u32) StripError!bool {
-        // Check for 'distinct', 'type', or 'interface' keyword
+        // Check for 'distinct', 'type', 'structural', 'nominal', or 'interface'
         var is_distinct = false;
         const first_kw = self.peekKeyword();
         if (first_kw == null) {
@@ -1341,15 +1349,24 @@ const Stripper = struct {
             return false;
         }
 
-        const is_type = std.mem.eql(u8, keyword.?, "type");
+        // `structural` is the model-1 spelling of `type` and `nominal` of
+        // `distinct type`. Both are one keyword rather than two, so neither can
+        // follow `distinct` - `distinct nominal` is not a declaration and the
+        // guard below refuses it along with `distinct interface`.
+        const keyword_is_type = std.mem.eql(u8, keyword.?, "type");
+        const is_nominal = std.mem.eql(u8, keyword.?, "nominal");
+        const is_type = keyword_is_type or is_nominal or
+            std.mem.eql(u8, keyword.?, "structural");
         const is_interface = std.mem.eql(u8, keyword.?, "interface");
 
-        if ((!is_type and !is_interface) or (is_distinct and is_interface)) {
+        if ((!is_type and !is_interface) or (is_distinct and !keyword_is_type)) {
             self.pos = span_start;
             self.line = span_start_line;
             self.col = span_start_col;
             return false;
         }
+
+        if (is_nominal) is_distinct = true;
 
         // Skip the keyword
         self.pos += keyword.?.len;
@@ -1398,14 +1415,35 @@ const Stripper = struct {
 
         var type_body_start: usize = 0;
         var type_body_end: usize = 0;
+        var body_line: u32 = self.line;
+        var body_col: u32 = self.col;
 
         if (is_type and self.pos < self.source.len and self.source[self.pos] == '=') {
             self.pos += 1;
             self.col += 1;
             self.skipWhitespaceTracked();
             type_body_start = self.pos;
+            body_line = self.line;
+            body_col = self.col;
             try self.skipTypeExpressionUntilDelimiter(&[_]u8{ ';', '\n' }, false);
             type_body_end = self.pos;
+        }
+
+        // Scalar identity only. A nominal declaration over a record, a union, a
+        // function, or another nominal would mint an identity whose base the
+        // checker cannot name, and the published grammar has always said
+        // `ScalarType` here - it was the enforcement that was missing, so
+        // `distinct type Bad = { a: number }` checked clean.
+        if (is_distinct and !isScalarBaseText(self.source[type_body_start..type_body_end])) {
+            if (self.report_errors) {
+                std.log.err("{}:{}: {s}", .{
+                    body_line,
+                    body_col,
+                    StripDiagnosticKind.nominal_base_not_scalar.message(),
+                });
+            }
+            self.recordDiagnosticAt(.nominal_base_not_scalar, body_line, body_col);
+            if (!self.collect_all_diagnostics) return StripError.NominalBaseNotScalar;
         }
 
         if (is_interface and self.pos < self.source.len and self.source[self.pos] == '{') {
@@ -2052,7 +2090,22 @@ const Stripper = struct {
     /// that requested structured diagnostics. A no-op when `diagnostic_out`
     /// is null. The matching `StripError` is still returned by the caller.
     fn recordDiagnostic(self: *Self, kind: StripDiagnosticKind) void {
-        const d: StripDiagnostic = .{ .line = self.line, .column = self.col, .kind = kind };
+        self.recordDiagnosticAt(kind, self.line, self.col);
+    }
+
+    /// Spec 8's `ScalarType`, which is `"number" | "string"` and nothing else.
+    /// Compared as text because this runs before any type is resolved, and a
+    /// trailing `;` is not part of the base the author wrote.
+    fn isScalarBaseText(text: []const u8) bool {
+        const trimmed = std.mem.trim(u8, text, " \t\r\n;");
+        return std.mem.eql(u8, trimmed, "string") or std.mem.eql(u8, trimmed, "number");
+    }
+
+    /// The same, at a position the caller kept rather than the cursor's. A
+    /// declaration is scanned to its end before it can be judged, so the cursor
+    /// has left the span the reader needs to be pointed at.
+    fn recordDiagnosticAt(self: *Self, kind: StripDiagnosticKind, line: u32, col: u32) void {
+        const d: StripDiagnostic = .{ .line = line, .column = col, .kind = kind };
         if (self.diagnostic_out) |out| out.* = d;
         // Best-effort: an OOM here will resurface at the next allocating step.
         self.diagnostics.append(self.allocator, d) catch {};
@@ -2879,6 +2932,109 @@ test "interface stripped" {
     defer @constCast(&result).deinit();
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "structural declaration stripped" {
+    const result = try strip(std.testing.allocator, "structural X = number;", .{});
+    defer @constCast(&result).deinit();
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "nominal declaration stripped" {
+    const result = try strip(std.testing.allocator, "nominal UserId = string;", .{});
+    defer @constCast(&result).deinit();
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "exported structural and nominal declarations stripped" {
+    const result = try strip(
+        std.testing.allocator,
+        "export structural X = number;\nexport nominal UserId = string;\n",
+        .{},
+    );
+    defer @constCast(&result).deinit();
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+test "nominal records the distinct_type kind and structural the alias kind" {
+    // The two keywords are not cosmetic: `nominal` has to reach the same
+    // TypeEnv path `distinct type` does, or it would declare a transparent
+    // alias and every cross-nominal assignment would be accepted.
+    const result = try strip(
+        std.testing.allocator,
+        "structural Config = { port: number };\nnominal UserId = string;\n",
+        .{},
+    );
+    defer @constCast(&result).deinit();
+
+    var saw_alias = false;
+    var saw_distinct = false;
+    for (result.type_map.entries.items) |entry| {
+        const name = result.type_map.getNameText(entry) orelse continue;
+        if (entry.kind == .type_alias and std.mem.eql(u8, name, "Config")) saw_alias = true;
+        if (entry.kind == .distinct_type and std.mem.eql(u8, name, "UserId")) saw_distinct = true;
+    }
+    try std.testing.expect(saw_alias);
+    try std.testing.expect(saw_distinct);
+}
+
+test "structural and nominal are still ordinary identifiers" {
+    // Adding a declaration keyword must not steal the name from expression
+    // position. Both words appear in tracked source as plain identifiers, and
+    // a stripper that blanked them would delete running code.
+    const source = "const nominal = 1;\nconst structural = nominal + 1;\n";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "distinct does not compose with the model-1 keywords" {
+    // `distinct` pairs with `type` and nothing else. `distinct nominal` is not
+    // a declaration, so the stripper must leave it for the parser to refuse
+    // rather than blank it as one.
+    const source = "distinct nominal UserId = string;";
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqualStrings(source, result.code);
+}
+
+test "a nominal base that is not scalar is refused" {
+    const result = strip(std.testing.allocator, "nominal Bad = { a: number };", .{});
+    try std.testing.expectError(StripError.NominalBaseNotScalar, result);
+}
+
+test "the same refusal reaches the distinct type spelling" {
+    // The two spellings share one path, so the rule cannot hold for one and not
+    // the other. This is what the published grammar has claimed since it was
+    // written: `DistinctDecl ::= "distinct" "type" Ident "=" ScalarType ";"`.
+    const result = strip(std.testing.allocator, "distinct type Bad = { a: number };", .{});
+    try std.testing.expectError(StripError.NominalBaseNotScalar, result);
+}
+
+test "a nominal base refusal points at the base, not the declaration" {
+    var diag: ?StripDiagnostic = null;
+    const result = strip(
+        std.testing.allocator,
+        "nominal Bad = Other;",
+        .{ .diagnostic_out = &diag },
+    );
+    try std.testing.expectError(StripError.NominalBaseNotScalar, result);
+    try std.testing.expectEqual(StripDiagnosticKind.nominal_base_not_scalar, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    // `nominal Bad = ` is 14 bytes, so the base starts at column 15.
+    try std.testing.expectEqual(@as(u32, 15), diag.?.column);
+}
+
+test "both scalar bases are admitted" {
+    for ([_][]const u8{ "nominal UserId = string;", "nominal Retries = number;" }) |source| {
+        const result = try strip(std.testing.allocator, source, .{});
+        defer @constCast(&result).deinit();
+        const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+        try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+    }
 }
 
 test "semicolon-less generic type alias does not swallow next statement" {

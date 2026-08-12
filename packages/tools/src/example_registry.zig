@@ -402,6 +402,54 @@ pub const examples = [_]Example{
         ,
     },
     .{
+        .feature = "structural",
+        .evidence = .{ .source_text = .{
+            .needle = "structural Point",
+            .reason = "`structural` and `type` share the `type_alias` map kind by construction - the keyword is the whole difference and the map records neither, so a kind-based row here would be satisfied by an example that writes `type` throughout and teaches nothing",
+        } },
+        .source =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\structural Guard = Spec<"state_isolated">;
+        \\
+        \\structural Point = { x: number; y: number };
+        \\
+        \\function sum(point: Point): number {
+        \\  return point.x + point.y;
+        \\}
+        \\
+        \\export function handler(req: Request): Response & Guard {
+        \\  const origin: Point = { x: 1, y: 2 };
+        \\  return Response.json({ total: sum(origin) });
+        \\}
+        \\
+        ,
+    },
+    .{
+        .feature = "nominal",
+        .evidence = .{ .source_text = .{
+            .needle = "nominal OrderId",
+            .reason = "the same reason the `structural` row gives: `nominal` and `distinct type` are one path and one `distinct_type` map kind, so the kind cannot separate the spelling this row exists to teach",
+        } },
+        .source =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\type Guard = Spec<"state_isolated">;
+        \\
+        \\nominal OrderId = string;
+        \\
+        \\function label(id: OrderId): string {
+        \\  return id;
+        \\}
+        \\
+        \\export function handler(req: Request): Response & Guard {
+        \\  const id: OrderId = OrderId("o-1");
+        \\  return Response.text(label(id));
+        \\}
+        \\
+        ,
+    },
+    .{
         .feature = "readonly fields",
         .evidence = .{ .source_text = .{
             .needle = "readonly port",

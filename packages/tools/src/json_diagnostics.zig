@@ -178,6 +178,10 @@ fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
         .any_type => "ZTS041",
         .as_assertion => "ZTS042",
         .satisfies_assertion => "ZTS043",
+        // Minted rather than folded into a type-checker code: the declaration is
+        // blanked before the parser runs, so the stripper is the only pass that
+        // can point at the base the author wrote.
+        .nominal_base_not_scalar => "ZTS048",
         // The parser band's existing code for the same fault. The stripper
         // reaches it first, so the code is shared rather than minted: a client
         // that handles ZTS008 handles it wherever it was raised.
@@ -666,6 +670,11 @@ const allowed_features = [_]Feature{
     .{ .name = "import/export", .status = .allowed, .alternative = null },
     .{ .name = "type annotations", .status = .allowed, .alternative = null },
     .{ .name = "distinct type", .status = .allowed, .alternative = null },
+    // Phase 7's spellings of the two rows above them. They are separate rows
+    // rather than a renaming because both spellings are admitted during the
+    // cutover, and a client reading this table has to be able to write either.
+    .{ .name = "structural", .status = .allowed, .alternative = null },
+    .{ .name = "nominal", .status = .allowed, .alternative = null },
     .{ .name = "readonly fields", .status = .allowed, .alternative = null },
     .{ .name = "type guards (x is T)", .status = .allowed, .alternative = null },
     .{ .name = "template literal types", .status = .allowed, .alternative = null },

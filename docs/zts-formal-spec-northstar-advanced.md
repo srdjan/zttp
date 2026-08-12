@@ -1900,12 +1900,16 @@ ImportNames  ::= ImportName ("," ImportName)* [","]
 ImportName   ::= Ident ["as" Ident]
 
 TopDecl      ::= ["export"] TypeDecl
+               | ["export"] StructuralDecl
                | ["export"] DistinctDecl
+               | ["export"] NominalDecl
                | ["export"] FunctionDecl
                | ["export"] TopBindingDecl
 
 TypeDecl     ::= "type" Ident TypeParams? "=" Type ";"
+StructuralDecl ::= "structural" Ident TypeParams? "=" Type ";"
 DistinctDecl ::= "distinct" "type" Ident "=" ScalarType ";"
+NominalDecl  ::= "nominal" Ident "=" ScalarType ";"
 TypeParams   ::= "<" TypeParam ("," TypeParam)* ">"
 TypeParam    ::= Ident ["extends" Type]
 

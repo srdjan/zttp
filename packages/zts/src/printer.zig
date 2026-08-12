@@ -275,10 +275,11 @@ fn collectRegions(
 }
 
 /// Walk back from a declaration's name to the start of the statement that
-/// declares it: over `type`, `interface`, `distinct type`, and any `export`.
+/// declares it: over `type`, `interface`, `structural`, `nominal`,
+/// `distinct type`, and any `export`.
 fn declarationStart(source: []const u8, name_start: u32) u32 {
     var at = name_start;
-    at = skipWordBack(source, at, &.{ "type", "interface" });
+    at = skipWordBack(source, at, &.{ "type", "interface", "structural", "nominal" });
     at = skipWordBack(source, at, &.{"distinct"});
     at = skipWordBack(source, at, &.{"export"});
     return at;

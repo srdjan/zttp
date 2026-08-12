@@ -5129,6 +5129,50 @@ test "TypeChecker: distinct type rejects raw base type" {
     , 1, 0);
 }
 
+test "TypeChecker: nominal rejects cross-nominal assignment" {
+    try checkTypedSource(
+        \\nominal UserId = string;
+        \\nominal SessionId = string;
+        \\const sid: SessionId = SessionId("sess_456");
+        \\const uid: UserId = sid;
+    , 1, 0);
+}
+
+test "TypeChecker: nominal constructor returns nominal type" {
+    try checkTypedSource(
+        \\nominal UserId = string;
+        \\const uid: UserId = UserId("usr_123");
+    , 0, 0);
+}
+
+test "TypeChecker: nominal rejects raw base type" {
+    try checkTypedSource(
+        \\nominal UserId = string;
+        \\const uid: UserId = "raw_string";
+    , 1, 0);
+}
+
+test "TypeChecker: structural is a transparent alias" {
+    try checkTypedSource(
+        \\structural Config = { port: number; host: string };
+        \\const cfg: Config = { port: 3000, host: "localhost" };
+    , 0, 0);
+}
+
+test "TypeChecker: structural carries type parameters" {
+    try checkTypedSource(
+        \\structural Box<T> = { value: T };
+        \\const boxed: Box<number> = { value: 1 };
+    , 0, 0);
+}
+
+test "TypeChecker: structural rejects a mismatched member" {
+    try checkTypedSource(
+        \\structural Config = { port: number };
+        \\const cfg: Config = { port: "3000" };
+    , 1, 0);
+}
+
 test "TypeChecker: template literal type accepts matching string" {
     try checkTypedSource(
         \\type ApiRoute = `/api/${string}`;

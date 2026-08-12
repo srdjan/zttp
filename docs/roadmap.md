@@ -934,6 +934,28 @@ and its annotation was ignored, an object spread contributed its operand's name
 instead of its fields, a used destructured binding read as unused, and a
 template literal type was not assignable to `string`.
 
+Phase 7 has started with its declaration keywords, and the frozen pre-cutover
+baseline it measures against is the last row of
+[convergence.md](convergence.md), published from a clean tree for that purpose.
+`structural` and `nominal` are admitted now, alongside the `type` and
+`distinct type` they replace: each pair is one path and one type-map kind, so
+the two spellings behave identically and mix in one file during the migration.
+The published profile stays `zts-advanced-1` until the removal list is done,
+because the identity is compared against a client's `expected.profile_id` and
+naming it `zts-model-1` while `|>`, truthiness, and templates still parse would
+make it a claim the compiler does not meet.
+
+Two findings came out of that slice. `distinct type Bad = { a: number };`
+checked clean, while the published grammar has said `ScalarType` at that
+position since the registry was written and marked the row `parse_time` - the
+grammar was right and nothing enforced it. Both spellings now refuse a
+non-scalar base with ZTS048, located at the base rather than the declaration.
+And the example registry's evidence model cannot see a keyword: `structural`
+and `type` share the `type_alias` map kind by construction, so a kind-based row
+would have been satisfied by an example that wrote `type` throughout. Both new
+rows carry source-text evidence with that reason, and swapping the keyword in
+the example fails the gate.
+
 | Phase | Scope | Exit |
 |---|---|---|
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |
