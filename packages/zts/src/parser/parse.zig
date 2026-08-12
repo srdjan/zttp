@@ -2442,7 +2442,7 @@ pub const Parser = struct {
         const loc = token.location();
         const text = token.text(self.source);
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-        const str_idx = try self.addUnescapedString(content);
+        const str_idx = try self.unescapedStringOrDiagnostic(content, loc);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -2454,13 +2454,7 @@ pub const Parser = struct {
             return error.UnexpectedToken;
         }
 
-        const str_idx = self.addUnescapedString(text[1 .. text.len - 1]) catch |err| switch (err) {
-            error.InvalidEscapeSequence => {
-                self.errors.addError(.invalid_escape_sequence, loc, "invalid escape sequence");
-                return error.UnexpectedToken;
-            },
-            else => return err,
-        };
+        const str_idx = try self.unescapedStringOrDiagnostic(text[1 .. text.len - 1], loc);
         return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
@@ -3988,8 +3982,34 @@ pub const Parser = struct {
     /// Template literals unescape through the same table as quoted strings.
     /// They always did on the normal profile, and a comptime-folded literal has
     /// to be byte-identical to the same literal written outside `comptime(...)`.
+    /// Decode a string literal's content, reporting a closed-escape-set
+    /// violation as a located diagnostic rather than propagating a bare error.
+    /// The two faults are distinct to a reader and carry different repairs, so
+    /// they carry different codes.
+    fn unescapedStringOrDiagnostic(self: *Parser, content: []const u8, loc: SourceLocation) !u16 {
+        return self.addUnescapedString(content) catch |err| switch (err) {
+            error.InvalidEscapeSequence => {
+                self.errors.addError(
+                    .invalid_escape_sequence,
+                    loc,
+                    "unknown escape sequence; the escape set is closed to \\n \\r \\t \\b \\f \\v \\0 \\\\ \\' \\\" \\` \\$ \\xNN \\uNNNN and \\u{N..}",
+                );
+                return err;
+            },
+            error.StringLineContinuation => {
+                self.errors.addError(
+                    .string_line_continuation,
+                    loc,
+                    "a string may not continue across a line; join the lines, or write the newline as \\n",
+                );
+                return err;
+            },
+            else => return err,
+        };
+    }
+
     fn addUnescapedString(self: *Parser, content: []const u8) !u16 {
-        const unescaped = try self.unescape(content, self.expression_profile != null);
+        const unescaped = try self.unescape(content);
         defer unescaped.deinit(self.allocator);
         return self.addString(unescaped.bytes);
     }
@@ -4024,17 +4044,16 @@ pub const Parser = struct {
     /// `\'`, `\"`, `\0`, `\xNN`, `\uNNNN`, and `\u{N..}`; every other escape
     /// emits the character that follows the backslash.
     ///
-    /// `strict` is the only axis the two parser profiles differ on. The comptime
-    /// expression profile passes true and reports malformed input as
-    /// `error.InvalidEscapeSequence`, which `addComptimeStringNode` turns into a
-    /// diagnostic; the normal profile passes false and copies a malformed escape
-    /// through literally. The escape table itself must not differ, or a
-    /// comptime-folded literal stops matching the same literal written outside
-    /// `comptime(...)`.
+    /// The two profiles no longer differ here. The comptime profile used to be
+    /// the strict one and the normal profile copied a malformed escape through
+    /// literally, which meant a literal could be legal outside `comptime(...)`
+    /// and refused inside it - and, worse, that a mistyped escape silently
+    /// changed the string. The set is closed for both, so there is nothing left
+    /// to parameterize.
     ///
     /// Returns the original input on the fast path, or an owned allocation plus
     /// the used byte range when escape decoding shortens the string.
-    fn unescape(self: *Parser, input: []const u8, strict: bool) !UnescapedString {
+    fn unescape(self: *Parser, input: []const u8) !UnescapedString {
         if (std.mem.indexOfScalar(u8, input, '\\') == null) return .{ .bytes = input };
 
         // The decoded form is never longer than the input: every escape emits
@@ -4046,7 +4065,9 @@ pub const Parser = struct {
 
         while (i < input.len) {
             if (input[i] != '\\' or i + 1 >= input.len) {
-                if (input[i] == '\\' and strict) return error.InvalidEscapeSequence;
+                // A trailing backslash escapes the closing quote in every
+                // reading, so the literal it appears in is malformed.
+                if (input[i] == '\\') return error.InvalidEscapeSequence;
                 result[out_pos] = input[i];
                 out_pos += 1;
                 i += 1;
@@ -4066,10 +4087,7 @@ pub const Parser = struct {
                         i += 4;
                         continue;
                     }
-                    if (strict) return error.InvalidEscapeSequence;
-                    result[out_pos] = input[i];
-                    out_pos += 1;
-                    i += 1;
+                    return error.InvalidEscapeSequence;
                 },
                 'u' => {
                     if (decodeUnicodeEscape(input, i)) |decoded| {
@@ -4079,11 +4097,15 @@ pub const Parser = struct {
                             continue;
                         } else |_| {}
                     } else |_| {}
-                    if (strict) return error.InvalidEscapeSequence;
-                    result[out_pos] = input[i];
-                    out_pos += 1;
-                    i += 1;
+                    return error.InvalidEscapeSequence;
                 },
+                // A backslash before a real newline. JavaScript reads it as a
+                // line continuation and emits nothing; D3 section 1 refuses it,
+                // because a string that spans a line reads as two strings to
+                // everyone but the compiler. Refused in both profiles: a
+                // comptime-folded literal and the same literal written outside
+                // `comptime(...)` must not disagree about what is legal.
+                '\n', '\r' => return error.StringLineContinuation,
                 else => {
                     result[out_pos] = switch (escaped) {
                         'n' => '\n',
@@ -4093,9 +4115,14 @@ pub const Parser = struct {
                         'f' => 0x0C, // form feed
                         'v' => 0x0B, // vertical tab
                         '0' => 0,
-                        // `\\`, `\'`, `\"`, `` \` ``, `\$` and every unknown
-                        // escape emit the character after the backslash.
-                        else => escaped,
+                        // The rest of the closed set: an escaped delimiter or
+                        // backslash stands for itself.
+                        '\\', '\'', '"', '`', '$' => escaped,
+                        // Every other byte closes the set rather than copying
+                        // through. `\q` emitted `q`, so a mistyped escape
+                        // produced a string the author did not write and no
+                        // diagnostic said so.
+                        else => return error.InvalidEscapeSequence,
                     };
                     out_pos += 1;
                     i += 2;
@@ -4842,6 +4869,45 @@ test "comptime numeric separators remain isolated from normal parsing" {
     const errors = program_parser.getErrors();
     try std.testing.expect(errors.len >= 1);
     try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
+}
+
+test "an unknown escape is refused rather than copied" {
+    // D3 section 1: the escape set is closed. `\q` used to emit `q`, so a typo
+    // in an escape produced a string the author did not write and no
+    // diagnostic ever said so.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "const s = \"a\\qb\";");
+    defer parser.deinit();
+    try std.testing.expectError(error.InvalidEscapeSequence, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expect(errors.len >= 1);
+    try std.testing.expectEqual(error_mod.ErrorKind.invalid_escape_sequence, errors[0].kind);
+    try std.testing.expect(errors[0].location.line >= 1);
+}
+
+test "a backslash before a real newline is refused" {
+    // The other half of the closed escape set. A line continuation used to
+    // yield a literal newline, so a string silently spanned lines.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "const s = \"a\\\nb\";");
+    defer parser.deinit();
+    try std.testing.expectError(error.StringLineContinuation, parser.parse());
+    const errors = parser.getErrors();
+    try std.testing.expect(errors.len >= 1);
+    try std.testing.expectEqual(error_mod.ErrorKind.string_line_continuation, errors[0].kind);
+}
+
+test "the legal escapes still parse" {
+    // The floor under both refusals: closing the set must not close it on the
+    // escapes the profile admits.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(
+        allocator,
+        "const s = \"n\\nr\\rt\\tb\\bf\\fv\\v0\\0q\\\"d\\\\x\\x41u\\u0041c\\u{1F600}\";",
+    );
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "comptime string folding decodes unicode escapes like the normal parser" {

@@ -76,6 +76,14 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
         .invalid_number => "ZTS012",
         .invalid_escape_sequence => "ZTS013",
         .invalid_unicode_escape => "ZTS014",
+        // Minted rather than folded into `invalid_escape_sequence`: a reader
+        // told "invalid escape sequence" looks for a bad escape letter, and
+        // the fault is a string that spans a line.
+        .string_line_continuation => "ZTS045",
+        // Minted rather than folded into `unexpected_token`: the fault is that
+        // an identifier carries a byte outside ASCII, not that a token arrived
+        // where another was expected.
+        .non_ascii_identifier => "ZTS046",
         .expected_property_name => "ZTS015",
         .invalid_assignment_target => "ZTS016",
         .invalid_destructuring => "ZTS017",

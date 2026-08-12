@@ -20,6 +20,13 @@ pub const ErrorKind = enum {
     invalid_number,
     invalid_escape_sequence,
     invalid_unicode_escape,
+    /// A backslash before a real newline inside a string literal. Not an
+    /// invalid escape: the escape set is closed and this is a string spanning
+    /// a line, which the repair joins rather than respells.
+    string_line_continuation,
+    /// A byte outside ASCII inside an identifier. Reported once for the run,
+    /// because the alternative is one diagnostic per byte of one character.
+    non_ascii_identifier,
 
     // Syntax errors
     unexpected_token,
