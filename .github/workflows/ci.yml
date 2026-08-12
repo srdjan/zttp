@@ -104,6 +104,15 @@ jobs:
       - name: Run semantics spec gate
         run: bash scripts/check-semantics-spec.sh
 
+      - name: Run registry and normalization gates
+        run: |
+          bash scripts/check-normalize-idempotent.sh
+          bash scripts/check-idiom-table.sh
+          bash scripts/check-grammar-drift.sh
+          bash scripts/check-decision-registry.sh
+          bash scripts/check-meta-drift.sh
+          bash scripts/check-agent-determinism.sh
+
       - name: Verify expert subsystem
         run: |
           META=$(./zig-out/bin/zts meta --json)

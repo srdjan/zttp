@@ -193,10 +193,18 @@ pub const rows = [_]Row{
     // argument spec 5.5 makes - stated here as something that runs rather than
     // as prose. No precondition: parse identity compares whole programs, so
     // there is nothing for a law to re-derive.
+    // `.planned`, not `.implemented`, so nothing advertises this repair or
+    // auto-applies it. M2 as wired parses BOTH sides under the ASI grammar the
+    // compiler no longer ships, so it certified two mutually inconsistent
+    // programs as equivalent to the same original: with `return` on its own
+    // line, writing the `;` one way yields `return;` and the other yields
+    // `return r;`, and tree identity under the permissive grammar cannot tell
+    // them apart. The row returns to `.implemented` when the repaired side is
+    // compared under the shipping grammar.
     .{
         .intent = .insert_semicolon,
         .method = .parse_identity,
-        .status = .implemented,
+        .status = .planned,
         .precondition = null,
     },
     .{
@@ -1428,9 +1436,26 @@ test "every gradable row has a law, and every law has a gradable row" {
             return error.TestFailed;
         }
     }
-    // Eight under M4 plus the one under M2, which is the semicolon insertion
-    // ASI removal needs and the only row parse identity discharges.
-    try std.testing.expectEqual(@as(usize, 9), gradable_count);
+    // Eight, all under M4. The one M2 row is `.planned` while its pipeline is
+    // withdrawn, so it is not gradable and advertises nothing.
+    try std.testing.expectEqual(@as(usize, 8), gradable_count);
+}
+
+test "the withdrawn semicolon row advertises nothing" {
+    // While the row is `.planned`, `validateApplication` must answer
+    // `no_validator` for it - the apply path then refuses the intent rather
+    // than applying an edit nothing checked.
+    try std.testing.expect(!gradable(.insert_semicolon));
+    try std.testing.expectEqual(
+        Discharge.no_validator,
+        try validateApplication(
+            std.testing.allocator,
+            .insert_semicolon,
+            "const a = 1\n",
+            "const a = 1;\n",
+            1,
+        ),
+    );
 }
 
 test "parse identity discharges a written semicolon" {
@@ -1439,12 +1464,10 @@ test "parse identity discharges a written semicolon" {
     // leaves the tree the parser built exactly as it was.
     try std.testing.expectEqual(
         Discharge.equivalent,
-        try validateApplication(
+        try dischargeParseIdentity(
             std.testing.allocator,
-            .insert_semicolon,
             "const a = 1\nconst b = 2\n",
             "const a = 1;\nconst b = 2;\n",
-            1,
         ),
     );
 }
@@ -1453,32 +1476,26 @@ test "parse identity refuses an edit that moves structure, not just tokens" {
     // The floor. A method that accepted everything would discharge the row and
     // grade an arbitrary edit as an equivalence, which is the one answer a
     // validator must never give.
-    const changed_value = try validateApplication(
+    const changed_value = try dischargeParseIdentity(
         std.testing.allocator,
-        .insert_semicolon,
         "const a = 1\n",
         "const a = 2;\n",
-        1,
     );
     try std.testing.expect(changed_value == .not_law_shape);
 
-    const added_statement = try validateApplication(
+    const added_statement = try dischargeParseIdentity(
         std.testing.allocator,
-        .insert_semicolon,
         "const a = 1\n",
         "const a = 1;\nconst b = 2;\n",
-        1,
     );
     try std.testing.expect(added_statement == .not_law_shape);
 
     // A repaired source that does not parse is not the same program as one
     // that does.
-    const broken = try validateApplication(
+    const broken = try dischargeParseIdentity(
         std.testing.allocator,
-        .insert_semicolon,
         "const a = 1\n",
         "const a = ;\n",
-        1,
     );
     try std.testing.expect(broken == .not_law_shape);
 }

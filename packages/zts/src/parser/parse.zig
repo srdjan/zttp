@@ -2609,7 +2609,7 @@ pub const Parser = struct {
                 return error.UnexpectedToken;
             }
             const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            const str_idx = try self.addUnescapedString(content);
+            const str_idx = try self.unescapedStringOrDiagnostic(content, loc);
             return try self.nodes.add(Node.litString(loc, str_idx));
         }
 
@@ -2621,7 +2621,7 @@ pub const Parser = struct {
         var text = self.current.text(self.source);
         self.advance();
         var content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-        var str_idx = try self.addUnescapedString(content);
+        var str_idx = try self.unescapedStringOrDiagnostic(content, loc);
         var str_node = try self.nodes.add(.{
             .tag = .template_part_string,
             .loc = loc,
@@ -2643,7 +2643,7 @@ pub const Parser = struct {
                 text = self.current.text(self.source);
                 self.advance();
                 content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-                str_idx = try self.addUnescapedString(content);
+                str_idx = try self.unescapedStringOrDiagnostic(content, loc);
                 str_node = try self.nodes.add(.{
                     .tag = .template_part_string,
                     .loc = loc,
@@ -2663,7 +2663,7 @@ pub const Parser = struct {
             text = self.current.text(self.source);
             self.advance();
             content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            str_idx = try self.addUnescapedString(content);
+            str_idx = try self.unescapedStringOrDiagnostic(content, loc);
             str_node = try self.nodes.add(.{
                 .tag = .template_part_string,
                 .loc = loc,
@@ -3542,6 +3542,16 @@ pub const Parser = struct {
     /// named the byte that caused them.
     fn reportNonAsciiIdentifier(self: *Parser) void {
         if (self.current.type != .invalid) return;
+        // JSX children are collected by consuming ordinary tokens between the
+        // tag boundaries and keeping the raw source span, so the text of
+        // `<p>Cafe</p>` arrives here as tokens. A byte above ASCII in prose is
+        // not an identifier, and refusing it turned a rule about names into a
+        // rule against rendering non-English text. The tokenizer's own mode is
+        // the only signal available at this point, so a file parsed as JSX
+        // keeps the diagnostic off entirely rather than off for text alone -
+        // stated plainly because it is a real gap: a non-ASCII identifier in a
+        // .tsx file is not reported.
+        if (self.tokenizer.jsx_mode) return;
         const text = self.current.text(self.source);
         var has_non_ascii = false;
         for (text) |byte| {
@@ -5099,6 +5109,30 @@ test "a non-ASCII identifier reports once, not once per cascade" {
     const errors = parser.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(error_mod.ErrorKind.non_ascii_identifier, errors[0].kind);
+}
+
+test "non-ASCII text inside a JSX element is text, not an identifier" {
+    // JSX children are collected by consuming ordinary tokens between the tag
+    // boundaries, so a byte above ASCII in a text run reaches the same code an
+    // identifier does. Reporting it there refused every handler that renders a
+    // non-English string, which is a rule about identifiers applied to prose.
+    //
+    // Stripped first, because that is the path a .tsx file takes through the
+    // CLI. A bare parse of the same source does not reproduce it.
+    const allocator = std.testing.allocator;
+    const source = "function App() { return <p>Caf\xc3\xa9</p>; }\n";
+
+    var stripped = try @import("../stripper.zig").strip(allocator, source, .{ .tsx_mode = true });
+    defer stripped.deinit();
+
+    var parser = try Parser.init(allocator, stripped.code);
+    defer parser.deinit();
+    parser.enableJsx();
+    _ = parser.parse() catch 0;
+    for (parser.getErrors()) |err| {
+        std.debug.print("JSX text reported {s}: {s}\n", .{ @tagName(err.kind), err.message });
+    }
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "an ASCII identifier with digits and underscores still parses" {

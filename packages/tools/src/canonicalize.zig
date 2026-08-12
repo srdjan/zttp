@@ -130,12 +130,31 @@ pub fn collectFromSource(
     errdefer result.deinit(allocator);
 
     try buildLineRepairs(allocator, source, check.json_diagnostics.items, &result);
-    try buildSemicolonRepairs(allocator, source, virtual_path, &result);
     return result;
 }
 
 /// Propose the `;` every statement that relies on automatic semicolon
 /// insertion is missing.
+///
+/// WITHDRAWN, and not called. A review of the pipeline found it unsound in
+/// every stage, and each fault produced a wrong edit that the wire reported as
+/// a success:
+///
+/// - The line numbers come from a parse of the STRIPPED code and are used
+///   against the original source with no `sourcePosition` translation, so a
+///   `comptime(...)` fold - which the stripper documents as its one
+///   offset-breaking operation - shifts every later repair onto the wrong line.
+/// - The replacement is built from `trimEnd(line, " \t\r")`, so a line ending
+///   in a `//` comment gets the `;` written inside the comment, and a CRLF file
+///   loses its `\r`.
+/// - JSX is enabled for `.tsx` only, though `.jsx` reaches here too.
+///
+/// The corpus needs zero of these repairs, so withdrawing costs nothing a user
+/// can feel, while leaving it in place kept `apply_repair` writing edits that
+/// changed a program's meaning and publishing them as proven equivalences. It
+/// comes back when the line mapping goes through `sourcePosition`, the
+/// replacement is built from a span rather than a trimmed line, and M2 compares
+/// against the grammar this compiler actually ships.
 ///
 /// Not diagnostic-driven, because there is no diagnostic yet: spec 5.5 mandates
 /// no ASI and the parser still accepts it, so this reads the parse's own census
@@ -4468,52 +4487,6 @@ test "delimitersBalanced detects expressions that do not finish on the line" {
     try std.testing.expect(!delimitersBalanced("makeUser("));
     try std.testing.expect(!delimitersBalanced("{"));
     try std.testing.expect(!delimitersBalanced("f(\"unterminated"));
-}
-
-test "a statement relying on insertion gets a semicolon repair its validator discharges" {
-    // The producer and the validator, tied together: the repair this emits has
-    // to be one M2 accepts, or `apply_repair` would refuse the only mechanical
-    // exit a program has once ASI removal lands.
-    const allocator = std.testing.allocator;
-    const source =
-        \\export function handler(req) {
-        \\  const a = 1
-        \\  const b = 2
-        \\  return Response.json({ a, b })
-        \\}
-        \\
-    ;
-
-    var result = try collectFromSource(allocator, source, "h.js");
-    defer result.deinit(allocator);
-
-    var semicolons: usize = 0;
-    for (result.repairs.items) |repair| {
-        if (repair.intent != .insert_semicolon) continue;
-        semicolons += 1;
-
-        var one = [_]Repair{repair};
-        const repaired = try applyRepairs(allocator, source, &one);
-        defer allocator.free(repaired);
-
-        switch (try repairPolicy.validateApplication(
-            allocator,
-            .insert_semicolon,
-            source,
-            repaired,
-            repair.line,
-        )) {
-            .equivalent => {},
-            .not_law_shape => |why| {
-                std.debug.print("the semicolon repair is not an equivalence: {s}\n", .{why});
-                return error.TestFailed;
-            },
-            else => return error.TestFailed,
-        }
-    }
-    // Three statements rely on insertion here. A run that produced none would
-    // satisfy the loop above without testing anything.
-    try std.testing.expectEqual(@as(usize, 3), semicolons);
 }
 
 test "nestedDestructureRewrite refuses a multiline right-hand side" {
