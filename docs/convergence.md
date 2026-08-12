@@ -35,6 +35,7 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-10 | `66f8aaa7-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `8dfb32f91549` | 100% (19/19) | 4 | 100% (13/13) |
 | 2026-08-10 | `e0ab4058-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
 | 2026-08-12 | `dcee3baf-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-12 | `734f0c8b` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
@@ -368,6 +369,22 @@ that accepts whatever it is compared against.
 
 Coverage moved with the rate: [coverage.md](coverage.md) goes from five of the
 compiler's seventy-two advertised rules tripped to seven.
+
+## The frozen pre-cutover baseline
+
+The last row is the one phase 7's paired comparison measures against, and it is
+here for that reason rather than because anything moved. The four rows above it
+were published from dirty trees, so none of them could be reproduced from a
+commit alone - which is exactly the property a baseline needs. This one is a
+replay at `734f0c8b` with a clean tree, and it reports what the four dirty rows
+did: 100% first draft over 19 cases, median 4, 100% intent over 13.
+
+That the numbers held across the no-ASI removal and the four defect fixes that
+followed it is the ratchet doing its job, not a separate finding. What the row
+adds is reproducibility. Phase 7 changes the corpus by construction - the
+prompts and seeds move to the new dialect, so the corpus version changes - and a
+post-cutover row can only be read against a pre-cutover one that a reader can
+regenerate.
 
 ## Reading the table
 
