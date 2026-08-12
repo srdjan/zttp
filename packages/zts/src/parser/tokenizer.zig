@@ -135,6 +135,20 @@ pub const Tokenizer = struct {
                 if (isIdentifierStart(c)) {
                     break :blk self.scanIdentifier(start, start_col, start_line);
                 }
+                // A byte above ASCII is one token, not one per byte. One
+                // character outside ASCII is two or three bytes in UTF-8, and
+                // emitting an `invalid` token for each made the parser report
+                // the same fault two or three times over. The run also absorbs
+                // the ASCII identifier characters around it, so `caf` + `é` is
+                // one token rather than an identifier followed by a fault.
+                if (c >= 0x80) {
+                    while (self.pos < self.source.len and
+                        (self.source[self.pos] >= 0x80 or isIdentifierChar(self.source[self.pos])))
+                    {
+                        self.pos += 1;
+                    }
+                    break :blk self.tokN(start, start_col, start_line, .invalid);
+                }
                 break :blk self.tok1(start, start_col, start_line, .invalid);
             },
         };
@@ -495,6 +509,21 @@ pub const Tokenizer = struct {
 
     fn scanIdentifier(self: *Tokenizer, start: u32, col: u32, line: u32) Token {
         while (self.pos < self.source.len and isIdentifierChar(self.source[self.pos])) self.pos += 1;
+
+        // A byte above ASCII where the identifier ends belongs to the same
+        // name a reader sees: `café` is one identifier on the page, so it is
+        // one token here rather than `caf` followed by a fault. Reporting the
+        // fault against the whole name is what lets the parser say what is
+        // wrong instead of reporting that `=` was expected.
+        if (self.pos < self.source.len and self.source[self.pos] >= 0x80) {
+            while (self.pos < self.source.len and
+                (self.source[self.pos] >= 0x80 or isIdentifierChar(self.source[self.pos])))
+            {
+                self.pos += 1;
+            }
+            return self.tokN(start, col, line, .invalid);
+        }
+
         const text = self.source[start..self.pos];
         const token_type = lookupKeyword(text) orelse .identifier;
         return self.tokN(start, col, line, token_type);

@@ -3455,6 +3455,33 @@ pub const Parser = struct {
     fn advance(self: *Parser) void {
         self.previous = self.current;
         self.current = self.tokenizer.next();
+        self.reportNonAsciiIdentifier();
+    }
+
+    /// Report a byte above ASCII inside an identifier, once, at the token that
+    /// carries it.
+    ///
+    /// Identifiers are ASCII by spec 5, and the tokenizer hands the whole run
+    /// back as one `invalid` token. Reporting here rather than where the token
+    /// is consumed is what makes the count one: every consumer of a token goes
+    /// through this funnel, and the panic mode the report enters suppresses the
+    /// parse errors that follow from the same fault - `const café = 1` reported
+    /// a const with no initializer and a missing expression, neither of which
+    /// named the byte that caused them.
+    fn reportNonAsciiIdentifier(self: *Parser) void {
+        if (self.current.type != .invalid) return;
+        const text = self.current.text(self.source);
+        var has_non_ascii = false;
+        for (text) |byte| {
+            if (byte >= 0x80) has_non_ascii = true;
+        }
+        if (!has_non_ascii) return;
+        self.errors.addError(
+            .non_ascii_identifier,
+            self.current.location(),
+            "identifiers are ASCII: letters, digits, `_` and `$`",
+        );
+        self.errors.enterPanicMode();
     }
 
     fn check(self: *Parser, token_type: TokenType) bool {
@@ -4918,6 +4945,30 @@ test "comptime numeric separators remain isolated from normal parsing" {
     const errors = program_parser.getErrors();
     try std.testing.expect(errors.len >= 1);
     try std.testing.expectEqual(error_mod.ErrorKind.invalid_number, errors[0].kind);
+}
+
+test "a non-ASCII identifier reports once, not once per cascade" {
+    // `const café = 1;` produced three diagnostics - a const with no
+    // initializer, a missing expression, and an unexpected token - none of
+    // which named the actual fault. The bytes of one character are one fault
+    // and get one diagnostic.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "const caf\xc3\xa9 = 1;");
+    defer parser.deinit();
+    _ = parser.parse() catch 0;
+    const errors = parser.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(error_mod.ErrorKind.non_ascii_identifier, errors[0].kind);
+}
+
+test "an ASCII identifier with digits and underscores still parses" {
+    // The floor: refusing bytes above ASCII must not refuse the identifier
+    // characters the profile admits.
+    const allocator = std.testing.allocator;
+    var parser = try Parser.init(allocator, "const _priv$1 = 1; const camelCase2 = _priv$1;");
+    defer parser.deinit();
+    _ = try parser.parse();
+    try std.testing.expect(!parser.hasErrors());
 }
 
 test "a radix prefix with no digits is refused" {
