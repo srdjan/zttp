@@ -51,11 +51,19 @@ found it writing semicolons onto the wrong line and into trailing comments.
 | Form | Code | What it does instead |
 |---|---|---|
 | `nominal Bad = { a: number };` - a nominal base that is not scalar | ZTS048 | A nominal declaration carries scalar identity only, so its base is `string` or `number`. Use `structural` for a record, a tuple, a union, or a function |
+| `interface X { ... }` | ZTS049 | Write `structural X = { ... };`. The `export` form is refused the same way |
 
-The rule reaches the older `distinct type Bad = { ... }` spelling too, which
-shares the same path. The published grammar has always said `ScalarType` at
-that position; until this rule existed nothing enforced it, and a nominal type
-over a record checked clean.
+The nominal rule reaches the older `distinct type Bad = { ... }` spelling too,
+which shares the same path. The published grammar has always said `ScalarType`
+at that position; until this rule existed nothing enforced it, and a nominal
+type over a record checked clean.
+
+`interface` is recognized rather than merely rejected: the body is scanned so
+the span is known and the repair is exact, and no type-map entry is recorded,
+so nothing downstream resolves it. Open interfaces, `extends`, merging, and
+declaration augmentation were never supported and are not repaired into an
+alias. The heuristic that made an all-function interface nominal went with the
+form - nominal identity now comes only from a `nominal` declaration.
 
 ## Supported Module Syntax
 

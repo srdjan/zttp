@@ -231,7 +231,7 @@ fn collectRegions(
             },
             // A type declaration is opaque as a whole statement: the body span
             // alone would leave `type Foo =` to be laid out as code.
-            .type_alias, .interface_decl, .distinct_type => .{
+            .type_alias, .distinct_type => .{
                 .start = declarationStart(source, entry.name_start),
                 .end = declarationEnd(source, entry.source_end),
             },

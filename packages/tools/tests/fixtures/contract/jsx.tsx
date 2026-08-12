@@ -5,9 +5,9 @@ type Props = {
     count: number;
 };
 
-interface GreetingProps {
+structural GreetingProps = {
     message: string;
-}
+};
 
 function Greeting(props: GreetingProps): JSX.Element {
     return <h1>{props.message}</h1>;

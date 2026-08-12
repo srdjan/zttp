@@ -41,7 +41,10 @@ fi
 EXPECTED_PROFILE="zts-advanced-1"
 EXPECTED_POLICY_HASH="78c9fec96be277836842b2365a249ed26da46f1f0545f36753e33434cc3fd685"
 EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
-EXPECTED_RESTRICTION_HASH="4fcf90666711907a3ad9cf7459a12d12515ede86ef2597b5e179832357a132c6"
+# Moved when phase 7 refused `interface` with ZTS049: `restriction.interface`
+# stopped being an unenforced row and gained a rule code, which is a change to
+# what the matrix says rather than to how it is rendered.
+EXPECTED_RESTRICTION_HASH="df59c14e36c97906c4b8b29f1c4b824865036babb1b618a8b456e462432c63c8"
 EXPECTED_BUILTIN_HASH="10729b9666dd9843313ab40f2d0c98e81aaab0360830f0530d202c66764c5138"
 
 fail() {

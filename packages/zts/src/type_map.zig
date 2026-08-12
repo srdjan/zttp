@@ -16,8 +16,6 @@ const std = @import("std");
 pub const TypeMapKind = enum(u8) {
     /// `type Foo = { ... }` - type alias declaration
     type_alias,
-    /// `interface CacheFx { ... }` - interface declaration
-    interface_decl,
     /// `distinct type Foo = string` - nominal/branded type declaration
     distinct_type,
     /// `const x: Type = ...` or `let x: Type = ...` - variable annotation

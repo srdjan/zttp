@@ -182,6 +182,10 @@ fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
         // blanked before the parser runs, so the stripper is the only pass that
         // can point at the base the author wrote.
         .nominal_base_not_scalar => "ZTS048",
+        // Minted rather than reusing a parser code: `interface` is recognized
+        // far enough to name the exact repair and then refused, so the fault is
+        // the declaration form, not an unexpected token.
+        .interface_declaration => "ZTS049",
         // The parser band's existing code for the same fault. The stripper
         // reaches it first, so the code is shared rather than minted: a client
         // that handles ZTS008 handles it wherever it was raised.

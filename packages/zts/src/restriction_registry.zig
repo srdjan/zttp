@@ -433,8 +433,8 @@ pub const entries = [_]RestrictionEntry{
         .feature = "interface",
         .boundary = "one closed data and module model",
         .nature = .language_simplicity,
-        .note = "language-simplicity choice",
-        .unenforced_note = "still admitted: `interface` parses and type-checks today, and its removal is blocked on the migration policy the D workstream owes.",
+        .note = "write `structural Name = { ... };`",
+        .enforced_by = &.{"ZTS049"},
     },
     .{
         .id = "restriction.object-methods",

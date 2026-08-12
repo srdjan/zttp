@@ -20,10 +20,10 @@ type RequestData = {
     count: number;
 };
 
-interface ResponseData {
+structural ResponseData = {
     message: string;
     timestamp: number;
-}
+};
 
 function processData(data: RequestData): ResponseData {
     return {

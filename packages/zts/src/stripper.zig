@@ -42,6 +42,8 @@ pub const StripError = error{
     UnsupportedSatisfiesAssertion,
     /// A nominal declaration's base is not `string` or `number`
     NominalBaseNotScalar,
+    /// `interface` is not a declaration form in this profile
+    InterfaceDeclaration,
 };
 
 /// Kind of unsupported-TypeScript construct rejected by the stripper. Each
@@ -60,6 +62,10 @@ pub const StripDiagnosticKind = enum {
     /// `number`. Raised here because the declaration is blanked before the
     /// parser sees it, so this is the last pass that holds its source location.
     nominal_base_not_scalar,
+    /// An `interface` declaration. Recognized far enough to name the repair and
+    /// then refused: the body is scanned so the span is known, and no type-map
+    /// entry is recorded, so nothing downstream resolves it.
+    interface_declaration,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -68,6 +74,7 @@ pub const StripDiagnosticKind = enum {
             .satisfies_assertion => "'satisfies' type assertion is not supported; use type-safe patterns instead",
             .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",
             .nominal_base_not_scalar => "a nominal declaration carries scalar identity only; its base must be `string` or `number`",
+            .interface_declaration => "`interface` is not a declaration form in this profile; write `structural Name = { ... };`",
         };
     }
 };
@@ -1458,7 +1465,25 @@ const Stripper = struct {
             self.col += 1;
         }
 
-        const kind: TypeMapKind = if (is_distinct) .distinct_type else if (is_type) .type_alias else .interface_decl;
+        // Recognition-only, which is what phase 7 asks a migration path to be.
+        // The body above was scanned, so the span is known and the repair can be
+        // exact; the declaration is then refused rather than recorded, and no
+        // type-map entry means nothing downstream resolves an interface.
+        if (is_interface) {
+            if (self.report_errors) {
+                std.log.err("{}:{}: {s}", .{
+                    span_start_line,
+                    span_start_col,
+                    StripDiagnosticKind.interface_declaration.message(),
+                });
+            }
+            self.recordDiagnosticAt(.interface_declaration, span_start_line, span_start_col);
+            if (!self.collect_all_diagnostics) return StripError.InterfaceDeclaration;
+            self.blankSpan(span_start, self.pos);
+            return true;
+        }
+
+        const kind: TypeMapKind = if (is_distinct) .distinct_type else .type_alias;
         self.recordTypeAnnotation(kind, type_body_start, type_body_end, name_start, name_end);
         if (generic_start != 0) {
             self.recordTypeAnnotation(.generic_params, generic_start, generic_end, name_start, name_end);
@@ -2927,11 +2952,17 @@ test "type alias stripped" {
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
-test "interface stripped" {
-    const result = try strip(std.testing.allocator, "interface Foo { x: number; }", .{});
-    defer @constCast(&result).deinit();
-    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
-    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+test "interface is refused, and the refusal names the repair" {
+    var diag: ?StripDiagnostic = null;
+    const result = strip(
+        std.testing.allocator,
+        "interface Foo { x: number; }",
+        .{ .diagnostic_out = &diag },
+    );
+    try std.testing.expectError(StripError.InterfaceDeclaration, result);
+    try std.testing.expectEqual(StripDiagnosticKind.interface_declaration, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.column);
 }
 
 test "structural declaration stripped" {
@@ -3109,17 +3140,18 @@ test "exported type alias declaration stripped" {
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
-test "exported interface declaration stripped" {
+test "an exported interface is refused too" {
+    // The `export` prefix reaches the same body through `tryStripExportType`,
+    // so a refusal that only covered the bare form would leave the exported
+    // one admitted - which is the spelling a capability interface used.
     const source =
         \\export interface AppCapabilities {
         \\  taskRepo: Repository<Task>;
         \\  clock: Clock;
         \\}
     ;
-    const result = try strip(std.testing.allocator, source, .{});
-    defer @constCast(&result).deinit();
-    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
-    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+    const result = strip(std.testing.allocator, source, .{});
+    try std.testing.expectError(StripError.InterfaceDeclaration, result);
 }
 
 // NOTE: enum, namespace, decorator, implements, and access modifier detection
@@ -3524,10 +3556,10 @@ test "full handler example" {
         \\    count: number;
         \\};
         \\
-        \\interface ResponseData {
+        \\structural ResponseData = {
         \\    message: string;
         \\    timestamp: number;
-        \\}
+        \\};
         \\
         \\function processData(data: RequestData): ResponseData {
         \\    return {
@@ -3549,7 +3581,7 @@ test "full handler example" {
 
     // Should not contain type annotations
     try std.testing.expect(std.mem.indexOf(u8, result.code, "type RequestData") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "interface ResponseData") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.code, "structural ResponseData") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": RequestData") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, ": ResponseData") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, " as RequestData") == null);
@@ -3885,20 +3917,25 @@ test "TypeMap records type alias" {
     try std.testing.expect(found_alias);
 }
 
-test "TypeMap records interface" {
-    const source = "interface CacheFx { get(key: string): string | null; }";
-    const result = try strip(std.testing.allocator, source, .{});
-    defer @constCast(&result).deinit();
+test "a refused interface records no type-map entry" {
+    // Recognition-only means the body is scanned and then dropped. An entry
+    // here would be resolved by `TypeEnv`, which is the machinery this removal
+    // deletes, so the absence is the claim rather than an incidental detail.
+    var diag: ?StripDiagnostic = null;
+    var result = try strip(
+        std.testing.allocator,
+        "interface CacheFx { get(key: string): string | null; }",
+        .{ .diagnostic_out = &diag, .collect_all_diagnostics = true },
+    );
+    defer result.deinit();
 
-    const tm = result.type_map;
-    var found_iface = false;
-    for (tm.entries.items) |entry| {
-        if (entry.kind == .interface_decl) {
-            found_iface = true;
-            try std.testing.expectEqualStrings("CacheFx", tm.getNameText(entry).?);
-        }
+    try std.testing.expectEqual(StripDiagnosticKind.interface_declaration, diag.?.kind);
+    for (result.type_map.entries.items) |entry| {
+        const name = result.type_map.getNameText(entry) orelse continue;
+        try std.testing.expect(!std.mem.eql(u8, name, "CacheFx"));
     }
-    try std.testing.expect(found_iface);
+    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
+    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
 test "TypeMap records function return type" {

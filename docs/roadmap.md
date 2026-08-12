@@ -956,6 +956,24 @@ would have been satisfied by an example that wrote `type` throughout. Both new
 rows carry source-text evidence with that reason, and swapping the keyword in
 the example fails the gate.
 
+`interface` is the first form phase 7 removes, and it is gone in both halves.
+Five tracked files declared one, all plain records, so the migration to
+`structural` changed no contract golden. The form is now refused with ZTS049,
+recognition-only in the sense the plan asks for - the body is scanned so the
+span is known and the repair is exact, and no type-map entry is recorded, so
+the resolution side could be deleted rather than left dormant. What went with
+it is the heuristic that made an all-function interface nominal, which is the
+hidden exception the plan names: an identity no declaration expressed, minted
+by counting a record's fields. Nominal identity now comes only from a `nominal`
+declaration over `string` or `number`.
+
+`restriction.interface` left the unenforced set with it. It had carried the
+note "blocked on the migration policy the D workstream owes" and now names
+ZTS049, so the count of rows with no rule code behind them fell from three to
+two. That moved `restriction_matrix_hash` and not `policy_hash`, which is the
+distinction those two identities exist to draw: what the matrix says changed,
+and the rule set that judges a file did not.
+
 | Phase | Scope | Exit |
 |---|---|---|
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |

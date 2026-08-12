@@ -239,7 +239,7 @@ fn resolveAlias(env: *const TypeEnv, type_idx: TypeIndex) ?TypeIndex {
     const pool = env.pool;
     if (pool.getTag(type_idx) != .t_ref) return null;
     const name = pool.getRefName(type_idx);
-    return env.getTypeAlias(name) orelse env.getInterface(name);
+    return env.getTypeAlias(name);
 }
 
 fn getTupleMembers(pool: *const TypePool, type_idx: TypeIndex) []const TypeIndex {

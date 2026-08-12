@@ -356,8 +356,6 @@ pub const TypeEnv = struct {
     type_aliases: std.StringHashMapUnmanaged(TypeIndex),
     /// Generic type aliases: name -> uninstantiated body + param names
     generic_aliases: std.StringHashMapUnmanaged(GenericAlias),
-    /// Interface namespace: interface name -> resolved TypeIndex
-    interfaces: std.StringHashMapUnmanaged(TypeIndex),
     /// Variable types: packed(context_line, context_col) -> TypeIndex
     var_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Function signatures: packed(context_line, context_col) -> FunctionSig
@@ -409,7 +407,6 @@ pub const TypeEnv = struct {
             .allocator = allocator,
             .type_aliases = .empty,
             .generic_aliases = .empty,
-            .interfaces = .empty,
             .var_types = .empty,
             .fn_signatures = .empty,
             .var_types_by_name = .empty,
@@ -523,7 +520,6 @@ pub const TypeEnv = struct {
         self.non_contractive_indices.deinit(self.allocator);
         self.type_aliases.deinit(self.allocator);
         self.generic_aliases.deinit(self.allocator);
-        self.interfaces.deinit(self.allocator);
         self.var_types.deinit(self.allocator);
         self.fn_signatures.deinit(self.allocator);
         self.var_types_by_name.deinit(self.allocator);
@@ -561,7 +557,6 @@ pub const TypeEnv = struct {
         for (tm.entries.items) |entry| {
             switch (entry.kind) {
                 .type_alias => self.processTypeAlias(tm, entry, &generic_params_map),
-                .interface_decl => self.processInterface(tm, entry),
                 .distinct_type => self.processDistinctType(tm, entry),
                 // exhaustive: this is the type-namespace pass. The annotation
                 // kinds it skips are consumed by the second pass below, so
@@ -846,33 +841,6 @@ pub const TypeEnv = struct {
         self.type_aliases.put(self.allocator, owned_name, nominal_idx) catch self.markAllocationFailure();
     }
 
-    fn processInterface(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
-        const name = tm.getNameText(entry) orelse return;
-        const type_text = tm.getTypeText(entry);
-        if (type_text.len == 0) return;
-
-        const type_idx = self.resolveType(type_text);
-
-        // Check if all members are function-typed -> mark as nominal (capability interface)
-        if (type_idx != null_type_idx and self.pool.getTag(type_idx) == .t_record) {
-            const fields = self.pool.getRecordFields(type_idx);
-            var all_functions = fields.len > 0;
-            for (fields) |field| {
-                const ftag = self.pool.getTag(field.type_idx);
-                if (ftag != .t_function and ftag != null) {
-                    all_functions = false;
-                    break;
-                }
-            }
-            if (all_functions and type_idx < self.pool.nodes.items.len) {
-                self.pool.markNominal(self.allocator, type_idx, name);
-            }
-        }
-
-        const owned_name = self.internName(name);
-        self.interfaces.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
-    }
-
     fn processVarAnnotation(self: *TypeEnv, tm: *const TypeMap, entry: TypeMapEntry) void {
         const type_text = tm.getTypeText(entry);
         if (type_text.len == 0) return;
@@ -910,8 +878,6 @@ pub const TypeEnv = struct {
 
         // Check type aliases
         if (self.type_aliases.get(trimmed)) |idx| return idx;
-        // Check interfaces
-        if (self.interfaces.get(trimmed)) |idx| return idx;
         // Check generic scope stack (innermost first)
         if (self.generic_scopes.items.len > 0) {
             var i = self.generic_scopes.items.len;
@@ -1214,7 +1180,7 @@ pub const TypeEnv = struct {
             if (tag != .t_ref) return cur;
             const name = self.pool.getRefName(cur);
             if (name.len == 0) return cur;
-            const next = self.type_aliases.get(name) orelse self.interfaces.get(name) orelse return cur;
+            const next = self.type_aliases.get(name) orelse return cur;
             if (next == cur) return cur;
             cur = next;
         }
@@ -1359,11 +1325,6 @@ pub const TypeEnv = struct {
     pub fn putTypeAlias(self: *TypeEnv, name: []const u8, type_idx: TypeIndex) void {
         const owned_name = self.internName(name);
         self.type_aliases.put(self.allocator, owned_name, type_idx) catch self.markAllocationFailure();
-    }
-
-    /// Look up an interface by name.
-    pub fn getInterface(self: *const TypeEnv, name: []const u8) ?TypeIndex {
-        return self.interfaces.get(name);
     }
 
     /// Look up a function signature by source location.

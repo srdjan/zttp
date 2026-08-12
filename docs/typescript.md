@@ -20,10 +20,9 @@ The type stripper (`packages/zts/src/stripper.zig`) removes TypeScript syntax be
 ### Supported Subset
 
 **Type declarations** (stripped entirely):
-- `type` aliases (including ADT unions)
-- `distinct type` declarations (nominal/branded types)
-- `interface` declarations
-- `export type ...` / `export distinct type ...` / `import type ...`
+- `type` and `structural` aliases (including ADT unions)
+- `distinct type` and `nominal` declarations (nominal/branded types)
+- `export type ...` / `export structural ...` / `export nominal ...` / `import type ...`
 
 **Type annotations** (stripped in place):
 - Variable annotations: `const x: T = ...` or reassigned `let x: T = ...`
@@ -35,7 +34,7 @@ The type stripper (`packages/zts/src/stripper.zig`) removes TypeScript syntax be
 - `satisfies` assertions: `value satisfies T`
 
 **Basic generics** (stripped):
-- Generic params on type/interface: `type Box<T> = ...`
+- Generic params on an alias: `structural Box<T> = ...`
 - Generic params on functions: `function id<T>(x: T): T { ... }`
 - Generic arrow functions in .ts files: `const id = <T>(x: T): T => x;`
 
@@ -225,9 +224,9 @@ The type checker (`packages/zts/src/type_checker.zig`) validates type annotation
 
 ### Structural Matching
 
-Object literals are structurally matched against declared interface and type alias types. A `{ message: string, count: number }` literal passes as a `ResponseData` interface if the fields match, regardless of whether the type was declared as `type` or `interface`.
+Object literals are structurally matched against declared alias types. A `{ message: string, count: number }` literal passes as a `ResponseData` alias if the fields match.
 
-Interfaces whose members are all functions are treated as nominal (identity-based matching only). This prevents structural forgery of capability objects.
+A record alias is transparent, whatever the keyword. Nominal identity comes only from a `nominal` declaration, and only over `string` or `number`. `interface` used to be the exception - one whose members were all functions became nominal by a heuristic no declaration expressed - and both the form and the heuristic are gone.
 
 ### Optional Narrowing
 

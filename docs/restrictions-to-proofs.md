@@ -65,16 +65,15 @@ clients through the version-2 `restrictions` operation rather than through
 | numeric record keys | one keyed-collection model | `canonical_simplicity` | `ZTS001` |
 | multiple record spreads | fixed-shape elaboration without field-presence tests | `canonical_simplicity` | `ZTS614` |
 | fallback `assert` | one explicit early-return spelling | `canonical_simplicity` | `ZTS002` |
-| interface | one closed data and module model | `language_simplicity` | no diagnostic |
+| interface | one closed data and module model | `language_simplicity` | `ZTS049` |
 | object methods, getters, setters | explicit functions and effects | `language_simplicity` | `ZTS001` |
 
 ## Rows No Diagnostic Rejects
 
-Three rows sit in the matrix with no rule code behind them. Each says why:
+Two rows sit in the matrix with no rule code behind them. Each says why:
 
 - **unchecked recursive cycle** - not a rejection by design: recursion runs, and phase 0 downgrades the totality and cost claims instead (spec_discharge refuses the capsule, path_generator reports the coverage cause).
 - **native module with unbound contract** - enforced outside the rule registry, by module manifest authentication and `zts verify-modules`, which emit no registry rule code.
-- **interface** - still admitted: `interface` parses and type-checks today, and its removal is blocked on the migration policy the D workstream owes.
 
 ## Why
 
@@ -111,5 +110,5 @@ Per-restriction rationale, one sentence each.
 - **numeric record keys** - canonical simplicity; use a string key, or an array when the keys are dense indices
 - **multiple record spreads** - canonical simplicity; write explicit fields over one base
 - **fallback `assert`** - use `if` plus `return`
-- **interface** - language-simplicity choice
+- **interface** - write `structural Name = { ... };`
 - **object methods, getters, setters** - language-simplicity choice
