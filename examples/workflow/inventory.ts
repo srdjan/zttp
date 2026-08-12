@@ -5,7 +5,7 @@
 import { routerMatch } from "zttp:router";
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<"deterministic" | "no_secret_leakage" | "no_credential_leakage" | "injection_safe" | "input_validated" | "pii_contained">;
+structural Guardrails = Spec<"deterministic" | "no_secret_leakage" | "no_credential_leakage" | "injection_safe" | "input_validated" | "pii_contained">;
 
 function checkStock(req: Request): Response {
   return Response.json({ inStock: true });

@@ -1,4 +1,4 @@
-type Todo = {
+structural Todo = {
     text: string;
     done: boolean;
 };

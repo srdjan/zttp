@@ -27,7 +27,7 @@ import {
   unwrapOr,
 } from "zttp:result";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"

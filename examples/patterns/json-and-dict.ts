@@ -19,7 +19,7 @@ import type { Spec } from "zttp:types";
 import { parseJson, stringifyJson } from "zttp:json";
 import { dictGet, dictEntries } from "zttp:collections";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"

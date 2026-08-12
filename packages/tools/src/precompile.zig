@@ -5485,8 +5485,8 @@ test "serialized bytecode matches the committed goldens" {
 // members written without `Box<string>` reject under the truncating implementation
 // too, and would have stood here as a permanent false pass.
 const wide_intersection_members =
-    \\type Box<T> = { boxed: T };
-    \\type Wide =
+    \\structural Box<T> = { boxed: T };
+    \\structural Wide =
     \\  Box<string> &
     \\  { f01: string } & { f02: string } & { f03: string } & { f04: string } &
     \\  { f05: string } & { f06: string } & { f07: string } & { f08: string } &
@@ -5569,9 +5569,9 @@ test "zts check accepts the same value once the seventeenth member is satisfied"
 // that reopens the fail-open moves `named` back to 0 while leaving `inlined`
 // green, and only the contrast catches that.
 const named_intersection_members =
-    \\type A = { a: string };
-    \\type B = { b: string };
-    \\type AB = A & B;
+    \\structural A = { a: string };
+    \\structural B = { b: string };
+    \\structural AB = A & B;
     \\function handler(req: Request): Response {
     \\  const v: AB = { a: "x" };
     \\  return Response.json(v);
@@ -5580,7 +5580,7 @@ const named_intersection_members =
 ;
 
 const inline_intersection_members =
-    \\type AB = { a: string } & { b: string };
+    \\structural AB = { a: string } & { b: string };
     \\function handler(req: Request): Response {
     \\  const v: AB = { a: "x" };
     \\  return Response.json(v);

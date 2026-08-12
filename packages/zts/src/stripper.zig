@@ -3128,7 +3128,7 @@ test "export type stripped" {
 
 test "exported type alias declaration stripped" {
     const source =
-        \\export type Result<T, E> = {
+        \\export structural Result<T, E> = {
         \\  ok: boolean;
         \\  value?: T;
         \\  error?: E;
@@ -3551,7 +3551,7 @@ test "full handler example" {
     const source =
         \\// TypeScript handler example
         \\
-        \\type RequestData = {
+        \\structural RequestData = {
         \\    name: string;
         \\    count: number;
         \\};

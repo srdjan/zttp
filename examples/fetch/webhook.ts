@@ -20,7 +20,7 @@
 import type { Spec } from "zttp:types";
 import { fetch } from "zttp:fetch";
 
-type WebhookProof = Spec<"state_isolated" | "no_secret_leakage">;
+structural WebhookProof = Spec<"state_isolated" | "no_secret_leakage">;
 
 function handler(req: Request): Response & WebhookProof {
   if (req.path !== "/charge") {

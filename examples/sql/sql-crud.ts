@@ -11,7 +11,7 @@ import { sql, sqlExec, sqlMany } from "zttp:sql";
 // the last insert left in the table. This example declared it until the flow
 // checker learned that a read from mutable module state varies the same way a
 // clock read does - `zttp:sql` declares no clock, so nothing had caught it.
-type CrudGuarantees = Spec<
+structural CrudGuarantees = Spec<
     | "state_isolated"
     | "fault_covered"
     | "result_safe"

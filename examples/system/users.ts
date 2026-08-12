@@ -4,7 +4,7 @@ import { cacheGet, cacheSet } from "zttp:cache";
 import { routerMatch } from "zttp:router";
 import { serviceCall } from "zttp:service";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "injection_safe"
     | "state_isolated"
     | "no_secret_leakage"

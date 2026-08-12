@@ -4323,7 +4323,7 @@ test "an object spread contributes the spread record's fields" {
     // spread object therefore failed to satisfy the record type it was written
     // to produce, which is the whole use of the form.
     try checkTypedSource(
-        \\type Config = { host: string, port: number };
+        \\structural Config = { host: string, port: number };
         \\function defaults(): Config {
         \\  return { host: "localhost", port: 80 };
         \\}
@@ -4339,7 +4339,7 @@ test "an object spread does not invent fields the spread record lacks" {
     // field the target type requires and neither side provides is still a
     // mismatch.
     try checkTypedSourceSaying(
-        \\type Config = { host: string, port: number };
+        \\structural Config = { host: string, port: number };
         \\function partial(): { port: number } {
         \\  return { port: 80 };
         \\}
@@ -4804,7 +4804,7 @@ test "TypeChecker: param-discriminant match with default arm is exhaustive (no w
     // producing a spurious non-exhaustive warning. A catch-all arm is now
     // honored regardless of discriminant type.
     try checkTypedSource(
-        \\type C = { kind: "echo", text: string } | { kind: "ping", text: string };
+        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
@@ -4846,7 +4846,7 @@ test "TypeChecker: full-variant param-discriminant match without a default is ex
     // warning. (The canonical profile still separately requires a default arm
     // on every match; this only fixes the type-checker layer's false warn.)
     try checkTypedSource(
-        \\type C = { kind: "echo", text: string } | { kind: "ping", text: string };
+        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
@@ -4860,7 +4860,7 @@ test "TypeChecker: partial param-discriminant match without a default still warn
     // The same parameter-type resolution must not silence REAL gaps: one of
     // two variants covered, no default - warn.
     try checkTypedSource(
-        \\type C = { kind: "echo", text: string } | { kind: "ping", text: string };
+        \\structural C = { kind: "echo", text: string } | { kind: "ping", text: string };
         \\function run(c: C): string {
         \\  return match (c) {
         \\    when { kind: "echo" }: c.text,
@@ -5089,7 +5089,7 @@ test "TypeChecker: undefined nullish coalescing returns fallback type" {
 
 test "TypeChecker: rejects assignment to readonly property" {
     try checkTypedSource(
-        \\type Config = { readonly port: number; host: string };
+        \\structural Config = { readonly port: number; host: string };
         \\const cfg: Config = { port: 3000, host: "localhost" };
         \\cfg.port = 8080;
     , 1, 0);
@@ -5097,7 +5097,7 @@ test "TypeChecker: rejects assignment to readonly property" {
 
 test "TypeChecker: allows assignment to non-readonly property" {
     try checkTypedSource(
-        \\type Config = { readonly port: number; host: string };
+        \\structural Config = { readonly port: number; host: string };
         \\const cfg: Config = { port: 3000, host: "localhost" };
         \\cfg.host = "other";
     , 0, 0);
@@ -5106,8 +5106,8 @@ test "TypeChecker: allows assignment to non-readonly property" {
 test "TypeChecker: distinct type rejects cross-nominal assignment" {
     // SessionId should not be assignable to UserId
     try checkTypedSource(
-        \\distinct type UserId = string;
-        \\distinct type SessionId = string;
+        \\nominal UserId = string;
+        \\nominal SessionId = string;
         \\const sid: SessionId = SessionId("sess_456");
         \\const uid: UserId = sid;
     , 1, 0);
@@ -5116,7 +5116,7 @@ test "TypeChecker: distinct type rejects cross-nominal assignment" {
 test "TypeChecker: distinct type constructor returns nominal type" {
     // UserId("str") should produce a UserId, accepted where UserId is expected
     try checkTypedSource(
-        \\distinct type UserId = string;
+        \\nominal UserId = string;
         \\const uid: UserId = UserId("usr_123");
     , 0, 0);
 }
@@ -5124,7 +5124,7 @@ test "TypeChecker: distinct type constructor returns nominal type" {
 test "TypeChecker: distinct type rejects raw base type" {
     // raw string should not be assignable to UserId
     try checkTypedSource(
-        \\distinct type UserId = string;
+        \\nominal UserId = string;
         \\const uid: UserId = "raw_string";
     , 1, 0);
 }
@@ -5175,14 +5175,14 @@ test "TypeChecker: structural rejects a mismatched member" {
 
 test "TypeChecker: template literal type accepts matching string" {
     try checkTypedSource(
-        \\type ApiRoute = `/api/${string}`;
+        \\structural ApiRoute = `/api/${string}`;
         \\const good: ApiRoute = "/api/users";
     , 0, 0);
 }
 
 test "TypeChecker: template literal type rejects non-matching string" {
     try checkTypedSource(
-        \\type ApiRoute = `/api/${string}`;
+        \\structural ApiRoute = `/api/${string}`;
         \\const bad: ApiRoute = "/other";
     , 1, 0);
 }
@@ -5788,7 +5788,7 @@ test "a null guard over an optional type narrows nothing" {
 // ---------------------------------------------------------------------------
 
 const command_union =
-    \\type Command =
+    \\structural Command =
     \\  | { kind: "echo"; text: string }
     \\  | { kind: "ping" };
 ;
@@ -5903,7 +5903,7 @@ test "a type test does not narrow the arm it does not name" {
 
 test "the null literal and the four type tests exhaust JsonValue without a default" {
     try checkTypedSource(
-        \\type JsonValue =
+        \\structural JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
@@ -5932,7 +5932,7 @@ test "the six arms cover JsonValue with its Dict arm" {
     // cover the six value kinds exactly, so the match is exhaustive without a
     // `default` - which a closed union is required to do without.
     try checkTypedSource(
-        \\type JsonValue =
+        \\structural JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
@@ -6383,7 +6383,7 @@ test "the recursive fold over JsonValue type-checks" {
     // Spec 16.3 minus its Dict arm: the array arm recurses through the same
     // alias, which is what the contractive rule exists to admit.
     try checkTypedSource(
-        \\type JsonValue =
+        \\structural JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
@@ -6417,7 +6417,7 @@ test "the recursive fold over JsonValue type-checks" {
 
 test "a recursive alias guarded by an array is accepted" {
     try checkTypedSource(
-        \\type JsonValue =
+        \\structural JsonValue =
         \\  | null
         \\  | boolean
         \\  | number
@@ -6435,7 +6435,7 @@ test "a recursive alias guarded by an array is accepted" {
 
 test "a recursive alias guarded by a record is accepted" {
     try checkTypedSource(
-        \\type Tree = { value: number; children: readonly Tree[] };
+        \\structural Tree = { value: number; children: readonly Tree[] };
         \\function handler(req: Request): Response {
         \\    const t: Tree = { value: 1, children: [] };
         \\    return Response.json({ v: t.value });
@@ -6448,7 +6448,7 @@ test "a recursive alias guarded by a record is accepted" {
 
 test "a direct cycle is refused" {
     try checkTypedSourceSaying(
-        \\type Loop = Loop;
+        \\structural Loop = Loop;
         \\function handler(req: Request): Response {
         \\    const v: Loop = 1;
         \\    return Response.json({ ok: true });
@@ -6463,7 +6463,7 @@ test "a union edge does not guard a cycle" {
     // The union member is where the recursion sits, and a union is not a data
     // constructor. `type U = number | U` describes no finite value.
     try checkTypedSourceSaying(
-        \\type U = number | U;
+        \\structural U = number | U;
         \\function handler(req: Request): Response {
         \\    const v: U = 1;
         \\    return Response.json({ ok: true });
@@ -6485,7 +6485,7 @@ test "a Bytes member does not disturb a recursive alias either way" {
     // A record guards, so the alias is contractive and the Bytes field rides
     // along.
     try checkTypedSource(
-        \\type Chunk = { data: Bytes; next: Chunk | null };
+        \\structural Chunk = { data: Bytes; next: Chunk | null };
         \\function handler(req: Request): Response {
         \\    return Response.json({ ok: true });
         \\}
@@ -6498,7 +6498,7 @@ test "a Bytes member does not disturb a recursive alias either way" {
     // where a declared annotation names the alias, which is why the binding is
     // here and not just the alias.
     try checkTypedSourceSaying(
-        \\type B = Bytes | B;
+        \\structural B = Bytes | B;
         \\function handler(req: Request): Response {
         \\    const v: B = 1;
         \\    return Response.json({ ok: true });
@@ -6511,8 +6511,8 @@ test "a Bytes member does not disturb a recursive alias either way" {
 
 test "a cycle through two names is refused" {
     try checkTypedSourceSaying(
-        \\type A = B;
-        \\type B = A;
+        \\structural A = B;
+        \\structural B = A;
         \\function handler(req: Request): Response {
         \\    const v: A = 1;
         \\    return Response.json({ ok: true });
@@ -6525,7 +6525,7 @@ test "a cycle through two names is refused" {
 
 test "negative recursion through a function parameter is refused" {
     try checkTypedSourceSaying(
-        \\type Neg = (value: Neg) => number;
+        \\structural Neg = (value: Neg) => number;
         \\function handler(req: Request): Response {
         \\    const v: Neg = (value) => 1;
         \\    return Response.json({ ok: true });

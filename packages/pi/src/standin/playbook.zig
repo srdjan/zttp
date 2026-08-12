@@ -1043,7 +1043,7 @@ pub fn synthesizeRoute(
 
     if (!has_router and !has_guardrails_alias) {
         try out.appendSlice(allocator,
-            \\type Guardrails = Spec<
+            \\structural Guardrails = Spec<
             \\    | "deterministic"
             \\    | "idempotent"
             \\    | "no_secret_leakage"

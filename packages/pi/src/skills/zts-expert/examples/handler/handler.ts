@@ -1,6 +1,6 @@
 // TypeScript handler example
 
-type RequestData = {
+structural RequestData = {
     name: string;
     count: number;
 };

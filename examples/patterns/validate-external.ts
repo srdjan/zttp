@@ -11,7 +11,7 @@ import type { Spec } from "zttp:types";
 
 schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"

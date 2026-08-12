@@ -7,7 +7,7 @@ import { schemaCompile, validateJson, coerceJson } from "zttp:validate";
 import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
 import { sha256 } from "zttp:crypto";
 
-type RequestBody = {
+structural RequestBody = {
     name: string;
     age: number;
 };

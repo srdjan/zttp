@@ -11,9 +11,9 @@
 
 import type { Spec } from "zttp:types";
 
-type Command = { kind: "echo", text: string } | { kind: "ping", text: string };
+structural Command = { kind: "echo", text: string } | { kind: "ping", text: string };
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"

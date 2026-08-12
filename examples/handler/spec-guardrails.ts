@@ -12,7 +12,7 @@
 
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "idempotent"
     | "deterministic"
     | "no_secret_leakage"

@@ -3147,7 +3147,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
 
 test "unsupported typed function-valued const is skipped, not fatal" {
     const source =
-        \\type Loader = (id: string) => Response;
+        \\structural Loader = (id: string) => Response;
         \\export const load: Loader = (id: string): Response => Response.text(id);
         \\function handler(req: Request): Response {
         \\  return load("x");

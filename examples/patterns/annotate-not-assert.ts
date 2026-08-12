@@ -9,9 +9,9 @@
 
 import type { Spec } from "zttp:types";
 
-type Config = { port: number; host: string; readonly version: string };
+structural Config = { port: number; host: string; readonly version: string };
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"

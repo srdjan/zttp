@@ -7,7 +7,7 @@ pub const starter_source =
     \\
     \\import type { Spec } from "zttp:types";
     \\
-    \\type Guardrails = Spec<
+    \\structural Guardrails = Spec<
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"
@@ -30,7 +30,7 @@ pub const broken_source =
     \\
     \\import type { Spec } from "zttp:types";
     \\
-    \\type Guardrails = Spec<
+    \\structural Guardrails = Spec<
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"

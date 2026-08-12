@@ -196,7 +196,7 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
                 \\the default supported set, e.g.
                 \\
                 \\    import type {{ Spec }} from "zttp:types";
-                \\    type Guardrails = Spec<"pure" | "deterministic">;
+                \\    structural Guardrails = Spec<"pure" | "deterministic">;
                 \\    function handler(req: Request): Response & Guardrails {{ ... }}
                 \\
             , .{});
@@ -428,7 +428,7 @@ test "runCheck holds when every declared spec is proven" {
         .sub_path = "held.ts",
         .data =
         \\import type { Spec } from "zttp:types";
-        \\type Guardrails = Spec<"pure" | "deterministic">;
+        \\structural Guardrails = Spec<"pure" | "deterministic">;
         \\function handler(req: Request): Response & Guardrails {
         \\    return Response.json({ ok: true });
         \\}
@@ -457,7 +457,7 @@ test "runCheck fails when a declared spec is not proven" {
         .sub_path = "regress.ts",
         .data =
         \\import type { Spec } from "zttp:types";
-        \\type Guardrails = Spec<"fault_covered">;
+        \\structural Guardrails = Spec<"fault_covered">;
         \\function handler(req: Request): Response & Guardrails {
         \\    return Response.json({ ok: true });
         \\}
@@ -550,7 +550,7 @@ test "runShow reports the declared/proven differences without failing" {
         .sub_path = "unmet.ts",
         .data =
         \\import type { Spec } from "zttp:types";
-        \\type Guardrails = Spec<"fault_covered">;
+        \\structural Guardrails = Spec<"fault_covered">;
         \\function handler(req: Request): Response & Guardrails {
         \\  return Response.json({ ok: true });
         \\}
@@ -599,7 +599,7 @@ test "runCheck fails NonRatchetableSpec when every declared name is non-monotoni
         .sub_path = "egress.ts",
         .data =
         \\import type { Spec } from "zttp:types";
-        \\type Egress = Spec<"has_egress">;
+        \\structural Egress = Spec<"has_egress">;
         \\function handler(req: Request): Response & Egress {
         \\    return Response.json({ ok: true });
         \\}
@@ -631,7 +631,7 @@ test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
         .sub_path = "pure.ts",
         .data =
         \\import type { Spec } from "zttp:types";
-        \\type G = Spec<"pure">;
+        \\structural G = Spec<"pure">;
         \\function handler(req: Request): Response & G {
         \\    return Response.json({ ok: true });
         \\}
@@ -669,7 +669,7 @@ fn printHelp() void {
         \\Declaring obligations:
         \\
         \\    import type {{ Spec }} from "zttp:types";
-        \\    type Guardrails = Spec<"pure" | "deterministic">;
+        \\    structural Guardrails = Spec<"pure" | "deterministic">;
         \\    function handler(req: Request): Response & Guardrails {{ ... }}
         \\
         \\The proven set is also written to contract.json under `provenSpecs`

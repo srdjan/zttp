@@ -4,7 +4,7 @@
 import { env } from "zttp:env";
 import { sha256, hmacSha256, base64Encode } from "zttp:crypto";
 
-type WebhookPayload = {
+structural WebhookPayload = {
     event: string;
     data: string;
 };

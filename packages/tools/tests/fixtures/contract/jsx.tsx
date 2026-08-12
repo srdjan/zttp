@@ -1,6 +1,6 @@
 // TypeScript + JSX handler example
 
-type Props = {
+structural Props = {
     name: string;
     count: number;
 };

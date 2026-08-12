@@ -8,10 +8,10 @@
 
 import type { Spec } from "zttp:types";
 
-type Method = "GET" | "POST" | "DELETE";
-type ApiRoute = `/api/${string}`;
+structural Method = "GET" | "POST" | "DELETE";
+structural ApiRoute = `/api/${string}`;
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"

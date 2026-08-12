@@ -2000,7 +2000,7 @@ test "a type declaration prints as the author wrote it" {
     // Types are opaque: the stripper decided the span, and re-deciding the
     // layout inside it here would be a second answer to a settled question.
     const source =
-        \\type Shape = {
+        \\structural Shape = {
         \\      kind: string;
         \\  size: number;
         \\};

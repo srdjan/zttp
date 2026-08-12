@@ -6,7 +6,7 @@
 
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -17,7 +17,7 @@ type Guardrails = Spec<
     | "input_validated"
 >;
 
-type User = {
+structural User = {
     id: number;
     name: string;
     email: string;
@@ -25,18 +25,18 @@ type User = {
 };
 
 // Pick: a public summary that carries only id and name.
-type Summary = Pick<User, "id" | "name">;
+structural Summary = Pick<User, "id" | "name">;
 
 // Omit: the same record without the sensitive email.
-type Safe = Omit<User, "email">;
+structural Safe = Omit<User, "email">;
 
 // Partial: every field optional, for a patch payload.
-type UserPatch = Partial<User>;
+structural UserPatch = Partial<User>;
 
 // Required: force every optional field present, deriving a fully-specified
 // config from a loosely-typed source.
-type RawConfig = { host?: string; port?: number };
-type Config = Required<RawConfig>;
+structural RawConfig = { host?: string; port?: number };
+structural Config = Required<RawConfig>;
 
 const summary: Summary = { id: 1, name: "Ada" };
 const safe: Safe = { id: 2, name: "Grace", age: 36 };

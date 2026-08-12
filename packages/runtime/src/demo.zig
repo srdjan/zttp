@@ -697,7 +697,7 @@ pub const baseline_source =
     \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
     \\import { env } from "zttp:env";
     \\
-    \\type Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
+    \\structural Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
     \\
     \\const routes = {
     \\    "GET /": "home",
@@ -751,7 +751,7 @@ pub const bug_source =
     \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
     \\import { env } from "zttp:env";
     \\
-    \\type Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
+    \\structural Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
     \\
     \\const routes = {
     \\    "GET /": "home",
@@ -807,7 +807,7 @@ pub const repaired_source =
     \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
     \\import { env } from "zttp:env";
     \\
-    \\type Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
+    \\structural Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
     \\
     \\const routes = {
     \\    "GET /": "home",

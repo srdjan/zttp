@@ -22,14 +22,14 @@
 
 import type { Spec } from "zttp:types";
 
-type JsonValue =
+structural JsonValue =
     | null
     | boolean
     | number
     | string
     | readonly JsonValue[];
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "read_only"
     | "retry_safe"

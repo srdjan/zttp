@@ -8,14 +8,14 @@
 
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "injection_safe"
     | "state_isolated"
     | "retry_safe"
     | "no_secret_leakage"
 >;
 
-type RequestData = {
+structural RequestData = {
     name: string;
     count: number;
 };

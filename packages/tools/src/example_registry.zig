@@ -68,7 +68,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const limit: number = 10;
@@ -83,7 +83,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  let total: number = 0;
@@ -101,7 +101,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\function double(n: number): number {
         \\  return n * 2;
@@ -119,7 +119,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const doubled: number[] = [1, 2, 3].map((n: number): number => n * 2);
@@ -134,9 +134,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Point = { x: number, y: number };
+        \\structural Point = { x: number, y: number };
         \\
         \\function origin(): Point {
         \\  return { x: 1, y: 2 };
@@ -155,9 +155,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Config = { host: string, port: number };
+        \\structural Config = { host: string, port: number };
         \\
         \\function defaults(): Config {
         \\  return { host: "localhost", port: 80 };
@@ -176,7 +176,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const name: string = "world";
@@ -191,7 +191,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const n: number = 3;
@@ -210,7 +210,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  let total: number = 0;
@@ -228,7 +228,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const n: number = 3;
@@ -244,9 +244,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Profile = { name: string, city?: string };
+        \\structural Profile = { name: string, city?: string };
         \\
         \\function profile(): Profile {
         \\  return { name: "ada" };
@@ -266,9 +266,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Profile = { name: string, city?: string };
+        \\structural Profile = { name: string, city?: string };
         \\
         \\function profile(): Profile {
         \\  return { name: "ada" };
@@ -288,9 +288,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Command = { kind: "echo", text: string } | { kind: "ping" };
+        \\structural Command = { kind: "echo", text: string } | { kind: "ping" };
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const command: Command = { kind: "ping" };
@@ -309,7 +309,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const items: number[] = [1, 2, 3];
@@ -326,7 +326,7 @@ pub const examples = [_]Example{
         \\import { ok } from "zttp:result";
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const parsed = ok(42);
@@ -344,7 +344,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\function area(width: number, height: number): number {
         \\  return width * height;
@@ -362,9 +362,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\distinct type UserId = string;
+        \\nominal UserId = string;
         \\
         \\function label(id: UserId): string {
         \\  return id;
@@ -410,7 +410,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\nominal OrderId = string;
         \\
@@ -434,9 +434,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Config = { readonly port: number, host: string };
+        \\structural Config = { readonly port: number, host: string };
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const config: Config = { port: 3000, host: "localhost" };
@@ -451,7 +451,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\function isString(value: string | number): value is string {
         \\  return typeof value === "string";
@@ -476,9 +476,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Route = `/api/${string}`;
+        \\structural Route = `/api/${string}`;
         \\
         \\function path(route: Route): string {
         \\  return route;
@@ -500,7 +500,7 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const seconds: number = comptime(60 * 60 * 24);
@@ -515,9 +515,9 @@ pub const examples = [_]Example{
         .source =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guard = Spec<"state_isolated">;
+        \\structural Guard = Spec<"state_isolated">;
         \\
-        \\type Row = { id: number, note: string | null };
+        \\structural Row = { id: number, note: string | null };
         \\
         \\export function handler(req: Request): Response & Guard {
         \\  const row: Row = { id: 1, note: null };

@@ -767,7 +767,7 @@ test "the constructs the unmodeled arm names cannot reach this file" {
 const admitted_surface =
     \\import { json } from "zttp:json";
     \\
-    \\type Order = { id: string; total: number };
+    \\structural Order = { id: string; total: number };
     \\
     \\export function handler(req: Request): Response {
     \\  const orders: Order[] = [{ id: "a", total: 1 }, { id: "b", total: 2 }];

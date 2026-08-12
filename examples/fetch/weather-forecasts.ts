@@ -11,7 +11,7 @@
 import type { Spec } from "zttp:types";
 import { fetch } from "zttp:fetch";
 
-type WeatherProof = Spec<"state_isolated" | "no_secret_leakage">;
+structural WeatherProof = Spec<"state_isolated" | "no_secret_leakage">;
 
 function handler(req: Request): Response & WeatherProof {
   if (req.method !== "GET") {

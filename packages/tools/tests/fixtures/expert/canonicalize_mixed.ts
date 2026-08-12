@@ -4,7 +4,7 @@ export const load = (id: string): Response => Response.text(id);
 
 const parse = (x: number): number => x;
 
-type Loader = (id: string) => Response;
+structural Loader = (id: string) => Response;
 export const typed: Loader = (id: string): Response => Response.text(id);
 
 function handler(req: Request): Response & Spec<"state_isolated"> {

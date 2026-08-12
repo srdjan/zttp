@@ -522,7 +522,7 @@ const apiHandler =
     \\// to these properties; without it every supported spec is active, and the
     \\// /echo route below (which reflects the request body) cannot discharge
     \\// pii_contained. Run `zttp check` to see them proven at compile time.
-    \\type Guardrails = Spec<
+    \\structural Guardrails = Spec<
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"
@@ -551,7 +551,7 @@ const htmxHandler =
     \\// to these properties; without it every supported spec is active and the
     \\// proof cannot be discharged. Run `zttp check` to see them proven at
     \\// compile time.
-    \\type Guardrails = Spec<
+    \\structural Guardrails = Spec<
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"

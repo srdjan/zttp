@@ -10,7 +10,7 @@ const routes = {
     "GET /": getHome,
 };
 
-type Guardrails = Spec<"optional_safe">;
+structural Guardrails = Spec<"optional_safe">;
 
 function handler(req: Request): Response & Guardrails {
     const route = routerMatch(routes, req);

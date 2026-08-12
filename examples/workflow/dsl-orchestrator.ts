@@ -12,7 +12,7 @@ import { run } from "zttp:durable";
 import { call } from "zttp:workflow";
 import type { Spec } from "zttp:types";
 
-type WorkflowDslGuarantees = Spec<
+structural WorkflowDslGuarantees = Spec<
     | "deterministic"
     | "state_isolated"
     | "result_safe"

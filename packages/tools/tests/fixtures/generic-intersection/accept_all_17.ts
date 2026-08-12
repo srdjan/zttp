@@ -1,4 +1,4 @@
-type Box<T> = { value: T };
+structural Box<T> = { value: T };
 
 function requireAll(value: Box<string>
   & { p02: string }

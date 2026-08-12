@@ -1,7 +1,7 @@
 // Should pass: all paths return
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<"result_safe">;
+structural Guardrails = Spec<"result_safe">;
 
 function handler(req: Request): Response & Guardrails {
     const url = req.url;

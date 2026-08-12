@@ -96,7 +96,7 @@ pub fn renderRouteSource(allocator: std.mem.Allocator, v: RouteVariant) ![]u8 {
 
     if (v.has_guardrails_alias) {
         try w.writeAll(
-            \\type Guardrails = Spec<
+            \\structural Guardrails = Spec<
             \\    | "deterministic"
             \\    | "idempotent"
             \\    | "no_secret_leakage"

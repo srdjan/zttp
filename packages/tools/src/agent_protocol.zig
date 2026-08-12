@@ -2936,7 +2936,7 @@ test "check on a clean handler succeeds with no diagnostics" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\structural Guardrails = Spec<"state_isolated" | "injection_safe">;
         \\
         \\export function handler(req: Request): Response & Guardrails {
         \\    return Response.json({ ok: true });
@@ -3787,7 +3787,7 @@ test "success is exactly no error diagnostic, not no diagnostic" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\structural Guardrails = Spec<"state_isolated" | "injection_safe">;
         \\
         \\export function handler(req: Request): Response & Guardrails {
         \\    const unused = 1;
@@ -3833,7 +3833,7 @@ test "check publishes the path-coverage cause, not only a bool" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\structural Guardrails = Spec<"state_isolated" | "injection_safe">;
         \\
         \\export function handler(req: Request): Response & Guardrails {
         \\    return Response.json({ ok: true });
@@ -3862,7 +3862,7 @@ test "check publishes the path-coverage cause, not only a bool" {
 const let_handler =
     \\import type { Spec } from "zttp:types";
     \\
-    \\type Guardrails = Spec<"state_isolated">;
+    \\structural Guardrails = Spec<"state_isolated">;
     \\
     \\export function handler(req: Request): Response & Guardrails {
     \\    let name = "world";
@@ -4018,7 +4018,7 @@ test "normalize maps an applied intent back to the idiom row it realizes" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\import type { Spec } from "zttp:types";
         \\
-        \\type Guardrails = Spec<"state_isolated">;
+        \\structural Guardrails = Spec<"state_isolated">;
         \\
         \\export function handler(req: Request): Response & Guardrails {
         \\    const arr = [10, 20];

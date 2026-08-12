@@ -31,7 +31,7 @@ import { env } from "zttp:env";
 import { bytesLength, decodeUtf8, encodeUtf8 } from "zttp:bytes";
 import { parseJsonBytes } from "zttp:json";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "read_only"
     | "retry_safe"
     | "state_isolated"
