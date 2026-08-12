@@ -1251,6 +1251,104 @@ fn populateVersionTwoTestContract(
         &contract.durable.workflow.properties.reasons,
         "stable workflow keys",
     );
+    // A service call and a full API route, because without them the two key
+    // sets below meet vacuously: every per-item key inside these loops is
+    // emitted only when the list is non-empty, so a fixture that leaves them
+    // empty compares nothing for roughly seventy of the camelCase keys the
+    // version-2 mapping exists to translate.
+    {
+        const service = try allocator.dupe(u8, "orders");
+        errdefer allocator.free(service);
+        const route_pattern = try allocator.dupe(u8, "/orders/:id");
+        errdefer allocator.free(route_pattern);
+
+        var path_params: std.ArrayList([]const u8) = .empty;
+        try appendTestString(allocator, &path_params, "id");
+        var query_keys: std.ArrayList([]const u8) = .empty;
+        try appendTestString(allocator, &query_keys, "expand");
+        var header_keys: std.ArrayList([]const u8) = .empty;
+        try appendTestString(allocator, &header_keys, "x-request-id");
+
+        try contract.service_calls.append(allocator, .{
+            .service = service,
+            .route_pattern = route_pattern,
+            .dynamic = false,
+            .path_params = .{ .complete = path_params },
+            .query_keys = .{ .complete = query_keys },
+            .header_keys = .{ .complete = header_keys },
+            .body = .present,
+        });
+    }
+
+    {
+        var schema_refs: std.ArrayList([]const u8) = .empty;
+        try appendTestString(allocator, &schema_refs, "OrderCreate");
+
+        var path_params: std.ArrayList(contract_types.ApiParamInfo) = .empty;
+        try path_params.append(allocator, .{
+            .name = try allocator.dupe(u8, "id"),
+            .location = "path",
+            .required = true,
+            .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+        });
+
+        var query_params: std.ArrayList(contract_types.ApiParamInfo) = .empty;
+        try query_params.append(allocator, .{
+            .name = try allocator.dupe(u8, "expand"),
+            .location = "query",
+            .required = false,
+            .schema_json = try allocator.dupe(u8, "{\"type\":\"boolean\"}"),
+        });
+
+        var header_params: std.ArrayList(contract_types.ApiParamInfo) = .empty;
+        try header_params.append(allocator, .{
+            .name = try allocator.dupe(u8, "x-request-id"),
+            .location = "header",
+            .required = false,
+            .schema_json = try allocator.dupe(u8, "{\"type\":\"string\"}"),
+        });
+
+        var request_bodies: std.ArrayList(contract_types.ApiBodyInfo) = .empty;
+        try request_bodies.append(allocator, .{
+            .content_type = try allocator.dupe(u8, "application/json"),
+            .schema = .{ .ref = try allocator.dupe(u8, "OrderCreate") },
+        });
+
+        var responses: std.ArrayList(contract_types.ApiResponseInfo) = .empty;
+        try responses.append(allocator, .{
+            .status = 201,
+            .content_type = try allocator.dupe(u8, "application/json"),
+            .schema = .{ .ref = try allocator.dupe(u8, "Order") },
+        });
+
+        try contract.api.routes.append(allocator, .{
+            .method = try allocator.dupe(u8, "POST"),
+            .path = try allocator.dupe(u8, "/orders/:id"),
+            .request_schema_refs = schema_refs,
+            .request_schema_dynamic = false,
+            .requires_bearer = true,
+            .requires_jwt = false,
+            .path_params = path_params,
+            .query_params = query_params,
+            .header_params = header_params,
+            .query_params_dynamic = false,
+            .header_params_dynamic = false,
+            .request_bodies = request_bodies,
+            .request_bodies_dynamic = false,
+            .responses = responses,
+            .responses_dynamic = false,
+            .response_status = 201,
+            .response_content_type = try allocator.dupe(u8, "application/json"),
+            .response_schema_ref = try allocator.dupe(u8, "Order"),
+        });
+
+        try contract.api.schemas.append(allocator, .{
+            .name = try allocator.dupe(u8, "Order"),
+            .schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        });
+        contract.api.auth = .{ .bearer = true, .jwt = false };
+    }
+
     contract.aot = .{ .pattern_count = 1, .has_default = true };
     contract.properties = .{
         .pure = false,
@@ -1301,7 +1399,7 @@ test "version 2 writes only snake_case keys" {
 
     var visited: usize = 0;
     try expectSnakeCaseKeys(&parsed.value, &visited);
-    try std.testing.expect(visited >= 50);
+    try std.testing.expect(visited >= 150);
 }
 
 test "version 1 keeps its version and camelCase keys" {
@@ -1404,7 +1502,12 @@ test "version 2's key set is exactly the snake_case image of version 1's" {
     defer v2_parsed.deinit();
 
     try std.testing.expectEqual(v1_keys.items.len, v2_keys.items.len);
-    try std.testing.expect(v1_keys.items.len >= 50);
+    // 176 keys with the fixture populated across every section. The floor was
+    // 50 while the fixture left `service_calls` and the `api` routes empty,
+    // which is the number a walk reaches without visiting a single one of the
+    // per-item keys this mapping exists to translate - the comparison held
+    // because neither side emitted them.
+    try std.testing.expect(v1_keys.items.len >= 150);
 
     // Document order is the same traversal on both sides, so the images line
     // up index for index and a mismatch names the key that moved.
