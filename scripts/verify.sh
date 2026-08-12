@@ -70,6 +70,9 @@ bash scripts/check-idiom-table.sh
 step "bash scripts/check-grammar-drift.sh  (spec section 8 grammar against the registry)"
 bash scripts/check-grammar-drift.sh
 
+step "bash scripts/check-decision-registry.sh  (every published decision kind is emitted)"
+bash scripts/check-decision-registry.sh
+
 step "bash scripts/check-agent-determinism.sh  (v2 agent transport determinism)"
 bash scripts/check-agent-determinism.sh
 

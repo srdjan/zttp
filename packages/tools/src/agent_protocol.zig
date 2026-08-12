@@ -20,6 +20,7 @@ const json_diagnostics = @import("json_diagnostics.zig");
 const precompile = @import("precompile.zig");
 const canonicalize = @import("canonicalize.zig");
 const example_registry = @import("example_registry.zig");
+const decision_registry = @import("decision_registry.zig");
 
 const policy_catalog = zts.PolicyCatalog;
 const idiomCatalog = zts.IdiomCatalog;
@@ -87,7 +88,7 @@ pub const operations = [_]OperationSpec{
         "severities",            "idioms",            "limits",
         "module_catalog",        "deferred_sections", "validators",
         "verifiers",             "ambient_names",     "type_serialization",
-        "grammar",               "examples",
+        "grammar",               "examples",          "decisions",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -125,7 +126,6 @@ pub const operations = [_]OperationSpec{
 pub const DeferredSection = struct { name: []const u8, note: []const u8 };
 
 pub const deferred_sections = [_]DeferredSection{
-    .{ .name = "decisions", .note = "phase 6: no next-action or semantic-decision registry exists" },
     .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
     .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
     .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
@@ -702,6 +702,33 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     }
     try json.endArray();
 
+    // The decision kinds a client keys on (spec 4.8), versioned, each with the
+    // response fields that carry it and the next action it admits. The `Id`
+    // enum behind this is the wire vocabulary every refusal is written from, so
+    // a kind on the wire and a kind published here cannot differ.
+    try json.objectField("decisions");
+    try json.beginObject();
+    try json.objectField("version");
+    try json.write(decision_registry.version);
+    try json.objectField("kinds");
+    try json.beginArray();
+    for (&decision_registry.decisions) |row| {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(row.id.wire());
+        try json.objectField("next_action");
+        try json.write(@tagName(row.next_action));
+        try json.objectField("description");
+        try json.write(row.description);
+        try json.objectField("parameters");
+        try json.beginArray();
+        for (row.parameters) |param| try json.write(param);
+        try json.endArray();
+        try json.endObject();
+    }
+    try json.endArray();
+    try json.endObject();
+
     // One canonical minimal example per admitted surface form (spec 4.8), so
     // an agent learns the ZTS-specific spellings here rather than from hidden
     // instructions. Every example is checked by the test that publishes it and
@@ -1084,7 +1111,7 @@ fn runApplyRepair(
     if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
-        return try writeApplyRefusal(json, file_rel, before_digest, "no_repairs", "`repairs` must carry at least one repair");
+        return try writeApplyRefusal(json, file_rel, before_digest, .no_repairs, "`repairs` must carry at least one repair");
     }
 
     // Gradability first, before anything is applied: refusing early keeps the
@@ -1096,7 +1123,7 @@ fn runApplyRepair(
                 json,
                 file_rel,
                 before_digest,
-                "ungraded_intent",
+                .ungraded_intent,
                 "this operation applies only repairs a registered validator discharges; read meta.validators, and use simulate_edit to preview an ungraded one",
             );
         }
@@ -1110,9 +1137,9 @@ fn runApplyRepair(
     // result is discarded; only the verdict is wanted here.
     {
         const dry = canonicalize.applyRepairs(allocator, source, repairs.items) catch |err| switch (err) {
-            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, "stale_repair", "a repair's `original` does not match the file as it stands"),
-            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, "overlapping_repairs", "two repairs cover the same bytes"),
-            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it"),
+            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, .stale_repair, "a repair's `original` does not match the file as it stands"),
+            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, .overlapping_repairs, "two repairs cover the same bytes"),
+            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
             else => return err,
         };
         allocator.free(dry);
@@ -1146,9 +1173,9 @@ fn runApplyRepair(
         const r = repairs.items[idx];
         var one = [_]canonicalize.Repair{r};
         const next = canonicalize.applyRepairs(allocator, current, &one) catch |err| switch (err) {
-            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, "stale_repair", "a repair's `original` does not match the file as it stands"),
-            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, "overlapping_repairs", "two repairs cover the same bytes"),
-            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it"),
+            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, .stale_repair, "a repair's `original` does not match the file as it stands"),
+            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, .overlapping_repairs, "two repairs cover the same bytes"),
+            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
             else => return err,
         };
 
@@ -1156,11 +1183,11 @@ fn runApplyRepair(
             .equivalent => {},
             .not_law_shape => |why| {
                 allocator.free(next);
-                return try writeApplyRefusal(json, file_rel, before_digest, "not_law_shape", why);
+                return try writeApplyRefusal(json, file_rel, before_digest, .not_law_shape, why);
             },
             .no_validator => {
                 allocator.free(next);
-                return try writeApplyRefusal(json, file_rel, before_digest, "ungraded_intent", "no validator discharges this intent");
+                return try writeApplyRefusal(json, file_rel, before_digest, .ungraded_intent, "no validator discharges this intent");
             },
             // The validator ran and formed no answer. That is its own refusal
             // code rather than one of the two above: the edit was neither
@@ -1168,7 +1195,7 @@ fn runApplyRepair(
             // tell the client something that did not happen.
             .undecided => |why| {
                 allocator.free(next);
-                return try writeApplyRefusal(json, file_rel, before_digest, "undecided_equivalence", why);
+                return try writeApplyRefusal(json, file_rel, before_digest, .undecided_equivalence, why);
             },
         }
 
@@ -1187,7 +1214,7 @@ fn runApplyRepair(
             json,
             file_rel,
             before_digest,
-            "veto",
+            .veto,
             "the repaired file carries diagnostics the original did not; nothing was written",
         );
     }
@@ -1217,7 +1244,7 @@ fn writeApplyRefusal(
     json: *std.json.Stringify,
     file_rel: []const u8,
     digest: [64]u8,
-    reason: []const u8,
+    decision: decision_registry.Id,
     message: []const u8,
 ) !bool {
     try json.beginObject();
@@ -1235,9 +1262,13 @@ fn writeApplyRefusal(
     try json.objectField("refusal");
     try json.beginObject();
     try json.objectField("reason");
-    try json.write(reason);
+    try json.write(decision.wire());
     try json.objectField("message");
     try json.write(message);
+    // The next action, from the decision registry rather than from this call
+    // site: a client branches on it instead of parsing the message.
+    try json.objectField("next_action");
+    try json.write(@tagName(decision_registry.get(decision).next_action));
     try json.endObject();
     try json.endObject();
     return false;
@@ -1268,15 +1299,15 @@ fn parseRepairs(
     };
 
     for (items) |item| {
-        if (item != .object) return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "each entry in `repairs` must be an object");
+        if (item != .object) return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "each entry in `repairs` must be an object");
         const o = item.object;
 
         const intent_value = o.get("intent") orelse
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must name its `intent`");
+            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must name its `intent`");
         if (intent_value != .string)
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`intent` must be a string");
+            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`intent` must be a string");
         const intent = zts.RepairIntent.fromString(intent_value.string) orelse
-            return try writeApplyRefusal(json, file_rel, digest, "unknown_intent", "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
+            return try writeApplyRefusal(json, file_rel, digest, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
 
         // A repair is keyed on a byte span. `line` is the older spelling of the
         // same thing for a whole-line rewrite, and it keeps working: within
@@ -1289,42 +1320,42 @@ fn parseRepairs(
         var line: u32 = 0;
         if (o.get("span")) |span_value| {
             if (span_value != .object)
-                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span` must be an object with `start` and `end`");
+                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span` must be an object with `start` and `end`");
             const start_value = span_value.object.get("start") orelse
-                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span` must carry `start`");
+                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span` must carry `start`");
             const end_value = span_value.object.get("end") orelse
-                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span` must carry `end`");
+                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span` must carry `end`");
             if (start_value != .integer or start_value.integer < 0 or
                 end_value != .integer or end_value.integer < start_value.integer)
-                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`span.start` and `span.end` must be byte offsets with start <= end");
+                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span.start` and `span.end` must be byte offsets with start <= end");
             start_offset = @intCast(start_value.integer);
             end_offset = @intCast(end_value.integer);
             if (end_offset > source.len)
-                return try writeApplyRefusal(json, file_rel, digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeApplyRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             line = canonicalize.offsetLine(source, start_offset);
         } else if (o.get("line")) |line_value| {
             if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
-                return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`line` must be a positive integer");
+                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`line` must be a positive integer");
             line = @intCast(line_value.integer);
             const span = canonicalize.lineSpan(source, line) orelse
-                return try writeApplyRefusal(json, file_rel, digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeApplyRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             start_offset = span.start;
             end_offset = span.end;
         } else {
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
+            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
         }
 
         const replacement_value = o.get("replacement") orelse
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry its `replacement`");
+            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry its `replacement`");
         if (replacement_value != .string)
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`replacement` must be a string");
+            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`replacement` must be a string");
 
         // Required, not optional. An absent snapshot would make the staleness
         // check silently skip, which is the one thing this field exists for.
         const original_value = o.get("original") orelse
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "a repair must carry `original`, the snapshot of the bytes it replaces");
+            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry `original`, the snapshot of the bytes it replaces");
         if (original_value != .string)
-            return try writeApplyRefusal(json, file_rel, digest, "malformed_repair", "`original` must be a string");
+            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`original` must be a string");
 
         try out.append(allocator, .{
             .intent = intent,
@@ -1376,13 +1407,13 @@ fn runSimulateEdit(
     if (try parseRepairs(allocator, json, &repairs, file_rel, digest, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
-        return try writeSimulateRefusal(json, file_rel, digest, "no_repairs", "`repairs` must carry at least one repair; simulating nothing has no answer to give");
+        return try writeSimulateRefusal(json, file_rel, digest, .no_repairs, "`repairs` must carry at least one repair; simulating nothing has no answer to give");
     }
 
     const proposed = canonicalize.applyRepairs(allocator, source, repairs.items) catch |err| switch (err) {
-        error.StaleRepair => return try writeSimulateRefusal(json, file_rel, digest, "stale_repair", "a repair's `original` does not match the file as it stands; re-read the file and re-derive the repair"),
-        error.OverlappingRepairs => return try writeSimulateRefusal(json, file_rel, digest, "overlapping_repairs", "two repairs cover the same bytes, so which one applies is undefined"),
-        error.RepairOutOfBounds => return try writeSimulateRefusal(json, file_rel, digest, "repair_out_of_range", "a repair names a line past the end of the file, or a byte span outside it"),
+        error.StaleRepair => return try writeSimulateRefusal(json, file_rel, digest, .stale_repair, "a repair's `original` does not match the file as it stands; re-read the file and re-derive the repair"),
+        error.OverlappingRepairs => return try writeSimulateRefusal(json, file_rel, digest, .overlapping_repairs, "two repairs cover the same bytes, so which one applies is undefined"),
+        error.RepairOutOfBounds => return try writeSimulateRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
         else => return err,
     };
     defer allocator.free(proposed);
@@ -1446,7 +1477,7 @@ fn writeSimulateRefusal(
     json: *std.json.Stringify,
     file_rel: []const u8,
     digest: [64]u8,
-    reason: []const u8,
+    decision: decision_registry.Id,
     message: []const u8,
 ) !bool {
     try json.beginObject();
@@ -1468,9 +1499,13 @@ fn writeSimulateRefusal(
     try json.objectField("refusal");
     try json.beginObject();
     try json.objectField("reason");
-    try json.write(reason);
+    try json.write(decision.wire());
     try json.objectField("message");
     try json.write(message);
+    // The next action, from the decision registry rather than from this call
+    // site: a client branches on it instead of parsing the message.
+    try json.objectField("next_action");
+    try json.write(@tagName(decision_registry.get(decision).next_action));
     try json.endObject();
     try json.endObject();
     return false;
@@ -4049,6 +4084,59 @@ test "meta publishes the built-in module catalog from the bindings" {
         try testing.expect(module.get("exports").?.array.items.len >= 1);
         try testing.expect(module.get("required_capabilities").? == .array);
     }
+}
+
+test "meta publishes every decision kind a refusal can carry, with its next action" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const section = parsed.value.object.get("payload").?.object.get("decisions").?.object;
+    try testing.expectEqual(@as(i64, decision_registry.version), section.get("version").?.integer);
+
+    const kinds = section.get("kinds").?.array;
+    try testing.expectEqual(decision_registry.decisions.len, kinds.items.len);
+    for (kinds.items, &decision_registry.decisions) |item, row| {
+        const published = item.object;
+        try testing.expectEqualStrings(row.id.wire(), published.get("id").?.string);
+        try testing.expectEqualStrings(@tagName(row.next_action), published.get("next_action").?.string);
+        try testing.expect(published.get("parameters").?.array.items.len > 0);
+    }
+
+    for (parsed.value.object.get("payload").?.object.get("deferred_sections").?.array.items) |section_row| {
+        try testing.expect(!std.mem.eql(u8, section_row.object.get("name").?.string, "decisions"));
+    }
+}
+
+test "a refusal on the wire carries a published kind and its next action" {
+    // The end the registry exists for. A client reads `refusal.reason`, looks
+    // it up in `meta.decisions`, and branches on `next_action` - so the string
+    // a real refusal emits has to be one of the published identifiers, and the
+    // next action beside it has to be the registry's.
+    const a = testing.allocator;
+    const req =
+        \\{"schema_version":2,"operation":"apply_repair","project_root":".","input":{"file":"packages/tools/tests/fixtures/contract/plain_ts.ts","repairs":[]}}
+    ;
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+
+    const refusal = parsed.value.object.get("payload").?.object.get("refusal").?.object;
+    const reason = refusal.get("reason").?.string;
+    const row = blk: {
+        for (&decision_registry.decisions) |*candidate| {
+            if (std.mem.eql(u8, candidate.id.wire(), reason)) break :blk candidate;
+        }
+        std.debug.print("refusal names an unpublished kind: {s}\n", .{reason});
+        return error.UnpublishedDecisionKind;
+    };
+    try testing.expectEqualStrings("no_repairs", reason);
+    try testing.expectEqualStrings(@tagName(row.next_action), refusal.get("next_action").?.string);
+    // A malformed request is not evidence the file moved, and the wire says so.
+    try testing.expectEqualStrings("fix_the_request", refusal.get("next_action").?.string);
 }
 
 test "every admitted surface form has an example, and every example names one" {

@@ -471,6 +471,10 @@ pub fn build(b: *std.Build) void {
     const grammar_drift_step = b.step("test-grammar-drift", "Check spec section 8's grammar against the registry");
     grammar_drift_step.dependOn(&grammar_drift.step);
 
+    const decision_registry_gate = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-decision-registry.sh" });
+    const decision_registry_step = b.step("test-decision-registry", "Check every published decision kind is emitted somewhere");
+    decision_registry_step.dependOn(&decision_registry_gate.step);
+
     const doc_links = b.addSystemCommand(&.{ "/bin/bash", "scripts/audit-docs.sh" });
     const doc_links_step = b.step("test-doc-links", "Check docs for broken relative links");
     doc_links_step.dependOn(&doc_links.step);

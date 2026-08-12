@@ -190,6 +190,21 @@ where one exists, and otherwise a note naming the band that answers, which today
 is `TypeDecl` and ZTS212. Each enforcement point was measured by running
 `zts check` on a program that exercises the wider form, not reasoned about.
 
+`decisions` publishes the kinds a client keys on, with a version, the response
+fields that carry each one, and the next action it admits - `fix_the_request`,
+`reread_the_file`, `narrow_the_repair_set`, `choose_a_graded_intent`, or
+`no_mechanical_repair`. Those were what each refusal's message had been saying
+in prose. Every refusal is now written from the registry's enum, so a kind on
+the wire and a kind published here cannot differ, and
+`scripts/check-decision-registry.sh` enforces the other direction: a published
+kind that nothing emits fails, because a client writing a branch for it would
+wait forever. A refusal on the wire carries `reason` and `next_action` together.
+
+What is not published, measured rather than assumed: spec 13.6's explanation
+graph, which no build report emits, and any semantic-decision kind, since
+nothing here asks a client to choose a semantic. Both join the registry when
+they land, and the version moves with them.
+
 `examples` publishes one canonical minimal example per admitted surface form,
 keyed to the same feature table the `features` operation publishes and compared
 to it in both directions, so an admitted form with no example fails and an
