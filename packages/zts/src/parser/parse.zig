@@ -134,6 +134,17 @@ pub const Parser = struct {
     // Optional atom table for interning identifiers/properties
     atoms: ?*atom_table.AtomTable,
 
+    /// When true, a statement missing its `;` is accepted and counted instead
+    /// of refused. Spec 5.5 mandates no ASI, so the default is false and every
+    /// normal parse refuses.
+    ///
+    /// Three callers need the old acceptance and say so: the census that
+    /// measures reliance, the repair producer that has to find the insertion
+    /// points in a source that no longer parses, and M2, which compares the
+    /// tree of the unrepaired original against the tree of the repaired file -
+    /// the unique-parse argument spec 5.5 makes.
+    allow_asi: bool = false,
+
     /// How many statements this parse terminated by automatic semicolon
     /// insertion rather than by a written `;`, split by the arm that accepted.
     /// Spec 5.5 mandates no ASI, and this is the measurement that says what
@@ -1128,11 +1139,13 @@ pub const Parser = struct {
         }
 
         var value: ?NodeIndex = null;
-        // ASI: a newline between 'return' and the next token acts as an implicit semicolon.
-        // Only parse an expression when on the same line as the 'return' keyword.
-        if (self.current.line <= self.previous.line and
-            !self.check(.semicolon) and !self.check(.rbrace) and !self.check(.eof))
-        {
+        // With no ASI, a newline after `return` means nothing: `return` binds
+        // the next expression wherever it sits, and `return;` is how a value is
+        // omitted. Under the compatibility mode the old line rule still runs,
+        // so M2 can compare what the ASI parse built against the repaired file.
+        const stops_here = self.check(.semicolon) or self.check(.rbrace) or self.check(.eof);
+        const asi_ends_it = self.allow_asi and self.current.line > self.previous.line;
+        if (!stops_here and !asi_ends_it) {
             value = try self.parseExpression(.none);
         }
         try self.expectSemicolon();
@@ -3564,7 +3577,9 @@ pub const Parser = struct {
 
     fn expectSemicolon(self: *Parser) !void {
         if (self.match(.semicolon)) return;
-        // ASI: accept implicit semicolon after } or at newline
+        // A statement whose previous token is `}` is a block or a declaration,
+        // which section 8 terminates with the brace rather than with a `;`.
+        // This arm is not insertion and stays.
         if (self.previous.type == .rbrace) {
             self.asi.after_rbrace +|= 1;
             return;
@@ -3572,11 +3587,13 @@ pub const Parser = struct {
         if (self.check(.rbrace)) {
             self.asi.before_rbrace +|= 1;
             self.asi.note(self.previous.location());
+            if (!self.allow_asi) return self.refuseMissingSemicolon();
             return;
         }
         if (self.check(.eof)) {
             self.asi.at_eof +|= 1;
             self.asi.note(self.previous.location());
+            if (!self.allow_asi) return self.refuseMissingSemicolon();
             return;
         }
         // For simplicity, just accept. Counted so the migration this removal
@@ -3585,6 +3602,18 @@ pub const Parser = struct {
         // it decides whether the flip is mechanical or a migration.
         self.asi.at_newline +|= 1;
         self.asi.note(self.previous.location());
+        if (!self.allow_asi) return self.refuseMissingSemicolon();
+    }
+
+    /// Spec 5.5: statement termination is explicit. The diagnostic points at
+    /// the token the `;` belongs after, which is where the repair writes it.
+    fn refuseMissingSemicolon(self: *Parser) error{MissingSemicolon} {
+        self.errors.addError(
+            .missing_semicolon,
+            self.previous.location(),
+            "statement is not terminated; this profile has no automatic semicolon insertion",
+        );
+        return error.MissingSemicolon;
     }
 
     fn expectIdentifier(self: *Parser, ctx_label: []const u8) !Token {
@@ -4316,7 +4345,13 @@ pub const Parser = struct {
 
 // ============ Tests ============
 
-test "ASI: return on its own line has no argument" {
+test "a newline after return no longer swallows the value" {
+    // This test asserted the opposite until ASI was removed, and the fixture it
+    // used says why the old answer was worth removing: under JS ASI the
+    // newline terminated the statement, so the handler returned nothing and the
+    // `Response.json` below it became unreachable - silently. Spec 5.5 has no
+    // insertion, so the newline means nothing and `return` binds the expression
+    // that follows it.
     var parser = try Parser.init(std.testing.allocator,
         \\function handler(req) {
         \\  return
@@ -4324,7 +4359,7 @@ test "ASI: return on its own line has no argument" {
         \\}
     );
     defer parser.deinit();
-    _ = parser.parse() catch {};
+    _ = parser.parse() catch 0;
 
     var found_return = false;
     var return_has_arg = false;
@@ -4334,9 +4369,38 @@ test "ASI: return on its own line has no argument" {
             return_has_arg = parser.nodes.getData(@intCast(i)).a != null_node;
         }
     }
-    // Per JS ASI, a newline after 'return' forces `return;` -> opt_value should be null_node.
     try std.testing.expect(found_return);
-    try std.testing.expect(!return_has_arg);
+    try std.testing.expect(return_has_arg);
+    try std.testing.expect(!parser.hasErrors());
+}
+
+test "a bare return with no semicolon is refused, with the insertion repair" {
+    // The other half: `return` genuinely returning nothing still needs its
+    // terminator written, and the refusal names the rule rather than reporting
+    // that some token was expected.
+    var parser = try Parser.init(std.testing.allocator,
+        \\function handler(req) {
+        \\  return
+        \\}
+    );
+    defer parser.deinit();
+    _ = parser.parse() catch 0;
+
+    const errors = parser.getErrors();
+    try std.testing.expect(errors.len >= 1);
+    try std.testing.expectEqual(error_mod.ErrorKind.missing_semicolon, errors[0].kind);
+}
+
+test "the compatibility mode still parses what insertion accepted" {
+    // M2 compares the tree of the unrepaired original against the repaired
+    // file, so the original has to keep parsing somewhere. That somewhere is
+    // this flag, and this is the test that it still does what it did.
+    var parser = try Parser.init(std.testing.allocator, "const a = 1\nconst b = 2\n");
+    defer parser.deinit();
+    parser.allow_asi = true;
+    _ = try parser.parse();
+    try std.testing.expect(!parser.hasErrors());
+    try std.testing.expectEqual(@as(u32, 2), parser.asi.required());
 }
 
 test "parse simple expression" {

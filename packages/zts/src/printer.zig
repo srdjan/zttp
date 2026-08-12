@@ -335,14 +335,6 @@ fn regionAt(regions: []const Region, offset: u32) ?Region {
 fn unsupported(t: TokenType) bool {
     return switch (t) {
         .regex_literal,
-        .jsx_tag_open,
-        .jsx_tag_close,
-        .jsx_tag_self_close,
-        .jsx_tag_end_open,
-        .jsx_text,
-        .jsx_expr_start,
-        .jsx_expr_end,
-        .newline,
         .at_sign,
         .plus_plus,
         .minus_minus,

@@ -27,6 +27,9 @@ pub const ErrorKind = enum {
     /// A byte outside ASCII inside an identifier. Reported once for the run,
     /// because the alternative is one diagnostic per byte of one character.
     non_ascii_identifier,
+    /// A statement with no `;`. Spec 5.5 mandates no automatic semicolon
+    /// insertion, so termination is written rather than inferred.
+    missing_semicolon,
 
     // Syntax errors
     unexpected_token,

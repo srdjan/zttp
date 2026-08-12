@@ -84,6 +84,10 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
         // an identifier carries a byte outside ASCII, not that a token arrived
         // where another was expected.
         .non_ascii_identifier => "ZTS046",
+        // Minted rather than reusing `expected_token`: the fault is that a
+        // statement was never terminated, not that some particular token was
+        // expected in place of another.
+        .missing_semicolon => "ZTS047",
         .expected_property_name => "ZTS015",
         .invalid_assignment_target => "ZTS016",
         .invalid_destructuring => "ZTS017",

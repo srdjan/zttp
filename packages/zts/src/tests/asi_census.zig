@@ -38,6 +38,10 @@ fn insertionsIn(allocator: std.mem.Allocator, source: []const u8, is_ts: bool, i
     var p = try parser.JsParser.init(allocator, to_parse);
     defer p.deinit();
     if (is_tsx) p.enableJsx();
+    // The census measures what the old acceptance would have accepted, which
+    // is a question the refusing parser cannot answer: it stops at the first
+    // unterminated statement.
+    p.allow_asi = true;
     _ = p.parse() catch 0;
     return .{
         .insertions = p.asi.required(),

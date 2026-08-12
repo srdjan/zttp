@@ -57,16 +57,16 @@ const Case = struct {
 };
 
 pub const corpus = [_]Case{
-    .{ .tag = .lit_int, .source = "7", .required_opcode = .push_i8 },
-    .{ .tag = .lit_bool, .source = "true", .required_opcode = .push_true },
-    .{ .tag = .identifier, .source = "const a = 5; a" },
-    .{ .tag = .binary_op, .binop = .add, .source = "const a = 5; const b = 3; a + b" },
-    .{ .tag = .binary_op, .binop = .sub, .source = "const a = 5; const b = 3; a - b" },
-    .{ .tag = .binary_op, .binop = .mul, .source = "const a = 5; const b = 3; a * b" },
-    .{ .tag = .binary_op, .binop = .lt, .source = "const a = 5; const b = 3; a < b" },
-    .{ .tag = .unary_op, .unop = .neg, .source = "const a = 5; -a" },
-    .{ .tag = .unary_op, .unop = .not, .source = "const a = true; !a" },
-    .{ .tag = .ternary, .shape = .branch, .source = "const c = true; const t = 7; const e = 9; c ? t : e" },
+    .{ .tag = .lit_int, .source = "7;", .required_opcode = .push_i8 },
+    .{ .tag = .lit_bool, .source = "true;", .required_opcode = .push_true },
+    .{ .tag = .identifier, .source = "const a = 5; a;" },
+    .{ .tag = .binary_op, .binop = .add, .source = "const a = 5; const b = 3; a + b;" },
+    .{ .tag = .binary_op, .binop = .sub, .source = "const a = 5; const b = 3; a - b;" },
+    .{ .tag = .binary_op, .binop = .mul, .source = "const a = 5; const b = 3; a * b;" },
+    .{ .tag = .binary_op, .binop = .lt, .source = "const a = 5; const b = 3; a < b;" },
+    .{ .tag = .unary_op, .unop = .neg, .source = "const a = 5; -a;" },
+    .{ .tag = .unary_op, .unop = .not, .source = "const a = true; !a;" },
+    .{ .tag = .ternary, .shape = .branch, .source = "const c = true; const t = 7; const e = 9; c ? t : e;" },
 };
 
 // ---------------------------------------------------------------------------
@@ -400,7 +400,7 @@ test "recover reads the dropped expression denotation from real bytecode" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
 
-    const func = try compiler.compile(scratch.allocator(), "const a = 5; const b = 3; a + b");
+    const func = try compiler.compile(scratch.allocator(), "const a = 5; const b = 3; a + b;");
     const rec = try recover(scratch.allocator(), func.code);
     try std.testing.expect(rec.unhandled == null);
     // A single-expression snippet drops exactly once - the invariant the corpus
@@ -431,7 +431,7 @@ test "recover reconstructs ternary branch denotation" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
 
-    const func = try compiler.compile(scratch.allocator(), "const c = true; const t = 7; const e = 9; c ? t : e");
+    const func = try compiler.compile(scratch.allocator(), "const c = true; const t = 7; const e = 9; c ? t : e;");
     const rec = try recover(scratch.allocator(), func.code);
     try std.testing.expect(rec.unhandled == null);
     try std.testing.expect(rec.has_if_false);
@@ -444,11 +444,11 @@ test "literal corpus cases require exact literal opcodes" {
     var scratch = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer scratch.deinit();
 
-    const true_func = try compiler.compile(scratch.allocator(), "true");
+    const true_func = try compiler.compile(scratch.allocator(), "true;");
     try std.testing.expect(containsOpcode(true_func.code, .push_true));
     try std.testing.expect(!containsOpcode(true_func.code, .push_false));
 
-    const int_func = try compiler.compile(scratch.allocator(), "7");
+    const int_func = try compiler.compile(scratch.allocator(), "7;");
     try std.testing.expect(containsOpcode(int_func.code, .push_i8));
 
     const wrong_true = [_]u8{
@@ -466,7 +466,7 @@ test "a corpus case whose expected operator is wrong is caught" {
 
     // Real codegen for `a - b` recovers `opnd opnd sub`; assert it does NOT match
     // an add expectation - i.e. the differential would catch a sub-for-add bug.
-    const func = try compiler.compile(s, "const a = 5; const b = 3; a - b");
+    const func = try compiler.compile(s, "const a = 5; const b = 3; a - b;");
     const rec = try recover(s, func.code);
     const got = rec.dropped.?;
     try std.testing.expect(!semantics.termsEql(got, &.{ operand, operand, .{ .binop = .add } }));

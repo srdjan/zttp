@@ -166,6 +166,10 @@ fn buildSemicolonRepairs(
     var parser = zts.parser.JsParser.init(allocator, to_parse) catch return;
     defer parser.deinit();
     if (is_tsx) parser.enableJsx();
+    // The source this reads is one the refusing parser rejects - that is why it
+    // needs a repair. Finding where the `;` belongs means parsing it the way
+    // the old acceptance did.
+    parser.allow_asi = true;
     _ = parser.parse() catch return;
 
     for (parser.asi.recordedLines()) |line_no| {

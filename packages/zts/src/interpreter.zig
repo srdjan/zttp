@@ -2731,7 +2731,7 @@ test "End-to-end: parse and execute JS" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try parser_mod.Parser.init(allocator, "function f() { return 1 + 2; } f()", &strings, null);
+    var p = try parser_mod.Parser.init(allocator, "function f() { return 1 + 2; } f();", &strings, null);
     defer p.deinit();
 
     const code = try p.parse();
@@ -3260,7 +3260,7 @@ test "End-to-end: function declaration" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    const code_str = "function outer() { function add(a, b) { return a + b; } return add(3, 4); } outer()";
+    const code_str = "function outer() { function add(a, b) { return a + b; } return add(3, 4); } outer();";
     var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
     defer p.deinit();
 
@@ -3403,7 +3403,7 @@ test "End-to-end: default parameters" {
     // Note: Expression statements drop values, so we verify execution completes
     var strings = string_mod.StringTable.init(allocator);
 
-    const code_str = "function outer() { function greet(name = 'World') { return name; } return greet(); } outer()";
+    const code_str = "function outer() { function greet(name = 'World') { return name; } return greet(); } outer();";
     var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
     defer p.deinit();
 
@@ -3447,7 +3447,7 @@ test "End-to-end: optional method call short-circuits on nullish receiver" {
     defer ctx.deinit();
 
     var strings = string_mod.StringTable.init(allocator);
-    const code_str = "function outer() { const a = undefined; return a?.foo(); } outer()";
+    const code_str = "function outer() { const a = undefined; return a?.foo(); } outer();";
     var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
     defer p.deinit();
 

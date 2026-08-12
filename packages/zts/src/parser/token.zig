@@ -93,13 +93,6 @@ pub const TokenType = enum(u8) {
     spread, // ...
 
     // JSX-specific
-    jsx_tag_open, // < in JSX context
-    jsx_tag_close, // > in JSX context
-    jsx_tag_self_close, // />
-    jsx_tag_end_open, // </
-    jsx_text, // Text content between JSX tags
-    jsx_expr_start, // { in JSX context
-    jsx_expr_end, // } in JSX context
 
     // Keywords
     kw_var,
@@ -164,7 +157,6 @@ pub const TokenType = enum(u8) {
 
     // Special
     eof,
-    newline, // Significant for ASI
     invalid,
 };
 

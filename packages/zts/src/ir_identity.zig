@@ -73,13 +73,13 @@ pub fn compare(
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var left = Parsed.init(allocator, original, &atoms) catch |err| switch (err) {
+    var left = Parsed.init(allocator, original, &atoms, true) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NoTree => return .{ .unparsable = .original },
     };
     defer left.deinit();
 
-    var right = Parsed.init(allocator, repaired, &atoms) catch |err| switch (err) {
+    var right = Parsed.init(allocator, repaired, &atoms, true) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.NoTree => return .{ .unparsable = .repaired },
     };
@@ -104,7 +104,12 @@ const Parsed = struct {
 
     const InitError = error{ OutOfMemory, NoTree };
 
-    fn init(allocator: std.mem.Allocator, source: []const u8, atoms: *AtomTable) InitError!Parsed {
+    fn init(
+        allocator: std.mem.Allocator,
+        source: []const u8,
+        atoms: *AtomTable,
+        allow_asi: bool,
+    ) InitError!Parsed {
         // The stripper runs first for the same reason the rest of the analyzer
         // runs it first: the parser reads JavaScript, and a `: T` it never saw
         // stripped is a syntax error rather than a type.
@@ -117,6 +122,18 @@ const Parsed = struct {
         var parser = try parser_mod.JsParser.init(allocator, strip.code);
         errdefer parser.deinit();
         parser.setAtomTable(atoms);
+        // Both sides parse permissively, and the equivalence claim is tree
+        // identity rather than either side's strictness.
+        //
+        // The unrepaired side has to: under spec 5.5 it does not parse at all,
+        // which is the point of the repair. The repaired side has to for a
+        // less obvious reason - a file missing three semicolons is repaired one
+        // at a time, so every intermediate still has two missing. Requiring the
+        // repaired side to parse strictly would refuse every repair in that
+        // file and leave it with no mechanical exit, which is the opposite of
+        // what the repair is for. What makes the claim sound is that the trees
+        // are identical: same structure, more tokens.
+        parser.allow_asi = allow_asi;
 
         const root = parser.parse() catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
