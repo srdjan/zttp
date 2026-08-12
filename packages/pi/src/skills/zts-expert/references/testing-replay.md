@@ -61,7 +61,7 @@ Stubbing auth functions:
 
 ### Complete Example
 
-A guard-compose handler with CORS preflight, auth, and error cases:
+A guard-flow handler with CORS preflight, auth, and error cases:
 
 ```jsonl
 {"type":"test","name":"OPTIONS returns CORS preflight"}

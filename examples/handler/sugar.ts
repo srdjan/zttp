@@ -11,7 +11,7 @@ function handler(req) {
   const doubled = evens.map((n) => n * 2);
   const total = doubled.reduce((acc, n) => acc + n, 0);
 
-  const piped = score |> double;
+  const piped = double(score);
 
   const keys = Object.keys({a: 1, b: 2});
 

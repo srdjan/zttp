@@ -262,7 +262,7 @@ run_tests_with_args "examples/fetch/webhook.ts"           "examples/fetch/webhoo
 
 # routing/
 run_tests_with_args "examples/routing/router.ts"         "examples/routing/router.test.jsonl"
-run_tests_with_args "examples/routing/guard-compose.ts"  "examples/routing/guard-compose.test.jsonl"
+run_tests_with_args "examples/routing/guard-flow.ts"  "examples/routing/guard-flow.test.jsonl"
 run_tests_with_args "examples/routing/match-handler.ts"  "examples/routing/match-handler.test.jsonl"
 
 # patterns/ - every pattern example must type-check clean; the

@@ -1,7 +1,7 @@
-// Guard composition example
-// Demonstrates left-to-right guard chain with compile-time desugaring
+// Explicit guard flow
+// Each guard answers a Response to refuse the request, or undefined to let it
+// through. The handler runs them in order and returns the first refusal.
 
-import { guard } from "zttp:compose";
 import { routerMatch } from "zttp:router";
 import { env } from "zttp:env";
 import { parseBearer, jwtVerify } from "zttp:auth";
@@ -55,5 +55,15 @@ function routeHandler(req: Request): Response {
   return Response.json({ error: "Not Found" }, { status: 404 });
 }
 
-// Composed handler: preflight -> auth -> routes
-const handler = guard(preflight) |> guard(requireAuth) |> routeHandler;
+// preflight -> auth -> routes
+function handler(req: Request): Response {
+  const preflighted = preflight(req);
+  if (preflighted !== undefined) {
+    return preflighted;
+  }
+  const refused = requireAuth(req);
+  if (refused !== undefined) {
+    return refused;
+  }
+  return routeHandler(req);
+}

@@ -93,7 +93,7 @@ test "census: how many tracked statements rely on automatic semicolon insertion"
         "examples/patterns/unknown-and-guards.ts",
         "examples/patterns/validate-external.ts",
         "examples/routing/api-surface.ts",
-        "examples/routing/guard-compose.ts",
+        "examples/routing/guard-flow.ts",
         "examples/routing/match-handler.ts",
         "examples/routing/router.ts",
         "examples/sql/sql-crud.ts",

@@ -32,7 +32,7 @@ The core shape of a zttp handler. Start with the three above, then:
 - [handler.ts](handler/handler.ts) - the canonical TS handler with `Spec<...>`.
 - [handler.tsx](handler/handler.tsx) - the same shape in TSX.
 - [handler-with-imports.ts](handler/handler-with-imports.ts) - importing multiple virtual modules.
-- [sugar.ts](handler/sugar.ts) - the small syntactic conveniences (pipe, match, `assert`) the parser permits.
+- [sugar.ts](handler/sugar.ts) - the small syntactic conveniences (compound assignment, array HOFs, `Object.keys`) the parser permits.
 - [feature-probes.ts](handler/feature-probes.ts) - exact-output probes for runtime language features tracked in the feature matrix.
 - [spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) - a deliberately failing `Spec<...>` for the discharge diagnostics path.
 
@@ -50,7 +50,7 @@ Branch on `req.method` and `req.path`. No external router needed.
 
 - [router.ts](routing/router.ts) - the bare branching style.
 - [match-handler.ts](routing/match-handler.ts) - `match` expression for cleaner exhaustiveness.
-- [guard-compose.ts](routing/guard-compose.ts) - pre and post guards composed with `|>` from `zttp:compose`.
+- [guard-flow.ts](routing/guard-flow.ts) - guards run in order by explicit early return.
 - [api-surface.ts](routing/api-surface.ts) - declaring a larger API as a flat object.
 
 ### modules/
