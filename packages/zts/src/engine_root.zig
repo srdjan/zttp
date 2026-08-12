@@ -71,6 +71,7 @@ test {
 // explicitly.
 test {
     _ = @import("tests/opcode_parity.zig");
+    _ = @import("tests/asi_census.zig");
 }
 
 // modules/internal/compiler.zig is only reached via the `modules` re-export

@@ -143,6 +143,7 @@ zts security_events.zig
 zts sqlite.zig
 zts string.zig
 zts stripper.zig
+zts tests/asi_census.zig
 zts tests/opcode_parity.zig
 zts trace.zig
 zts value.zig

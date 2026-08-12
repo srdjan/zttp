@@ -68,6 +68,31 @@ const Precedence = enum(u8) {
 };
 
 /// Parser state
+/// Where a parse accepted a statement terminator it never saw.
+///
+/// Split by arm because the arms do not mean the same thing. `after_rbrace`
+/// covers a statement whose previous token is `}`, which spec section 8
+/// terminates with the brace; the other three cover statements the grammar
+/// requires a `;` after, and are what removing ASI actually costs.
+pub const AsiCensus = struct {
+    after_rbrace: u32 = 0,
+    before_rbrace: u32 = 0,
+    at_eof: u32 = 0,
+    at_newline: u32 = 0,
+    /// The first location any of the three counted arms accepted, so a report
+    /// names a line rather than only a count.
+    first: ?SourceLocation = null,
+
+    pub fn note(self: *AsiCensus, loc: SourceLocation) void {
+        if (self.first == null) self.first = loc;
+    }
+
+    /// Statements that would stop parsing if the acceptance were removed.
+    pub fn required(self: AsiCensus) u32 {
+        return self.before_rbrace + self.at_eof + self.at_newline;
+    }
+};
+
 pub const Parser = struct {
     allocator: std.mem.Allocator,
     tokenizer: Tokenizer,
@@ -85,6 +110,17 @@ pub const Parser = struct {
 
     // Optional atom table for interning identifiers/properties
     atoms: ?*atom_table.AtomTable,
+
+    /// How many statements this parse terminated by automatic semicolon
+    /// insertion rather than by a written `;`, split by the arm that accepted.
+    /// Spec 5.5 mandates no ASI, and this is the measurement that says what
+    /// removing it costs.
+    ///
+    /// `after_rbrace` is excluded from the total on purpose: a statement whose
+    /// previous token is `}` is a block or a declaration, which spec section 8
+    /// terminates with the brace rather than with a semicolon. The other three
+    /// arms are statements the grammar requires a `;` after.
+    asi: AsiCensus = .{},
 
     // Context flags
     in_loop: bool,
@@ -3506,9 +3542,26 @@ pub const Parser = struct {
     fn expectSemicolon(self: *Parser) !void {
         if (self.match(.semicolon)) return;
         // ASI: accept implicit semicolon after } or at newline
-        if (self.previous.type == .rbrace) return;
-        if (self.check(.rbrace) or self.check(.eof)) return;
-        // For simplicity, just accept
+        if (self.previous.type == .rbrace) {
+            self.asi.after_rbrace +|= 1;
+            return;
+        }
+        if (self.check(.rbrace)) {
+            self.asi.before_rbrace +|= 1;
+            self.asi.note(self.previous.location());
+            return;
+        }
+        if (self.check(.eof)) {
+            self.asi.at_eof +|= 1;
+            self.asi.note(self.previous.location());
+            return;
+        }
+        // For simplicity, just accept. Counted so the migration this removal
+        // needs can be measured before it is attempted: spec 5.5 mandates no
+        // automatic semicolon insertion, and how much tracked source relies on
+        // it decides whether the flip is mechanical or a migration.
+        self.asi.at_newline +|= 1;
+        self.asi.note(self.previous.location());
     }
 
     fn expectIdentifier(self: *Parser, ctx_label: []const u8) !Token {
