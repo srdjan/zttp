@@ -21,6 +21,30 @@ These features exist only in TypeScript type annotation positions that are strip
 | `any` type (all positions: annotations, assertions, nested) | UnsupportedAnyType | Use specific types (string, number, object) or union types |
 | `as` type assertion (e.g., `x as string`) | UnsupportedAssertion | Use explicit type narrowing with typeof guards or undefined checks |
 | `satisfies` operator (e.g., `x satisfies T`) | UnsupportedAssertion | Use explicit type annotations on declarations |
+| A string literal that reaches the end of its line | UnterminatedString | Close the quote, or write the newline as `\n` |
+
+The stripper runs before the parser, so it is what meets an unterminated string
+first. It reports one as ZTS008 with a line and a column - the same code the
+parser uses for the same fault.
+
+## Lexical Rules
+
+The escape set, the numeric forms, and the identifier character set are closed.
+Each of these was accepted silently before and is now refused with a location.
+
+| Form | Code | What it does instead |
+|---|---|---|
+| `"a\qb"` - an escape outside the closed set | ZTS013 | The set is `\n \r \t \b \f \v \0 \\ \' \" \` \$ \xNN \uNNNN \u{N..}`, in quoted strings and template literals alike |
+| A backslash before a real newline | ZTS045 | Join the lines, or write the newline as `\n` |
+| `0x`, `0b`, `0o` with no digits | ZTS012 | Write the digits |
+| `1e`, `1e+` with no exponent digits | ZTS012 | Write the exponent |
+| `0755` - a legacy octal literal | ZTS012 | `0o755` for octal, or drop the leading zero for decimal |
+| A byte above ASCII inside an identifier | ZTS046 | Identifiers are letters, digits, `_` and `$`. Not reported inside a JSX file, where text content reaches the same code path |
+| A statement with no `;` | ZTS047 | Write the terminator; this profile has no automatic semicolon insertion |
+
+The last one is a statement-termination rule rather than a lexical one. It has
+no mechanical repair today: the one that shipped was withdrawn after a review
+found it writing semicolons onto the wrong line and into trailing comments.
 
 ## Supported Module Syntax
 

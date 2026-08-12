@@ -45,8 +45,8 @@ for investigation.
 - `-n` controls isolated runtime count. The default is derived from CPU count
   and clamped to 8-128.
 - `-m` sets a per-runtime allocator ceiling. The default is no explicit limit.
-- `zttp:fetch`, `zttp:service`, `zttp:io`, durable workflows, and
-  WebSocket paths depend on external systems and runtime flags.
+- `zttp:fetch`, `zttp:service`, `zttp:io`, and durable workflow paths depend on
+  external systems and runtime flags.
 - `--actor-queue` allocates in-memory mailbox rings only when enabled. The
   default serving path pays no queue-worker or mailbox cost, and queued payloads
   are stored as compact JSON byte slices outside the JS heap.

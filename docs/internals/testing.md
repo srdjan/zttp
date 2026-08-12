@@ -105,6 +105,21 @@ it: `smoke-v1`, `scripts/test-examples.sh`,
 `zts module-spec-render --check`, the policy-hash and expert-subsystem
 assertions, and `zig fmt --check`. `scripts/verify.sh` runs all of them.
 
+It also runs six gates that need the built binary, which is why they are
+scripts rather than build steps. `ci.yml` runs the same six:
+
+| Gate | Asserts |
+|---|---|
+| `check-normalize-idempotent.sh` | a second `normalize` of the corpus produces identical bytes, and names every file the printer refused |
+| `check-idiom-table.sh` | spec 4.2.1's table matches `idiom_registry.zig` row for row |
+| `check-grammar-drift.sh` | spec section 8's productions match `grammar_registry.zig` in document order |
+| `check-decision-registry.sh` | every decision kind `meta` publishes is emitted somewhere |
+| `check-meta-drift.sh` | the four registry hashes `meta` publishes match their pins |
+| `check-agent-determinism.sh` | the same request twice produces identical bytes |
+
+Each carries a floor on its own input, because a gate whose corpus is empty or
+whose extraction stopped matching reports success while checking nothing.
+
 ## Why The ZRuntime Suite Is Standalone
 
 `zruntime_tests.zig` is the end-to-end test root for `handler_instance.zig`. It
@@ -147,11 +162,18 @@ Reassess this limitation when the pinned Zig toolchain changes.
 ## Running One Test
 
 ```bash
-zig build test -- --test-filter "runtime init and deinit"
+zig build test -Dtest-filter="runtime init and deinit"
 ```
 
 The filter applies to the test name in the `test "..."` block. Tests live
 alongside the code they cover; there is no separate test directory.
+
+Zig takes the filter at compile time, so it has to be a build option. The
+`-- --test-filter ...` form this document used to show does not filter at all:
+the run executes every test in the root and reports success, which reads as a
+single passing test to whoever wrote the command. `build.zig` records what that
+cost once - a live recording meant for one case cleared every committed
+cassette.
 
 ## Adding A Test Root
 

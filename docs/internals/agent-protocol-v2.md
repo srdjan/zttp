@@ -142,25 +142,31 @@ source span. The code set is closed and published in `meta.payload.error_codes`.
 ## Diagnostics
 
 Each entry in `diagnostics` carries `code`, `rule_id`, `severity`, `message`,
-`file`, `source_digest`, `line`, `column`, `byte_offset`, `suggestion`, and
-`repair_available`.
+`file`, `source_digest`, `line`, `column`, `byte_offset`, `span`, `suggestion`,
+and `repair_available`.
 
 `file` is project-relative. `source_digest` is the SHA-256 of the raw bytes the
 offsets index into. `rule_id` is null for the ZTS0xx parser band and the ZTS2xx
 type-checker band, which are real codes outside the policy-hashed registry.
 
-Two absences are deliberate in this version, and both appear in
-`meta.payload.deferred_sections`:
+`span` is the half-open byte range of the token the diagnostic points at, in
+those same bytes. `start == end` is a point rather than a range, which is what a
+producer that has an offset but no extent reports.
 
-- **no `span`.** No producer computes a half-open byte range, so a diagnostic
-  publishes the exact start as `byte_offset` rather than inventing an end.
-- **`repair_available` is uniformly false.** Spec 4.8 permits advertising an
-  exact repair only where a registered equivalence validator exists, and that
-  registry does not exist yet.
+`repair_available` is true exactly when the diagnostic's repair intent has a
+validator row whose method is implemented, which is what spec 4.8 permits
+advertising an exact repair on. Eight rows qualify, all under M4: the validator
+re-derives the declared law's rewrite from the original and requires the
+candidate to match it. A `canonicalize` candidate or `normalize` rewrite grades
+`mechanical_repair` under the same condition and `proposed_refactor` otherwise,
+read from that registry rather than from a constant.
 
-For the same reason, every `canonicalize` candidate and every `normalize`
-rewrite grades `proposed_refactor`. Nothing on this wire is a mechanical repair
-yet.
+One row is `.planned` rather than implemented: `insert_semicolon`, under M2.
+The repair shipped and was withdrawn in the same phase after a review found it
+unsound - it took line numbers from a parse of the stripped source, built its
+replacement from a trimmed line, and was certified by a parse identity that read
+both sides under the ASI grammar this compiler no longer ships. Nothing
+advertises or applies it while the row stays `.planned`.
 
 ## Deferred sections
 

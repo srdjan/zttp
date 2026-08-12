@@ -81,7 +81,7 @@ function handler(req: Request): Response & Guardrails {
 ```
 
 See [examples/](examples/) for routing, JSX/TSX, SQL, fetch, durable
-workflows, WebSocket, and proof examples.
+workflows, and proof examples.
 
 ## Current Surface
 
@@ -97,7 +97,7 @@ workflows, WebSocket, and proof examples.
   and proof receipts. A runtime fault that slips through names the proof chip
   that guards it and the faulting source line, instead of a bare 500.
 - Virtual modules: native modules under `zttp:*` for env, crypto, auth,
-  validation, cache, SQL, fetch, service calls, WebSocket, routing, durable and
+  validation, cache, SQL, fetch, service calls, routing, durable and
   multi-handler workflows, structured I/O, logging, IDs, time, text, and more.
 - Local deploy: self-contained binary output under
   `.zttp/deploy/<project-name>` with default-on attestation.
