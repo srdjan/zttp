@@ -968,11 +968,13 @@ is why the ground rule above bans them. Silent decisions leaking into wire
 formats is why D1 lands before phase 2, D2 before phase 4, and D3's digest
 section before the phase-1 hash freeze.
 
-The no-ASI flip still waits for phase 6 and its unique-parse-insertion
-validator, because the live parser has `return`-ASI today. The migration policy
-is now decided: phase 7 performs a direct cutover to the model-minimal profile,
-including removal of `|>`, `pipe()`, `guard()`, and `interface`. Those forms
-stay shipped only until that phase begins; no compatibility profile is planned.
+The no-ASI flip landed in phase 6 and did not wait on a validator: the corpus
+needed no migration, so a statement with no terminator is refused with ZTS047
+and a location, and the repair that shipped beside it was withdrawn when a
+review found it unsound. The migration policy is now decided: phase 7 performs
+a direct cutover to the model-minimal profile, including removal of `|>`,
+`pipe()`, `guard()`, and `interface`. Those forms stay shipped only until that
+phase begins; no compatibility profile is planned.
 
 ## Reset And Simplification
 
