@@ -127,7 +127,7 @@ pub const DeferredSection = struct { name: []const u8, note: []const u8 };
 
 pub const deferred_sections = [_]DeferredSection{
     .{ .name = "contract_body", .note = "phase 6: writeContractJson emits mixed-case v1 keys, so check publishes contract_available and leaves the body to `zts check --json --contract` until a snake_case serializer exists" },
-    .{ .name = "extension_manifests", .note = "phase 6: no zttp-ext manifest is authenticated yet, so every extension specifier is reported as unavailable and the extensions list is empty" },
+    .{ .name = "extension_manifests", .note = "waits on a trust policy, not on a phase: a manifest is authenticated only against trusted issuers, pinned or transparent keys, rotation, and revocation (spec 13.4), and a self-asserted manifest is not proof (13.5). Until then every zttp-ext specifier is reported under `rejected` as unavailable rather than silently resolved, and the extensions list is empty" },
     .{ .name = "rule_severity", .note = "no registry can answer it: severity is chosen at each emission site, not per rule - handler_verifier emits ZTS305 as warning and ZTS500 as error from one category. Publishing a derived value would be a guess" },
     .{ .name = "repair_budget", .note = "decided rather than scheduled: the repair-iteration and tool-call budget is a client's loop policy, and nothing in this compiler runs that loop or could enforce a number published here. It closes when a loop lands that enforces one, not before" },
 };
