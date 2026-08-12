@@ -33,7 +33,6 @@ const ported = struct {
     const log = adapter.adaptModuleBinding(modules.catalog.log);
     const text = adapter.adaptModuleBinding(modules.catalog.text);
     const time = adapter.adaptModuleBinding(modules.catalog.time);
-    const compose = adapter.adaptModuleBinding(modules.catalog.compose);
 };
 
 // installState helpers run during runtime bootstrap, outside any
@@ -71,7 +70,6 @@ pub const builtins = [_]ModuleBinding{
     sql_mod.binding,
     io_mod.binding,
     scope_mod.binding,
-    ported.compose,
     durable_mod.binding,
     workflow_mod.binding,
     queue_mod.binding,
@@ -113,7 +111,6 @@ pub const builtin_governance_entries = [_]BuiltinGovernanceEntry{
     .{ .specifier = "zttp:sql", .module_path = "packages/modules/src/data/sql.zig", .spec_path = "packages/modules/module-specs/data/sql.json" },
     .{ .specifier = "zttp:io", .module_path = "packages/zts/src/modules/workflow/io.zig", .spec_path = "packages/modules/module-specs/workflow/io.json" },
     .{ .specifier = "zttp:scope", .module_path = "packages/zts/src/modules/workflow/scope.zig", .spec_path = "packages/modules/module-specs/workflow/scope.json" },
-    .{ .specifier = "zttp:compose", .module_path = "packages/modules/src/workflow/compose.zig", .spec_path = "packages/modules/module-specs/workflow/compose.json" },
     .{ .specifier = "zttp:durable", .module_path = "packages/zts/src/modules/workflow/durable.zig", .spec_path = "packages/modules/module-specs/workflow/durable.json" },
     .{ .specifier = "zttp:workflow", .module_path = "packages/zts/src/modules/workflow/workflow.zig", .spec_path = "packages/modules/module-specs/workflow/workflow.json" },
     .{ .specifier = "zttp:queue", .module_path = "packages/zts/src/modules/workflow/queue.zig", .spec_path = "packages/modules/module-specs/workflow/queue.json" },

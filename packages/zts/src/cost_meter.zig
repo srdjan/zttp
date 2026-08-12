@@ -19,7 +19,6 @@ pub const ModuleClass = enum {
     fetch,
     io,
     durable,
-    compose,
     scope,
     url,
     id,
@@ -95,7 +94,6 @@ test "classForSpecifier maps builtin specifiers and defaults to other" {
     try std.testing.expectEqual(ModuleClass.fetch, comptime classForSpecifier("zttp:fetch"));
     try std.testing.expectEqual(ModuleClass.io, comptime classForSpecifier("zttp:io"));
     try std.testing.expectEqual(ModuleClass.durable, comptime classForSpecifier("zttp:durable"));
-    try std.testing.expectEqual(ModuleClass.compose, comptime classForSpecifier("zttp:compose"));
     try std.testing.expectEqual(ModuleClass.scope, comptime classForSpecifier("zttp:scope"));
     try std.testing.expectEqual(ModuleClass.url, comptime classForSpecifier("zttp:url"));
     try std.testing.expectEqual(ModuleClass.id, comptime classForSpecifier("zttp:id"));

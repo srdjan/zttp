@@ -1996,8 +1996,16 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "while (true) 1", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "const value = 1", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "() => 1", .expected = ComptimeError.UnexpectedToken },
-        .{ .source = "\"value\" |> hash", .expected = ComptimeError.UnexpectedToken },
-        .{ .source = "1 |> Math.abs", .expected = ComptimeError.UnexpectedToken },
+        // `|>` used to be refused here by a comptime-only branch that raised
+        // `unexpected_token`. It is refused everywhere now, as
+        // `unsupported_feature`, which `mapParserError` folds into
+        // `UnknownIdentifier` for that whole kind. The name is wrong for an
+        // operator - it sends the reader looking for a typo - and it is wrong
+        // for `new` and `while` on the same rows for the same reason. Pinned
+        // as it behaves; correcting the mapping means re-pinning every row
+        // that reaches it and is not this change.
+        .{ .source = "\"value\" |> hash", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "1 |> Math.abs", .expected = ComptimeError.UnknownIdentifier },
 
         // Logical and ternary evaluation stays eager so an invalid expression
         // cannot hide in either selected or unselected children.

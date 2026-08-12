@@ -942,8 +942,8 @@ baseline it measures against is the last row of
 the two spellings behave identically and mix in one file during the migration.
 The published profile stays `zts-advanced-1` until the removal list is done,
 because the identity is compared against a client's `expected.profile_id` and
-naming it `zts-model-1` while `|>`, truthiness, and templates still parse would
-make it a claim the compiler does not meet.
+naming it `zts-model-1` while truthiness and templates still parse would make
+it a claim the compiler does not meet.
 
 Two findings came out of that slice. `distinct type Bad = { a: number };`
 checked clean, while the published grammar has said `ScalarType` at that
@@ -973,6 +973,39 @@ ZTS049, so the count of rows with no rule code behind them fell from three to
 two. That moved `restriction_matrix_hash` and not `policy_hash`, which is the
 distinction those two identities exist to draw: what the matrix says changed,
 and the rule set that judges a file did not.
+
+`|>`, `pipe()`, and `guard()` went next, and the module under them with them.
+Two examples used the operator, so the migration was two files: a direct call
+in one, and explicit early-return guard flow in the other, pinned by comparing
+`zts check --json` before and after - identical properties, identical
+proofTrace verdicts, identical diagnostic codes. The operator now reports
+ZTS001 naming the direct call, at the operator's own span. It keeps its
+precedence row so it is recognized there rather than falling out as an
+unexpected token wherever the expression happens to end, and it builds no IR.
+
+`zttp:compose` is deleted, taking the module surface from 24 specifiers to 23.
+Its two exports were compile-time forms wearing a module's clothes: the parser
+replaced every use, so the native implementations shipped and never ran. What
+went with them is 313 lines of parser desugaring - the guard-chain lowering
+that synthesized an arrow function with generated bindings, the `pipe()` call
+fold, and the two import-tracked binding slots that armed both.
+
+The comptime profile had its own branch refusing `|>` with `unexpected_token`,
+which is gone: there is one refusal now, in both profiles. That costs one thing
+worth recording. `mapParserError` folds the whole `unsupported_feature` kind
+into `ComptimeError.UnknownIdentifier`, so `comptime("a |> f")` now reports an
+unknown identifier and sends the reader looking for a typo. The mapping is
+equally wrong for `new` and `while` on the rows beside it and predates this
+change; correcting it means re-pinning every row that reaches it.
+
+The last thing the compose import held up was rate limiting. `detectRateLimiting`
+required that import plus a `cacheIncr` call, and no handler in the repository
+ever satisfied both, so `rate_limiting` and the deploy manifest's
+`rate_limit_namespace` had never once been produced by a compile and no test
+asserted they could be. Meanwhile `zttp:ratelimit` had declared a
+`rate_limit_key` extraction on `rateCheck`'s first argument all along, and
+`getCategoryTarget` mapped that category to null. The detection answers from
+the primitive now, and three tests give it the floor it never had.
 
 | Phase | Scope | Exit |
 |---|---|---|
@@ -1012,9 +1045,8 @@ The no-ASI flip landed in phase 6 and did not wait on a validator: the corpus
 needed no migration, so a statement with no terminator is refused with ZTS047
 and a location, and the repair that shipped beside it was withdrawn when a
 review found it unsound. The migration policy is now decided: phase 7 performs
-a direct cutover to the model-minimal profile, including removal of `|>`,
-`pipe()`, `guard()`, and `interface`. Those forms stay shipped only until that
-phase begins; no compatibility profile is planned.
+a direct cutover to the model-minimal profile. `|>`, `pipe()`, `guard()`, and
+`interface` are removed; no compatibility profile is planned.
 
 ## Reset And Simplification
 

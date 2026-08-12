@@ -437,6 +437,19 @@ pub const entries = [_]RestrictionEntry{
         .enforced_by = &.{"ZTS049"},
     },
     .{
+        .id = "restriction.pipe-operator",
+        .feature = "`|>`, `pipe()`, `guard()`",
+        .boundary = "one spelling for calling a function",
+        .nature = .language_simplicity,
+        // All three lowered to calls and arrows in the parser, so nothing
+        // downstream could tell a piped call from a written one. They were
+        // alternate authoring routes to control flow the language already
+        // has, and `pipe()` and `guard()` were compile-time forms wearing a
+        // module's clothes: their native implementations never executed.
+        .note = "write the call directly; run guards by explicit early return",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
         .id = "restriction.object-methods",
         .feature = "object methods, getters, setters",
         .boundary = "explicit functions and effects",

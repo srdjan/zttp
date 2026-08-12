@@ -39,9 +39,7 @@ pub const net = struct {
     pub const service = @import("net/service.zig");
 };
 
-pub const workflow = struct {
-    pub const compose = @import("workflow/compose.zig");
-};
+pub const workflow = struct {};
 
 pub const catalog = struct {
     pub const crypto = security.crypto.binding;
@@ -65,8 +63,6 @@ pub const catalog = struct {
 
     pub const fetch = net.fetch.binding;
     pub const service = net.service.binding;
-
-    pub const compose = workflow.compose.binding;
 };
 
 pub const all_bindings = [_]sdk.ModuleBinding{
@@ -87,7 +83,6 @@ pub const all_bindings = [_]sdk.ModuleBinding{
     catalog.sql,
     catalog.fetch,
     catalog.service,
-    catalog.compose,
 };
 
 comptime {
@@ -114,5 +109,4 @@ test {
     _ = data.sql;
     _ = net.fetch;
     _ = net.service;
-    _ = workflow.compose;
 }

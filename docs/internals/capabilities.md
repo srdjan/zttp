@@ -80,7 +80,6 @@ These modules are pure compute - string manipulation, parsing, URL encoding, str
 
 - `zttp:bytes`
 - `zttp:collections`
-- `zttp:compose`
 - `zttp:decode`
 - `zttp:http`
 - `zttp:json`

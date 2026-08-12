@@ -2617,10 +2617,11 @@ The corpus MUST include:
 ### Tighten
 
 - reserve `assert` for programmer invariants
-- use direct named calls instead of custom pipe syntax - note the scope is
-  wider than one operator: `|>` is parser syntax, and `pipe()` and `guard()`
-  from `zttp:compose` are compile-time forms wearing a module's clothes, with
-  native implementations that never execute
+- use direct named calls instead of custom pipe syntax - DONE in phase 7. The
+  scope was wider than one operator: `|>` was parser syntax, and `pipe()` and
+  `guard()` from `zttp:compose` were compile-time forms wearing a module's
+  clothes, with native implementations that never executed. All three are
+  gone, `|>` reports ZTS001 naming the direct call, and the module with them
 - reject ambient time, random, logging, and I/O - OPEN CONFLICT. The engine
   admits these names deliberately and charges a property instead of refusing
   the program: reading a clock is legitimate and costs `deterministic`. That is

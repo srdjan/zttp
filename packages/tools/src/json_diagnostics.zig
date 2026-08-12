@@ -670,7 +670,6 @@ const allowed_features = [_]Feature{
     .{ .name = "nullish coalescing", .status = .allowed, .alternative = null },
     .{ .name = "match expression", .status = .allowed, .alternative = null },
     .{ .name = "assert statement", .status = .allowed, .alternative = null },
-    .{ .name = "pipe operator", .status = .allowed, .alternative = null },
     .{ .name = "import/export", .status = .allowed, .alternative = null },
     .{ .name = "type annotations", .status = .allowed, .alternative = null },
     .{ .name = "distinct type", .status = .allowed, .alternative = null },

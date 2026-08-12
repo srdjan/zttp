@@ -226,8 +226,8 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 | Operators | `+` `-` `*` `/` `%` `**`, `===` `!==` `<` `>` `<=` `>=`, `&&` `||` `!` |
 | Assignment | `=` `+=` `-=` `*=` `/=` `%=` `**=` |
 | Modules | `import { x } from "zttp:mod"`, `import { x } from "./local"`, `export` |
-| Special | `match` expression, pipe operator `|>`, `guard()` composition, `comptime()` |
-| Types | Type aliases, `distinct type`, interfaces, annotations, `readonly` fields, type guards (`x is T`), template literal types |
+| Special | `match` expression, `comptime()` |
+| Types | `structural` and `nominal` declarations (and the `type` and `distinct type` they replace), annotations, `readonly` fields, type guards (`x is T`), template literal types |
 
 ### What's Blocked (and Why)
 
@@ -249,6 +249,8 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 | `this` | Explicit parameter passing |
 | `async`/`await`/`Promise` | `fetchSync()`, `parallel()`, `race()` |
 | `delete` | New object literal with only the keys you keep |
+| `\|>`, `pipe()`, `guard()` | Call directly; run guards by explicit early return |
+| `interface` | `structural Name = { ... };` |
 
 ### Error Handling
 
@@ -382,7 +384,6 @@ import { parseBearer, jwtVerify, jwtSign } from "zttp:auth";
 import { schemaCompile, validateJson } from "zttp:validate";
 import { cacheGet, cacheSet, cacheIncr } from "zttp:cache";
 import { parallel, race } from "zttp:io";
-import { guard, pipe } from "zttp:compose";
 import { logInfo, logError } from "zttp:log";
 import { serviceCall } from "zttp:service";
 import { send, close, getWebSockets, setAutoResponse, serializeAttachment, deserializeAttachment } from "zttp:websocket";
@@ -405,15 +406,18 @@ function handler(req: Request): Response {
 }
 ```
 
-### Composition with pipe and guard
+### Guard flow
+
+Guards are ordinary functions that answer a `Response` to refuse or `undefined`
+to continue. The handler runs them in order and returns the first refusal.
 
 ```typescript
-import { guard } from "zttp:compose";
+import { rateCheck } from "zttp:ratelimit";
 
 function rateLimiter(req: Request): Response | undefined {
     const ip = req.headers["x-forwarded-for"] ?? "unknown";
-    const count = cacheIncr("ratelimit", ip, 1, 60);
-    if (count > 100) return Response.json({ error: "rate limited" }, { status: 429 });
+    const allowed = rateCheck(ip, 100, 60);
+    if (!allowed.ok) return Response.json({ error: "rate limited" }, { status: 429 });
 }
 
 function requireAuth(req: Request): Response | undefined {
@@ -425,7 +429,17 @@ function requireAuth(req: Request): Response | undefined {
     if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
 }
 
-const handler = guard(rateLimiter) |> guard(requireAuth) |> dashboard;
+function handler(req: Request): Response {
+    const limited = rateLimiter(req);
+    if (limited !== undefined) {
+        return limited;
+    }
+    const refused = requireAuth(req);
+    if (refused !== undefined) {
+        return refused;
+    }
+    return dashboard(req);
+}
 ```
 
 ### Sound Mode Type System
@@ -468,7 +482,7 @@ ordered durable batch grouping, not true concurrency.
 2. Import only what you need - every import is a sandbox contract
 3. Use `const` for everything - there is no mutation needed
 4. Use Result types for fallibility - never throw
-5. Use `pipe()` for sequencing - never nest callbacks
+5. Name each step and call it - never nest callbacks to sequence work
 6. Use `match()` for routing - never chain if/else on method+path
 7. Type your functions - annotations drive the type checker and proof system
 8. One handler per file - the compiler's proof unit is a single file

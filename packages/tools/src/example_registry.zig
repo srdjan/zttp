@@ -2,8 +2,7 @@
 //!
 //! Spec 4.8 requires `meta.payload.examples` to publish these so an agent can
 //! learn the ZTS-specific spellings - `match`, `distinct type`, `assert`,
-//! `comptime()`, the pipe - from the protocol rather than from hidden
-//! instructions.
+//! `comptime()` - from the protocol rather than from hidden instructions.
 //!
 //! Two gates, both in `agent_protocol.zig` where the feature table and the
 //! checker both live. Completeness: the example set and
@@ -316,29 +315,6 @@ pub const examples = [_]Example{
         \\  const items: number[] = [1, 2, 3];
         \\  assert items.length > 0;
         \\  return Response.json({ first: items[0] });
-        \\}
-        \\
-        ,
-    },
-    .{
-        .feature = "pipe operator",
-        .evidence = .{ .source_text = .{
-            .needle = "|>",
-            .reason = "the parser folds `a |> f` into the call `f(a)`, so the tree carries a `call` node indistinguishable from one written that way",
-        } },
-        .source =
-        \\import type { Spec } from "zttp:types";
-        \\
-        \\type Guard = Spec<"state_isolated">;
-        \\
-        \\function double(n: number): number {
-        \\  return n * 2;
-        \\}
-        \\
-        \\export function handler(req: Request): Response & Guard {
-        \\  const score: number = 21;
-        \\  const doubled: number = score |> double;
-        \\  return Response.json({ doubled });
         \\}
         \\
         ,

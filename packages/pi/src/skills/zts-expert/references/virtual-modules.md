@@ -157,15 +157,10 @@ return Response.json({
 });
 ```
 
-## zttp:compose (effect: none)
+## Guard flow (no module)
 
-```typescript
-import { guard } from "zttp:compose";
-
-guard(fn: (req: Request) => Response | undefined): fn
-```
-
-Compile-time handler composition via pipe operator. Pre-guards receive `req`, return `Response` to short-circuit or `undefined` to continue. Post-guards (after the main handler) receive the response.
+Guards are ordinary functions. Each answers a `Response` to refuse the request
+or `undefined` to let it through, and the handler runs them in order.
 
 ```typescript
 function cors(req: Request): Response | undefined {
@@ -186,10 +181,22 @@ function requireAuth(req: Request): Response | undefined {
     if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
 }
 
-const handler = guard(cors)
-    |> guard(requireAuth)
-    |> routeHandler;
+function handler(req: Request): Response {
+    const preflighted = cors(req);
+    if (preflighted !== undefined) {
+        return preflighted;
+    }
+    const refused = requireAuth(req);
+    if (refused !== undefined) {
+        return refused;
+    }
+    return routeHandler(req);
+}
 ```
+
+A guard that runs after the handler takes the response the same way: call the
+handler, bind its result, run the guard on it, and return the guard's answer
+when it gives one.
 
 ## zttp:durable (effect: write)
 
