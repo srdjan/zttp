@@ -130,7 +130,69 @@ pub fn collectFromSource(
     errdefer result.deinit(allocator);
 
     try buildLineRepairs(allocator, source, check.json_diagnostics.items, &result);
+    try buildSemicolonRepairs(allocator, source, virtual_path, &result);
     return result;
+}
+
+/// Propose the `;` every statement that relies on automatic semicolon
+/// insertion is missing.
+///
+/// Not diagnostic-driven, because there is no diagnostic yet: spec 5.5 mandates
+/// no ASI and the parser still accepts it, so this reads the parse's own census
+/// of where it inserted. The repair lands before the refusal on purpose - a
+/// program the refusal will reject has a mechanical exit the moment the
+/// refusal arrives, rather than after it.
+fn buildSemicolonRepairs(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    virtual_path: []const u8,
+    result: *Result,
+) !void {
+    const is_ts = std.mem.endsWith(u8, virtual_path, ".ts");
+    const is_tsx = std.mem.endsWith(u8, virtual_path, ".tsx");
+
+    var stripped: ?zts.StripResult = null;
+    defer if (stripped) |*sr| sr.deinit();
+    var to_parse = source;
+    if (is_ts or is_tsx) {
+        stripped = zts.strip(allocator, source, .{
+            .tsx_mode = is_tsx,
+            .enable_comptime = true,
+            .comptime_env = .{},
+        }) catch return;
+        to_parse = stripped.?.code;
+    }
+
+    var parser = zts.parser.JsParser.init(allocator, to_parse) catch return;
+    defer parser.deinit();
+    if (is_tsx) parser.enableJsx();
+    _ = parser.parse() catch return;
+
+    for (parser.asi.recordedLines()) |line_no| {
+        const line = sourceLine(source, line_no) orelse continue;
+        const trimmed = std.mem.trimEnd(u8, line, " \t\r");
+        // Stripping leaves the source offset-aligned, so the line the parse
+        // reported is the line the author wrote. A line that already ends in a
+        // `;` is one the census cannot have reported, and re-checking it here
+        // costs nothing next to appending a repair that changes no byte.
+        if (trimmed.len == 0 or trimmed[trimmed.len - 1] == ';') continue;
+
+        const replacement = try std.fmt.allocPrint(allocator, "{s};", .{trimmed});
+        errdefer allocator.free(replacement);
+        const original = try allocator.dupe(u8, line);
+        errdefer allocator.free(original);
+        const message = try allocator.dupe(u8, "statement relies on automatic semicolon insertion, which this profile does not have");
+        errdefer allocator.free(message);
+
+        try appendRepairUnique(allocator, source, result, .{
+            .intent = .insert_semicolon,
+            .line = line_no,
+            .column = 1,
+            .message = message,
+            .replacement = replacement,
+            .original = original,
+        });
+    }
 }
 
 /// Translate the diagnostics from one analysis pass into concrete refactors.
@@ -2943,7 +3005,8 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         const repaired = try applyRepairs(allocator, fixture.source, &one);
         defer allocator.free(repaired);
 
-        switch (repairPolicy.validateApplication(
+        switch (try repairPolicy.validateApplication(
+            allocator,
             fixture.intent,
             fixture.source,
             repaired,
@@ -4401,6 +4464,52 @@ test "delimitersBalanced detects expressions that do not finish on the line" {
     try std.testing.expect(!delimitersBalanced("makeUser("));
     try std.testing.expect(!delimitersBalanced("{"));
     try std.testing.expect(!delimitersBalanced("f(\"unterminated"));
+}
+
+test "a statement relying on insertion gets a semicolon repair its validator discharges" {
+    // The producer and the validator, tied together: the repair this emits has
+    // to be one M2 accepts, or `apply_repair` would refuse the only mechanical
+    // exit a program has once ASI removal lands.
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req) {
+        \\  const a = 1
+        \\  const b = 2
+        \\  return Response.json({ a, b })
+        \\}
+        \\
+    ;
+
+    var result = try collectFromSource(allocator, source, "h.js");
+    defer result.deinit(allocator);
+
+    var semicolons: usize = 0;
+    for (result.repairs.items) |repair| {
+        if (repair.intent != .insert_semicolon) continue;
+        semicolons += 1;
+
+        var one = [_]Repair{repair};
+        const repaired = try applyRepairs(allocator, source, &one);
+        defer allocator.free(repaired);
+
+        switch (try repairPolicy.validateApplication(
+            allocator,
+            .insert_semicolon,
+            source,
+            repaired,
+            repair.line,
+        )) {
+            .equivalent => {},
+            .not_law_shape => |why| {
+                std.debug.print("the semicolon repair is not an equivalence: {s}\n", .{why});
+                return error.TestFailed;
+            },
+            else => return error.TestFailed,
+        }
+    }
+    // Three statements rely on insertion here. A run that produced none would
+    // satisfy the loop above without testing anything.
+    try std.testing.expectEqual(@as(usize, 3), semicolons);
 }
 
 test "nestedDestructureRewrite refuses a multiline right-hand side" {

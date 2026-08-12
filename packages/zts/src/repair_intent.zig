@@ -47,6 +47,12 @@ pub const RepairIntent = enum {
     // prior variant's `@intFromEnum` value.
     drop_redundant_bool_compare,
 
+    /// Write the `;` a statement relies on automatic semicolon insertion to
+    /// supply. Spec 5.5 mandates no ASI, and this is the mechanical exit for a
+    /// program written without terminators. Appended last to preserve every
+    /// prior variant's `@intFromEnum` value.
+    insert_semicolon,
+
     pub fn asString(self: RepairIntent) []const u8 {
         return @tagName(self);
     }

@@ -61,6 +61,7 @@
 
 const std = @import("std");
 const repair_intent = @import("repair_intent.zig");
+const ir_identity = @import("ir_identity.zig");
 
 pub const RepairIntent = repair_intent.RepairIntent;
 
@@ -186,6 +187,18 @@ pub const rows = [_]Row{
     // statement into two and the other turns two into one, so the trees differ
     // by construction and parse identity refuses both. M4 is the method that
     // fits, and its precondition column carries the fact the law re-derives.
+    // The one row M2 discharges, and the reason M2 exists. Writing the `;` a
+    // program relied on insertion for makes the token stream longer and leaves
+    // the tree exactly as the parser built it, which is the unique-parse
+    // argument spec 5.5 makes - stated here as something that runs rather than
+    // as prose. No precondition: parse identity compares whole programs, so
+    // there is nothing for a law to re-derive.
+    .{
+        .intent = .insert_semicolon,
+        .method = .parse_identity,
+        .status = .implemented,
+        .precondition = null,
+    },
     .{
         .intent = .flatten_destructure,
         .method = .declared_law,
@@ -288,38 +301,68 @@ pub const Discharge = union(enum) {
 /// Total: every outcome is a verdict. It allocates nothing and cannot fail,
 /// because the one method that runs re-derives the rewrite into a stack buffer
 /// and refuses a line too long to hold rather than growing one.
+/// `error.OutOfMemory` is the only failure. Everything else is a verdict,
+/// including "the tree carries a construct parse identity does not model",
+/// which is an answer about the input rather than a fault in the check.
+///
+/// The allocator came back with M2. `3c1d5f6b` removed it because the only
+/// allocating method discharged no row, and this is the change that gives one
+/// a consumer: the semicolon insertion ASI removal needs, whose equivalence is
+/// exactly the unique-parse argument spec 5.5 makes.
 pub fn validateApplication(
+    allocator: std.mem.Allocator,
     intent: RepairIntent,
     original: []const u8,
     repaired: []const u8,
     line: u32,
-) Discharge {
+) error{OutOfMemory}!Discharge {
     const row = find(intent) orelse return .no_validator;
     if (row.status != .implemented) return .no_validator;
-    return dischargeByMethod(row.method, intent, original, repaired, line);
+    return dischargeByMethod(allocator, row.method, intent, original, repaired, line);
 }
 
 /// The method table. A row with no implemented method never reaches here
 /// through `validateApplication`: it returns first.
 pub fn dischargeByMethod(
+    allocator: std.mem.Allocator,
     method: Method,
     intent: RepairIntent,
     original: []const u8,
     repaired: []const u8,
     line: u32,
-) Discharge {
+) error{OutOfMemory}!Discharge {
     return switch (method) {
         .declared_law => dischargeDeclaredLaw(intent, original, repaired, line),
-        // Nothing else discharges anything today. M1 and M2 were built, ran,
-        // and discharged no row - see the header - so they went out with the
+        .parse_identity => dischargeParseIdentity(allocator, original, repaired),
+        // M1 was built, ran, and discharged no row, so it went out with the
         // measurement. M3 has no kernel to elaborate into and M5 never
         // auto-applies. `.none` claims no equivalence at all.
         .layout_identity,
-        .parse_identity,
         .kernel_identity,
         .contract_equivalence,
         .none,
         => .no_validator,
+    };
+}
+
+/// M2, parse identity: the two sources build the same tree, so the edit moved
+/// tokens and not structure.
+fn dischargeParseIdentity(
+    allocator: std.mem.Allocator,
+    original: []const u8,
+    repaired: []const u8,
+) error{OutOfMemory}!Discharge {
+    return switch (try ir_identity.compare(allocator, original, repaired, .{})) {
+        .identical => .equivalent,
+        .differs => |why| .{ .not_law_shape = why },
+        // A repaired source that does not parse is not the same program as one
+        // that does, and saying so is the whole answer. An original that does
+        // not parse leaves nothing to compare against.
+        .unparsable => |side| switch (side) {
+            .original => .{ .undecided = "the original does not parse, so there is no tree to compare against" },
+            .repaired => .{ .not_law_shape = "the repaired source does not parse" },
+        },
+        .unmodeled => .{ .undecided = "the tree carries a construct parse identity does not model" },
     };
 }
 
@@ -1366,8 +1409,11 @@ test "every gradable row has a law, and every law has a gradable row" {
             // with `ungraded_intent`.
             const dischargeable = switch (row.method) {
                 .declared_law => has_law,
+                // M2 needs no law: it compares whole trees, so there is
+                // nothing per-row to re-derive. `dischargeByMethod` reaches
+                // `ir_identity.compare` for it.
+                .parse_identity => true,
                 .layout_identity,
-                .parse_identity,
                 .kernel_identity,
                 .contract_equivalence,
                 .none,
@@ -1382,22 +1428,75 @@ test "every gradable row has a law, and every law has a gradable row" {
             return error.TestFailed;
         }
     }
-    try std.testing.expectEqual(@as(usize, 8), gradable_count);
+    // Eight under M4 plus the one under M2, which is the semicolon insertion
+    // ASI removal needs and the only row parse identity discharges.
+    try std.testing.expectEqual(@as(usize, 9), gradable_count);
+}
+
+test "parse identity discharges a written semicolon" {
+    // The unique-parse argument spec 5.5 makes, as something that runs: writing
+    // the `;` a program relied on insertion for lengthens the token stream and
+    // leaves the tree the parser built exactly as it was.
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try validateApplication(
+            std.testing.allocator,
+            .insert_semicolon,
+            "const a = 1\nconst b = 2\n",
+            "const a = 1;\nconst b = 2;\n",
+            1,
+        ),
+    );
+}
+
+test "parse identity refuses an edit that moves structure, not just tokens" {
+    // The floor. A method that accepted everything would discharge the row and
+    // grade an arbitrary edit as an equivalence, which is the one answer a
+    // validator must never give.
+    const changed_value = try validateApplication(
+        std.testing.allocator,
+        .insert_semicolon,
+        "const a = 1\n",
+        "const a = 2;\n",
+        1,
+    );
+    try std.testing.expect(changed_value == .not_law_shape);
+
+    const added_statement = try validateApplication(
+        std.testing.allocator,
+        .insert_semicolon,
+        "const a = 1\n",
+        "const a = 1;\nconst b = 2;\n",
+        1,
+    );
+    try std.testing.expect(added_statement == .not_law_shape);
+
+    // A repaired source that does not parse is not the same program as one
+    // that does.
+    const broken = try validateApplication(
+        std.testing.allocator,
+        .insert_semicolon,
+        "const a = 1\n",
+        "const a = ;\n",
+        1,
+    );
+    try std.testing.expect(broken == .not_law_shape);
 }
 
 test "let becomes const, and the for-of form is a different law" {
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.replace_let_with_const, "  let n = 1;\n", "  const n = 1;\n", 1),
+        try validateApplication(std.testing.allocator, .replace_let_with_const, "  let n = 1;\n", "  const n = 1;\n", 1),
     );
     // Indentation is preserved verbatim, so a reflowed line is not the law.
-    const reflowed = validateApplication(.replace_let_with_const, "  let n = 1;\n", "const n = 1;\n", 1);
+    const reflowed = try validateApplication(std.testing.allocator, .replace_let_with_const, "  let n = 1;\n", "const n = 1;\n", 1);
     try std.testing.expect(reflowed == .not_law_shape);
 
     // The producer handles both from one function; the two intents are
     // separate here so a misclassified diagnostic cannot discharge against the
     // wrong law.
-    const wrong_law = validateApplication(
+    const wrong_law = try validateApplication(
+        std.testing.allocator,
         .replace_let_with_const,
         "  for (let x of xs) {\n",
         "  for (const x of xs) {\n",
@@ -1406,7 +1505,7 @@ test "let becomes const, and the for-of form is a different law" {
     try std.testing.expect(wrong_law == .not_law_shape);
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.canonicalize_for_of_const, "  for (let x of xs) {\n", "  for (const x of xs) {\n", 1),
+        try validateApplication(std.testing.allocator, .canonicalize_for_of_const, "  for (let x of xs) {\n", "  for (const x of xs) {\n", 1),
     );
 }
 
@@ -1415,7 +1514,8 @@ test "a compound assignment must parenthesize a compound right-hand side" {
     // tax)`; without the parens it reassociates to `(total - fee) + tax` and
     // computes something else, so accepting the unparenthesized form would
     // grade a value-changing edit as an equivalence.
-    const unparenthesized = validateApplication(
+    const unparenthesized = try validateApplication(
+        std.testing.allocator,
         .replace_compound_assign_with_explicit,
         "  total -= fee + tax;\n",
         "  total = total - fee + tax;\n",
@@ -1426,6 +1526,7 @@ test "a compound assignment must parenthesize a compound right-hand side" {
     try std.testing.expectEqual(
         Discharge.equivalent,
         validateApplication(
+            std.testing.allocator,
             .replace_compound_assign_with_explicit,
             "  total -= fee + tax;\n",
             "  total = total - (fee + tax);\n",
@@ -1437,9 +1538,10 @@ test "a compound assignment must parenthesize a compound right-hand side" {
     // accepting either spelling.
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.replace_compound_assign_with_explicit, "  n += 1;\n", "  n = n + 1;\n", 1),
+        try validateApplication(std.testing.allocator, .replace_compound_assign_with_explicit, "  n += 1;\n", "  n = n + 1;\n", 1),
     );
-    const over_parenthesized = validateApplication(
+    const over_parenthesized = try validateApplication(
+        std.testing.allocator,
         .replace_compound_assign_with_explicit,
         "  n += 1;\n",
         "  n = n + (1);\n",
@@ -1452,6 +1554,7 @@ test "an arrow becomes a function, expression body wrapped in a return" {
     try std.testing.expectEqual(
         Discharge.equivalent,
         validateApplication(
+            std.testing.allocator,
             .replace_arrow_with_function,
             "const parse = (x: number): number => x;\n",
             "function parse(x: number): number { return x; }\n",
@@ -1461,6 +1564,7 @@ test "an arrow becomes a function, expression body wrapped in a return" {
     try std.testing.expectEqual(
         Discharge.equivalent,
         validateApplication(
+            std.testing.allocator,
             .replace_export_arrow_with_function,
             "export const load = (id: string): Response => Response.text(id);\n",
             "export function load(id: string): Response { return Response.text(id); }\n",
@@ -1470,7 +1574,8 @@ test "an arrow becomes a function, expression body wrapped in a return" {
 
     // Dropping `export` changes what the module exports. A rewrite that did it
     // would still type-check inside the file and is not this law.
-    const dropped_export = validateApplication(
+    const dropped_export = try validateApplication(
+        std.testing.allocator,
         .replace_export_arrow_with_function,
         "export const load = (id: string): Response => Response.text(id);\n",
         "function load(id: string): Response { return Response.text(id); }\n",
@@ -1504,7 +1609,7 @@ test "the law's own rewrite discharges" {
     ;
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.drop_redundant_bool_compare, original, repaired, 2),
+        try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 2),
     );
 }
 
@@ -1513,7 +1618,7 @@ test "the negated form discharges" {
     const repaired = "const blocked = !flag;";
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.drop_redundant_bool_compare, original, repaired, 1),
+        try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1),
     );
 }
 
@@ -1522,7 +1627,7 @@ test "a rewrite that is not the law is refused" {
     // point of re-deriving rather than diffing is that this is caught.
     const original = "const ready = flag === true;";
     const repaired = "const ready = !flag;";
-    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
+    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1535,14 +1640,14 @@ test "an edit outside the diagnostic's line is refused" {
         \\const ready = flag;
         \\const other = 2;
     ;
-    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
+    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
 test "two candidates on one line refuse rather than guess" {
     const original = "const both = a === true && b === true;";
     const repaired = "const both = a && b === true;";
-    const answer = validateApplication(.drop_redundant_bool_compare, original, repaired, 1);
+    const answer = try validateApplication(std.testing.allocator, .drop_redundant_bool_compare, original, repaired, 1);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1550,7 +1655,7 @@ test "a planned intent has no validator" {
     // Distinct from a refusal: the edit is never examined. `lead_with_spread`
     // names M3 and nothing runs it, so an edit carrying it gets no verdict
     // rather than a negative one.
-    const answer = validateApplication(.lead_with_spread, "const a = {...b, c};", "const a = {...b, c};", 1);
+    const answer = try validateApplication(std.testing.allocator, .lead_with_spread, "const a = {...b, c};", "const a = {...b, c};", 1);
     try std.testing.expect(answer == .no_validator);
 }
 
@@ -1562,7 +1667,7 @@ test "no planned row can advertise a repair" {
         if (row.status == .implemented) continue;
         try std.testing.expect(!row.gradable());
         try std.testing.expect(!gradable(row.intent));
-        const answer = validateApplication(row.intent, "const a = 1;\n", "const a = 1;\n", 1);
+        const answer = try validateApplication(std.testing.allocator, row.intent, "const a = 1;\n", "const a = 1;\n", 1);
         try std.testing.expect(answer == .no_validator);
     }
 }
@@ -1585,7 +1690,7 @@ test "a nested destructure flattens, and a capture is refused" {
     ;
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.flatten_destructure, original, repaired, 3),
+        try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 3),
     );
 
     // The precondition, re-derived here rather than trusted: the rewrite
@@ -1608,7 +1713,7 @@ test "a nested destructure flattens, and a capture is refused" {
         \\  return Response.text(name);
         \\}
     ;
-    const refused = validateApplication(.flatten_destructure, captures, captured, 4);
+    const refused = try validateApplication(std.testing.allocator, .flatten_destructure, captures, captured, 4);
     try std.testing.expect(refused == .not_law_shape);
 }
 
@@ -1634,7 +1739,7 @@ test "an unused index alias collapses, and a live name is refused" {
     ;
     try std.testing.expectEqual(
         Discharge.equivalent,
-        validateApplication(.drop_unused_index_alias, original, repaired, 3),
+        try validateApplication(std.testing.allocator, .drop_unused_index_alias, original, repaired, 3),
     );
 
     // The index alias is what the loop drops. A body that reads it is left
@@ -1659,7 +1764,7 @@ test "an unused index alias collapses, and a live name is refused" {
         \\  return Response.text("done");
         \\}
     ;
-    const refused_index = validateApplication(.drop_unused_index_alias, reads_index, dropped_index, 3);
+    const refused_index = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_index, dropped_index, 3);
     try std.testing.expect(refused_index == .not_law_shape);
 
     // Same for the pair binding, which nothing but the producer ever checked.
@@ -1682,7 +1787,7 @@ test "an unused index alias collapses, and a live name is refused" {
         \\  return Response.text("done");
         \\}
     ;
-    const refused_pair = validateApplication(.drop_unused_index_alias, reads_pair, dropped_pair, 3);
+    const refused_pair = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_pair, dropped_pair, 3);
     try std.testing.expect(refused_pair == .not_law_shape);
 }
 
@@ -1702,7 +1807,7 @@ test "a region edit outside the reported line is refused" {
         \\  return Response.text(name);
         \\}
     ;
-    const answer = validateApplication(.flatten_destructure, original, repaired, 2);
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1733,7 +1838,7 @@ test "a binding wrapped across lines still refuses the flatten" {
         \\  return Response.text(name + user);
         \\}
     ;
-    const answer = validateApplication(.flatten_destructure, original, repaired, 6);
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 6);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1759,7 +1864,7 @@ test "a parameter list wrapped across lines still refuses the flatten" {
         \\  return Response.text(name + user);
         \\}
     ;
-    const answer = validateApplication(.flatten_destructure, original, repaired, 5);
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 5);
     try std.testing.expect(answer == .not_law_shape);
 }
 
@@ -1782,6 +1887,6 @@ test "an object-literal right-hand side that runs past the line refuses" {
         \\  return Response.text(name);
         \\}
     ;
-    const answer = validateApplication(.flatten_destructure, original, repaired, 2);
+    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
     try std.testing.expect(answer == .not_law_shape);
 }

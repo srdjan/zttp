@@ -82,9 +82,32 @@ pub const AsiCensus = struct {
     /// The first location any of the three counted arms accepted, so a report
     /// names a line rather than only a count.
     first: ?SourceLocation = null,
+    /// Every line a counted arm accepted on, in parse order, bounded so the
+    /// census costs no allocation. A file with more than this many is a file
+    /// the repair producer reports as needing more than one pass, which is
+    /// honest: the count is still exact, only the line list is capped.
+    lines: [max_recorded_lines]u32 = [_]u32{0} ** max_recorded_lines,
+    recorded: u8 = 0,
+
+    pub const max_recorded_lines = 64;
 
     pub fn note(self: *AsiCensus, loc: SourceLocation) void {
         if (self.first == null) self.first = loc;
+        if (self.recorded < max_recorded_lines) {
+            // A line already recorded is not recorded twice: two statements on
+            // one line need one repair for that line, and the producer keys on
+            // the line.
+            for (self.lines[0..self.recorded]) |seen| {
+                if (seen == loc.line) return;
+            }
+            self.lines[self.recorded] = loc.line;
+            self.recorded += 1;
+        }
+    }
+
+    /// The lines a `;` has to be written on, in parse order.
+    pub fn recordedLines(self: *const AsiCensus) []const u32 {
+        return self.lines[0..self.recorded];
     }
 
     /// Statements that would stop parsing if the acceptance were removed.
