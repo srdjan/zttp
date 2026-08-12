@@ -3344,6 +3344,49 @@ test "apply_repair is atomic: a rejected set leaves the file untouched" {
     const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
     defer a.free(on_disk);
     try testing.expectEqualStrings(let_handler, on_disk);
+
+    // The refusal's own digest has to be the digest of what is on disk. Byte
+    // equality above proves the file did not move; this proves the response did
+    // not lie about it, which is the field a client rebinds from and the one
+    // thing a half-applied write would make wrong.
+    const reported = payload.get("source_digest").?.string;
+    const actual = agent_identity.sourceDigest(on_disk);
+    try testing.expectEqualStrings(&actual, reported);
+}
+
+test "apply_repair refuses an overlapping set and writes nothing" {
+    // The refusal exists in the apply path and no test reached it through the
+    // wire until now. Two repairs on the same line cover the same bytes, so
+    // which one applies is undefined - the set is refused whole.
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}},{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"earth\";"}}]}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqual(@as(i64, 0), payload.get("applied").?.integer);
+    try testing.expectEqualStrings(
+        "overlapping_repairs",
+        payload.get("refusal").?.object.get("reason").?.string,
+    );
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+    const reported = payload.get("source_digest").?.string;
+    const actual = agent_identity.sourceDigest(on_disk);
+    try testing.expectEqualStrings(&actual, reported);
 }
 
 test "apply_repair refuses an edit its own law does not discharge" {

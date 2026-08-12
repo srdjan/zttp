@@ -898,31 +898,46 @@ default's value passes for a program that never selects a default. What
 distinguishes them is changing the default itself, which is the probe that
 belongs in the gate.
 
-Phase 6 is planned, and its plan is
+Phase 6 is done, and its plan, amended throughout with what each task actually
+found, is
 [docs/plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md](plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md).
-Measurement moved three of its scope lines before any of them was scheduled.
-The protocol's operation set is not open: all eleven operations ship,
-`apply_repair` takes a repair array and validates each one against its own law
-on the edit it produced, and `verify` takes a property list with a content
-override. Two of the exit sentence's three clauses are met already, and the one
-that is not - byte-identity over the whole corpus - waits on the canonical
-formatter, which does not exist and which the parser cannot yet feed because it
-retains no trivia. What replaces the operation work is the ten
-`deferred_sections` rows `meta` publishes about itself, two of which are stale
-deferrals whose mechanisms landed in earlier phases.
 
-The idiom table is 18 of the spec's 24 rows, three of those rows report, and one
-of them has a rewrite. That one, `element iteration`, reports at error severity,
-which spec 4.2.1 forbids in the same paragraph that admits the row. The cause
-generalizes past the one rule: the canonical band's count answers both "has the
-normalize loop made progress" and "is this file canonical", so an advisory that
-cannot fail a build does make `normalize --write` decline the file.
+The canonical formatter exists and prints 53 of the 58 corpus files; the five it
+refuses are JSX and TSX, and the idempotence gate names each one rather than
+counting it as coverage. Double-normalize byte-identity holds over all 58. The
+idiom table is the spec's full 24 rows, the advisory channel no longer decides a
+build, and nine validator rows are gradable - eight under M4, and one under M2,
+which was deleted mid-phase after measuring that it discharged nothing and
+returned when ASI removal gave it a consumer.
+
+`meta` went from ten `deferred_sections` rows to three, and the three that
+remain are decisions rather than schedules: an authenticated `zttp-ext:`
+manifest needs a trust policy with issuers, key pinning, rotation, and
+revocation; per-rule severity is chosen at each emission site, so no table can
+answer it; and the repair budget is a client's loop policy that nothing here
+enforces. What closed carries its own gates - section 8's grammar is drift-gated
+against the document, every admitted surface form has a compiled example, and
+every decision kind a refusal can carry is emitted somewhere.
+
+Two rules the spec had always stated became true of the compiler this phase.
+The six lexical divergences of D3 section 1 now report with a code and a
+location, including an unterminated string, which used to answer `success:false`
+with an empty diagnostics array. And spec 5.5's no-ASI rule holds: the corpus
+needed no migration - measured at 0 of 58 files before anything changed - and
+the semicolon repair landed before the refusal, so no program was ever left
+without a mechanical exit.
+
+Writing the per-form examples found five defects, three of which made an
+advertised admitted form unwritable: `let` was refused in every exported handler
+and its annotation was ignored, an object spread contributed its operand's name
+instead of its fields, a used destructured binding read as unused, and a
+template literal type was not assignable to `string`.
 
 | Phase | Scope | Exit |
 |---|---|---|
 | 4. Dict, JSON, Result completion | `Dict` and `zttp:collections` with persistent semantics, SameValueZero keys, and insertion order; `zttp:json` with a closed error taxonomy and policy-driven limits; `zttp:result` completion (`unwrapOr`, `orElse`, `collectAll`) with effect-row-polymorphic combinators per D2. | Dict determinism and SameValueZero tests; JSON round-trip and limit tests; `collectAll` first-error test. **Done.** |
 | 5. Bytes, ABI re-typing, defaults, Effects ceiling | [`Bytes` and `zttp:bytes`](plans/2026-08-09-025-zts-advanced-rev4-phase5-plan.md); the HTTP, queue, and durable ABIs re-typed to the spec's 7.2 shapes including total `responseText` (the WebSocket subsystem was removed rather than re-typed); trailing scalar default parameters; the decidable `Effects`-ceiling rule with repairs computed from the inferred row. | fetch and queue examples re-typed; ceiling-rule repair tests. **Done**, with the function-type ceiling landed for the empty row and blocked for a nonempty one - a function type whose return carries a capsule does not survive the checker, which is a type-representation fix recorded in the plan. |
-| 6. Full idiom table, validators, gate-complete protocol | [The remaining idiom rows](plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md); equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. |
+| 6. Full idiom table, validators, gate-complete protocol | [The remaining idiom rows](plans/2026-08-10-026-zts-advanced-rev4-phase6-plan.md); equivalence validators per D3's method taxonomy, with any row lacking a registered validator shipping advisory-only; fixed-point normalization with a published pass bound; batch `apply_repair` and multi-property `verify`; the full registry-generated meta payload set. | Double-normalize byte-identity over the whole corpus; atomic `apply_repair` rejection tests; meta drift gates wired into `scripts/verify.sh`. **Done.** The idiom table is 24 rows and the canonical formatter prints 53 of 58 corpus files, the five it refuses being JSX and TSX, each named by the gate. Nine validator rows are gradable: eight under M4 and one under M2, which returned with its consumer when ASI removal landed. `deferred_sections` fell from ten rows to three, and the three that remain are decisions rather than schedules - an authenticated extension manifest needs a trust policy, and per-rule severity and the repair budget are questions no registry here can answer. Spec 5.5's no-ASI rule holds, with the semicolon repair landing before the refusal so no program was left without a mechanical exit. |
 | 7. Model-minimal direct cutover | [`zts-model-1` and `zts-tsx-1`](plans/2026-08-09-024-zts-model-minimal-phase7-plan.md); explicit `structural` and scalar `nominal` declarations; boolean-only control flow; one canonical syntax for modules, parameters, objects, callbacks, guards, and text; TSX as a lowering frontend rather than core syntax. | Zero removed forms in tracked source; every removed form has one diagnostic and repair or refusal; `spec-check` classifies every reachable node and opcode; paired live-model flows preserve behavior, intent, proofs, and reached-green convergence. |
 
 Three design documents own the decisions the phases consume. Two of them also

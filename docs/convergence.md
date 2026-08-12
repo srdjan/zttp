@@ -34,6 +34,7 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-10 | `2c1a83d3-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `9c913bebcb59` | 100% (19/19) | 4 | 100% (13/13) |
 | 2026-08-10 | `66f8aaa7-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `8dfb32f91549` | 100% (19/19) | 4 | 100% (13/13) |
 | 2026-08-10 | `e0ab4058-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-12 | `dcee3baf-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those

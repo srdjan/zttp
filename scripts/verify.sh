@@ -73,6 +73,9 @@ bash scripts/check-grammar-drift.sh
 step "bash scripts/check-decision-registry.sh  (every published decision kind is emitted)"
 bash scripts/check-decision-registry.sh
 
+step "bash scripts/check-meta-drift.sh  (meta's registry hashes against their pins)"
+bash scripts/check-meta-drift.sh
+
 step "bash scripts/check-agent-determinism.sh  (v2 agent transport determinism)"
 bash scripts/check-agent-determinism.sh
 

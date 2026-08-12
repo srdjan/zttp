@@ -475,6 +475,10 @@ pub fn build(b: *std.Build) void {
     const decision_registry_step = b.step("test-decision-registry", "Check every published decision kind is emitted somewhere");
     decision_registry_step.dependOn(&decision_registry_gate.step);
 
+    const meta_drift = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-meta-drift.sh" });
+    const meta_drift_step = b.step("test-meta-drift", "Check meta's published registry hashes against their pins");
+    meta_drift_step.dependOn(&meta_drift.step);
+
     const doc_links = b.addSystemCommand(&.{ "/bin/bash", "scripts/audit-docs.sh" });
     const doc_links_step = b.step("test-doc-links", "Check docs for broken relative links");
     doc_links_step.dependOn(&doc_links.step);
