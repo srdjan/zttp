@@ -77,6 +77,27 @@ TS and TSX files work directly through the native type stripper. JSX is parsed b
 - **Deploy manifests**: `packages/tools/src/deploy_manifest.zig`.
 - **System linking**: `packages/zts/src/system_linker.zig`.
 
+## Models
+
+Local models only, as of 2026-08-13. Do not record cassettes, run the
+convergence corpus, or drive the expert loop against Claude, OpenAI, or any
+other hosted provider. The backend is a developer-managed MLX-LM server:
+
+```bash
+mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
+```
+
+`ZTTP_CODEGEN_PROVIDER=local` selects it for recording and is the default.
+Local recordings land under
+`packages/pi/src/simulator/testdata/empirical/local/codegen/`. The frozen Claude
+corpus under `packages/pi/src/providers/testdata/codegen/` is the pre-cutover
+baseline and is not re-recorded.
+
+A failing local case is the measurement, not a reason to reach for a hosted
+model. A recorded turn is capped at 3 minutes
+(`ZTTP_CODEGEN_TURN_TIMEOUT_MS`), because a stalled local generation is silence
+rather than an error and would otherwise take the whole corpus run with it.
+
 ## Conventions
 
 - All Zig. New code in Zig unless editing existing JS/TS handler examples.
