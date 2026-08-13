@@ -1,0 +1,3 @@
+function handler(req: Request): Response {
+    return Response.json({ ok: true });
+}

@@ -1,0 +1,1 @@
+'import { fetch } from "zttp:fetch";\n\nfunction handler(req: Request): Response & Spec<"state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {\n  const res = fetch("https://api.example.com/v1/status"
