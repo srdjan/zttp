@@ -280,6 +280,14 @@ const max_auto_repairs: usize = 8;
 const PreparedEdit = struct {
     edit: turn.Edit,
     resolved_path: []const u8,
+    before: ?[]const u8,
+    baseline_sha256: [32]u8,
+
+    fn deinit(self: *PreparedEdit, allocator: std.mem.Allocator) void {
+        allocator.free(self.resolved_path);
+        if (self.before) |before| allocator.free(before);
+        self.* = undefined;
+    }
 };
 
 fn callModel(
@@ -302,7 +310,11 @@ fn callModel(
 /// is what makes the retry loop information-complete: the diagnostics the model
 /// must fix reference bytes it can actually see, and the context survives a
 /// mid-repair tool call instead of evaporating with a transient prompt.
-fn buildApplyEditArgs(allocator: std.mem.Allocator, edit: turn.Edit) ![]u8 {
+fn buildApplyEditArgs(
+    allocator: std.mem.Allocator,
+    edit: turn.Edit,
+    prepared: ?*const PreparedEdit,
+) ![]u8 {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
     const w = buf.writer();
@@ -310,9 +322,13 @@ fn buildApplyEditArgs(allocator: std.mem.Allocator, edit: turn.Edit) ![]u8 {
     try json_writer.writeString(w, edit.file);
     try w.writeAll(",\"content\":");
     try json_writer.writeString(w, edit.content);
-    if (edit.before) |before| {
-        try w.writeAll(",\"before\":");
-        try json_writer.writeString(w, before);
+    if (prepared) |host| {
+        const digest_hex = std.fmt.bytesToHex(host.baseline_sha256, .lower);
+        try w.writeAll(",\"baseline_state\":\"");
+        try w.writeAll(if (host.before == null) "absent" else "present");
+        try w.writeAll("\",\"baseline_sha256\":\"");
+        try w.writeAll(&digest_hex);
+        try w.writeByte('"');
     }
     try w.writeByte('}');
     return try buf.toOwnedSlice();
@@ -513,34 +529,37 @@ pub fn runTurnWith(
                 // (required for `--resume` replay). Every exit from this arm must
                 // append a matching tool_result to close the tool call.
                 const edit_call_id = try std.fmt.allocPrint(ta, "apply_edit-{d}", .{transcript.len()});
-                {
-                    const args_json = try buildApplyEditArgs(ta, edit);
+                const prepared = prepareEdit(ta, options.workspace_root, edit) catch |err| {
+                    if (err == error.OutOfMemory) return err;
+                    const args_json = try buildApplyEditArgs(ta, edit, null);
                     const calls = [_]turn.ToolCall{.{ .id = edit_call_id, .name = "apply_edit", .args_json = args_json }};
                     try transcript.append(allocator, .{ .assistant_tool_use = &calls });
-                }
-                const prepared = prepareEdit(ta, options.workspace_root, edit) catch |err| switch (err) {
-                    // A path that resolves outside the workspace root is the
-                    // model's mistake, not a fatal agent error. Surface it as a
-                    // failed edit so the turn machine re-prompts the model to
-                    // fix the path, instead of propagating out of the turn and
-                    // crashing the whole agent. Other errors (OOM, unreadable
-                    // `before` file) remain fatal.
-                    error.PathOutsideWorkspace => {
-                        const msg = try std.fmt.allocPrint(
+                    const msg = if (err == error.PathOutsideWorkspace)
+                        try std.fmt.allocPrint(
                             ta,
                             "edit rejected: the file path `{s}` resolves outside the workspace " ++
                                 "root. Use a path relative to the workspace (for example " ++
                                 "`src/handler.ts`), not an absolute path or one that escapes the " ++
                                 "project directory.",
                             .{edit.file},
+                        )
+                    else
+                        try std.fmt.allocPrint(
+                            ta,
+                            "edit rejected: the host could not establish an authoritative baseline " ++
+                                "for `{s}` ({s}); no edit was applied.",
+                            .{ edit.file, @errorName(err) },
                         );
-                        try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = msg } });
-                        try appendEditToolResult(allocator, transcript, edit_call_id, false, msg);
-                        next_event = .{ .edit_verified = .{ .ok = false, .llm_text = msg } };
-                        continue;
-                    },
-                    else => return err,
+                    try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = msg } });
+                    try appendEditToolResult(allocator, transcript, edit_call_id, false, msg);
+                    next_event = .{ .edit_verified = .{ .ok = false, .llm_text = msg } };
+                    continue;
                 };
+                {
+                    const args_json = try buildApplyEditArgs(ta, edit, &prepared);
+                    const calls = [_]turn.ToolCall{.{ .id = edit_call_id, .name = "apply_edit", .args_json = args_json }};
+                    try transcript.append(allocator, .{ .assistant_tool_use = &calls });
+                }
                 if (!sql_schema_resolved) {
                     sql_schema_resolved = true;
                     sql_schema_path = veto.discoverSqlSchemaPath(ta);
@@ -548,7 +567,7 @@ pub fn runTurnWith(
                 const veto_result = try veto.runVetoWithSchema(ta, .{
                     .file = prepared.edit.file,
                     .content = prepared.edit.content,
-                    .before = prepared.edit.before,
+                    .before = prepared.before,
                 }, sql_schema_path);
                 // The outcome handed to the state machine. The model-free
                 // repair path (Phase B) overrides it to a pass after it lands a
@@ -609,13 +628,15 @@ pub fn runTurnWith(
                         if (cand.verified()) {
                             if (cand.proposed_content) |proposed| {
                                 const synth: PreparedEdit = .{
-                                    .edit = .{ .file = prepared.edit.file, .content = proposed, .before = prepared.edit.before },
+                                    .edit = .{ .file = prepared.edit.file, .content = proposed },
                                     .resolved_path = prepared.resolved_path,
+                                    .before = prepared.before,
+                                    .baseline_sha256 = prepared.baseline_sha256,
                                 };
                                 const reveto = try veto.runVetoWithSchema(ta, .{
                                     .file = synth.edit.file,
                                     .content = synth.edit.content,
-                                    .before = synth.edit.before,
+                                    .before = synth.before,
                                 }, sql_schema_path);
                                 if (reveto.outcome.ok) {
                                     const st = try applyVerifiedEdit(allocator, ta, registry, transcript, options, synth, reveto.report, cand.plan_ids);
@@ -900,27 +921,44 @@ fn prepareEdit(
     const target_path = try tools_common.resolveInsideWorkspace(allocator, workspace_root, edit.file);
     errdefer allocator.free(target_path);
 
-    const before = edit.before orelse blk: {
-        // 16 MiB matches the workspace tools' cap so a normal large handler
-        // still provides before-context. FileTooBig (beyond that) is recoverable
-        // like FileNotFound: treat it as a fresh edit rather than propagating the
-        // error out of runTurnWith, which would crash the whole turn (exit(1) in
-        // --print mode) instead of letting the veto re-prompt.
-        const current = file_io.readFile(allocator, target_path, 16 * 1024 * 1024) catch |err| switch (err) {
-            error.FileNotFound, error.FileTooBig => break :blk null,
-            else => return err,
-        };
-        break :blk current;
+    const before: ?[]const u8 = file_io.readFile(allocator, target_path, 16 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
     };
+    errdefer if (before) |bytes| allocator.free(bytes);
 
     return .{
-        .edit = .{
-            .file = edit.file,
-            .content = edit.content,
-            .before = before,
-        },
+        .edit = edit,
         .resolved_path = target_path,
+        .before = before,
+        .baseline_sha256 = baselineDigest(before),
     };
+}
+
+fn baselineDigest(before: ?[]const u8) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    if (before) |bytes| {
+        hasher.update("present\x00");
+        hasher.update(bytes);
+    } else {
+        hasher.update("absent\x00");
+    }
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    return digest;
+}
+
+fn verifyBaselineUnchanged(allocator: std.mem.Allocator, prepared: PreparedEdit) !void {
+    const current: ?[]u8 = file_io.readFile(allocator, prepared.resolved_path, 16 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => null,
+        error.FileTooBig => return error.WorkspaceChangedBeforeApply,
+        else => return err,
+    };
+    defer if (current) |bytes| allocator.free(bytes);
+    const current_digest = baselineDigest(current);
+    if (!std.mem.eql(u8, &current_digest, &prepared.baseline_sha256)) {
+        return error.WorkspaceChangedBeforeApply;
+    }
 }
 
 fn applyPreparedEdit(
@@ -991,7 +1029,7 @@ fn applyVerifiedEdit(
     if (options.approval_fn) |approve| {
         const preview: ApprovalPreview = .{
             .file = prepared.edit.file,
-            .before = prepared.edit.before,
+            .before = prepared.before,
             .after = applied_content,
             .properties = report.after_properties,
             .rewrite_trace = report.rewrite_trace,
@@ -1012,6 +1050,7 @@ fn applyVerifiedEdit(
     // reduction, fed to BOTH the disk write and the verified-patch entry so the
     // file on disk, the equivalence receipt (after=applied), and the transcript
     // attest the same bytes.
+    try verifyBaselineUnchanged(ta, prepared);
     try applyPreparedEdit(ta, prepared, applied_content);
     const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared, applied_content);
     defer if (post_apply.summary) |s| allocator.free(s);
@@ -1128,7 +1167,7 @@ fn postApplyCheck(
         .overwrite_summary = false,
     }) catch return report;
 
-    if (prepared.edit.before != null) {
+    if (prepared.before != null) {
         const review_args = blk: {
             var buf = TextBuffer.init(arena);
             const w = buf.writer();
@@ -1140,7 +1179,7 @@ fn postApplyCheck(
             try w.writeAll(",\"content\":");
             try json_writer.writeString(w, applied_content);
             try w.writeAll(",\"before\":");
-            try json_writer.writeString(w, prepared.edit.before.?);
+            try json_writer.writeString(w, prepared.before.?);
             try w.writeAll(",\"diff_only\":true}");
             break :blk buf.written();
         };
@@ -1195,7 +1234,7 @@ fn appendVerifiedPatchEntry(
         .{
             .workspace_root = workspace_root_abs,
             .file = prepared.edit.file,
-            .before = prepared.edit.before,
+            .before = prepared.before,
             .after = applied_content,
             .policy_hash = report.policy_hash,
             .applied_at_unix_ms = tools_common.nowUnixMs(),
@@ -1381,6 +1420,26 @@ const bad_handler =
 const clean_handler =
     "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
 
+const ApprovalRace = struct {
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    expected_before: []const u8,
+    concurrent_content: []const u8,
+    saw_authoritative_before: bool = false,
+
+    fn approve(context: *anyopaque, preview: ApprovalPreview) anyerror!bool {
+        const self: *ApprovalRace = @ptrCast(@alignCast(context));
+        self.saw_authoritative_before = preview.before != null and
+            std.mem.eql(u8, preview.before.?, self.expected_before);
+        try file_io.writeFile(self.allocator, self.path, self.concurrent_content);
+        return true;
+    }
+
+    fn callback(self: *ApprovalRace) ApprovalFn {
+        return .{ .contextual = .{ .context = self, .func = approve } };
+    }
+};
+
 // Accesses result.value without checking result.ok: a HandlerVerifier error
 // (ZTS303 unchecked_result_value) that the repair lane can author a fix for.
 const unchecked_result_handler =
@@ -1431,8 +1490,8 @@ test "veto failure triggers model-free compiler-authored apply" {
     defer testing.allocator.free(written_path);
 
     var client: RetryCaptureClient = .{ .replies = &.{
-        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = unchecked_result_handler, .before = null } } },
-        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = clean_handler, .before = null } } },
+        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = unchecked_result_handler } } },
+        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = clean_handler } } },
     } };
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
@@ -1474,6 +1533,7 @@ const DraftVisibilityClient = struct {
 
     fn draftAndDiagVisible(transcript: *const transcript_mod.Transcript) bool {
         var saw_draft = false;
+        var saw_digest_without_baseline_copy = false;
         var saw_diag = false;
         for (transcript.entries.items) |*entry| {
             switch (entry.*) {
@@ -1481,7 +1541,13 @@ const DraftVisibilityClient = struct {
                     for (calls) |call| {
                         if (std.mem.eql(u8, call.name, "apply_edit") and
                             std.mem.indexOf(u8, call.args_json, "var x = 1") != null)
+                        {
                             saw_draft = true;
+                            saw_digest_without_baseline_copy =
+                                std.mem.indexOf(u8, call.args_json, "baseline_sha256") != null and
+                                std.mem.indexOf(u8, call.args_json, "\"before\"") == null and
+                                std.mem.indexOf(u8, call.args_json, clean_handler) == null;
+                        }
                     }
                 },
                 .tool_result => |result| {
@@ -1491,7 +1557,7 @@ const DraftVisibilityClient = struct {
                 else => {},
             }
         }
-        return saw_draft and saw_diag;
+        return saw_draft and saw_digest_without_baseline_copy and saw_diag;
     }
 
     fn requestFn(
@@ -1507,7 +1573,7 @@ const DraftVisibilityClient = struct {
         const stub_calls = [_]turn.ToolCall{.{ .id = "toolu_probe", .name = "stub", .args_json = "{}" }};
         return switch (self.calls) {
             // First draft: fails the veto (unsupported `var`).
-            1 => .{ .reply = .{ .response = .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } } } },
+            1 => .{ .reply = .{ .response = .{ .edit = .{ .file = "handler.ts", .content = bad_handler } } } },
             // Retry: the failed draft and its diagnostic must already be in the
             // transcript. Respond with a TOOL CALL rather than a new edit - the
             // mid-repair interleave that used to wipe the transient retry prompt.
@@ -1530,6 +1596,14 @@ const DraftVisibilityClient = struct {
 };
 
 test "retry loop is information-complete: failed draft + diagnostic survive a mid-repair tool call" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const handler_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    defer testing.allocator.free(handler_path);
+    try file_io.writeFile(testing.allocator, handler_path, clean_handler);
+
     var client: DraftVisibilityClient = .{};
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
@@ -1546,7 +1620,7 @@ test "retry loop is information-complete: failed draft + diagnostic survive a mi
         &registry,
         &tr,
         "write the handler",
-        .{ .replay_mode = true },
+        .{ .workspace_root = workspace_root, .replay_mode = true },
     );
     try testing.expectEqual(turn.TurnState.done, result.final_state);
 
@@ -1675,7 +1749,6 @@ test "clean edit path: veto passes and writes file" {
         .response = .{ .edit = .{
             .file = "src/handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -1712,7 +1785,6 @@ test "broken edit path: veto fails with diagnostic box" {
         .response = .{ .edit = .{
             .file = "src/handler.ts",
             .content = bad_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -1780,8 +1852,8 @@ test "retry: one bad draft then one good draft lands a proof card" {
     defer testing.allocator.free(written_path);
 
     const replies = [_]turn.AssistantReply{
-        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = bad_handler, .before = null } } },
-        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = clean_handler, .before = null } } },
+        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = bad_handler } } },
+        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = clean_handler } } },
     };
     var seq: SequenceClient = .{ .replies = &replies };
     var tr: transcript_mod.Transcript = .{};
@@ -1822,7 +1894,6 @@ test "approval callback can block an otherwise verified edit from being written"
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -1849,12 +1920,52 @@ test "approval callback can block an otherwise verified edit from being written"
     try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }
 
+test "workspace change during approval fails closed without overwriting concurrent bytes" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+
+    const original = "const original = true;\n";
+    const concurrent = "const concurrent = true;\n";
+    try file_io.writeFile(testing.allocator, written_path, original);
+
+    var race: ApprovalRace = .{
+        .allocator = testing.allocator,
+        .path = written_path,
+        .expected_before = original,
+        .concurrent_content = concurrent,
+    };
+    var canned: CannedClient = .{ .reply = .{ .response = .{ .edit = .{
+        .file = "handler.ts",
+        .content = clean_handler,
+    } } } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    try testing.expectError(error.WorkspaceChangedBeforeApply, runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "replace the handler",
+        .{ .workspace_root = workspace_root, .approval_fn = race.callback() },
+    ));
+    try testing.expect(race.saw_authoritative_before);
+    const after = try file_io.readFile(testing.allocator, written_path, 1024);
+    defer testing.allocator.free(after);
+    try testing.expectEqualStrings(concurrent, after);
+}
+
 test "edit path outside the workspace is surfaced as a recoverable diagnostic, not a crash" {
     var canned: CannedClient = .{ .reply = .{
         .response = .{ .edit = .{
             .file = "../outside-handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -1889,6 +2000,46 @@ test "edit path outside the workspace is surfaced as a recoverable diagnostic, n
     try testing.expect(saw_path_diag);
 }
 
+test "unreadable edit target fails closed as a recoverable baseline diagnostic" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "handler.ts");
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var canned: CannedClient = .{ .reply = .{ .response = .{ .edit = .{
+        .file = "handler.ts",
+        .content = clean_handler,
+    } } } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "replace the unreadable target",
+        .{ .workspace_root = workspace_root, .max_attempts = 1 },
+    );
+
+    var saw_baseline_failure = false;
+    var saw_verified_patch = false;
+    for (tr.entries.items) |*entry| switch (entry.*) {
+        .diagnostic_box => |box| {
+            if (std.mem.indexOf(u8, box.llm_text, "authoritative baseline") != null) {
+                saw_baseline_failure = true;
+            }
+        },
+        .verified_patch => saw_verified_patch = true,
+        else => {},
+    };
+    try testing.expect(saw_baseline_failure);
+    try testing.expect(!saw_verified_patch);
+}
+
 test "resolveInsideWorkspace converts a relative root to absolute" {
     const abs = try tools_common.resolveInsideWorkspace(testing.allocator, ".", "build.zig");
     defer testing.allocator.free(abs);
@@ -1901,15 +2052,80 @@ test "prepareEdit accepts an in-tree relative path under the default '.' root" {
     // workspace_root (".") used to leave every relative edit path rejected as
     // "outside the workspace" - which meant the agent could never apply an
     // edit in --print mode. The root must be anchored at the real cwd.
-    const prepared = try prepareEdit(testing.allocator, ".", .{
+    var prepared = try prepareEdit(testing.allocator, ".", .{
         .file = "src/handler.ts",
         .content = "x",
-        .before = null,
     });
-    defer testing.allocator.free(prepared.resolved_path);
-    defer if (prepared.edit.before) |b| testing.allocator.free(b);
+    defer prepared.deinit(testing.allocator);
     try testing.expect(std.fs.path.isAbsolute(prepared.resolved_path));
     try testing.expect(std.mem.endsWith(u8, prepared.resolved_path, "src/handler.ts"));
+}
+
+test "prepareEdit distinguishes absent, empty, and existing host baselines" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const existing_path = try std.fmt.allocPrint(testing.allocator, "{s}/existing.ts", .{workspace_root});
+    defer testing.allocator.free(existing_path);
+    try file_io.writeFile(testing.allocator, existing_path, "host bytes");
+
+    var existing = try prepareEdit(testing.allocator, workspace_root, .{
+        .file = "existing.ts",
+        .content = "replacement",
+    });
+    defer existing.deinit(testing.allocator);
+    try testing.expectEqualStrings("host bytes", existing.before.?);
+    const expected_existing = baselineDigest("host bytes");
+    try testing.expectEqualSlices(u8, &expected_existing, &existing.baseline_sha256);
+
+    var absent = try prepareEdit(testing.allocator, workspace_root, .{
+        .file = "new.ts",
+        .content = "new file",
+    });
+    defer absent.deinit(testing.allocator);
+    try testing.expect(absent.before == null);
+    const absent_digest = baselineDigest(null);
+    const empty_digest = baselineDigest("");
+    try testing.expect(!std.mem.eql(u8, &absent_digest, &empty_digest));
+}
+
+test "prepareEdit refuses a target larger than the authoritative baseline limit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const large_path = try std.fmt.allocPrint(testing.allocator, "{s}/large.ts", .{workspace_root});
+    defer testing.allocator.free(large_path);
+    const bytes = try testing.allocator.alloc(u8, 16 * 1024 * 1024 + 1);
+    defer testing.allocator.free(bytes);
+    @memset(bytes, 'x');
+    try file_io.writeFile(testing.allocator, large_path, bytes);
+
+    try testing.expectError(error.FileTooBig, prepareEdit(testing.allocator, workspace_root, .{
+        .file = "large.ts",
+        .content = "replacement",
+    }));
+}
+
+test "recorded apply_edit arguments carry a host digest without baseline bytes" {
+    const host_bytes = "private host baseline";
+    const prepared: PreparedEdit = .{
+        .edit = .{ .file = "handler.ts", .content = clean_handler },
+        .resolved_path = "/unused/handler.ts",
+        .before = host_bytes,
+        .baseline_sha256 = baselineDigest(host_bytes),
+    };
+    const args = try buildApplyEditArgs(testing.allocator, prepared.edit, &prepared);
+    defer testing.allocator.free(args);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, args, .{});
+    defer parsed.deinit();
+
+    const object = parsed.value.object;
+    try testing.expect(object.get("before") == null);
+    try testing.expectEqualStrings("present", object.get("baseline_state").?.string);
+    try testing.expectEqual(@as(usize, 64), object.get("baseline_sha256").?.string.len);
+    try testing.expect(std.mem.indexOf(u8, args, host_bytes) == null);
 }
 
 test "autoApprove returns true for any preview" {
@@ -1936,7 +2152,6 @@ test "replay_mode skips filesystem writes for a verified edit" {
         .response = .{ .edit = .{
             .file = "src/handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -1973,7 +2188,6 @@ test "replay_mode skips the approval callback" {
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -2013,7 +2227,6 @@ test "replay_mode off preserves existing write behavior" {
         .response = .{ .edit = .{
             .file = "src/handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -2049,7 +2262,6 @@ test "verified edit path appends a verified_patch entry before the proof card" {
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -2116,7 +2328,6 @@ test "non-canonical-but-legal first draft lands in one attempt; disk == attested
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = arrow_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -2173,7 +2384,6 @@ test "verified patch does not infer links from broad repair plan result" {
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -2226,7 +2436,6 @@ test "verified patch records matching repair candidate plan link" {
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = clean_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};
@@ -2284,7 +2493,6 @@ test "failed veto does not append a verified_patch entry" {
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = bad_handler,
-            .before = null,
         } },
     } };
     var tr: transcript_mod.Transcript = .{};

@@ -507,7 +507,6 @@ test "runCase scores a clean first draft as a veto pass" {
     var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
         .file = "handler.ts",
         .content = clean_health,
-        .before = null,
     } } } };
     const case: CodegenCase = .{
         .name = "health-scaffold",
@@ -541,7 +540,6 @@ test "runCase scores a clean workflow first draft as a veto pass" {
     var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
         .file = "handler.ts",
         .content = workflow_handler,
-        .before = null,
     } } } };
     const case: CodegenCase = .{
         .name = "queued-workflow",
@@ -565,7 +563,6 @@ test "runCase records the failing ZTS code for a bad first draft" {
     var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({ x }); }",
-        .before = null,
     } } } };
     const case: CodegenCase = .{
         .name = "forbidden-var",

@@ -645,9 +645,12 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
         switch (reply.response) {
             .edit => |edit| {
                 try testing.expectEqualStrings(case.file, edit.file);
-                try testing.expectEqualStrings(case.source, edit.before orelse return error.MissingBeforeContent);
                 try testing.expect(std.mem.indexOf(u8, edit.content, case.must_contain) != null);
-                var veto_result = try veto.runVeto(allocator, edit);
+                var veto_result = try veto.runVeto(allocator, .{
+                    .file = edit.file,
+                    .content = edit.content,
+                    .before = case.source,
+                });
                 defer veto_result.deinit(allocator);
                 try testing.expect(veto_result.outcome.ok);
                 try testing.expectEqual(@as(u32, 0), veto_result.report.new);
@@ -712,14 +715,17 @@ test "stand-in environment edit preserves existing handler source and passes the
     const reply = try apply_edit.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
         .edit => |edit| {
-            try testing.expectEqualStrings(source, edit.before orelse return error.MissingBeforeContent);
             try testing.expect(std.mem.indexOf(u8, edit.content, "// KEEP: application-specific response marker") != null);
             try testing.expect(std.mem.indexOf(u8, edit.content, "const marker = \"preserve-me\";") != null);
             try testing.expect(std.mem.indexOf(u8, edit.content, "import { env } from \"zttp:env\";") != null);
             const env_read = std.mem.indexOf(u8, edit.content, "env(\"APP_NAME\");") orelse return error.MissingEnvironmentRead;
             const marker = std.mem.indexOf(u8, edit.content, "const marker = \"preserve-me\";") orelse return error.MissingMarker;
             try testing.expect(env_read < marker);
-            var veto_result = try veto.runVeto(allocator, edit);
+            var veto_result = try veto.runVeto(allocator, .{
+                .file = edit.file,
+                .content = edit.content,
+                .before = source,
+            });
             defer veto_result.deinit(allocator);
             try testing.expect(veto_result.outcome.ok);
             try testing.expectEqual(@as(u32, 0), veto_result.report.new);
@@ -813,7 +819,11 @@ test "stand-in violation fix preserves source around the inserted guard" {
     switch (reply.response) {
         .edit => |edit| {
             try testing.expectEqualStrings(expected, edit.content);
-            var veto_result = try veto.runVeto(allocator, edit);
+            var veto_result = try veto.runVeto(allocator, .{
+                .file = edit.file,
+                .content = edit.content,
+                .before = source,
+            });
             defer veto_result.deinit(allocator);
             try testing.expect(veto_result.outcome.ok);
             try testing.expectEqual(@as(u32, 0), veto_result.report.new);

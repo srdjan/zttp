@@ -4,7 +4,7 @@
 //! edit-simulate envelope, and returns a `turn.EditOutcome` the state machine
 //! can feed back through `edit_verified`.
 //!
-//! `EditOutcome.ok = result.new_count == 0` — pre-existing violations don't
+//! `EditOutcome.ok = result.new_count == 0` - pre-existing violations don't
 //! block the edit, which matches the contract pinned in turn.zig's tests and
 //! in docs/zts-expert-contract.md.
 
@@ -17,6 +17,14 @@ const canonicalize = zts_cli.canonicalize;
 const turn = @import("turn.zig");
 const ui_payload = @import("ui_payload.zig");
 const proof_enrichment = @import("proof_enrichment.zig");
+
+/// Host-prepared input for differential verification. `before` comes from the
+/// workspace, never from model-authored tool arguments.
+pub const Edit = struct {
+    file: []const u8,
+    content: []const u8,
+    before: ?[]const u8,
+};
 
 /// Structured veto summary extracted from `edit_simulate.simulate`.
 ///
@@ -94,7 +102,7 @@ pub const VetoResult = struct {
 /// `discoverSqlSchemaPath` and call `runVetoWithSchema` per attempt.
 pub fn runVeto(
     allocator: std.mem.Allocator,
-    edit: turn.Edit,
+    edit: Edit,
 ) !VetoResult {
     const discovered_schema = discoverSqlSchemaPath(allocator);
     defer if (discovered_schema) |path| allocator.free(path);
@@ -111,7 +119,7 @@ pub fn discoverSqlSchemaPath(allocator: std.mem.Allocator) ?[]u8 {
 /// Public for tests; `runVeto` is the production entry point.
 pub fn runVetoWithSchema(
     allocator: std.mem.Allocator,
-    edit: turn.Edit,
+    edit: Edit,
     sql_schema_path: ?[]const u8,
 ) !VetoResult {
     // A zttp:sql edit without a configured schema cannot be verified.
@@ -167,7 +175,7 @@ pub fn runVetoWithSchema(
     // Salvage-on-reject. When an edit would be rejected, try normalizing the
     // draft and re-checking: if normalization clears the (canonical-band)
     // violations and the edit now passes, apply the canonicalized bytes instead
-    // of bouncing the model — turning a veto rejection into an in-place auto-fix
+    // of bouncing the model - turning a veto rejection into an in-place auto-fix
     // for the model's canonical slips (ternary, `+=`, redundant bool compare,
     // ...). Normalize runs ONLY on a would-be-reject, so an already-passing edit
     // is applied verbatim (surgical; no wasted pass). The `ok` bit stays
@@ -566,7 +574,7 @@ test "a veto-passing edit is normalized: is_canonical set and the proof card car
 test "a canonical-band failing edit is salvaged by normalize-on-reject" {
     // `let x = 1;` is ZTS604, a hard canonical error: the raw draft would be
     // rejected. Salvage-on-reject normalizes it (`let` -> `const`), re-checks,
-    // and the edit then passes — the canonicalized bytes are applied and the
+    // and the edit then passes - the canonicalized bytes are applied and the
     // rewrite trace is surfaced. This is the model's canonical slip auto-fixed.
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",

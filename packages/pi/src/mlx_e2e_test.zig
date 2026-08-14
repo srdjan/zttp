@@ -62,7 +62,6 @@ const VetoThenLocalClient = struct {
                 .file = "handler.ts",
                 .content = "import { sqlOne } from \"zttp:sql\";\n" ++
                     "function handler(req: Request): Response { const row = sqlOne(\"SELECT * FROM users\"); return Response.json({ row }); }\n",
-                .before = null,
             } } } };
         }
         return self.delegate.request(arena, transcript, extra_user_text);

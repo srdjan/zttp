@@ -17,10 +17,10 @@ pub const apply_edit: Definition = .{
         "on the content before it reaches the user; if new violations appear, " ++
         "you will be re-prompted with the diagnostic and must try again.",
     .input_schema = "{\"type\":\"object\"," ++
+        "\"additionalProperties\":false," ++
         "\"properties\":{" ++
         "\"file\":{\"type\":\"string\",\"description\":\"Handler file path (e.g. handler.ts).\"}," ++
-        "\"content\":{\"type\":\"string\",\"description\":\"Full file content after the edit.\"}," ++
-        "\"before\":{\"type\":\"string\",\"description\":\"Optional: full file content before the edit.\"}" ++
+        "\"content\":{\"type\":\"string\",\"description\":\"Full file content after the edit.\"}" ++
         "}," ++
         "\"required\":[\"file\",\"content\"]}",
 };

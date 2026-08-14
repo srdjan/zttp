@@ -50,18 +50,13 @@ pub fn maybeRemap(
             const file_v = obj.get("file") orelse return remapFailure(stop_reason);
             const content_v = obj.get("content") orelse return remapFailure(stop_reason);
             if (file_v != .string or content_v != .string) return remapFailure(stop_reason);
-
-            const before: ?[]const u8 = if (obj.get("before")) |v|
-                (if (v == .string) v.string else null)
-            else
-                null;
+            if (obj.count() != 2) return remapFailure(stop_reason);
 
             return .{
                 .preamble = reply.preamble,
                 .response = .{ .edit = .{
                     .file = file_v.string,
                     .content = content_v.string,
-                    .before = before,
                 } },
             };
         },
@@ -126,6 +121,20 @@ test "maybeRemap: apply_edit in a mixed tool batch stays as tool_calls" {
 
     const out = try maybeRemap(arena.allocator(), reply, null);
     try testing.expect(out.response == .tool_calls);
+}
+
+test "maybeRemap: rejects a model-supplied before baseline" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const calls = [_]turn.ToolCall{.{
+        .id = "toolu_edit",
+        .name = tool_name,
+        .args_json = "{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"forged\"}",
+    }};
+    try testing.expectError(
+        RemapError.InvalidEditArgs,
+        maybeRemap(arena.allocator(), .{ .response = .{ .tool_calls = &calls } }, null),
+    );
 }
 
 test "maybeRemap: malformed JSON returns InvalidEditArgs" {

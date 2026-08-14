@@ -40,7 +40,6 @@ pub const ToolCall = struct {
 pub const Edit = struct {
     file: []const u8,
     content: []const u8,
-    before: ?[]const u8,
 };
 
 pub const DisplayMessage = struct {
@@ -288,7 +287,6 @@ test "awaiting_model + edit -> verifying_edit with run_veto" {
         .response = .{ .edit = .{
             .file = "handler.ts",
             .content = "...",
-            .before = null,
         } },
     } });
 
@@ -296,7 +294,7 @@ test "awaiting_model + edit -> verifying_edit with run_veto" {
     switch (action) {
         .run_veto => |edit| {
             try testing.expectEqualStrings("handler.ts", edit.file);
-            try testing.expect(edit.before == null);
+            try testing.expectEqualStrings("...", edit.content);
         },
         else => return error.TestFailed,
     }

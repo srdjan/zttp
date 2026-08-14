@@ -84,7 +84,7 @@ fn renderRouteAdd(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             defer allocator.free(handler_name);
             const proposed = try synthesizeRoute(allocator, source, spec, handler_name);
             defer allocator.free(proposed);
-            const args = try renderApplyArgs(allocator, spec.file, proposed, source);
+            const args = try renderApplyArgs(allocator, spec.file, proposed);
             defer allocator.free(args);
             const tool = if (parsed.step_index == 3) "zts_expert_edit_simulate" else "apply_edit";
             break :blk try renderToolCall(allocator, parsed.step_index, tool, args);
@@ -193,7 +193,7 @@ fn renderEnvFeature(allocator: std.mem.Allocator, parsed: request.ParsedRequest)
             break :blk switch (transform) {
                 .edit => |proposed| blk_edit: {
                     defer allocator.free(proposed);
-                    const args = try renderApplyArgs(allocator, file, proposed, source);
+                    const args = try renderApplyArgs(allocator, file, proposed);
                     defer allocator.free(args);
                     break :blk_edit try renderToolCall(allocator, 2, "apply_edit", args);
                 },
@@ -244,7 +244,7 @@ fn renderTestGeneration(allocator: std.mem.Allocator, parsed: request.ParsedRequ
             const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "write-test");
             const proposed = try synthesizeTestFile(allocator, source);
             defer allocator.free(proposed);
-            const args = try renderApplyArgs(allocator, test_file, proposed, source);
+            const args = try renderApplyArgs(allocator, test_file, proposed);
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 3, "apply_edit", args);
         },
@@ -299,7 +299,7 @@ fn renderSeededViolationFix(
                     "the ask names a seeded diagnostic but the file is not that seed's source",
                 );
             }
-            const args = try renderApplyArgs(allocator, file, seed.bad_draft, source);
+            const args = try renderApplyArgs(allocator, file, seed.bad_draft);
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 3, "apply_edit", args);
         },
@@ -310,10 +310,8 @@ fn renderSeededViolationFix(
                     "The seeded draft was not rejected, so there is nothing to repair.",
                 );
             }
-            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fix");
-            // The rejected bytes were never written, so the baseline is still
-            // the seed source the read recovered.
-            const args = try renderApplyArgs(allocator, file, seed.good_draft, source);
+            if (parsed.source == null) break :blk try renderUnreadableSource(allocator, "fix");
+            const args = try renderApplyArgs(allocator, file, seed.good_draft);
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 4, "apply_edit", args);
         },
@@ -374,7 +372,7 @@ fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             break :blk try renderToolCall(allocator, 2, "zts_expert_fill_hole", args);
         },
         3 => blk: {
-            const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fill-hole");
+            if (parsed.source == null) break :blk try renderUnreadableSource(allocator, "fill-hole");
             const output = parsed.last_output orelse break :blk try renderSourceMiss(
                 allocator,
                 "fill-hole",
@@ -388,7 +386,7 @@ fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             );
             defer allocator.free(content);
 
-            const args = try renderApplyArgs(allocator, file, content, source);
+            const args = try renderApplyArgs(allocator, file, content);
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 3, "apply_edit", args);
         },
@@ -478,7 +476,7 @@ fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedReques
             break :blk switch (transform) {
                 .edit => |proposed| blk_edit: {
                     defer allocator.free(proposed);
-                    const args = try renderApplyArgs(allocator, file, proposed, source);
+                    const args = try renderApplyArgs(allocator, file, proposed);
                     defer allocator.free(args);
                     break :blk_edit try renderToolCall(allocator, 3, "apply_edit", args);
                 },
@@ -592,10 +590,9 @@ fn synthesizeViolationFix(allocator: std.mem.Allocator, source: []const u8) !Vio
 
 /// No read has produced usable bytes for the target file.
 ///
-/// Refuse rather than author from "". `apply_edit` writes unconditionally -
-/// `before` is a veto baseline, not a compare-and-swap - so a stub built from
-/// nothing would replace whatever the user actually had, and an empty baseline
-/// means the draft proves clean on the way out.
+/// Refuse rather than author from "". The host still checks an authoritative
+/// baseline before writing, but a stub built from nothing cannot preserve the
+/// user's existing program or support a meaningful veto comparison.
 fn renderUnreadableSource(allocator: std.mem.Allocator, playbook_name: []const u8) ![]u8 {
     return renderSourceMiss(
         allocator,
@@ -1164,7 +1161,6 @@ fn renderApplyArgs(
     allocator: std.mem.Allocator,
     file: []const u8,
     content: []const u8,
-    before: []const u8,
 ) ![]u8 {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
@@ -1173,8 +1169,6 @@ fn renderApplyArgs(
     try writeJsonString(writer, file);
     try writer.writeAll(",\"content\":");
     try writeJsonString(writer, content);
-    try writer.writeAll(",\"before\":");
-    try writeJsonString(writer, before);
     try writer.writeByte('}');
     return try buf.toOwnedSlice();
 }
