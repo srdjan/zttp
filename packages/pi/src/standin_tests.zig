@@ -60,7 +60,7 @@ test "stand-in add-route playbook applies an edit through the real OpenAI agent 
         "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+        .{ .base_url = endpoint },
     );
     defer session.deinit(allocator);
 
@@ -119,7 +119,7 @@ fn runSeedArm(
         "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+        .{ .base_url = endpoint },
     );
     defer session.deinit(allocator);
 
@@ -278,7 +278,7 @@ test "stand-in seeded arm: a foreign source gets a miss, not a scripted defect" 
         "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+        .{ .base_url = endpoint },
     );
     defer session.deinit(allocator);
 
@@ -367,7 +367,7 @@ test "stand-in hole arm: two one-fill turns compose through publisher and apply"
         "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+        .{ .base_url = endpoint },
     );
     defer session.deinit(allocator);
 
@@ -461,7 +461,7 @@ test "stand-in miss returns its marker through the real loop and applies no edit
         "unused-loopback-key",
         "Use the deterministic playbook server.",
         tools_json,
-        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+        .{ .base_url = endpoint },
     );
     defer session.deinit(allocator);
 
@@ -532,7 +532,7 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
             "unused-loopback-key",
             system_prompt,
             tools_json,
-            .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+            .{ .base_url = endpoint },
         );
         defer session.deinit(allocator);
 
@@ -902,7 +902,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         "unused-loopback-key",
         system_prompt,
         tools_json,
-        .{ .base_url = endpoint, .model = "zttp-deterministic-playbook" },
+        .{ .base_url = endpoint },
     );
     defer session.deinit(allocator);
 

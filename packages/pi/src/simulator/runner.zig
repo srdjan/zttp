@@ -181,6 +181,22 @@ pub const Runner = struct {
             ) catch |err| {
                 if (err == error.ReplayMismatch) {
                     self.last_mismatch = replay_client.lastMismatch() orelse approvals.lastMismatch();
+                    // Printed rather than only stored. A `response_underflow`
+                    // says the replay asked for a model turn the recording
+                    // does not hold, and the two numbers that identify it -
+                    // which turn diverged, and how many checkpoints exist -
+                    // are here and nowhere the caller can reach.
+                    if (self.last_mismatch) |mismatch| {
+                        std.debug.print(
+                            "[replay] {s} at turn {d}/{d}, model checkpoints recorded: {d}\n",
+                            .{
+                                @tagName(mismatch),
+                                turn_position,
+                                self.flow_case.manifest.turns.len,
+                                self.flow_case.manifest.model_responses.len,
+                            },
+                        );
+                    }
                 }
                 return err;
             };
@@ -368,6 +384,10 @@ pub const Runner = struct {
         var actual_files: usize = 0;
         while (try walker.next(io)) |entry| {
             if (entry.kind == .directory) continue;
+            // The recorder never captured agent scratch, and the replayed tools
+            // write it again, so counting it here would fail every case whose
+            // agent reached a witness-writing tool.
+            if (artifact.isAgentScratch(entry.path)) continue;
             if (entry.kind != .file or
                 artifact.findWorkspace(expected_files, entry.path) == null)
             {

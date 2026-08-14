@@ -6,8 +6,9 @@
 
 const std = @import("std");
 const transcript_mod = @import("../transcript.zig");
+const models = @import("models.zig");
 
-pub const Provider = enum { anthropic, openai };
+pub const Provider = models.Provider;
 
 pub const Config = struct {
     provider: Provider,
@@ -51,6 +52,12 @@ pub const Sha256Hex = struct {
         return finish(&hasher);
     }
 
+    pub fn fromRawBytes(bytes: []const u8) Sha256Hex {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+        return .{ .bytes = std.fmt.bytesToHex(digest, .lower) };
+    }
+
     pub fn eql(a: Sha256Hex, b: Sha256Hex) bool {
         return std.mem.eql(u8, &a.bytes, &b.bytes);
     }
@@ -67,6 +74,9 @@ pub const ModelRequestSnapshot = struct {
     request_context_sha256: Sha256Hex,
     transcript_sha256: Sha256Hex,
     transient_user_text_sha256: ?Sha256Hex,
+    /// Hash of the exact provider wire body when the transport supplies one.
+    /// Semantic-only clients and historical recordings leave it null.
+    wire_request_sha256: ?Sha256Hex = null,
 
     pub fn deinit(self: *ModelRequestSnapshot, allocator: std.mem.Allocator) void {
         allocator.free(self.items);

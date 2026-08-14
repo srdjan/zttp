@@ -8,7 +8,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
-const json_writer = @import("../providers/anthropic/json_writer.zig");
+const json_writer = @import("../providers/json_writer.zig");
 const pi_repair_plan = @import("pi_repair_plan.zig");
 const pi_apply_repair_plan = @import("pi_apply_repair_plan.zig");
 

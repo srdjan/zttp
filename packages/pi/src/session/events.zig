@@ -7,7 +7,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const ui_payload = @import("../ui_payload.zig");
-const json_writer = @import("../providers/anthropic/json_writer.zig");
+const json_writer = @import("../providers/json_writer.zig");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 
 pub const schema_version: u32 = 2;
@@ -155,6 +155,11 @@ pub const Meta = struct {
     /// ("ask", "auto_approve", "auto_reject"). Written on first create; re-read
     /// on --resume so the policy persists across sessions without re-passing flags.
     approval_policy: ?[]const u8 = null,
+    /// Public provider identity ("local", "claude", or "openai"). Optional
+    /// only while decoding sessions created before provider persistence.
+    provider: ?[]const u8 = null,
+    /// Exact provider-scoped model id. Optional only for historical metadata.
+    model: ?[]const u8 = null,
 };
 
 pub fn appendEvent(
@@ -368,6 +373,18 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
         null;
     errdefer if (approval_policy) |ap| allocator.free(ap);
 
+    const provider = if (getRequiredString(obj, "provider")) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (provider) |value| allocator.free(value);
+
+    const model = if (getRequiredString(obj, "model")) |value|
+        try allocator.dupe(u8, value)
+    else
+        null;
+    errdefer if (model) |value| allocator.free(value);
+
     return .{
         .schema_version = version,
         .session_id = session_id_copy,
@@ -376,6 +393,8 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
         .parent_id = parent_id,
         .policy_hash = policy_hash,
         .approval_policy = approval_policy,
+        .provider = provider,
+        .model = model,
     };
 }
 
@@ -408,6 +427,14 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
         try stream.objectField("approval_policy");
         try stream.write(ap);
     }
+    if (meta.provider) |provider| {
+        try stream.objectField("provider");
+        try stream.write(provider);
+    }
+    if (meta.model) |model| {
+        try stream.objectField("model");
+        try stream.write(model);
+    }
     try stream.endObject();
     try buf.writer().writeByte('\n');
 
@@ -428,6 +455,8 @@ pub fn freeMeta(allocator: std.mem.Allocator, meta: *Meta) void {
     if (meta.parent_id) |parent_id| allocator.free(parent_id);
     if (meta.policy_hash) |hash| allocator.free(hash);
     if (meta.approval_policy) |ap| allocator.free(ap);
+    if (meta.provider) |provider| allocator.free(provider);
+    if (meta.model) |model| allocator.free(model);
     meta.* = .{
         .schema_version = schema_version,
         .session_id = &.{},
@@ -587,6 +616,8 @@ test "writeMeta/readMeta round-trip current schema" {
         .created_at_unix_ms = 123,
         .parent_id = "parent",
         .policy_hash = "a" ** 64,
+        .provider = "local",
+        .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
     });
 
     var meta = try readMeta(allocator, path);
@@ -597,6 +628,8 @@ test "writeMeta/readMeta round-trip current schema" {
     try testing.expectEqualStrings("/tmp/ws", meta.workspace_realpath);
     try testing.expectEqual(@as(i64, 123), meta.created_at_unix_ms);
     try testing.expectEqualStrings("parent", meta.parent_id.?);
+    try testing.expectEqualStrings("local", meta.provider.?);
+    try testing.expectEqualStrings("LiquidAI/LFM2.5-2.6B-MLX-8bit", meta.model.?);
 }
 
 test "appendEvent serializes autoloop_outcome with goals and final hash" {
@@ -667,6 +700,8 @@ test "readMeta accepts older schema versions" {
     var meta = try readMeta(allocator, path);
     defer freeMeta(allocator, &meta);
     try testing.expectEqual(@as(u32, 1), meta.schema_version);
+    try testing.expect(meta.provider == null);
+    try testing.expect(meta.model == null);
 }
 
 test "appendEvent serializes turn_end with reason" {

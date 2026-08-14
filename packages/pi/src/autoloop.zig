@@ -29,7 +29,7 @@ const session_state = @import("session_state.zig");
 const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
 const tools_common = @import("tools/common.zig");
-const json_writer = @import("providers/anthropic/json_writer.zig");
+const json_writer = @import("providers/json_writer.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 pub const AutoloopVerdict = session_events.AutoloopVerdict;

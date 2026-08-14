@@ -7,11 +7,11 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const artifact = @import("artifact.zig");
 const observation = @import("observation.zig");
 const recording_storage = @import("recording_storage.zig");
 const capture_sink = @import("../providers/capture_sink.zig");
-const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
 const model_request = @import("../providers/model_request.zig");
 const loop = @import("../loop.zig");
@@ -23,6 +23,15 @@ pub const Options = struct {
     executable: bool = true,
     provider: artifact.Provider,
     model: []const u8,
+    model_revision: ?[]const u8 = null,
+    mlx_lm_version: ?[]const u8 = null,
+    /// Declared local stack, for a server that reports no MLX-LM fingerprint.
+    /// Set together or not at all - `artifact.zig` refuses half a pair.
+    runtime_name: ?[]const u8 = null,
+    runtime_version: ?[]const u8 = null,
+    /// Absolute ignored-worktree path for metadata-only live response
+    /// diagnostics. The diagnostic observer is disabled when this is null.
+    diagnostics_path: ?[]const u8 = null,
     workspace_allowlist: []const []const u8,
 };
 
@@ -62,6 +71,15 @@ pub const Recorder = struct {
         const owned = arena.allocator();
         const case_name = try owned.dupe(u8, options.case_name);
         const model = try owned.dupe(u8, options.model);
+        const model_revision = if (options.model_revision) |value| try owned.dupe(u8, value) else null;
+        const mlx_lm_version = if (options.mlx_lm_version) |value| try owned.dupe(u8, value) else null;
+        const runtime_name = if (options.runtime_name) |value| try owned.dupe(u8, value) else null;
+        const runtime_version = if (options.runtime_version) |value| try owned.dupe(u8, value) else null;
+        if ((runtime_name == null) != (runtime_version == null)) return error.IncompleteRuntimeIdentity;
+        const diagnostics_path = if (options.diagnostics_path) |value| path: {
+            if (!std.fs.path.isAbsolute(value)) return error.DiagnosticsPathMustBeAbsolute;
+            break :path try owned.dupe(u8, value);
+        } else null;
         if (options.workspace_allowlist.len > artifact.Limits.files) return error.FlowLimitExceeded;
         const workspace_allowlist = try owned.alloc([]const u8, options.workspace_allowlist.len);
         for (options.workspace_allowlist, 0..) |path, index| {
@@ -82,6 +100,11 @@ pub const Recorder = struct {
                 .executable = options.executable,
                 .provider = options.provider,
                 .model = model,
+                .model_revision = model_revision,
+                .mlx_lm_version = mlx_lm_version,
+                .runtime_name = runtime_name,
+                .runtime_version = runtime_version,
+                .diagnostics_path = diagnostics_path,
                 .workspace_allowlist = workspace_allowlist,
             },
         };
@@ -93,7 +116,14 @@ pub const Recorder = struct {
     }
 
     pub fn captureSink(self: *Recorder) capture_sink.CaptureSink {
-        return .{ .context = self, .record_fn = recordModelExchange };
+        return .{
+            .context = self,
+            .record_fn = recordModelExchange,
+            .diagnostics_fn = if (self.options.diagnostics_path != null)
+                recordResponseDiagnostics
+            else
+                null,
+        };
     }
 
     pub fn approvalFn(self: *Recorder) loop.ApprovalFn {
@@ -143,6 +173,7 @@ pub const Recorder = struct {
             .user_input = pending.user_input,
             .outcome = observation.outcomeFromResult(result),
             .final_response_sha256 = artifact.Sha256Hex.fromBytes(final_text),
+            .first_draft_veto_pass = result.first_draft_veto_pass,
         });
 
         for (transcript.entries.items[pending.transcript_start..]) |*entry| {
@@ -219,6 +250,10 @@ pub const Recorder = struct {
             .executable = self.options.executable,
             .provider = self.options.provider,
             .model = self.options.model,
+            .model_revision = self.options.model_revision,
+            .mlx_lm_version = self.options.mlx_lm_version,
+            .runtime_name = self.options.runtime_name,
+            .runtime_version = self.options.runtime_version,
             .turns = self.turns.items,
             .model_responses = self.responses.items,
             .approvals = self.approval_expectations.items,
@@ -257,19 +292,29 @@ pub const Recorder = struct {
         const self: *Recorder = @ptrCast(@alignCast(context));
         const pending = if (self.pending_turn) |*turn| turn else return error.InvalidRecorderState;
         if (global_call_index != self.model_calls.items.len or
-            artifactProvider(snapshot.config.provider) != self.options.provider or
+            snapshot.config.provider != self.options.provider or
             !std.mem.eql(u8, snapshot.config.model, self.options.model))
         {
             return error.InconsistentModelExchange;
         }
+        // A Chat Completions provider always supplies the digest of its wire
+        // body; a recording that lost it would replay as an absent-versus-
+        // present mismatch on every call, so refuse it at capture time.
+        if (recordsWireDigest(self.options.provider) and snapshot.wire_request_sha256 == null) {
+            return error.InconsistentModelExchange;
+        }
         if (self.model_calls.items.len >= artifact.Limits.model_checkpoints) return error.FlowLimitExceeded;
         if (raw_response.len > artifact.Limits.trace_or_response_bytes) return error.FlowLimitExceeded;
+        if (self.options.provider == .local and self.options.mlx_lm_version == null) {
+            self.options.mlx_lm_version = try mlxLmVersion(self.allocator(), raw_response);
+        }
 
         const response_bytes = try cassette_record.serializeCassette(self.allocator(), raw_response, .{
-            .provider = cassetteProvider(self.options.provider),
+            .provider = self.options.provider,
             .scenario = self.options.case_name,
             .stream = snapshot.config.stream,
             .model = self.options.model,
+            .request_sha256 = if (snapshot.wire_request_sha256) |digest| digest.slice() else null,
         });
         try self.reserveFixtureBytes(response_bytes.len, artifact.Limits.trace_or_response_bytes);
         const response_path = try std.fmt.allocPrint(
@@ -296,6 +341,10 @@ pub const Recorder = struct {
                 artifactDigest(digest)
             else
                 null,
+            .wire_request_sha256 = if (snapshot.wire_request_sha256) |digest|
+                artifactDigest(digest)
+            else
+                null,
         });
         try self.fixtures.append(self.allocator(), .{
             .role = .response,
@@ -303,6 +352,31 @@ pub const Recorder = struct {
             .bytes = response_bytes,
         });
         pending.model_calls += 1;
+    }
+
+    fn recordResponseDiagnostics(
+        context: *anyopaque,
+        attempt_index: usize,
+        diagnostic_context: capture_sink.ResponseDiagnosticContext,
+        diagnostics: capture_sink.ResponseDiagnostics,
+    ) anyerror!void {
+        const self: *Recorder = @ptrCast(@alignCast(context));
+        const path = self.options.diagnostics_path orelse return;
+        const line = try serializeResponseDiagnostics(
+            self.allocator(),
+            self.options.case_name,
+            attempt_index,
+            diagnostic_context,
+            diagnostics,
+        );
+        defer self.allocator().free(line);
+        appendDiagnosticLine(self.allocator(), path, line) catch |err| {
+            std.debug.print(
+                "[response-diagnostics] metadata append failed: {s}\n",
+                .{@errorName(err)},
+            );
+            return err;
+        };
     }
 
     fn recordApproval(context: *anyopaque, preview: loop.ApprovalPreview) anyerror!bool {
@@ -348,7 +422,26 @@ pub const Recorder = struct {
         while (try walker.next(io)) |entry| {
             if (entry.kind == .directory) continue;
             if (entry.kind != .file or !artifact.isSafeRelativePath(entry.path)) return error.UnsafePath;
-            if (!self.workspacePathAllowed(entry.path)) return error.UndeclaredWorkspacePath;
+            // `.zttp/` is agent-owned scratch, not case source: `pi_goal_check`
+            // persists witnesses to `.zttp/witnesses/<hash>/`. The directory
+            // name carries a per-run hash, so capturing it would make the
+            // expected workspace differ from itself on the next recording.
+            if (artifact.isAgentScratch(entry.path)) continue;
+            if (!self.workspacePathAllowed(entry.path)) {
+                // Name the path. The refusal is usually a model that wrote a
+                // file the case never declared, and the operator cannot decide
+                // between declaring it and treating it as a failure without
+                // knowing which file it was.
+                std.debug.print(
+                    "[recorder] undeclared workspace path '{s}' in {s}; declared:",
+                    .{ entry.path, @tagName(role) },
+                );
+                for (self.options.workspace_allowlist) |allowed| {
+                    std.debug.print(" '{s}'", .{allowed});
+                }
+                std.debug.print("\n", .{});
+                return error.UndeclaredWorkspacePath;
+            }
             if (paths.items.len >= artifact.Limits.files) return error.FlowLimitExceeded;
             try paths.append(self.allocator(), try self.allocator().dupe(u8, entry.path));
         }
@@ -423,22 +516,253 @@ pub const Recorder = struct {
     }
 };
 
-fn artifactProvider(provider: model_request.Provider) artifact.Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
+fn serializeResponseDiagnostics(
+    allocator: std.mem.Allocator,
+    case_name: []const u8,
+    attempt_index: usize,
+    diagnostic_context: capture_sink.ResponseDiagnosticContext,
+    diagnostics: capture_sink.ResponseDiagnostics,
+) ![]u8 {
+    var buffer = TextBuffer.init(allocator);
+    defer buffer.deinit();
+    const writer = buffer.writer();
+    try std.json.Stringify.value(.{
+        .v = @as(u32, 1),
+        .case_name = case_name,
+        .provider = diagnostic_context.provider,
+        .model = diagnostic_context.model,
+        .attempt_index = attempt_index,
+        .latency_ms = diagnostics.latency_ms,
+        .finish_reason = diagnostics.finish_reason,
+        .completion_tokens = diagnostics.completion_tokens,
+        .field_presence = diagnostics.field_presence,
+        .parser_warnings = diagnostics.parser_warnings,
+        .error_name = if (diagnostics.failure) |failure| @errorName(failure) else null,
+    }, .{}, writer);
+    try writer.writeByte('\n');
+    return buffer.toOwnedSlice();
+}
+
+fn appendDiagnosticLine(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    line: []const u8,
+) !void {
+    return appendDiagnosticLineWithWriter(allocator, path, line, .{});
+}
+
+const DiagnosticWriter = struct {
+    context: ?*anyopaque = null,
+    write_fn: *const fn (?*anyopaque, std.c.fd_t, []const u8) isize = writeDiagnosticBytes,
+};
+
+fn appendDiagnosticLineWithWriter(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    line: []const u8,
+    diagnostic_writer: DiagnosticWriter,
+) !void {
+    const parent = std.fs.path.dirname(path) orelse return error.InvalidDiagnosticsPath;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent);
+    const fd = try zts.file_io.openAppend(allocator, path);
+    defer std.Io.Threaded.closeFd(fd);
+    try lockDiagnosticFile(fd);
+    defer _ = std.c.flock(fd, std.posix.LOCK.UN);
+    const clean_eof = (try zts.file_io.fstatFd(fd)).size;
+    writeDiagnosticLine(fd, line, diagnostic_writer) catch |write_err| {
+        rollbackDiagnosticFile(fd, clean_eof) catch return error.DiagnosticsRollbackFailed;
+        return write_err;
     };
 }
 
-fn cassetteProvider(provider: artifact.Provider) cassette_client.Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-    };
+fn lockDiagnosticFile(fd: std.c.fd_t) !void {
+    while (true) {
+        const result = std.c.flock(fd, std.posix.LOCK.EX);
+        if (result == 0) return;
+        if (std.posix.errno(result) != .INTR) return error.DiagnosticsLockFailed;
+    }
+}
+
+fn rollbackDiagnosticFile(fd: std.c.fd_t, clean_eof: u64) !void {
+    while (true) {
+        const result = std.c.ftruncate(fd, @intCast(clean_eof));
+        if (result == 0) return;
+        if (std.posix.errno(result) != .INTR) return error.DiagnosticsRollbackFailed;
+    }
+}
+
+fn writeDiagnosticLine(
+    fd: std.c.fd_t,
+    line: []const u8,
+    diagnostic_writer: DiagnosticWriter,
+) !void {
+    var written: usize = 0;
+    while (written < line.len) {
+        const count = diagnostic_writer.write_fn(
+            diagnostic_writer.context,
+            fd,
+            line[written..],
+        );
+        if (count < 0) {
+            if (std.posix.errno(count) == .INTR) continue;
+            return error.DiagnosticsWriteFailed;
+        }
+        if (count == 0) return error.DiagnosticsWriteFailed;
+        written += @intCast(count);
+    }
+}
+
+fn writeDiagnosticBytes(_: ?*anyopaque, fd: std.c.fd_t, bytes: []const u8) isize {
+    return std.c.write(fd, bytes.ptr, bytes.len);
 }
 
 fn artifactDigest(digest: model_request.Sha256Hex) artifact.Sha256Hex {
     return .{ .bytes = digest.bytes };
+}
+
+/// True for the non-streaming Chat Completions providers, whose clients hash
+/// the exact request body they put on the wire. `simulator/model_client.zig`
+/// rebuilds that body on replay for the same set.
+fn recordsWireDigest(provider: artifact.Provider) bool {
+    return switch (provider) {
+        .local, .deepseek => true,
+        .anthropic, .openai => false,
+    };
+}
+
+fn mlxLmVersion(allocator: std.mem.Allocator, raw_response: []const u8) !?[]u8 {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), raw_response, .{
+        .duplicate_field_behavior = .@"error",
+    }) catch return null;
+    if (parsed != .object) return null;
+    const fingerprint = parsed.object.get("system_fingerprint") orelse return null;
+    if (fingerprint != .string) return null;
+    const end = std.mem.indexOfScalar(u8, fingerprint.string, '-') orelse fingerprint.string.len;
+    const version = fingerprint.string[0..end];
+    if (version.len == 0) return null;
+    for (version) |byte| if (!std.ascii.isDigit(byte) and byte != '.') return null;
+    return try allocator.dupe(u8, version);
+}
+
+const ShortDiagnosticWrite = struct {
+    calls: usize = 0,
+
+    fn write(context: ?*anyopaque, fd: std.c.fd_t, bytes: []const u8) isize {
+        const self: *ShortDiagnosticWrite = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        if (self.calls != 1) return 0;
+        const count = @min(bytes.len, 7);
+        return std.c.write(fd, bytes.ptr, count);
+    }
+};
+
+fn diagnosticTestPath(
+    allocator: std.mem.Allocator,
+    tmp: std.testing.TmpDir,
+    name: []const u8,
+) ![]u8 {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const cwd = try std.Io.Dir.realPathFileAlloc(
+        std.Io.Dir.cwd(),
+        io_backend.io(),
+        ".",
+        allocator,
+    );
+    defer allocator.free(cwd);
+    return std.fs.path.resolve(allocator, &.{
+        cwd,
+        ".zig-cache",
+        "tmp",
+        tmp.sub_path[0..],
+        name,
+    });
+}
+
+test "diagnostic append rolls back a partial line" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try diagnosticTestPath(std.testing.allocator, tmp, "rollback.jsonl");
+    defer std.testing.allocator.free(path);
+    const first = "{\"record\":1}\n";
+    const failed = "{\"record\":2}\n";
+    const last = "{\"record\":3}\n";
+    try appendDiagnosticLine(std.testing.allocator, path, first);
+    var short_write: ShortDiagnosticWrite = .{};
+    try std.testing.expectError(
+        error.DiagnosticsWriteFailed,
+        appendDiagnosticLineWithWriter(std.testing.allocator, path, failed, .{
+            .context = &short_write,
+            .write_fn = ShortDiagnosticWrite.write,
+        }),
+    );
+    try appendDiagnosticLine(std.testing.allocator, path, last);
+
+    const bytes = try zts.file_io.readFile(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(bytes);
+    try std.testing.expectEqualStrings(first ++ last, bytes);
+}
+
+const ConcurrentDiagnosticAppend = struct {
+    path: []const u8,
+    line: []const u8,
+    failure: ?anyerror = null,
+
+    fn run(self: *ConcurrentDiagnosticAppend) void {
+        for (0..20) |_| {
+            appendDiagnosticLine(std.heap.page_allocator, self.path, self.line) catch |err| {
+                self.failure = err;
+                return;
+            };
+        }
+    }
+};
+
+test "diagnostic append keeps concurrent records separate" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const path = try diagnosticTestPath(std.testing.allocator, tmp, "concurrent.jsonl");
+    defer std.testing.allocator.free(path);
+    var left: ConcurrentDiagnosticAppend = .{ .path = path, .line = "{\"writer\":\"a\"}\n" };
+    var right: ConcurrentDiagnosticAppend = .{ .path = path, .line = "{\"writer\":\"b\"}\n" };
+    const left_thread = try std.Thread.spawn(.{}, ConcurrentDiagnosticAppend.run, .{&left});
+    const right_thread = try std.Thread.spawn(.{}, ConcurrentDiagnosticAppend.run, .{&right});
+    left_thread.join();
+    right_thread.join();
+    try std.testing.expect(left.failure == null);
+    try std.testing.expect(right.failure == null);
+
+    const bytes = try zts.file_io.readFile(std.testing.allocator, path, 4096);
+    defer std.testing.allocator.free(bytes);
+    var lines = std.mem.splitScalar(u8, bytes, '\n');
+    var count: usize = 0;
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        try std.testing.expect(
+            std.mem.eql(u8, line, "{\"writer\":\"a\"}") or
+                std.mem.eql(u8, line, "{\"writer\":\"b\"}"),
+        );
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 40), count);
+}
+
+test "local response fingerprint exposes the MLX-LM version" {
+    const version = (try mlxLmVersion(
+        std.testing.allocator,
+        "{\"system_fingerprint\":\"0.31.3-0.32.0-macOS\"}",
+    )).?;
+    defer std.testing.allocator.free(version);
+    try std.testing.expectEqualStrings("0.31.3", version);
+    try std.testing.expect((try mlxLmVersion(
+        std.testing.allocator,
+        "{\"system_fingerprint\":\"unknown-build\"}",
+    )) == null);
 }
 
 fn lessThanPath(_: void, left: []const u8, right: []const u8) bool {

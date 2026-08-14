@@ -125,7 +125,7 @@ fn execute(
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to read {s}: {s}\n",
-            .{ absolute, @errorName(e) },
+            .{ args[0], @errorName(e) },
         );
     };
     defer allocator.free(source);

@@ -1,6 +1,6 @@
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
-const json_writer = @import("providers/anthropic/json_writer.zig");
+const json_writer = @import("providers/json_writer.zig");
 const payload_memory = @import("payload_memory.zig");
 
 pub const DiagnosticItem = struct {

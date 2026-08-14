@@ -10,6 +10,7 @@ const runner_mod = @import("runner.zig");
 const capture_sink = @import("../providers/capture_sink.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
+const local_client = @import("../providers/local/client.zig");
 const model_request = @import("../providers/model_request.zig");
 const loop = @import("../loop.zig");
 const registry_mod = @import("../registry/registry.zig");
@@ -29,6 +30,161 @@ const openai_text_response =
     "event: response.completed\n" ++
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n" ++
     "data: [DONE]\n\n";
+
+test "simulator recorder appends metadata-only response diagnostics" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const cwd = try cwdPathAlloc(testing.allocator);
+    defer testing.allocator.free(cwd);
+    const diagnostics_path = try std.fs.path.resolve(testing.allocator, &.{
+        cwd,
+        ".zig-cache",
+        "tmp",
+        tmp.sub_path[0..],
+        "local-response-diagnostics.jsonl",
+    });
+    defer testing.allocator.free(diagnostics_path);
+
+    var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
+        .case_name = "diagnostic-case",
+        .evidence_class = .deterministic_harness,
+        .provider = .local,
+        .model = "diagnostic-model",
+        .diagnostics_path = diagnostics_path,
+        .workspace_allowlist = &.{},
+    });
+    defer recorder.deinit();
+
+    var sink = recorder.captureSink();
+    sink.recordDiagnostics(.{
+        .provider = .local,
+        .model = "diagnostic-model",
+    }, .{
+        .latency_ms = 1234,
+        .finish_reason = .stop,
+        .completion_tokens = 0,
+        .field_presence = .{
+            .choices = true,
+            .first_choice = true,
+            .finish_reason = true,
+            .message = true,
+            .content = true,
+            .reasoning = true,
+            .usage = true,
+            .completion_tokens = true,
+        },
+        .parser_warnings = &.{ .content_null, .assistant_output_missing },
+        .failure = error.EmptyResponse,
+    });
+    sink.recordDiagnostics(.{
+        .provider = .local,
+        .model = "diagnostic-model",
+    }, .{
+        .latency_ms = 9,
+        .finish_reason = null,
+        .completion_tokens = null,
+        .field_presence = .{},
+        .parser_warnings = &.{.transport_failed},
+        .failure = error.LocalServerUnavailable,
+    });
+
+    const bytes = try zts.file_io.readFile(testing.allocator, diagnostics_path, 64 * 1024);
+    defer testing.allocator.free(bytes);
+    const first_end = std.mem.indexOfScalar(u8, bytes, '\n') orelse return error.TestUnexpectedResult;
+    const second_start = first_end + 1;
+    const second_end_rel = std.mem.indexOfScalar(u8, bytes[second_start..], '\n') orelse
+        return error.TestUnexpectedResult;
+    const second_end = second_start + second_end_rel;
+    try testing.expectEqual(bytes.len, second_end + 1);
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        bytes[0..first_end],
+        .{},
+    );
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expectEqual(@as(i64, 1), root.get("v").?.integer);
+    try testing.expectEqualStrings("diagnostic-case", root.get("case_name").?.string);
+    try testing.expectEqualStrings("local", root.get("provider").?.string);
+    try testing.expectEqualStrings("diagnostic-model", root.get("model").?.string);
+    try testing.expectEqual(@as(i64, 0), root.get("attempt_index").?.integer);
+    try testing.expectEqual(@as(i64, 1234), root.get("latency_ms").?.integer);
+    try testing.expectEqualStrings("stop", root.get("finish_reason").?.string);
+    try testing.expectEqual(@as(i64, 0), root.get("completion_tokens").?.integer);
+    try testing.expect(root.get("field_presence").?.object.get("reasoning").?.bool);
+    try testing.expectEqualStrings("content_null", root.get("parser_warnings").?.array.items[0].string);
+    try testing.expectEqualStrings("EmptyResponse", root.get("error_name").?.string);
+    try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"attempt_index\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"transport_failed\"") != null);
+}
+
+test "local client failure records diagnostics through the flow recorder" {
+    const response_body =
+        "{\"system_fingerprint\":\"0.31.3-fixture\"," ++
+        "\"choices\":[{\"finish_reason\":\"stop\",\"message\":{" ++
+        "\"reasoning\":\"private chain\",\"content\":null}}]," ++
+        "\"usage\":{\"completion_tokens\":0}}";
+    var server = try cassette_record.LocalHttpServer.init(
+        testing.allocator,
+        response_body,
+        "application/json",
+    );
+    try server.start();
+    errdefer server.join() catch {};
+    const base_url = try server.url(testing.allocator, "");
+    defer testing.allocator.free(base_url);
+
+    var tree = try IsolatedTmp.init(testing.allocator, "local-response-diagnostics");
+    defer tree.cleanup(testing.allocator);
+    try tree.mkdir(testing.allocator, "workspace");
+    const workspace_abs = try tree.childPath(testing.allocator, "workspace");
+    defer testing.allocator.free(workspace_abs);
+    const diagnostics_path = try tree.childPath(testing.allocator, "diagnostics.jsonl");
+    defer testing.allocator.free(diagnostics_path);
+
+    var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
+        .case_name = "local-empty-response",
+        .evidence_class = .deterministic_harness,
+        .provider = .local,
+        .model = "diagnostic-model",
+        .diagnostics_path = diagnostics_path,
+        .workspace_allowlist = &.{},
+    });
+    defer recorder.deinit();
+    try recorder.captureInitialWorkspace(workspace_abs);
+    try recorder.beginTurn("private user source", 0, .approve);
+    var sink = recorder.captureSink();
+    var client = local_client.Client.initWithCapture(.{
+        .system_prompt = "private system prompt",
+        .model = "diagnostic-model",
+        .base_url = base_url,
+    }, &sink);
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "private user source" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(
+        local_client.ClientError.EmptyResponse,
+        client.sendTurn(arena.allocator(), &transcript, null),
+    );
+    try server.join();
+
+    const bytes = try zts.file_io.readFile(testing.allocator, diagnostics_path, 64 * 1024);
+    defer testing.allocator.free(bytes);
+    try testing.expect(std.mem.indexOf(u8, bytes, "private user source") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "private system prompt") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "private chain") == null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"latency_ms\":") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"finish_reason\":\"stop\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"completion_tokens\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"content\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"reasoning\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"assistant_output_missing\"") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes, "\"error_name\":\"EmptyResponse\"") != null);
+}
 
 const CapturingClient = struct {
     config: model_request.Config,
@@ -158,6 +314,67 @@ test "simulator recorder rejects undeclared credential file before workspace rea
     try testing.expectEqual(@as(usize, 0), recorder.fixtures.items.len);
 }
 
+test "simulator recorder skips agent scratch but still refuses undeclared source" {
+    // `pi_goal_check` persists witnesses under `.zttp/witnesses/<hash>/`. That
+    // is agent-owned state, not case source, and its directory name carries a
+    // per-run hash, so capturing it would make a case differ from itself on the
+    // next recording. Skipping it must not weaken the refusal for a real file
+    // the case never declared.
+    var tree = try IsolatedTmp.init(testing.allocator, "flow-recorder-scratch");
+    defer tree.cleanup(testing.allocator);
+    try tree.mkdir(testing.allocator, "workspace");
+    try tree.writeFile(testing.allocator, "workspace/handler.ts", "allowed\n");
+    try tree.mkdir(testing.allocator, "workspace/.zttp");
+    try tree.mkdir(testing.allocator, "workspace/.zttp/witnesses");
+    try tree.mkdir(testing.allocator, "workspace/.zttp/witnesses/f0812d0e79287bb9");
+    try tree.writeFile(
+        testing.allocator,
+        "workspace/.zttp/witnesses/f0812d0e79287bb9/handler.path",
+        "witness state\n",
+    );
+    const workspace_path = try tree.childPath(testing.allocator, "workspace");
+    defer testing.allocator.free(workspace_path);
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const workspace_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(
+        io_backend.io(),
+        workspace_path,
+        testing.allocator,
+    );
+    defer testing.allocator.free(workspace_abs);
+
+    var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
+        .case_name = "agent-scratch",
+        .evidence_class = .deterministic_harness,
+        .provider = .openai,
+        .model = "gpt-4o-mini",
+        .workspace_allowlist = &.{"handler.ts"},
+    });
+    defer recorder.deinit();
+    try recorder.captureInitialWorkspace(workspace_abs);
+    try testing.expectEqual(@as(usize, 1), recorder.initial_workspace.items.len);
+    try testing.expectEqualStrings("handler.ts", recorder.initial_workspace.items[0].path);
+    for (recorder.fixtures.items) |fixture| {
+        try testing.expect(std.mem.indexOf(u8, fixture.path, ".zttp") == null);
+    }
+
+    // A sibling source file the case did not declare is still refused, so the
+    // skip covers scratch only.
+    try tree.writeFile(testing.allocator, "workspace/helper.ts", "undeclared\n");
+    var strict = try recorder_mod.Recorder.init(testing.allocator, .{
+        .case_name = "agent-scratch-strict",
+        .evidence_class = .deterministic_harness,
+        .provider = .openai,
+        .model = "gpt-4o-mini",
+        .workspace_allowlist = &.{"handler.ts"},
+    });
+    defer strict.deinit();
+    try testing.expectError(
+        error.UndeclaredWorkspacePath,
+        strict.captureInitialWorkspace(workspace_abs),
+    );
+}
+
 test "simulator recorder promotes and replays a complete two-Turn flow" {
     var tree = try IsolatedTmp.init(testing.allocator, "flow-recorder");
     defer tree.cleanup(testing.allocator);
@@ -255,6 +472,10 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
         .available => |*flow_case| {
             try testing.expect(flow_case.flow_version.eql(flow_version));
             try testing.expectEqual(@as(usize, 2), flow_case.manifest.turns.len);
+            try testing.expectEqual(
+                @as(?bool, false),
+                flow_case.manifest.turns[0].first_draft_veto_pass,
+            );
             try testing.expectEqual(@as(usize, 2), flow_case.trace.model_calls.len);
             var runner = runner_mod.Runner.init(testing.allocator, flow_case, &registry, request_config);
             const replay = try runner.run();

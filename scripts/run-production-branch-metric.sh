@@ -11,4 +11,9 @@ ZIG="${ZIG:-zig}"
 # checking it in does not move the product baseline it was built to measure.
 # The Zig tool owns the empty input and parse-failure floors.
 git ls-files -z -- '*.zig' ':!tooling/production_branch_metric.zig' |
+  xargs -0 sh -c '
+    for file do
+      [ -f "$file" ] && printf "%s\0" "$file"
+    done
+  ' sh |
   "$ZIG" run tooling/production_branch_metric.zig -- --require-package-floor --paths0-from-stdin "$@"

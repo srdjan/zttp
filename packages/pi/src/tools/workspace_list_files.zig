@@ -1,7 +1,7 @@
 const std = @import("std");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-const json_writer = @import("../providers/anthropic/json_writer.zig");
+const json_writer = @import("../providers/json_writer.zig");
 
 const name = "workspace_list_files";
 
@@ -105,7 +105,13 @@ fn execute(
     return .{ .ok = ok, .llm_text = try text_buf.toOwnedSlice() };
 }
 
-const excluded_names = [_][]const u8{ ".git", "zig-out", ".zig-cache", "node_modules" };
+/// `.zttp` is agent-owned state, not workspace source. `pi_repair_plan`
+/// persists witnesses to `.zttp/witnesses/<short_hash>/`, where the hash is
+/// sha256 of the handler's absolute path and `handler.path` holds that path
+/// verbatim. Listing it makes this tool's output depend on which directory the
+/// run happens to occupy, which is what made a recorded flow replay to a
+/// different transcript in a fresh workspace.
+const excluded_names = [_][]const u8{ ".git", "zig-out", ".zig-cache", "node_modules", ".zttp" };
 
 fn isExcluded(entry_name: []const u8) bool {
     for (excluded_names) |ex| {
@@ -203,7 +209,15 @@ test "collectFiles: in-process walk lists files relative to root and skips noise
     try tmp.dir.createDirPath(io, ".git");
     try tmp.dir.createDirPath(io, "zig-out");
     try tmp.dir.createDirPath(io, "node_modules");
-    inline for (.{ "src/handler.ts", "README.md", ".git/config", "zig-out/bin", "node_modules/dep.js" }) |p| {
+    try tmp.dir.createDirPath(io, ".zttp/witnesses/f0812d0e79287bb9");
+    inline for (.{
+        "src/handler.ts",
+        "README.md",
+        ".git/config",
+        "zig-out/bin",
+        "node_modules/dep.js",
+        ".zttp/witnesses/f0812d0e79287bb9/handler.path",
+    }) |p| {
         var f = try tmp.dir.createFile(io, p, .{});
         f.close(io);
     }
@@ -225,10 +239,13 @@ test "collectFiles: in-process walk lists files relative to root and skips noise
     for (files.items) |f| {
         if (std.mem.eql(u8, f, "src/handler.ts")) saw_handler = true;
         if (std.mem.eql(u8, f, "README.md")) saw_readme = true;
-        // Nothing from an excluded directory may appear.
+        // Nothing from an excluded directory may appear. `.zttp` matters most:
+        // its paths carry a per-workspace hash, so listing it would make this
+        // tool's output differ between two runs of the same recorded flow.
         try testing.expect(std.mem.indexOf(u8, f, ".git") == null);
         try testing.expect(std.mem.indexOf(u8, f, "zig-out") == null);
         try testing.expect(std.mem.indexOf(u8, f, "node_modules") == null);
+        try testing.expect(std.mem.indexOf(u8, f, ".zttp") == null);
     }
     try testing.expect(saw_handler);
     try testing.expect(saw_readme);

@@ -2,10 +2,10 @@
 
 The coding agent behind the `zttp expert` and `zttp ledger` CLI commands.
 Linked only into the developer `zttp` binary, never into the pi-free `zts`
-analyzer binary or the deployed `zttp-runtime`. Built in Zig against the
-Anthropic Messages and OpenAI Responses APIs, driven by a pure turn state
-machine with a compiler-aware tool registry and a mandatory compile-check veto
-on every edit.
+analyzer binary or the deployed `zttp-runtime`. Built in Zig against local MLX
+Chat Completions, Anthropic Messages, and OpenAI Responses APIs, driven by a
+pure turn state machine with a compiler-aware tool registry and a mandatory
+compile-check veto on every edit.
 
 Companion to Mario Zechner's TypeScript [pi-mono](https://github.com/badlogic/pi-mono).
 Ported to Zig, scoped to this repo's lockdown policy: everything the
@@ -29,7 +29,7 @@ apply. The model cannot emit text that bypasses the check.
 packages/pi/
   src/
     app.zig               # entrypoint; parses ExpertFlags, dispatches to REPL / print / rpc
-    agent.zig             # AgentSession: transcript, backend union (stub|anthropic|openai), session persistence
+    agent.zig             # AgentSession: transcript, backend union, resolved provider identity, persistence
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
     expert_workflow.zig   # deterministic task routing hints before first model round-trip
@@ -45,8 +45,13 @@ packages/pi/
       project_context.zig # AGENTS.md / CLAUDE.md walk from cwd → project root
     providers/
       models.zig          # compile-time model registry
+      selection.zig       # pure launch, persisted identity, and default resolver
+      tool_catalog.zig    # provider-neutral ordered model-tool catalog
+      chat_completions.zig # Chat Completions body writer shared by local and deepseek
+      local/              # MLX-LM Chat Completions decoder, readiness
       anthropic/          # request builder, SSE parser, response assembler, client
       openai/             # Responses API request builder, SSE parser, response assembler, client
+      deepseek/           # DeepSeek Chat Completions client, decoder, endpoint policy
     registry/
       tool.zig            # ToolDef + JSON decoders
       registry.zig        # invoke / invokeJson / findByName
@@ -176,16 +181,38 @@ or the browser proof workbench surfaced by `/studio <handler.ts>`.
 
 ### Backends
 
+`providers/local/` implements non-streaming Chat Completions for the exact
+`LiquidAI/LFM2.5-2.6B-MLX-8bit` model. The default endpoint is
+`http://127.0.0.1:8080`; `ZTTP_MLX_BASE_URL` accepts only credential-free HTTP
+loopback roots. Readiness checks call `/health` and `/v1/models`. The adapter
+prefers structured tool calls, strictly normalizes Liquid's raw tool envelope,
+discards reasoning fields, and never retries another provider.
+
 `providers/anthropic/` implements the Messages API with SSE streaming,
 ephemeral prompt caching on the system block, and usage token
 accounting (`input_tokens`, `output_tokens`, `cache_read_input_tokens`,
 `cache_creation_input_tokens`).
 
 `providers/openai/` implements the Responses API with SSE streaming and the
-same `turn.AssistantReply` boundary. Anthropic is the measured provider;
-OpenAI is shipped but experimental. The static registry tags every model with
-its provider. Anthropic defaults to `claude-sonnet-4-6`; OpenAI defaults to
-`gpt-4o-mini`. When both credentials exist, Anthropic takes precedence.
+same `turn.AssistantReply` boundary.
+
+`providers/deepseek/` implements the same non-streaming Chat Completions shape
+as the local adapter, over HTTPS with a bearer key. `providers/chat_completions.zig`
+holds the request body writer both share; what differs is the endpoint policy
+(local requires a plain-HTTP loopback root, DeepSeek requires an HTTPS root
+carrying no credential), authentication, and decoding. DeepSeek assigns its own
+tool-call ids, so replay needs no request digest, and it emits no raw tool
+envelope. `reasoning_content` and `reasoning` are discarded before capture.
+
+The static registry tags every model with its provider. Local defaults to
+`LiquidAI/LFM2.5-2.6B-MLX-8bit`, Anthropic to `claude-sonnet-4-6`, OpenAI to
+`gpt-4o-mini`, and DeepSeek to `deepseek-v4-flash`.
+
+Provider resolution is explicit launch flags, stored resume or fork identity,
+then the current DeepSeek default. Cloud keys do not influence selection. New sessions
+store provider and model identity; `/new` keeps the process provider and current
+model. In-process resume refuses a different provider and leaves the current
+session unchanged.
 
 Model IDs select within the active provider and never change providers.
 `--model`, `/model`, and RPC `model.set` all use the same exact registry lookup.
@@ -214,7 +241,8 @@ to pi:
 --yes                    auto-approve all verified edits
 --no-edit                auto-reject all verified edits
 --tools {full,minimal}   tool preset (minimal = workspace read-only)
---model <id>             model registered for the configured provider
+--provider <name>        local, claude, or openai for this launch
+--model <id>             model registered for the active provider
 --print <prompt>         one-shot, rendered text to stdout
 --mode json              one-shot, NDJSON events to stdout (needs --print)
 --mode rpc               long-lived JSON-RPC 2.0 over stdio
@@ -230,6 +258,7 @@ Flag interactions the parser enforces:
   `--print` is one-shot.
 - `--mode json` requires `--print`; the JSON event stream only makes
   sense in one-shot mode.
+- `--goal` is compiler-only and rejects `--provider` and `--model`.
 
 The parser returns a distinct error variant for each collision so the
 stderr message points at the exact bad combination.

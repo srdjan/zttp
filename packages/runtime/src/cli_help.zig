@@ -128,10 +128,11 @@ const help_all_mid =
     \\  zttp verify <url>                    Verify a deployed proof receipt
     \\
     \\Credentials:
-    \\  zttp auth claude                     Store an Anthropic API key for expert (measured, supported)
-    \\  zttp auth openai                     Store an OpenAI API key for expert (experimental)
+    \\  zttp auth deepseek                   Store the default DeepSeek API key
+    \\  zttp auth claude                     Store an optional Anthropic API key
+    \\  zttp auth openai                     Store an optional OpenAI API key
     \\  zttp auth status                     Show which provider keys are configured
-    \\  zttp auth revoke <provider>          Remove a stored key (claude | openai)
+    \\  zttp auth revoke <provider>          Remove a stored key (claude | openai | deepseek)
     \\
     \\Machine tools (JSON output for IDE and review-bot integrations):
     \\
@@ -202,6 +203,7 @@ const expert_help =
     \\Usage:
     \\  zttp expert [--yes | --no-edit] [--no-session] [--no-persist-tool-output]
     \\                [--session-id <id> | --resume | --continue | --fork <id>]
+    \\                [--provider local|claude|openai|deepseek] [--model <id>]
     \\                [--tools minimal|full] [--no-context-files]
     \\  zttp expert --print <prompt> [--mode json]
     \\  zttp expert --mode rpc
@@ -218,7 +220,8 @@ const expert_help =
     \\  --session-id <id>          resume or create a session with this id
     \\  --resume, --continue       resume the newest session for this cwd
     \\  --fork <session-id>        branch from an existing session
-    \\  --model <id>               start on a specific provider model
+    \\  --provider <name>          select local, claude, openai, or deepseek for this launch
+    \\  --model <id>               select a model within the active provider
     \\  --tools minimal|full       select workspace-read-only or full tool preset
     \\  --print <prompt>           run a single non-interactive turn and exit
     \\  --mode json                with --print, emit NDJSON transcript events
@@ -233,16 +236,20 @@ const expert_help =
     \\Examples:
     \\  zttp expert --resume
     \\  zttp expert --print "add a GET /health route" --mode json
+    \\  zttp expert --provider claude
     \\  zttp expert --handler handler.ts --goal no_secret_leakage
     \\
     \\Model backend:
-    \\  Run `zttp auth claude` once to store an Anthropic key at
-    \\  ~/.zttp/providers.json (mode 0600). `zttp expert` reads it
-    \\  on launch. Alternatively, export one of these variables yourself:
-    \\    ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
-    \\    OPENAI_API_KEY
-    \\  An empty value counts as missing; the command exits with a setup
-    \\  message instead of launching against an unconfigured backend.
+    \\  The current default is DeepSeek. Configure its key with
+    \\  `zttp auth deepseek` or DEEPSEEK_API_KEY.
+    \\  DEEPSEEK_BASE_URL selects another HTTPS root; plain HTTP is refused.
+    \\  To use the local LFM provider explicitly, start MLX-LM separately:
+    \\    mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
+    \\    zttp expert --provider local
+    \\  ZTTP_MLX_BASE_URL can select another credential-free HTTP loopback root.
+    \\  Zttp checks readiness but never starts, stops, or replaces the server.
+    \\  Claude and OpenAI require explicit --provider and their own keys.
+    \\  --goal is compiler-only and rejects --provider and --model.
     \\
     \\For machine-facing compiler tooling, use direct commands such as:
     \\  zttp meta
@@ -321,6 +328,9 @@ test "expert help advertises documented modes" {
         "zttp expert --handler <handler.ts> --goal <goals>",
         "--tools minimal|full",
         "--no-context-files",
+        "--provider local|claude|openai|deepseek",
+        "zttp expert --provider local",
+        "--goal is compiler-only",
     }) |needle| {
         try std.testing.expect(has(expert_help, needle));
     }

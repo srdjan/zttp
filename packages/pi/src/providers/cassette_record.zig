@@ -113,6 +113,9 @@ pub const WriteOptions = struct {
     recorded_at: ?[]const u8 = null,
     /// Optional model name to record alongside the scenario.
     model: ?[]const u8 = null,
+    /// Exact SHA-256 of the provider wire request. Required for local flow
+    /// recordings so deterministic tool IDs survive offline replay.
+    request_sha256: ?[]const u8 = null,
 };
 
 /// Serialise a captured body into the JSONL cassette format
@@ -171,8 +174,10 @@ pub fn writeCassette(
 fn writeHeaderLine(w: anytype, options: WriteOptions) !void {
     try w.writeAll("{\"v\":1,\"provider\":");
     try writeJsonString(w, switch (options.provider) {
+        .local => "local",
         .anthropic => "anthropic",
         .openai => "openai",
+        .deepseek => "deepseek",
     });
     try w.writeAll(",\"scenario\":");
     try writeJsonString(w, options.scenario);
@@ -180,6 +185,10 @@ fn writeHeaderLine(w: anytype, options: WriteOptions) !void {
     if (options.model) |model| {
         try w.writeAll(",\"model\":");
         try writeJsonString(w, model);
+    }
+    if (options.request_sha256) |digest| {
+        try w.writeAll(",\"request_sha256\":");
+        try writeJsonString(w, digest);
     }
     if (options.recorded_at) |stamp| {
         try w.writeAll(",\"recorded_at\":");

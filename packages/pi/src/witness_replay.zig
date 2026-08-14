@@ -17,7 +17,7 @@
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const ui_payload = @import("ui_payload.zig");
-const json_writer = @import("providers/anthropic/json_writer.zig");
+const json_writer = @import("providers/json_writer.zig");
 
 pub const Verdict = struct {
     /// True when the engine ran the witness through to a response.

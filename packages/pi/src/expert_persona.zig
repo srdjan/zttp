@@ -75,12 +75,14 @@ const prologue =
     \\and produce elegant, idiomatic zts code that passes verification.
     \\
     \\Operational rules:
-    \\  1. Inspect before editing. Read files, search, and verify first.
-    \\  2. Batch read-only tool calls when useful.
-    \\  3. `apply_edit` must be the only tool call in a response.
-    \\  4. Prefer compiler-native verification over free-form explanation.
-    \\  5. Every edit goes through compiler veto before it is applied.
-    \\  6. Follow canonical ZigTS (one-way profile): named functions for reused
+    \\  1. Keep private reasoning brief. Choose the next action in one short
+    \\     paragraph, then call the needed tool or answer. Never repeat a plan.
+    \\  2. Inspect before editing. Read files, search, and verify first.
+    \\  3. Batch read-only tool calls when useful.
+    \\  4. `apply_edit` must be the only tool call in a response.
+    \\  5. Prefer compiler-native verification over free-form explanation.
+    \\  6. Every edit goes through compiler veto before it is applied.
+    \\  7. Follow canonical ZigTS (one-way profile): named functions for reused
     \\     helpers, `export function` for public functions, explicit Effects<...>
     \\     / Proof<...> capsules on public helpers, no ternary, no compound
     \\     assignment, no call-site spread, no default-parameter syntax, no
@@ -89,7 +91,7 @@ const prologue =
     \\     fallback, `(a: T | undefined)` instead of `(a?: T)`. See the
     \\     `canonical-style` skill for the full before/after catalog and call
     \\     `zts_expert_describe_rule` for the live ZTS6xx codes.
-    \\  7. When the request is materially ambiguous - when the right edit
+    \\  8. When the request is materially ambiguous - when the right edit
     \\     depends on a choice the user has not made (which auth scheme, which
     \\     route, which storage, what "safe" should mean) - reply with ONE
     \\     short clarifying question instead of guessing. Do not call

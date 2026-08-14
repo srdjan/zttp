@@ -372,6 +372,29 @@ pub fn build(b: *std.Build) void {
         b.step(root.step, root.desc).dependOn(&host_test_runs[i].step);
     }
 
+    // Explicit real-model gate. It is intentionally absent from the aggregate
+    // test step because zttp never manages the developer's MLX server.
+    const mlx_e2e_tests = b.addTest(.{
+        .filters = &.{"local MLX expert flow"},
+        .root_module = b.createModule(.{
+            .root_source_file = pi_host_dep.path("src/mlx_e2e_test.zig"),
+            .target = b.graph.host,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+        .test_runner = .{
+            .path = pi_host_dep.path("src/mlx_e2e_runner.zig"),
+            .mode = .simple,
+        },
+    });
+    mlx_e2e_tests.root_module.addImport("zts", zts_host_mod);
+    mlx_e2e_tests.root_module.addImport("project_config", project_config_mod);
+    mlx_e2e_tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
+    mlx_e2e_tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
+    const run_mlx_e2e_tests = b.addRunArtifact(mlx_e2e_tests);
+    const mlx_e2e_step = b.step("test-expert-mlx-e2e", "Run the real local MLX expert flow");
+    mlx_e2e_step.dependOn(&run_mlx_e2e_tests.step);
+
     const capability_audit = b.addSystemCommand(&.{ "/bin/bash", "scripts/check-capability-helpers.sh" });
     const capability_audit_step = b.step("test-capability-audit", "Run capability helper audit");
     capability_audit_step.dependOn(&capability_audit.step);
@@ -825,6 +848,49 @@ pub fn build(b: *std.Build) void {
     // the contract. The `expert` command now lives only in the developer
     // `zttp` binary (cli_exe); analyzer commands stay on `zts` (zts_exe).
     addExpertExitCheck(b, expert_golden_step, cli_exe, &.{ "expert", "--help" }, 0);
+    // Compiler-only goal runs must never consult cloud credentials or local
+    // model readiness. Keep this at the executable boundary so dispatch and
+    // environment injection cannot regress independently of the pi unit tests.
+    const goal_without_model = b.addRunArtifact(cli_exe);
+    goal_without_model.addArgs(&.{
+        "expert",
+        "--handler",
+        fixtures_root ++ "/clean_handler.ts",
+        "--goal",
+        "no_secret_leakage",
+        "--max-iters",
+        "1",
+        "--no-session",
+    });
+    goal_without_model.removeEnvironmentVariable("HOME");
+    goal_without_model.removeEnvironmentVariable("ANTHROPIC_API_KEY");
+    goal_without_model.removeEnvironmentVariable("OPENAI_API_KEY");
+    goal_without_model.setEnvironmentVariable("ZTTP_MLX_BASE_URL", "http://127.0.0.1:1");
+    goal_without_model.expectExitCode(0);
+    goal_without_model.expectStdOutMatch("autoloop verdict: achieved");
+    expert_golden_step.dependOn(&goal_without_model.step);
+
+    // `init --expert` performs the same readiness check before scaffolding.
+    // The follow-up absence check is the execution floor for that ordering.
+    const init_preflight_root = b.addWriteFiles();
+    _ = init_preflight_root.add("preflight-fixture", "");
+    const init_preflight = b.addRunArtifact(cli_exe);
+    init_preflight.addArgs(&.{ "init", "demo", "--expert" });
+    init_preflight.setCwd(init_preflight_root.getDirectory());
+    init_preflight.removeEnvironmentVariable("HOME");
+    init_preflight.removeEnvironmentVariable("ANTHROPIC_API_KEY");
+    init_preflight.removeEnvironmentVariable("OPENAI_API_KEY");
+    init_preflight.removeEnvironmentVariable("DEEPSEEK_API_KEY");
+    init_preflight.setEnvironmentVariable("ZTTP_MLX_BASE_URL", "http://127.0.0.1:1");
+    init_preflight.expectExitCode(1);
+    // Names the default provider's credential, so moving the default without
+    // moving this line fails here rather than shipping a message for a provider
+    // the preflight no longer checks.
+    init_preflight.expectStdErrMatch("--provider deepseek requires DEEPSEEK_API_KEY");
+    const init_preflight_absence = b.addSystemCommand(&.{ "/bin/test", "!", "-e", "demo" });
+    init_preflight_absence.setCwd(init_preflight_root.getDirectory());
+    init_preflight_absence.step.dependOn(&init_preflight.step);
+    expert_golden_step.dependOn(&init_preflight_absence.step);
     addExpertExitCheck(b, expert_golden_step, zts_exe, &.{ "meta", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zts_exe, &.{ "verify-paths", "--help" }, 0);
     addExpertExitCheck(b, expert_golden_step, zts_exe, &.{ "verify-paths", fixtures_root ++ "/clean_handler.ts", "--help" }, 0);

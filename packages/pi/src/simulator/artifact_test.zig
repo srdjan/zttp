@@ -16,6 +16,15 @@ const Mutation = enum {
     response_orphan,
     missing_initial,
     missing_turn_checkpoint,
+    local_valid,
+    local_missing_version,
+    local_empty_version,
+    cloud_version,
+    empty_revision,
+    local_runtime_only,
+    local_runtime_name_only,
+    local_runtime_version_only,
+    cloud_runtime,
 };
 
 const Fixture = struct {
@@ -130,8 +139,41 @@ fn buildCase(mutation: Mutation) !Fixture {
         .case_name = "multi-turn",
         .evidence_class = .deterministic_harness,
         .executable = true,
-        .provider = .anthropic,
+        .provider = switch (mutation) {
+            .local_valid,
+            .local_missing_version,
+            .local_empty_version,
+            .local_runtime_only,
+            .local_runtime_name_only,
+            .local_runtime_version_only,
+            => .local,
+            else => .anthropic,
+        },
         .model = "fixture-model",
+        .model_revision = switch (mutation) {
+            .local_valid => "model-revision-fixture",
+            .empty_revision => "",
+            else => null,
+        },
+        .mlx_lm_version = switch (mutation) {
+            .local_valid => "mlx-lm-fixture",
+            .local_empty_version => "",
+            .cloud_version => "mlx-lm-on-cloud",
+            else => null,
+        },
+        // A stack that reports no fingerprint names itself through the declared
+        // pair instead. `local_runtime_only` carries no `mlx_lm_version` and
+        // must still load: it is the rapid-mlx shape.
+        .runtime_name = switch (mutation) {
+            .local_runtime_only, .local_runtime_name_only => "rapid-mlx",
+            .cloud_runtime => "rapid-mlx-on-cloud",
+            else => null,
+        },
+        .runtime_version = switch (mutation) {
+            .local_runtime_only, .local_runtime_version_only => "0.12.11",
+            .cloud_runtime => "0.12.11",
+            else => null,
+        },
         .turns = &.{
             .{ .index = 0, .user_input = "first", .outcome = .approved, .final_response_sha256 = artifact.Sha256Hex.fromBytes("done-0") },
             .{ .index = 1, .user_input = "second", .outcome = .approved, .final_response_sha256 = artifact.Sha256Hex.fromBytes("done-1") },
@@ -234,6 +276,110 @@ test "flow artifact loader accepts a valid multi-Turn case" {
     }
 }
 
+test "local provenance round-trips and binds the flow version" {
+    var fixture = try buildCase(.local_valid);
+    defer fixture.deinit();
+    var state = artifact.loadCase(testing.allocator, fixture.case_root_abs);
+    defer state.deinit();
+    switch (state) {
+        .failure => return error.ExpectedAvailableFlowCase,
+        .available => |flow_case| {
+            try testing.expectEqual(artifact.Provider.local, flow_case.manifest.provider);
+            try testing.expectEqualStrings(
+                "model-revision-fixture",
+                flow_case.manifest.model_revision orelse return error.TestUnexpectedResult,
+            );
+            try testing.expectEqualStrings(
+                "mlx-lm-fixture",
+                flow_case.manifest.mlx_lm_version orelse return error.TestUnexpectedResult,
+            );
+
+            var changed_revision = flow_case.manifest;
+            changed_revision.model_revision = "different-revision";
+            const revision_version = try artifact.computeFlowVersion(
+                testing.allocator,
+                &changed_revision,
+                flow_case.fixtures,
+            );
+            try testing.expect(!revision_version.eql(flow_case.flow_version));
+
+            var changed_mlx = flow_case.manifest;
+            changed_mlx.mlx_lm_version = "different-mlx-lm";
+            const mlx_version = try artifact.computeFlowVersion(
+                testing.allocator,
+                &changed_mlx,
+                flow_case.fixtures,
+            );
+            try testing.expect(!mlx_version.eql(flow_case.flow_version));
+        },
+    }
+}
+
+test "a declared runtime is provenance on its own and binds the flow version" {
+    var fixture = try buildCase(.local_runtime_only);
+    defer fixture.deinit();
+    var state = artifact.loadCase(testing.allocator, fixture.case_root_abs);
+    defer state.deinit();
+    switch (state) {
+        .failure => return error.ExpectedAvailableFlowCase,
+        .available => |flow_case| {
+            // The rapid-mlx shape: no fingerprint on the wire, so no
+            // `mlx_lm_version`, and the pair carries the identity instead.
+            try testing.expect(flow_case.manifest.mlx_lm_version == null);
+            try testing.expectEqualStrings(
+                "rapid-mlx",
+                flow_case.manifest.runtime_name orelse return error.TestUnexpectedResult,
+            );
+            try testing.expectEqualStrings(
+                "0.12.11",
+                flow_case.manifest.runtime_version orelse return error.TestUnexpectedResult,
+            );
+
+            // Provenance that does not reach the flow version is provenance a
+            // re-record can change without the version noticing.
+            var changed_name = flow_case.manifest;
+            changed_name.runtime_name = "mlx-lm";
+            const name_version = try artifact.computeFlowVersion(
+                testing.allocator,
+                &changed_name,
+                flow_case.fixtures,
+            );
+            try testing.expect(!name_version.eql(flow_case.flow_version));
+
+            var changed_version = flow_case.manifest;
+            changed_version.runtime_version = "0.12.12";
+            const version_version = try artifact.computeFlowVersion(
+                testing.allocator,
+                &changed_version,
+                flow_case.fixtures,
+            );
+            try testing.expect(!version_version.eql(flow_case.flow_version));
+        },
+    }
+}
+
+test "a cassette recorded before the runtime pair existed keeps its flow version" {
+    var fixture = try buildCase(.local_valid);
+    defer fixture.deinit();
+    var state = artifact.loadCase(testing.allocator, fixture.case_root_abs);
+    defer state.deinit();
+    switch (state) {
+        .failure => return error.ExpectedAvailableFlowCase,
+        .available => |flow_case| {
+            // The 15 committed local cassettes carry neither field. The hash
+            // skips an absent pair, so adding it must not restamp them.
+            try testing.expect(flow_case.manifest.runtime_name == null);
+            try testing.expect(flow_case.manifest.runtime_version == null);
+            const recomputed = try artifact.computeFlowVersion(
+                testing.allocator,
+                &flow_case.manifest,
+                flow_case.fixtures,
+            );
+            try testing.expect(recomputed.eql(flow_case.flow_version));
+        },
+    }
+}
+
 test "flow artifact loader rejects strict checkpoint mutations" {
     const cases = [_]struct { mutation: Mutation, failure: artifact.FailureKind }{
         .{ .mutation = .model_gap, .failure = .invalid_index },
@@ -245,6 +391,13 @@ test "flow artifact loader rejects strict checkpoint mutations" {
         .{ .mutation = .response_orphan, .failure = .checkpoint_alignment },
         .{ .mutation = .missing_initial, .failure = .missing_fixture },
         .{ .mutation = .missing_turn_checkpoint, .failure = .checkpoint_alignment },
+        .{ .mutation = .local_missing_version, .failure = .invalid_inventory },
+        .{ .mutation = .local_empty_version, .failure = .invalid_inventory },
+        .{ .mutation = .cloud_version, .failure = .invalid_inventory },
+        .{ .mutation = .empty_revision, .failure = .invalid_inventory },
+        .{ .mutation = .local_runtime_name_only, .failure = .invalid_inventory },
+        .{ .mutation = .local_runtime_version_only, .failure = .invalid_inventory },
+        .{ .mutation = .cloud_runtime, .failure = .invalid_inventory },
     };
     for (cases) |case| {
         var fixture = try buildCase(case.mutation);

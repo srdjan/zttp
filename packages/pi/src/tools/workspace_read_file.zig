@@ -2,7 +2,7 @@ const std = @import("std");
 const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-const json_writer = @import("../providers/anthropic/json_writer.zig");
+const json_writer = @import("../providers/json_writer.zig");
 
 const name = "workspace_read_file";
 

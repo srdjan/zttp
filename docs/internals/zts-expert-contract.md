@@ -132,9 +132,12 @@ core:
 | `pi_goal_check` | Check property goals and return executable counterexample witnesses. |
 
 `zttp expert --mode rpc` exposes a line-delimited JSON-RPC 2.0 interface over
-stdio for long-lived clients. The agent loads its model backend from
-`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `~/.zttp/providers.json`; missing
-configuration exits with setup guidance.
+stdio for long-lived clients. The agent resolves provider identity from launch
+flags, persisted session metadata, or the current DeepSeek default before
+constructing a backend. The explicit local provider is the loopback-only MLX-LM
+Chat Completions adapter for `LiquidAI/LFM2.5-2.6B-MLX-8bit`. Provider
+credentials are read only after resolution. `session.info` includes the
+resolved provider and model.
 
 Edits in RPC mode are proposed only through the model-mediated `turn` method:
 the model emits an `apply_edit`, the compiler veto runs, and a `verified_patch`

@@ -7,7 +7,7 @@ const ui_payload = @import("ui_payload.zig");
 const session_events = @import("session/events.zig");
 const session_paths = @import("session/paths.zig");
 const reconstructor = @import("session/reconstructor.zig");
-const json_writer = @import("providers/anthropic/json_writer.zig");
+const json_writer = @import("providers/json_writer.zig");
 const tools_common = @import("tools/common.zig");
 
 pub const export_schema_version: u32 = 1;

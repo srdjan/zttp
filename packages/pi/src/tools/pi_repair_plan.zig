@@ -84,7 +84,7 @@ pub fn execute(
         return registry_mod.ToolResult.errFmt(
             allocator,
             name ++ ": failed to read {s}: {s}\n",
-            .{ absolute, @errorName(e) },
+            .{ args[0], @errorName(e) },
         );
     };
     defer allocator.free(source);
@@ -462,6 +462,8 @@ fn goalRequested(goals: []const counterexample.PropertyTag, tag: counterexample.
 }
 
 const testing = std.testing;
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+const cwdPathAlloc = @import("../test_support/cwd.zig").cwdPathAlloc;
 
 test "decodeJson accepts path and goals" {
     const args = try decodeJson(testing.allocator, "{\"path\":\"h.ts\",\"goals\":[\"injection_safe\"]}");
@@ -528,6 +530,66 @@ test "planFromSource preserves a local optional binding name in its repair" {
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (appName === undefined)") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (value === undefined)") == null);
+}
+
+test "an unreadable path is reported as the caller wrote it, not as an absolute path" {
+    // The message goes into the transcript, which a recorded flow replays from
+    // a different directory. Printing the resolved absolute path made this
+    // failure text differ between the recording and its replay, so a case whose
+    // agent asked for a missing file could never promote.
+    var tree = try IsolatedTmp.init(testing.allocator, "repair-plan-missing-file");
+    defer tree.cleanup(testing.allocator);
+    const saved_cwd = try cwdPathAlloc(testing.allocator);
+    defer testing.allocator.free(saved_cwd);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+    try std.Io.Threaded.chdir(tree.abs_path);
+
+    var result = try execute(testing.allocator, &.{"handler.ts"});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(!result.ok);
+    try testing.expectEqualStrings(
+        "pi_repair_plan: failed to read handler.ts: FileNotFound\n",
+        result.llm_text,
+    );
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, tree.abs_path) == null);
+}
+
+test "a persisting plan reads the same from two different workspaces" {
+    // The flow recorder captures this tool's result into a transcript and
+    // replays it from a fresh directory. Any part of the output that depends on
+    // where the run lives makes the replayed transcript differ from the
+    // recorded one, which fails the case rather than the tool.
+    const source =
+        \\import { validateJson } from "zttp:validate";
+        \\
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  const result = validateJson("item", req.body);
+        \\  const data = result.value;
+        \\  return Response.json({ data });
+        \\}
+    ;
+
+    var first_tree = try IsolatedTmp.init(testing.allocator, "repair-plan-workspace-a");
+    defer first_tree.cleanup(testing.allocator);
+    var second_tree = try IsolatedTmp.init(testing.allocator, "repair-plan-workspace-b");
+    defer second_tree.cleanup(testing.allocator);
+
+    const saved_cwd = try cwdPathAlloc(testing.allocator);
+    defer testing.allocator.free(saved_cwd);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    try std.Io.Threaded.chdir(first_tree.abs_path);
+    var first = try planFromSource(testing.allocator, source, "handler.ts", &.{}, true);
+    defer first.deinit(testing.allocator);
+    const first_text = try testing.allocator.dupe(u8, first.llm_text);
+    defer testing.allocator.free(first_text);
+
+    try std.Io.Threaded.chdir(second_tree.abs_path);
+    var second = try planFromSource(testing.allocator, source, "handler.ts", &.{}, true);
+    defer second.deinit(testing.allocator);
+
+    try testing.expectEqualStrings(first_text, second.llm_text);
 }
 
 test "tool description names repair plan authority boundary" {

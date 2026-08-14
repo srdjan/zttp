@@ -13,7 +13,7 @@ const zts = @import("zts");
 const file_io = zts.file_io;
 const apply_edit = @import("providers/anthropic/apply_edit.zig");
 const tools_common = @import("tools/common.zig");
-const json_writer = @import("providers/anthropic/json_writer.zig");
+const json_writer = @import("providers/json_writer.zig");
 const session_events = @import("session/events.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const auto_repair = @import("auto_repair.zig");
@@ -132,7 +132,7 @@ pub const veto_exhausted_next_step =
 /// to do instead of a bare CamelCase error name.
 pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
     return switch (err) {
-        error.AuthFailed => "Authentication failed. Check your key with `zttp auth status`, or re-run `zttp auth claude`.",
+        error.AuthFailed => "Authentication failed. Check `zttp auth status`, then configure the explicitly selected cloud provider.",
         error.InsufficientCredit => "The provider rejected the request for insufficient credit. Check your account credit balance.",
         error.RateLimited => "Rate limited by the provider. Wait a moment and try again.",
         error.ModelNotFound => "The configured model was not found. Switch with `/model <id>` or check the model name.",
@@ -142,6 +142,20 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.PromptTooLong => "The conversation is too large for the model's context window. Run `/compact` to shrink it, then retry.",
         error.OutputTruncated => "The edit was too large for one response and was cut off at the model's output limit. Split the change into smaller edits (edit one function or section at a time), or switch to a model with a larger output budget via `/model <id>`.",
         error.RequestTimedOut => "The request timed out with no response. Check your network and try again.",
+        error.LocalServerUnavailable,
+        error.LocalHealthNotOk,
+        error.LocalModelUnavailable,
+        => "The local MLX model is not ready. Start `mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080`, then retry.",
+        error.InvalidMlxBaseUrl => "ZTTP_MLX_BASE_URL must be a credential-free HTTP loopback root such as http://127.0.0.1:8080.",
+        error.InvalidResponseJson,
+        error.MalformedToolCall,
+        error.MalformedToolEnvelope,
+        error.UnexpectedResponseShape,
+        error.EmptyResponse,
+        => "The local MLX response was malformed or incomplete. Check the tested MLX-LM version and model, then retry.",
+        error.ResponseTooLarge,
+        error.TooManyToolCalls,
+        => "The local MLX response exceeded zttp's bounded response limits. Narrow the request and retry.",
         // SSE/stream decode failures from `providers/openai/sse_parser.zig`. A
         // mangled or partial stream (often a proxy) otherwise prints a bare
         // CamelCase name; collapse them all into one actionable line.

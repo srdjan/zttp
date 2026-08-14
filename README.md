@@ -114,12 +114,11 @@ exposing a binary publicly. Two boundaries are easy to miss:
 - No TLS. The runtime serves plain HTTP and binds `127.0.0.1` by default.
   Terminate TLS at a reverse proxy and set the host explicitly before exposing a
   deployed binary to public traffic.
-- `expert` sends your handler source to the configured model provider
-  (Anthropic or OpenAI). Setting `ZTS_OPENAI_BASE_URL` points it at any server
-  that speaks the OpenAI Responses shape, including one on loopback, in which
-  case the source never leaves the machine. Attestation is on by default and
-  publishes a stable per-user public-key fingerprint at
-  `/.well-known/zttp-attest`.
+- `expert` currently defaults to Claude. Select `--provider local` to use
+  `LiquidAI/LFM2.5-2.6B-MLX-8bit` through a developer-managed loopback MLX-LM
+  server. Zttp checks readiness but never manages the process or falls back to
+  another provider. Attestation is on by default and publishes a stable
+  per-user public-key fingerprint at `/.well-known/zttp-attest`.
 
 ## Numbers
 

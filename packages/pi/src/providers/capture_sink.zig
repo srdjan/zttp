@@ -7,6 +7,75 @@
 
 const model_request = @import("model_request.zig");
 
+pub const ResponseFieldPresence = struct {
+    choices: bool = false,
+    first_choice: bool = false,
+    finish_reason: bool = false,
+    message: bool = false,
+    content: bool = false,
+    reasoning: bool = false,
+    tool_calls: bool = false,
+    usage: bool = false,
+    completion_tokens: bool = false,
+};
+
+pub const FinishReason = enum {
+    stop,
+    length,
+    tool_calls,
+    content_filter,
+    function_call,
+};
+
+pub const ParserWarning = enum {
+    transport_failed,
+    response_too_large,
+    json_parse_failed,
+    root_not_object,
+    choices_missing,
+    choices_not_array,
+    choices_empty,
+    first_choice_not_object,
+    finish_reason_invalid,
+    finish_reason_unknown,
+    finish_reason_null,
+    message_missing,
+    message_not_object,
+    content_invalid,
+    content_null,
+    content_empty,
+    tool_calls_invalid,
+    tool_calls_empty,
+    usage_missing,
+    usage_invalid,
+    completion_tokens_missing,
+    completion_tokens_invalid,
+    assistant_output_missing,
+    sanitizer_rejected_response,
+    capture_rejected_response,
+    decoder_rejected_response,
+};
+
+/// Metadata-only observation of one provider response. The record intentionally
+/// excludes prompts, response content, reasoning, tool arguments, arbitrary
+/// provider strings, and user source.
+pub const ResponseDiagnostics = struct {
+    latency_ms: ?u64,
+    finish_reason: ?FinishReason,
+    completion_tokens: ?u64,
+    field_presence: ResponseFieldPresence,
+    parser_warnings: []const ParserWarning,
+    failure: ?anyerror,
+};
+
+/// The only request metadata visible to a diagnostic observer. Keep this
+/// narrower than ModelRequestSnapshot so observers cannot access prompts,
+/// transcript items, tool arguments, or user source.
+pub const ResponseDiagnosticContext = struct {
+    provider: model_request.Provider,
+    model: []const u8,
+};
+
 pub const CaptureSink = struct {
     context: *anyopaque,
     record_fn: *const fn (
@@ -15,7 +84,18 @@ pub const CaptureSink = struct {
         snapshot: *const model_request.ModelRequestSnapshot,
         raw_response: []const u8,
     ) anyerror!void,
+    /// Optional best-effort observer. A diagnostics failure must never replace
+    /// the transport, capture, or parser result for the model call.
+    diagnostics_fn: ?*const fn (
+        context: *anyopaque,
+        attempt_index: usize,
+        diagnostic_context: ResponseDiagnosticContext,
+        diagnostics: ResponseDiagnostics,
+    ) anyerror!void = null,
+    /// Strict capture cursor. It advances only after record_fn succeeds.
     next_call_index: usize = 0,
+    /// Diagnostic sequence. It includes failures that happen before capture.
+    next_diagnostic_attempt_index: usize = 0,
 
     pub fn record(
         self: *CaptureSink,
@@ -24,5 +104,16 @@ pub const CaptureSink = struct {
     ) !void {
         try self.record_fn(self.context, self.next_call_index, snapshot, raw_response);
         self.next_call_index += 1;
+    }
+
+    pub fn recordDiagnostics(
+        self: *CaptureSink,
+        diagnostic_context: ResponseDiagnosticContext,
+        diagnostics: ResponseDiagnostics,
+    ) void {
+        const diagnose = self.diagnostics_fn orelse return;
+        const attempt_index = self.next_diagnostic_attempt_index;
+        self.next_diagnostic_attempt_index +%= 1;
+        diagnose(self.context, attempt_index, diagnostic_context, diagnostics) catch {};
     }
 };

@@ -7,4 +7,5 @@ comptime {
     _ = @import("simulator/runner_test.zig");
     _ = @import("simulator/recording_storage_test.zig");
     _ = @import("simulator/recorder_test.zig");
+    _ = @import("simulator/workspace.zig");
 }

@@ -6,12 +6,13 @@
 const std = @import("std");
 const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const registry_mod = @import("../../registry/registry.zig");
-const json_writer = @import("json_writer.zig");
+const json_writer = @import("../json_writer.zig");
 const apply_edit = @import("apply_edit.zig");
+const tool_catalog = @import("../tool_catalog.zig");
 
 fn writeToolEntry(
     writer: anytype,
-    tool: ToolDef,
+    tool: tool_catalog.Definition,
     is_last: bool,
 ) !void {
     try writer.writeAll("{\"name\":");
@@ -34,29 +35,14 @@ pub fn writeToolsArray(
     writer: anytype,
     registry: *const registry_mod.Registry,
 ) !void {
-    const entries = registry.list();
-    var model_tool_count: usize = 0;
-    for (entries) |entry| {
-        if (entry.allowedOn(.model)) model_tool_count += 1;
-    }
+    const tool_count = tool_catalog.count(registry);
+    var tools = tool_catalog.iterator(registry);
     try writer.writeByte('[');
-    // apply_edit is the synthetic first tool; it is last only when no other
-    // tools are registered.
-    try writeToolEntry(writer, .{
-        .name = apply_edit.tool_name,
-        .label = "apply edit",
-        .description = apply_edit.tool_description,
-        .effect = .write_workspace,
-        .input_schema = apply_edit.input_schema_literal,
-        .decode_json = registry_mod.helpers.decodeJsonPassthrough,
-        .execute = unusedExecute,
-    }, model_tool_count == 0);
     var emitted: usize = 0;
-    for (entries) |entry| {
-        if (!entry.allowedOn(.model)) continue;
-        try writer.writeByte(',');
+    while (tools.next()) |tool| {
+        if (emitted > 0) try writer.writeByte(',');
         emitted += 1;
-        try writeToolEntry(writer, entry, emitted == model_tool_count);
+        try writeToolEntry(writer, tool, emitted == tool_count);
     }
     try writer.writeByte(']');
 }

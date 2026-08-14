@@ -68,6 +68,22 @@ pub const Workspace = struct {
         try self.parent.deleteTree(self.io, std.fs.path.basename(self.abs_path));
     }
 
+    /// Releases the handles and restores the prior directory, but leaves the
+    /// directory on disk and hands its path to the caller, who owns the slice
+    /// and the directory. Used when a validation run fails: the artifact it
+    /// wrote is the only evidence of why, and `deinit` would delete it.
+    pub fn abandon(self: *Workspace) ![:0]u8 {
+        defer self.* = undefined;
+        defer self.parent.close(self.io);
+        self.root.close(self.io);
+
+        if (self.previous_cwd) |previous_cwd| {
+            defer self.allocator.free(previous_cwd);
+            try std.Io.Threaded.chdir(previous_cwd);
+        }
+        return self.abs_path;
+    }
+
     /// Makes this workspace current until `deinit` restores the prior directory.
     pub fn enter(self: *Workspace) !void {
         if (self.previous_cwd != null) return error.WorkspaceAlreadyEntered;
@@ -121,4 +137,39 @@ fn privateFilePermissions() std.Io.File.Permissions {
 
 fn privateDirPermissions() std.Io.File.Permissions {
     return @enumFromInt(0o700);
+}
+
+const testing = std.testing;
+
+test "deinit removes the workspace and abandon leaves it for inspection" {
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var removed = try Workspace.create(testing.allocator, io);
+    const removed_path = try testing.allocator.dupeZ(u8, removed.abs_path);
+    defer testing.allocator.free(removed_path);
+    try removed.restoreFile("handler.ts", "export default 1;\n");
+    try removed.deinit();
+    try testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.cwd().statFile(io, removed_path, .{ .follow_symlinks = false }),
+    );
+
+    var kept = try Workspace.create(testing.allocator, io);
+    try kept.restoreFile("handler.ts", "export default 1;\n");
+    const kept_path = try kept.abandon();
+    defer testing.allocator.free(kept_path);
+    // The directory and its contents survive, which is the whole point: a
+    // failed validation leaves its evidence behind.
+    const stat = try std.Io.Dir.cwd().statFile(io, kept_path, .{ .follow_symlinks = false });
+    try testing.expectEqual(std.Io.File.Kind.directory, stat.kind);
+    var kept_dir = try std.Io.Dir.openDirAbsolute(io, kept_path, .{});
+    defer kept_dir.close(io);
+    const handler = try kept_dir.statFile(io, "handler.ts", .{ .follow_symlinks = false });
+    try testing.expectEqual(std.Io.File.Kind.file, handler.kind);
+
+    var parent = try std.Io.Dir.openDirAbsolute(io, temp_root, .{});
+    defer parent.close(io);
+    try parent.deleteTree(io, std.fs.path.basename(kept_path));
 }

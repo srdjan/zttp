@@ -1,14 +1,12 @@
-//! `zttp auth` — store provider API keys so `zttp expert` (and any
-//! handler that declares the env var in its contract) can find them without
-//! the user exporting shell variables or sourcing a `.env`.
+//! `zttp auth` stores cloud-provider API keys for `zttp expert`
+//! without requiring shell exports.
 //!
 //! Storage: `~/.zttp/providers.json`, 0600. Sibling to `~/.zttp/credentials`
 //! used by the hosted-cloud deploy path; keeping the two files orthogonal
 //! avoids accidentally coupling provider auth to deferred-cloud-auth state.
 //!
-//! The `injectStoredProvidersIntoEnv` helper is called by `dev_cli.zig`
-//! before `dev`/`serve`/`expert` dispatch so the runtime sees the values
-//! transparently. Shell-set variables always win; the file only fills gaps.
+//! The `injectStoredProvidersIntoEnv` helper is called by `dev_cli.zig` before
+//! expert dispatch. Shell-set variables always win; the file only fills gaps.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -30,6 +28,7 @@ const Provider = struct {
 const providers = [_]Provider{
     .{ .name = "anthropic", .env_var = "ANTHROPIC_API_KEY", .label = "claude" },
     .{ .name = "openai", .env_var = "OPENAI_API_KEY", .label = "openai" },
+    .{ .name = "deepseek", .env_var = "DEEPSEEK_API_KEY", .label = "deepseek" },
 };
 
 fn providerByLabel(label: []const u8) ?Provider {
@@ -58,6 +57,10 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         try authProviderSet(allocator, providerByLabel("openai").?, argv[1..]);
         return;
     }
+    if (std.mem.eql(u8, sub, "deepseek")) {
+        try authProviderSet(allocator, providerByLabel("deepseek").?, argv[1..]);
+        return;
+    }
     if (std.mem.eql(u8, sub, "status")) {
         try authStatus(allocator);
         return;
@@ -68,7 +71,7 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
             return error.InvalidArgument;
         }
         const provider = providerByLabel(argv[1]) orelse {
-            std.debug.print("Unknown provider: {s}. Known: claude, openai.\n", .{argv[1]});
+            std.debug.print("Unknown provider: {s}. Known: claude, openai, deepseek.\n", .{argv[1]});
             return error.InvalidArgument;
         };
         try authRevoke(allocator, provider);
@@ -82,22 +85,23 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
 pub fn printAuthHelp() void {
     const help =
-        \\zttp auth - store provider API keys for expert and handlers
+        \\zttp auth - store cloud-provider API keys for expert
         \\
         \\Usage:
         \\  zttp auth claude              Prompt for an Anthropic API key and store it
-        \\  zttp auth openai              Prompt for an OpenAI API key (experimental) and store it
+        \\  zttp auth openai              Prompt for an OpenAI API key and store it
+        \\  zttp auth deepseek            Prompt for a DeepSeek API key and store it
         \\  zttp auth status              Show which providers are configured
-        \\  zttp auth revoke <provider>   Remove a stored key (claude | openai)
+        \\  zttp auth revoke <provider>   Remove a stored key (claude | openai | deepseek)
         \\
-        \\Anthropic is the measured, supported expert backend. The OpenAI backend
-        \\is experimental (gpt-4o-mini fallback) and not covered by the codegen
-        \\quality ratchet.
+        \\Claude remains the current bare-launch default. The local LFM provider
+        \\needs no key when selected with `--provider local`. OpenAI and DeepSeek
+        \\are explicit.
         \\
         \\Storage: ~/.zttp/providers.json (mode 0600).
         \\
-        \\The runtime injects stored keys into ANTHROPIC_API_KEY / OPENAI_API_KEY
-        \\at the start of `zttp dev`, `zttp serve`, and `zttp expert`.
+        \\The CLI injects stored keys into ANTHROPIC_API_KEY / OPENAI_API_KEY /
+        \\DEEPSEEK_API_KEY at the start of `zttp expert`.
         \\Shell-set variables always win; the stored value only fills gaps.
         \\
     ;
@@ -159,8 +163,8 @@ fn authProviderSet(
 
     std.debug.print(
         "Saved {s} key for {s}.\n" ++
-            "Run `zttp expert` to start (the key is checked on the first request).\n",
-        .{ provider.label, provider.name },
+            "Run `zttp expert --provider {s}` to start (the key is checked on the first request).\n",
+        .{ provider.label, provider.name, provider.label },
     );
 }
 

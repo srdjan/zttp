@@ -49,6 +49,7 @@ pub fn run(
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
+        .provider = flags.provider,
         .model = flags.model,
     });
     defer session.deinit(allocator);
@@ -126,7 +127,7 @@ fn runWithSession(
 
     const turn_start_len = session.transcript.len();
     const turn_result = if (client_override) |client|
-        runOneTurnWithClient(allocator, session, registry, client, prompt, approval_fn)
+        agent.runOneTurnWithClient(allocator, session, registry, client, prompt, approval_fn)
     else
         agent.runOneTurn(allocator, session, registry, prompt, approval_fn);
     const rendered = turn_result catch |err| {
@@ -157,34 +158,6 @@ fn runWithSession(
 
     // Entries were streamed live by the observer; just close the stream.
     try emitEndEvent(allocator, out_writer);
-}
-
-fn runOneTurnWithClient(
-    allocator: std.mem.Allocator,
-    session: *agent.AgentSession,
-    registry: *const Registry,
-    client: loop.ModelClient,
-    user_text: []const u8,
-    approval_fn: ?loop.ApprovalFn,
-) ![]u8 {
-    const replay = session.replay_next_turn;
-    session.replay_next_turn = false;
-
-    _ = try loop.runTurnWith(
-        allocator,
-        client,
-        registry,
-        &session.transcript,
-        user_text,
-        .{
-            .approval_fn = approval_fn,
-            .replay_mode = replay,
-            .max_attempts = loop.interactive_max_attempts,
-        },
-    );
-    const tr = &session.transcript;
-    std.debug.assert(tr.len() >= 1);
-    return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
 }
 
 /// In non-JSON `--print`, emit the legible verified-patch summary (the "verified:"

@@ -135,7 +135,22 @@ fn promoteWithHooks(
     var loaded = artifact.loadCase(allocator, staged_root_abs);
     defer loaded.deinit();
     switch (loaded) {
-        .failure => return error.InvalidArtifact,
+        // The reason is printed rather than discarded. This is the recorder
+        // refusing an artifact it wrote itself one statement earlier, so the
+        // `Diagnostic` is the only thing that says which component and which
+        // path disagreed - and the staging directory is gone by the time a
+        // caller sees `InvalidArtifact`, so there is nothing left to inspect.
+        .failure => |diagnostic| {
+            std.debug.print(
+                "[recording-storage] staged artifact did not load back: {s} in {s}, path '{s}'\n",
+                .{
+                    @tagName(diagnostic.kind),
+                    @tagName(diagnostic.component),
+                    diagnostic.path[0..diagnostic.path_len],
+                },
+            );
+            return error.InvalidArtifact;
+        },
         .available => |flow_case| if (!flow_case.flow_version.eql(flow_version)) return error.InvalidArtifact,
     }
 

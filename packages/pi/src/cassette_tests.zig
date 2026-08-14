@@ -11,4 +11,5 @@ comptime {
     _ = @import("providers/anthropic/response_assembler.zig");
     _ = @import("providers/anthropic/apply_edit.zig");
     _ = @import("providers/openai/client.zig");
+    _ = @import("providers/deepseek/client.zig");
 }

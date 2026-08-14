@@ -21,16 +21,41 @@ pub fn validateAndPromote(
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     var validation_workspace = try Workspace.create(allocator, io_backend.io());
-    defer validation_workspace.deinit() catch {};
+    // A validation failure is the one case where the artifact must outlive the
+    // run: the recorded responses and trace are the only evidence of why the
+    // replay diverged, and deleting them leaves an operator with a category
+    // name and nothing to inspect.
+    var keep_for_inspection = false;
+    defer {
+        if (keep_for_inspection) {
+            if (validation_workspace.abandon()) |kept_path| {
+                std.debug.print(
+                    "[promotion] validation failed; kept the artifact at {s}\n",
+                    .{kept_path},
+                );
+                allocator.free(kept_path);
+            } else |_| {
+                validation_workspace.deinit() catch {};
+            }
+        } else {
+            validation_workspace.deinit() catch {};
+        }
+    }
 
     const validated_version = try recorder.promote(validation_workspace.abs_path);
     var loaded = artifact.loadCase(allocator, validation_workspace.abs_path);
     defer loaded.deinit();
     switch (loaded) {
-        .failure => return error.InvalidRecordedFlow,
+        .failure => {
+            keep_for_inspection = true;
+            return error.InvalidRecordedFlow;
+        },
         .available => |*flow_case| {
             var replay = runner_mod.Runner.init(allocator, flow_case, registry, request_config);
-            _ = try replay.run();
+            _ = replay.run() catch |err| {
+                keep_for_inspection = true;
+                return err;
+            };
         },
     }
 

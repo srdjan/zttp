@@ -83,9 +83,13 @@ pub fn processSubmit(
         return .{ .tool_result = try renderStatus(allocator, session) };
     }
 
+    if (std.mem.eql(u8, trimmed, "/settings")) {
+        return .{ .tool_result = try renderSessionSettings(allocator, session) };
+    }
+
     if (std.mem.startsWith(u8, trimmed, "/model ")) {
         const model_id = std.mem.trim(u8, trimmed["/model ".len..], " \t");
-        session.setModel(model_id) catch |err| {
+        session.setModel(allocator, model_id) catch |err| {
             const msg = switch (err) {
                 error.UnknownModel => try std.fmt.allocPrint(allocator, "Unknown model: {s}\n", .{model_id}),
                 error.ProviderMismatch => try std.fmt.allocPrint(
@@ -94,6 +98,11 @@ pub fn processSubmit(
                     .{ session.backendDescriptor().provider_label, model_id },
                 ),
                 error.NoActiveProvider => try allocator.dupe(u8, "No active model provider.\n"),
+                else => try std.fmt.allocPrint(
+                    allocator,
+                    "Model selection was not changed because persistence failed: {s}\n",
+                    .{@errorName(err)},
+                ),
             };
             return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
         };
@@ -347,7 +356,6 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     return ToolResult.withPlainText(allocator, true, buf.written());
 }
 
-const request_mod = @import("providers/anthropic/request.zig");
 const session_paths = @import("session/paths.zig");
 
 fn renderModel(allocator: std.mem.Allocator, session: *const agent.AgentSession) !ToolResult {
@@ -383,6 +391,7 @@ fn renderStudio(allocator: std.mem.Allocator, handler_path: []const u8) !ToolRes
 fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
     // Source every figure from the actual defaults so this display cannot drift.
     const defaults = loop.RunOptions{};
+    const default_model = models_registry.defaultForProvider(models_registry.default_provider);
     const msg = try std.fmt.allocPrint(
         allocator,
         "Settings (compile-time defaults):\n" ++
@@ -393,8 +402,36 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
             "  tool_calls/turn: {d}\n" ++
             "  batch_size:      {d}\n",
         .{
-            request_mod.default_model,
-            request_mod.default_max_tokens,
+            default_model.id,
+            default_model.request_policy.max_output_tokens,
+            loop.interactive_max_attempts,
+            defaults.max_model_roundtrips_per_turn,
+            defaults.max_tool_calls_per_turn,
+            defaults.max_tool_batch_size,
+        },
+    );
+    defer allocator.free(msg);
+    return ToolResult.withPlainText(allocator, true, msg);
+}
+
+fn renderSessionSettings(allocator: std.mem.Allocator, session: *const agent.AgentSession) !ToolResult {
+    const defaults = loop.RunOptions{};
+    const model_id = session.currentModel() orelse "none";
+    const model = models_registry.findById(model_id);
+    const msg = try std.fmt.allocPrint(
+        allocator,
+        "Settings (resolved session):\n" ++
+            "  provider:         {s}\n" ++
+            "  model:            {s}\n" ++
+            "  max_tokens:       {d}\n" ++
+            "  max_attempts:     {d}\n" ++
+            "  roundtrips/turn:  {d}\n" ++
+            "  tool_calls/turn:  {d}\n" ++
+            "  batch_size:       {d}\n",
+        .{
+            session.backendDescriptor().provider_label,
+            model_id,
+            if (model) |value| value.request_policy.max_output_tokens else 0,
             loop.interactive_max_attempts,
             defaults.max_model_roundtrips_per_turn,
             defaults.max_tool_calls_per_turn,
@@ -709,8 +746,6 @@ pub fn run(
     explicit_policy: ?loop.ApprovalPolicy,
 ) !void {
     const is_tty = std.c.isatty(std.c.STDIN_FILENO) != 0;
-    if (is_tty) writeBanner(allocator);
-
     // Encode the explicit policy as a string tag so it can be written to
     // meta.json and restored on --resume without events.zig importing loop.zig.
     const policy_tag: ?[]const u8 = if (explicit_policy) |p| @tagName(p) else null;
@@ -722,10 +757,13 @@ pub fn run(
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
+        .provider = flags.provider,
         .model = flags.model,
         .approval_policy_tag = policy_tag,
     });
     defer session.deinit(allocator);
+
+    if (is_tty) writeBanner(allocator, &session);
 
     // Effective policy: explicit flag wins; fall back to the stored policy from
     // the resumed session's meta.json; finally default to .ask.
@@ -736,7 +774,9 @@ pub fn run(
 
     // Confirm a restore the user asked for (otherwise resume is silent), and
     // surface any policy-drift note that would otherwise reach only the model.
-    if (is_tty and (flags.resume_latest or flags.fork_session_id != null)) {
+    if (is_tty and (flags.resume_latest or flags.fork_session_id != null or
+        (flags.session_id != null and session.replay_next_turn)))
+    {
         writeResumeDisclosure(&session, flags.fork_session_id != null);
     }
 
@@ -804,8 +844,15 @@ pub fn run(
                     }
                 }
             },
-            .session_resume => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })),
-            .session_new => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{})),
+            .session_resume => agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })) catch |err| {
+                if (err != error.CrossProviderResume) return err;
+                const message = "Cannot resume a session from another provider in this process. Restart with --provider and optional --model.\n";
+                _ = std.c.write(std.c.STDERR_FILENO, message.ptr, message.len);
+            },
+            .session_new => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{
+                .provider = session.activeProvider(),
+                .model = session.currentModel(),
+            })),
             .session_compact => {
                 const msg = try agent.compact(allocator, &session);
                 defer allocator.free(msg);
@@ -830,7 +877,7 @@ const expert_banner =
     "zttp expert: I propose compiler-verified edits to your handler. Every draft is\n" ++
     "checked by the analyzer and rejected if it fails, so you only approve edits that pass.\n" ++
     "\n" ++
-    "Each turn calls your model provider and consumes API credits.\n";
+    "Each turn calls the resolved model provider. Use /status to inspect its identity.\n";
 
 /// The destination line, printed under the banner before the first turn.
 ///
@@ -838,12 +885,22 @@ const expert_banner =
 /// source on the wire as soon as the model calls a read tool. That is worth
 /// stating once, up front, rather than leaving a user to infer it from a
 /// README bullet after the fact.
-fn writeDestination(allocator: std.mem.Allocator) void {
-    const dest = agent.destinationFromEnv();
+fn writeDestination(allocator: std.mem.Allocator, session: *const agent.AgentSession) void {
+    const dest = agent.destinationForSession(session);
     const line = switch (dest) {
         .offline => allocator.dupe(u8, "\nNo model key is set, so no handler source leaves this process.\n") catch return,
+        .local => |url| std.fmt.allocPrint(
+            allocator,
+            "\nSource the model reads stays on this machine through the local MLX server at {s}.\n",
+            .{url},
+        ) catch return,
         .anthropic => allocator.dupe(u8, "\nSource the model reads is sent to Anthropic. Files are sent only when the\nmodel reads them; nothing is uploaded up front.\n") catch return,
         .openai_hosted => allocator.dupe(u8, "\nSource the model reads is sent to OpenAI. Files are sent only when the model\nreads them; nothing is uploaded up front.\n") catch return,
+        .deepseek => |url| std.fmt.allocPrint(
+            allocator,
+            "\nSource the model reads is sent to DeepSeek at {s}. Files are sent only when\nthe model reads them; nothing is uploaded up front.\n",
+            .{url},
+        ) catch return,
         .openai_custom => |url| blk: {
             const where = if (dest.isLocal())
                 "stays on this machine"
@@ -867,9 +924,9 @@ const expert_banner_tail =
 const expert_no_workspace_hint =
     "\nNo handler found here. Run 'zttp init <name>' to scaffold a project first.\n";
 
-fn writeBanner(allocator: std.mem.Allocator) void {
+fn writeBanner(allocator: std.mem.Allocator, session: *const agent.AgentSession) void {
     _ = std.c.write(std.c.STDOUT_FILENO, expert_banner.ptr, expert_banner.len);
-    writeDestination(allocator);
+    writeDestination(allocator, session);
     _ = std.c.write(std.c.STDOUT_FILENO, expert_banner_tail.ptr, expert_banner_tail.len);
     if (!workspaceHasHandler(allocator)) {
         _ = std.c.write(std.c.STDOUT_FILENO, expert_no_workspace_hint.ptr, expert_no_workspace_hint.len);
@@ -1006,6 +1063,17 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
         .{ verb, id, session.transcript.len() },
     ) catch "session restored\n";
     _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+
+    if (session.identity_override_disclosed) {
+        const provider = if (session.activeProvider()) |value| value.publicName() else "none";
+        const model = session.currentModel() orelse "none";
+        const override_line = std.fmt.bufPrint(
+            &buf,
+            "launch override applied and persisted: provider={s} model={s}\n",
+            .{ provider, model },
+        ) catch "launch identity override applied and persisted\n";
+        _ = std.c.write(std.c.STDOUT_FILENO, override_line.ptr, override_line.len);
+    }
 
     if (agent.policyDriftNote(session)) |note| {
         _ = std.c.write(std.c.STDOUT_FILENO, note.ptr, note.len);
@@ -1519,8 +1587,9 @@ test "EXP-5: hotkeys help no longer claims Ctrl-C interrupts a blocked turn" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "Ctrl-C         stop the session") != null);
 }
 
-test "EXP-8: interactive banner warns that each turn spends API credits" {
-    try testing.expect(std.mem.indexOf(u8, expert_banner, "consumes API credits") != null);
+test "interactive banner points to resolved session identity" {
+    try testing.expect(std.mem.indexOf(u8, expert_banner, "resolved model provider") != null);
+    try testing.expect(std.mem.indexOf(u8, expert_banner, "/status") != null);
 }
 
 test "EXP-8: post-turn token line is labelled cumulative for the whole session" {
@@ -1632,7 +1701,7 @@ test "processSubmit: cross-provider model rejection preserves session config" {
         .tool_result => |*result| {
             defer result.deinit(testing.allocator);
             try testing.expect(!result.ok);
-            try testing.expect(std.mem.indexOf(u8, result.llm_text, "active anthropic provider") != null);
+            try testing.expect(std.mem.indexOf(u8, result.llm_text, "active claude provider") != null);
         },
         else => return error.TestUnexpectedResult,
     }
@@ -1656,6 +1725,33 @@ test "processSubmit: /status reports provider auth and persistence state" {
             try testing.expect(std.mem.indexOf(u8, r.llm_text, "persistence:   disabled") != null);
         },
         else => return error.TestFailed,
+    }
+}
+
+test "processSubmit: local settings status and model list agree" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = try agent.AgentSession.initLocal(
+        testing.allocator,
+        "system",
+        null,
+        "http://127.0.0.1:8080",
+    );
+    defer session.deinit(testing.allocator);
+
+    for ([_][]const u8{ "/settings", "/status", "/model" }) |command| {
+        var outcome = try processSubmit(testing.allocator, &session, &reg, command, null);
+        switch (outcome) {
+            .tool_result => |*result| {
+                defer result.deinit(testing.allocator);
+                try testing.expect(result.ok);
+                try testing.expect(std.mem.indexOf(u8, result.llm_text, "local") != null or
+                    std.mem.indexOf(u8, result.llm_text, "LiquidAI/LFM2.5-2.6B-MLX-8bit") != null);
+                try testing.expect(std.mem.indexOf(u8, result.llm_text, "claude-") == null);
+                try testing.expect(std.mem.indexOf(u8, result.llm_text, "gpt-4o-mini") == null);
+            },
+            else => return error.TestFailed,
+        }
     }
 }
 

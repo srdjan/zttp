@@ -40,6 +40,11 @@ fail() {
 # which names both markers in its own text.
 sites_for() {
   git ls-files -z |
+    xargs -0 sh -c '
+      for file do
+        [ -f "$file" ] && printf "%s\0" "$file"
+      done
+    ' sh |
     xargs -0 grep -l -F -e "$1" -- 2>/dev/null |
     grep -v -x -F "$self" |
     grep -v '^docs/' |

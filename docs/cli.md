@@ -389,14 +389,18 @@ they never change an exit code.
 
 ## Expert Mode
 
-Configure a model key, then launch the interactive agent:
+The current default is DeepSeek:
 
 ```bash
-zttp auth claude
-zttp auth openai
-zttp auth status
-zttp auth revoke claude
+zttp auth deepseek
 zttp expert
+```
+
+To use local LFM, start the developer-managed server and select it explicitly:
+
+```bash
+mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
+zttp expert --provider local
 ```
 
 Useful modes:
@@ -405,7 +409,7 @@ Useful modes:
 zttp expert --resume
 zttp expert --yes
 zttp expert --no-edit
-zttp expert --model claude-sonnet-4-6
+zttp expert --provider claude --model claude-sonnet-4-6
 zttp expert --print "add a GET /health route"
 zttp expert --print "..." --mode json
 zttp expert --mode rpc
@@ -417,30 +421,46 @@ zttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--resume` | Continue the last session for the current project. |
 | `--yes` | Apply every verified edit without prompting. |
 | `--no-edit` | Let the model read and analyze files but block all writes. |
-| `--model <id>` | Start on a model registered for the configured provider. |
+| `--provider <name>` | Select `local`, `claude`, `openai`, or `deepseek` for this launch. |
+| `--model <id>` | Start on a model registered for the active provider. |
 | `--print <text>` | Non-interactive: send one message, print the response, and exit. |
 | `--mode json` | Emit JSON-encoded turn events to stdout (pairs with `--print`). |
 | `--mode rpc` | Run in RPC mode for editor integrations. |
 | `--handler <file>` | Override the handler file (default: auto-detected from `zttp.json`). |
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 
-Pi uses `claude-sonnet-4-6` for Anthropic and `gpt-4o-mini` for OpenAI.
-Anthropic remains the measured path; OpenAI support ships as an experimental
-Responses API backend. If both credentials are configured, Anthropic takes
-precedence.
+The explicit local provider uses `LiquidAI/LFM2.5-2.6B-MLX-8bit` through
+non-streaming Chat Completions at the loopback-only `ZTTP_MLX_BASE_URL`, which defaults to
+`http://127.0.0.1:8080`. Zttp checks `/health` and `/v1/models` before creating
+session files. It never manages the MLX-LM process or falls back to cloud.
+The local adapter was tested with MLX-LM 0.31.3 and model revision
+`b372ebbb518c0e81617e25d8824427dd9ee1f08c`.
 
 `--model <id>` accepts an exact ID from the static registry, then checks it
-against the provider selected from credentials. A model ID never switches the
-provider. `/model` lists only models for the active provider, marks the current
-one, and changes the current session when you select another. Selection also
-applies that model's request budget: the Claude entries keep their existing
-budgets, while `gpt-4o-mini` requests at most 8,192 output tokens despite its
-16,384-token output capability. RPC clients get the same allowed set through
-`model.list` and the same validation through `model.set`.
+against the resolved provider. A model ID never switches the provider. The
+resolution order is explicit launch flags, stored resume or fork identity, then
+the current DeepSeek default. `/model` lists only models for the active provider, marks the
+current one, and persists a valid change. RPC clients get the same allowed set
+through `model.list` and the same validation through `model.set`.
 
-The stored provider file is `~/.zttp/providers.json` with mode `0600`.
-Environment variables `ANTHROPIC_API_KEY` and `OPENAI_API_KEY` override stored
-values.
+The local model has a 131,072-token context and an 8,192-token request output
+budget. Claude defaults to `claude-sonnet-4-6`; OpenAI defaults to
+`gpt-4o-mini`; DeepSeek defaults to `deepseek-v4-flash`. `--goal` is
+compiler-only: it rejects `--provider` and `--model` and bypasses model
+readiness.
+
+DeepSeek uses the same non-streaming Chat Completions shape as the local
+provider, over HTTPS at `DEEPSEEK_BASE_URL`, which defaults to
+`https://api.deepseek.com`. The endpoint policy admits only an HTTPS root that
+carries no credential of its own; plain HTTP is refused rather than upgraded.
+`deepseek-v4-flash` and `deepseek-v4-pro` both declare a 1,000,000-token context
+and a 384,000-token output ceiling; zttp asks for 8,192 output tokens per turn.
+A DeepSeek turn sends handler source to a third party, which the destination
+line under the banner states before the first turn.
+
+Optional cloud keys are stored in `~/.zttp/providers.json` with mode `0600`.
+Environment variables `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and
+`DEEPSEEK_API_KEY` override stored values after their provider is selected.
 
 ## Optional Surfaces
 

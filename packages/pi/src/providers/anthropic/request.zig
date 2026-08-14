@@ -4,7 +4,7 @@
 
 const std = @import("std");
 const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
-const json_writer = @import("json_writer.zig");
+const json_writer = @import("../json_writer.zig");
 const model_request = @import("../model_request.zig");
 const transcript_mod = @import("../../transcript.zig");
 

@@ -5,9 +5,37 @@
 const std = @import("std");
 
 pub const Provider = enum {
+    local,
     anthropic,
     openai,
+    deepseek,
+
+    pub fn publicName(self: Provider) []const u8 {
+        return switch (self) {
+            .local => "local",
+            .anthropic => "claude",
+            .openai => "openai",
+            .deepseek => "deepseek",
+        };
+    }
+
+    pub fn parsePublic(value: []const u8) ?Provider {
+        if (std.mem.eql(u8, value, "local")) return .local;
+        if (std.mem.eql(u8, value, "claude")) return .anthropic;
+        if (std.mem.eql(u8, value, "openai")) return .openai;
+        if (std.mem.eql(u8, value, "deepseek")) return .deepseek;
+        return null;
+    }
 };
+
+/// Single authority for the product and evaluation headline default.
+///
+/// DeepSeek since 2026-08-14, moved once its complete 19-case corpus replayed
+/// 19/19 offline and its coverage baseline was measured rather than borrowed.
+/// The product default and the evaluation headline stay one constant so the
+/// published convergence number always describes the model a bare
+/// `zttp expert` actually gets.
+pub const default_provider: Provider = .deepseek;
 
 pub const Capabilities = struct {
     context_window_tokens: u32,
@@ -28,6 +56,26 @@ pub const Model = struct {
 };
 
 pub const registry = [_]Model{
+    .{
+        .provider = .local,
+        .id = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
+        .display_name = "LFM2.5 2.6B MLX 8-bit",
+        .capabilities = .{ .context_window_tokens = 131_072, .max_output_tokens = 8_192 },
+        .request_policy = .{ .max_output_tokens = 8_192 },
+        .is_default = true,
+    },
+    .{
+        // A candidate replacement for the 2.6B default, not the default. The
+        // context window is the served snapshot's own
+        // `max_position_embeddings`, not the family's YaRN ceiling: this build
+        // declares no `rope_scaling`, so 40_960 is what it has, well under the
+        // 131_072 the LFM default carries.
+        .provider = .local,
+        .id = "mlx-community/Qwen3-8B-4bit",
+        .display_name = "Qwen3 8B MLX 4-bit",
+        .capabilities = .{ .context_window_tokens = 40_960, .max_output_tokens = 8_192 },
+        .request_policy = .{ .max_output_tokens = 8_192 },
+    },
     .{
         .provider = .anthropic,
         .id = "claude-opus-4-8",
@@ -64,6 +112,25 @@ pub const registry = [_]Model{
         .capabilities = .{ .context_window_tokens = 128_000, .max_output_tokens = 16_384 },
         .request_policy = .{ .max_output_tokens = 8_192 },
         .is_default = true,
+    },
+    .{
+        // Capabilities are the published DeepSeek figures (1M context, 384K
+        // maximum output). The request policy is far below the ceiling on
+        // purpose: an expert turn emits a patch, not a book, and the ceiling
+        // is what the model permits rather than what zttp intends to spend.
+        .provider = .deepseek,
+        .id = "deepseek-v4-flash",
+        .display_name = "DeepSeek V4 Flash",
+        .capabilities = .{ .context_window_tokens = 1_000_000, .max_output_tokens = 384_000 },
+        .request_policy = .{ .max_output_tokens = 8_192 },
+        .is_default = true,
+    },
+    .{
+        .provider = .deepseek,
+        .id = "deepseek-v4-pro",
+        .display_name = "DeepSeek V4 Pro",
+        .capabilities = .{ .context_window_tokens = 1_000_000, .max_output_tokens = 384_000 },
+        .request_policy = .{ .max_output_tokens = 8_192 },
     },
 };
 
@@ -165,4 +232,23 @@ test "Anthropic request policies preserve curated model budgets" {
 test "provider resolution distinguishes unknown and cross-provider ids" {
     try std.testing.expectError(error.UnknownModel, resolveForProvider(.openai, "gpt-4o-min"));
     try std.testing.expectError(error.ProviderMismatch, resolveForProvider(.anthropic, "gpt-4o-mini"));
+}
+
+test "DeepSeek rows carry the published limits and a deliberate request policy" {
+    const flash = try resolveForProvider(.deepseek, "deepseek-v4-flash");
+    try std.testing.expectEqual(@as(u32, 1_000_000), flash.capabilities.context_window_tokens);
+    try std.testing.expectEqual(@as(u32, 384_000), flash.capabilities.max_output_tokens);
+    try std.testing.expectEqual(@as(u32, 8_192), flash.request_policy.max_output_tokens);
+    try std.testing.expectEqual(flash, defaultForProvider(.deepseek));
+
+    const pro = try resolveForProvider(.deepseek, "deepseek-v4-pro");
+    try std.testing.expect(!pro.is_default);
+    try std.testing.expectError(error.ProviderMismatch, resolveForProvider(.openai, "deepseek-v4-flash"));
+}
+
+test "local provider has exactly the pinned LFM default and request policy" {
+    const model = try resolveForProvider(.local, "LiquidAI/LFM2.5-2.6B-MLX-8bit");
+    try std.testing.expectEqual(@as(u32, 131_072), model.capabilities.context_window_tokens);
+    try std.testing.expectEqual(@as(u32, 8_192), model.request_policy.max_output_tokens);
+    try std.testing.expectEqual(model, defaultForProvider(.local));
 }

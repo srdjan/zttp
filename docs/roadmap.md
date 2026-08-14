@@ -505,28 +505,87 @@ is the thesis demonstrated rather than asserted. If it fails, that is also infor
 it makes item 3 required rather than optional, because per-hole fill is the known way to
 shrink a task to small-model size.
 
-The plumbing is in place and the measurement is not. "Through the existing
-OpenAI-compatible provider path" was optimistic: the path existed but had no way to be
-pointed anywhere. `base_url` was a `Config` field nothing set, and the model id came
-from `models.zig`, which only knows hosted models - so a local runtime was unreachable
-even though it speaks the same wire shape. `ZTS_OPENAI_BASE_URL` and `ZTS_OPENAI_MODEL`
-now set both, an off-registry model takes the provider default output ceiling rather
-than inheriting a hosted model's, and unset means the hosted path is exactly what it
-was.
+The dedicated local provider now covers the supported local-model path with MLX-LM
+Chat Completions. The OpenAI provider remains available for registered OpenAI models,
+and `ZTS_OPENAI_BASE_URL` may redirect its Responses API transport without changing
+provider or model identity. Model selection stays explicit through `--model`; the old
+off-registry `ZTS_OPENAI_MODEL` override is rejected.
 
-To run it, with any server that serves the OpenAI Responses shape:
+To run the supported local measurement:
 
 ```bash
-export OPENAI_API_KEY=unused-by-a-local-server
-export ZTS_OPENAI_BASE_URL=http://127.0.0.1:11434/v1/responses
-export ZTS_OPENAI_MODEL=qwen2.5-coder:7b
+# Both tool flags are required. Without them the server returns LFM2's native
+# [fn(arg='x')] calls as prose, and the agent loop sees nothing to run.
+rapid-mlx serve LiquidAI/LFM2.5-2.6B-MLX-8bit --port 8080 \
+  --enable-auto-tool-choice --tool-call-parser lfm
 zig build test-expert-app          # replay first: confirms the harness is sound offline
-# then the live corpus run, and `bash scripts/update-convergence.sh` to publish
+ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=local \
+  ZTTP_CODEGEN_MODEL=LiquidAI/LFM2.5-2.6B-MLX-8bit \
+  ZTTP_CODEGEN_LOCAL_RUNTIME=rapid-mlx@0.12.11 \
+  zig build test-expert-app -Dtest-filter="record codegen baseline corpus"
+# then `bash scripts/update-convergence.sh` to publish
 ```
 
-What remains is running it, which needs a local model server. Note the wire shape is the
-Responses API, not Chat Completions - a runtime that serves only the latter needs a
-shim, and that is worth checking before reading a failure as a result about the model.
+What remains is a full passing corpus measurement. The structural real-model flow has
+passed, but the measured local corpus currently blocks the default cutover.
+The approved execution path is [Plan 027](plans/2026-08-13-027-local-lfm-default-cutover-plan.md).
+
+Status as of 2026-08-14: the local corpus holds 16 of 19 cases and is parked until a
+more capable local model replaces LiquidAI/LFM2.5-2.6B-MLX-8bit. The three missing cases
+are model failures rather than harness failures: `durable-order`, `workflow-wait-signal`,
+and `cache-counter-holes` all end in `EmptyResponse`.
+
+Three budgets were measured against them and none is what blocks. A raised per-turn wall
+clock does not recover them: `ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000` recovered four other
+cases that the 180s default had cut off, and these failed the same way with the longer
+ceiling. A raised roundtrip and tool-call budget does not recover them either. Raising
+`loop.RunOptions` from 18/16 to 44/40 converted none of the five budget-bound cases to
+green and made recording less reliable, because a longer turn is more exposure to an
+empty or truncated response. The five cases that pinned at 18 roundtrips had all also hit
+`max_tool_calls_per_turn = 16`, and `loop.zig:664` lets a turn continue past that budget
+with every further tool batch refused, so the roundtrip cap is where those turns stop
+rather than what ends them. Every completed run reports `retries=4` against
+`interactive_max_attempts = 5`, so verification attempts bind once the budgets do not.
+
+The serving stack is the one thing that did move a case. It changed to rapid-mlx 0.12.11
+on 2026-08-14, and with `--enable-auto-tool-choice --tool-call-parser lfm` it recovered
+`workflow-queued-call`, which had failed three times before. The old server was running
+with no tool-call parser, so LFM2's native `[fn(arg='x')]` calls arrived as prose and the
+agent loop saw nothing to run. The other three then reached 13 to 17 model calls against
+10 to 12 before, and still ended in `EmptyResponse`. Failing identically on both stacks is
+what makes them a model limit rather than a serving one.
+
+Do not spend further time on parser permutations. `--tool-call-parser auto` resolves to
+the same parser as `lfm`, and both rewrite the assistant's text: a probe offering only
+`read_file` and asking for prose containing `[totally_unknown_tool(x='1')]` came back with
+that fragment cut out of `content` and emitted as a real tool call for a function never
+offered. A reply that is entirely call-shaped therefore arrives with `content: ""`, which
+is the `EmptyResponse` above. Without a parser the server emits no `tool_calls` at all, so
+neither setting is safe by default, and any cassette recorded on this stack is provisional
+until the parser stops editing prose.
+
+rapid-mlx sends no `system_fingerprint` and serves no version endpoint, so a recording
+declares its stack with `ZTTP_CODEGEN_LOCAL_RUNTIME=rapid-mlx@0.12.11`, and the manifest
+carries `runtime_name` and `runtime_version` where an MLX-LM recording carries
+`mlx_lm_version`. A local manifest that names its stack by neither route is refused.
+
+Nothing blocks while this is parked. The replay falls back to `headline_provider`, which
+is `.anthropic`, so `zig build test`, `zig build test-expert-app`, `scripts/verify.sh`,
+`scripts/update-convergence.sh`, and `scripts/update-coverage.sh` all replay the frozen
+Claude corpus and never read the local one. The local corpus fails only under an explicit
+`ZTTP_CODEGEN_REPLAY_PROVIDER=local`, with `MissingCodegenCassette`.
+
+Leave that a hard failure. Do not make the replay skip the missing cases to get it green.
+The three absentees are exactly the cases the model cannot finish, so a rate computed over
+the surviving 16 reads higher than the truth and hides the failure mode. This is the
+inverse of the gate rule in AGENTS.md about a gate that counts nothing still reporting a
+pass. There is no local first-draft or green number in existence today, because the replay
+aborts before it computes one, so completing all 19 is the precondition for publishing a
+local row at all.
+
+When a better local model lands, the work is a full 19-case re-record rather than a patch
+of the three. Every manifest pins the model revision and the stack that served it, so a
+model swap supersedes all 16 committed cassettes.
 
 Observable: one published row per model in the item-2 table, dated.
 

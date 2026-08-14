@@ -1,11 +1,10 @@
-//! Expert session wrapper around `loop.runTurn`. Carries a backend union
-//! that is either a `StubClient` (default, zero-config, fixed reply) or an
-//! Anthropic client built from an API key and a system prompt. Callers swap
-//! backends at session construction; the rest of the loop is agnostic.
+//! Expert session wrapper around `loop.runTurn`. Launch identity is resolved
+//! before any backend is constructed, then the provider-specific client stays
+//! behind one tagged union for the lifetime of the process.
 //!
 //! The session owns a long-lived `Transcript` that grows across turns
-//! plus, for the Anthropic backend, an allocator-owned copy of the system
-//! prompt so the persona bytes outlive whatever buffer produced them.
+//! plus allocator-owned provider configuration whose bytes must outlive a
+//! client request.
 //! `runOneTurn` drives one pass through the loop driver, then renders
 //! the latest appended transcript entry to an owned `[]u8` the caller
 //! frees. Rendering the whole transcript per turn would re-print
@@ -21,7 +20,10 @@ const registry_mod = @import("registry/registry.zig");
 const anthropic_client = @import("providers/anthropic/client.zig");
 const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const openai_client = @import("providers/openai/client.zig");
+const local_client = @import("providers/local/client.zig");
+const deepseek_client = @import("providers/deepseek/client.zig");
 const models_registry = @import("providers/models.zig");
+const provider_selection = @import("providers/selection.zig");
 const expert_persona = @import("expert_persona.zig");
 const zts_cli = @import("zts_cli");
 const expert_meta = zts_cli.expert_meta;
@@ -37,13 +39,6 @@ const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
 
 pub const Provider = models_registry.Provider;
-pub const ModelSelectionError = models_registry.SelectionError || error{NoActiveProvider};
-
-pub const AuthKind = enum {
-    stub,
-    anthropic_api_key,
-    openai_api_key,
-};
 
 pub const BackendDescriptor = struct {
     auth_label: []const u8,
@@ -51,6 +46,9 @@ pub const BackendDescriptor = struct {
 };
 
 pub const SessionConfig = struct {
+    /// Internal compiler-only lane. It may persist compiler events but never
+    /// constructs or checks a model transport.
+    model_free: bool = false,
     no_session: bool = false,
     no_persist_tool_output: bool = false,
     /// Skip AGENTS.md / CLAUDE.md project-context loading. Persona is
@@ -67,6 +65,9 @@ pub const SessionConfig = struct {
     /// with `parent_id` pointing to the source. Mutually exclusive with
     /// `resume_latest` and `session_id`.
     fork_session_id: ?[]const u8 = null,
+    /// Launch-scoped provider override. Null restores a persisted identity or
+    /// selects the product default for a new model-mediated session.
+    provider: ?Provider = null,
     /// `--model <id>` launch override (a canonical static registry id, so it
     /// outlives the session). Applied once here so every entry point inherits
     /// it; null leaves the compile-time default in place.
@@ -80,9 +81,7 @@ pub const SessionConfig = struct {
 const stub_reply_text =
     "expert offline: no live model backend configured; set ANTHROPIC_API_KEY to enable expert mode";
 
-/// Zero-state client used when no Anthropic credentials are present.
-/// Returns a fixed reply regardless of the prompt so the loop still
-/// exercises every path from keyboard to transcript.
+/// Deterministic internal client used by compiler-only and unit-test paths.
 const StubClient = struct {
     fn requestFn(
         ctx: *anyopaque,
@@ -107,8 +106,10 @@ const StubClient = struct {
 
 const Backend = union(enum) {
     stub: StubClient,
+    local: local_client.Client,
     anthropic: anthropic_client.Client,
     openai: openai_client.Client,
+    deepseek: deepseek_client.Client,
 };
 
 fn configWithModel(config: anytype, model: *const models_registry.Model) @TypeOf(config) {
@@ -116,6 +117,15 @@ fn configWithModel(config: anytype, model: *const models_registry.Model) @TypeOf
     next.model = model.id;
     next.max_tokens = model.request_policy.max_output_tokens;
     return next;
+}
+
+fn modelConfigMatches(
+    model_id: []const u8,
+    max_tokens: u32,
+    model: *const models_registry.Model,
+) bool {
+    return std.mem.eql(u8, model_id, model.id) and
+        max_tokens == model.request_policy.max_output_tokens;
 }
 
 /// Running per-session metrics, folded one turn at a time and emitted as a
@@ -196,12 +206,8 @@ pub const SessionMetrics = struct {
 
 /// Where to send OpenAI-shaped requests when the target is not OpenAI.
 ///
-/// `model` is optional because the two things vary independently: a proxy in
-/// front of OpenAI keeps the registry model id and only moves the endpoint,
-/// while a local runtime serves a model the registry has never heard of.
 pub const OpenAiEndpoint = struct {
     base_url: []const u8,
-    model: ?[]const u8 = null,
 };
 
 /// Read an endpoint override out of the environment, or null when
@@ -210,45 +216,54 @@ pub const OpenAiEndpoint = struct {
 /// The slices borrow from the process environment, which outlives any session,
 /// and `initOpenAI` copies them anyway so one ownership rule covers both the
 /// env source and a caller-supplied literal.
-pub fn openAiEndpointFromEnv() ?OpenAiEndpoint {
+pub fn openAiEndpointFromEnv() !?OpenAiEndpoint {
+    if (envVar("ZTS_OPENAI_MODEL") != null) return error.UnsupportedOpenAIModelOverride;
     const base_url = envVar("ZTS_OPENAI_BASE_URL") orelse return null;
-    return .{ .base_url = base_url, .model = envVar("ZTS_OPENAI_MODEL") };
+    return .{ .base_url = base_url };
 }
 
-/// Where a session built from the environment will send handler source.
+/// Where the resolved session will send handler source.
 ///
 /// A `zttp expert` turn puts source on the wire whenever the model reads a
 /// file, so a user is owed the destination before the first turn rather than
-/// after. This mirrors `initFromEnv`'s provider precedence in one place: a
-/// banner that re-derived it would eventually disagree with the session it
-/// describes, which is the drift this repo has already paid for twice.
+/// after. The banner reads this from the constructed backend instead of
+/// re-deriving identity from credentials or other environment state.
 pub const Destination = union(enum) {
-    /// No key is set; the stub backend answers and nothing leaves the process.
+    /// Internal stub backend used by compiler-only and test paths.
     offline,
+    local: []const u8,
     anthropic,
     openai_hosted,
     /// `ZTS_OPENAI_BASE_URL` is set. Carries the value as given.
     openai_custom: []const u8,
+    /// DeepSeek, at its default root or at a `DEEPSEEK_BASE_URL` override.
+    /// Carries the value as given. The endpoint policy requires HTTPS, so this
+    /// is always a remote host.
+    deepseek: []const u8,
 
     /// True when the destination is on this machine, so source never reaches a
     /// third party. Host-form check only: it reports what the user configured,
     /// not what DNS would resolve to.
     pub fn isLocal(self: Destination) bool {
         return switch (self) {
-            .offline => true,
-            .anthropic, .openai_hosted => false,
+            .offline, .local => true,
+            .anthropic, .openai_hosted, .deepseek => false,
             .openai_custom => |url| containsAny(url, &.{ "//127.0.0.1", "//localhost", "//[::1]", "//0.0.0.0" }),
         };
     }
 };
 
-pub fn destinationFromEnv() Destination {
-    if (envVar("ANTHROPIC_API_KEY") != null) return .anthropic;
-    if (envVar("OPENAI_API_KEY") != null) {
-        if (openAiEndpointFromEnv()) |ep| return .{ .openai_custom = ep.base_url };
-        return .openai_hosted;
-    }
-    return .offline;
+pub fn destinationForSession(session: *const AgentSession) Destination {
+    return switch (session.backend) {
+        .stub => .offline,
+        .local => |client| .{ .local = client.config.base_url },
+        .anthropic => .anthropic,
+        .openai => |client| if (std.mem.eql(u8, client.config.base_url, openai_client.default_base_url))
+            .openai_hosted
+        else
+            .{ .openai_custom = client.config.base_url },
+        .deepseek => |client| .{ .deepseek = client.config.base_url },
+    };
 }
 
 fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
@@ -269,7 +284,11 @@ pub const AgentSession = struct {
     /// Config borrows these, so the session outlives the caller's buffers the
     /// same way it does for the prompt.
     base_url_owned: ?[]u8 = null,
-    model_owned: ?[]u8 = null,
+    /// Resolved launch identity. This is authoritative for UI and persistence,
+    /// including test sessions that inject a model client separately.
+    resolved_provider: ?Provider = null,
+    resolved_model: ?*const models_registry.Model = null,
+    identity_override_disclosed: bool = false,
 
     session_id: ?[]u8 = null,
     session_dir: ?[]u8 = null,
@@ -325,6 +344,37 @@ pub const AgentSession = struct {
             }) },
             .system_prompt_owned = prompt_owned,
             .tools_json_owned = tools_owned,
+            .resolved_provider = .anthropic,
+            .resolved_model = model,
+        };
+    }
+
+    pub fn initLocal(
+        allocator: std.mem.Allocator,
+        system_prompt: []const u8,
+        tools_json: ?[]const u8,
+        base_url: []const u8,
+    ) !AgentSession {
+        const prompt_owned = try allocator.dupe(u8, system_prompt);
+        errdefer allocator.free(prompt_owned);
+        const tools_owned = if (tools_json) |json| try allocator.dupe(u8, json) else null;
+        errdefer if (tools_owned) |json| allocator.free(json);
+        const base_owned = try allocator.dupe(u8, base_url);
+        errdefer allocator.free(base_owned);
+        const model = models_registry.defaultForProvider(.local);
+        return .{
+            .backend = .{ .local = local_client.Client.init(.{
+                .system_prompt = prompt_owned,
+                .tools_json = tools_owned,
+                .base_url = base_owned,
+                .model = model.id,
+                .max_tokens = model.request_policy.max_output_tokens,
+            }) },
+            .system_prompt_owned = prompt_owned,
+            .tools_json_owned = tools_owned,
+            .base_url_owned = base_owned,
+            .resolved_provider = .local,
+            .resolved_model = model,
         };
     }
 
@@ -333,13 +383,8 @@ pub const AgentSession = struct {
     /// api_key, system prompt, and tools_json are all duped so the caller's
     /// buffers can be freed independently. `tools_json` is the
     /// Responses-API tools array produced by `openai_client.writeToolsArray`.
-    ///
-    /// `override` points the client at an OpenAI-compatible server that is not
-    /// OpenAI - a local runtime serving the same wire shape. Roadmap item 5
-    /// needs exactly that and had no way to ask for it: both the endpoint and
-    /// the model id were read from the registry, which only knows about hosted
-    /// models. `null` keeps the registry default, so the hosted path is byte
-    /// for byte what it was.
+    /// An endpoint override changes only the Responses API destination. The
+    /// active provider's registry-selected model remains authoritative.
     pub fn initOpenAI(
         allocator: std.mem.Allocator,
         api_key: []const u8,
@@ -368,21 +413,9 @@ pub const AgentSession = struct {
 
         var base_url_owned: ?[]u8 = null;
         errdefer if (base_url_owned) |s| allocator.free(s);
-        var model_owned: ?[]u8 = null;
-        errdefer if (model_owned) |s| allocator.free(s);
-
         if (override) |ep| {
             base_url_owned = try allocator.dupe(u8, ep.base_url);
             config.base_url = base_url_owned.?;
-            if (ep.model) |id| {
-                model_owned = try allocator.dupe(u8, id);
-                config.model = model_owned.?;
-                // An off-registry model has no policy to read, so the request
-                // keeps the provider default rather than inheriting a hosted
-                // model's ceiling, which would be a number about a different
-                // model entirely.
-                config.max_tokens = openai_client.default_max_tokens;
-            }
         }
 
         return .{
@@ -390,7 +423,50 @@ pub const AgentSession = struct {
             .system_prompt_owned = prompt_owned,
             .tools_json_owned = tools_owned,
             .base_url_owned = base_url_owned,
-            .model_owned = model_owned,
+            .resolved_provider = .openai,
+            .resolved_model = model,
+        };
+    }
+
+    /// Constructs a session whose backend is a real DeepSeek Chat Completions
+    /// client. Same ownership contract as `initAnthropic`, plus the base URL:
+    /// an override is duped so the client's Config never borrows a caller
+    /// buffer that could be freed first. `tools_json` is the OpenAI
+    /// function-calling array produced by `deepseek_client.writeToolsArray`.
+    pub fn initDeepSeek(
+        allocator: std.mem.Allocator,
+        api_key: []const u8,
+        system_prompt: []const u8,
+        tools_json: ?[]const u8,
+        base_url: []const u8,
+    ) !AgentSession {
+        const prompt_owned = try allocator.dupe(u8, system_prompt);
+        errdefer allocator.free(prompt_owned);
+        const key_owned = try allocator.dupe(u8, api_key);
+        errdefer allocator.free(key_owned);
+        const tools_owned = if (tools_json) |json|
+            try allocator.dupe(u8, json)
+        else
+            null;
+        errdefer if (tools_owned) |json| allocator.free(json);
+        const base_owned = try allocator.dupe(u8, base_url);
+        errdefer allocator.free(base_owned);
+
+        const model = models_registry.defaultForProvider(.deepseek);
+        return .{
+            .backend = .{ .deepseek = deepseek_client.Client.init(.{
+                .api_key = key_owned,
+                .system_prompt = prompt_owned,
+                .tools_json = tools_owned,
+                .base_url = base_owned,
+                .model = model.id,
+                .max_tokens = model.request_policy.max_output_tokens,
+            }) },
+            .system_prompt_owned = prompt_owned,
+            .tools_json_owned = tools_owned,
+            .base_url_owned = base_owned,
+            .resolved_provider = .deepseek,
+            .resolved_model = model,
         };
     }
 
@@ -399,72 +475,90 @@ pub const AgentSession = struct {
         if (self.system_prompt_owned) |s| allocator.free(s);
         if (self.tools_json_owned) |json| allocator.free(json);
         if (self.base_url_owned) |s| allocator.free(s);
-        if (self.model_owned) |s| allocator.free(s);
         if (self.session_id) |s| allocator.free(s);
         if (self.session_dir) |s| allocator.free(s);
         if (self.events_path) |s| allocator.free(s);
         if (self.meta_path) |s| allocator.free(s);
         switch (self.backend) {
             .stub => {},
+            .local => {},
             .anthropic => |*c| allocator.free(c.config.api_key),
             .openai => |*c| allocator.free(c.config.api_key),
+            .deepseek => |*c| allocator.free(c.config.api_key),
         }
     }
 
     pub fn modelClient(self: *AgentSession) loop.ModelClient {
         return switch (self.backend) {
             .stub => (&self.backend.stub).asClient(),
+            .local => (&self.backend.local).asModelClient(),
             .anthropic => (&self.backend.anthropic).asModelClient(),
             .openai => (&self.backend.openai).asModelClient(),
+            .deepseek => (&self.backend.deepseek).asModelClient(),
         };
     }
 
     /// Returns the model id currently in use, or null for the stub backend.
     pub fn currentModel(self: *const AgentSession) ?[]const u8 {
-        return switch (self.backend) {
-            .stub => null,
-            .anthropic => |c| c.config.model,
-            .openai => |c| c.config.model,
-        };
+        return if (self.resolved_model) |model| model.id else null;
     }
 
     pub fn activeProvider(self: *const AgentSession) ?Provider {
-        return switch (self.backend) {
-            .stub => null,
-            .anthropic => .anthropic,
-            .openai => .openai,
-        };
+        return self.resolved_provider;
     }
 
-    pub fn authKind(self: *const AgentSession) AuthKind {
-        return switch (self.backend) {
-            .stub => .stub,
-            .anthropic => .anthropic_api_key,
-            .openai => .openai_api_key,
-        };
-    }
-
-    /// Single source of truth for the backend's display labels. One switch
-    /// on `self.backend` replaces what used to be three: authKind, then
-    /// authLabel (re-dispatching on authKind), then providerLabel.
+    /// Single source of truth for the backend's display labels.
     pub fn backendDescriptor(self: *const AgentSession) BackendDescriptor {
-        return switch (self.backend) {
-            .stub => .{ .auth_label = "stub", .provider_label = "stub" },
-            .anthropic => .{ .auth_label = "api-key", .provider_label = "anthropic" },
-            .openai => .{ .auth_label = "api-key", .provider_label = "openai" },
+        const provider_label = if (self.activeProvider()) |provider| provider.publicName() else "stub";
+        const auth_label: []const u8 = switch (self.backend) {
+            .stub => "stub",
+            .local => "none",
+            .anthropic, .openai, .deepseek => "api-key",
         };
+        return .{ .auth_label = auth_label, .provider_label = provider_label };
     }
 
     /// Select an exact registry model for the active provider. Validation
     /// computes the complete next state before either config field changes.
-    pub fn setModel(self: *AgentSession, model_id: []const u8) ModelSelectionError!void {
+    pub fn setModel(
+        self: *AgentSession,
+        allocator: std.mem.Allocator,
+        model_id: []const u8,
+    ) !void {
+        return self.setModelWithRestamp(allocator, model_id, restampSessionIdentity);
+    }
+
+    fn setModelWithRestamp(
+        self: *AgentSession,
+        allocator: std.mem.Allocator,
+        model_id: []const u8,
+        restamp_fn: anytype,
+    ) !void {
         const provider = self.activeProvider() orelse return error.NoActiveProvider;
         const model = try models_registry.resolveForProvider(provider, model_id);
+        const backend_matches = switch (self.backend) {
+            .local => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
+            .anthropic => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
+            .openai => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
+            .deepseek => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
+            .stub => false,
+        };
+        if (backend_matches) {
+            self.resolved_model = model;
+            return;
+        }
+        // Persist the complete next identity before changing the live client.
+        // A filesystem failure therefore leaves both the session and backend
+        // on the previous model.
+        try restamp_fn(allocator, self, provider, model.id);
         switch (self.backend) {
+            .local => |*client| client.config = configWithModel(client.config, model),
             .anthropic => |*client| client.config = configWithModel(client.config, model),
             .openai => |*client| client.config = configWithModel(client.config, model),
-            .stub => unreachable,
+            .deepseek => |*client| client.config = configWithModel(client.config, model),
+            .stub => {},
         }
+        self.resolved_model = model;
     }
 
     /// Append the per-session metrics row at session close. Best-effort and a
@@ -479,10 +573,9 @@ pub const AgentSession = struct {
     }
 };
 
-/// Build a session from the environment (`ANTHROPIC_API_KEY` -> anthropic,
-/// else stub) and, unless `config.no_session` is true, materialize the
-/// on-disk session directory, write `meta.json` + `workspace.txt`, and
-/// wire up `events.jsonl` persistence.
+/// Resolve session identity, construct only that provider's backend, and,
+/// unless `config.no_session` is true, materialize the on-disk session
+/// directory and event persistence.
 ///
 /// When `config.resume_latest` is set, the newest existing session for
 /// this cwd is loaded and the transcript is replaced with a reconstruction
@@ -492,9 +585,83 @@ pub fn initFromEnvWithSessionConfig(
     registry: ?*const Registry,
     config: SessionConfig,
 ) !AgentSession {
+    return initFromEnvWithPreparedResume(allocator, registry, config, null);
+}
+
+fn initFromEnvWithPreparedResume(
+    allocator: std.mem.Allocator,
+    registry: ?*const Registry,
+    config: SessionConfig,
+    prepared_resume: ?*const PreparedResume,
+) !AgentSession {
     std.debug.assert(!(config.resume_latest and config.session_id != null));
     std.debug.assert(!(config.fork_session_id != null and config.resume_latest));
     std.debug.assert(!(config.fork_session_id != null and config.session_id != null));
+
+    // Resolve the source session and read its identity before credential
+    // validation, transport readiness, or any session-directory write.
+    var resumed = false;
+    var resolved_resume_id: ?[]u8 = null;
+    defer if (resolved_resume_id) |id| allocator.free(id);
+    if (config.resume_latest) {
+        if (prepared_resume) |prepared| {
+            resumed = true;
+            resolved_resume_id = try allocator.dupe(u8, prepared.session_id);
+        } else {
+            const root = try session_paths.sessionRoot(allocator);
+            defer allocator.free(root);
+            const hash = try session_paths.cwdHashFull(allocator);
+            const entries = try session_paths.listSessions(allocator, root, hash[0..]);
+            defer {
+                for (entries) |*entry| entry.deinit(allocator);
+                allocator.free(entries);
+            }
+            if (entries.len > 0) {
+                resumed = true;
+                resolved_resume_id = try allocator.dupe(u8, entries[0].session_id);
+            }
+        }
+    }
+
+    var owned_stored_meta: ?session_events.Meta = null;
+    defer if (owned_stored_meta) |*meta| session_events.freeMeta(allocator, meta);
+    var stored_meta: ?*const session_events.Meta = null;
+    if (resolved_resume_id) |source_id| {
+        if (prepared_resume) |prepared| {
+            stored_meta = &prepared.meta;
+        } else {
+            owned_stored_meta = try readSessionMeta(allocator, source_id);
+            if (owned_stored_meta) |*meta| stored_meta = meta;
+        }
+    } else if (config.session_id) |source_id| {
+        owned_stored_meta = readSessionMeta(allocator, source_id) catch |err| switch (err) {
+            error.FileNotFound => if (try sessionEventsExist(allocator, source_id))
+                return error.MissingSessionMetadata
+            else
+                null,
+            else => return err,
+        };
+        if (owned_stored_meta != null) {
+            if (owned_stored_meta) |*meta| stored_meta = meta;
+            resumed = true;
+            resolved_resume_id = try allocator.dupe(u8, source_id);
+        }
+    } else if (config.fork_session_id) |source_id| {
+        owned_stored_meta = try readSessionMeta(allocator, source_id);
+        if (owned_stored_meta) |*meta| stored_meta = meta;
+    }
+
+    const resolution: ?provider_selection.Resolution = if (config.model_free)
+        null
+    else
+        try provider_selection.resolve(.{
+            .launch_provider = config.provider,
+            .launch_model = config.model,
+            .stored = if (stored_meta) |meta| .{
+                .provider = meta.provider,
+                .model = meta.model,
+            } else null,
+        });
 
     // Load project context (AGENTS.md / CLAUDE.md) from cwd upward unless
     // the caller disabled it. Best-effort: a load failure is logged as a
@@ -506,41 +673,77 @@ pub fn initFromEnvWithSessionConfig(
     defer if (project_ctx) |p| allocator.free(p);
 
     var session = blk: {
-        if (envVar("ANTHROPIC_API_KEY")) |api_key| {
-            const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
-            defer allocator.free(system_prompt);
-            const tools_json = if (registry) |reg|
-                try buildToolsJson(allocator, reg)
-            else
-                null;
-            defer if (tools_json) |json| allocator.free(json);
-            break :blk try AgentSession.initAnthropic(allocator, api_key, system_prompt, tools_json);
+        if (config.model_free) break :blk AgentSession.initStub();
+        // A null registry is the test-only seam for sessions that exercise
+        // persistence and context loading without issuing model requests.
+        const active_registry = registry orelse break :blk AgentSession.initStub();
+        const resolved = resolution orelse return error.NoActiveProvider;
+        switch (resolved.provider) {
+            .local => {
+                const base_url = local_client.effectiveBaseUrl(envVar("ZTTP_MLX_BASE_URL"));
+                try local_client.checkReadiness(allocator, base_url, resolved.model.id);
+                const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
+                defer allocator.free(system_prompt);
+                const tools_json = try buildLocalToolsJson(allocator, active_registry);
+                defer allocator.free(tools_json);
+                break :blk try AgentSession.initLocal(allocator, system_prompt, tools_json, base_url);
+            },
+            .anthropic => {
+                const api_key = envVar("ANTHROPIC_API_KEY") orelse return error.MissingAnthropicCredential;
+                const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
+                defer allocator.free(system_prompt);
+                const tools_json = try buildToolsJson(allocator, active_registry);
+                defer allocator.free(tools_json);
+                break :blk try AgentSession.initAnthropic(allocator, api_key, system_prompt, tools_json);
+            },
+            .openai => {
+                const api_key = envVar("OPENAI_API_KEY") orelse return error.MissingOpenAICredential;
+                const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
+                defer allocator.free(system_prompt);
+                const tools_json = try buildOpenAIToolsJson(allocator, active_registry);
+                defer allocator.free(tools_json);
+                break :blk try AgentSession.initOpenAI(
+                    allocator,
+                    api_key,
+                    system_prompt,
+                    tools_json,
+                    try openAiEndpointFromEnv(),
+                );
+            },
+            .deepseek => {
+                const api_key = envVar("DEEPSEEK_API_KEY") orelse return error.MissingDeepSeekCredential;
+                const base_url = deepseek_client.effectiveBaseUrl(envVar("DEEPSEEK_BASE_URL"));
+                try deepseek_client.validateBaseUrl(base_url);
+                const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
+                defer allocator.free(system_prompt);
+                const tools_json = try buildDeepSeekToolsJson(allocator, active_registry);
+                defer allocator.free(tools_json);
+                break :blk try AgentSession.initDeepSeek(
+                    allocator,
+                    api_key,
+                    system_prompt,
+                    tools_json,
+                    base_url,
+                );
+            },
         }
-        if (envVar("OPENAI_API_KEY")) |api_key| {
-            const system_prompt = try expert_persona.buildSystemPromptWithContext(allocator, project_ctx);
-            defer allocator.free(system_prompt);
-            const tools_json = if (registry) |reg|
-                try buildOpenAIToolsJson(allocator, reg)
-            else
-                null;
-            defer if (tools_json) |json| allocator.free(json);
-            break :blk try AgentSession.initOpenAI(
-                allocator,
-                api_key,
-                system_prompt,
-                tools_json,
-                openAiEndpointFromEnv(),
-            );
-        }
-        break :blk AgentSession.initStub();
     };
     errdefer session.deinit(allocator);
+
+    if (resolution) |resolved| {
+        session.resolved_provider = resolved.provider;
+        session.resolved_model = resolved.model;
+        session.identity_override_disclosed = resolved.provider_overridden or resolved.model_overridden;
+    }
 
     // Apply a --model launch override once, here, so every caller
     // (interactive REPL, autoloop, --print, --rpc) inherits it without each
     // having to remember a separate apply step. Also covers no_session sessions.
-    if (config.model) |model_id| {
-        try session.setModel(model_id);
+    if (resolution) |resolved| {
+        switch (session.backend) {
+            .stub => {},
+            else => try session.setModel(allocator, resolved.model.id),
+        }
     }
 
     if (config.no_session) return session;
@@ -553,23 +756,9 @@ pub fn initFromEnvWithSessionConfig(
     const realpath = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
     defer allocator.free(realpath);
 
-    var resumed = false;
     const sid: []u8 = pick: {
         if (config.session_id) |id| break :pick try allocator.dupe(u8, id);
-        if (config.resume_latest) {
-            const root = try session_paths.sessionRoot(allocator);
-            defer allocator.free(root);
-            const hash = try session_paths.cwdHashFull(allocator);
-            const entries = try session_paths.listSessions(allocator, root, hash[0..]);
-            defer {
-                for (entries) |*e| e.deinit(allocator);
-                allocator.free(entries);
-            }
-            if (entries.len > 0) {
-                resumed = true;
-                break :pick try allocator.dupe(u8, entries[0].session_id);
-            }
-        }
+        if (resolved_resume_id) |id| break :pick try allocator.dupe(u8, id);
         break :pick try session_id_mod.generate(allocator);
     };
     session.session_id = sid;
@@ -580,12 +769,29 @@ pub fn initFromEnvWithSessionConfig(
 
     session.events_path = try std.fs.path.join(allocator, &.{ dir, "events.jsonl" });
     session.meta_path = try std.fs.path.join(allocator, &.{ dir, "meta.json" });
+    const events_path = session.events_path orelse return error.MissingSessionPath;
+    const meta_path = session.meta_path orelse return error.MissingSessionPath;
+    // A successfully created session is resumable even before its first turn.
+    // Forking an empty transcript likewise needs a real, empty event log.
+    if (!resumed) try zts.file_io.writeFile(allocator, events_path, "");
 
     const current_hash_bytes = expert_meta.compute().policy_hash;
     const current_hash = current_hash_bytes[0..];
+    const persisted_provider = if (resolution) |resolved|
+        resolved.provider.publicName()
+    else if (stored_meta) |meta|
+        meta.provider
+    else
+        null;
+    const persisted_model = if (resolution) |resolved|
+        resolved.model.id
+    else if (stored_meta) |meta|
+        meta.model
+    else
+        null;
 
     if (resumed) {
-        var tr = try reconstructor.reconstructTranscript(allocator, session.events_path.?, null);
+        var tr = try reconstructor.reconstructTranscript(allocator, events_path, null);
         session.transcript.deinit(allocator);
         session.transcript = tr;
         session.last_persisted_len = tr.len();
@@ -594,7 +800,18 @@ pub fn initFromEnvWithSessionConfig(
         // Detect policy drift: if the resumed session's meta.json stamps a
         // different hash than the current binary, prepend a system_note to
         // the transcript so both the model and the user see the mismatch.
-        try injectDriftNote(allocator, &session, current_hash);
+        const resume_meta = stored_meta orelse return error.MissingSessionMetadata;
+        try injectDriftNote(allocator, &session, current_hash, resume_meta);
+        try session_events.writeMeta(allocator, meta_path, .{
+            .session_id = resume_meta.session_id,
+            .workspace_realpath = resume_meta.workspace_realpath,
+            .created_at_unix_ms = resume_meta.created_at_unix_ms,
+            .parent_id = resume_meta.parent_id,
+            .policy_hash = current_hash,
+            .approval_policy = resume_meta.approval_policy,
+            .provider = persisted_provider,
+            .model = persisted_model,
+        });
     } else if (config.fork_session_id) |fork_id| {
         const src_dir = try session_paths.sessionDir(allocator, fork_id);
         defer allocator.free(src_dir);
@@ -605,28 +822,48 @@ pub fn initFromEnvWithSessionConfig(
         session.transcript = tr;
         // Re-persist forked transcript to the new session's events.jsonl.
         for (session.transcript.entries.items) |*entry| {
-            try persister.appendEntry(allocator, session.events_path.?, entry, session.persist_opts);
+            try persister.appendEntry(allocator, events_path, entry, session.persist_opts);
         }
         session.last_persisted_len = session.transcript.len();
-        try session_events.writeMeta(allocator, session.meta_path.?, .{
+        try session_events.writeMeta(allocator, meta_path, .{
             .session_id = sid,
             .workspace_realpath = realpath,
             .created_at_unix_ms = nowUnixMs(),
             .parent_id = fork_id,
             .policy_hash = current_hash,
             .approval_policy = config.approval_policy_tag,
+            .provider = persisted_provider,
+            .model = persisted_model,
         });
     } else {
-        try session_events.writeMeta(allocator, session.meta_path.?, .{
+        try session_events.writeMeta(allocator, meta_path, .{
             .session_id = sid,
             .workspace_realpath = realpath,
             .created_at_unix_ms = nowUnixMs(),
             .policy_hash = current_hash,
             .approval_policy = config.approval_policy_tag,
+            .provider = persisted_provider,
+            .model = persisted_model,
         });
     }
 
     return session;
+}
+
+fn readSessionMeta(allocator: std.mem.Allocator, session_id: []const u8) !session_events.Meta {
+    const source_dir = try session_paths.sessionDir(allocator, session_id);
+    defer allocator.free(source_dir);
+    const source_meta_path = try std.fs.path.join(allocator, &.{ source_dir, "meta.json" });
+    defer allocator.free(source_meta_path);
+    return try session_events.readMeta(allocator, source_meta_path);
+}
+
+fn sessionEventsExist(allocator: std.mem.Allocator, session_id: []const u8) !bool {
+    const source_dir = try session_paths.sessionDir(allocator, session_id);
+    defer allocator.free(source_dir);
+    const events_path = try std.fs.path.join(allocator, &.{ source_dir, "events.jsonl" });
+    defer allocator.free(events_path);
+    return zts.file_io.fileExists(allocator, events_path);
 }
 
 /// Compare the resumed session's stored policy_hash against the current
@@ -705,13 +942,8 @@ fn injectDriftNote(
     allocator: std.mem.Allocator,
     session: *AgentSession,
     current_hash: []const u8,
+    meta: *const session_events.Meta,
 ) !void {
-    const meta_path = session.meta_path orelse return;
-    // An unreadable meta.json is surfaced as a silent skip: the session can
-    // still run; the next successful write rebuilds the file.
-    var meta = session_events.readMeta(allocator, meta_path) catch return;
-    defer session_events.freeMeta(allocator, &meta);
-
     // Restore the stored approval policy (if any) so --resume inherits it.
     // The policy tag string is parsed back to the enum; unknown tags are
     // silently ignored so old sessions without the field do not break.
@@ -727,8 +959,8 @@ fn injectDriftNote(
 
     // Pre-Phase-2 sessions (no saved hash) and matching hashes both skip the
     // note; only the drift case appends + persists a system_note. All three
-    // cases fall through to a single forward-stamp at the bottom so the next
-    // resume has an accurate baseline.
+    // cases leave the transcript unchanged. The caller forward-stamps the
+    // complete metadata once after this function returns.
     if (meta.policy_hash) |saved| {
         if (std.mem.eql(u8, saved, current_hash)) return;
 
@@ -750,14 +982,26 @@ fn injectDriftNote(
             session.last_persisted_len = session.transcript.len();
         }
     }
+}
 
+fn restampSessionIdentity(
+    allocator: std.mem.Allocator,
+    session: *const AgentSession,
+    provider: Provider,
+    model: []const u8,
+) !void {
+    const meta_path = session.meta_path orelse return;
+    var meta = try session_events.readMeta(allocator, meta_path);
+    defer session_events.freeMeta(allocator, &meta);
     try session_events.writeMeta(allocator, meta_path, .{
         .session_id = meta.session_id,
         .workspace_realpath = meta.workspace_realpath,
         .created_at_unix_ms = meta.created_at_unix_ms,
         .parent_id = meta.parent_id,
-        .policy_hash = current_hash,
+        .policy_hash = meta.policy_hash,
         .approval_policy = meta.approval_policy,
+        .provider = provider.publicName(),
+        .model = model,
     });
 }
 
@@ -773,15 +1017,6 @@ fn envVar(name_z: [:0]const u8) ?[]const u8 {
     const trimmed = std.mem.trim(u8, value, " \t\n\r");
     if (trimmed.len == 0) return null;
     return trimmed;
-}
-
-/// True when a live model backend can be built from the environment. The
-/// `zttp expert` entry point checks this before launching the interactive
-/// session so a missing key fails fast with setup guidance instead of
-/// dropping into the offline stub. Single source of truth for the env-var
-/// names matched by `initFromEnvWithSessionConfig`.
-pub fn envHasModelBackend() bool {
-    return envVar("ANTHROPIC_API_KEY") != null or envVar("OPENAI_API_KEY") != null;
 }
 
 fn nowUnixMs() i64 {
@@ -804,6 +1039,20 @@ fn buildOpenAIToolsJson(allocator: std.mem.Allocator, registry: *const Registry)
     return try buf.toOwnedSlice();
 }
 
+fn buildLocalToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try local_client.writeToolsArray(buf.writer(), registry);
+    return try buf.toOwnedSlice();
+}
+
+fn buildDeepSeekToolsJson(allocator: std.mem.Allocator, registry: *const Registry) ![]u8 {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try deepseek_client.writeToolsArray(buf.writer(), registry);
+    return try buf.toOwnedSlice();
+}
+
 /// Runs one turn through the loop driver and returns an owned slice holding
 /// the rendered plain-text form of the message the turn appended. Caller
 /// frees with `allocator.free`.
@@ -817,12 +1066,30 @@ pub fn runOneTurn(
     user_text: []const u8,
     approval_fn: ?loop.ApprovalFn,
 ) ![]u8 {
+    return runOneTurnWithClient(
+        allocator,
+        session,
+        registry,
+        session.modelClient(),
+        user_text,
+        approval_fn,
+    );
+}
+
+pub fn runOneTurnWithClient(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    registry: *const Registry,
+    client: loop.ModelClient,
+    user_text: []const u8,
+    approval_fn: ?loop.ApprovalFn,
+) ![]u8 {
     const replay = session.replay_next_turn;
     session.replay_next_turn = false;
 
     const turn_result = loop.runTurnWith(
         allocator,
-        session.modelClient(),
+        client,
         registry,
         &session.transcript,
         user_text,
@@ -940,6 +1207,8 @@ pub fn fork(
         .workspace_realpath = realpath,
         .created_at_unix_ms = nowUnixMs(),
         .parent_id = old_sid,
+        .provider = if (session.activeProvider()) |provider| provider.publicName() else null,
+        .model = session.currentModel(),
     });
 
     if (session.session_id) |s| allocator.free(s);
@@ -962,18 +1231,76 @@ pub fn fork(
 
 /// Tear down `session` and rebuild it in place from the same environment.
 /// Used by `/resume` and `/new`.
+const PreparedResume = struct {
+    session_id: []u8,
+    meta: session_events.Meta,
+
+    fn deinit(self: *PreparedResume, allocator: std.mem.Allocator) void {
+        session_events.freeMeta(allocator, &self.meta);
+        allocator.free(self.session_id);
+        self.* = undefined;
+    }
+};
+
+fn prepareLatestResume(allocator: std.mem.Allocator) !?PreparedResume {
+    const root = try session_paths.sessionRoot(allocator);
+    defer allocator.free(root);
+    const hash = try session_paths.cwdHashFull(allocator);
+    const entries = try session_paths.listSessions(allocator, root, hash[0..]);
+    defer {
+        for (entries) |*entry| entry.deinit(allocator);
+        allocator.free(entries);
+    }
+    if (entries.len == 0) return null;
+
+    const session_id = try allocator.dupe(u8, entries[0].session_id);
+    errdefer allocator.free(session_id);
+    return .{
+        .session_id = session_id,
+        .meta = try readSessionMeta(allocator, session_id),
+    };
+}
+
 pub fn rebuildSession(
     allocator: std.mem.Allocator,
     session: *AgentSession,
     registry: *const Registry,
     config: SessionConfig,
 ) !void {
-    // The current session ends here; capture its metrics row before its events
-    // path is swapped for the new session's. Centralized so every session-switch
-    // caller (/new, /resume) records without remembering to.
+    var prepared_resume = if (config.resume_latest)
+        try prepareLatestResume(allocator)
+    else
+        null;
+    defer if (prepared_resume) |*prepared| prepared.deinit(allocator);
+    if (prepared_resume) |*prepared| {
+        const target = try provider_selection.resolve(.{
+            .launch_provider = config.provider,
+            .launch_model = config.model,
+            .stored = .{
+                .provider = prepared.meta.provider,
+                .model = prepared.meta.model,
+            },
+        });
+        if (target.provider != session.activeProvider()) {
+            return error.CrossProviderResume;
+        }
+    }
+    var next = try initFromEnvWithPreparedResume(
+        allocator,
+        registry,
+        config,
+        if (prepared_resume) |*prepared| prepared else null,
+    );
+    errdefer next.deinit(allocator);
+    if (config.resume_latest and next.activeProvider() != session.activeProvider()) {
+        return error.CrossProviderResume;
+    }
+
+    // Commit the swap only after the target session and provider constraint are
+    // fully validated. A failed resume leaves the current session untouched.
     session.writeSessionSummary(allocator);
     session.deinit(allocator);
-    session.* = try initFromEnvWithSessionConfig(allocator, registry, config);
+    session.* = next;
 }
 
 // ---------------------------------------------------------------------------
@@ -1210,28 +1537,85 @@ test "initOpenAI dupes api_key and system_prompt and routes through openai backe
     try testing.expectEqualStrings("you are a zts expert", session.backend.openai.config.system_prompt);
     try testing.expectEqualStrings("gpt-4o-mini", session.backend.openai.config.model);
     try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
-    try testing.expectEqual(AuthKind.openai_api_key, session.authKind());
     try testing.expectEqualStrings("openai", session.backendDescriptor().provider_label);
 }
 
+test "initDeepSeek dupes its owned bytes and routes through the deepseek backend" {
+    var session = try AgentSession.initDeepSeek(
+        testing.allocator,
+        "deepseek-fixture-key",
+        "you are a zts expert",
+        "[{\"type\":\"function\",\"function\":{\"name\":\"x\"}}]",
+        deepseek_client.default_base_url,
+    );
+    defer session.deinit(testing.allocator);
+
+    try testing.expect(session.backend == .deepseek);
+    try testing.expectEqualStrings("deepseek-fixture-key", session.backend.deepseek.config.api_key);
+    try testing.expectEqualStrings("you are a zts expert", session.backend.deepseek.config.system_prompt);
+    try testing.expectEqualStrings("deepseek-v4-flash", session.backend.deepseek.config.model);
+    try testing.expectEqual(@as(u32, 8_192), session.backend.deepseek.config.max_tokens);
+    try testing.expectEqualStrings("deepseek", session.backendDescriptor().provider_label);
+    try testing.expectEqualStrings("api-key", session.backendDescriptor().auth_label);
+    try testing.expect(session.base_url_owned != null);
+}
+
+test "a deepseek session declares a remote destination at whatever root it uses" {
+    var hosted = try AgentSession.initDeepSeek(
+        testing.allocator,
+        "k",
+        "p",
+        null,
+        deepseek_client.default_base_url,
+    );
+    defer hosted.deinit(testing.allocator);
+    const hosted_destination = destinationForSession(&hosted);
+    try testing.expectEqualStrings(deepseek_client.default_base_url, hosted_destination.deepseek);
+    try testing.expect(!hosted_destination.isLocal());
+
+    var gateway = try AgentSession.initDeepSeek(
+        testing.allocator,
+        "k",
+        "p",
+        null,
+        "https://gateway.example.com/v1",
+    );
+    defer gateway.deinit(testing.allocator);
+    const gateway_destination = destinationForSession(&gateway);
+    try testing.expectEqualStrings("https://gateway.example.com/v1", gateway_destination.deepseek);
+    try testing.expect(!gateway_destination.isLocal());
+}
+
+test "setModel moves a deepseek session between registered deepseek models only" {
+    var session = try AgentSession.initDeepSeek(testing.allocator, "k", "p", null, deepseek_client.default_base_url);
+    defer session.deinit(testing.allocator);
+
+    try session.setModel(testing.allocator, "deepseek-v4-pro");
+    try testing.expectEqualStrings("deepseek-v4-pro", session.backend.deepseek.config.model);
+    try testing.expectEqualStrings("deepseek-v4-pro", session.currentModel().?);
+
+    try testing.expectError(
+        error.ProviderMismatch,
+        session.setModel(testing.allocator, "gpt-4o-mini"),
+    );
+    try testing.expectEqualStrings("deepseek-v4-pro", session.backend.deepseek.config.model);
+}
+
 test "an endpoint override redirects the client without touching the hosted default" {
-    // Item 5 runs the corpus against a local runtime serving the OpenAI wire
-    // shape. Both halves have to move: the endpoint, and a model id the
-    // registry has never heard of.
+    // A custom Responses-compatible endpoint changes transport location only.
+    // Model selection remains provider-scoped through the static registry.
     var local = try AgentSession.initOpenAI(
         testing.allocator,
         "unused-by-a-local-server",
         "p",
         null,
-        .{ .base_url = "http://127.0.0.1:11434/v1/responses", .model = "qwen2.5-coder:7b" },
+        .{ .base_url = "http://127.0.0.1:11434/v1/responses" },
     );
     defer local.deinit(testing.allocator);
 
     try testing.expectEqualStrings("http://127.0.0.1:11434/v1/responses", local.backend.openai.config.base_url);
-    try testing.expectEqualStrings("qwen2.5-coder:7b", local.backend.openai.config.model);
-    // An off-registry model carries the provider default rather than a hosted
-    // model's ceiling, which would be a number about a different model.
-    try testing.expectEqual(openai_client.default_max_tokens, local.backend.openai.config.max_tokens);
+    try testing.expectEqualStrings("gpt-4o-mini", local.backend.openai.config.model);
+    try testing.expectEqual(@as(u32, 8_192), local.backend.openai.config.max_tokens);
 
     var hosted = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
     defer hosted.deinit(testing.allocator);
@@ -1293,108 +1677,602 @@ test "setModel validates provider and commits model with request policy atomical
     var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
     defer session.deinit(testing.allocator);
 
-    try session.setModel("claude-sonnet-4-6");
+    try session.setModel(testing.allocator, "claude-sonnet-4-6");
     try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
     try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
 
-    try testing.expectError(error.UnknownModel, session.setModel("some-unknown-model"));
+    try testing.expectError(error.UnknownModel, session.setModel(testing.allocator, "some-unknown-model"));
     try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
     try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
 
-    try testing.expectError(error.ProviderMismatch, session.setModel("gpt-4o-mini"));
+    try testing.expectError(error.ProviderMismatch, session.setModel(testing.allocator, "gpt-4o-mini"));
     try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
     try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+}
+
+test "setModel persistence failure leaves the live model unchanged" {
+    const FailRestamp = struct {
+        fn run(
+            _: std.mem.Allocator,
+            _: *const AgentSession,
+            _: Provider,
+            _: []const u8,
+        ) !void {
+            return error.WriteFailure;
+        }
+    };
+
+    var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
+    defer session.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "claude-sonnet-4-6",
+        session.currentModel() orelse return error.TestUnexpectedResult,
+    );
+
+    try testing.expectError(
+        error.WriteFailure,
+        session.setModelWithRestamp(testing.allocator, "claude-opus-4-8", FailRestamp.run),
+    );
+    try testing.expectEqualStrings(
+        "claude-sonnet-4-6",
+        session.currentModel() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
+    try testing.expectEqual(@as(u32, 64_000), session.backend.anthropic.config.max_tokens);
 }
 
 test "OpenAI and stub model selection respect backend provider state" {
     var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
     defer openai.deinit(testing.allocator);
-    try testing.expectEqual(Provider.openai, openai.activeProvider().?);
-    try openai.setModel("gpt-4o-mini");
+    try testing.expectEqual(
+        Provider.openai,
+        openai.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try openai.setModel(testing.allocator, "gpt-4o-mini");
     try testing.expectEqual(@as(u32, 8_192), openai.backend.openai.config.max_tokens);
 
     var stub = AgentSession.initStub();
     defer stub.deinit(testing.allocator);
     try testing.expect(stub.activeProvider() == null);
-    try testing.expectError(error.NoActiveProvider, stub.setModel("gpt-4o-mini"));
+    try testing.expectError(error.NoActiveProvider, stub.setModel(testing.allocator, "gpt-4o-mini"));
     try testing.expect(stub.currentModel() == null);
 }
 
-test "envHasModelBackend: empty env var is treated as absent" {
-    const allocator = testing.allocator;
-    var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "");
-    defer anth.restore(allocator);
-    var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "");
-    defer oai.restore(allocator);
-    try testing.expect(!envHasModelBackend());
-}
-
-test "envHasModelBackend: whitespace-only env var is treated as absent" {
-    const allocator = testing.allocator;
-    var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "   ");
-    defer anth.restore(allocator);
-    var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "\t\n");
-    defer oai.restore(allocator);
-    try testing.expect(!envHasModelBackend());
-}
-
-test "envHasModelBackend: a non-empty env var is detected" {
-    const allocator = testing.allocator;
-    var oai = try EnvOverride.unset(allocator, "OPENAI_API_KEY");
-    defer oai.restore(allocator);
-    var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
-    defer anth.restore(allocator);
-    try testing.expect(envHasModelBackend());
-}
-
-test "Anthropic credential precedence rejects an OpenAI model override" {
+test "explicit Claude selects only the Anthropic credential" {
     const allocator = testing.allocator;
     var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-key");
     defer anthropic.restore(allocator);
     var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
     defer openai.restore(allocator);
 
-    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
+        .provider = .anthropic,
         .model = "claude-haiku-4-5-20251001",
     });
     defer session.deinit(allocator);
-    try testing.expectEqual(Provider.anthropic, session.activeProvider().?);
-    try testing.expectEqualStrings("claude-haiku-4-5-20251001", session.currentModel().?);
+    try testing.expectEqual(
+        Provider.anthropic,
+        session.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings(
+        "claude-haiku-4-5-20251001",
+        session.currentModel() orelse return error.TestUnexpectedResult,
+    );
 
     try testing.expectError(
         error.ProviderMismatch,
-        initFromEnvWithSessionConfig(allocator, null, .{
+        initFromEnvWithSessionConfig(allocator, &registry, .{
             .no_session = true,
             .no_context_files = true,
+            .provider = .anthropic,
             .model = "gpt-4o-mini",
         }),
     );
 }
 
-test "OpenAI-only startup accepts OpenAI and rejects Anthropic overrides" {
+test "explicit OpenAI selects only the OpenAI credential" {
     const allocator = testing.allocator;
-    var anthropic = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-decoy");
     defer anthropic.restore(allocator);
     var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
     defer openai.restore(allocator);
 
-    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
+        .provider = .openai,
         .model = "gpt-4o-mini",
     });
     defer session.deinit(allocator);
-    try testing.expectEqual(Provider.openai, session.activeProvider().?);
+    try testing.expectEqual(
+        Provider.openai,
+        session.activeProvider() orelse return error.TestUnexpectedResult,
+    );
 
     try testing.expectError(
         error.ProviderMismatch,
-        initFromEnvWithSessionConfig(allocator, null, .{
+        initFromEnvWithSessionConfig(allocator, &registry, .{
             .no_session = true,
             .no_context_files = true,
+            .provider = .openai,
             .model = "claude-sonnet-4-6",
         }),
+    );
+}
+
+test "explicit DeepSeek selects only the DeepSeek credential" {
+    const allocator = testing.allocator;
+    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-decoy");
+    defer anthropic.restore(allocator);
+    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-decoy");
+    defer openai.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "deepseek-key");
+    defer deepseek.restore(allocator);
+    var base_url = try EnvOverride.unset(allocator, "DEEPSEEK_BASE_URL");
+    defer base_url.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
+        .no_session = true,
+        .no_context_files = true,
+        .provider = .deepseek,
+        .model = "deepseek-v4-pro",
+    });
+    defer session.deinit(allocator);
+    try testing.expectEqual(
+        Provider.deepseek,
+        session.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings("deepseek-key", session.backend.deepseek.config.api_key);
+    try testing.expectEqualStrings(deepseek_client.default_base_url, session.backend.deepseek.config.base_url);
+    try testing.expectEqualStrings("deepseek-v4-pro", session.currentModel().?);
+
+    try testing.expectError(
+        error.ProviderMismatch,
+        initFromEnvWithSessionConfig(allocator, &registry, .{
+            .no_session = true,
+            .no_context_files = true,
+            .provider = .deepseek,
+            .model = "claude-sonnet-4-6",
+        }),
+    );
+}
+
+test "a DeepSeek session refuses to launch without a key or over plain HTTP" {
+    const allocator = testing.allocator;
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+
+    {
+        var deepseek = try EnvOverride.unset(allocator, "DEEPSEEK_API_KEY");
+        defer deepseek.restore(allocator);
+        try testing.expectError(
+            error.MissingDeepSeekCredential,
+            initFromEnvWithSessionConfig(allocator, &registry, .{
+                .no_session = true,
+                .no_context_files = true,
+                .provider = .deepseek,
+            }),
+        );
+    }
+
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "deepseek-key");
+    defer deepseek.restore(allocator);
+    var base_url = try EnvOverride.set(allocator, "DEEPSEEK_BASE_URL", "http://127.0.0.1:8080");
+    defer base_url.restore(allocator);
+    try testing.expectError(
+        error.InvalidDeepSeekBaseUrl,
+        initFromEnvWithSessionConfig(allocator, &registry, .{
+            .no_session = true,
+            .no_context_files = true,
+            .provider = .deepseek,
+        }),
+    );
+}
+
+test "explicit cloud provider never borrows the other provider credential" {
+    const allocator = testing.allocator;
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+
+    {
+        var anthropic = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+        defer anthropic.restore(allocator);
+        var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-only");
+        defer openai.restore(allocator);
+        try testing.expectError(error.MissingAnthropicCredential, initFromEnvWithSessionConfig(
+            allocator,
+            &registry,
+            .{ .no_session = true, .no_context_files = true, .provider = .anthropic },
+        ));
+    }
+    {
+        var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-only");
+        defer anthropic.restore(allocator);
+        var openai = try EnvOverride.unset(allocator, "OPENAI_API_KEY");
+        defer openai.restore(allocator);
+        try testing.expectError(error.MissingOpenAICredential, initFromEnvWithSessionConfig(
+            allocator,
+            &registry,
+            .{ .no_session = true, .no_context_files = true, .provider = .openai },
+        ));
+    }
+}
+
+test "bare persisted session follows the global default regardless of cloud keys" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "anthropic-decoy");
+    defer anthropic.restore(allocator);
+    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-decoy");
+    defer openai.restore(allocator);
+
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
+    defer session.deinit(allocator);
+    // Named rather than derived from `default_provider`: deriving both sides
+    // would pass whatever the constant said, including a value nobody meant to
+    // ship. Anthropic and OpenAI keys are set here and no DeepSeek key is,
+    // which is the point - credentials never steer the default.
+    try testing.expectEqual(
+        Provider.deepseek,
+        session.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqual(models_registry.default_provider, session.activeProvider().?);
+    try testing.expectEqualStrings(
+        "deepseek-v4-flash",
+        session.currentModel() orelse return error.TestUnexpectedResult,
+    );
+
+    var meta = try session_events.readMeta(
+        allocator,
+        session.meta_path orelse return error.TestUnexpectedResult,
+    );
+    defer session_events.freeMeta(allocator, &meta);
+    try testing.expectEqualStrings("deepseek", meta.provider orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings(
+        "deepseek-v4-flash",
+        meta.model orelse return error.TestUnexpectedResult,
+    );
+}
+
+test "resume fork override and model mutation preserve provider identity" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    const source_id = blk: {
+        var source = try initFromEnvWithSessionConfig(allocator, null, .{
+            .no_context_files = true,
+            .provider = .anthropic,
+            .model = "claude-opus-4-8",
+        });
+        defer source.deinit(allocator);
+        try zts.file_io.writeFile(
+            allocator,
+            source.events_path orelse return error.TestUnexpectedResult,
+            "",
+        );
+        break :blk try allocator.dupe(
+            u8,
+            source.session_id orelse return error.TestUnexpectedResult,
+        );
+    };
+    defer allocator.free(source_id);
+
+    var resumed = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .resume_latest = true,
+    });
+    try testing.expectEqual(
+        Provider.anthropic,
+        resumed.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings(
+        "claude-opus-4-8",
+        resumed.currentModel() orelse return error.TestUnexpectedResult,
+    );
+    try resumed.setModel(allocator, "claude-sonnet-5");
+    var mutated = try session_events.readMeta(
+        allocator,
+        resumed.meta_path orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings("claude", mutated.provider orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings(
+        "claude-sonnet-5",
+        mutated.model orelse return error.TestUnexpectedResult,
+    );
+    session_events.freeMeta(allocator, &mutated);
+    resumed.deinit(allocator);
+
+    var forked = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .fork_session_id = source_id,
+    });
+    defer forked.deinit(allocator);
+    try testing.expectEqual(
+        Provider.anthropic,
+        forked.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings(
+        "claude-sonnet-5",
+        forked.currentModel() orelse return error.TestUnexpectedResult,
+    );
+    var fork_meta = try session_events.readMeta(
+        allocator,
+        forked.meta_path orelse return error.TestUnexpectedResult,
+    );
+    defer session_events.freeMeta(allocator, &fork_meta);
+    try testing.expectEqualStrings(source_id, fork_meta.parent_id orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("claude", fork_meta.provider orelse return error.TestUnexpectedResult);
+
+    var overridden = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .resume_latest = true,
+        .provider = .local,
+    });
+    defer overridden.deinit(allocator);
+    try testing.expect(overridden.identity_override_disclosed);
+    try testing.expectEqual(
+        Provider.local,
+        overridden.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    var override_meta = try session_events.readMeta(
+        allocator,
+        overridden.meta_path orelse return error.TestUnexpectedResult,
+    );
+    defer session_events.freeMeta(allocator, &override_meta);
+    try testing.expectEqualStrings("local", override_meta.provider orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings(
+        local_client.default_model,
+        override_meta.model orelse return error.TestUnexpectedResult,
+    );
+}
+
+test "named session resume preserves transcript bytes and stored identity" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    const source_id, const expected_events = blk: {
+        var source = try initFromEnvWithSessionConfig(allocator, null, .{
+            .no_context_files = true,
+            .provider = .anthropic,
+            .model = "claude-opus-4-8",
+        });
+        defer source.deinit(allocator);
+        const source_events_path = source.events_path orelse return error.TestUnexpectedResult;
+        try session_events.appendEvent(allocator, source_events_path, .{ .user_text = "preserve me" });
+        const bytes = try zts.file_io.readFile(allocator, source_events_path, 1024 * 1024);
+        errdefer allocator.free(bytes);
+        break :blk .{
+            try allocator.dupe(
+                u8,
+                source.session_id orelse return error.TestUnexpectedResult,
+            ),
+            bytes,
+        };
+    };
+    defer allocator.free(source_id);
+    defer allocator.free(expected_events);
+
+    var resumed = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .session_id = source_id,
+    });
+    defer resumed.deinit(allocator);
+
+    const actual_events = try zts.file_io.readFile(
+        allocator,
+        resumed.events_path orelse return error.TestUnexpectedResult,
+        1024 * 1024,
+    );
+    defer allocator.free(actual_events);
+    try testing.expectEqualStrings(expected_events, actual_events);
+    try testing.expect(resumed.replay_next_turn);
+    try testing.expectEqual(@as(usize, 1), resumed.transcript.len());
+    try testing.expectEqual(
+        Provider.anthropic,
+        resumed.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings(
+        "claude-opus-4-8",
+        resumed.currentModel() orelse return error.TestUnexpectedResult,
+    );
+}
+
+test "named session with events and missing metadata fails without truncation" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    const session_id = "missing-meta";
+    const session_dir = try session_paths.sessionDir(allocator, session_id);
+    defer allocator.free(session_dir);
+    const workspace = try cwdPathAlloc(allocator);
+    defer allocator.free(workspace);
+    try session_paths.writeWorkspacePointer(allocator, session_dir, workspace);
+
+    const events_path = try std.fs.path.join(allocator, &.{ session_dir, "events.jsonl" });
+    defer allocator.free(events_path);
+    const expected_events = "{\"type\":\"user_text\",\"text\":\"preserve me\"}\n";
+    try zts.file_io.writeFile(allocator, events_path, expected_events);
+
+    try testing.expectError(
+        error.MissingSessionMetadata,
+        initFromEnvWithSessionConfig(allocator, null, .{
+            .no_context_files = true,
+            .session_id = session_id,
+        }),
+    );
+
+    const actual_events = try zts.file_io.readFile(allocator, events_path, 1024 * 1024);
+    defer allocator.free(actual_events);
+    try testing.expectEqualStrings(expected_events, actual_events);
+}
+
+test "model-free legacy resume bypasses provider identity and preserves metadata" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    const meta_path = blk: {
+        var source = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
+        defer source.deinit(allocator);
+        try session_events.appendEvent(
+            allocator,
+            source.events_path orelse return error.TestUnexpectedResult,
+            .{ .user_text = "compiler witness" },
+        );
+        const source_meta_path = source.meta_path orelse return error.TestUnexpectedResult;
+        var meta = try session_events.readMeta(allocator, source_meta_path);
+        defer session_events.freeMeta(allocator, &meta);
+        try session_events.writeMeta(allocator, source_meta_path, .{
+            .session_id = meta.session_id,
+            .workspace_realpath = meta.workspace_realpath,
+            .created_at_unix_ms = meta.created_at_unix_ms,
+            .policy_hash = meta.policy_hash,
+            .provider = null,
+            .model = null,
+        });
+        break :blk try allocator.dupe(u8, source_meta_path);
+    };
+    defer allocator.free(meta_path);
+
+    var resumed = try initFromEnvWithSessionConfig(allocator, null, .{
+        .model_free = true,
+        .no_context_files = true,
+        .resume_latest = true,
+    });
+    defer resumed.deinit(allocator);
+    try testing.expect(resumed.backend == .stub);
+    try testing.expectEqual(@as(usize, 1), resumed.transcript.len());
+
+    var meta = try session_events.readMeta(allocator, meta_path);
+    defer session_events.freeMeta(allocator, &meta);
+    try testing.expect(meta.provider == null);
+    try testing.expect(meta.model == null);
+}
+
+test "obsolete OpenAI model environment override is rejected" {
+    const allocator = testing.allocator;
+    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "openai-key");
+    defer openai.restore(allocator);
+    var endpoint = try EnvOverride.set(allocator, "ZTS_OPENAI_BASE_URL", "http://127.0.0.1:11434/v1/responses");
+    defer endpoint.restore(allocator);
+    var model = try EnvOverride.set(allocator, "ZTS_OPENAI_MODEL", "qwen2.5-coder:7b");
+    defer model.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+
+    try testing.expectError(error.UnsupportedOpenAIModelOverride, initFromEnvWithSessionConfig(
+        allocator,
+        &registry,
+        .{ .no_session = true, .no_context_files = true, .provider = .openai },
+    ));
+}
+
+test "legacy resume migrates once and cross-provider rebuild is atomic" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    const meta_path = blk: {
+        var legacy = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
+        defer legacy.deinit(allocator);
+        try zts.file_io.writeFile(
+            allocator,
+            legacy.events_path orelse return error.TestUnexpectedResult,
+            "",
+        );
+        const legacy_meta_path = legacy.meta_path orelse return error.TestUnexpectedResult;
+        var meta = try session_events.readMeta(allocator, legacy_meta_path);
+        defer session_events.freeMeta(allocator, &meta);
+        try session_events.writeMeta(allocator, legacy_meta_path, .{
+            .session_id = meta.session_id,
+            .workspace_realpath = meta.workspace_realpath,
+            .created_at_unix_ms = meta.created_at_unix_ms,
+            .policy_hash = meta.policy_hash,
+            .provider = null,
+            .model = null,
+        });
+        break :blk try allocator.dupe(u8, legacy_meta_path);
+    };
+    defer allocator.free(meta_path);
+
+    try testing.expectError(
+        error.LegacySessionIdentity,
+        initFromEnvWithSessionConfig(allocator, null, .{
+            .no_context_files = true,
+            .resume_latest = true,
+        }),
+    );
+
+    var migrated = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .resume_latest = true,
+        .provider = .anthropic,
+    });
+    defer migrated.deinit(allocator);
+    var meta = try session_events.readMeta(allocator, meta_path);
+    defer session_events.freeMeta(allocator, &meta);
+    try testing.expectEqualStrings("claude", meta.provider orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings(
+        "claude-sonnet-4-6",
+        meta.model orelse return error.TestUnexpectedResult,
+    );
+
+    var current = AgentSession.initStub();
+    current.resolved_provider = .local;
+    current.resolved_model = models_registry.defaultForProvider(.local);
+    defer current.deinit(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    const before_model = current.currentModel() orelse return error.TestUnexpectedResult;
+    try testing.expectError(error.CrossProviderResume, rebuildSession(
+        allocator,
+        &current,
+        &registry,
+        .{ .resume_latest = true, .no_context_files = true },
+    ));
+    try testing.expectEqual(
+        Provider.local,
+        current.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+    try testing.expectEqualStrings(
+        before_model,
+        current.currentModel() orelse return error.TestUnexpectedResult,
     );
 }
 
@@ -1429,6 +2307,107 @@ test "rejected startup model creates no session state and frees owned buffers" {
         error.FileNotFound,
         std.Io.Dir.accessAbsolute(io, sessions_dir, .{}),
     );
+}
+
+test "unready explicit local provider has no filesystem or cloud fallback side effects" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions-not-created");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var base = try EnvOverride.set(allocator, "ZTTP_MLX_BASE_URL", "http://127.0.0.1:1");
+    defer base.restore(allocator);
+    var anthropic = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "must-not-be-used");
+    defer anthropic.restore(allocator);
+    var openai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "must-not-be-used");
+    defer openai.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+
+    try testing.expectError(
+        error.LocalServerUnavailable,
+        initFromEnvWithSessionConfig(allocator, &registry, .{
+            .no_context_files = true,
+            .provider = .local,
+        }),
+    );
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try testing.expectError(error.FileNotFound, std.Io.Dir.accessAbsolute(
+        io_backend.io(),
+        sessions_dir,
+        .{},
+    ));
+
+    // The compiler-only lane bypasses the same invalid local transport.
+    var model_free = try initFromEnvWithSessionConfig(allocator, &registry, .{
+        .no_session = true,
+        .no_context_files = true,
+        .model_free = true,
+    });
+    defer model_free.deinit(allocator);
+    try testing.expect(model_free.backend == .stub);
+}
+
+test "mid-turn provider failure persists one error exit without fallback" {
+    const FailingClient = struct {
+        calls: usize = 0,
+
+        fn request(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: *const Transcript,
+            _: ?[]const u8,
+        ) anyerror!loop.ModelCallResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return error.LocalServerUnavailable;
+        }
+
+        fn modelClient(self: *@This()) loop.ModelClient {
+            return .{ .context = self, .request_fn = request };
+        }
+    };
+
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .provider = .local,
+    });
+    defer session.deinit(allocator);
+    var failing: FailingClient = .{};
+
+    try testing.expectError(error.LocalServerUnavailable, runOneTurnWithClient(
+        allocator,
+        &session,
+        &registry,
+        failing.modelClient(),
+        "inspect the handler",
+        null,
+    ));
+    try testing.expectEqual(@as(usize, 1), failing.calls);
+    try testing.expectEqual(
+        Provider.local,
+        session.activeProvider() orelse return error.TestUnexpectedResult,
+    );
+
+    const events = try zts.file_io.readFile(
+        allocator,
+        session.events_path orelse return error.TestUnexpectedResult,
+        1024 * 1024,
+    );
+    defer allocator.free(events);
+    try testing.expect(std.mem.indexOf(u8, events, "\"reason\":\"error_exit\"") != null);
 }
 
 test "estimateContextTokens grows with transcript and includes the fixed allowance" {
@@ -1508,7 +2487,12 @@ test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only 
     var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
     defer api_override.restore(allocator);
 
-    var session = try initFromEnvWithSessionConfig(allocator, null, .{ .no_session = true });
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
+        .no_session = true,
+        .provider = .anthropic,
+    });
     defer session.deinit(allocator);
 
     try testing.expect(session.backend == .anthropic);
@@ -1537,9 +2521,12 @@ test "initFromEnvWithSessionConfig: no_context_files suppresses AGENTS and CLAUD
     var api_override = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-fixture-key");
     defer api_override.restore(allocator);
 
-    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
+        .provider = .anthropic,
     });
     defer session.deinit(allocator);
 
@@ -1630,6 +2617,8 @@ test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_no
         .created_at_unix_ms = original.created_at_unix_ms,
         .parent_id = original.parent_id,
         .policy_hash = drifted_hash,
+        .provider = original.provider,
+        .model = original.model,
     });
 
     var resumed = try initFromEnvWithSessionConfig(allocator, null, .{ .resume_latest = true });
@@ -1655,65 +2644,39 @@ test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_no
     try testing.expectEqualStrings(current[0..], stamped);
 }
 
-test "destinationFromEnv mirrors initFromEnv's provider precedence" {
-    const allocator = testing.allocator;
-
-    // Anthropic wins when both keys are present, matching initFromEnv.
-    {
-        var anth = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "k");
-        defer anth.restore(allocator);
-        var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "k");
-        defer oai.restore(allocator);
-        try testing.expect(destinationFromEnv() == .anthropic);
-    }
-
-    // OpenAI only, no override: the hosted endpoint.
-    {
-        var anth = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
-        defer anth.restore(allocator);
-        var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "k");
-        defer oai.restore(allocator);
-        var base = try EnvOverride.unset(allocator, "ZTS_OPENAI_BASE_URL");
-        defer base.restore(allocator);
-        try testing.expect(destinationFromEnv() == .openai_hosted);
-    }
-
-    // No key at all: nothing leaves the process.
-    {
-        var anth = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
-        defer anth.restore(allocator);
-        var oai = try EnvOverride.unset(allocator, "OPENAI_API_KEY");
-        defer oai.restore(allocator);
-        try testing.expect(destinationFromEnv() == .offline);
-        try testing.expect(destinationFromEnv().isLocal());
-    }
-}
-
 test "a loopback endpoint override is reported as local, a remote one is not" {
-    const allocator = testing.allocator;
-    var anth = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
-    defer anth.restore(allocator);
-    var oai = try EnvOverride.set(allocator, "OPENAI_API_KEY", "k");
-    defer oai.restore(allocator);
-
     const local_urls = [_][]const u8{
         "http://127.0.0.1:11434/v1/responses",
         "http://localhost:8080/v1/responses",
         "http://[::1]:11434/v1/responses",
     };
     for (local_urls) |url| {
-        var base = try EnvOverride.set(allocator, "ZTS_OPENAI_BASE_URL", url);
-        defer base.restore(allocator);
-        const dest = destinationFromEnv();
+        const session = AgentSession{
+            .backend = .{ .openai = .{ .config = .{
+                .api_key = "test",
+                .model = "gpt-4o-mini",
+                .system_prompt = "test",
+                .base_url = url,
+                .max_tokens = 1,
+            } } },
+        };
+        const dest = destinationForSession(&session);
         try testing.expect(dest == .openai_custom);
         try testing.expect(dest.isLocal());
     }
 
     // A proxy in front of a hosted provider is still off-machine, and the
     // banner must not tell the user their source stays put.
-    var remote = try EnvOverride.set(allocator, "ZTS_OPENAI_BASE_URL", "https://proxy.example.com/v1/responses");
-    defer remote.restore(allocator);
-    const dest = destinationFromEnv();
+    const session = AgentSession{
+        .backend = .{ .openai = .{ .config = .{
+            .api_key = "test",
+            .model = "gpt-4o-mini",
+            .system_prompt = "test",
+            .base_url = "https://proxy.example.com/v1/responses",
+            .max_tokens = 1,
+        } } },
+    };
+    const dest = destinationForSession(&session);
     try testing.expect(dest == .openai_custom);
     try testing.expect(!dest.isLocal());
 }

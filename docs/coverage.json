@@ -1,15 +1,13 @@
 {
   "corpusVersion": "760bc9965c6735565a5d3c7850f1c2156f0013b76d7fe9c12c6dfc0a55c23ef0",
   "rulesTotal": 74,
-  "rulesTripped": 7,
+  "rulesTripped": 5,
   "tripped": [
     "ZTS305",
     "ZTS400",
     "ZTS401",
-    "ZTS407",
     "ZTS500",
-    "ZTS502",
-    "ZTS600"
+    "ZTS501"
   ],
   "untripped": [
     "ZTS300",
@@ -22,7 +20,8 @@
     "ZTS308",
     "ZTS309",
     "ZTS310",
-    "ZTS501",
+    "ZTS502",
+    "ZTS600",
     "ZTS601",
     "ZTS602",
     "ZTS603",
@@ -78,13 +77,9 @@
     "ZTS403",
     "ZTS404",
     "ZTS405",
-    "ZTS406"
+    "ZTS406",
+    "ZTS407"
   ],
-  "offRegistry": [
-    "ZTS001",
-    "ZTS002",
-    "ZTS203",
-    "ZTS211"
-  ],
-  "recorded": "2026-08-12"
+  "offRegistry": [],
+  "recorded": "2026-08-14"
 }

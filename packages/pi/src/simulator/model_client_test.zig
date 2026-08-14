@@ -3,6 +3,9 @@ const testing = std.testing;
 
 const artifact = @import("artifact.zig");
 const model_client = @import("model_client.zig");
+const local_client = @import("../providers/local/client.zig");
+const deepseek_client = @import("../providers/deepseek/client.zig");
+const chat_completions = @import("../providers/chat_completions.zig");
 const model_request = @import("../providers/model_request.zig");
 const transcript_mod = @import("../transcript.zig");
 const turn = @import("../turn.zig");
@@ -156,6 +159,165 @@ test "simulator client rejects a semantic mismatch without consuming the respons
         else => return error.TestFailed,
     }
     try testing.expectEqual(@as(usize, 1), client.consumedCount());
+}
+
+test "local replay rejects a wire framing mismatch before releasing a response" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "inspect handler.ts" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const request_config: model_request.Config = .{
+        .provider = .local,
+        .model = local_client.default_model,
+        .max_output_tokens = local_client.default_max_tokens,
+        .system_prompt = "persona",
+        .tools_json = "[]",
+        .stream = false,
+    };
+    var expected = try model_request.createSnapshot(arena.allocator(), .{
+        .config = request_config,
+        .transcript = &transcript,
+    });
+    const body = try local_client.buildRequestBody(arena.allocator(), .{
+        .system_prompt = request_config.system_prompt,
+        .model = request_config.model,
+        .max_tokens = request_config.max_output_tokens,
+        .tools_json = request_config.tools_json,
+    }, &transcript, null);
+    expected.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
+
+    var checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
+    checkpoints[0].wire_request_sha256 = .{ .bytes = expected.wire_request_sha256.?.bytes };
+    const response =
+        "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
+    const cassette = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"v\":1,\"provider\":\"local\",\"stream\":false,\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n",
+        .{ expected.wire_request_sha256.?.slice(), std.json.fmt(response, .{}) },
+    );
+    defer testing.allocator.free(cassette);
+    const responses = [_]artifact.ResponseFixture{.{
+        .index = 0,
+        .turn_index = 0,
+        .call_index = 0,
+        .path = "responses/0.jsonl",
+        .sha256 = artifact.Sha256Hex.fromBytes(cassette),
+    }};
+    const fixtures = [_]artifact.LoadedFixture{.{
+        .role = .response,
+        .path = "responses/0.jsonl",
+        .bytes = cassette,
+    }};
+
+    checkpoints[0].wire_request_sha256 = .{ .bytes = [_]u8{'0'} ** 64 };
+    var client = model_client.Client.init(.{
+        .provider = .local,
+        .model = local_client.default_model,
+        .checkpoints = &checkpoints,
+        .responses = &responses,
+        .fixtures = &fixtures,
+    }, request_config);
+    const model = client.asModelClient();
+    try testing.expectError(error.ReplayMismatch, model.request(arena.allocator(), &transcript, null));
+    try testing.expectEqual(@as(usize, 0), client.consumedCount());
+    try testing.expect(std.meta.activeTag(client.lastMismatch().?) == .transcript_or_transient_prompt_mismatch);
+}
+
+test "every Chat Completions provider rebuilds its wire digest on replay" {
+    // The recorder stores a wire digest for each non-streaming provider. If
+    // replay rebuilds that body for only some of them, the checkpoint carries
+    // a digest the snapshot lacks and every call fails as a
+    // transcript_or_transient_prompt_mismatch, which is what a DeepSeek
+    // recording hit before this path covered more than `.local`.
+    const cases = [_]struct {
+        provider: artifact.Provider,
+        model: []const u8,
+        max_output_tokens: u32,
+        header_name: []const u8,
+    }{
+        .{
+            .provider = .local,
+            .model = local_client.default_model,
+            .max_output_tokens = local_client.default_max_tokens,
+            .header_name = "local",
+        },
+        .{
+            .provider = .deepseek,
+            .model = deepseek_client.default_model,
+            .max_output_tokens = deepseek_client.default_max_tokens,
+            .header_name = "deepseek",
+        },
+    };
+
+    for (cases) |case| {
+        var transcript: transcript_mod.Transcript = .{};
+        defer transcript.deinit(testing.allocator);
+        try transcript.append(testing.allocator, .{ .user_text = "inspect handler.ts" });
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const request_config: model_request.Config = .{
+            .provider = case.provider,
+            .model = case.model,
+            .max_output_tokens = case.max_output_tokens,
+            .system_prompt = "persona",
+            .tools_json = "[]",
+            .stream = false,
+        };
+        var expected = try model_request.createSnapshot(arena.allocator(), .{
+            .config = request_config,
+            .transcript = &transcript,
+        });
+        const body = try chat_completions.buildRequestBody(arena.allocator(), .{
+            .system_prompt = request_config.system_prompt,
+            .model = request_config.model,
+            .max_tokens = request_config.max_output_tokens,
+            .tools_json = request_config.tools_json,
+        }, &transcript, null);
+        expected.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
+
+        var checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
+        checkpoints[0].wire_request_sha256 = .{ .bytes = expected.wire_request_sha256.?.bytes };
+        const response =
+            "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
+        const cassette = try std.fmt.allocPrint(
+            testing.allocator,
+            "{{\"v\":1,\"provider\":\"{s}\",\"stream\":false,\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n",
+            .{
+                case.header_name,
+                expected.wire_request_sha256.?.slice(),
+                std.json.fmt(response, .{}),
+            },
+        );
+        defer testing.allocator.free(cassette);
+        const responses = [_]artifact.ResponseFixture{.{
+            .index = 0,
+            .turn_index = 0,
+            .call_index = 0,
+            .path = "responses/0.jsonl",
+            .sha256 = artifact.Sha256Hex.fromBytes(cassette),
+        }};
+        const fixtures = [_]artifact.LoadedFixture{.{
+            .role = .response,
+            .path = "responses/0.jsonl",
+            .bytes = cassette,
+        }};
+
+        var client = model_client.Client.init(.{
+            .provider = case.provider,
+            .model = case.model,
+            .checkpoints = &checkpoints,
+            .responses = &responses,
+            .fixtures = &fixtures,
+        }, request_config);
+        const model = client.asModelClient();
+        const result = try model.request(arena.allocator(), &transcript, null);
+        try testing.expectEqualStrings("ok", result.reply.response.final_text);
+        try testing.expectEqual(@as(usize, 1), client.consumedCount());
+        try testing.expect(client.lastMismatch() == null);
+    }
 }
 
 test "adversarial request mutations fail before releasing a response" {

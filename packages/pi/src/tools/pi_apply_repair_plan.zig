@@ -70,7 +70,7 @@ pub fn execute(
             return registry_mod.ToolResult.errFmt(
                 allocator,
                 name ++ ": failed to read {s}: {s}\n",
-                .{ absolute, @errorName(e) },
+                .{ path, @errorName(e) },
             );
         };
     };

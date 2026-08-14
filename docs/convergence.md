@@ -11,31 +11,32 @@ counted result over a frozen corpus, not an estimate.
 
 ## Results
 
-| Recorded | Commit | Corpus | Cases | Model | Policy | First-draft pass | Median round-trips | Intent pass |
-|---|---|---|---|---|---|---|---|---|
-| 2026-08-01 | `e4a13aee` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `37a115c262dc` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-01 | `847840a4-dirty` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `57269997` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `79e9fc86` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `845025e7` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `2db4545c` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `ec31f5a8` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `631aabd6` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `9b7518ea` | `b28a83a531db` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
-| 2026-08-02 | `7ec8ba85` | `ed809ba50da1` | 11 | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 4 | 100% (6/6) |
-| 2026-08-03 | `74d48add` | `3742860e78b2` | 16 | claude-sonnet-4-6 | `118885d3f647` | 87% (14/16) | 4 | 100% (10/10) |
-| 2026-08-03 | `aba46bee` | `d6b571835aa5` | 16 | claude-sonnet-4-6 | `118885d3f647` | 93% (15/16) | 4 | 100% (10/10) |
-| 2026-08-03 | `d984092c` | `d6b571835aa5` | 16 | claude-haiku-4-5-20251001 | `118885d3f647` | 25% (4/16) | 3 | 90% (9/10) |
-| 2026-08-03 | `39449aff` | `83c9c0c040e8` | 20 | claude-sonnet-4-6 | `118885d3f647` | 95% (19/20) | 4 | 100% (14/14) |
-| 2026-08-04 | `4822d2e2` | `04d2e920b07f` | 20 | claude-sonnet-4-6 | `118885d3f647` | 100% (20/20) | 4 | 100% (14/14) |
-| 2026-08-09 | `6f02ad7c` | `04d2e920b07f` | 20 | claude-sonnet-4-6 | `118885d3f647` | 100% (20/20) | 4 | 100% (14/14) |
-| 2026-08-09 | `f10f6e26` | `04d2e920b07f` | 20 | claude-sonnet-4-6 | `e26a66c0a8a2` | 100% (20/20) | 4 | 100% (14/14) |
-| 2026-08-10 | `2c1a83d3-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `e26a66c0a8a2` | 100% (19/19) | 4 | 100% (13/13) |
-| 2026-08-10 | `2c1a83d3-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `9c913bebcb59` | 100% (19/19) | 4 | 100% (13/13) |
-| 2026-08-10 | `66f8aaa7-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `8dfb32f91549` | 100% (19/19) | 4 | 100% (13/13) |
-| 2026-08-10 | `e0ab4058-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
-| 2026-08-12 | `dcee3baf-dirty` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
-| 2026-08-12 | `734f0c8b` | `760bc9965c67` | 19 | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
+| Recorded | Commit | Corpus | Cases | Provider | Model | Policy | First-draft pass | Median round-trips | Intent pass |
+|---|---|---|---|---|---|---|---|---|---|
+| 2026-08-01 | `e4a13aee` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `37a115c262dc` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-01 | `847840a4-dirty` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `57269997` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `79e9fc86` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `845025e7` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `2db4545c` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `ec31f5a8` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `631aabd6` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `9b7518ea` | `b28a83a531db` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 5 | 100% (6/6) |
+| 2026-08-02 | `7ec8ba85` | `ed809ba50da1` | 11 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 90% (10/11) | 4 | 100% (6/6) |
+| 2026-08-03 | `74d48add` | `3742860e78b2` | 16 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 87% (14/16) | 4 | 100% (10/10) |
+| 2026-08-03 | `aba46bee` | `d6b571835aa5` | 16 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 93% (15/16) | 4 | 100% (10/10) |
+| 2026-08-03 | `d984092c` | `d6b571835aa5` | 16 | anthropic | claude-haiku-4-5-20251001 | `118885d3f647` | 25% (4/16) | 3 | 90% (9/10) |
+| 2026-08-03 | `39449aff` | `83c9c0c040e8` | 20 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 95% (19/20) | 4 | 100% (14/14) |
+| 2026-08-04 | `4822d2e2` | `04d2e920b07f` | 20 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 100% (20/20) | 4 | 100% (14/14) |
+| 2026-08-09 | `6f02ad7c` | `04d2e920b07f` | 20 | anthropic | claude-sonnet-4-6 | `118885d3f647` | 100% (20/20) | 4 | 100% (14/14) |
+| 2026-08-09 | `f10f6e26` | `04d2e920b07f` | 20 | anthropic | claude-sonnet-4-6 | `e26a66c0a8a2` | 100% (20/20) | 4 | 100% (14/14) |
+| 2026-08-10 | `2c1a83d3-dirty` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `e26a66c0a8a2` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-10 | `2c1a83d3-dirty` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `9c913bebcb59` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-10 | `66f8aaa7-dirty` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `8dfb32f91549` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-10 | `e0ab4058-dirty` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-12 | `dcee3baf-dirty` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-12 | `734f0c8b` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
+| 2026-08-14 | `29038503-dirty` | `760bc9965c67` | 19 | deepseek | deepseek-v4-flash | `78c9fec96be2` | 89% (17/19) | 3 | 84% (11/13) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those

@@ -65,10 +65,11 @@ fn buildSession(
     registry: *const registry_mod.Registry,
     resume_latest: bool,
 ) !agent.AgentSession {
-    // Tests unset ANTHROPIC_API_KEY to keep the session stub-backed; the
-    // EditClient is fed directly to `runOneTurnWithClient`, so the
-    // backend vtable is never exercised.
-    return try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+    _ = registry;
+    // The explicit test client is fed to `runOneTurnWithClient`, so construct
+    // the session through the test-only null-registry seam. This keeps replay
+    // tests independent of provider credentials and readiness.
+    return try agent.initFromEnvWithSessionConfig(allocator, null, .{
         .resume_latest = resume_latest,
     });
 }
@@ -286,6 +287,9 @@ test "replay-safety: /new starts a fresh session_id and fresh events.jsonl" {
 
     try testing.expect(!std.mem.eql(u8, first_id, fresh.session_id.?));
 
-    // Fresh events.jsonl does not exist yet (no turn has run).
-    try testing.expect(!zts.file_io.fileExists(allocator, fresh.events_path.?));
+    // A successful launch creates an empty event log so the new session is
+    // immediately resumable, even before its first turn.
+    const fresh_events = try zts.file_io.readFile(allocator, fresh.events_path.?, 1024);
+    defer allocator.free(fresh_events);
+    try testing.expectEqual(@as(usize, 0), fresh_events.len);
 }

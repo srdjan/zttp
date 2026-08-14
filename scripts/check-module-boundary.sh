@@ -115,6 +115,10 @@ used_pairs="$(
   for pkg in runtime tools pi modules proof-review zttp-sdk; do
     [[ -d "packages/$pkg" ]] || continue
     while IFS= read -r -d '' file; do
+      # `git ls-files` still reports an unstaged deletion. Skip paths that are
+      # absent from the working tree so a cleanup diff cannot make awk fail
+      # noisily while the gate continues with a false-looking success log.
+      [[ -f "$file" ]] || continue
       names_used_in "$file"
     done < <(git ls-files -z "packages/$pkg/*.zig") |
       sort -u |

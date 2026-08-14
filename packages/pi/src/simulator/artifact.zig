@@ -1,216 +1,36 @@
-//! Versioned, fail-closed flow-cassette artifact contract.
+//! Fail-closed flow-cassette artifact loading, validation, and hashing.
 
 const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
+pub const contract = @import("artifact_contract.zig");
 
-pub const schema_version: u32 = 1;
-
-pub const Limits = struct {
-    pub const manifest_bytes: usize = 1 * 1024 * 1024;
-    pub const trace_or_response_bytes: usize = 8 * 1024 * 1024;
-    pub const workspace_file_bytes: usize = 8 * 1024 * 1024;
-    pub const case_bytes: usize = 128 * 1024 * 1024;
-    pub const path_bytes: usize = 1024;
-    pub const files: usize = 1024;
-    pub const turns: usize = 32;
-    pub const model_checkpoints: usize = 256;
-    pub const approval_checkpoints: usize = 256;
-    pub const diagnostic_bytes: usize = 256;
-};
-
-pub const Sha256Hex = struct {
-    bytes: [64]u8,
-
-    pub fn fromBytes(bytes: []const u8) Sha256Hex {
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
-        return .{ .bytes = std.fmt.bytesToHex(digest, .lower) };
-    }
-
-    pub fn eql(a: Sha256Hex, b: Sha256Hex) bool {
-        return std.mem.eql(u8, &a.bytes, &b.bytes);
-    }
-
-    pub fn slice(self: *const Sha256Hex) []const u8 {
-        return &self.bytes;
-    }
-
-    pub fn jsonParse(
-        allocator: std.mem.Allocator,
-        source: anytype,
-        options: std.json.ParseOptions,
-    ) !Sha256Hex {
-        const raw = try std.json.innerParse([]const u8, allocator, source, options);
-        if (raw.len != 64) return error.UnexpectedToken;
-        var out: Sha256Hex = undefined;
-        for (raw, 0..) |byte, i| {
-            if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return error.UnexpectedToken;
-            out.bytes[i] = byte;
-        }
-        return out;
-    }
-
-    pub fn jsonStringify(self: Sha256Hex, json: anytype) !void {
-        try json.write(&self.bytes);
-    }
-};
-
-pub const EvidenceClass = enum { empirical_model, deterministic_harness };
-pub const Provider = enum { anthropic, openai };
-pub const ApprovalDecision = enum { approve, reject };
-pub const TurnOutcome = enum {
-    approved,
-    approval_denied,
-    veto_exhausted,
-    budget_roundtrips,
-    budget_tool_calls,
-    budget_timeout,
-    error_exit,
-};
-pub const EventKind = enum {
-    user_text,
-    model_text,
-    tool_use,
-    tool_result,
-    proof_card,
-    diagnostic_box,
-    verified_patch,
-    system_note,
-    turn_end,
-};
-pub const TranscriptItemKind = enum {
-    user_text,
-    model_text,
-    assistant_tool_use,
-    tool_result,
-    proof_card,
-    diagnostic_box,
-    verified_patch,
-    system_note,
-};
-pub const WorkspaceChangeKind = enum { created, changed, deleted };
-
-pub const CaseDescriptor = struct {
-    schema_version: u32,
-    case_name: []const u8,
-    evidence_class: EvidenceClass,
-    executable: bool,
-    active_generation: Sha256Hex,
-};
-
-pub const TurnExpectation = struct {
-    index: u32,
-    user_input: []const u8,
-    outcome: TurnOutcome,
-    final_response_sha256: Sha256Hex,
-};
-
-pub const ResponseFixture = struct {
-    index: u32,
-    turn_index: u32,
-    call_index: u32,
-    path: []const u8,
-    sha256: Sha256Hex,
-};
-
-pub const ApprovalExpectation = struct {
-    index: u32,
-    turn_index: u32,
-    checkpoint_index: u32,
-    decision: ApprovalDecision,
-};
-
-pub const EventExpectation = struct {
-    index: u32,
-    turn_index: u32,
-    kind: EventKind,
-    payload_sha256: Sha256Hex,
-};
-
-pub const WorkspaceFixture = struct {
-    path: []const u8,
-    sha256: Sha256Hex,
-};
-
-pub const TurnWorkspaceCheckpoint = struct {
-    turn_index: u32,
-    files: []const WorkspaceFixture,
-};
-
-pub const WorkspaceChange = struct {
-    path: []const u8,
-    kind: WorkspaceChangeKind,
-};
-
-pub const ArtifactReference = struct {
-    path: []const u8,
-    sha256: Sha256Hex,
-};
-
-pub const FlowManifest = struct {
-    schema_version: u32,
-    flow_version: Sha256Hex,
-    case_name: []const u8,
-    evidence_class: EvidenceClass,
-    executable: bool,
-    provider: Provider,
-    model: []const u8,
-    turns: []const TurnExpectation,
-    model_responses: []const ResponseFixture,
-    approvals: []const ApprovalExpectation,
-    events: []const EventExpectation,
-    allowed_workspace_changes: []const WorkspaceChange,
-    initial_workspace: []const WorkspaceFixture,
-    turn_workspaces: []const TurnWorkspaceCheckpoint,
-    expected_workspace: []const WorkspaceFixture,
-    trace: ArtifactReference,
-};
-
-pub const ModelCheckpoint = struct {
-    index: u32,
-    turn_index: u32,
-    call_index: u32,
-    transcript_prefix_count: u32,
-    transcript_sha256: Sha256Hex,
-    request_context_sha256: Sha256Hex,
-    transient_user_text_sha256: ?Sha256Hex,
-};
-
-pub const ApprovalCheckpoint = struct {
-    index: u32,
-    turn_index: u32,
-    checkpoint_index: u32,
-    preview_sha256: Sha256Hex,
-};
-
-pub const TranscriptItem = struct {
-    index: u32,
-    turn_index: u32,
-    kind: TranscriptItemKind,
-    payload_sha256: Sha256Hex,
-};
-
-pub const ApplyReceipt = struct {
-    index: u32,
-    turn_index: u32,
-    payload_sha256: Sha256Hex,
-};
-
-pub const InteractionTrace = struct {
-    schema_version: u32,
-    model_calls: []const ModelCheckpoint,
-    approvals: []const ApprovalCheckpoint,
-    transcript_items: []const TranscriptItem,
-    apply_receipts: []const ApplyReceipt,
-};
-
-pub const FixtureRole = enum { trace, response, initial_workspace, turn_workspace, expected_workspace };
-
-pub const LoadedFixture = struct {
-    role: FixtureRole,
-    path: []const u8,
-    bytes: []const u8,
-};
+pub const schema_version = contract.schema_version;
+pub const Limits = contract.Limits;
+pub const Sha256Hex = contract.Sha256Hex;
+pub const EvidenceClass = contract.EvidenceClass;
+pub const Provider = contract.Provider;
+pub const ApprovalDecision = contract.ApprovalDecision;
+pub const TurnOutcome = contract.TurnOutcome;
+pub const EventKind = contract.EventKind;
+pub const TranscriptItemKind = contract.TranscriptItemKind;
+pub const WorkspaceChangeKind = contract.WorkspaceChangeKind;
+pub const CaseDescriptor = contract.CaseDescriptor;
+pub const TurnExpectation = contract.TurnExpectation;
+pub const ResponseFixture = contract.ResponseFixture;
+pub const ApprovalExpectation = contract.ApprovalExpectation;
+pub const EventExpectation = contract.EventExpectation;
+pub const WorkspaceFixture = contract.WorkspaceFixture;
+pub const TurnWorkspaceCheckpoint = contract.TurnWorkspaceCheckpoint;
+pub const WorkspaceChange = contract.WorkspaceChange;
+pub const ArtifactReference = contract.ArtifactReference;
+pub const FlowManifest = contract.FlowManifest;
+pub const ModelCheckpoint = contract.ModelCheckpoint;
+pub const ApprovalCheckpoint = contract.ApprovalCheckpoint;
+pub const TranscriptItem = contract.TranscriptItem;
+pub const ApplyReceipt = contract.ApplyReceipt;
+pub const InteractionTrace = contract.InteractionTrace;
+pub const FixtureRole = contract.FixtureRole;
+pub const LoadedFixture = contract.LoadedFixture;
 
 pub const FlowCase = struct {
     arena: std.heap.ArenaAllocator,
@@ -630,6 +450,41 @@ fn validateManifest(loader: *Loader, manifest: *const FlowManifest) LoadInternal
     for (manifest.turn_workspaces) |checkpoint| file_count += checkpoint.files.len;
     if (file_count > Limits.files) return loader.fail(.too_many_files, .manifest, "manifest.json");
     if (manifest.model.len == 0) return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+    if (manifest.model_revision) |revision| {
+        if (revision.len == 0 or revision.len > Limits.path_bytes) {
+            return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+        }
+    }
+    // A local recording must name the stack that produced it, by one of the
+    // two routes a stack offers. MLX-LM reports itself in the response
+    // `system_fingerprint`; rapid-mlx reports nothing on the wire, so the
+    // operator declares the pair. Neither route present means a cassette that
+    // cannot say what generated it, which is not a measurement.
+    const named_by_fingerprint = manifest.mlx_lm_version != null;
+    const named_by_runtime = manifest.runtime_name != null and manifest.runtime_version != null;
+    if (manifest.provider == .local and !named_by_fingerprint and !named_by_runtime) {
+        return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+    }
+    if (manifest.mlx_lm_version) |version| {
+        if (manifest.provider != .local or version.len == 0 or version.len > 128) {
+            return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+        }
+    }
+    // Half a pair is refused rather than ignored: a name with no version reads
+    // as provenance while carrying none.
+    if ((manifest.runtime_name == null) != (manifest.runtime_version == null)) {
+        return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+    }
+    if (manifest.runtime_name) |name| {
+        if (manifest.provider != .local or name.len == 0 or name.len > 128) {
+            return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+        }
+    }
+    if (manifest.runtime_version) |version| {
+        if (manifest.provider != .local or version.len == 0 or version.len > 128) {
+            return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+        }
+    }
 
     for (manifest.turns, 0..) |turn, i| {
         if (turn.index != i or turn.user_input.len == 0) {
@@ -864,6 +719,23 @@ fn validateSafePathOrFail(loader: *Loader, path: []const u8, component: Componen
     if (!isSafeRelativePath(path)) return loader.fail(.unsafe_path, component, path);
 }
 
+/// Workspace state the agent's own tools write, which is never case source and
+/// never part of what a replay compares: `pi_goal_check` persists witnesses to
+/// `.zttp/witnesses/<hash>/`. Both the recorder's capture and the runner's
+/// replay comparison consult this one predicate, because a file that one side
+/// skips and the other side counts fails every replay of that case.
+pub fn isAgentScratch(path: []const u8) bool {
+    return std.mem.eql(u8, path, ".zttp") or std.mem.startsWith(u8, path, ".zttp/");
+}
+
+test "agent scratch covers the witness tree and nothing beside it" {
+    try std.testing.expect(isAgentScratch(".zttp"));
+    try std.testing.expect(isAgentScratch(".zttp/witnesses/f0812d0e79287bb9/handler.path"));
+    try std.testing.expect(!isAgentScratch("handler.ts"));
+    try std.testing.expect(!isAgentScratch("src/.zttp/handler.ts"));
+    try std.testing.expect(!isAgentScratch(".zttprc"));
+}
+
 pub fn isSafeRelativePath(path: []const u8) bool {
     if (path.len == 0 or path.len > Limits.path_bytes) return false;
     if (std.fs.path.isAbsolute(path) or path[0] == '/' or path[0] == '\\') return false;
@@ -950,6 +822,24 @@ pub fn computeFlowVersion(
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update("zttp-flow-cassette-v1\x00");
     hashFramed(&hasher, canonical.written());
+    if (manifest.model_revision) |revision| {
+        hashFramed(&hasher, "model-revision-v1");
+        hashFramed(&hasher, revision);
+    }
+    if (manifest.mlx_lm_version) |version| {
+        hashFramed(&hasher, "mlx-lm-version-v1");
+        hashFramed(&hasher, version);
+    }
+    // Appended after the fields that came before it, and skipped when absent,
+    // so every cassette recorded before this field existed keeps its version.
+    if (manifest.runtime_name) |name| {
+        hashFramed(&hasher, "runtime-name-v1");
+        hashFramed(&hasher, name);
+    }
+    if (manifest.runtime_version) |version| {
+        hashFramed(&hasher, "runtime-version-v1");
+        hashFramed(&hasher, version);
+    }
     for (ordered) |fixture| {
         hashFramed(&hasher, fixture.path);
         hashFramed(&hasher, fixture.bytes);

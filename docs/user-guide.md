@@ -456,16 +456,15 @@ entries and `zttp proofs gate` for pull-request checks.
 ## Expert Mode
 
 `zttp expert` is the compiler-in-the-loop coding agent. It proposes edits and
-routes every one through the same compiler checks before they land. The
-Anthropic backend is the measured, supported path. The shipped OpenAI Responses
-API backend is experimental and unmeasured; its `gpt-4o-mini` default is not
-covered by the codegen quality ratchet.
+routes every one through the same compiler checks before they land. Claude
+remains the current default. The developer-managed local MLX-LM provider and
+OpenAI are available through explicit `--provider` selection.
 
 ### What a turn sends
 
-Expert mode is a coding agent, so it reads your code to work on it, and what it
-reads goes to your model provider. Nothing is uploaded when the session starts:
-the first request carries your prompt, the agent persona, and the tool schemas.
+Expert mode is a coding agent, so it reads your code to work on it. Nothing is
+sent when the session starts: the first request carries your prompt, the agent
+persona, and the tool schemas.
 
 Source crosses the wire when the model calls a tool that returns it. Three do:
 `workspace_read_file` returns a file's contents, `workspace_search_text` returns
@@ -483,19 +482,24 @@ Files the model never asks for are never sent. There is no repository scan and
 no upfront upload, and the examples baked into the persona are this repository's
 own, not yours.
 
-The interactive banner states the destination before your first turn. To keep
-source on your machine, point `ZTS_OPENAI_BASE_URL` at a local server that
-speaks the OpenAI Responses shape:
+The interactive banner states the resolved destination before your first turn.
+To keep requests on the machine, start MLX-LM separately and select local:
 
 ```bash
-export OPENAI_API_KEY=unused-by-a-local-server
-export ZTS_OPENAI_BASE_URL=http://127.0.0.1:11434/v1/responses
-export ZTS_OPENAI_MODEL=<the model your server serves>
-zttp expert
+mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
+zttp expert --provider local
 ```
 
-The banner reports a loopback endpoint as staying on this machine. A proxy in
-front of a hosted provider is still off-machine and is reported as such.
+`ZTTP_MLX_BASE_URL` defaults to `http://127.0.0.1:8080`. It accepts only a
+credential-free HTTP loopback root: `localhost`, `127.0.0.1`, or `::1`, with no
+path, query, or fragment. Zttp checks `/health` and `/v1/models` before creating
+a session, but it never starts, stops, or replaces the server. It does not retry
+through another provider after a local failure.
+
+The local adapter was tested with MLX-LM 0.31.3 and model revision
+`b372ebbb518c0e81617e25d8824427dd9ee1f08c`. The model has a 131,072-token
+context window; zttp requests at most 8,192 output tokens and otherwise uses the
+model-shipped generation defaults.
 
 ### How a turn runs
 
@@ -510,25 +514,32 @@ front of a hosted provider is still off-machine and is reported as such.
 6. The host writes the file. The agent never writes to disk itself.
 
 ```bash
-zttp auth claude
-zttp auth openai                              # experimental provider
-zttp expert
+zttp expert                                      # current DeepSeek default
+zttp expert --provider local                     # local LFM
+zttp expert --provider openai                    # explicit OpenAI
+zttp expert --provider deepseek                  # explicit DeepSeek
 zttp expert --yes                                # apply edits without prompting
 zttp expert --no-edit                            # read-only analysis, no writes
 zttp expert --resume                             # continue last session
-zttp expert --model claude-sonnet-4-6            # user-selected override
+zttp expert --provider claude --model claude-sonnet-4-6
 zttp expert --print "add a GET /health route"
 zttp expert --handler src/handler.ts --goal no_secret_leakage
 ```
 
-Pi uses `claude-sonnet-4-6` for Anthropic and `gpt-4o-mini` for OpenAI. If both
-credentials are configured, Anthropic takes precedence. Pass `--model <id>` to
-start on an exact model registered for that active provider, or switch the
-current session with `/model`. Model selection never switches providers;
-`/model` lists only the active provider's entries and marks the current one.
-Selecting a model also applies its request budget. Claude models keep their
-curated budgets; `gpt-4o-mini` uses an 8,192-token request limit while retaining
-its documented 16,384-token output capability and 128,000-token context window.
+Provider resolution is explicit launch flags, then stored resume or fork
+identity, then the current DeepSeek default. Cloud keys never select a provider. A new
+session stores its provider and model; resume restores both, fork inherits both,
+and `/new` keeps the process provider and current model. An explicit launch
+override is disclosed and persisted. To resume a session from another provider,
+restart with `--provider` and optional `--model`.
+
+`--model <id>` selects only within the active provider. It never infers or
+changes the provider. `/model` and RPC `model.set` follow the same rule and
+persist the choice atomically. Claude defaults to `claude-sonnet-4-6`; OpenAI
+defaults to `gpt-4o-mini`; DeepSeek defaults to `deepseek-v4-flash`. The
+compiler-only `--goal` workflow rejects `--provider` and `--model` and does not
+check model readiness.
+
 Pass `--yes` to apply every verified edit without a confirmation prompt; the
 approval policy is persisted through `--resume`.
 Pass `--no-edit` to allow analysis and file reads while blocking all writes.
@@ -540,8 +551,11 @@ veto was not satisfied within the attempt budget, `3` a turn budget was
 exhausted (round-trips, tool calls, or the wall-clock limit), `4` an edit was
 verified but the approval prompt rejected it.
 
-Keys are stored in `~/.zttp/providers.json` with mode `0600`. A shell-set
-`ANTHROPIC_API_KEY` or `OPENAI_API_KEY` overrides the stored value.
+`zttp auth claude`, `zttp auth openai`, and `zttp auth deepseek` store cloud keys
+in `~/.zttp/providers.json` with mode `0600`. A shell-set `ANTHROPIC_API_KEY`,
+`OPENAI_API_KEY`, or `DEEPSEEK_API_KEY` overrides the stored value, and the key
+is validated only after its cloud provider is resolved. `DEEPSEEK_BASE_URL`
+points DeepSeek at another HTTPS root; plain HTTP is refused.
 
 When your request is ambiguous - the right edit depends on a choice you have not
 made - the agent asks one clarifying question instead of guessing. Answer it on

@@ -60,8 +60,9 @@ comptime {
     _ = @import("demo_passport.zig");
     _ = @import("providers/anthropic/events.zig");
     _ = @import("providers/anthropic/sse_parser.zig");
-    _ = @import("providers/anthropic/json_writer.zig");
+    _ = @import("providers/json_writer.zig");
     _ = @import("providers/anthropic/tools_schema.zig");
+    _ = @import("providers/selection.zig");
     _ = @import("providers/anthropic/request.zig");
     _ = @import("providers/anthropic/response_assembler.zig");
     _ = @import("providers/anthropic/apply_edit.zig");
@@ -72,6 +73,9 @@ comptime {
     _ = @import("providers/openai/sse_parser.zig");
     _ = @import("providers/openai/response_assembler.zig");
     _ = @import("providers/openai/client.zig");
+    _ = @import("providers/local/client.zig");
+    _ = @import("providers/chat_completions.zig");
+    _ = @import("providers/deepseek/client.zig");
     _ = @import("app.zig");
     _ = @import("print_mode.zig");
     _ = @import("session/paths.zig");

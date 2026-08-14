@@ -1,27 +1,35 @@
 //! expert_codegen_record - baseline recorder and offline recorder smoke test.
 //!
-//! Corpus recording spends real tokens and stays gated behind
-//! `ZTTP_CODEGEN_RECORD=1` plus a live ANTHROPIC_API_KEY. Its transport,
-//! capture, disk, and replay path is exercised separately against a loopback
-//! Anthropic response, so harness development needs neither a key nor credit.
+//! Corpus recording spends real model time and stays gated behind
+//! `ZTTP_CODEGEN_RECORD=1`. `ZTTP_CODEGEN_PROVIDER` selects the provider;
+//! cloud credentials are required only for an explicitly selected cloud
+//! provider. Transport, capture, disk, and replay are tested offline.
 //! Live cassettes remain the only source for model-behavior measurements.
 
 const std = @import("std");
 const zts = @import("zts");
 const anthropic = @import("providers/anthropic/client.zig");
+const anthropic_tools = @import("providers/anthropic/tools_schema.zig");
+const local = @import("providers/local/client.zig");
+const openai = @import("providers/openai/client.zig");
+const deepseek = @import("providers/deepseek/client.zig");
 const cassette_client = @import("providers/cassette_client.zig");
 const cassette_record = @import("providers/cassette_record.zig");
 const capture_sink = @import("providers/capture_sink.zig");
 const model_request = @import("providers/model_request.zig");
+const registry_mod = @import("registry/registry.zig");
 const flow_artifact = @import("simulator/artifact.zig");
 const flow_promotion = @import("simulator/promotion.zig");
 const flow_recorder = @import("simulator/recorder.zig");
+const simulator_model_client = @import("simulator/model_client.zig");
 const transcript_mod = @import("transcript.zig");
 const loop = @import("loop.zig");
 const app = @import("app.zig");
 const agent = @import("agent.zig");
 const codegen = @import("expert_codegen_eval.zig");
-const request_mod = @import("providers/anthropic/request.zig");
+const expert_persona = @import("expert_persona.zig");
+const models = @import("providers/models.zig");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
 
@@ -53,12 +61,15 @@ const CodegenResponseCapture = struct {
         defer self.allocator.free(path);
         try cassette_record.writeCassette(self.allocator, path, raw_response, .{
             .provider = switch (snapshot.config.provider) {
+                .local => .local,
                 .anthropic => .anthropic,
                 .openai => .openai,
+                .deepseek => .deepseek,
             },
             .scenario = self.scenario,
             .stream = snapshot.config.stream,
             .model = snapshot.config.model,
+            .request_sha256 = if (snapshot.wire_request_sha256) |digest| digest.slice() else null,
         });
     }
 };
@@ -161,11 +172,30 @@ fn dropStashedCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, nam
 }
 
 /// Where one case's provider responses were read from.
-pub const StepSource = enum { flow_artifact, flat_cassette };
+pub const StepSource = enum { flow_artifact, flat_cassette, missing };
 
 pub const ResolvedSteps = struct {
     steps: [][]u8,
     source: StepSource,
+    flow_case: ?flow_artifact.FlowCase = null,
+
+    pub fn deinit(self: *ResolvedSteps, allocator: std.mem.Allocator) void {
+        if (self.flow_case) |*flow_case| flow_case.deinit();
+        for (self.steps) |step| allocator.free(step);
+        allocator.free(self.steps);
+        self.* = undefined;
+    }
+
+    pub fn responseCount(self: *const ResolvedSteps) usize {
+        if (self.flow_case) |flow_case| return flow_case.manifest.model_responses.len;
+        return self.steps.len;
+    }
+
+    pub fn model(self: *const ResolvedSteps) ?[]const u8 {
+        if (self.flow_case) |flow_case| return flow_case.manifest.model;
+        if (self.steps.len == 0) return null;
+        return cassetteModel(self.steps[0]);
+    }
 };
 
 /// True when `name` has a recorded flow artifact, which is the descriptor's
@@ -199,32 +229,27 @@ fn hasFlowArtifact(allocator: std.mem.Allocator, case_root_abs: []const u8) bool
 fn resolveCaseSteps(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
+    provider: agent.Provider,
     name: []const u8,
 ) !ResolvedSteps {
     const flow_case_root = try std.fmt.allocPrint(
         allocator,
         "{s}/{s}/{s}",
-        .{ repo_root, empirical_flow_root, name },
+        .{ repo_root, flowRoot(provider), name },
     );
     defer allocator.free(flow_case_root);
 
     if (hasFlowArtifact(allocator, flow_case_root)) {
-        var state = flow_artifact.loadCase(allocator, flow_case_root);
-        defer state.deinit();
+        const state = flow_artifact.loadCase(allocator, flow_case_root);
         switch (state) {
-            .available => |*flow_case| {
-                var list: std.ArrayList([]u8) = .empty;
-                errdefer {
-                    for (list.items) |s| allocator.free(s);
-                    list.deinit(allocator);
-                }
-                // `loadCase` appends response fixtures in `manifest.model_responses`
-                // order, which is call order, so the sequence needs no sorting.
-                for (flow_case.fixtures) |fixture| {
-                    if (fixture.role != .response) continue;
-                    try list.append(allocator, try allocator.dupe(u8, fixture.bytes));
-                }
-                return .{ .steps = try list.toOwnedSlice(allocator), .source = .flow_artifact };
+            .available => |flow_case| {
+                var owned_flow_case = flow_case;
+                errdefer owned_flow_case.deinit();
+                return .{
+                    .steps = try allocator.alloc([]u8, 0),
+                    .source = .flow_artifact,
+                    .flow_case = owned_flow_case,
+                };
             },
             .failure => |diagnostic| {
                 std.debug.print(
@@ -239,6 +264,10 @@ fn resolveCaseSteps(
                 return error.UnloadableFlowArtifact;
             },
         }
+    }
+
+    if (provider != .anthropic) {
+        return .{ .steps = try allocator.alloc([]u8, 0), .source = .missing };
     }
 
     const cassette_case_root = try std.fmt.allocPrint(
@@ -276,7 +305,276 @@ fn readCaseSteps(allocator: std.mem.Allocator, dir_abs: []const u8) ![][]u8 {
 /// Where committed cassettes live, relative to the repo root (the cwd when the
 /// recorder runs via `zig build`).
 pub const cassette_root = "packages/pi/src/providers/testdata/codegen";
-pub const empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/codegen";
+pub const claude_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/codegen";
+pub const local_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/local/codegen";
+pub const openai_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/openai/codegen";
+pub const deepseek_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/deepseek/codegen";
+
+// Runtime and evaluation defaults share one authority. The local cutover is a
+// one-line change only after its structural E2E and full corpus both complete.
+pub const headline_provider: agent.Provider = models.default_provider;
+pub const empirical_flow_root = flowRoot(headline_provider);
+
+fn flowRoot(provider: agent.Provider) []const u8 {
+    return switch (provider) {
+        .local => local_empirical_flow_root,
+        .anthropic => claude_empirical_flow_root,
+        .openai => openai_empirical_flow_root,
+        .deepseek => deepseek_empirical_flow_root,
+    };
+}
+
+fn recordingProvider() !agent.Provider {
+    const value = envValue("ZTTP_CODEGEN_PROVIDER") orelse return .local;
+    return agent.Provider.parsePublic(value) orelse error.UnsupportedRecordingProvider;
+}
+
+fn recordingAuthAvailable(provider: agent.Provider) bool {
+    return switch (provider) {
+        .local => true,
+        .anthropic => envValue("ANTHROPIC_API_KEY") != null,
+        .openai => envValue("OPENAI_API_KEY") != null,
+        .deepseek => envValue("DEEPSEEK_API_KEY") != null,
+    };
+}
+
+fn recordingCommand(
+    allocator: std.mem.Allocator,
+    provider: agent.Provider,
+    named_case: bool,
+) ![]u8 {
+    return if (named_case)
+        std.fmt.allocPrint(
+            allocator,
+            "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} ZTTP_CODEGEN_ONLY=<name> " ++
+                "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"",
+            .{provider.publicName()},
+        )
+    else
+        std.fmt.allocPrint(
+            allocator,
+            "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} " ++
+                "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"",
+            .{provider.publicName()},
+        );
+}
+
+test "recording remediation preserves the replay provider" {
+    const claude = try recordingCommand(testing.allocator, .anthropic, false);
+    defer testing.allocator.free(claude);
+    try testing.expect(std.mem.indexOf(u8, claude, "ZTTP_CODEGEN_PROVIDER=claude") != null);
+
+    const local_named = try recordingCommand(testing.allocator, .local, true);
+    defer testing.allocator.free(local_named);
+    try testing.expect(std.mem.indexOf(u8, local_named, "ZTTP_CODEGEN_PROVIDER=local") != null);
+    try testing.expect(std.mem.indexOf(u8, local_named, "ZTTP_CODEGEN_ONLY=<name>") != null);
+}
+
+/// The declared local server stack, as `name@version`.
+///
+/// MLX-LM names itself in every response `system_fingerprint`, so a recording
+/// against it needs nothing here. rapid-mlx sends no fingerprint and serves no
+/// version endpoint, so the identity exists only in the operator's shell and
+/// `ZTTP_CODEGEN_LOCAL_RUNTIME=rapid-mlx@0.12.11` is how it reaches the
+/// manifest. Refused rather than guessed when malformed: a wrong stack name is
+/// worse than an absent one, because the artifact gate accepts it.
+const RuntimeIdentity = struct { name: []const u8, version: []const u8 };
+
+fn declaredRuntime(provider: agent.Provider) !?RuntimeIdentity {
+    return declaredRuntimeFrom(provider, envValue("ZTTP_CODEGEN_LOCAL_RUNTIME"));
+}
+
+test "a declared runtime identity splits on the first at-sign" {
+    const identity = (try declaredRuntimeFrom(.local, "rapid-mlx@0.12.11")).?;
+    try testing.expectEqualStrings("rapid-mlx", identity.name);
+    try testing.expectEqualStrings("0.12.11", identity.version);
+    try testing.expectError(error.MalformedRuntimeIdentity, declaredRuntimeFrom(.local, "rapid-mlx"));
+    try testing.expectError(error.MalformedRuntimeIdentity, declaredRuntimeFrom(.local, "@0.12.11"));
+    try testing.expectError(error.MalformedRuntimeIdentity, declaredRuntimeFrom(.local, "rapid-mlx@"));
+    try testing.expectError(
+        error.RuntimeIdentityRequiresLocalProvider,
+        declaredRuntimeFrom(.anthropic, "rapid-mlx@0.12.11"),
+    );
+    try testing.expect(try declaredRuntimeFrom(.local, null) == null);
+}
+
+/// The body of `declaredRuntime`, with the environment read lifted out so the
+/// parse is testable without a process-wide variable.
+fn declaredRuntimeFrom(provider: agent.Provider, raw_opt: ?[]const u8) !?RuntimeIdentity {
+    const raw = raw_opt orelse return null;
+    if (provider != .local) return error.RuntimeIdentityRequiresLocalProvider;
+    const split = std.mem.indexOfScalar(u8, raw, '@') orelse return error.MalformedRuntimeIdentity;
+    const name = std.mem.trim(u8, raw[0..split], " \t");
+    const version = std.mem.trim(u8, raw[split + 1 ..], " \t");
+    if (name.len == 0 or version.len == 0) return error.MalformedRuntimeIdentity;
+    if (name.len > 128 or version.len > 128) return error.MalformedRuntimeIdentity;
+    return .{ .name = name, .version = version };
+}
+
+fn cachedModelRevision(allocator: std.mem.Allocator, provider: agent.Provider, model: []const u8) !?[]u8 {
+    if (provider != .local or !std.mem.eql(u8, model, local.default_model)) return null;
+    if (envValue("ZTTP_CODEGEN_MODEL_REVISION")) |revision| return try allocator.dupe(u8, revision);
+    const cache_root = if (envValue("HF_HOME")) |root|
+        try allocator.dupe(u8, root)
+    else if (envValue("HOME")) |home|
+        try std.fs.path.join(allocator, &.{ home, ".cache", "huggingface" })
+    else
+        return null;
+    defer allocator.free(cache_root);
+    const ref_path = try std.fs.path.join(allocator, &.{
+        cache_root,
+        "hub",
+        "models--LiquidAI--LFM2.5-2.6B-MLX-8bit",
+        "refs",
+        "main",
+    });
+    defer allocator.free(ref_path);
+    const bytes = zts.file_io.readFile(allocator, ref_path, 256) catch return null;
+    defer allocator.free(bytes);
+    const revision = std.mem.trim(u8, bytes, " \t\r\n");
+    if (revision.len == 0) return null;
+    for (revision) |byte| if (!std.ascii.isHex(byte)) return null;
+    return try allocator.dupe(u8, revision);
+}
+
+fn requestConfigForSession(session: *const agent.AgentSession) !model_request.Config {
+    return switch (session.backend) {
+        .local => |client| .{
+            .provider = .local,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .stream = false,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        .anthropic => |client| .{
+            .provider = .anthropic,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        .openai => |client| .{
+            .provider = .openai,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        .deepseek => |client| .{
+            .provider = .deepseek,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .stream = false,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        .stub => error.UnsupportedRecordingProvider,
+    };
+}
+
+const ReplayRequestContext = struct {
+    system_prompt: []u8,
+    tools_json: []u8,
+    config: model_request.Config,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        registry: *const registry_mod.Registry,
+        provider: agent.Provider,
+        model_id: []const u8,
+    ) !ReplayRequestContext {
+        const selected_model = try models.resolveForProvider(provider, model_id);
+        const system_prompt = try expert_persona.buildSystemPrompt(allocator);
+        errdefer allocator.free(system_prompt);
+
+        var tools = TextBuffer.init(allocator);
+        defer tools.deinit();
+        switch (provider) {
+            .local => try local.writeToolsArray(tools.writer(), registry),
+            .anthropic => try anthropic_tools.writeToolsArray(tools.writer(), registry),
+            .openai => try openai.writeToolsArray(tools.writer(), registry),
+            .deepseek => try deepseek.writeToolsArray(tools.writer(), registry),
+        }
+        const tools_json = try tools.toOwnedSlice();
+        errdefer allocator.free(tools_json);
+
+        return .{
+            .system_prompt = system_prompt,
+            .tools_json = tools_json,
+            .config = .{
+                .provider = switch (provider) {
+                    .local => .local,
+                    .anthropic => .anthropic,
+                    .openai => .openai,
+                    .deepseek => .deepseek,
+                },
+                .model = selected_model.id,
+                .max_output_tokens = selected_model.request_policy.max_output_tokens,
+                // The two Chat Completions adapters are non-streaming; the two
+                // SSE adapters stream.
+                .stream = provider != .local and provider != .deepseek,
+                .system_prompt = system_prompt,
+                .tools_json = tools_json,
+            },
+        };
+    }
+
+    fn deinit(self: *ReplayRequestContext, allocator: std.mem.Allocator) void {
+        allocator.free(self.tools_json);
+        allocator.free(self.system_prompt);
+        self.* = undefined;
+    }
+};
+
+const CorpusReplayClient = union(enum) {
+    flow: simulator_model_client.Client,
+    flat: CassetteSequenceClient,
+
+    fn init(
+        resolved: *const ResolvedSteps,
+        request_config: ?model_request.Config,
+    ) !CorpusReplayClient {
+        if (resolved.flow_case) |*flow_case| {
+            return .{ .flow = simulator_model_client.Client.init(
+                simulator_model_client.Script.fromFlowCase(flow_case),
+                request_config orelse return error.MissingFlowRequestConfig,
+            ) };
+        }
+        return .{ .flat = .{ .steps = resolved.steps } };
+    }
+
+    fn asModelClient(self: *CorpusReplayClient) loop.ModelClient {
+        return switch (self.*) {
+            .flow => |*client| client.asModelClient(),
+            .flat => |*client| client.asClient(),
+        };
+    }
+
+    fn finish(self: *CorpusReplayClient) !void {
+        return switch (self.*) {
+            .flow => |*client| client.finish(),
+            .flat => {},
+        };
+    }
+
+    fn lastFlowMismatch(self: *const CorpusReplayClient) ?flow_artifact.ReplayMismatch {
+        return switch (self.*) {
+            .flow => |*client| client.lastMismatch(),
+            .flat => null,
+        };
+    }
+};
+
+fn setSessionCapture(session: *agent.AgentSession, sink: ?*capture_sink.CaptureSink) !void {
+    switch (session.backend) {
+        .local => |*client| client.capture = sink,
+        .anthropic => |*client| client.capture = sink,
+        .openai => |*client| client.capture = sink,
+        .deepseek => |*client| client.capture = sink,
+        .stub => return error.UnsupportedRecordingProvider,
+    }
+}
 
 /// Borrowed env-var read (no allocation), mirroring agent.zig's `envVar`:
 /// std.process env helpers are not the 0.16 path; std.c.getenv is.
@@ -475,13 +773,37 @@ test "empirical recording requires declared intent to pass" {
     try requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.passed);
 }
 
+test "first draft expectations are provider qualified" {
+    try testing.expectEqual(
+        @as(?bool, false),
+        firstDraftExpectation(.local, false, true),
+    );
+    try testing.expectEqual(
+        @as(?bool, null),
+        firstDraftExpectation(.local, null, true),
+    );
+    try testing.expectEqual(
+        @as(?bool, true),
+        firstDraftExpectation(.anthropic, null, true),
+    );
+}
+
+fn firstDraftExpectation(
+    provider: agent.Provider,
+    recorded: ?bool,
+    claude_expectation: bool,
+) ?bool {
+    if (recorded) |expectation| return expectation;
+    return if (provider == .anthropic) claude_expectation else null;
+}
+
 /// The headline model for the published convergence number.
 ///
 /// Derived from the product default rather than written down twice, so the
 /// number always describes the model a user actually gets. `ZTTP_CODEGEN_MODEL`
 /// overrides it for a cheap harness run (e.g. Haiku) or to record a second row
 /// against a different tier.
-pub const headline_model = request_mod.default_model;
+pub const headline_model = models.defaultForProvider(headline_provider).id;
 
 /// Identity of the frozen prompt corpus.
 ///
@@ -551,12 +873,12 @@ test "corpus version changes when a case changes" {
 // workflows). Each elicits realistic multi-roundtrip behaviour (explore then
 // edit) and records as step_0/step_1/...
 //
-// Fourteen of the twenty carry an intent spec. The five durable and workflow
+// Thirteen of the nineteen carry an intent spec. The five durable and workflow
 // cases do not: executing them needs the durable store and queue the runtime
 // stands up, and `zttp test` has no offline story for either - `saga()` fails
 // with NativeFunctionError before any assertion runs, and an io stub does not
 // intercept it. Those cases stay veto-checked and report `.not_checked`, which
-// the summary counts apart from passes, so the published figure reads 14 of 20
+// the summary counts apart from passes, so the published figure reads 13 of 19
 // covered instead of pretending to 20. Closing that gap means giving the test
 // runner a durable backend, which is its own piece of work.
 //
@@ -570,6 +892,69 @@ test "corpus version changes when a case changes" {
 // logged a timestamp, none returned a value read from a store, none wrote the
 // shapes the flow-checker fail-opens hid behind. A fence no case stands on
 // cannot move a number.
+/// Restrict the model-facing tool catalog to a comma-separated allowlist in
+/// `ZTTP_CODEGEN_TOOLS`, for measuring whether a smaller preamble changes
+/// convergence. Unset leaves every registered tool in place, which is the
+/// shape every committed recording was made under.
+///
+/// The motivating measurement: a case's *first* model call carries ~29,000
+/// prompt tokens before the task is even stated, and the whole 18-roundtrip
+/// transcript adds only ~5,000 more. Thirty-seven tools contribute roughly
+/// 21 KB of that preamble and the recorded traces call eight of them.
+///
+/// Two things this deliberately does not do. It never drops `apply_edit`,
+/// which `tool_catalog` emits ahead of the registry and is the only way an
+/// edit reaches the veto. And it fails on a name that matches nothing rather
+/// than silently keeping fewer tools than asked for - a typo'd allowlist that
+/// quietly shrank the catalog further would read as a stronger result than it
+/// is.
+fn applyToolAllowlist(registry: *registry_mod.Registry) !void {
+    const raw = envValue("ZTTP_CODEGEN_TOOLS") orelse return;
+    var kept: usize = 0;
+    const before = registry.entries.items.len;
+
+    var wanted = std.mem.splitScalar(u8, raw, ',');
+    while (wanted.next()) |name_raw| {
+        const name = std.mem.trim(u8, name_raw, " \t");
+        if (name.len == 0) continue;
+        if (registry.findByName(name) == null) {
+            std.debug.print("[codegen-tools] no registered tool named '{s}'\n", .{name});
+            return error.UnknownToolInAllowlist;
+        }
+    }
+
+    var index: usize = 0;
+    while (index < registry.entries.items.len) {
+        const entry_name = registry.entries.items[index].name;
+        var allowed = false;
+        var scan = std.mem.splitScalar(u8, raw, ',');
+        while (scan.next()) |candidate| {
+            if (std.mem.eql(u8, std.mem.trim(u8, candidate, " \t"), entry_name)) {
+                allowed = true;
+                break;
+            }
+        }
+        if (allowed) {
+            index += 1;
+            kept += 1;
+        } else {
+            _ = registry.entries.orderedRemove(index);
+        }
+    }
+
+    std.debug.print(
+        "[codegen-tools] catalog restricted: {d} of {d} tools kept\n",
+        .{ kept, before },
+    );
+}
+
+/// Wall-clock ceiling on one recorded turn. A local model server is the
+/// recording backend now, and a stalled generation there is silence rather
+/// than an error, so an uncapped turn takes the whole corpus run with it.
+/// `ZTTP_CODEGEN_TURN_TIMEOUT_MS` overrides it; zero restores the old
+/// unbounded behavior for a case that legitimately needs longer.
+const default_record_turn_timeout_ms: u64 = 180_000;
+
 const record_corpus = [_]RecordCase{
     .{
         .name = "health",
@@ -1153,14 +1538,16 @@ const record_corpus = [_]RecordCase{
 };
 
 // Record the real expert agent against the corpus and report the live baseline.
-// Gated: ZTTP_CODEGEN_RECORD=1 + a live key. Each case runs in its own tmp
+// Gated: ZTTP_CODEGEN_RECORD=1. Cloud providers additionally require their
+// named key. Each case runs in its own tmp
 // workspace with cwd switched to it, so the agent's tools and the edit veto
 // resolve the same files; cassettes are written to an absolute repo path so the
 // chdir does not misplace them. ZTTP_CODEGEN_LIMIT caps the case count for a
 // cheap small-scale validation before the full run.
 test "record codegen baseline corpus (live, gated)" {
     if (!recordingRequested()) return error.SkipZigTest;
-    if (envValue("ANTHROPIC_API_KEY") == null) return error.SkipZigTest;
+    const corpus_provider = try recordingProvider();
+    if (!recordingAuthAvailable(corpus_provider)) return error.SkipZigTest;
     // A live recording driver, not a memory-correctness test: use an arena over
     // the page allocator so the strict test allocator's leak check does not flag
     // the live HTTP/TLS stack (which the deterministic tests never exercise).
@@ -1170,42 +1557,65 @@ test "record codegen baseline corpus (live, gated)" {
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
+    try applyToolAllowlist(&registry);
     // The published number describes the model a user actually gets, so the
     // corpus records against the product default rather than a hand-picked
     // tier - see `headline_model`. ZTTP_CODEGEN_MODEL overrides it (e.g. Haiku)
     // for cheap harness testing, or to record a second row against another
     // tier. Env strings live for the process, so the borrowed slice is safe.
-    const corpus_model = envValue("ZTTP_CODEGEN_MODEL") orelse headline_model;
+    const corpus_model = envValue("ZTTP_CODEGEN_MODEL") orelse
+        models.defaultForProvider(corpus_provider).id;
     var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
+        .provider = corpus_provider,
         .model = corpus_model,
     });
     defer session.deinit(allocator);
-    if (session.authKind() != .anthropic_api_key) return error.SkipZigTest;
+    if (session.activeProvider() != corpus_provider) return error.UnsupportedRecordingProvider;
     // ZTTP_CODEGEN_ONLY=<name> records just one case, leaving the others'
     // committed cassettes untouched.
     const only_case = envValue("ZTTP_CODEGEN_ONLY");
 
+    const record_turn_timeout_ms: u64 = if (envValue("ZTTP_CODEGEN_TURN_TIMEOUT_MS")) |raw|
+        std.fmt.parseInt(u64, raw, 10) catch default_record_turn_timeout_ms
+    else
+        default_record_turn_timeout_ms;
+    std.debug.print(
+        "[codegen-record] per-turn ceiling: {d}ms\n",
+        .{record_turn_timeout_ms},
+    );
+
     const repo_root = try cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
-    const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, empirical_flow_root });
+    const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, flowRoot(corpus_provider) });
     defer allocator.free(out_dir);
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, out_dir);
 
-    const request_config: model_request.Config = switch (session.backend) {
-        .anthropic => |client| .{
-            .provider = .anthropic,
-            .model = client.config.model,
-            .max_output_tokens = client.config.max_tokens,
-            .system_prompt = client.config.system_prompt,
-            .tools_json = client.config.tools_json,
-        },
-        else => return error.UnsupportedRecordingProvider,
-    };
+    const request_config = try requestConfigForSession(&session);
+    const model_revision = try cachedModelRevision(allocator, corpus_provider, corpus_model);
+    defer if (model_revision) |revision| allocator.free(revision);
+    const runtime_identity = try declaredRuntime(corpus_provider);
+    if (runtime_identity) |identity| {
+        std.debug.print(
+            "[codegen-record] declared local runtime: {s} {s}\n",
+            .{ identity.name, identity.version },
+        );
+    }
+    // A fresh directory per invocation keeps failed attempts from different
+    // corpus runs distinguishable without making diagnostics authoritative.
+    const diagnostics_run_id: ?[]const u8 = if (corpus_provider == .local)
+        try std.fmt.allocPrint(
+            allocator,
+            "{d}-{d}",
+            .{ zts.realtimeNowMs() catch 0, std.c.getpid() },
+        )
+    else
+        null;
+    defer if (diagnostics_run_id) |run_id| allocator.free(run_id);
 
     var limit: usize = record_corpus.len;
     if (envValue("ZTTP_CODEGEN_LIMIT")) |lim| {
@@ -1221,65 +1631,111 @@ test "record codegen baseline corpus (live, gated)" {
             if (!std.mem.eql(u8, only, rc.name)) continue;
         }
         total += 1;
+        var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer case_arena.deinit();
+        const ca = case_arena.allocator();
 
-        var tmp = try IsolatedTmp.init(allocator, "codegen-record");
-        defer tmp.cleanup(allocator);
-        for (rc.seed_files) |sf| try tmp.writeFile(allocator, sf.path, sf.bytes);
+        var tmp = try IsolatedTmp.init(ca, "codegen-record");
+        defer tmp.cleanup(ca);
+        for (rc.seed_files) |sf| try tmp.writeFile(ca, sf.path, sf.bytes);
 
-        const case_dir = try std.fs.path.join(allocator, &.{ out_dir, rc.name });
+        const case_dir = try std.fs.path.join(ca, &.{ out_dir, rc.name });
         try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, case_dir);
-        const case_root_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(io, case_dir, allocator);
-        defer allocator.free(case_root_abs);
+        const case_root_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(io, case_dir, ca);
+        const response_diagnostics_path: ?[]const u8 = if (diagnostics_run_id) |run_id|
+            try std.fmt.allocPrint(
+                ca,
+                "{s}/.zig-cache/codegen-record-diagnostics/{s}/{s}.jsonl",
+                .{ repo_root, run_id, rc.name },
+            )
+        else
+            null;
 
-        const workspace_allowlist = try workspaceCaptureAllowlist(allocator, rc.seed_files);
-        defer allocator.free(workspace_allowlist);
-        var recorder = try flow_recorder.Recorder.init(allocator, .{
+        const workspace_allowlist = try workspaceCaptureAllowlist(ca, rc.seed_files);
+        var recorder = try flow_recorder.Recorder.init(ca, .{
             .case_name = rc.name,
             .evidence_class = .empirical_model,
-            .provider = .anthropic,
+            .provider = switch (corpus_provider) {
+                .local => .local,
+                .anthropic => .anthropic,
+                .openai => .openai,
+                .deepseek => .deepseek,
+            },
             .model = corpus_model,
+            .model_revision = model_revision,
+            .runtime_name = if (runtime_identity) |identity| identity.name else null,
+            .runtime_version = if (runtime_identity) |identity| identity.version else null,
+            .diagnostics_path = response_diagnostics_path,
             .workspace_allowlist = workspace_allowlist,
         });
         defer recorder.deinit();
         try recorder.captureInitialWorkspace(tmp.abs_path);
 
-        const saved_cwd = try cwdPathAlloc(allocator);
-        defer allocator.free(saved_cwd);
+        const saved_cwd = try cwdPathAlloc(ca);
         try std.Io.Threaded.chdir(tmp.abs_path);
         defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
         var sink = recorder.captureSink();
-        session.backend.anthropic.capture = &sink;
+        try setSessionCapture(&session, &sink);
 
         var tr: transcript_mod.Transcript = .{};
-        defer tr.deinit(allocator);
+        defer tr.deinit(ca);
         try recorder.beginTurn(rc.prompt, tr.len(), .approve);
-        const result = loop.runTurnWith(allocator, session.modelClient(), &registry, &tr, rc.prompt, .{
+        const result = loop.runTurnWith(ca, session.modelClient(), &registry, &tr, rc.prompt, .{
             .workspace_root = ".",
             .max_attempts = loop.interactive_max_attempts,
             .approval_fn = recorder.approvalFn(),
             .replay_mode = false,
-            .turn_timeout_ms = 0,
+            // Three minutes per cassette. This was 0, which disables the bound
+            // entirely: a local model that stops producing tokens mid-turn
+            // hangs the whole corpus run rather than failing that one case, and
+            // `durable-order` has ended in `EmptyResponse` after doing exactly
+            // that. A capped case fails, gets named in the run's output, and
+            // the remaining cases still record.
+            .turn_timeout_ms = record_turn_timeout_ms,
         }) catch |err| {
-            session.backend.anthropic.capture = null;
+            try setSessionCapture(&session, null);
             // Collection is memory-only until validation and replay both pass,
             // so a live failure cannot disturb the active case pointer.
             std.debug.print("[codegen-record] {s}: turn failed: {s}\n", .{ rc.name, @errorName(err) });
+            if (response_diagnostics_path) |path| {
+                std.debug.print("[codegen-record] metadata-only response diagnostics: {s}\n", .{path});
+            }
             return err;
         };
-        session.backend.anthropic.capture = null;
+        try setSessionCapture(&session, null);
+        // A turn the wall clock cut short cannot be replayed. The live loop
+        // stopped asking for model calls because the elapsed time crossed
+        // `turn_timeout_ms`; a replay of the same turn finishes in
+        // milliseconds, never crosses it, and asks for one more call than the
+        // recording holds. Promotion would surface that as `response_underflow`
+        // at the last call, which reads like a divergence and is not one.
+        // Refuse here, where the reason is still known and can be acted on.
+        if (result.end_reason == .budget_timeout) {
+            std.debug.print(
+                "[codegen-record] {s}: turn hit the {d}s wall-clock ceiling, so its recording " ++
+                    "would not replay; raise ZTTP_CODEGEN_TURN_TIMEOUT_MS for this corpus. " ++
+                    "Active case unchanged.\n",
+                .{ rc.name, record_turn_timeout_ms / 1000 },
+            );
+            return error.RecordedTurnHitTimeBudget;
+        }
         try recorder.finishTurn(result, &tr);
         try recorder.captureExpectedWorkspace(tmp.abs_path);
-        if (result.first_draft_veto_pass != rc.expect_first_draft_pass) {
-            std.debug.print(
-                "[codegen-record] {s}: pinned first_draft_pass={} but fresh flow observed {}; active case unchanged\n",
-                .{ rc.name, rc.expect_first_draft_pass, result.first_draft_veto_pass },
-            );
-            return error.PinnedExpectationMismatch;
+        if (corpus_provider == headline_provider) {
+            if (firstDraftExpectation(corpus_provider, null, rc.expect_first_draft_pass)) |expected| {
+                if (result.first_draft_veto_pass != expected) {
+                    std.debug.print(
+                        "[codegen-record] {s}: pinned first_draft_pass={} but fresh flow observed {}; active case unchanged\n",
+                        .{ rc.name, expected, result.first_draft_veto_pass },
+                    );
+                    return error.PinnedExpectationMismatch;
+                }
+            }
         }
 
         const zttp_bin: ?[]u8 = if (rc.intent != null)
-            codegen.locateZttpBinary(allocator, repo_root) orelse {
+            codegen.locateZttpBinary(ca, repo_root) orelse {
                 std.debug.print(
                     "[codegen-record] {s}: declared intent cannot run because zig-out/bin/zttp is unavailable; active case unchanged\n",
                     .{rc.name},
@@ -1288,23 +1744,31 @@ test "record codegen baseline corpus (live, gated)" {
             }
         else
             null;
-        defer if (zttp_bin) |bin| allocator.free(bin);
         requireRecordedIntent(
-            allocator,
+            ca,
             rc.intent,
             tmp.abs_path,
             zttp_bin,
             codegen.runIntentCheck,
         ) catch |err| {
+            const handler_path: ?[]u8 = std.fs.path.join(
+                ca,
+                &.{ tmp.abs_path, "handler.ts" },
+            ) catch null;
+            if (handler_path) |path| {
+                if (zts.file_io.readFile(ca, path, 1024 * 1024)) |handler| {
+                    std.debug.print("[codegen-record] {s}: produced handler:\n{s}\n", .{ rc.name, handler });
+                } else |_| {}
+            }
             std.debug.print(
-                "[codegen-record] {s}: declared intent did not pass ({s}); active case unchanged\n",
+                "[codegen-record] {s}: declared intent did not pass ({s}); failure will be measured and promoted\n",
                 .{ rc.name, @errorName(err) },
             );
-            return err;
+            if (err == error.IntentCheckUnavailable) return err;
         };
 
         const active_version = try flow_promotion.validateAndPromote(
-            allocator,
+            ca,
             &recorder,
             case_root_abs,
             &registry,
@@ -1314,9 +1778,11 @@ test "record codegen baseline corpus (live, gated)" {
         if (result.applied_edit) greens += 1;
         const fail_code = codegen.firstZtsCode(&tr) orelse "-";
         std.debug.print(
-            "[codegen-record] {s}: flow={s} first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
+            "[codegen-record] {s}: provider={s} model={s} flow={s} first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
             .{
                 rc.name,
+                corpus_provider.publicName(),
+                corpus_model,
                 active_version.slice()[0..12],
                 result.first_draft_veto_pass,
                 result.applied_edit,
@@ -1392,13 +1858,64 @@ test "cassetteModel reads the recorded model from a cassette header" {
 /// that on five rules. Four flow rules and one spec-discharge rule, which is a
 /// fair description of what these prompts ask for and a poor description of what
 /// the compiler proves.
-const coverage_baseline = [_][]const u8{
+const anthropic_coverage_baseline = [_][]const u8{
     "ZTS400",
     "ZTS401",
     "ZTS407",
     "ZTS500",
     "ZTS502",
 };
+
+/// Five of seventy-four, measured 2026-08-14 over the complete 19-case DeepSeek
+/// corpus. It is not the Anthropic set: DeepSeek trips ZTS305 and ZTS501, which
+/// Claude's recordings never reached, and never reaches ZTS407 or ZTS502, which
+/// Claude's do. Two fence sets of the same size describing different rules is
+/// the reason a headline may not borrow another provider's baseline.
+const deepseek_coverage_baseline = [_][]const u8{
+    "ZTS305",
+    "ZTS400",
+    "ZTS401",
+    "ZTS500",
+    "ZTS501",
+};
+
+/// Return the coverage floor measured for one exact provider/model identity.
+/// A new headline identity must publish its own complete corpus before the
+/// default can move; borrowing another provider's fence set is never valid.
+fn coverageBaseline(provider: agent.Provider, model: []const u8) ?[]const []const u8 {
+    return switch (provider) {
+        .anthropic => if (std.mem.eql(u8, model, models.defaultForProvider(.anthropic).id))
+            &anthropic_coverage_baseline
+        else
+            null,
+        .deepseek => if (std.mem.eql(u8, model, models.defaultForProvider(.deepseek).id))
+            &deepseek_coverage_baseline
+        else
+            null,
+        .local, .openai => null,
+    };
+}
+
+test "coverage baselines are provider and model qualified" {
+    try testing.expectEqual(
+        @as(?[]const []const u8, &anthropic_coverage_baseline),
+        coverageBaseline(.anthropic, models.defaultForProvider(.anthropic).id),
+    );
+    try testing.expectEqual(
+        @as(?[]const []const u8, &deepseek_coverage_baseline),
+        coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id),
+    );
+    try testing.expect(coverageBaseline(.local, local.default_model) == null);
+    try testing.expect(coverageBaseline(.anthropic, "claude-other") == null);
+    try testing.expect(coverageBaseline(.deepseek, "deepseek-v4-pro") == null);
+    // The two sets are measurements of different models, not copies.
+    try testing.expect(anthropic_coverage_baseline.len == deepseek_coverage_baseline.len);
+    var identical = true;
+    for (anthropic_coverage_baseline, deepseek_coverage_baseline) |claude_code, deepseek_code| {
+        if (!std.mem.eql(u8, claude_code, deepseek_code)) identical = false;
+    }
+    try testing.expect(!identical);
+}
 
 /// Sorted JSON array of a code set, for a line git can diff.
 ///
@@ -1514,6 +2031,10 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     const a = arena.allocator();
 
     const repo_root = try cwdPathAlloc(a);
+    const replay_provider = if (envValue("ZTTP_CODEGEN_REPLAY_PROVIDER")) |name|
+        agent.Provider.parsePublic(name) orelse return error.UnsupportedRecordingProvider
+    else
+        headline_provider;
 
     var registry = try app.buildRegistry(a);
     defer registry.deinit(a);
@@ -1550,19 +2071,23 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     var off_registry: codegen.CodeSet = .empty;
     defer off_registry.deinit(a);
     for (record_corpus) |rc| {
+        var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        defer case_arena.deinit();
+        const ca = case_arena.allocator();
         // Read the responses from the repo (absolute) BEFORE chdir. A real read
         // error propagates; an absent recording yields no steps and is
         // collected so the whole set is reported at once instead of aborting
         // on the first missing case.
-        const resolved = try resolveCaseSteps(a, repo_root, rc.name);
-        const steps = resolved.steps;
-        if (steps.len == 0) {
+        var resolved = try resolveCaseSteps(ca, repo_root, replay_provider, rc.name);
+        defer resolved.deinit(ca);
+        const response_count = resolved.responseCount();
+        if (response_count == 0) {
             try missing.append(a, rc.name);
             continue;
         }
         if (resolved.source == .flow_artifact) flow_backed += 1;
 
-        if (cassetteModel(steps[0])) |model| {
+        if (resolved.model()) |model| {
             models_read += 1;
             if (corpus_model) |seen| {
                 if (!std.mem.eql(u8, seen, model)) {
@@ -1573,24 +2098,37 @@ test "codegen baseline replays at the committed first-draft pass rate" {
                     );
                     return error.MixedModelCorpus;
                 }
-            } else corpus_model = model;
+            } else corpus_model = try a.dupe(u8, model);
         }
 
-        var tmp = try IsolatedTmp.init(a, "codegen-replay");
-        defer tmp.cleanup(a);
-        for (rc.seed_files) |sf| try tmp.writeFile(a, sf.path, sf.bytes);
+        var tmp = try IsolatedTmp.init(ca, "codegen-replay");
+        defer tmp.cleanup(ca);
+        for (rc.seed_files) |sf| try tmp.writeFile(ca, sf.path, sf.bytes);
 
-        const saved_cwd = try cwdPathAlloc(a);
+        const saved_cwd = try cwdPathAlloc(ca);
         try std.Io.Threaded.chdir(tmp.abs_path);
         defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-        var client: CassetteSequenceClient = .{ .steps = steps };
+        var replay_context: ?ReplayRequestContext = null;
+        defer if (replay_context) |*context| context.deinit(ca);
+        if (resolved.flow_case) |*flow_case| {
+            replay_context = try ReplayRequestContext.init(
+                ca,
+                &registry,
+                replay_provider,
+                flow_case.manifest.model,
+            );
+        }
+        var client = try CorpusReplayClient.init(
+            &resolved,
+            if (replay_context) |context| context.config else null,
+        );
         var tr: transcript_mod.Transcript = .{};
         // A cassette that no longer covers its turn is collected, not thrown.
         // Returning at the first stale case means a compiler change that
         // invalidates several is discovered one paid recording at a time; the
         // whole re-record list is worth more than the early exit.
-        const result = loop.runTurnWith(a, client.asClient(), &registry, &tr, rc.prompt, .{
+        const result = loop.runTurnWith(ca, client.asModelClient(), &registry, &tr, rc.prompt, .{
             .workspace_root = ".",
             .max_attempts = loop.interactive_max_attempts,
             .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
@@ -1600,36 +2138,59 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             try stale.append(a, rc.name);
             std.debug.print(
                 "[codegen-replay] {s}: {s} - its {d}-step cassette no longer covers the turn\n",
-                .{ rc.name, @errorName(err), steps.len },
+                .{ rc.name, @errorName(err), response_count },
+            );
+            continue;
+        };
+        client.finish() catch |err| {
+            try stale.append(a, rc.name);
+            std.debug.print(
+                "[codegen-replay] {s}: {s} - its {d}-step flow has unconsumed checkpoints\n",
+                .{ rc.name, @errorName(err), response_count },
             );
             continue;
         };
         try codegen.collectCodes(a, &tr, &tripped, &off_registry);
 
-        // Ratchet: replay must reproduce the recorded first-draft outcome
-        // exactly. A regression flips a recorded pass to fail (or vice versa).
-        //
-        // Scoped to the headline model. `expect_first_draft_pass` records what
-        // one model did on one prompt, so it can only ratchet that model - a
-        // corpus recorded against a smaller tier legitimately fails cases the
-        // headline passes, and asserting the headline's pins against it would
-        // report a compiler regression that is really a tier difference. The
-        // rate is still measured and published for those runs; only the
-        // per-case assertion is held back, and the run says so rather than
-        // going quiet.
-        if (result.first_draft_veto_pass != rc.expect_first_draft_pass) {
-            const on_headline = if (corpus_model) |m| std.mem.eql(u8, m, headline_model) else true;
+        // Ratchet each provider against its own recorded observation. Claude's
+        // historical flat cassettes predate provider-qualified turn metadata,
+        // so their immutable corpus pin remains the compatibility source.
+        const recorded_expectation = if (resolved.flow_case) |flow_case|
+            flow_case.manifest.turns[0].first_draft_veto_pass
+        else
+            null;
+        const expected_first_draft = firstDraftExpectation(
+            replay_provider,
+            recorded_expectation,
+            rc.expect_first_draft_pass,
+        );
+        const case_model = resolved.model() orelse headline_model;
+        const on_headline = replay_provider == headline_provider and
+            std.mem.eql(u8, case_model, headline_model);
+        if (expected_first_draft) |expected| {
+            if (result.first_draft_veto_pass != expected) {
+                std.debug.print(
+                    "[codegen-replay] {s}: expected first_draft_pass={} got {} (code {s}){s}\n",
+                    .{
+                        rc.name,
+                        expected,
+                        result.first_draft_veto_pass,
+                        codegen.firstZtsCode(&tr) orelse "-",
+                        if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
+                    },
+                );
+                if (on_headline) return error.CassetteRatchetMismatch;
+            }
+        } else {
             std.debug.print(
-                "[codegen-replay] {s}: expected first_draft_pass={} got {} (code {s}){s}\n",
+                "[codegen-replay] {s}: provider {s} has no recorded first-draft expectation{s}\n",
                 .{
                     rc.name,
-                    rc.expect_first_draft_pass,
-                    result.first_draft_veto_pass,
-                    codegen.firstZtsCode(&tr) orelse "-",
-                    if (on_headline) "" else " - off-headline model, measured not ratcheted",
+                    replay_provider.publicName(),
+                    if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
                 },
             );
-            if (on_headline) return error.CassetteRatchetMismatch;
+            if (on_headline) return error.MissingProviderFirstDraftExpectation;
         }
         var case_intent: codegen.IntentOutcome = .not_checked;
 
@@ -1639,7 +2200,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         // pass, so an unmeasured corpus reads as unmeasured.
         if (rc.intent) |intent| {
             if (zttp_bin) |bin| {
-                case_intent = codegen.runIntentCheck(a, intent, tmp.abs_path, bin);
+                case_intent = codegen.runIntentCheck(ca, intent, tmp.abs_path, bin);
                 if (case_intent == .passed) intent_passes += 1 else {
                     std.debug.print("[codegen-intent] {s}: handler did not do the task\n", .{rc.name});
                 }
@@ -1649,7 +2210,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
 
         // Gap histogram: the first rule each non-passing case tripped, ranking
         // which teaching gap to close next.
-        if (!rc.expect_first_draft_pass) {
+        if (!result.first_draft_veto_pass) {
             std.debug.print("[codegen-gap] {s}: {s} (green={})\n", .{
                 rc.name,
                 codegen.firstZtsCode(&tr) orelse "?",
@@ -1673,20 +2234,19 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     if (stale.items.len > 0) {
         std.debug.print("[codegen-replay] {d} cassette(s) need re-recording:\n", .{stale.items.len});
         for (stale.items) |name| std.debug.print("  - {s}\n", .{name});
-        std.debug.print(
-            "  ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_ONLY=<name> zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"\n",
-            .{},
-        );
+        const command = try recordingCommand(a, replay_provider, true);
+        std.debug.print("  {s}\n", .{command});
         return error.StaleCodegenCassette;
     }
 
     if (missing.items.len > 0) {
         std.debug.print("[codegen-replay] missing committed cassette(s) for {d} case(s):\n", .{missing.items.len});
         for (missing.items) |name| std.debug.print("  - {s}\n", .{name});
+        const command = try recordingCommand(a, replay_provider, false);
         std.debug.print(
-            "  record with: ZTTP_CODEGEN_RECORD=1 zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"\n" ++
+            "  record with: {s}\n" ++
                 "  (the filter is a build option; `-- --test-filter` is dropped and records the whole corpus)\n",
-            .{},
+            .{command},
         );
         return error.MissingCodegenCassette;
     }
@@ -1720,12 +2280,13 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     const version = corpusVersion();
     std.debug.print(
         "[codegen-convergence] {{\"corpusVersion\":\"{s}\",\"corpusCases\":{d}," ++
-            "\"model\":\"{s}\",\"policyHash\":\"{s}\",\"firstDraftPassPercent\":{d}," ++
+            "\"provider\":\"{s}\",\"model\":\"{s}\",\"policyHash\":\"{s}\",\"firstDraftPassPercent\":{d}," ++
             "\"firstDraftPasses\":{d},\"medianRoundtrips\":{d},\"intentPassPercent\":{d}," ++
             "\"intentPasses\":{d},\"intentChecked\":{d}}}\n",
         .{
             version[0..],
             summary.total,
+            replay_provider.publicName(),
             published_model,
             zts.policyHash()[0..],
             summary.firstDraftPassPercent(),
@@ -1791,32 +2352,41 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             },
         );
 
-        // Floor on the baseline itself. An emptied list makes the loop below
-        // iterate nothing and report a clean ratchet over no claim at all, which
-        // is the shape this repo has been bitten by four times.
-        if (coverage_baseline.len < 5) {
-            std.debug.print(
-                "[proof-coverage] the committed baseline names {d} rules; it cannot ratchet anything\n",
-                .{coverage_baseline.len},
-            );
-            return error.CoverageBaselineEmpty;
-        }
+        const on_headline = replay_provider == headline_provider and
+            std.mem.eql(u8, published_model, headline_model);
+        if (coverageBaseline(replay_provider, published_model)) |baseline| {
+            // Floor on the selected baseline itself. An emptied list makes the
+            // loop below iterate nothing and report a clean ratchet over no
+            // claim at all, which is the shape this repo has been bitten by.
+            if (baseline.len == 0) {
+                std.debug.print(
+                    "[proof-coverage] the {s}/{s} baseline names {d} rules; it cannot ratchet anything\n",
+                    .{ replay_provider.publicName(), published_model, baseline.len },
+                );
+                return error.CoverageBaselineEmpty;
+            }
 
-        // Ratchet, headline-model only for the same reason the per-case pin is:
-        // a smaller tier legitimately draws different drafts and trips a
-        // different set, and asserting the headline's baseline against it would
-        // report a tier difference as lost coverage.
-        const on_headline = std.mem.eql(u8, published_model, headline_model);
-        var lost: usize = 0;
-        for (coverage_baseline) |code| {
-            if (tripped.contains(code)) continue;
-            lost += 1;
+            var lost: usize = 0;
+            for (baseline) |code| {
+                if (tripped.contains(code)) continue;
+                lost += 1;
+                std.debug.print(
+                    "[proof-coverage] {s} was tripped by the baseline corpus and is not tripped now{s}\n",
+                    .{ code, if (on_headline) "" else " - off-headline provider or model, measured not ratcheted" },
+                );
+            }
+            if (lost > 0 and on_headline) return error.CoverageRatchetMismatch;
+        } else {
             std.debug.print(
-                "[proof-coverage] {s} was tripped by the baseline corpus and is not tripped now{s}\n",
-                .{ code, if (on_headline) "" else " - off-headline model, measured not ratcheted" },
+                "[proof-coverage] {s}/{s} has no committed coverage baseline{s}\n",
+                .{
+                    replay_provider.publicName(),
+                    published_model,
+                    if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
+                },
             );
+            if (on_headline) return error.MissingProviderCoverageBaseline;
         }
-        if (lost > 0 and on_headline) return error.CoverageRatchetMismatch;
 
         // The published page must be the page this run would write. Checked here
         // rather than in a docs-drift script because the numbers are already in
@@ -1883,22 +2453,12 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             "[codegen-intent] {d}/{d} intent-checked cases did the task\n",
             .{ intent_passes, intent_checked },
         );
-        // Every case carrying a spec must satisfy it. The spec asserts the task
-        // the prompt asked for, not the shape of one recording, so a failure
-        // here means the recorded handler does not do the job - which is the
-        // thing the veto cannot tell us and the whole reason this check exists.
-        //
-        // Headline model only, for the same reason as the per-case ratchet
-        // above: "every recorded handler does the task" is a claim about the
-        // model that recorded them. A smaller tier producing a handler that
-        // clears the veto but misses the task is the tier difference this row
-        // is measuring, not a regression to fail on. The rate is published
-        // either way, so a drop is visible rather than swallowed.
-        if (std.mem.eql(u8, published_model, headline_model)) {
-            try testing.expectEqual(intent_checked, intent_passes);
-        } else if (intent_passes != intent_checked) {
+        // Intent is a measurement, not a release threshold. A failure says the
+        // recorded handler missed the task even if the compiler accepted its
+        // shape. Publish that result without selecting a more flattering run.
+        if (intent_passes != intent_checked) {
             std.debug.print(
-                "[codegen-intent] off-headline model, measured not ratcheted\n",
+                "[codegen-intent] failures are measured; no score threshold is applied\n",
                 .{},
             );
         }
@@ -1912,23 +2472,63 @@ test "every corpus case resolves to exactly one recording source" {
 
     var flow_backed: usize = 0;
     for (record_corpus) |rc| {
-        const resolved = try resolveCaseSteps(allocator, repo_root, rc.name);
-        defer {
-            for (resolved.steps) |s| allocator.free(s);
-            allocator.free(resolved.steps);
-        }
+        var resolved = try resolveCaseSteps(allocator, repo_root, headline_provider, rc.name);
+        defer resolved.deinit(allocator);
         // The floor that makes the counts below mean anything: a resolver that
         // found nothing would report a clean split of zero and zero.
-        try std.testing.expect(resolved.steps.len > 0);
+        try std.testing.expect(resolved.responseCount() > 0);
         if (resolved.source == .flow_artifact) flow_backed += 1;
     }
+    // The headline corpus is recorded in one shape, so every case resolves the
+    // same way. This is a floor on the flow path, not a claim that the flat one
+    // is gone.
+    try std.testing.expectEqual(record_corpus.len, flow_backed);
 
-    // Both sources are live. Asserting a number for either would be a reason to
-    // re-record a case to move it, which is the one thing the corpus rules
-    // forbid, so this asserts only that neither path is dead - a resolver that
-    // silently stopped reading artifacts would still pass a total-only check.
-    try std.testing.expect(flow_backed > 0);
-    try std.testing.expect(flow_backed < record_corpus.len);
+    // The flat-cassette path is anthropic-only by construction, so it has to be
+    // exercised against that provider or not at all. Checking it here keeps a
+    // resolver that silently stopped reading flat cassettes from passing on the
+    // strength of a headline that no longer uses them.
+    var flat_backed: usize = 0;
+    for (record_corpus) |rc| {
+        var resolved = try resolveCaseSteps(allocator, repo_root, .anthropic, rc.name);
+        defer resolved.deinit(allocator);
+        if (resolved.source == .flat_cassette and resolved.responseCount() > 0) flat_backed += 1;
+    }
+    try std.testing.expect(flat_backed > 0);
+}
+
+test "flow-backed replay validates the current request checkpoint" {
+    const allocator = std.testing.allocator;
+    const repo_root = try cwdPathAlloc(allocator);
+    defer allocator.free(repo_root);
+    var resolved = try resolveCaseSteps(allocator, repo_root, headline_provider, "durable-order");
+    defer resolved.deinit(allocator);
+    try std.testing.expectEqual(StepSource.flow_artifact, resolved.source);
+
+    var registry = try app.buildRegistry(allocator);
+    defer registry.deinit(allocator);
+    const flow_case = if (resolved.flow_case) |*case| case else return error.ExpectedFlowArtifact;
+    var request_context = try ReplayRequestContext.init(
+        allocator,
+        &registry,
+        headline_provider,
+        flow_case.manifest.model,
+    );
+    defer request_context.deinit(allocator);
+    var client = try CorpusReplayClient.init(&resolved, request_context.config);
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    try std.testing.expectError(
+        error.ReplayMismatch,
+        client.asModelClient().request(
+            arena.allocator(),
+            &transcript,
+            "this prompt does not match the recorded flow",
+        ),
+    );
+    try std.testing.expect(client.lastFlowMismatch() != null);
 }
 
 test "a broken flow artifact is refused rather than falling back" {
@@ -1951,7 +2551,7 @@ test "a broken flow artifact is refused rather than falling back" {
 
     try std.testing.expectError(
         error.UnloadableFlowArtifact,
-        resolveCaseSteps(allocator, tmp.abs_path, name),
+        resolveCaseSteps(allocator, tmp.abs_path, headline_provider, name),
     );
 }
 
@@ -1960,12 +2560,20 @@ test "a case with neither recording resolves to no steps" {
     var tmp = try IsolatedTmp.init(allocator, "codegen-resolve-empty");
     defer tmp.cleanup(allocator);
 
-    const resolved = try resolveCaseSteps(allocator, tmp.abs_path, "never-recorded");
-    defer allocator.free(resolved.steps);
     // Reported as missing by the caller, not thrown here: the whole missing set
     // is worth more than an abort on the first one.
-    try std.testing.expectEqual(@as(usize, 0), resolved.steps.len);
-    try std.testing.expectEqual(StepSource.flat_cassette, resolved.source);
+    var resolved = try resolveCaseSteps(allocator, tmp.abs_path, headline_provider, "never-recorded");
+    defer resolved.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), resolved.responseCount());
+    // A provider with no flat-cassette lane has nowhere else to look, so the
+    // absence is named `.missing`. Anthropic falls through to its flat lane and
+    // reports that source with zero steps instead.
+    try std.testing.expectEqual(StepSource.missing, resolved.source);
+
+    var anthropic_resolved = try resolveCaseSteps(allocator, tmp.abs_path, .anthropic, "never-recorded");
+    defer anthropic_resolved.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), anthropic_resolved.responseCount());
+    try std.testing.expectEqual(StepSource.flat_cassette, anthropic_resolved.source);
 }
 
 test "a failed recording restores the previous cassette" {

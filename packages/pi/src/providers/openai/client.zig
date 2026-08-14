@@ -20,12 +20,15 @@ const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
 const http_errors = @import("../http_errors.zig");
 const apply_edit = @import("../anthropic/apply_edit.zig");
+const tool_catalog = @import("../tool_catalog.zig");
 const model_request = @import("../model_request.zig");
 const capture_sink = @import("../capture_sink.zig");
+const json_writer = @import("../json_writer.zig");
+const model_registry = @import("../models.zig");
 
-const default_base_url = "https://api.openai.com/v1/responses";
-pub const default_model = "gpt-4o-mini";
-pub const default_max_tokens: u32 = 8192;
+pub const default_base_url = "https://api.openai.com/v1/responses";
+pub const default_model = model_registry.defaultForProvider(.openai).id;
+pub const default_max_tokens = model_registry.defaultForProvider(.openai).request_policy.max_output_tokens;
 const max_response_body_bytes: usize = 16 * 1024 * 1024;
 
 pub const Config = struct {
@@ -247,23 +250,18 @@ fn writeSnapshotItem(
 // -----------------------------------------------------------------------
 
 pub fn writeToolsArray(writer: anytype, registry: *const registry_mod.Registry) !void {
+    var tools = tool_catalog.iterator(registry);
     try writer.writeByte('[');
-    try writer.writeAll("{\"type\":\"function\",\"name\":");
-    try writeJsonString(writer, apply_edit.tool_name);
-    try writer.writeAll(",\"description\":");
-    try writeJsonString(writer, apply_edit.tool_description);
-    try writer.writeAll(",\"parameters\":");
-    try writer.writeAll(apply_edit.input_schema_literal);
-    try writer.writeByte('}');
-    for (registry.list()) |entry| {
-        if (!entry.allowedOn(.model)) continue;
-        try writer.writeByte(',');
+    var index: usize = 0;
+    while (tools.next()) |tool| {
+        if (index > 0) try writer.writeByte(',');
+        index += 1;
         try writer.writeAll("{\"type\":\"function\",\"name\":");
-        try writeJsonString(writer, entry.name);
+        try writeJsonString(writer, tool.name);
         try writer.writeAll(",\"description\":");
-        try writeJsonString(writer, entry.description);
+        try writeJsonString(writer, tool.description);
         try writer.writeAll(",\"parameters\":");
-        try writer.writeAll(entry.input_schema);
+        try writer.writeAll(tool.input_schema);
         try writer.writeByte('}');
     }
     try writer.writeByte(']');
@@ -351,50 +349,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     return response_body;
 }
 
-// -----------------------------------------------------------------------
-// JSON string escape (local copy; the anthropic provider has a parallel
-// helper but cross-importing across providers/ would invert the layering).
-// -----------------------------------------------------------------------
-
-fn writeJsonString(writer: anytype, s: []const u8) !void {
-    try writer.writeByte('"');
-    var i: usize = 0;
-    while (i < s.len) {
-        const c = s[i];
-        if (c < 0x80) {
-            switch (c) {
-                '"' => try writer.writeAll("\\\""),
-                '\\' => try writer.writeAll("\\\\"),
-                '\n' => try writer.writeAll("\\n"),
-                '\r' => try writer.writeAll("\\r"),
-                '\t' => try writer.writeAll("\\t"),
-                0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
-                    try writer.print("\\u{x:0>4}", .{@as(u16, c)});
-                },
-                else => try writer.writeByte(c),
-            }
-            i += 1;
-            continue;
-        }
-        // Emit a multi-byte sequence only if it is a complete, valid UTF-8
-        // codepoint. SSE deltas can split a surrogate pair, which the JSON
-        // parser decodes to invalid CESU-8 the API rejects ("surrogates not
-        // allowed"); replace any invalid byte with U+FFFD so the body stays valid.
-        const seq_len = std.unicode.utf8ByteSequenceLength(c) catch {
-            try writer.writeAll("\u{FFFD}");
-            i += 1;
-            continue;
-        };
-        if (i + seq_len > s.len or !std.unicode.utf8ValidateSlice(s[i .. i + seq_len])) {
-            try writer.writeAll("\u{FFFD}");
-            i += 1;
-            continue;
-        }
-        try writer.writeAll(s[i .. i + seq_len]);
-        i += seq_len;
-    }
-    try writer.writeByte('"');
-}
+const writeJsonString = json_writer.writeString;
 
 // -----------------------------------------------------------------------
 // Tests

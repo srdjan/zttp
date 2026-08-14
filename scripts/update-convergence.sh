@@ -75,13 +75,14 @@ echo ">> wrote $json_out"
 
 recorded="$(date -u +%Y-%m-%d)"
 
-read -r corpus_version cases model policy first_pct first_n median intent_pct intent_pass intent_n <<EOF
+read -r corpus_version cases provider model policy first_pct first_n median intent_pct intent_pass intent_n <<EOF
 $(printf '%s' "$payload" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 print(
     d["corpusVersion"][:12],
     d["corpusCases"],
+    d["provider"],
     d["model"],
     d["policyHash"][:12],
     d["firstDraftPassPercent"],
@@ -94,7 +95,7 @@ print(
 ')
 EOF
 
-row="| $recorded | \`$commit\` | \`$corpus_version\` | $cases | $model | \`$policy\` | ${first_pct}% ($first_n/$cases) | $median | ${intent_pct}% ($intent_pass/$intent_n) |"
+row="| $recorded | \`$commit\` | \`$corpus_version\` | $cases | $provider | $model | \`$policy\` | ${first_pct}% ($first_n/$cases) | $median | ${intent_pct}% ($intent_pass/$intent_n) |"
 
 if ! grep -q '^| Recorded ' "$md_out" 2>/dev/null; then
   echo "error: $md_out has no results table to append to" >&2
@@ -117,6 +118,23 @@ lines = open(path).read().splitlines()
 header = next((i for i, l in enumerate(lines) if l.startswith("| Recorded ")), None)
 if header is None:
     sys.exit("error: no results table header (`| Recorded `) in " + path)
+
+cells = [cell.strip() for cell in lines[header].strip("|").split("|")]
+if "Provider" not in cells:
+    model_index = cells.index("Model")
+    cells.insert(model_index, "Provider")
+    lines[header] = "| " + " | ".join(cells) + " |"
+
+    separators = [cell.strip() for cell in lines[header + 1].strip("|").split("|")]
+    separators.insert(model_index, "---")
+    lines[header + 1] = "|" + "|".join(separators) + "|"
+
+    i = header + 2
+    while i < len(lines) and lines[i].startswith("| "):
+        historical = [cell.strip() for cell in lines[i].strip("|").split("|")]
+        historical.insert(model_index, "anthropic")
+        lines[i] = "| " + " | ".join(historical) + " |"
+        i += 1
 
 last = header + 1  # the |---|---| separator
 while last + 1 < len(lines) and lines[last + 1].startswith("| "):

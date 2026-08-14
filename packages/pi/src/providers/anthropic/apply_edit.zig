@@ -1,27 +1,16 @@
-//! Synthetic `apply_edit` tool: the bridge between the model's Anthropic-side
-//! tool vocabulary and the turn machine's first-class `.edit` reply shape.
+//! Synthetic `apply_edit` bridge between provider tool vocabularies and the
+//! turn machine's first-class `.edit` reply shape.
 //!
-//! It is exposed in the Anthropic tool catalog but never registered in the
-//! in-process tool registry.
+//! Its provider-neutral definition lives in `providers/tool_catalog.zig`; this
+//! module only validates and remaps a call before it reaches the registry.
 
 const std = @import("std");
 const turn = @import("../../turn.zig");
+const tool_catalog = @import("../tool_catalog.zig");
 
-pub const tool_name = "apply_edit";
-
-pub const tool_description =
-    "Propose a complete file edit. The zttp compiler runs edit-simulate " ++
-    "on the content before it reaches the user; if new violations appear, " ++
-    "you will be re-prompted with the diagnostic and must try again.";
-
-pub const input_schema_literal =
-    "{\"type\":\"object\"," ++
-    "\"properties\":{" ++
-    "\"file\":{\"type\":\"string\",\"description\":\"Handler file path (e.g. handler.ts).\"}," ++
-    "\"content\":{\"type\":\"string\",\"description\":\"Full file content after the edit.\"}," ++
-    "\"before\":{\"type\":\"string\",\"description\":\"Optional: full file content before the edit.\"}" ++
-    "}," ++
-    "\"required\":[\"file\",\"content\"]}";
+pub const tool_name = tool_catalog.apply_edit.name;
+pub const tool_description = tool_catalog.apply_edit.description;
+pub const input_schema_literal = tool_catalog.apply_edit.input_schema;
 
 pub const RemapError = error{
     InvalidEditArgs,

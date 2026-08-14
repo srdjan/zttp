@@ -7,3 +7,10 @@ repository's active planning authority.
 advisory plan is implemented, promote its approved delivery unit into a dated
 file under `docs/plans/` and reconcile it with the roadmap. Do not execute two
 overlapping plans at the same time.
+
+## Saved proposals
+
+| Plan | Title | Priority | Effort | Status |
+|---|---|---|---|---|
+| 001 | TigerBeetle-inspired predictable performance | P1 | XL | PROPOSED |
+| 002 | [Complete the local LFM measurement and default cutover](../docs/plans/2026-08-13-027-local-lfm-default-cutover-plan.md) | P1 | L | PROMOTED, BLOCKED (`durable-order` returns `EmptyResponse`) |

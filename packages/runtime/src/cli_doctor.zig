@@ -17,6 +17,7 @@ const precompile = zts_cli.precompile;
 const self_extract = @import("self_extract.zig");
 const cli_paths = @import("cli_paths.zig");
 const cli_auth = @import("cli_auth.zig");
+const pi_app = @import("pi_app");
 
 pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     // Rejected by name rather than left to fall through to path handling,
@@ -128,7 +129,7 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
         defer allocator.free(tests_path);
         printDoctorOptionalPath("tests", tests_path, doctorPathExists(io, tests_path));
 
-        printDoctorExpertKey(allocator);
+        printDoctorExpertProvider(allocator);
 
         std.debug.print("\n", .{});
         if (failures > 0) {
@@ -165,7 +166,8 @@ pub fn printDoctorHelp() void {
         \\
         \\Checks:
         \\  manifest, entry, static directory, system file, tests fixture,
-        \\  sqlite/durable settings, and outbound HTTP configuration.
+        \\  sqlite/durable settings, outbound HTTP configuration, and the
+        \\  default expert model provider.
         \\
         \\Examples:
         \\  zttp doctor
@@ -229,25 +231,21 @@ fn printDoctorRuntimeTemplate(allocator: std.mem.Allocator) void {
     }
 }
 
-/// Non-failing readiness row: does `zttp expert` have a provider key? Mirrors
-/// the auth/expert resolution exactly: stored `~/.zttp/providers.json` values
-/// are injected into the env first, then the same env vars are read with the
-/// same "blank counts as missing" trimming the expert fail-fast path applies.
-fn printDoctorExpertKey(allocator: std.mem.Allocator) void {
+/// Non-failing readiness row for the product-default expert provider.
+fn printDoctorExpertProvider(allocator: std.mem.Allocator) void {
     cli_auth.injectStoredProvidersIntoEnv(allocator);
-    if (doctorExpertKeyEnv("ANTHROPIC_API_KEY")) {
-        printDoctorOk("expert", "ANTHROPIC_API_KEY configured");
-    } else if (doctorExpertKeyEnv("OPENAI_API_KEY")) {
-        printDoctorOk("expert", "OPENAI_API_KEY configured");
-    } else {
-        std.debug.print("[info] expert   no provider key; run `zttp auth claude` to enable `zttp expert`\n", .{});
-    }
-}
-
-fn doctorExpertKeyEnv(name: [*:0]const u8) bool {
-    const raw = std.c.getenv(name) orelse return false;
-    const value = std.mem.sliceTo(raw, 0);
-    return std.mem.trim(u8, value, " \t\r\n").len != 0;
+    pi_app.checkDefaultProviderReadiness(allocator) catch |err| {
+        std.debug.print("[info] expert   default provider not ready ({s})\n", .{@errorName(err)});
+        if (err == error.MissingAnthropicCredential) {
+            std.debug.print("       next     zttp auth claude\n", .{});
+        } else if (err == error.MissingOpenAICredential) {
+            std.debug.print("       next     zttp auth openai\n", .{});
+        } else {
+            std.debug.print("       next     mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080\n", .{});
+        }
+        return;
+    };
+    printDoctorOk("expert", "default model provider ready");
 }
 
 fn printDoctorPlatform() void {

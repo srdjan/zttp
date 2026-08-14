@@ -9,6 +9,7 @@ const artifact = @import("artifact.zig");
 const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
+const chat_completions = @import("../providers/chat_completions.zig");
 const model_request = @import("../providers/model_request.zig");
 
 pub const Script = struct {
@@ -83,6 +84,24 @@ pub const Client = struct {
             .extra_user_text = extra_user_text,
         });
         defer snapshot.deinit(arena);
+        // Every Chat Completions provider records the digest of its exact wire
+        // body, so replay has to rebuild that body to compare against it. The
+        // two SSE providers record no wire digest and need no rebuild here.
+        // Gating on the provider list rather than on `.local` alone is what
+        // keeps a newly added Chat Completions provider from failing every
+        // replay with an absent-versus-present digest.
+        switch (self.script.provider) {
+            .local, .deepseek => {
+                const body = try chat_completions.buildRequestBody(arena, .{
+                    .system_prompt = self.request_config.system_prompt,
+                    .model = self.request_config.model,
+                    .max_tokens = self.request_config.max_output_tokens,
+                    .tools_json = self.request_config.tools_json,
+                }, transcript, extra_user_text);
+                snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
+            },
+            .anthropic, .openai => {},
+        }
 
         const checkpoint = try self.validateSnapshot(&snapshot);
         const response = try self.responseFor(checkpoint);
@@ -92,7 +111,16 @@ pub const Client = struct {
             error.SidecarNotFound, error.SidecarUnreadable => return self.failResponseFixture(.unreadable),
             else => return self.failResponseFixture(.malformed),
         };
-        if (cassette.header.provider != cassetteProvider(self.script.provider)) {
+        if (cassette.header.provider != self.script.provider) {
+            return self.fail(.{ .response_order_mismatch = self.detail(.response) });
+        }
+        if (checkpoint.wire_request_sha256) |expected| {
+            const actual = cassette.header.request_sha256 orelse
+                return self.fail(.{ .response_order_mismatch = self.detail(.response) });
+            if (!std.mem.eql(u8, expected.slice(), actual)) {
+                return self.fail(.{ .response_order_mismatch = self.detail(.response) });
+            }
+        } else if (cassette.header.request_sha256 != null) {
             return self.fail(.{ .response_order_mismatch = self.detail(.response) });
         }
 
@@ -109,13 +137,36 @@ pub const Client = struct {
         snapshot: *const model_request.ModelRequestSnapshot,
     ) !*const artifact.ModelCheckpoint {
         if (self.cursor >= self.script.checkpoints.len) {
+            // The replay wants a model call the recording does not hold. The
+            // recorded sequence ended here and the live run did not, so the
+            // divergence is already behind us - what identifies it is this
+            // request's context digest against the digests the script holds.
+            // Printed because `response_underflow` carries no index once the
+            // cursor is past the end, so the detail is empty by construction.
+            std.debug.print(
+                "[replay-underflow] wanted call {d}, script holds {d}\n" ++
+                    "  request_context {s}\n" ++
+                    "  transcript      {s}\n",
+                .{
+                    self.cursor,
+                    self.script.checkpoints.len,
+                    snapshot.request_context_sha256.slice(),
+                    snapshot.transcript_sha256.slice(),
+                },
+            );
+            for (self.script.checkpoints, 0..) |cp, i| {
+                std.debug.print(
+                    "  script[{d}] turn={d} call={d} request_context {s}\n",
+                    .{ i, cp.turn_index, cp.call_index, cp.request_context_sha256.slice() },
+                );
+            }
             return self.fail(.{ .response_underflow = self.detail(.trace) });
         }
         const checkpoint = &self.script.checkpoints[self.cursor];
         if (checkpoint.index != self.cursor) {
             return self.fail(.{ .response_order_mismatch = self.detailFor(.trace, checkpoint) });
         }
-        if (artifactProvider(snapshot.config.provider) != self.script.provider or
+        if (snapshot.config.provider != self.script.provider or
             !std.mem.eql(u8, snapshot.config.model, self.script.model))
         {
             return self.fail(.{ .provider_request_mismatch = self.detailFor(.trace, checkpoint) });
@@ -129,10 +180,59 @@ pub const Client = struct {
         }
         const item_count: u32 = std.math.cast(u32, snapshot.items.len) orelse
             return self.fail(.{ .transcript_or_transient_prompt_mismatch = self.detailFor(.trace, checkpoint) });
-        if (item_count != checkpoint.transcript_prefix_count or
-            !std.mem.eql(u8, snapshot.transcript_sha256.slice(), checkpoint.transcript_sha256.slice()) or
-            !optionalDigestEql(snapshot.transient_user_text_sha256, checkpoint.transient_user_text_sha256))
-        {
+        const item_count_differs = item_count != checkpoint.transcript_prefix_count;
+        const transcript_differs = !std.mem.eql(
+            u8,
+            snapshot.transcript_sha256.slice(),
+            checkpoint.transcript_sha256.slice(),
+        );
+        const transient_differs = !optionalDigestEql(
+            snapshot.transient_user_text_sha256,
+            checkpoint.transient_user_text_sha256,
+        );
+        const wire_differs = !optionalDigestEql(
+            snapshot.wire_request_sha256,
+            checkpoint.wire_request_sha256,
+        );
+        if (item_count_differs or transcript_differs or transient_differs or wire_differs) {
+            // One mismatch kind covers four distinct inputs, and which one moved
+            // is the whole diagnosis: a differing item count is a transcript the
+            // replay grew differently, while a differing wire digest with an
+            // equal transcript is a request the client framed differently.
+            std.debug.print(
+                "[replay-detail] call {d}: items {d} vs {d}{s}{s}{s}\n",
+                .{
+                    self.cursor,
+                    item_count,
+                    checkpoint.transcript_prefix_count,
+                    if (transcript_differs) ", transcript digest differs" else "",
+                    if (transient_differs) ", transient prompt digest differs" else "",
+                    if (wire_differs) ", wire request digest differs" else "",
+                },
+            );
+            // With equal item counts the divergence is content, and the newest
+            // items are the ones this call added. The recording stores digests
+            // rather than text, so the replay side is the only text available;
+            // printing it bounded is what turns "some tool differs" into a name.
+            if (transcript_differs and !item_count_differs) {
+                const tail_start = snapshot.items.len -| 2;
+                for (snapshot.items[tail_start..], tail_start..) |item, index| {
+                    switch (item) {
+                        .tool_result => |result| std.debug.print(
+                            "[replay-detail]   item {d} tool_result {s} ok={} text[0..240]={s}\n",
+                            .{ index, result.tool_name, result.ok, boundedPrefix(result.llm_text) },
+                        ),
+                        .tool_use => |use| std.debug.print(
+                            "[replay-detail]   item {d} tool_use {s} args={s}\n",
+                            .{ index, use.name, boundedPrefix(use.args_json) },
+                        ),
+                        else => std.debug.print(
+                            "[replay-detail]   item {d} {s}\n",
+                            .{ index, @tagName(std.meta.activeTag(item)) },
+                        ),
+                    }
+                }
+            }
             return self.fail(.{ .transcript_or_transient_prompt_mismatch = self.detailFor(.trace, checkpoint) });
         }
         return checkpoint;
@@ -203,18 +303,11 @@ pub const Client = struct {
     }
 };
 
-fn artifactProvider(provider: model_request.Provider) artifact.Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-    };
-}
-
-fn cassetteProvider(provider: artifact.Provider) cassette_client.Provider {
-    return switch (provider) {
-        .anthropic => .anthropic,
-        .openai => .openai,
-    };
+/// A short, single-line window onto a tool payload. Diagnostics must not
+/// paste a whole tool result into the build log.
+fn boundedPrefix(text: []const u8) []const u8 {
+    const limit = @min(text.len, 240);
+    return text[0..limit];
 }
 
 fn optionalDigestEql(

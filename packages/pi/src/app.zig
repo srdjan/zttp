@@ -14,6 +14,7 @@ const agent = @import("agent.zig");
 const session_state = @import("session_state.zig");
 const property_goals = @import("property_goals.zig");
 const models_registry = @import("providers/models.zig");
+const local_client = @import("providers/local/client.zig");
 const tools_common = @import("tools/common.zig");
 
 const meta_tool = @import("tools/zts_expert_meta.zig");
@@ -72,9 +73,27 @@ pub const equivalence_probe = @import("equivalence_probe.zig");
 pub const capsule_probe = @import("capsule_probe.zig");
 pub const demo_passport = @import("demo_passport.zig");
 
-/// Re-exported so the `zttp expert` CLI dispatch can fail fast when no
-/// model backend is configured, without reaching into `agent.zig` directly.
-pub const envHasModelBackend = agent.envHasModelBackend;
+pub fn checkLocalReadiness(allocator: std.mem.Allocator) !void {
+    const raw = if (std.c.getenv("ZTTP_MLX_BASE_URL")) |value| std.mem.sliceTo(value, 0) else null;
+    const base_url = local_client.effectiveBaseUrl(raw);
+    return local_client.checkReadiness(allocator, base_url, local_client.default_model);
+}
+
+/// Fail before scaffolding when the current product default cannot launch.
+/// The one provider authority keeps this check aligned with session selection.
+pub fn checkDefaultProviderReadiness(allocator: std.mem.Allocator) !void {
+    switch (models_registry.default_provider) {
+        .local => return checkLocalReadiness(allocator),
+        .anthropic => if (!envHasNonBlank("ANTHROPIC_API_KEY")) return error.MissingAnthropicCredential,
+        .openai => if (!envHasNonBlank("OPENAI_API_KEY")) return error.MissingOpenAICredential,
+        .deepseek => if (!envHasNonBlank("DEEPSEEK_API_KEY")) return error.MissingDeepSeekCredential,
+    }
+}
+
+fn envHasNonBlank(name: [:0]const u8) bool {
+    const raw = std.c.getenv(name) orelse return false;
+    return std.mem.trim(u8, std.mem.sliceTo(raw, 0), " \t\r\n").len > 0;
+}
 
 const Registry = registry_mod.Registry;
 const ToolDef = registry_mod.ToolDef;
@@ -187,7 +206,7 @@ pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
 
 /// Long flags whose next token is a value. `zts_main.zig` consults this
 /// list so it can skip the value while scanning for stray positional args.
-pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler", "--model" };
+pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler", "--provider", "--model" };
 
 var captured_argv: ?[]const []const u8 = null;
 
@@ -266,11 +285,13 @@ fn runAutoloop(
     // session bootstrap the run is in-memory only (the original
     // behaviour, kept for `--no-session`).
     var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+        .model_free = true,
         .no_session = flags.no_session,
         .no_persist_tool_output = flags.no_persist_tool_output,
         .no_context_files = true, // autoloop doesn't need project context
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
+        .provider = flags.provider,
         .model = flags.model,
     });
     defer session.deinit(allocator);
@@ -369,7 +390,20 @@ fn exitWithMessage(msg: []const u8, code: u8) noreturn {
 pub fn modeErrorMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
         error.ProviderMismatch => "error: --model is not available for the configured provider; model IDs do not switch providers\n",
-        error.NoActiveProvider => "error: no active model provider; configure Anthropic or OpenAI credentials first\n",
+        error.NoActiveProvider => "error: no active model provider\n",
+        error.MissingAnthropicCredential => "error: --provider claude requires ANTHROPIC_API_KEY or `zttp auth claude`\n",
+        error.MissingOpenAICredential => "error: --provider openai requires OPENAI_API_KEY or `zttp auth openai`\n",
+        error.MissingDeepSeekCredential => "error: --provider deepseek requires DEEPSEEK_API_KEY or `zttp auth deepseek`\n",
+        error.InvalidDeepSeekBaseUrl => "error: DEEPSEEK_BASE_URL must be an HTTPS root carrying no credential, such as https://api.deepseek.com\n",
+        error.UnsupportedOpenAIModelOverride => "error: ZTS_OPENAI_MODEL is no longer supported; use --provider openai --model <registered-id>\n",
+        error.LegacySessionIdentity => "error: this historical session has no provider identity; resume once with --provider local|claude|openai|deepseek and optional --model\n",
+        error.InvalidStoredProvider => "error: the stored session provider is invalid; restart with --provider and optional --model to override it\n",
+        error.LocalServerUnavailable,
+        error.LocalHealthNotOk,
+        error.LocalModelUnavailable,
+        error.InvalidResponseJson,
+        => "error: local LFM is not ready; start `mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080`\n",
+        error.InvalidMlxBaseUrl => "error: ZTTP_MLX_BASE_URL must be a credential-free HTTP loopback root such as http://127.0.0.1:8080\n",
         else => null,
     };
 }
@@ -400,7 +434,10 @@ pub fn flagErrorMessage(err: anyerror) []const u8 {
         error.GoalRequiresHandler => "error: --goal requires --handler <path>\n",
         error.GoalConflictsWithPrintOrRpc => "error: --goal cannot be combined with --print or --mode rpc\n",
         error.MissingModelValue => "error: --model requires a model id value\n",
+        error.MissingProviderValue => "error: --provider requires local, claude, or openai\n",
+        error.UnsupportedProvider => "error: --provider only accepts local, claude, or openai\n",
         error.UnknownModel => "error: --model has an unknown id; run /model in the expert REPL to list available models\n",
+        error.GoalConflictsWithProviderOrModel => "error: --goal is compiler-only and cannot be combined with --provider or --model\n",
         else => "error: unexpected flag parse failure\n",
     };
 }
@@ -470,9 +507,12 @@ pub const ExpertFlags = struct {
     /// behavioral verdict between the pre- and post-edit handler. Default on,
     /// matching the attestation default; `--no-equivalence-receipt` opts out.
     equivalence_receipt: bool = true,
+    /// Launch-scoped provider override. The public Claude name maps to the
+    /// existing Anthropic adapter without changing its internal identity.
+    provider: ?models_registry.Provider = null,
     /// Launch-time model override (`--model <id>`). Parsing resolves a canonical
-    /// registry id; session construction then checks it against the provider
-    /// selected from credentials. Null keeps that provider's registry default.
+    /// registry id; session construction then checks it against the resolved
+    /// provider. Null keeps that provider's registry default.
     model: ?[]const u8 = null,
 };
 
@@ -563,6 +603,15 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
         if (std.mem.startsWith(u8, arg, "--model=")) {
             out.model = try resolveModelId(arg["--model=".len..]);
         }
+        if (std.mem.eql(u8, arg, "--provider")) {
+            const value = try takeArg(&i, argv, error.MissingProviderValue);
+            out.provider = models_registry.Provider.parsePublic(value) orelse return error.UnsupportedProvider;
+            continue;
+        }
+        if (std.mem.startsWith(u8, arg, "--provider=")) {
+            const value = arg["--provider=".len..];
+            out.provider = models_registry.Provider.parsePublic(value) orelse return error.UnsupportedProvider;
+        }
         if (std.mem.eql(u8, arg, "--no-perf-receipt")) out.perf_receipt = false;
         if (std.mem.eql(u8, arg, "--perf-receipt")) out.perf_receipt = true;
         if (std.mem.eql(u8, arg, "--no-equivalence-receipt")) out.equivalence_receipt = false;
@@ -576,6 +625,7 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     if (out.rpc_mode and out.print != null) return error.RpcModeConflictsWithPrint;
     if (out.goals != null and out.handler == null) return error.GoalRequiresHandler;
     if (out.goals != null and (out.print != null or out.rpc_mode)) return error.GoalConflictsWithPrintOrRpc;
+    if (out.goals != null and (out.provider != null or out.model != null)) return error.GoalConflictsWithProviderOrModel;
     if (saw_yes) {
         out.policy = .auto_approve;
     } else if (saw_no_edit) {
@@ -1006,6 +1056,29 @@ test "parseExpertFlags: --model defaults to null when absent" {
     const argv = [_][]const u8{ "zts", "expert" };
     const flags = try parseExpertFlags(argv[0..]);
     try testing.expect(flags.model == null);
+}
+
+test "parseExpertFlags: public provider names map to internal adapters" {
+    const local = try parseExpertFlags(&.{ "--provider", "local" });
+    try testing.expectEqual(models_registry.Provider.local, local.provider.?);
+    const claude = try parseExpertFlags(&.{"--provider=claude"});
+    try testing.expectEqual(models_registry.Provider.anthropic, claude.provider.?);
+    const openai = try parseExpertFlags(&.{ "--provider", "openai" });
+    try testing.expectEqual(models_registry.Provider.openai, openai.provider.?);
+}
+
+test "parseExpertFlags: provider rejects missing and unsupported values" {
+    try testing.expectError(error.MissingProviderValue, parseExpertFlags(&.{"--provider"}));
+    try testing.expectError(error.UnsupportedProvider, parseExpertFlags(&.{"--provider=anthropic"}));
+}
+
+test "parseExpertFlags: compiler-only goal rejects provider and model flags" {
+    try testing.expectError(error.GoalConflictsWithProviderOrModel, parseExpertFlags(&.{
+        "--goal", "pure", "--handler", "handler.ts", "--provider", "local",
+    }));
+    try testing.expectError(error.GoalConflictsWithProviderOrModel, parseExpertFlags(&.{
+        "--goal", "pure", "--handler", "handler.ts", "--model", "LiquidAI/LFM2.5-2.6B-MLX-8bit",
+    }));
 }
 
 test "parseExpertFlags: --model without a value errors MissingModelValue" {

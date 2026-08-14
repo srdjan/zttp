@@ -61,26 +61,18 @@ test {
     _ = @import("verify_cli.zig");
 }
 
-/// Print the model-backend setup message and exit when no provider key is
-/// configured. Shared by `dispatchExpert` and the `init --expert` pre-check so
-/// the message lives in one place and can fire before any side effects (for
-/// `init --expert`, before scaffolding).
-fn ensureModelBackendOrExit() void {
-    if (pi_app.envHasModelBackend()) return;
-    std.debug.print(
-        \\zttp expert needs a model backend.
-        \\
-        \\Quickest path:
-        \\  zttp auth claude   # paste your key once, stored at ~/.zttp/providers.json
-        \\
-        \\Or set one of these environment variables and run `zttp expert` again:
-        \\  ANTHROPIC_API_KEY   (recommended)  https://console.anthropic.com/
-        \\  OPENAI_API_KEY
-        \\
-        \\See `zttp expert --help` for details.
-        \\
-    , .{});
-    std.process.exit(1);
+/// `init --expert` must verify the product-default provider before scaffolding.
+/// Ordinary expert launches resolve resume/fork identity inside pi before the
+/// same check, because only the session metadata can identify that provider.
+fn ensureDefaultProviderReadyOrExit(allocator: std.mem.Allocator) void {
+    pi_app.checkDefaultProviderReadiness(allocator) catch |err| {
+        if (pi_app.modeErrorMessage(err)) |message| {
+            std.debug.print("{s}", .{message});
+        } else {
+            std.debug.print("zttp expert default provider is not ready ({s}).\n", .{@errorName(err)});
+        }
+        std.process.exit(1);
+    };
 }
 
 /// Validate, configure, and launch the expert agent. Shared by the `expert`
@@ -109,7 +101,6 @@ fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8)
         std.debug.print("{s}", .{pi_app.flagErrorMessage(err)});
         std.process.exit(2);
     };
-    ensureModelBackendOrExit();
     const witness_replay_lib = @import("witness_replay_lib.zig");
     const perf_probe_lib = @import("perf_probe_lib.zig");
     const equivalence_probe_lib = @import("equivalence_probe_lib.zig");
@@ -145,13 +136,13 @@ fn cmdAuth(ctx: cli_help.Ctx) anyerror!void {
 
 fn cmdInit(ctx: cli_help.Ctx) anyerror!void {
     // `init --expert` hands off to the agent after scaffolding. If the agent
-    // cannot launch (no provider key), say so before creating any files so
+    // cannot launch (local transport unavailable), say so before creating any files so
     // the user is not scaffolded into a dead end. Gate on the authoritative
     // parse so this never fires for `--help`, `--extension`, or an `--expert`
     // that was actually consumed as another flag's value.
     if (init_command.willEnterExpert(ctx.args)) {
         cli_auth.injectStoredProvidersIntoEnv(ctx.allocator);
-        ensureModelBackendOrExit();
+        ensureDefaultProviderReadyOrExit(ctx.allocator);
     }
     const outcome = init_command.initCommand(ctx.allocator, ctx.args) catch |err| {
         if (err == error.HelpRequested) {
@@ -192,9 +183,7 @@ fn cmdInit(ctx: cli_help.Ctx) anyerror!void {
     };
     if (outcome.enter_expert) {
         if (outcome.project_name) |proj| {
-            // Stored provider keys were already injected by the pre-scaffold
-            // backend check above (willEnterExpert was true), so no re-inject
-            // is needed here before the handoff.
+            // The default backend was already checked before scaffolding.
             std.Io.Threaded.chdir(proj) catch |e| {
                 std.debug.print("init --expert: could not enter '{s}': {s}\n", .{ proj, @errorName(e) });
                 std.process.exit(1);
@@ -494,7 +483,7 @@ fn cmdHelp(ctx: cli_help.Ctx) anyerror!void {
 }
 
 const commands = [_]cli_help.Command{
-    .{ .name = "auth", .run = cmdAuth, .section = .credentials, .args = "claude", .blurb = "Store an Anthropic API key for expert (measured, supported)" },
+    .{ .name = "auth", .run = cmdAuth, .section = .credentials, .args = "[claude|openai|status|revoke]", .blurb = "Manage cloud-provider keys for expert" },
     .{ .name = "init", .run = cmdInit, .section = .core, .args = "<name> [--template basic|api|htmx]", .blurb = "Create a project" },
     .{ .name = "dev", .run = cmdDev, .section = .core, .args = "[handler.ts]", .blurb = "Run locally, watch and prove on save" },
     .{ .name = "studio", .run = cmdStudio, .section = .run_and_inspect, .args = "[handler.ts]", .blurb = "Optional browser proof workbench" },

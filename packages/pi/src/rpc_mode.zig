@@ -32,7 +32,7 @@ const session_events = @import("session/events.zig");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 const models_registry = @import("providers/models.zig");
-const json_writer = @import("providers/anthropic/json_writer.zig");
+const json_writer = @import("providers/json_writer.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 const Registry = registry_mod.Registry;
@@ -63,6 +63,7 @@ pub fn run(
         .session_id = flags.session_id,
         .resume_latest = flags.resume_latest,
         .fork_session_id = flags.fork_session_id,
+        .provider = flags.provider,
         .model = flags.model,
     });
     defer session.deinit(allocator);
@@ -293,6 +294,8 @@ fn handleSessionInfo(
     if (session.session_id) |sid| try json_writer.writeString(w, sid) else try w.writeAll("null");
     try w.writeAll(",\"model\":");
     if (session.currentModel()) |m| try json_writer.writeString(w, m) else try w.writeAll("null");
+    try w.writeAll(",\"provider\":");
+    if (session.activeProvider()) |provider| try json_writer.writeString(w, provider.publicName()) else try w.writeAll("null");
     try w.writeAll(",\"transcript_len\":");
     try w.print("{d}", .{session.transcript.len()});
     try w.writeAll(",\"tokens\":{\"input\":");
@@ -349,7 +352,7 @@ fn handleModelSet(
 ) !void {
     const obj = (try requireObjectParams(allocator, out, params, id)) orelse return;
     const model_id = (try requireStringField(allocator, out, obj, "id", id)) orelse return;
-    session.setModel(model_id) catch |err| {
+    session.setModel(allocator, model_id) catch |err| {
         switch (err) {
             error.UnknownModel => try emitErrorFmt(allocator, out, id, INVALID_PARAMS, "unknown model: {s}", .{model_id}),
             error.ProviderMismatch => try emitErrorFmt(
@@ -361,6 +364,7 @@ fn handleModelSet(
                 .{ session.backendDescriptor().provider_label, model_id },
             ),
             error.NoActiveProvider => try emitError(allocator, out, id, INVALID_PARAMS, "no active model provider"),
+            else => try emitErrorFmt(allocator, out, id, INTERNAL_ERROR, "model selection persistence failed: {s}", .{@errorName(err)}),
         }
         return;
     };
@@ -921,6 +925,31 @@ test "rpc: model.list filters models to the active provider" {
         try testing.expect(std.mem.indexOf(u8, buf.written(), "claude-") == null);
         try testing.expect(std.mem.indexOf(u8, buf.written(), "\"max_output_tokens\":8192") != null);
     }
+}
+
+test "rpc: local session info and model list expose the resolved identity" {
+    const allocator = testing.allocator;
+    var session = try agent.AgentSession.initLocal(
+        allocator,
+        "system",
+        null,
+        "http://127.0.0.1:8080",
+    );
+    defer session.deinit(allocator);
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try driveWithSession(
+        allocator,
+        &session,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"session.info\"}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"model.list\"}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\"}\n",
+        &buf,
+    );
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"provider\":\"local\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "LiquidAI/LFM2.5-2.6B-MLX-8bit") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "claude-") == null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "gpt-4o-mini") == null);
 }
 
 test "rpc: model methods expose no models without an active provider" {

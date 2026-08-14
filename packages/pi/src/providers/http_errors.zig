@@ -1,9 +1,9 @@
 //! Shared mapping from a model-provider HTTP error response to a typed error.
 //!
-//! Both the Anthropic and OpenAI wire layers call `classify`; the catch sites
+//! Provider wire layers call `classify`; the catch sites
 //! turn each typed error into one-line remediation via
 //! `loop.providerErrorRemediation`. Keeping the status/body interpretation in
-//! one place means the two providers cannot drift in how they report auth,
+//! one place means providers cannot drift in how they report auth,
 //! credit, rate-limit, model, overload, and prompt-too-long failures.
 
 const std = @import("std");
@@ -65,9 +65,20 @@ pub fn connectTimeout() std.Io.Timeout {
 /// until the peer closes the stream. Mirrors the runtime server's slow-client
 /// guard. Failures are ignored: the connect timeout still bounds the request.
 pub fn setReadTimeout(fd: std.posix.fd_t) void {
+    setReadTimeoutMs(fd, read_idle_timeout_ms);
+}
+
+/// The same guard with an explicit budget, for a provider whose silence is not
+/// a stall. A non-streaming completion sends its response head at once and then
+/// nothing at all until generation finishes, so the default idle budget would
+/// expire in the middle of a healthy request. That matters more than a slow
+/// error: `SO_RCVTIMEO` surfaces as POSIX EAGAIN inside a blocking read, which
+/// Zig 0.16 treats as a programmer bug and panics on rather than returning an
+/// error, so an under-sized budget aborts the process.
+pub fn setReadTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
     const tv = std.posix.timeval{
-        .sec = @intCast(read_idle_timeout_ms / 1000),
-        .usec = @intCast((read_idle_timeout_ms % 1000) * 1000),
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast((timeout_ms % 1000) * 1000),
     };
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&tv)) catch {};
 }

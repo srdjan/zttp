@@ -116,7 +116,7 @@ fn execute(
     // refusal naming the reason. Enforcing it on the read instead produced a
     // bare `FileTooBig` and made that refusal's own first clause unreachable.
     const source = zts.file_io.readFile(allocator, absolute, common.default_output_limit) catch |e| {
-        return registry_mod.ToolResult.errFmt(allocator, name ++ ": failed to read {s}: {s}\n", .{ absolute, @errorName(e) });
+        return registry_mod.ToolResult.errFmt(allocator, name ++ ": failed to read {s}: {s}\n", .{ path, @errorName(e) });
     };
     defer allocator.free(source);
 

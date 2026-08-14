@@ -2,7 +2,7 @@ const std = @import("std");
 const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
-const json_writer = @import("../providers/anthropic/json_writer.zig");
+const json_writer = @import("../providers/json_writer.zig");
 
 const name = "workspace_search_text";
 
@@ -183,7 +183,7 @@ const SearchOutput = struct {
 /// The trailing "--" ends rg's flag parsing, so a model-controlled query
 /// beginning with "-" (e.g. "--pre", which executes a command) is always
 /// treated as the search pattern, never as an rg option.
-const rg_argv_prefix = [_][]const u8{ "rg", "-n", "--no-heading", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", "--" };
+const rg_argv_prefix = [_][]const u8{ "rg", "-n", "--no-heading", "--color", "never", "--hidden", "-g", "!.git", "-g", "!zig-out", "-g", "!.zig-cache", "-g", "!node_modules", "-g", "!.zttp", "--" };
 
 fn buildRgArgv(
     buf: *[rg_argv_prefix.len + 2][]const u8,
@@ -223,7 +223,10 @@ fn searchWithRipgrep(
     return .{ .stdout = out_stdout, .stderr = out_stderr, .ok = ok };
 }
 
-const excluded_names = [_][]const u8{ ".git", "zig-out", ".zig-cache", "node_modules" };
+/// Mirrors `workspace_list_files`: `.zttp` is agent-owned state whose paths
+/// carry a per-workspace hash, so searching it makes the result depend on where
+/// the run happens to live.
+const excluded_names = [_][]const u8{ ".git", "zig-out", ".zig-cache", "node_modules", ".zttp" };
 
 fn isExcluded(entry_name: []const u8) bool {
     for (excluded_names) |ex| {
@@ -426,6 +429,14 @@ test "workspace_search_text: in-process fallback finds matches, emits path:line:
     try tmp.writeFile(allocator, "README.md", "nothing\n");
     // A match inside an excluded directory must never surface.
     try tmp.writeFile(allocator, "node_modules/dep.js", "find-me in noise\n");
+    // Agent-owned witness state carries an absolute path in its contents and a
+    // hash of that path in its directory name, so a hit here would differ
+    // between two runs of the same recorded flow.
+    try tmp.writeFile(
+        allocator,
+        ".zttp/witnesses/f0812d0e79287bb9/handler.path",
+        "/tmp/zttp-flow-simulator-abc/find-me\n",
+    );
 
     var output = try searchInProcess(allocator, tmp.abs_path, tmp.abs_path, "find-me", 50);
     defer output.deinit(allocator);
@@ -433,8 +444,9 @@ test "workspace_search_text: in-process fallback finds matches, emits path:line:
     try testing.expect(output.ok);
     // The handler hit is on line 2, in rg `-n --no-heading` shape.
     try testing.expect(std.mem.indexOf(u8, output.stdout, "src/handler.ts:2:find-me here") != null);
-    // The excluded directory contributed nothing.
+    // The excluded directories contributed nothing.
     try testing.expect(std.mem.indexOf(u8, output.stdout, "node_modules") == null);
+    try testing.expect(std.mem.indexOf(u8, output.stdout, ".zttp") == null);
     // The non-matching file contributed nothing.
     try testing.expect(std.mem.indexOf(u8, output.stdout, "README.md") == null);
 }
