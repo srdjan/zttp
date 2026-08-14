@@ -37,7 +37,10 @@ fail() {
 }
 
 # Every tracked file carrying a marker, minus documentation and minus this file,
-# which names both markers in its own text.
+# which names both markers in its own text. Documentation is excluded by
+# extension rather than by directory: prose that names a marker lives in
+# `docs/`, in `advisor-plans/`, and in any plan directory added later, and a
+# markdown file cannot print a line into the build output wherever it sits.
 sites_for() {
   git ls-files -z |
     xargs -0 sh -c '
@@ -47,7 +50,7 @@ sites_for() {
     ' sh |
     xargs -0 grep -l -F -e "$1" -- 2>/dev/null |
     grep -v -x -F "$self" |
-    grep -v '^docs/' |
+    grep -v '\.md$' |
     LC_ALL=C sort
 }
 
