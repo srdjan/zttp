@@ -12,12 +12,19 @@ const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const transcript_mod = @import("transcript.zig");
 const turn = @import("turn.zig");
 
-test "current repository full preset fixed prefix stays pinned" {
+test "current repository full preset fixed prefix meets U2 budget and stays stable" {
+    const pre_u2_baseline_tokens: u64 = 31_477;
+    const fixed_prefix_target_tokens: u64 = 20_000;
+    const maximum_retained_percent: u64 = 65;
     const allocator = testing.allocator;
     const repository_agents = try zts.file_io.readFile(allocator, "AGENTS.md", 64 * 1024);
     defer allocator.free(repository_agents);
     const prompt = try expert_persona.buildSystemPromptWithContext(allocator, repository_agents);
     defer allocator.free(prompt);
+    const repeated_prompt = try expert_persona.buildSystemPromptWithContext(allocator, repository_agents);
+    defer allocator.free(repeated_prompt);
+    try testing.expectEqualStrings(prompt, repeated_prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, repository_agents) != null);
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
@@ -26,6 +33,12 @@ test "current repository full preset fixed prefix stays pinned" {
     try deepseek_client.writeToolsArray(tools.writer(), &registry);
     const tools_json = try tools.toOwnedSlice();
     defer allocator.free(tools_json);
+    var repeated_tools = TextBuffer.init(allocator);
+    defer repeated_tools.deinit();
+    try deepseek_client.writeToolsArray(repeated_tools.writer(), &registry);
+    const repeated_tools_json = try repeated_tools.toOwnedSlice();
+    defer allocator.free(repeated_tools_json);
+    try testing.expectEqualStrings(tools_json, repeated_tools_json);
 
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(allocator);
@@ -46,13 +59,16 @@ test "current repository full preset fixed prefix stays pinned" {
     try snapshot.completePreparation(body);
     const budget = snapshot.budget orelse return error.TestExpectedEqual;
 
-    try testing.expectEqual(@as(u64, 102_968), budget.bytes.system);
-    try testing.expectEqual(@as(u64, 19_387), budget.bytes.tools);
+    try testing.expectEqual(@as(u64, prompt.len), budget.bytes.system);
+    try testing.expectEqual(@as(u64, tools_json.len), budget.bytes.tools);
     try testing.expectEqual(@as(u64, 0), budget.bytes.history);
     try testing.expectEqual(@as(u64, 0), budget.bytes.transient);
-    try testing.expectEqual(@as(u64, 3_551), budget.bytes.framing);
-    try testing.expectEqual(@as(u64, 125_906), budget.bytes.wire);
-    try testing.expectEqual(@as(u64, 31_477), budget.tokens.total);
+    try testing.expect(budget.bytes.framing > 0);
+    try testing.expectEqual(@as(u64, body.len), budget.bytes.wire);
+    try testing.expect(budget.tokens.total <= fixed_prefix_target_tokens);
+    try testing.expect(
+        budget.tokens.total * 100 <= pre_u2_baseline_tokens * maximum_retained_percent,
+    );
 }
 
 test "request preparation accounts all visible components and exact wire bytes" {

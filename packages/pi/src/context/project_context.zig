@@ -9,12 +9,8 @@
 //! filesystem root is reached. Files are concatenated in outer-first order
 //! so nested rules read after (and conceptually refine) parent rules.
 //!
-//! Caps keep the loader bounded: per-file cap prevents a single enormous
-//! AGENTS.md from dominating the prompt budget; total cap is a final guard
-//! before the caller's own persona-cap truncation kicks in. Callers should
-//! treat a `FileTooBig` from `zts.file_io.readFile` as a signal to skip
-//! that file rather than abort the whole load - the caller's prompt cap
-//! still enforces the final envelope.
+//! Caps keep the loader bounded. Crossing either cap is an explicit error:
+//! applicable project instructions are never skipped or truncated.
 
 const std = @import("std");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
@@ -26,10 +22,9 @@ pub const Options = struct {
     filename_primary: []const u8 = "AGENTS.md",
     /// Secondary filename; both are read if both are present.
     filename_alternate: []const u8 = "CLAUDE.md",
-    /// Maximum bytes read from a single file. Oversized files are skipped.
+    /// Maximum bytes read from a single file. Oversized files fail closed.
     per_file_cap: usize = 64 * 1024,
-    /// Hard cap on the concatenated output. Return null once exceeded so
-    /// the caller does not have to re-truncate.
+    /// Hard cap on the concatenated output. Crossing it fails explicitly.
     total_cap: usize = 512 * 1024,
     /// Stop walking (inclusive) when a directory contains `.git`.
     stop_at_git_root: bool = true,
@@ -108,7 +103,7 @@ pub fn loadFromDir(
             try w.writeAll(file.body);
             if (file.body.len == 0 or file.body[file.body.len - 1] != '\n') try w.writeByte('\n');
             try w.writeByte('\n');
-            if (buf.written().len > options.total_cap) return error.ProjectContextTooLarge;
+            if (buf.written().len > options.total_cap) return error.ProjectInstructionsTooLarge;
         }
     }
 
@@ -144,15 +139,14 @@ fn readIfPresent(
     const joined = try std.fs.path.join(allocator, &.{ dir, name });
     errdefer allocator.free(joined);
 
-    // Oversized and missing files are silent skips. The per-file cap is an
-    // abuse guard, not a correctness invariant: the model is better off with
-    // some context than none, and the caller's prompt-cap still enforces the
-    // final envelope.
+    // Missing files are absent. Oversized applicable instructions are a hard
+    // error because continuing would silently weaken the project contract.
     const body = file_io.readFile(allocator, joined, per_file_cap) catch |err| switch (err) {
-        error.FileNotFound, error.FileTooBig => {
+        error.FileNotFound => {
             allocator.free(joined);
             return;
         },
+        error.FileTooBig => return error.ProjectInstructionsTooLarge,
         else => return err,
     };
     errdefer allocator.free(body);
@@ -255,7 +249,7 @@ test "stops at .git directory inclusive" {
     try testing.expect(std.mem.indexOf(u8, result, "INNER") != null);
 }
 
-test "respects per-file cap by skipping oversized files" {
+test "oversized instruction file fails explicitly" {
     var tree = try initTmp(testing.allocator);
     defer tree.cleanup(testing.allocator);
 
@@ -264,8 +258,10 @@ test "respects per-file cap by skipping oversized files" {
     try big.appendNTimes(testing.allocator, 'x', 1024);
     try tree.writeFile(testing.allocator, "AGENTS.md", big.items);
 
-    const result = try loadFromDir(testing.allocator, tree.abs_path, .{ .per_file_cap = 512 });
-    try testing.expect(result == null);
+    try testing.expectError(
+        error.ProjectInstructionsTooLarge,
+        loadFromDir(testing.allocator, tree.abs_path, .{ .per_file_cap = 512 }),
+    );
 }
 
 test "total cap surfaces as an error" {
@@ -281,7 +277,7 @@ test "total cap surfaces as an error" {
         .per_file_cap = 4096,
         .total_cap = 256,
     });
-    try testing.expectError(error.ProjectContextTooLarge, err);
+    try testing.expectError(error.ProjectInstructionsTooLarge, err);
 }
 
 test "rejects relative cwd" {

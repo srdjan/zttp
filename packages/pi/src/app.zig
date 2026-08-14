@@ -52,6 +52,7 @@ const holes_tool = @import("tools/zts_expert_holes.zig");
 const fill_hole_tool = @import("tools/zts_expert_fill_hole.zig");
 const narrow_tool = @import("tools/zts_expert_narrow.zig");
 const ratchet_tool = @import("tools/zts_expert_ratchet.zig");
+const reference_tool = @import("tools/zts_expert_reference.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -145,6 +146,7 @@ const analysis_bundle = [_]ToolDef{
     fill_hole_tool.tool,
     narrow_tool.tool,
     ratchet_tool.tool,
+    reference_tool.tool,
 };
 
 const build_bundle = [_]ToolDef{
@@ -395,6 +397,8 @@ pub fn modeErrorMessage(err: anyerror) ?[]const u8 {
         error.MissingOpenAICredential => "error: --provider openai requires OPENAI_API_KEY or `zttp auth openai`\n",
         error.MissingDeepSeekCredential => "error: --provider deepseek requires DEEPSEEK_API_KEY or `zttp auth deepseek`\n",
         error.InvalidDeepSeekBaseUrl => "error: DEEPSEEK_BASE_URL must be an HTTPS root carrying no credential, such as https://api.deepseek.com\n",
+        error.ProjectInstructionsTooLarge => "error: complete AGENTS.md/CLAUDE.md instructions do not fit Pi's 48 KiB system-prompt cap; reduce the applicable project instructions before launching\n",
+        error.ProtectedPromptTooLarge => "error: Pi's protected expert prompt exceeds its 16 KiB safety gate; update the Pi build before launching\n",
         error.UnsupportedOpenAIModelOverride => "error: ZTS_OPENAI_MODEL is no longer supported; use --provider openai --model <registered-id>\n",
         error.LegacySessionIdentity => "error: this historical session has no provider identity; resume once with --provider local|claude|openai|deepseek and optional --model\n",
         error.InvalidStoredProvider => "error: the stored session provider is invalid; restart with --provider and optional --model to override it\n",
@@ -1101,6 +1105,13 @@ test "modeErrorMessage explains provider mismatch without provider payloads" {
     try testing.expect(std.mem.indexOf(u8, message, "model IDs do not switch providers") != null);
     try testing.expect(std.mem.indexOf(u8, message, "key") == null);
     try testing.expect(modeErrorMessage(error.OutOfMemory) == null);
+}
+
+test "modeErrorMessage gives actionable project instruction size guidance" {
+    const message = modeErrorMessage(error.ProjectInstructionsTooLarge).?;
+    try testing.expect(std.mem.indexOf(u8, message, "AGENTS.md/CLAUDE.md") != null);
+    try testing.expect(std.mem.indexOf(u8, message, "48 KiB") != null);
+    try testing.expect(std.mem.indexOf(u8, message, "reduce") != null);
 }
 
 test "parseExpertFlags: --goal without --handler is rejected" {

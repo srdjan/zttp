@@ -664,12 +664,12 @@ fn initFromEnvWithPreparedResume(
         });
 
     // Load project context (AGENTS.md / CLAUDE.md) from cwd upward unless
-    // the caller disabled it. Best-effort: a load failure is logged as a
-    // silent skip so a broken file does not make the agent unusable.
+    // the caller disabled it. Instruction failures propagate: launching with
+    // an incomplete project contract would be less safe than refusing.
     const project_ctx: ?[]u8 = if (config.no_context_files)
         null
     else
-        project_context.loadFromCwd(allocator) catch null;
+        try project_context.loadFromCwd(allocator);
     defer if (project_ctx) |p| allocator.free(p);
 
     var session = blk: {
@@ -2499,7 +2499,7 @@ test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only 
     const actual = session.system_prompt_owned orelse return error.TestUnexpectedResult;
     try testing.expect(std.mem.indexOf(u8, actual, "AGENTS_MARKER_XYZ") != null);
     try testing.expect(std.mem.indexOf(u8, actual, "CLAUDE_MARKER_ABC") != null);
-    try testing.expect(std.mem.indexOf(u8, actual, "PROJECT CONTEXT") != null);
+    try testing.expect(std.mem.indexOf(u8, actual, "PROJECT INSTRUCTIONS") != null);
     // Persona identity still intact - project context never overrides it.
     try testing.expect(std.mem.indexOf(u8, actual, "native zts coding agent") != null);
     try testing.expect(std.mem.indexOf(u8, actual, "END OF PERSONA") != null);

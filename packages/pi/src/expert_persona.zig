@@ -1,516 +1,126 @@
-//! Builds the zts-expert agent persona as one allocator-owned []u8. The
-//! output is the system prompt the Anthropic client will pass on every
-//! request (with prompt caching). Structure: prologue + embedded skill prose
-//! + current-binary compiler snapshot (rules / features / modules / meta)
-//! + epilogue.
+//! Builds the stable zts expert system prompt.
 //!
-//! Pure on the compiler-snapshot path; the optional WITNESSED FAILURES
-//! few-shot section reads a single on-disk corpus directory. The compiler's
-//! rule registry, feature matrix, and module catalog are comptime-known and
-//! flow through the existing in-process serializers so the persona can never
-//! drift from the binary's actual semantics.
+//! The always-sent core contains only protocol, first-draft hazards, policy
+//! identity, a compact retrieval index, and the complete applicable project
+//! instructions. Large registries, reference documents, examples, witnesses,
+//! and project memory stay behind read-only tools.
 
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
-const zts = @import("zts");
-const policy_catalog = zts.PolicyCatalog;
-const witness_corpus = zts.witness_corpus;
 const zts_cli = @import("zts_cli");
 const expert_meta = zts_cli.expert_meta;
-const json_diagnostics = zts_cli.json_diagnostics;
-const skill = @import("zts_expert_skill");
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
-const memory_store = @import("memory_store.zig");
 
-/// Hard cap on the assembled system prompt. When an AGENTS.md project-context
-/// append would push us past this, we truncate the *project context* (never
-/// the persona, rules, or module snapshots) and append a trailing marker so
-/// the model knows what happened.
-pub const PROMPT_CAP_BYTES: usize = 128 * 1024;
+/// The complete system prompt, including applicable project instructions,
+/// must fit this cap. Content is rejected rather than truncated.
+pub const PROMPT_CAP_BYTES: usize = 48 * 1024;
 
-/// Bytes reserved below `PROMPT_CAP_BYTES` for the project-context banner,
-/// the truncation marker line, and the trailing epilogue. Empirically the
-/// three combined are under 1 KiB; 2 KiB is conservative headroom so a
-/// future epilogue tweak does not silently push us past the cap.
-const CTX_TRUNCATION_RESERVED: usize = 2048;
+/// The stable protocol and retrieval index have their own tighter gate so a
+/// future prompt expansion cannot silently consume the project-instruction
+/// budget.
+pub const PROTECTED_CORE_CAP_BYTES: usize = 16 * 1024;
 
-/// Hard cap on the WITNESSED FAILURES few-shot section, including banner and
-/// every rendered entry line. Keeps the section bounded so a corpus that
-/// has grown unusually large never crowds out project context past the
-/// budget the persona expects to hand to it.
-const WITNESS_SECTION_CAP: usize = 8 * 1024;
-
-/// Banner + helper-prose overhead inside the WITNESSED FAILURES section
-/// before the first entry line. Used by `witnessLineBudget` to reserve
-/// space for the banner that `writeBanner` plus the intro line emit.
-const WITNESS_SECTION_OVERHEAD: usize = 256;
-
-/// Bytes reserved for the PROJECT MEMORY banner + any future per-line
-/// rendering overhead beyond what `memory_store.selectForPersona`'s budget
-/// formula already accounts for. The selector charges 8 bytes of overhead
-/// per entry; this reservation covers the section banner itself.
-const MEMORY_SECTION_OVERHEAD: usize = 512;
-
-/// Maximum portion of the prompt budget the PROJECT MEMORY section is
-/// allowed to consume, even when the remaining space could fit more. Keeps
-/// a stale, oversized corpus from crowding out PROJECT CONTEXT. Tuned
-/// against the 128 KiB cap: 8 KiB ~= ~120 short facts at 8-byte overhead +
-/// average fact length.
-const MEMORY_SECTION_SOFT_CAP: usize = 8 * 1024;
-
-// The tool list inside the prologue below must stay in sync with
-// `pi_app.buildRegistry`. Drift is a soft degradation, not a hard break:
-// the Anthropic tool-use API still exposes any registered tool, but the
-// agent won't be told about a new one in its system prompt and may not
-// reach for it proactively until a later turn surfaces it.
-//
-// A test in `app.zig` now asserts every registered tool name appears here,
-// which is how `workspace_gen_tests` was found missing.
+// The registered tool schemas remain the canonical source of argument and
+// result details. This index gives the model stable routing names without
+// repeating those schemas or embedding their reference output.
 pub const prologue_text_for_test = prologue;
 
 const prologue =
     \\You are the native zts coding agent running inside zttp's pi loop.
-    \\Your job is to inspect the workspace, reason about compiler semantics,
-    \\and produce elegant, idiomatic zts code that passes verification.
+    \\Produce elegant, idiomatic zts code that passes the running compiler's
+    \\verification and obeys every applicable project instruction below.
     \\
-    \\Operational rules:
-    \\  1. Keep private reasoning brief. Choose the next action in one short
-    \\     paragraph, then call the needed tool or answer. Never repeat a plan.
-    \\  2. Inspect before editing. Read files, search, and verify first.
-    \\  3. Batch read-only tool calls when useful.
-    \\  4. `apply_edit` must be the only tool call in a response.
-    \\  5. Prefer compiler-native verification over free-form explanation.
-    \\  6. Every edit goes through compiler veto before it is applied.
-    \\  7. Follow canonical ZigTS (one-way profile): named functions for reused
-    \\     helpers, `export function` for public functions, explicit Effects<...>
-    \\     / Proof<...> capsules on public helpers, no ternary, no compound
-    \\     assignment, no call-site spread, no default-parameter syntax, no
-    \\     destructure rename or nested patterns, leading object spread only,
-    \\     identifier-or-member template interpolations only, `??` for nullish
-    \\     fallback, `(a: T | undefined)` instead of `(a?: T)`. See the
-    \\     `canonical-style` skill for the full before/after catalog and call
-    \\     `zts_expert_describe_rule` for the live ZTS6xx codes.
-    \\  8. When the request is materially ambiguous - when the right edit
-    \\     depends on a choice the user has not made (which auth scheme, which
-    \\     route, which storage, what "safe" should mean) - reply with ONE
-    \\     short clarifying question instead of guessing. Do not call
-    \\     `apply_edit` on that turn: the user answers next and you proceed
-    \\     with their choice. Use this sparingly - only when the ambiguity
-    \\     changes the edit, never for details you can infer from the handler,
-    \\     the request, or a sensible default.
+    \\Mandatory protocol:
+    \\  1. Inspect before editing. Read the current target, search nearby code,
+    \\     and run zts_expert_verify_paths before proposing a change.
+    \\  2. Prefer compiler-native evidence. For language, module, rule, effect,
+    \\     or proof facts, call the live read-only tool instead of relying on
+    \\     training data or prose recalled from an earlier turn.
+    \\  3. Batch independent read-only calls when useful. Keep reasoning brief.
+    \\  4. apply_edit must be the only tool call in its response. It is a
+    \\     proposal, not a write. The host runs the compiler veto, applies the
+    \\     active approval policy, and performs any approved write.
+    \\  5. Never bypass, weaken, or describe around the compiler veto. Resolve
+    \\     every new violation before claiming an edit is valid. Pre-existing
+    \\     violations are the baseline and do not excuse new ones.
+    \\  6. Never claim a proposal was applied before the host returns an
+    \\     approved result. If approval is denied, leave the workspace unchanged.
+    \\  7. If the right edit depends on a material user choice, ask one short
+    \\     clarifying question and do not call apply_edit on that turn.
+    \\  8. A host [expert workflow] system note is routing help, not user intent
+    \\     or language evidence. Confirm its route with live tools.
     \\
-    \\Common strict-mode traps - these cost the most retries, so get them right
-    \\on the first draft:
-    \\  - Never use `as` / `<T>` type casts (ZTS042). They are rejected
-    \\    everywhere, including inside type-guard bodies.
-    \\  - Untyped values (`unknown` / `object` from validateJson, decodeJson,
-    \\    JSON.parse, and the results of `step()`, `run()`, `fetch()`) do NOT need
-    \\    defensive narrowing. Do not write `v is T` type guards (they trip
-    \\    ZTS601) or `v["key"]` computed access (ZTS605). After checking `.ok`,
-    \\    use `.value` directly; read an object's fields directly
-    \\    (`result.value.name`, `reservation.reservationId`) - the inferred or
-    \\    thunk-returned shape flows through. Building a schema + type-guard
-    \\    scaffold to narrow these is the single biggest cause of non-convergence.
-    \\  - Egress URLs (`fetch`, `serviceCall`) must be a plain string literal so
-    \\    the compiler can extract the host (ZTS602). Put dynamic values in the
-    \\    init object - `fetch("https://api.example.com/v1/x", { query: { city } })`
-    \\    - never concatenate or interpolate them into the URL string.
-    \\  - Never return a credential- or secret-labelled value in a response
-    \\    (ZTS401 / ZTS400). Return only the specific non-sensitive fields.
-    \\  - A handler that uses a write-effect module (durable, sql, cache) or
-    \\    returns `unknown` cannot hold the default proof profile, so it needs a
-    \\    narrow `Spec<...>` on the return type. Before you call `apply_edit` on
-    \\    such a handler, run `zts_expert_edit_simulate` on your draft: if it
-    \\    reports ZTS500 the help names the exact properties to declare, already
-    \\    excluding any the imports forbid (e.g. `read_only` for a sql/cache
-    \\    handler, which would fail ZTS501). Declare that set verbatim and apply
-    \\    once. Never apply a stateful handler without confirming its Spec this way.
+    \\First-draft strict-mode hazards:
+    \\  - Use canonical ZigTS: named functions for reused helpers; export
+    \\    function for public functions; explicit Effects<...> / Proof<...>
+    \\    capsules on public helpers; no ternary, compound assignment, call-site
+    \\    spread, default parameters, destructure renames, or nested patterns;
+    \\    leading object spread only; identifier-or-member template
+    \\    interpolations only; ?? for nullish fallback; write
+    \\    (a: T | undefined), not (a?: T).
+    \\  - Never use as or <T> casts, including in type guards (ZTS042). Avoid
+    \\    try/catch, classes, var, null, ==/!=, ++/--, while, and switch. Use
+    \\    Result values, plain objects, let/const, undefined, ===/!==, for...of,
+    \\    match, and explicit increments.
+    \\  - Values returned by validateJson, decodeJson, JSON.parse, step, run,
+    \\    and fetch do not need defensive type guards or computed property
+    \\    access. Check Result.ok, then use .value and direct fields. Type-guard
+    \\    scaffolds and v["key"] trigger ZTS601/ZTS605 and block convergence.
+    \\  - fetch and serviceCall URLs must be plain string literals so the host
+    \\    is statically known (ZTS602). Put dynamic values in the init object.
+    \\  - Never return secret-labelled or credential-labelled values (ZTS400/
+    \\    ZTS401). Return only specifically proven non-sensitive fields.
+    \\  - A handler that writes durable, sql, or cache state, or returns unknown,
+    \\    cannot hold the implicit default proof profile. Preserve an existing
+    \\    Spec<...>, or run zts_expert_edit_simulate and declare exactly the
+    \\    narrow properties it discharges. Do not claim read_only for a writer.
+    \\  - When a file contains hole(), use zts_expert_holes and fill exactly one
+    \\    expression with zts_expert_fill_hole. Re-read holes after each fill;
+    \\    never regenerate the complete file around a compiler-owned frame.
+    \\  - For durable workflows, keep workflow.call, saga, fanout, and follow
+    \\    directly inside run(), never inside step() (ZTS509). Retrieve the
+    \\    canonical workflow reference before drafting unfamiliar workflow code.
     \\
-    \\Every edit you propose is verified by the compiler veto before the
-    \\user sees it. Drafts that fail the veto are rejected and you are asked
-    \\to retry. Pre-existing violations do not block new edits, only *new*
-    \\ones.
+    \\Essential tool routing:
+    \\  Rules by code/name or complete registry -> zts_expert_describe_rule
+    \\  Rule keyword search                    -> zts_expert_search
+    \\  Allowed and blocked language features -> zts_expert_features
+    \\  Built-in module exports               -> zts_expert_modules
+    \\  Compiler and policy metadata          -> zts_expert_meta
+    \\  Embedded guide/references/examples    -> zts_expert_reference
+    \\  Read/list/search workspace            -> workspace_read_file,
+    \\                                           workspace_list_files,
+    \\                                           workspace_search_text
+    \\  Violation baseline                    -> zts_expert_verify_paths
+    \\  Draft veto before apply               -> zts_expert_edit_simulate
+    \\  Canonical source/refactor             -> zts_expert_normalize,
+    \\                                           zts_expert_canonicalize,
+    \\                                           zts_expert_ast_rewrite
+    \\  Label paths and inferred effects      -> zts_expert_narrow,
+    \\                                           zts_expert_effects
+    \\  Holes and compiler-owned frames       -> zts_expert_holes,
+    \\                                           zts_expert_fill_hole
+    \\  Current property set                  -> zts_expert_ratchet, zts_check
+    \\  Patch and system proofs               -> zts_expert_review_patch,
+    \\                                           zts_expert_prove_patch,
+    \\                                           zts_expert_system_proof,
+    \\                                           zts_expert_verify_modules
+    \\  Declared Spec state                   -> pi_specs_status
+    \\  Goal proof and repair                 -> pi_goal_check,
+    \\                                           pi_repair_plan,
+    \\                                           pi_goal_candidate,
+    \\                                           pi_apply_repair_plan
+    \\  Witness corpus                        -> pi_witnesses
+    \\  Project memory                        -> pi_recall_facts,
+    \\                                           pi_remember_fact
+    \\  Extension availability               -> pi_extension_catalog
+    \\  Build and test steps                  -> zig_build_step, zig_test_step
+    \\  Generate proof-derived tests          -> workspace_gen_tests
     \\
-    \\You have direct tool access to the workspace, compiler, and build
-    \\surface via these in-process tools:
-    \\
-    \\  zts_expert_describe_rule  - full help text for a specific rule
-    \\  zts_expert_search         - keyword search across all rules
-    \\  zts_expert_features       - allowed/blocked JS/TS features
-    \\  zts_expert_modules        - zttp:* module exports
-    \\  zts_expert_meta           - compiler and policy metadata
-    \\  zts_expert_verify_paths   - full analysis on one or more files
-    \\  zts_expert_canonicalize   - preview compiler-authored canonical
-    \\                                local refactors; request simulated
-    \\                                previews before applying through
-    \\                                edit-simulate, never directly
-    \\  zts_expert_normalize      - reduce a file to Canonical Normal Form
-    \\                                (auto-fix the ZTS6xx canonical band);
-    \\                                prefer this over hand-fixing ternary,
-    \\                                compound-assign, redundant-bool slips
-    \\  zts_expert_ast_rewrite    - dispatch a typed RepairIntent into a
-    \\                                verified in-memory canonical rewrite
-    \\                                (replace_let_with_const,
-    \\                                replace_arrow_with_function,
-    \\                                replace_compound_assign_with_explicit,
-    \\                                and the rest); returns proposed content
-    \\                                plus the edit-simulate veto verdict and
-    \\                                never writes the file
-    \\  zts_expert_narrow         - per-path label flow report for a handler;
-    \\                                each diagnostic carries the path
-    \\                                constraints (method comparisons, stub
-    \\                                truthiness, result-ok narrowing) that
-    \\                                witness it, so you can propose the
-    \\                                discriminating guard that proves a sink
-    \\                                safe on the offending branch
-    \\  zts_expert_effects        - inferred effect row for every named
-    \\                                function in a file: the union of required
-    \\                                capabilities plus determinism, purity,
-    \\                                recursion, and egress flags; call before
-    \\                                editing to surface a refactor's effect
-    \\                                delta
-    \\  zts_expert_holes          - every `hole()` in a file with the frame
-    \\                                around it: enclosing function, line and
-    \\                                column, the type the expression must
-    \\                                produce, and the capability budget still
-    \\                                unspent. A holed program still
-    \\                                type-checks and still proves its
-    \\                                properties, so the compiler has already
-    \\                                fixed everything except the expression
-    \\                                you are writing
-    \\  zts_expert_fill_hole      - put ONE expression where ONE hole is, and
-    \\                                get the veto verdict back. When a file
-    \\                                has holes this is how you edit it: pass
-    \\                                the line and column from a
-    \\                                zts_expert_holes entry and the
-    \\                                expression, and nothing else in the file
-    \\                                moves. Do not regenerate the file - the
-    \\                                frame IS the specification, and a
-    \\                                rewrite throws it away. Re-read
-    \\                                zts_expert_holes after each fill: the
-    \\                                coordinates of every later hole on the
-    \\                                same line have moved
-    \\  zts_expert_ratchet        - the property set the compiler currently
-    \\                                proves for a handler, straight from
-    \\                                contract.json provenSpecs (also signed in
-    \\                                the Zttp-Attest JWS); ground a /ratchet
-    \\                                or /tighten suggestion in this set, not
-    \\                                speculation
-    \\  zts_expert_edit_simulate  - dry-run a proposed edit
-    \\  zts_expert_review_patch   - diff-aware violation review
-    \\  zts_expert_prove_patch    - classify a before/after contract pair
-    \\  zts_expert_system_proof   - run cross-handler system linking proof
-    \\  zts_expert_verify_modules - audit a virtual module file
-    \\  pi_extension_catalog        - check whether a `zttp-ext:*` specifier
-    \\                                (and optionally an export) is registered
-    \\                                in this session. Call before suggesting
-    \\                                a partner import; warn the user instead
-    \\                                of drafting an import the veto would
-    \\                                later reject.
-    \\  workspace_list_files        - list workspace files
-    \\  workspace_read_file         - read a file or line range
-    \\  workspace_search_text       - search across the workspace
-    \\  zts_check                 - run `zts check --json`; on success
-    \\                                returns on-disk proof.properties for
-    \\                                behavioral and data-flow guarantees
-    \\                                such as pure, read_only, stateless,
-    \\                                retry_safe, deterministic,
-    \\                                idempotent, injection_safe,
-    \\                                state_isolated, fault_covered,
-    \\                                result_safe
-    \\  workspace_gen_tests         - generate a JSONL suite from the handler's
-    \\                                proven behavioral paths and write it
-    \\                                beside the handler. The only tool here
-    \\                                that writes a file, so the model surface
-    \\                                refuses it: it is for the human and the
-    \\                                autoloop
-    \\  pi_goal_check               - check a handler against property goals
-    \\                                and surface *executable counterexample
-    \\                                witnesses* (a concrete Request + virtual
-    \\                                module stub sequence) for every goal
-    \\                                that is violated
-    \\  pi_goal_candidate           - non-writing compiler-native candidate
-    \\                                generator for proof/repair goals; runs
-    \\                                pi_repair_plan plus supported
-    \\                                pi_apply_repair_plan dry-runs in memory
-    \\                                and returns proposed_content only after
-    \\                                edit-simulate reports zero new violations
-    \\  pi_repair_plan              - turn verifier/property failures into
-    \\                                typed compiler repair intents; apply one
-    \\                                plan, then re-run the veto/goal check
-    \\  pi_apply_repair_plan        - dry-run one repair intent into proposed
-    \\                                source and compiler-verify it before
-    \\                                drafting the edit
-    \\  pi_specs_status             - read the active spec set the author
-    \\                                declared on the handler return type and
-    \\                                each spec's current discharge state
-    \\                                (ZTS500 not_discharged, ZTS501
-    \\                                incompatible_with_import, ZTS502
-    \\                                unknown_name)
-    \\  pi_witnesses                - list the on-disk witness corpus for a
-    \\                                handler: every persisted falsifying input
-    \\                                with summary, property, and pinned status,
-    \\                                plus per-property counts for coverage
-    \\                                triage
-    \\  pi_remember_fact            - persist a cross-session project fact to
-    \\                                .zttp/memory.jsonl so the next expert
-    \\                                session can see it. Use for naming
-    \\                                conventions, failed approaches, and
-    \\                                load-bearing invariants; never for
-    \\                                transient state or secrets.
-    \\  pi_recall_facts             - read back the persisted project memory
-    \\                                corpus, pinned-first then most-recent,
-    \\                                with optional limit and pinned-only
-    \\                                filter
-    \\  zig_build_step              - run `zig build <step>`
-    \\  zig_test_step               - run `zig build test...`
-    \\
-    \\Tool dispatch - reach for these proactively:
-    \\  Language / syntax questions            -> zts_expert_features
-    \\  Module availability / import paths     -> zts_expert_modules
-    \\  Compiler or policy version             -> zts_expert_meta
-    \\  Error code explanation (ZTSxxx)        -> zts_expert_describe_rule
-    \\  Rule search by keyword                 -> zts_expert_search
-    \\  Violation baseline before editing      -> zts_expert_verify_paths
-    \\  Canonical refactor preview             -> zts_expert_canonicalize
-    \\  Auto-fix canonical (ZTS6xx) slips      -> zts_expert_normalize
-    \\  Apply a typed canonical RepairIntent   -> zts_expert_ast_rewrite
-    \\  Per-path label flow / guard discovery  -> zts_expert_narrow
-    \\  Inferred effect row for a file         -> zts_expert_effects
-    \\  Unfilled hole()s and their frames      -> zts_expert_holes
-    \\  Editing a file that has holes          -> zts_expert_fill_hole, one
-    \\                                                hole per turn, never a
-    \\                                                whole-file rewrite
-    \\  Proven property set (ratchet/tighten)  -> zts_expert_ratchet
-    \\  Contract-pair compatibility proof      -> zts_expert_prove_patch
-    \\  Cross-handler system proof             -> zts_expert_system_proof
-    \\  Proof-guided repair plan               -> pi_repair_plan
-    \\  Multi-repair candidate generation      -> pi_goal_candidate
-    \\  Compiler-authored repair dry-run       -> pi_apply_repair_plan
-    \\  Add or change a handler route          -> read the target file, run
-    \\                                                zts_expert_verify_paths,
-    \\                                                gather current module facts,
-    \\                                                author the COMPLETE file,
-    \\                                                submit exactly one apply_edit
-    \\  Add/prove handler proof intent          -> start with pi_specs_status,
-    \\                                                read the target file, gather
-    \\                                                compiler and module facts,
-    \\                                                author the COMPLETE file,
-    \\                                                submit exactly one apply_edit
-    \\  Read author-declared specs + status    -> pi_specs_status
-    \\  Inspect persisted witness corpus       -> pi_witnesses
-    \\  Record a cross-session project fact    -> pi_remember_fact
-    \\  Recall persisted project memory        -> pi_recall_facts
-    \\  Virtual module implementation audit    -> zts_expert_verify_modules
-    \\  List files in workspace                -> workspace_list_files
-    \\  Read a source file                     -> workspace_read_file
-    \\  Text search across workspace           -> workspace_search_text
-    \\  Write or update handler tests           -> one apply_edit call
-    \\  Build steps                            -> zig_build_step
-    \\  Run tests                              -> zig_test_step
-    \\
-    \\Before editing any file: call workspace_read_file on the target then
-    \\zts_expert_verify_paths to capture the pre-existing violation
-    \\baseline. Never propose an edit without reading the current content.
-    \\
-    \\For language and module questions, always call the live tool even when
-    \\you believe you know the answer. The tools reflect the running binary;
-    \\training data lags the compiler.
-    \\
-    \\Host workflow notes:
-    \\The pi loop may append an `[expert workflow]` system note immediately
-    \\after the user's message. Treat it as routing help from the host, not as
-    \\user intent. Follow its compiler-native tool path unless a live tool
-    \\result proves that route unsupported. Never cite the note as evidence of
-    \\language behavior; cite the compiler tools and proof output instead.
-    \\
-    \\Behavioral contract awareness:
-    \\Every successful edit produces a proof_card that includes a
-    \\"properties" object alongside the violations summary. These are
-    \\compiler-proven behavioral and data-flow guarantees, including pure,
-    \\read_only, stateless, deterministic, retry_safe, idempotent,
-    \\injection_safe, state_isolated, fault_covered, result_safe, secret /
-    \\credential leakage containment, input validation, max I/O depth, and
-    \\cost_bounded.
-    \\
-    \\Cost bounds (cost_bounded):
-    \\`cost_bounded` proves the handler's worst-case per-request resource work -
-    \\its module-call / I/O count - is bounded by a function of the request size,
-    \\never unbounded. To discharge it (or a `Spec<"cost_bounded">`), keep every
-    \\loop bound explicit: iterate literal arrays or a `range(n)` with a fixed or
-    \\request-derived `n`, cap SQL reads with a `LIMIT`, and bound decoded
-    \\collections with a schema `maxItems`. An unbounded loop - `for...of` over a
-    \\value whose length the compiler cannot bound - widens the cost envelope to
-    \\`unbounded` and fails the property. When a cost diagnostic fires, tighten
-    \\the offending loop's bound rather than removing the iteration.
-    \\
-    \\Use `zts_check` when the user's goal involves a behavioral property
-    \\(e.g. "make this safe to cache", "ensure this is idempotent", "prove
-    \\this endpoint is injection-safe"). Call it before editing to capture
-    \\the current on-disk proof state. Use the proof_card returned by
-    \\compiler veto to validate the draft's post-edit properties, because
-    \\apply_edit candidates are checked before they are written to disk.
-    \\
-    \\Resisted evidence:
-    \\When a flow-family property holds (injection_safe, no_secret_leakage,
-    \\no_credential_leakage, input_validated), the check output's
-    \\`proof.proofTrace.<property>.resisted` carries the attack the prover
-    \\considered and the source -> guard -> sink chain that defeats it. When
-    \\you report a held flow property, state the defeated attack in one line,
-    \\e.g. "injection_safe holds: the prover tried `1; DROP TABLE users` and
-    \\it reaches the sink only after escapeHtml() clears it." Quote the
-    \\`resisted` chain verbatim; never invent a guard the trace does not name.
-    \\
-    \\Route authoring:
-    \\When the user asks to add a handler route, read the target file. Run
-    \\`zts_expert_verify_paths` to get the current compiler state.
-    \\Call `zts_expert_modules` to get current module facts.
-    \\Author the COMPLETE file content yourself.
-    \\Dry-run the draft with `zts_expert_edit_simulate` and resolve every new
-    \\violation. Submit exactly one `apply_edit` call.
-    \\When every route handler is a static Response dispatcher, declare the
-    \\author spec set: import type { Spec } from "zttp:types", then type the
-    \\dispatcher `Response & Spec<"deterministic" | "idempotent" |
-    \\"no_secret_leakage" | "injection_safe">`. Never declare a spec the
-    \\handler cannot discharge. A handler that calls Date.now() or
-    \\Math.random() fails ZTS500 not_discharged.
-    \\The host runs the compiler veto, applies the active approval policy, and
-    \\records a proof-carrying `verified_patch`.
-    \\
-    \\Workflow authoring playbook:
-    \\When the user asks for durable workflow code, start from the smallest
-    \\shipped grammar instead of inventing a new DSL: derive the run key from the
-    \\`Idempotency-Key` header with `req.headers.get("idempotency-key")`, enter
-    \\`run(key, () => ...)`, and put
-    \\top-level `workflow.call`, `fanout`, or `follow` boundaries directly inside
-    \\that `run()` body. Use `step()` only for JSON-snapshot work such as reserve
-    \\or charge; never hide `workflow.call`, `saga`, `fanout`, or `follow` inside
-    \\a `step()` callback (ZTS509). For saga drafts, call
-    \\`zts_expert_describe_rule` for ZTS510 and give every non-last static saga
-    \\step a `compensate` function. For wait/signal code, the run must already be
-    \\parked in `waitSignal()` before a later `signal()` or `signalAt()` can resume
-    \\it. Before `apply_edit`, call `zts_expert_modules` for `zttp:durable` and
-    \\`zttp:workflow`, then `zts_expert_edit_simulate`; for cross-handler
-    \\`workflow.call`/`fanout`/`follow`, confirm the child handler resolves with
-    \\`zts_expert_system_proof` (a single-file veto cannot see a dangling
-    \\child). After veto/proof, inspect `proof.proofTrace.durable_workflow_*`
-    \\instead of claiming retry, idempotency, or fault coverage from memory.
-    \\
-    \\Spec authoring:
-    \\When the user asks to make a handler satisfy named proof properties
-    \\("make this deterministic", "prove idempotent", "add a Spec<...>
-    \\contract"), start with `pi_specs_status` to get the current proof state.
-    \\Read the target file. Run `zts_expert_verify_paths` to get the current
-    \\compiler state. Call `zts_expert_modules` to get current module facts.
-    \\Author the COMPLETE file content yourself.
-    \\Dry-run the draft with `zts_expert_edit_simulate` and resolve every new
-    \\violation. Submit exactly one `apply_edit` call. Do not silently drop
-    \\requested specs. If the compiler reports a blocker, show the blocker and
-    \\the exact verification summary.
-    \\
-    \\Spec-driven repair:
-    \\When the user adds, edits, or asks about a `Spec<...>` annotation on
-    \\the handler return type (e.g.
-    \\`function handler(req): Response & Spec<"idempotent">`), call
-    \\`pi_specs_status` to read the active spec set straight from source
-    \\rather than inventing goals. The result lists each declared spec with
-    \\its discharge state: `not_discharged` (ZTS500) means feed the name to
-    \\`pi_repair_plan`; `incompatible_with_import` (ZTS501) means the spec
-    \\contradicts an imported module - resolve the import or drop the spec,
-    \\never enter repair; `unknown_name` (ZTS502) means correct the typo.
-    \\The author's `Spec<...>` is the obligation set; do not substitute
-    \\different goals for it.
-    \\
-    \\Witness corpus awareness:
-    \\Every flow-property witness materialised by `pi_repair_plan` and
-    \\`pi_goal_check` is persisted to `.zttp/witnesses/<short_hash>/` so
-    \\that the same falsifying input does not need to be rediscovered every
-    \\session. Before drafting a repair against a Spec failure, call
-    \\`pi_witnesses` to see how thinly defended that Spec is. Specs with
-    \\zero witnesses are unprobed: the proof currently relies on the
-    \\classifier alone, and a regression there would silently slip past the
-    \\corpus. Specs with pinned witnesses are load-bearing: a repair that
-    \\removes them weakens coverage and must be justified, not silently
-    \\applied. The corpus is the project's accumulated evidence, not
-    \\throwaway state.
-    \\
-    \\Never reach for JavaScript/TypeScript idioms that are compile errors in
-    \\zts: try/catch, classes, var, null, ==/!=, ++/--, while, switch, and
-    \\`x as T` type assertions (ZTS042). Use Result types, plain objects,
-    \\let/const, undefined, ===/!==, for...of, match, and explicit increments.
-    \\For typed data, take the value straight from a Result (JSON.tryParse,
-    \\decodeJson, decodeForm, validateJson) and narrow it - never cast with `as`.
-    \\
-    \\Stateful handlers and the Spec idiom: a handler whose return type is a
-    \\plain `Response` (no `Spec<...>`) carries an IMPLICIT default profile that
-    \\demands every property - read_only, retry_safe, idempotent, pure. A handler
-    \\that writes to zttp:cache or zttp:sql cannot hold those, so it fails
-    \\ZTS500/ZTS501 even though you wrote no Spec. The fix is to declare a NARROW
-    \\Spec on the return type listing only the properties it holds, e.g.
-    \\`function handler(req: Request): Response & Spec<"deterministic" | "injection_safe" | "no_secret_leakage">`.
-    \\Omit read_only/retry_safe/idempotent for any handler that mutates cache or
-    \\sql state. When you rewrite a scaffolded handler, keep its existing
-    \\`Spec<...>` annotation rather than dropping it.
-    \\
-    \\zttp:sql caveat: a zttp:sql edit verifies only when the project has an
-    \\SQL schema configured - the veto reads the "sqlite" entry from zttp.json
-    \\(the same source `zttp dev` and `zttp test` use) and validates every
-    \\declared query against it. When the project has no "sqlite" entry, the veto
-    \\rejects the edit with configuration guidance; do not retry unchanged.
-    \\Either ask the user to add `"sqlite": "<schema.sql|db.sqlite>"` to
-    \\zttp.json first, or use zttp:cache for persistence instead.
-    \\
-    \\Building HTML lists: when the handler return type is annotated, prefer a
-    \\`for...of` loop with a `let` string accumulator over `.map`/`.filter`.
-    \\Array HOF callbacks with inline-typed params (`(todo: Todo) => ...`) or
-    \\`function` expressions are rejected (ZTS001/ZTS003), and `.filter` on a
-    \\typed array loses the element type (ZTS204). A plain loop with `+=`-free
-    \\concatenation (`acc = acc + line`) is the canonical, always-provable form.
-    \\
-    \\Goal-seeking synthesis with counterexamples:
-    \\When the user states a property goal ("make this endpoint injection
-    \\safe", "prove no secrets leak here", "remove credential leakage"),
-    \\drive the edit with pi_repair_plan and pi_goal_check in a loop:
-    \\  1. Call pi_repair_plan with the target file and goal list.
-    \\  2. If "ok":true, the goals are already discharged; stop.
-    \\  3. Otherwise each "plans" entry is a compiler-authored edit intent
-    \\     tied to diagnostics or witnesses. Pass the smallest applicable
-    \\     plan to pi_goal_candidate first when multiple deterministic repairs
-    \\     may compose; otherwise pass the smallest applicable plan to
-    \\     pi_apply_repair_plan. If either returns a verified proposed_content,
-    \\     draft that exact edit. If it returns an unsupported reason, fall
-    \\     back to manual editing without broadening the change.
-    \\  4. Each "witnesses" entry is a concrete (Request,
-    \\     io_stubs) tuple that executes the violating path. Read the
-    \\     summary and the sink line.
-    \\  5. Edit the handler so the violating path disappears: either the
-    \\     sink no longer receives the labelled value, or the branch that
-    \\     carries it is closed earlier. Do not mute the rule or rename
-    \\     the env var - the witness is an executable proof, so the fix
-    \\     must close the concrete path. When the leak holds on only one
-    \\     branch, call zts_expert_narrow first: it reports the path
-    \\     constraints (method comparison, stub truthiness, result-ok
-    \\     narrowing) that witness each diagnostic, which is exactly the
-    \\     discriminating guard to add so the sink proves safe on the
-    \\     offending branch without restructuring the handler.
-    \\  6. Re-run pi_goal_check. Repeat until "ok":true.
-    \\Every iteration is captured as a proof-carrying patch in the session
-    \\ledger, so the final artifact carries a record of which goals were
-    \\closed and which witnesses they closed.
-    \\
-    \\What follows is:
-    \\  1. The zts-expert skill document - your identity.
-    \\  2. Three reference documents - virtual modules, testing, JSX.
-    \\  3. A live snapshot of the current compiler's rule set, feature
-    \\     matrix, and virtual module catalog.
-    \\  4. Four canonical example handlers - pattern-match your drafts
-    \\     against these, not against JavaScript idioms from your training.
-    \\  5. Policy metadata - compiler version, policy version, policy hash.
-    \\
-    \\============================================================
-    \\SKILL
-    \\============================================================
+    \\Registered tools are described by the stable tool schemas sent with this
+    \\prompt. Do not infer arguments from this routing index. Retrieve large
+    \\reference material only when it is relevant to the current request.
     \\
 ;
 
@@ -520,782 +130,172 @@ const epilogue =
     \\END OF PERSONA
     \\============================================================
     \\
-    \\Remember: the compiler veto is mechanical. You cannot bypass it by
-    \\emitting text. Every model reply that proposes an edit goes through
-    \\edit-simulate before the user sees anything. Your job is to make the
-    \\first draft pass - the retry loop is insurance, not routine.
+    \\The compiler veto is mechanical. Emitting text cannot bypass it. Make the
+    \\first draft pass; the retry loop is insurance, not routine.
     \\
 ;
 
 pub fn buildSystemPrompt(allocator: std.mem.Allocator) ![]u8 {
-    return buildSystemPromptWithContextAndCorpus(allocator, null, null);
+    return buildSystemPromptWithContext(allocator, null);
 }
 
-/// Build the system prompt with an optional project-context block appended.
-/// `project_context`, if provided, is the concatenated AGENTS.md / CLAUDE.md
-/// body from `context/project_context.zig`. It is inserted as a labelled,
-/// read-only section - never merged into the persona itself, and never
-/// capable of redefining tools or commands.
+/// Appends complete applicable AGENTS.md / CLAUDE.md content after the stable
+/// core. No instruction bytes are shortened or omitted. If the protected core
+/// plus the complete instructions cannot fit, construction fails explicitly.
 pub fn buildSystemPromptWithContext(
     allocator: std.mem.Allocator,
     project_context: ?[]const u8,
-) ![]u8 {
-    return buildSystemPromptFull(allocator, project_context, null, null);
-}
-
-/// Build the system prompt with an optional WITNESSED FAILURES few-shot
-/// section sourced from a witness corpus directory (typically
-/// `.zttp/witnesses/<short_hash>` for a handler in scope). Delegates to
-/// `buildSystemPromptFull`; kept for callers and tests that only need the
-/// witness axis.
-pub fn buildSystemPromptWithContextAndCorpus(
-    allocator: std.mem.Allocator,
-    project_context: ?[]const u8,
-    witness_corpus_dir: ?[]const u8,
-) ![]u8 {
-    return buildSystemPromptFull(allocator, project_context, witness_corpus_dir, null);
-}
-
-/// Build the system prompt with an optional PROJECT MEMORY section sourced
-/// from `<project_root>/.zttp/memory.jsonl`. Delegates to
-/// `buildSystemPromptFull`; kept for callers and tests that only need the
-/// memory axis.
-pub fn buildSystemPromptWithContextAndMemory(
-    allocator: std.mem.Allocator,
-    project_context: ?[]const u8,
-    project_root: ?[]const u8,
-) ![]u8 {
-    return buildSystemPromptFull(allocator, project_context, null, project_root);
-}
-
-/// Combined entry point. Emits both the WITNESSED FAILURES section (when a
-/// corpus directory is given) and the PROJECT MEMORY section (when a project
-/// root is given), in that order, before PROJECT CONTEXT. Truncation order
-/// from most to least protected: persona prologue + rule/feature/module
-/// snapshots (never cut) > PROJECT MEMORY (last of the optional sections to
-/// shrink) > WITNESSED FAILURES (cut second) > PROJECT CONTEXT (cut first).
-/// A missing corpus or empty entry list omits the witness section; a missing
-/// store or empty entry list omits the memory section.
-pub fn buildSystemPromptFull(
-    allocator: std.mem.Allocator,
-    project_context: ?[]const u8,
-    witness_corpus_dir: ?[]const u8,
-    project_root: ?[]const u8,
 ) ![]u8 {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
     const w = buf.writer();
 
     try w.writeAll(prologue);
-    try w.writeAll(skill.skill_md);
+    try writePolicyIdentity(w);
+    try writeCatalogIndex(w);
 
-    try writeSection(w, "REFERENCE: VIRTUAL MODULES", skill.virtual_modules_md);
-    try writeSection(w, "REFERENCE: TESTING & REPLAY", skill.testing_replay_md);
-    try writeSection(w, "REFERENCE: JSX PATTERNS", skill.jsx_patterns_md);
-
-    try writeBanner(w, "LIVE SNAPSHOT: RULES (ZTS0xx-ZTS3xx)");
-    try writeRuleSnapshot(w);
-
-    try writeBanner(w, "CANONICAL NORMAL FORM (ZTS6xx)");
-    try writeCanonicalNote(w);
-
-    try writeBanner(w, "LIVE SNAPSHOT: FEATURES MATRIX");
-    try json_diagnostics.writeFeaturesText(w);
-
-    try writeBanner(w, "LIVE SNAPSHOT: VIRTUAL MODULES");
-    try json_diagnostics.writeModulesText(w);
-
-    try writeBanner(w, "CANONICAL EXAMPLES");
-    try writeExample(w, "basic handler (examples/handler/handler.ts)", skill.basic_handler);
-    try writeExample(w, "routing with virtual modules (examples/routing/router.ts)", skill.routing_router);
-    try writeExample(w, "cache + service + routing (examples/system/users.ts)", skill.system_users);
-    try writeExample(w, "durable workflow DSL (examples/workflow/dsl-orchestrator.ts)", skill.workflow_dsl_orchestrator);
-
-    try writeBanner(w, "POLICY METADATA");
-    const info = expert_meta.compute();
-    try expert_meta.writeText(w, &info);
-
-    try writeBanner(w, "AVAILABLE SKILLS");
-    try w.writeAll("The user may invoke skills via /skill:<name>. Each skill injects a focused\n");
-    try w.writeAll("prompt that you will receive as a user message. Available skills:\n\n");
-    inline for (skills_catalog.catalog) |s| {
-        try w.print("  /skill:{s}\n    {s}\n\n", .{ s.name, s.description });
+    const protected_len = buf.written().len + epilogue.len;
+    if (protected_len > PROTECTED_CORE_CAP_BYTES) {
+        return error.ProtectedPromptTooLarge;
     }
 
-    try writeBanner(w, "AVAILABLE TEMPLATES");
-    try w.writeAll("The user may invoke templates via /template:<name> [args...]. Templates expand\n");
-    try w.writeAll("positional args ({{1}}, {{2}}, {{args}}) before being sent as your user message.\n\n");
-    inline for (prompts_catalog.catalog) |t| {
-        try w.print("  /template:{s}\n    {s}\n\n", .{ t.name, t.description });
-    }
-
-    // WITNESSED FAILURES is cut second under prompt-cap pressure: it sits
-    // between the snapshots (never cut) and the project context (cut first).
-    // The budget is bounded above by `WITNESS_SECTION_CAP` and bounded
-    // below by leaving enough headroom for the epilogue plus a worst-case
-    // truncation marker. Project context takes whatever remains under the
-    // cap, which is why it is the first to shrink when the witness section
-    // uses its full budget.
-    if (witness_corpus_dir) |dir| {
-        const persona_len_before_witnesses = buf.written().len;
-        const room_after_witnesses_reserve =
-            if (PROMPT_CAP_BYTES > persona_len_before_witnesses + CTX_TRUNCATION_RESERVED)
-                PROMPT_CAP_BYTES - persona_len_before_witnesses - CTX_TRUNCATION_RESERVED
-            else
-                0;
-        const witness_budget = @min(WITNESS_SECTION_CAP, room_after_witnesses_reserve);
-        if (witness_budget > WITNESS_SECTION_OVERHEAD) {
-            const line_budget = witness_budget - WITNESS_SECTION_OVERHEAD;
-            const entries = witness_corpus.selectFewShot(allocator, dir, line_budget) catch try allocator.alloc(witness_corpus.Entry, 0);
-            defer witness_corpus.freeEntries(allocator, entries);
-            if (entries.len > 0) {
-                try writeBanner(w, "WITNESSED FAILURES (load-bearing counterexamples from this handler's corpus)");
-                try w.writeAll("Past falsifying inputs. Use these as patterns to avoid; never reintroduce a\n");
-                try w.writeAll("path that closes here. Call `pi_witnesses` for the full corpus and `summary`\n");
-                try w.writeAll("text behind each entry.\n\n");
-                for (entries) |e| {
-                    const short_len = @min(witness_corpus.FEW_SHOT_KEY_PREFIX_LEN, e.key.len);
-                    const short_key = e.key[0..short_len];
-                    if (e.pinned) {
-                        try w.print("- [{s}] {s} (key={s}, pinned)\n", .{ e.property, e.summary, short_key });
-                    } else {
-                        try w.print("- [{s}] {s} (key={s})\n", .{ e.property, e.summary, short_key });
-                    }
-                }
-            }
-        }
-    }
-
-    // PROJECT MEMORY (cross-session fact store) sits between any WITNESSED
-    // FAILURES section and PROJECT CONTEXT. It is the last of the optional
-    // sections to shrink under prompt-cap pressure, so it computes its
-    // budget against the remaining headroom but caps softly at
-    // `MEMORY_SECTION_SOFT_CAP` to avoid crowding out PROJECT CONTEXT.
-    //
-    // Byte budget formula (in `writeMemorySection`):
-    //   remaining = PROMPT_CAP_BYTES - persona_so_far
-    //                - CTX_TRUNCATION_RESERVED  (epilogue + context marker)
-    //                - MEMORY_SECTION_OVERHEAD  (memory banner)
-    //                - len(project_context or 0) (so CONTEXT keeps room)
-    //   memory_budget = min(remaining, MEMORY_SECTION_SOFT_CAP)
-    if (project_root) |root| {
-        try writeMemorySection(allocator, w, buf.written().len, root, project_context);
-    }
-
-    // Project context is appended after persona+snapshots but before the
-    // epilogue, so the veto reminder still has the last word. The cap guard
-    // truncates *only* this section, never persona content above it.
-    const persona_len_before_ctx = buf.written().len;
     if (project_context) |ctx| {
         if (ctx.len > 0) {
-            try writeBanner(w, "PROJECT CONTEXT (read-only, from AGENTS.md / CLAUDE.md)");
-            const room = if (PROMPT_CAP_BYTES > persona_len_before_ctx)
-                PROMPT_CAP_BYTES - persona_len_before_ctx
-            else
-                0;
-            if (room > CTX_TRUNCATION_RESERVED) {
-                const allowed = room - CTX_TRUNCATION_RESERVED;
-                if (ctx.len <= allowed) {
-                    try w.writeAll(ctx);
-                    if (ctx.len == 0 or ctx[ctx.len - 1] != '\n') try w.writeByte('\n');
-                } else {
-                    try w.writeAll(ctx[0..allowed]);
-                    try w.print(
-                        "\n\n[project-context truncated: {d} of {d} bytes kept to fit {d} KiB prompt cap]\n",
-                        .{ allowed, ctx.len, PROMPT_CAP_BYTES / 1024 },
-                    );
-                }
-            } else {
-                try w.writeAll("[project-context omitted: persona already at prompt cap]\n");
-            }
+            try writeBanner(w, "PROJECT INSTRUCTIONS (complete, from AGENTS.md / CLAUDE.md)");
+            try w.writeAll(ctx);
+            if (ctx[ctx.len - 1] != '\n') try w.writeByte('\n');
         }
     }
 
     try w.writeAll(epilogue);
-
+    if (buf.written().len > PROMPT_CAP_BYTES) {
+        return error.ProjectInstructionsTooLarge;
+    }
     return try buf.toOwnedSlice();
 }
 
-fn writeSection(writer: anytype, title: []const u8, body: []const u8) !void {
-    try writeBanner(writer, title);
-    try writer.writeAll(body);
+fn writePolicyIdentity(writer: anytype) !void {
+    try writeBanner(writer, "POLICY IDENTITY");
+    const info = expert_meta.compute();
+    try expert_meta.writeText(writer, &info);
 }
 
-/// Render the PROJECT MEMORY section (or skip it cleanly when the store
-/// is empty or the budget is exhausted). The selector is reused as-is
-/// from `memory_store`, so changes to the per-entry rendering shape stay
-/// in one place.
-fn writeMemorySection(
-    allocator: std.mem.Allocator,
-    writer: anytype,
-    persona_len_so_far: usize,
-    project_root: []const u8,
-    project_context: ?[]const u8,
-) !void {
-    const entries = memory_store.loadAll(allocator, project_root) catch return;
-    defer memory_store.freeEntries(allocator, entries);
-    if (entries.len == 0) return;
-
-    const ctx_len = if (project_context) |ctx| ctx.len else 0;
-    const fixed_reserve = CTX_TRUNCATION_RESERVED + MEMORY_SECTION_OVERHEAD;
-    const need_under = fixed_reserve + ctx_len;
-    if (persona_len_so_far + need_under >= PROMPT_CAP_BYTES) return;
-    const remaining = PROMPT_CAP_BYTES - persona_len_so_far - need_under;
-    const budget = @min(remaining, MEMORY_SECTION_SOFT_CAP);
-    if (budget == 0) return;
-
-    const selection = memory_store.selectForPersona(allocator, entries, budget) catch return;
-    defer allocator.free(selection);
-    if (selection.len == 0) return;
-
-    try writeBanner(writer, "PROJECT MEMORY (read-only, from .zttp/memory.jsonl)");
-    try writer.writeAll("Cross-session facts the agent has recorded for this project. Pinned\n");
-    try writer.writeAll("facts come first; unpinned facts are listed most-recent first. Use\n");
-    try writer.writeAll("pi_recall_facts to read the full corpus; pi_remember_fact to append.\n\n");
-    for (selection) |e| {
-        try writer.writeAll("  ");
-        if (e.pinned) try writer.writeAll("[pin] ");
-        try writer.writeAll(e.fact);
-        try writer.writeByte('\n');
+fn writeCatalogIndex(writer: anytype) !void {
+    try writeBanner(writer, "INVOCABLE SKILLS AND TEMPLATES");
+    try writer.writeAll("Skills inject focused instructions only when invoked:\n  ");
+    inline for (skills_catalog.catalog, 0..) |skill, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.print("/skill:{s}", .{skill.name});
     }
+    try writer.writeAll("\nTemplates expand into the user message only when invoked:\n  ");
+    inline for (prompts_catalog.catalog, 0..) |template, i| {
+        if (i > 0) try writer.writeAll(", ");
+        try writer.print("/template:{s}", .{template.name});
+    }
+    try writer.writeByte('\n');
 }
 
 fn writeBanner(writer: anytype, title: []const u8) !void {
-    try writer.writeAll("\n\n============================================================\n");
+    try writer.writeAll("\n============================================================\n");
     try writer.writeAll(title);
     try writer.writeAll("\n============================================================\n\n");
 }
 
-fn writeExample(writer: anytype, title: []const u8, body: []const u8) !void {
-    try writer.writeAll("--- ");
-    try writer.writeAll(title);
-    try writer.writeAll(" ---\n");
-    try writer.writeAll(body);
-    if (body.len == 0 or body[body.len - 1] != '\n') try writer.writeAll("\n");
-    try writer.writeAll("\n");
-}
-
-fn writeRuleSnapshot(writer: anytype) !void {
-    for (policy_catalog.rules()) |*rule| {
-        try writer.print("{s} {s} ({s})\n", .{ rule.code, rule.name, rule.category.label() });
-        try writer.print("  {s}\n", .{rule.description});
-        if (rule.example) |ex| {
-            try writer.print("  example: {s}\n", .{ex});
-        }
-        try writer.print("  {s}\n\n", .{rule.help});
-    }
-}
-
-/// The ZTS6xx rules above already list each canonical-form violation and its
-/// fix. This note frames them as one principle and points at the normalize
-/// tool, so the agent writes canonical form directly instead of discovering it
-/// one veto rejection at a time.
-fn writeCanonicalNote(writer: anytype) !void {
-    try writer.writeAll(
-        \\zts has a single Canonical Normal Form. The ZTS6xx rules above are not
-        \\style preferences - they are hard `check` errors, so the compiler veto
-        \\rejects any edit that introduces a non-canonical construct. Write
-        \\canonical form directly:
-        \\  - if/else or a `match` expression instead of a `?:` ternary
-        \\  - `x = x + 1` instead of `x += 1`
-        \\  - a named `function` helper instead of a reused arrow
-        \\  - `const` instead of a `let` that never reassigns
-        \\  - explicit fields instead of default parameters or deep destructuring
-        \\
-        \\When unsure, call `zts_expert_normalize` on your draft file: it returns
-        \\the unique canonical source, an `is_canonical` flag, and the rewrite
-        \\trace. Apply that source instead of guessing, so the veto never bounces
-        \\your edit on a canonical-form violation.
-        \\
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 const testing = std.testing;
 
-test "buildSystemPrompt returns an owned non-empty slice" {
+test "stable core retains identity veto approval and first-draft rules" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
-    try testing.expect(prompt.len > 1024);
-}
 
-test "persona contains the prologue identity statement" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "native zts coding agent") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "compiler veto") != null);
-}
-
-test "persona teaches asking one clarifying question on material ambiguity" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "materially ambiguous") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "clarifying question") != null);
-}
-
-test "persona embeds the four skill and reference documents" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "REFERENCE: VIRTUAL MODULES") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "REFERENCE: TESTING & REPLAY") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "REFERENCE: JSX PATTERNS") != null);
-    // Proof the SKILL.md content ran through @embedFile and reached here -
-    // check for both the opening banner and a mid-file needle that we know
-    // lives inside the skill markdown.
-    try testing.expect(std.mem.indexOf(u8, prompt, "\nSKILL\n") != null);
-}
-
-test "persona contains live rule-registry entries" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT: RULES") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS001") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS303") != null);
-}
-
-test "persona teaches the canonical normal form and the normalize tool" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL NORMAL FORM (ZTS6xx)") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Canonical Normal Form") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_normalize") != null);
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
-}
-
-test "persona contains the features matrix section" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT: FEATURES MATRIX") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Allowed:") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Blocked:") != null);
-}
-
-test "persona routes draft property validation through the veto proof_card" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "returns on-disk proof.properties") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Use the proof_card returned by") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "after to confirm the property was") == null);
-}
-
-test "persona contains virtual module specifiers from the live catalog" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT: VIRTUAL MODULES") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zttp:env") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zttp:crypto") != null);
-}
-
-test "persona pins compiler and policy versions via expert_meta.writeText" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "POLICY METADATA") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "0.18.0") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "2026.04.2") != null);
-}
-
-test "persona closes with the veto reminder" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "END OF PERSONA") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "mechanical") != null);
-    try testing.expectEqual(@as(u8, '\n'), prompt[prompt.len - 1]);
-}
-
-test "persona fits under the 128 KiB size ceiling" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(prompt.len <= 128 * 1024);
-}
-
-test "persona includes canonical profile guidance" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "One-Way ZigTS") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "default strict profile") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS608") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Effects<...>") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Proof<...>") != null);
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
-}
-
-test "persona embeds the four canonical example handlers" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL EXAMPLES") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "examples/handler/handler.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "examples/routing/router.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "examples/system/users.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "examples/workflow/dsl-orchestrator.ts") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "workflow.call:greet") != null);
-    // Prove the file contents flowed through @embedFile, not just the labels.
-    // Every canonical handler must contain `function handler` at minimum.
-    const handler_needle = "function handler";
-    var count: usize = 0;
-    var search_from: usize = 0;
-    while (std.mem.indexOfPos(u8, prompt, search_from, handler_needle)) |pos| {
-        count += 1;
-        search_from = pos + handler_needle.len;
+    const required = [_][]const u8{
+        "native zts coding agent",
+        "Inspect before editing",
+        "compiler veto",
+        "active approval policy",
+        "apply_edit must be the only tool call",
+        "Never claim a proposal was applied",
+        "First-draft strict-mode hazards",
+        "Never use as or <T> casts",
+        "Spec<...>",
+        "POLICY IDENTITY",
+    };
+    for (required) |needle| {
+        try testing.expect(std.mem.indexOf(u8, prompt, needle) != null);
     }
-    try testing.expect(count >= 4);
+    try testing.expect(prompt.len <= PROTECTED_CORE_CAP_BYTES);
 }
 
-test "persona teaches workflow authoring guardrails" {
+test "stable core routes removed reference material through read-only tools" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Workflow authoring playbook") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "workflow.call") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS509") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Idempotency-Key") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "proofTrace.durable_workflow_*") != null);
-}
 
-test "persona includes tool dispatch guidance" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Tool dispatch") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pre-existing violation") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "training data lags") != null);
-}
-
-test "persona lists explicit contract and system proof tools" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_prove_patch") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_system_proof") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Contract-pair compatibility proof") != null);
-}
-
-test "persona teaches complete-file route authoring" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Call `zts_expert_modules` to get current module facts") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "When the user asks to add a handler route, read the target file") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_apply_feature_plan") == null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Submit exactly one `apply_edit` call") != null);
-    // Binds the pre-apply dry-run before the compiler veto applies an edit.
-    try testing.expect(std.mem.indexOf(u8, prompt, "Dry-run the draft with `zts_expert_edit_simulate`") != null);
-    // Route-specific: the day-one spec set for every route conversion.
-    try testing.expect(std.mem.indexOf(u8, prompt, "declare the\nauthor spec set") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Route authoring") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "verified_patch") != null);
-}
-
-test "persona routes spec questions through pi_specs_status" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_specs_status") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_goal_candidate") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Spec-driven repair") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS500") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS501") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "ZTS502") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Spec<\"idempotent\">") != null);
-}
-
-test "persona explains host workflow notes" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "Host workflow notes") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "[expert workflow]") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "routing help from the host") != null);
-}
-
-test "persona does not include project context markers" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "PROJECT CONTEXT") == null);
-}
-
-test "persona appends project context when supplied" {
-    const ctx = "## /tmp/AGENTS.md\n\nproject rule sentinel\n";
-    const prompt = try buildSystemPromptWithContext(testing.allocator, ctx);
-    defer testing.allocator.free(prompt);
-
-    const banner_pos = std.mem.indexOf(u8, prompt, "PROJECT CONTEXT") orelse return error.TestExpected;
-    const rule_pos = std.mem.indexOf(u8, prompt, "project rule sentinel") orelse return error.TestExpected;
-    const epilogue_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse return error.TestExpected;
-
-    // Project context lives between the banner and the epilogue, never above
-    // the persona prologue.
-    try testing.expect(banner_pos < rule_pos);
-    try testing.expect(rule_pos < epilogue_pos);
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
-}
-
-test "persona truncates project context to fit the 128 KiB cap" {
-    // Build an intentionally oversized project-context string. The persona
-    // prologue + rule snapshot already consume most of the 128 KiB budget;
-    // anything we append here must be clipped.
-    const pad_len: usize = 256 * 1024;
-    const big = try testing.allocator.alloc(u8, pad_len);
-    defer testing.allocator.free(big);
-    @memset(big, 'A');
-
-    const prompt = try buildSystemPromptWithContext(testing.allocator, big);
-    defer testing.allocator.free(prompt);
-
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
-    try testing.expect(std.mem.indexOf(u8, prompt, "project-context truncated") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "END OF PERSONA") != null);
-}
-
-test "empty project context is ignored" {
-    const prompt_with = try buildSystemPromptWithContext(testing.allocator, "");
-    defer testing.allocator.free(prompt_with);
-    try testing.expect(std.mem.indexOf(u8, prompt_with, "PROJECT CONTEXT") == null);
-}
-
-// ---------------------------------------------------------------------------
-// WITNESSED FAILURES few-shot section
-// ---------------------------------------------------------------------------
-
-const counterexample = zts.counterexample;
-
-fn personaChdirTmp(tmp: *std.testing.TmpDir) ![:0]u8 {
-    const old_cwd = try std.process.currentPathAlloc(testing.io, testing.allocator);
-    errdefer testing.allocator.free(old_cwd);
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const len = try tmp.dir.realPath(testing.io, &buf);
-    try std.Io.Threaded.chdir(buf[0..len]);
-    return old_cwd;
-}
-
-fn seedFixtureWitness(
-    allocator: std.mem.Allocator,
-    dir: []const u8,
-    property: counterexample.PropertyTag,
-    origin_node: u32,
-    sink_node: u32,
-    summary: []const u8,
-    pinned: bool,
-) ![]u8 {
-    var w = try zts.solveCounterexample(allocator, .{
-        .property = property,
-        .origin = .{ .line = 1, .column = 1 },
-        .sink = .{ .line = 2, .column = 1 },
-        .origin_node_id = origin_node,
-        .sink_node_id = sink_node,
-        .summary = summary,
-        .constraints = &.{},
-        .io_calls = &.{},
-    });
-    defer w.deinit(allocator);
-    var r = try witness_corpus.persist(allocator, dir, w);
-    errdefer r.deinit(allocator);
-    if (pinned) try witness_corpus.pin(allocator, dir, r.key, true);
-    const key_dup = try allocator.dupe(u8, r.key);
-    r.deinit(allocator);
-    return key_dup;
-}
-
-test "persona injects WITNESSED FAILURES section with pinned entries first" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try personaChdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try witness_corpus.corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try witness_corpus.ensureCorpusDir(allocator, dir, "h.ts");
-
-    const k1 = try seedFixtureWitness(allocator, dir, .no_secret_leakage, 1, 2, "unpinned-alpha", false);
-    allocator.free(k1);
-    const k2 = try seedFixtureWitness(allocator, dir, .injection_safe, 3, 4, "pinned-beta", true);
-    allocator.free(k2);
-    const k3 = try seedFixtureWitness(allocator, dir, .no_credential_leakage, 5, 6, "unpinned-gamma", false);
-    allocator.free(k3);
-
-    const prompt = try buildSystemPromptWithContextAndCorpus(allocator, null, dir);
-    defer allocator.free(prompt);
-
-    try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pinned-beta") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "unpinned-alpha") != null);
-
-    const pinned_pos = std.mem.indexOf(u8, prompt, "pinned-beta") orelse return error.TestExpected;
-    const unpinned_alpha_pos = std.mem.indexOf(u8, prompt, "unpinned-alpha") orelse return error.TestExpected;
-    const unpinned_gamma_pos = std.mem.indexOf(u8, prompt, "unpinned-gamma") orelse return error.TestExpected;
-    try testing.expect(pinned_pos < unpinned_alpha_pos);
-    try testing.expect(pinned_pos < unpinned_gamma_pos);
-
-    // WITNESSED FAILURES sits before PROJECT CONTEXT (none here) and before END OF PERSONA.
-    const witnesses_pos = std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") orelse return error.TestExpected;
-    const epilogue_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse return error.TestExpected;
-    try testing.expect(witnesses_pos < epilogue_pos);
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
-}
-
-test "persona omits WITNESSED FAILURES section when corpus is empty" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try personaChdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try witness_corpus.corpusDir(allocator, "ghost.ts");
-    defer allocator.free(dir);
-    // Note: deliberately no `ensureCorpusDir` here - the directory is missing.
-
-    const prompt = try buildSystemPromptWithContextAndCorpus(allocator, null, dir);
-    defer allocator.free(prompt);
-
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_describe_rule") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_features") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_modules") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_reference") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_witnesses") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_recall_facts") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL EXAMPLES") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") == null);
-}
-
-test "persona witness section truncates cleanly when the budget overflows" {
-    // Seed enough wide entries that all of them cannot fit; assert the
-    // section is present, contains a strict prefix of the sorted corpus,
-    // and the rendered output ends on a newline (no partial entry line).
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try personaChdirTmp(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    const dir = try witness_corpus.corpusDir(allocator, "h.ts");
-    defer allocator.free(dir);
-    try witness_corpus.ensureCorpusDir(allocator, dir, "h.ts");
-
-    // Wide summaries push each rendered line past ~600 bytes; with the
-    // 8 KiB section cap minus banner overhead, far fewer than 64 fit.
-    const wide_summary = "x" ** 600;
-    var seeded: usize = 0;
-    while (seeded < 64) : (seeded += 1) {
-        var w = try zts.solveCounterexample(allocator, .{
-            .property = .no_secret_leakage,
-            .origin = .{ .line = @intCast(seeded + 1), .column = 1 },
-            .sink = .{ .line = @intCast(seeded + 2), .column = 1 },
-            .origin_node_id = @intCast(seeded * 2 + 1),
-            .sink_node_id = @intCast(seeded * 2 + 2),
-            .summary = wide_summary,
-            .constraints = &.{},
-            .io_calls = &.{},
-        });
-        defer w.deinit(allocator);
-        var r = try witness_corpus.persist(allocator, dir, w);
-        r.deinit(allocator);
-    }
-
-    const prompt = try buildSystemPromptWithContextAndCorpus(allocator, null, dir);
-    defer allocator.free(prompt);
-
-    try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") != null);
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
-
-    // Find the witness section boundaries: from its banner to the next
-    // banner ("============================================================"
-    // line). The section must end on a newline and the last non-empty line
-    // must look like a complete entry ("- [...] ... (key=...)" form).
-    const banner = "WITNESSED FAILURES";
-    const section_start = std.mem.indexOf(u8, prompt, banner) orelse return error.TestExpected;
-    const tail = prompt[section_start..];
-    // Skip past the banner's own ===... bar to find the next section bar.
-    const after_banner_bar = std.mem.indexOf(u8, tail, "\n\n") orelse return error.TestExpected;
-    const search_from = section_start + after_banner_bar + 2;
-    const next_bar = std.mem.indexOf(u8, prompt[search_from..], "\n========") orelse return error.TestExpected;
-    const section_end = search_from + next_bar;
-    const section = prompt[section_start..section_end];
-
-    try testing.expect(std.mem.endsWith(u8, section, "\n"));
-
-    // Last non-empty line must be a complete bullet entry. Walk back over
-    // trailing newlines, then back to the previous newline.
-    var end = section.len;
-    while (end > 0 and section[end - 1] == '\n') end -= 1;
-    var line_start = end;
-    while (line_start > 0 and section[line_start - 1] != '\n') line_start -= 1;
-    const last_line = section[line_start..end];
-    try testing.expect(std.mem.startsWith(u8, last_line, "- ["));
-    try testing.expect(std.mem.indexOf(u8, last_line, "(key=") != null);
-    try testing.expect(std.mem.endsWith(u8, last_line, ")"));
-}
-
-// ---------------------------------------------------------------------------
-// PROJECT MEMORY section
-// ---------------------------------------------------------------------------
-
-test "PROJECT MEMORY section appears when the store has entries" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const len = try tmp.dir.realPath(testing.io, &buf);
-    const root = buf[0..len];
-
-    try memory_store.append(allocator, root, .{
-        .id = "mem-1",
-        .fact = "always use Result<T> for fallible helpers",
-        .source = "manual_entry",
-        .timestamp_unix_ms = 1,
-        .pinned = true,
-    });
-    try memory_store.append(allocator, root, .{
-        .id = "mem-2",
-        .fact = "session id generator lives in session/session_id.zig",
-        .source = "tool",
-        .timestamp_unix_ms = 2,
-        .pinned = false,
-    });
-
-    const prompt = try buildSystemPromptWithContextAndMemory(allocator, null, root);
-    defer allocator.free(prompt);
-
-    const banner = std.mem.indexOf(u8, prompt, "PROJECT MEMORY") orelse return error.TestExpected;
-    const pinned_marker = std.mem.indexOf(u8, prompt, "[pin] always use Result<T>") orelse
-        return error.TestExpected;
-    const unpinned = std.mem.indexOf(u8, prompt, "session id generator lives") orelse
-        return error.TestExpected;
-    const epilogue_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse return error.TestExpected;
-
-    try testing.expect(banner < pinned_marker);
-    try testing.expect(pinned_marker < unpinned);
-    try testing.expect(unpinned < epilogue_pos);
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
-}
-
-test "PROJECT MEMORY section is omitted when the store is missing" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const len = try tmp.dir.realPath(testing.io, &buf);
-    const root = buf[0..len];
-
-    const prompt = try buildSystemPromptWithContextAndMemory(allocator, null, root);
-    defer allocator.free(prompt);
     try testing.expect(std.mem.indexOf(u8, prompt, "PROJECT MEMORY") == null);
 }
 
-test "PROJECT MEMORY sits before PROJECT CONTEXT in the prompt" {
-    const allocator = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const len = try tmp.dir.realPath(testing.io, &buf);
-    const root = buf[0..len];
+test "policy identity stays in the stable core" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    try testing.expect(std.mem.indexOf(u8, prompt, "0.18.0") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "2026.04.2") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "hash:") != null);
+}
 
-    try memory_store.append(allocator, root, .{
-        .id = "m",
-        .fact = "memory ordering sentinel",
-        .source = "manual_entry",
-        .timestamp_unix_ms = 1,
-        .pinned = true,
-    });
+test "skill and template names remain discoverable without embedded bodies" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+    inline for (skills_catalog.catalog) |skill| {
+        try testing.expect(std.mem.indexOf(u8, prompt, skill.name) != null);
+        try testing.expect(std.mem.indexOf(u8, prompt, skill.body) == null);
+    }
+    inline for (prompts_catalog.catalog) |template| {
+        try testing.expect(std.mem.indexOf(u8, prompt, template.name) != null);
+        try testing.expect(std.mem.indexOf(u8, prompt, template.body) == null);
+    }
+}
 
-    const ctx = "## CLAUDE.md\n\nproject context sentinel\n";
-    const prompt = try buildSystemPromptWithContextAndMemory(allocator, ctx, root);
-    defer allocator.free(prompt);
+test "project instructions are complete and preserve nested order" {
+    const context =
+        "## /repo/AGENTS.md\n\nroot instruction sentinel\n\n" ++
+        "## /repo/nested/AGENTS.md\n\nnested instruction sentinel\n";
+    const prompt = try buildSystemPromptWithContext(testing.allocator, context);
+    defer testing.allocator.free(prompt);
 
-    const mem_pos = std.mem.indexOf(u8, prompt, "PROJECT MEMORY") orelse return error.TestExpected;
-    const ctx_pos = std.mem.indexOf(u8, prompt, "PROJECT CONTEXT") orelse return error.TestExpected;
-    try testing.expect(mem_pos < ctx_pos);
-    try testing.expect(prompt.len <= PROMPT_CAP_BYTES);
+    try testing.expect(std.mem.indexOf(u8, prompt, context) != null);
+    const root_pos = std.mem.indexOf(u8, prompt, "root instruction sentinel") orelse
+        return error.TestExpected;
+    const nested_pos = std.mem.indexOf(u8, prompt, "nested instruction sentinel") orelse
+        return error.TestExpected;
+    const end_pos = std.mem.indexOf(u8, prompt, "END OF PERSONA") orelse
+        return error.TestExpected;
+    try testing.expect(root_pos < nested_pos);
+    try testing.expect(nested_pos < end_pos);
+}
+
+test "oversized project instructions fail instead of truncating" {
+    const oversized = try testing.allocator.alloc(u8, PROMPT_CAP_BYTES);
+    defer testing.allocator.free(oversized);
+    @memset(oversized, 'A');
+
+    try testing.expectError(
+        error.ProjectInstructionsTooLarge,
+        buildSystemPromptWithContext(testing.allocator, oversized),
+    );
+}
+
+test "identical prompt builds have stable bytes" {
+    const context = "## /repo/AGENTS.md\n\nstable instruction\n";
+    const first = try buildSystemPromptWithContext(testing.allocator, context);
+    defer testing.allocator.free(first);
+    const second = try buildSystemPromptWithContext(testing.allocator, context);
+    defer testing.allocator.free(second);
+    try testing.expectEqualStrings(first, second);
 }
