@@ -35,6 +35,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "witnesses",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\List the on-disk witness corpus for a handler: every persisted
     \\counterexample input that some property at some site is known to

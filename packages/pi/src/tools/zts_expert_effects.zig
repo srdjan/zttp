@@ -16,6 +16,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "effect rows",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\Report the inferred effect row for every named function in a source
     \\file. Each row records the union of capabilities required by direct

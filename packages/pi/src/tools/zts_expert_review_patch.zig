@@ -1,6 +1,6 @@
 //! Edit-simulate with an optional `diff_only` filter matching the CLI's
 //! `zts review-patch --diff-only` semantics. `ToolResult.ok` is true iff no
-//! *new* violations were introduced — the same veto signal as
+//! *new* violations were introduced, the same veto signal as
 //! `zts_expert_edit_simulate`, regardless of the filter.
 //!
 //! Wire format for args[0]: {"file", "content", "before"?, "diff_only"?}.
@@ -16,6 +16,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "review patch",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description = "Simulate an edit with optional diff_only filter; report new vs preexisting violations.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"before\":{\"type\":\"string\"},\"diff_only\":{\"type\":\"boolean\"}},\"required\":[\"file\",\"content\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

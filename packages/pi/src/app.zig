@@ -720,6 +720,26 @@ test "buildRegistry omits the direct feature-plan writer from model tools" {
     }
 }
 
+test "every model tool declares an explicit context policy with all policy classes represented" {
+    var reg = try buildRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+
+    var exact: usize = 0;
+    var replayable: usize = 0;
+    var digest: usize = 0;
+    for (reg.list()) |registered| {
+        if (!registered.allowedOn(.model)) continue;
+        switch (registered.context_policy) {
+            .exact => exact += 1,
+            .replayable_preview => replayable += 1,
+            .structured_digest => digest += 1,
+        }
+    }
+    try testing.expect(exact > 0);
+    try testing.expect(replayable > 0);
+    try testing.expect(digest > 0);
+}
+
 fn expectOkContains(outcome: *repl.DispatchOutcome, allocator: std.mem.Allocator, needle: []const u8) !void {
     switch (outcome.*) {
         .result => |*r| {

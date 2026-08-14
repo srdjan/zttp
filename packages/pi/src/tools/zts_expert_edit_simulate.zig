@@ -16,6 +16,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "simulate edit",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description = "Run full analysis on proposed file content and report new vs. preexisting violations.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"},\"before\":{\"type\":\"string\"}},\"required\":[\"file\",\"content\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

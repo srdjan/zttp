@@ -34,6 +34,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "recall-facts",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\Read back the persisted project memory corpus from
     \\.zttp/memory.jsonl. Pinned facts come first (chronological), then

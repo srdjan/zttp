@@ -9,6 +9,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "system proof",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description = "Run cross-handler system linking proof and surface proof_level plus cross-boundary safety properties.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"system\":{\"type\":\"string\"},\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}}}}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

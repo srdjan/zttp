@@ -13,6 +13,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "describe rule",
     .effect = .analyze,
+    .context_policy = .exact,
     .description = "Describe a rule by name or code, or list all rules when called with no args.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"rule\":{\"type\":\"string\",\"description\":\"Optional rule code or name.\"}},\"required\":[]}",
     .decode_json = decodeJson,
@@ -110,7 +111,7 @@ test "lookup by code surfaces repair_intent when present" {
 
 test "lookup by code omits repair_intent when unset" {
     // Some diagnostics deliberately have no canonical repair primitive
-    // (e.g. ZTS600 implicit_unknown — needs a type annotation that can
+    // (e.g. ZTS600 implicit_unknown needs a type annotation that can
     // take several shapes). The field is omitted, not emitted as null.
     var result = try execute(testing.allocator, &.{"ZTS600"});
     defer result.deinit(testing.allocator);

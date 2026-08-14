@@ -36,6 +36,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "goal-check",
     .effect = .persist_agent_state,
+    .context_policy = .exact,
     .description =
     \\Check a handler against one or more property goals and return
     \\executable counterexample witnesses for the goals that are violated.

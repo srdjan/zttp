@@ -20,6 +20,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "narrow",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\Report per-path label flow for a handler. Each diagnostic carries the
     \\path constraints (request method comparisons, stub truthiness checks,

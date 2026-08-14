@@ -5,13 +5,15 @@ const common = @import("common.zig");
 const json_writer = @import("../providers/json_writer.zig");
 
 const name = "workspace_search_text";
+const max_search_matches: usize = 10_000;
 
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "search text",
     .effect = .execute_process,
-    .description = "Search the workspace for a text substring and return path/line matches.",
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"},\"path\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[\"query\"]}",
+    .context_policy = .replayable_preview,
+    .description = "Search a bounded page of path/line matches. Continue with next_offset until it is null; read the cited line for complete text.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"maxLength\":512},\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50}},\"required\":[\"query\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,
     .execute = execute,
 };
@@ -24,6 +26,7 @@ const ParsedArgs = struct {
     query: []const u8,
     path: []const u8,
     limit: usize,
+    offset: usize,
     owned_query: ?[]u8 = null,
     owned_path: ?[]u8 = null,
 
@@ -52,6 +55,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
         const obj = parsed.value.object;
         const query_val = obj.get("query") orelse return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": missing query\n") };
         if (query_val != .string) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": query must be a string\n") };
+        if (query_val.string.len > 512) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": query must be at most 512 bytes\n") };
 
         var path_str: ?[]const u8 = null;
         if (obj.get("path")) |value| {
@@ -60,8 +64,13 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
         }
         var limit: usize = 50;
         if (obj.get("limit")) |value| {
-            if (value != .integer or value.integer <= 0) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": limit must be a positive integer\n") };
+            if (value != .integer or value.integer <= 0 or value.integer > 50) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": limit must be between 1 and 50\n") };
             limit = @intCast(value.integer);
+        }
+        var offset: usize = 0;
+        if (obj.get("offset")) |value| {
+            if (value != .integer or value.integer < 0) return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": offset must be a non-negative integer\n") };
+            offset = @intCast(value.integer);
         }
 
         // Everything validated: dupe the strings out of the parse tree before it
@@ -74,6 +83,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
             .query = owned_query,
             .path = owned_path orelse ".",
             .limit = limit,
+            .offset = offset,
             .owned_query = owned_query,
             .owned_path = owned_path,
         } };
@@ -82,6 +92,7 @@ fn parseArgs(allocator: std.mem.Allocator, args: []const []const u8) !ParseResul
             .query = args[0],
             .path = if (args.len > 1) args[1] else ".",
             .limit = 50,
+            .offset = 0,
         } };
     } else {
         return .{ .err = try registry_mod.ToolResult.err(allocator, name ++ ": missing query\n") };
@@ -101,6 +112,7 @@ fn execute(
     const query = parsed_args.query;
     const path = parsed_args.path;
     const limit = parsed_args.limit;
+    const offset = parsed_args.offset;
 
     const root = try common.workspaceRoot(allocator);
     defer allocator.free(root);
@@ -116,12 +128,50 @@ fn execute(
     // a zero-dependency in-process substring search over the same files, with
     // the same noise-directory exclusions.
     var output = searchWithRipgrep(allocator, root, relative, query) catch |err| switch (err) {
-        error.FileNotFound, error.AccessDenied => try searchInProcess(allocator, root, absolute, query, limit),
+        error.FileNotFound, error.AccessDenied => try searchInProcess(
+            allocator,
+            root,
+            absolute,
+            query,
+            max_search_matches + 1,
+        ),
         else => return err,
     };
     defer output.deinit(allocator);
 
     const semantic_ok = output.ok;
+    return renderSearchOutput(allocator, query, offset, limit, semantic_ok, &output);
+}
+
+fn renderSearchOutput(
+    allocator: std.mem.Allocator,
+    query: []const u8,
+    offset: usize,
+    limit: usize,
+    semantic_ok: bool,
+    output: *const SearchOutput,
+) !registry_mod.ToolResult {
+    if (!output.complete) {
+        return registry_mod.ToolResult.errFmt(
+            allocator,
+            name ++ ": search exceeds the {d}-match inventory limit; narrow the query or path\n",
+            .{max_search_matches},
+        );
+    }
+    var records = std.ArrayList([]const u8).empty;
+    defer records.deinit(allocator);
+    var raw_lines = std.mem.splitScalar(u8, output.stdout, '\n');
+    while (raw_lines.next()) |line| {
+        if (line.len > 0) try records.append(allocator, line);
+    }
+    std.mem.sort([]const u8, records.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+    if (offset > records.items.len) {
+        return registry_mod.ToolResult.err(allocator, name ++ ": offset exceeds the current match inventory\n");
+    }
 
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
@@ -131,39 +181,71 @@ fn execute(
     try w.writeAll(if (semantic_ok) "true" else "false");
     try w.writeAll(",\"query\":");
     try json_writer.writeString(w, query);
+    try w.writeAll(",\"offset\":");
+    try w.print("{d}", .{offset});
     try w.writeAll(",\"matches\":[");
 
-    var count: usize = 0;
-    var truncated = false;
-    var lines = std.mem.splitScalar(u8, output.stdout, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        if (count >= limit) {
-            truncated = true;
+    var seen: usize = 0;
+    var returned: usize = 0;
+    var has_more = false;
+    for (records.items) |line| {
+        if (seen < offset) {
+            seen += 1;
+            continue;
+        }
+        if (returned >= limit) {
+            has_more = true;
             break;
         }
         var parts = std.mem.splitScalar(u8, line, ':');
         const file = parts.next() orelse continue;
         const line_str = parts.next() orelse continue;
-        const text = parts.rest();
-        if (count > 0) try w.writeByte(',');
+        const match_text = parts.rest();
+        const preview_end = common.utf8PrefixEnd(match_text, @min(match_text.len, 512));
+        const before = text_buf.written().len;
+        if (returned > 0) try w.writeByte(',');
         try w.writeAll("{\"path\":");
         try json_writer.writeString(w, file);
         try w.writeAll(",\"line\":");
         try w.print("{d}", .{std.fmt.parseInt(usize, line_str, 10) catch 0});
         try w.writeAll(",\"text\":");
-        try json_writer.writeString(w, text);
+        try json_writer.writeString(w, match_text[0..preview_end]);
+        try w.writeAll(",\"text_complete\":");
+        try w.writeAll(if (preview_end == match_text.len) "true" else "false");
+        try w.writeAll(",\"text_omitted_bytes\":");
+        try w.print("{d}", .{match_text.len - preview_end});
         try w.writeByte('}');
-        count += 1;
+        if (text_buf.written().len + 768 > common.max_projected_tool_result_bytes) {
+            text_buf.shrinkRetainingCapacity(before);
+            has_more = true;
+            break;
+        }
+        returned += 1;
+        seen += 1;
     }
+    if (returned == 0 and has_more) return error.ToolContextEntryTooLarge;
 
-    try w.writeAll("],\"truncated\":");
-    try w.writeAll(if (truncated) "true" else "false");
+    try w.writeAll("],\"returned\":");
+    try w.print("{d}", .{returned});
+    try w.writeAll(",\"truncated\":");
+    try w.writeAll(if (has_more) "true" else "false");
+    try w.writeAll(",\"next_offset\":");
+    if (has_more) {
+        try w.print("{d}", .{offset + returned});
+    } else {
+        try w.writeAll("null");
+    }
     try w.writeAll(",\"stderr\":");
-    try json_writer.writeString(w, output.stderr);
+    const stderr_end = common.utf8PrefixEnd(output.stderr, @min(output.stderr.len, 256));
+    try json_writer.writeString(w, output.stderr[0..stderr_end]);
+    try w.writeAll(",\"stderr_omitted_bytes\":");
+    try w.print("{d}", .{output.stderr.len - stderr_end});
     try w.writeAll("}\n");
 
-    return .{ .ok = semantic_ok, .llm_text = try text_buf.toOwnedSlice() };
+    const llm_text = try text_buf.toOwnedSlice();
+    errdefer allocator.free(llm_text);
+    if (llm_text.len > common.max_projected_tool_result_bytes) return error.ToolContextProjectionTooLarge;
+    return .{ .ok = semantic_ok, .llm_text = llm_text };
 }
 
 /// Match lines in `rg -n --no-heading` format (`path:line:text`). Both the
@@ -173,6 +255,7 @@ const SearchOutput = struct {
     stdout: []u8,
     stderr: []u8,
     ok: bool,
+    complete: bool = true,
 
     fn deinit(self: *SearchOutput, allocator: std.mem.Allocator) void {
         allocator.free(self.stdout);
@@ -264,6 +347,7 @@ fn searchInProcess(
         .stdout = try out.toOwnedSlice(allocator),
         .stderr = try allocator.dupe(u8, ""),
         .ok = true,
+        .complete = count < limit,
     };
 }
 
@@ -313,6 +397,7 @@ fn grepFile(
     const contents = zts.file_io.readFile(allocator, file_abs, 16 * 1024 * 1024) catch return;
     defer allocator.free(contents);
     if (std.mem.indexOfScalar(u8, contents, 0) != null) return; // skip binary files
+    if (!std.unicode.utf8ValidateSlice(contents)) return;
 
     const rel = common.relativeToRoot(root, file_abs);
     var line_no: usize = 0;
@@ -358,6 +443,30 @@ test "workspace_search_text: malformed JSON returns structured error" {
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "invalid JSON input") != null);
+}
+
+test "workspace_search_text: paged previews retain exact match locators" {
+    const stdout =
+        "src/a.ts:2:first match\n" ++
+        "src/b.ts:7:second match\n" ++
+        "src/c.ts:9:third match\n";
+    const output: SearchOutput = .{
+        .stdout = @constCast(stdout),
+        .stderr = @constCast(""),
+        .ok = true,
+    };
+    var result = try renderSearchOutput(testing.allocator, "match", 1, 1, true, &output);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.llm_text.len <= common.max_projected_tool_result_bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    try testing.expectEqual(@as(i64, 2), obj.get("next_offset").?.integer);
+    const matches = obj.get("matches").?.array.items;
+    try testing.expectEqual(@as(usize, 1), matches.len);
+    try testing.expectEqualStrings("src/b.ts", matches[0].object.get("path").?.string);
+    try testing.expectEqual(@as(i64, 7), matches[0].object.get("line").?.integer);
+    try testing.expectEqualStrings("second match", matches[0].object.get("text").?.string);
 }
 
 test "workspace_search_text: dash-leading query reaches rg as a pattern, after --" {

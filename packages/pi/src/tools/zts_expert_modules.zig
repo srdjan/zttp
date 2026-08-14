@@ -12,6 +12,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "virtual modules",
     .effect = .analyze,
+    .context_policy = .exact,
     .description = "List built-in zttp:* virtual modules and their exports. Takes no arguments.",
     .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeNoArgs,

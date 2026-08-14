@@ -6,14 +6,13 @@ const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const turn = @import("turn.zig");
 const ui_payload = @import("ui_payload.zig");
 
-/// Return an allocator-owned copy of `body`, capped at `max` bytes. When
-/// truncation happens, the returned slice ends with a note recording how many
-/// bytes were dropped. Callers always own the result, giving persistence
-/// workers a uniform lifetime regardless of input size.
+/// Return an allocator-owned display-only copy of `body`, capped at `max`
+/// bytes. The transcript and persisted provider projection stay untouched;
+/// this exists only to keep live terminal rendering manageable.
 ///
 /// If `max` is smaller than the truncation suffix itself, the function falls
 /// back to a short fixed marker so it never crashes on tiny `max` values.
-pub fn capToolResultBody(
+fn capToolResultBodyForDisplay(
     allocator: std.mem.Allocator,
     body: []const u8,
     max: usize,
@@ -299,7 +298,7 @@ pub fn renderRichEntryToOwnedTty(
     switch (entry.*) {
         .tool_result => |result| {
             if (result.llm_text.len > tty_tool_result_cap) {
-                const capped = try capToolResultBody(allocator, result.llm_text, tty_tool_result_cap);
+                const capped = try capToolResultBodyForDisplay(allocator, result.llm_text, tty_tool_result_cap);
                 defer allocator.free(capped);
                 // Shallow copy with the capped body; the ui_payload is borrowed
                 // (not freed here) and never longer than the cap anyway.
@@ -409,23 +408,23 @@ test "every entry variant renders a stable plain-text label" {
     try testing.expect(std.mem.indexOf(u8, out, "error: ZTS001 unsupported var\n") != null);
 }
 
-test "capToolResultBody returns original body when under the cap" {
-    const out = try capToolResultBody(testing.allocator, "hello", 100);
+test "display cap returns original body when under the cap" {
+    const out = try capToolResultBodyForDisplay(testing.allocator, "hello", 100);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("hello", out);
 }
 
-test "capToolResultBody returns original body when exactly at the cap" {
-    const out = try capToolResultBody(testing.allocator, "hello", 5);
+test "display cap returns original body when exactly at the cap" {
+    const out = try capToolResultBodyForDisplay(testing.allocator, "hello", 5);
     defer testing.allocator.free(out);
     try testing.expectEqualStrings("hello", out);
 }
 
-test "capToolResultBody truncates with a byte-count suffix when over the cap" {
+test "display cap truncates with a byte-count suffix when over the cap" {
     var big: [1000]u8 = undefined;
     @memset(&big, 'a');
 
-    const out = try capToolResultBody(testing.allocator, &big, 100);
+    const out = try capToolResultBodyForDisplay(testing.allocator, &big, 100);
     defer testing.allocator.free(out);
 
     try testing.expect(out.len <= 100);

@@ -123,6 +123,23 @@ pub const ToolEffect = enum {
     }
 };
 
+/// Provider-visible retention contract for one tool result.
+///
+/// This field is mandatory on every `ToolDef`. A new tool must therefore
+/// choose whether its complete output is authoritative, can be retrieved in
+/// bounded pages, or is a bounded digest of a larger process result.
+pub const ContextPolicy = enum {
+    /// Preserve the complete result. Request admission may reject a request
+    /// that cannot carry it, but the result itself is never shortened.
+    exact,
+    /// The tool emits a bounded, valid envelope with completeness metadata and
+    /// a locator that can retrieve the omitted bytes.
+    replayable_preview,
+    /// The tool emits bounded head/tail previews plus total and omitted byte
+    /// counts while the full output remains on the host-facing UI payload.
+    structured_digest,
+};
+
 pub const InvocationSurface = enum {
     /// Human-owned in-process dispatch, including slash commands and the
     /// deterministic autoloop.
@@ -138,6 +155,7 @@ pub const ToolDef = struct {
     label: []const u8,
     description: []const u8,
     effect: ToolEffect,
+    context_policy: ContextPolicy,
     input_schema: []const u8,
     decode_json: DecodeJsonFn,
     execute: ExecuteFn,

@@ -339,22 +339,37 @@ fn appendEditToolResult(
     } });
 }
 
-/// Byte cap on a tool_result body entering the transcript. A single large output
-/// (a full-file read, a long diagnostic blob) otherwise inflates the input token
-/// count of every subsequent roundtrip in the turn. Beyond the cap the body is
-/// truncated with a marker telling the model to re-read a specific range.
-const transcript_tool_result_cap = tools_common.max_hole_tool_result_bytes;
+const ProjectedToolResult = struct {
+    ok: bool,
+    llm_text: []const u8,
+};
 
-/// Cap a tool result body before it enters the transcript. Small results pass
-/// through unchanged (returned as-is, no copy); an oversized one is truncated on
-/// `arena` with an actionable re-read pointer.
-fn capToolResultForTranscript(arena: std.mem.Allocator, body: []const u8) ![]const u8 {
-    if (body.len <= transcript_tool_result_cap) return body;
-    return std.fmt.allocPrint(
-        arena,
-        "{s}\n...[truncated {d} bytes to bound context growth; re-read a specific line range with workspace_read_file if you need the rest]",
-        .{ body[0..transcript_tool_result_cap], body.len - transcript_tool_result_cap },
-    );
+/// Enforce the tool's declared provider-context contract without slicing its
+/// output. Replayable previews and process digests must already be bounded,
+/// valid envelopes when they reach the loop. A buggy tool fails closed with a
+/// small result instead of injecting malformed JSON into later requests.
+fn projectToolResult(
+    arena: std.mem.Allocator,
+    registry: *const registry_mod.Registry,
+    tool_name: []const u8,
+    ok: bool,
+    body: []const u8,
+) !ProjectedToolResult {
+    const tool = registry.findByName(tool_name) orelse return .{ .ok = ok, .llm_text = body };
+    return switch (tool.context_policy) {
+        .exact => .{ .ok = ok, .llm_text = body },
+        .replayable_preview, .structured_digest => if (body.len <= tools_common.max_projected_tool_result_bytes)
+            .{ .ok = ok, .llm_text = body }
+        else
+            .{
+                .ok = false,
+                .llm_text = try std.fmt.allocPrint(
+                    arena,
+                    "{{\"ok\":false,\"error\":\"{s} violated its bounded context policy\",\"result_bytes\":{d},\"maximum_bytes\":{d}}}\n",
+                    .{ tool_name, body.len, tools_common.max_projected_tool_result_bytes },
+                ),
+            },
+    };
 }
 
 /// SQL escalation hint appended to a failed-draft tool_result once the SQL veto
@@ -687,11 +702,18 @@ pub fn runTurnWith(
                 for (calls) |call| {
                     var result = try invokeToolRecovering(ta, registry, call);
                     defer result.deinit(ta);
+                    const projected = try projectToolResult(
+                        ta,
+                        registry,
+                        call.name,
+                        result.ok,
+                        result.llm_text,
+                    );
                     try transcript.append(allocator, .{ .tool_result = .{
                         .tool_use_id = call.id,
                         .tool_name = call.name,
-                        .ok = result.ok,
-                        .llm_text = try capToolResultForTranscript(ta, result.llm_text),
+                        .ok = projected.ok,
+                        .llm_text = projected.llm_text,
                         .ui_payload = result.ui_payload,
                     } });
                 }
@@ -1040,7 +1062,7 @@ fn runPostApplyTool(
     if (registry.findByName(spec.tool_name) == null) return;
 
     // Note: invokeJson errors are propagated up to postApplyCheck which
-    // catches them and returns the report-so-far — preserving the
+    // catches them and returns the report-so-far, preserving the
     // original `catch return report` short-circuit semantics.
     var result = try registry.invokeJson(arena, spec.tool_name, spec.args_json);
     defer result.deinit(arena);
@@ -1059,7 +1081,7 @@ fn runPostApplyTool(
     report.ok = false;
     if (spec.overwrite_summary) {
         // Null the field BEFORE the free, then re-assign. If `dupe` later
-        // OOMs the field is null rather than dangling — otherwise the
+        // OOMs the field is null rather than dangling; otherwise the
         // caller's `runPostApplyTool(...) catch return report` would
         // swallow the error and the outer call site's
         // `defer if (post_apply.summary) |s| allocator.free(s);` would
@@ -1150,7 +1172,7 @@ fn appendVerifiedPatchEntry(
     // candidate's plan ids directly (there is no pi_apply_repair_plan
     // tool_result in the transcript to scan). The model path passes null and we
     // recover the links from the transcript, keying on the model's *proposed*
-    // content (what the candidate tool emitted), not the post-normalize bytes —
+    // content (what the candidate tool emitted), not the post-normalize bytes,
     // a candidate the model echoed verbatim should still link even if normalize
     // then canonicalized it on the way to disk.
     var owned_links: ?RepairLinks = null;
@@ -1167,7 +1189,7 @@ fn appendVerifiedPatchEntry(
     };
 
     // `after` (the equivalence-receipt after-image), the disk write, and the
-    // transcript all attest `applied_content` — the canonicalized bytes.
+    // transcript all attest `applied_content`, the canonicalized bytes.
     const payload: ui_payload_mod.UiPayload = .{ .verified_patch = try proof_enrichment.buildVerifiedPatchPayload(
         allocator,
         .{
@@ -1338,6 +1360,7 @@ const stub_tool: registry_mod.ToolDef = .{
     .name = "stub",
     .label = "stub",
     .effect = .analyze,
+    .context_policy = .exact,
     .description = "Test stub",
     .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
     .decode_json = stubDecodeJson,
@@ -1533,22 +1556,82 @@ test "retry loop is information-complete: failed draft + diagnostic survive a mi
     try testing.expect(client.saw_after_interleave);
 }
 
-test "capToolResultForTranscript truncates an oversized body with a re-read pointer" {
+test "bounded context policy rejects oversized output without slicing it" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const ta = arena.allocator();
 
-    const big = try ta.alloc(u8, transcript_tool_result_cap + 5000);
-    @memset(big, 'a');
-    const capped = try capToolResultForTranscript(ta, big);
-    try testing.expect(capped.len < big.len);
-    try testing.expect(std.mem.indexOf(u8, capped, "truncated") != null);
-    try testing.expect(std.mem.indexOf(u8, capped, "workspace_read_file") != null);
+    const tool: registry_mod.ToolDef = .{
+        .name = "bounded",
+        .label = "bounded",
+        .effect = .analyze,
+        .context_policy = .replayable_preview,
+        .description = "test",
+        .input_schema = "{}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
+        .execute = stubExecute,
+    };
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
 
-    // A small body is returned as-is with no copy.
+    const big = try ta.alloc(u8, tools_common.max_projected_tool_result_bytes + 1);
+    @memset(big, 'a');
+    const rejected = try projectToolResult(ta, &registry, "bounded", true, big);
+    try testing.expect(!rejected.ok);
+    try testing.expect(std.mem.indexOf(u8, rejected.llm_text, "violated") != null);
+    try testing.expect(std.mem.indexOf(u8, rejected.llm_text, "aaaa") == null);
+
     const small = "ok";
-    const passthrough = try capToolResultForTranscript(ta, small);
-    try testing.expectEqual(small.ptr, passthrough.ptr);
+    const passthrough = try projectToolResult(ta, &registry, "bounded", true, small);
+    try testing.expect(passthrough.ok);
+    try testing.expectEqual(small.ptr, passthrough.llm_text.ptr);
+
+    const boundary = try ta.alloc(u8, tools_common.max_projected_tool_result_bytes);
+    @memset(boundary, 'b');
+    const accepted = try projectToolResult(ta, &registry, "bounded", true, boundary);
+    try testing.expect(accepted.ok);
+    try testing.expectEqual(boundary.ptr, accepted.llm_text.ptr);
+
+    var exact_tool = tool;
+    exact_tool.name = "exact";
+    exact_tool.context_policy = .exact;
+    try registry.register(testing.allocator, exact_tool);
+    const historical_boundary = try ta.alloc(u8, tools_common.max_hole_tool_result_bytes + 1);
+    @memset(historical_boundary, 'c');
+    const preserved = try projectToolResult(ta, &registry, "exact", true, historical_boundary);
+    try testing.expect(preserved.ok);
+    try testing.expectEqual(historical_boundary.len, preserved.llm_text.len);
+    try testing.expectEqual(historical_boundary.ptr, preserved.llm_text.ptr);
+}
+
+test "bounded tool batch growth is explicit and finite" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ta = arena.allocator();
+    const tool: registry_mod.ToolDef = .{
+        .name = "paged",
+        .label = "paged",
+        .effect = .read_workspace,
+        .context_policy = .replayable_preview,
+        .description = "test",
+        .input_schema = "{}",
+        .decode_json = registry_mod.helpers.decodeNoArgs,
+        .execute = stubExecute,
+    };
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+
+    const page = try ta.alloc(u8, tools_common.max_projected_tool_result_bytes);
+    @memset(page, 'p');
+    var total: usize = 0;
+    for (0..4) |_| {
+        const projected = try projectToolResult(ta, &registry, "paged", true, page);
+        try testing.expect(projected.ok);
+        total += projected.llm_text.len;
+    }
+    try testing.expectEqual(tools_common.max_projected_tool_result_bytes * 4, total);
 }
 
 test "text reply path injects workflow note before model text" {

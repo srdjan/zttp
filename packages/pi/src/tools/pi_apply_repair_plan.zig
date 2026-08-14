@@ -18,6 +18,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "apply-repair-plan",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\Dry-run a single pi_repair_plan entry into proposed source and
     \\compiler-verify the candidate. This tool never writes files. v1 only

@@ -7,21 +7,15 @@ pub const ParsedRequest = struct {
     step_index: usize,
     /// The target file's bytes, recovered from a read tool's output.
     ///
-    /// Null means no read has succeeded yet, which is NOT the same as an empty
-    /// file. The loop caps a tool result at 32 KiB, so the output for a large
-    /// file is truncated and no longer parses as JSON, and a failed read
-    /// returns plain text with no `content` field. Both arrive here as null. A
-    /// playbook that authored from "" in those cases would rewrite the file
-    /// from nothing, and the veto would not object because an empty `before`
-    /// makes an empty baseline.
+    /// Null means no complete read has succeeded yet, which is NOT the same as
+    /// an empty file. A paged read is valid JSON but carries `complete:false`;
+    /// a failed read has no content field. Both arrive here as null. A playbook
+    /// that authored from either would rewrite from an incomplete baseline.
     source: ?[]const u8 = null,
     /// Raw `output` string of the LAST function_call_output in the current turn.
     ///
-    /// Null before any tool result. The same recovery caveat as `source`
-    /// applies, and for the same reason: a truncated or failed tool arrives here
-    /// as text that does not parse, and a playbook that authored from it would
-    /// be writing from nothing. Read it through a real JSON parse and refuse on
-    /// anything unexpected.
+    /// Null before any tool result. Read it through a real JSON parse and refuse
+    /// incomplete source whenever authoring depends on it.
     last_output: ?[]const u8 = null,
     /// Function-call outputs in this turn carrying the loop's veto rejection
     /// preamble. Separates "past the apply step because the edit landed" from
@@ -157,6 +151,9 @@ fn readSource(arena: std.mem.Allocator, output: []const u8) !?[]const u8 {
         else => return null,
     };
     if (value != .object) return null;
+    const complete = value.object.get("complete") orelse return null;
+    const offset = value.object.get("offset") orelse return null;
+    if (complete != .bool or !complete.bool or offset != .integer or offset.integer != 0) return null;
     const content = value.object.get("content") orelse return null;
     if (content != .string) return null;
     return content.string;
@@ -173,7 +170,7 @@ test "stand-in request parsing recovers the ask, source, and stateless step inde
         \\  {"role":"user","content":[{"type":"input_text","text":"Add a GET /health route to handler.ts"}]},
         \\  {"role":"user","content":[{"type":"input_text","text":"[expert workflow] kind=route_add"}]},
         \\  {"type":"function_call","call_id":"call-0","name":"workspace_read_file","arguments":"{\"path\":\"handler.ts\"}"},
-        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":true,\"offset\":0,\"content\":\"function handler() {}\"}"},
         \\  {"type":"function_call_output","call_id":"call-1","output":"[]"}
         \\]}
     ;
@@ -193,7 +190,7 @@ test "stand-in request parsing scopes the turn to the latest ask" {
     const body =
         \\{"model":"standin","input":[
         \\  {"role":"user","content":[{"type":"input_text","text":"Add a GET /health route to handler.ts"}]},
-        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":true,\"offset\":0,\"content\":\"function handler() {}\"}"},
         \\  {"type":"function_call_output","call_id":"call-1","output":"[]"},
         \\  {"type":"function_call_output","call_id":"call-2","output":"{\"ok\":true}"},
         \\  {"role":"user","content":[{"type":"input_text","text":"Explain what this handler does"}]},
@@ -207,17 +204,16 @@ test "stand-in request parsing scopes the turn to the latest ask" {
     try testing.expect(parsed.source == null);
 }
 
-test "stand-in request parsing reports an unrecoverable read as null, not empty" {
+test "stand-in request parsing reports an incomplete read as null, not empty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    // What a >32 KiB file looks like after the loop truncates the tool result:
-    // no longer valid JSON, so no content can be recovered. Authoring from ""
-    // here would overwrite the user's file with a stub.
+    // A bounded page remains valid JSON but is not a complete authoring
+    // baseline. Authoring from it would overwrite the omitted suffix.
     const body =
         \\{"model":"standin","input":[
         \\  {"role":"user","content":[{"type":"input_text","text":"Add a GET /health route to handler.ts"}]},
-        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function han ...[truncated 40000 bytes]"}
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":false,\"offset\":0,\"next_offset\":12,\"content\":\"function han\"}"}
         \\]}
     ;
 
@@ -238,7 +234,7 @@ test "stand-in request parsing keeps the turn through a veto rejection and its r
         \\{"model":"standin","input":[
         \\  {"role":"user","content":[{"type":"input_text","text":"Fix the ZTS300 compiler error in handler.ts"}]},
         \\  {"role":"user","content":[{"type":"input_text","text":"[expert workflow] kind=violation_fix"}]},
-        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":true,\"offset\":0,\"content\":\"function handler() {}\"}"},
         \\  {"type":"function_call_output","call_id":"call-1","output":"The compiler rejected this edit. Fix every flagged violation below:\n\nZTS300"},
         \\  {"role":"user","content":[{"type":"input_text","text":"Your previous edit failed compiler verification (attempt 1/5). Emit a new, complete edit."}]}
         \\]}
@@ -258,7 +254,7 @@ test "stand-in request parsing keeps the turn through a compiler-authored repair
     const body =
         \\{"model":"standin","input":[
         \\  {"role":"user","content":[{"type":"input_text","text":"Fix the ZTS604 compiler error in handler.ts"}]},
-        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":true,\"offset\":0,\"content\":\"function handler() {}\"}"},
         \\  {"role":"user","content":[{"type":"input_text","text":"Compiler-authored repair for your last edit. Apply these changes verbatim."}]}
         \\]}
     ;
@@ -279,7 +275,7 @@ test "stand-in request parsing recovers the last tool output verbatim" {
     const body =
         \\{"model":"standin","input":[
         \\  {"role":"user","content":[{"type":"input_text","text":"Fill the remaining hole in handler.ts"}]},
-        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"content\":\"function handler() {}\"}"},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":true,\"offset\":0,\"content\":\"function handler() {}\"}"},
         \\  {"type":"function_call_output","call_id":"call-1","output":"{\"ok\":true,\"proposed_content\":\"return Response.json({});\"}"}
         \\]}
     ;

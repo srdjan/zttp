@@ -12,6 +12,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "verify handler(s)",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description = "Run full analysis on one or more handler files and emit the v1 envelope.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"},\"description\":\"One or more handler paths.\"}},\"required\":[\"paths\"]}",
     .decode_json = decodeJson,

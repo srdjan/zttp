@@ -4,13 +4,15 @@ const common = @import("common.zig");
 const json_writer = @import("../providers/json_writer.zig");
 
 const name = "workspace_list_files";
+const max_inventory_files: usize = 100_000;
 
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "list files",
     .effect = .read_workspace,
-    .description = "List workspace files relative to the repo root.",
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"limit\":{\"type\":\"integer\",\"minimum\":1}},\"required\":[]}",
+    .context_policy = .replayable_preview,
+    .description = "List a bounded page of workspace files. Continue with next_offset until it is null.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,
     .execute = execute,
 };
@@ -21,6 +23,7 @@ fn execute(
 ) anyerror!registry_mod.ToolResult {
     var path: []const u8 = ".";
     var limit: usize = 200;
+    var offset: usize = 0;
     // A JSON-derived path must outlive `parsed.deinit()` (it is used below for
     // resolveInsideWorkspace); the raw `args` slices are caller-owned and outlive
     // this call, so only the parsed value is duped.
@@ -40,8 +43,12 @@ fn execute(
             path = owned_path.?;
         }
         if (obj.get("limit")) |value| {
-            if (value != .integer or value.integer <= 0) return registry_mod.ToolResult.err(allocator, name ++ ": limit must be a positive integer\n");
+            if (value != .integer or value.integer <= 0 or value.integer > 200) return registry_mod.ToolResult.err(allocator, name ++ ": limit must be between 1 and 200\n");
             limit = @intCast(value.integer);
+        }
+        if (obj.get("offset")) |value| {
+            if (value != .integer or value.integer < 0) return registry_mod.ToolResult.err(allocator, name ++ ": offset must be a non-negative integer\n");
+            offset = @intCast(value.integer);
         }
     } else if (args.len > 0) {
         path = args[0];
@@ -71,10 +78,17 @@ fn execute(
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
-    collectFiles(allocator, io_backend.io(), root, absolute, limit, &files, &truncated, true) catch |err| {
+    collectFiles(allocator, io_backend.io(), root, absolute, max_inventory_files, &files, &truncated, true) catch |err| {
         ok = false;
         err_name = @errorName(err);
     };
+    if (truncated) {
+        return registry_mod.ToolResult.errFmt(
+            allocator,
+            name ++ ": directory exceeds the {d}-file inventory limit; retry with a narrower path\n",
+            .{max_inventory_files},
+        );
+    }
 
     // Deterministic ordering: a filesystem walk visits entries in OS-dependent
     // order, so sort before emitting.
@@ -84,25 +98,65 @@ fn execute(
         }
     }.lessThan);
 
+    return renderPage(allocator, ok, relative, err_name, files.items, offset, limit);
+}
+
+fn renderPage(
+    allocator: std.mem.Allocator,
+    ok: bool,
+    path: []const u8,
+    err_name: []const u8,
+    files: []const []const u8,
+    offset: usize,
+    limit: usize,
+) !registry_mod.ToolResult {
+    if (offset > files.len) {
+        return registry_mod.ToolResult.err(allocator, name ++ ": offset exceeds the current file inventory\n");
+    }
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
     const w = text_buf.writer();
     try w.writeAll("{\"ok\":");
     try w.writeAll(if (ok) "true" else "false");
     try w.writeAll(",\"path\":");
-    try json_writer.writeString(w, relative);
-    try w.writeAll(",\"truncated\":");
-    try w.writeAll(if (truncated) "true" else "false");
+    try json_writer.writeString(w, path);
+    try w.writeAll(",\"offset\":");
+    try w.print("{d}", .{offset});
     try w.writeAll(",\"files\":[");
-    for (files.items, 0..) |file, i| {
-        if (i > 0) try w.writeByte(',');
+    var returned: usize = 0;
+    const start = @min(offset, files.len);
+    for (files[start..], 0..) |file, i| {
+        if (i >= limit) break;
+        const before = text_buf.written().len;
+        if (returned > 0) try w.writeByte(',');
         try json_writer.writeString(w, file);
+        if (text_buf.written().len + 512 > common.max_projected_tool_result_bytes) {
+            text_buf.shrinkRetainingCapacity(before);
+            break;
+        }
+        returned += 1;
     }
-    try w.writeAll("],\"stderr\":");
+    const next_index = start + returned;
+    const has_more = next_index < files.len;
+    if (returned == 0 and start < files.len) return error.ToolContextEntryTooLarge;
+    try w.writeAll("],\"returned\":");
+    try w.print("{d}", .{returned});
+    try w.writeAll(",\"truncated\":");
+    try w.writeAll(if (has_more) "true" else "false");
+    try w.writeAll(",\"next_offset\":");
+    if (has_more) {
+        try w.print("{d}", .{next_index});
+    } else {
+        try w.writeAll("null");
+    }
+    try w.writeAll(",\"stderr\":");
     try json_writer.writeString(w, err_name);
     try w.writeAll("}\n");
 
-    return .{ .ok = ok, .llm_text = try text_buf.toOwnedSlice() };
+    const llm_text = try text_buf.toOwnedSlice();
+    errdefer allocator.free(llm_text);
+    if (llm_text.len > common.max_projected_tool_result_bytes) return error.ToolContextProjectionTooLarge;
+    return .{ .ok = ok, .llm_text = llm_text };
 }
 
 /// `.zttp` is agent-owned state, not workspace source. `pi_repair_plan`
@@ -186,7 +240,7 @@ test "workspace_list_files: limit must be a positive integer" {
     var result = try execute(testing.allocator, &.{"{\"limit\":0}"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "limit must be a positive integer") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "limit must be between") != null);
 }
 
 test "workspace_list_files: ../ escape is rejected by resolveInsideWorkspace" {
@@ -279,4 +333,30 @@ test "collectFiles: honors the limit and marks truncated" {
 
     try testing.expectEqual(@as(usize, 2), files.items.len);
     try testing.expect(truncated);
+}
+
+test "workspace_list_files: pages reconstruct a deterministic inventory" {
+    const files = [_][]const u8{ "a.ts", "b.ts", "c.ts", "d.ts", "e.ts" };
+    var rebuilt = std.ArrayList([]const u8).empty;
+    defer {
+        for (rebuilt.items) |file| testing.allocator.free(file);
+        rebuilt.deinit(testing.allocator);
+    }
+    var offset: usize = 0;
+    while (offset < files.len) {
+        var result = try renderPage(testing.allocator, true, ".", "", &files, offset, 2);
+        defer result.deinit(testing.allocator);
+        try testing.expect(result.llm_text.len <= common.max_projected_tool_result_bytes);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
+        defer parsed.deinit();
+        const obj = parsed.value.object;
+        for (obj.get("files").?.array.items) |item| {
+            try rebuilt.append(testing.allocator, try testing.allocator.dupe(u8, item.string));
+        }
+        const next = obj.get("next_offset").?;
+        if (next == .null) break;
+        offset = @intCast(next.integer);
+    }
+    try testing.expectEqual(files.len, rebuilt.items.len);
+    for (files, rebuilt.items) |expected, actual| try testing.expectEqualStrings(expected, actual);
 }

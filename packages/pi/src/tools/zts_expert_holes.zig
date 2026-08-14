@@ -25,6 +25,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "holes",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\List every `hole()` in a handler with the frame around it: the
     \\enclosing function, the line and column, the type the expression

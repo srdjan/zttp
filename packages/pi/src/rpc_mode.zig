@@ -791,6 +791,7 @@ fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
         .label = "test writer",
         .description = "Must never be exposed or invoked over RPC.",
         .effect = .write_workspace,
+        .context_policy = .exact,
         .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
         .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = struct {
@@ -807,6 +808,7 @@ fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
         .label = "test process runner",
         .description = "Must never be exposed or invoked over RPC.",
         .effect = .execute_process,
+        .context_policy = .structured_digest,
         .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
         .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = struct {

@@ -5,6 +5,15 @@ const json_writer = @import("../providers/json_writer.zig");
 
 pub const default_output_limit: usize = 256 * 1024;
 
+/// Maximum provider-visible bytes for a replayable preview or structured
+/// digest. Exact proof-bearing results deliberately do not use this cap.
+pub const max_projected_tool_result_bytes: usize = 8 * 1024;
+
+/// Bytes retained from each side of stdout and stderr in a process digest.
+/// JSON escaping can expand every byte to six bytes, so this keeps the complete
+/// envelope below `max_projected_tool_result_bytes` even for control bytes.
+const process_preview_side_bytes: usize = 512;
+
 /// Largest result body the expert loop can retain in the next model turn.
 /// Keep hole-tool output below this cap so a published frame always leads to a
 /// fill result whose complete proposed content reaches the model.
@@ -274,13 +283,16 @@ pub fn commandOutcomeToToolResult(
         try w.writeAll("null");
     }
     try w.writeAll(",\"stdout\":");
-    try json_writer.writeString(w, outcome.stdout);
+    try writeOutputDigest(w, outcome.stdout);
     try w.writeAll(",\"stderr\":");
-    try json_writer.writeString(w, outcome.stderr);
+    try writeOutputDigest(w, outcome.stderr);
     try w.writeAll("}\n");
 
     const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
+    if (llm_text.len > max_projected_tool_result_bytes) {
+        return error.ToolContextProjectionTooLarge;
+    }
 
     const command = try std.mem.join(allocator, " ", argv);
     errdefer allocator.free(command);
@@ -298,6 +310,90 @@ pub fn commandOutcomeToToolResult(
     };
 }
 
+fn writeOutputDigest(writer: anytype, bytes: []const u8) !void {
+    const is_utf8 = std.unicode.utf8ValidateSlice(bytes);
+    const head_end = if (is_utf8)
+        utf8PrefixEnd(bytes, @min(bytes.len, process_preview_side_bytes))
+    else
+        @min(bytes.len, process_preview_side_bytes);
+    const remaining = bytes[head_end..];
+    const tail_budget = @min(remaining.len, process_preview_side_bytes);
+    const tail_start = (if (is_utf8)
+        utf8SuffixStart(remaining, remaining.len - tail_budget)
+    else
+        remaining.len - tail_budget) + head_end;
+    const omitted = tail_start - head_end;
+
+    try writer.writeAll("{\"complete\":");
+    try writer.writeAll(if (omitted == 0) "true" else "false");
+    try writer.writeAll(",\"encoding\":\"");
+    try writer.writeAll(if (is_utf8) "utf8" else "base64");
+    try writer.writeByte('"');
+    try writer.writeAll(",\"total_bytes\":");
+    try writer.print("{d}", .{bytes.len});
+    try writer.writeAll(",\"omitted_bytes\":");
+    try writer.print("{d}", .{omitted});
+    try writer.writeAll(",\"head\":");
+    try writePreviewString(writer, bytes[0..head_end], is_utf8);
+    try writer.writeAll(",\"tail\":");
+    try writePreviewString(writer, bytes[tail_start..], is_utf8);
+    try writer.writeByte('}');
+}
+
+fn writePreviewString(writer: anytype, bytes: []const u8, is_utf8: bool) !void {
+    if (is_utf8) return json_writer.writeString(writer, bytes);
+    var encoded_buf: [std.base64.standard.Encoder.calcSize(process_preview_side_bytes)]u8 = undefined;
+    const encoded = std.base64.standard.Encoder.encode(&encoded_buf, bytes);
+    try json_writer.writeString(writer, encoded);
+}
+
+/// Return a prefix boundary that never splits a valid UTF-8 codepoint. Invalid
+/// bytes are treated as one-byte units so arbitrary process output remains
+/// deterministic and loss accounting stays exact.
+pub fn utf8PrefixEnd(bytes: []const u8, maximum: usize) usize {
+    var end = @min(bytes.len, maximum);
+    while (end > 0 and end < bytes.len and (bytes[end] & 0xc0) == 0x80) : (end -= 1) {}
+    return end;
+}
+
+/// Return a suffix boundary that never starts inside a valid UTF-8 codepoint.
+pub fn utf8SuffixStart(bytes: []const u8, minimum: usize) usize {
+    var start = @min(bytes.len, minimum);
+    while (start < bytes.len and (bytes[start] & 0xc0) == 0x80) : (start += 1) {}
+    return start;
+}
+
+pub const TextPage = struct {
+    offset: usize,
+    end: usize,
+    total_bytes: usize,
+    content: []const u8,
+
+    pub fn complete(self: TextPage) bool {
+        return self.offset == 0 and self.end == self.total_bytes;
+    }
+
+    pub fn nextOffset(self: TextPage) ?usize {
+        return if (self.end < self.total_bytes) self.end else null;
+    }
+};
+
+/// Select one exact, valid UTF-8 page. Callers own the surrounding envelope;
+/// this helper centralizes cursor validation and codepoint-safe boundaries.
+pub fn textPage(bytes: []const u8, offset: usize, maximum: usize) !TextPage {
+    if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8Text;
+    if (offset > bytes.len or (offset < bytes.len and (bytes[offset] & 0xc0) == 0x80)) {
+        return error.InvalidTextOffset;
+    }
+    const end = offset + utf8PrefixEnd(bytes[offset..], @min(maximum, bytes.len - offset));
+    return .{
+        .offset = offset,
+        .end = end,
+        .total_bytes = bytes.len,
+        .content = bytes[offset..end],
+    };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -309,6 +405,61 @@ test "hole publisher source cap leaves a fillable proposed-content boundary" {
     try testing.expect(holeReplacementFitsOutput(max_hole_handler_source_bytes, min_hole_expression_bytes));
     try testing.expect(!holeReplacementFitsOutput(max_hole_handler_source_bytes, min_hole_expression_bytes + 1));
     try testing.expect(!holeReplacementFitsOutput(max_hole_serialized_content_bytes, 0));
+}
+
+test "process result uses a bounded UTF-8-safe digest and preserves full UI output" {
+    var stdout = std.ArrayList(u8).empty;
+    defer stdout.deinit(testing.allocator);
+    for (0..2000) |_| try stdout.appendSlice(testing.allocator, "blåbær");
+
+    const outcome: CommandOutcome = .{
+        .ok = false,
+        .exit_code = 2,
+        .term = "exited",
+        .stdout = stdout.items,
+        .stderr = @constCast("diagnostic"),
+    };
+    const argv = [_][]const u8{ "zig", "build", "test" };
+    var result = try commandOutcomeToToolResult(testing.allocator, &argv, &outcome);
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.llm_text.len <= max_projected_tool_result_bytes);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    const stdout_digest = parsed.value.object.get("stdout").?.object;
+    try testing.expect(!stdout_digest.get("complete").?.bool);
+    try testing.expect(stdout_digest.get("omitted_bytes").?.integer > 0);
+    try testing.expectEqual(@as(i64, @intCast(stdout.items.len)), stdout_digest.get("total_bytes").?.integer);
+
+    switch (result.ui_payload.?) {
+        .command_outcome => |payload| try testing.expectEqualStrings(stdout.items, payload.stdout),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
+test "UTF-8 preview boundaries never split a codepoint" {
+    const source = "abblåbærcd";
+    const prefix_end = utf8PrefixEnd(source, 5);
+    const suffix_start = utf8SuffixStart(source, 5);
+    try testing.expect(std.unicode.utf8ValidateSlice(source[0..prefix_end]));
+    try testing.expect(std.unicode.utf8ValidateSlice(source[suffix_start..]));
+}
+
+test "process digest base64-encodes non-UTF-8 output" {
+    const invalid = [_]u8{ 0xff, 0x00, 0xfe };
+    var out = registry_mod.helpers.TextBuffer.init(testing.allocator);
+    defer out.deinit();
+    try writeOutputDigest(out.writer(), &invalid);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out.written(), .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("base64", parsed.value.object.get("encoding").?.string);
+    try testing.expectEqualStrings("/wD+", parsed.value.object.get("head").?.string);
+}
+
+test "textPage rejects invalid UTF-8 and a mid-codepoint cursor" {
+    const invalid = [_]u8{ 0xff, 0xfe };
+    try testing.expectError(error.InvalidUtf8Text, textPage(&invalid, 0, 1));
+    try testing.expectError(error.InvalidTextOffset, textPage("blåbær", 3, 2));
 }
 
 fn createSymlinkAbsolute(

@@ -45,6 +45,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "fill hole",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\Replace one `hole()` with one expression and report the compiler's
     \\verdict. Takes the `line` and `column` from a `zts_expert_holes` entry

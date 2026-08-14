@@ -10,6 +10,7 @@ const tool_mod = @import("tool.zig");
 pub const ToolDef = tool_mod.ToolDef;
 pub const ToolResult = tool_mod.ToolResult;
 pub const ToolEffect = tool_mod.ToolEffect;
+pub const ContextPolicy = tool_mod.ContextPolicy;
 pub const InvocationSurface = tool_mod.InvocationSurface;
 pub const helpers = tool_mod;
 
@@ -111,6 +112,7 @@ const echo_tool: ToolDef = .{
     .label = "Echo",
     .description = "Concatenate args with spaces",
     .effect = .analyze,
+    .context_policy = .exact,
     .input_schema =
     \\{"type":"object","properties":{"parts":{"type":"array","items":{"type":"string"}}},"required":["parts"]}
     ,
@@ -123,6 +125,7 @@ const writer_tool: ToolDef = .{
     .label = "Writer",
     .description = "Test-only workspace writer",
     .effect = .write_workspace,
+    .context_policy = .exact,
     .input_schema = "{}",
     .decode_json = tool_mod.decodeNoArgs,
     .execute = echoExecute,
@@ -194,4 +197,15 @@ test "unknown tool fails on findByName and invoke" {
     try testing.expect(reg.findByName("nope") == null);
     const err = reg.invoke(testing.allocator, "nope", &.{});
     try testing.expectError(RegistryError.ToolNotFound, err);
+}
+
+test "context policy has no default and must be selected by every tool" {
+    const fields = @typeInfo(ToolDef).@"struct".fields;
+    inline for (fields) |field| {
+        if (comptime std.mem.eql(u8, field.name, "context_policy")) {
+            try testing.expect(field.default_value_ptr == null);
+            return;
+        }
+    }
+    return error.TestExpectedContextPolicyField;
 }

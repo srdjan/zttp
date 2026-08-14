@@ -8,6 +8,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "gen tests",
     .effect = .write_workspace,
+    .context_policy = .exact,
     .description =
     \\Generate a JSONL test suite from the handler's compiler-proven behavioral
     \\paths and write it alongside the handler (e.g. handler.test.jsonl). Each

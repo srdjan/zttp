@@ -5,8 +5,8 @@
 //! `provenSpecs`. The expert uses this tool to surface the current proven
 //! set so a `/ratchet` or `/tighten` prompt can anchor in compiler facts
 //! instead of LLM speculation. Cross-build deltas are derived from the
-//! handler's own `Spec<...>` declarations — there is no baseline file to
-//! pass — so this tool intentionally exposes only the `path` field; the
+//! handler's own `Spec<...>` declarations. There is no baseline file to
+//! pass, so this tool intentionally exposes only the `path` field; the
 //! delta belongs to the corresponding CLI surface (`zttp ratchet check`).
 
 const std = @import("std");
@@ -22,6 +22,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "ratchet",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\Report the property set the compiler currently proves for a handler.
     \\The set comes from contract.json under provenSpecs (also signed inside

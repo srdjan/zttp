@@ -27,6 +27,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "ast-rewrite",
     .effect = .read_workspace,
+    .context_policy = .exact,
     .description =
     \\Dispatch a typed RepairIntent into a verified in-memory canonical
     \\rewrite. Supported canonicalize refactors:
@@ -768,7 +769,7 @@ test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → vet
     defer result.deinit(testing.allocator);
 
     // Step 3: the compiler veto loop on the proposed content reports
-    // zero new diagnostics — the AST primitive cleared the violation.
+    // zero new diagnostics because the AST primitive cleared the violation.
     try testing.expect(result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "function parse(x: number): number { return x; }") != null);
 }

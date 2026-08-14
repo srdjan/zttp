@@ -14,9 +14,8 @@
 //!   - `appendEntry` writes the entry to disk honoring `AppendOptions`:
 //!       * `no_persist_tool_output = true` skips `.tool_result` entries
 //!         entirely. All other variants still persist.
-//!       * `max_body` caps oversized `.tool_result` bodies via
-//!         `transcript.capToolResultBody` before writing. The input entry
-//!         is never mutated.
+//!       * Otherwise tool results are preserved exactly. Provider-context
+//!         bounds belong to each tool's typed projection, not the raw journal.
 //!
 //! This unit does not touch the loop, agent, transcript, or REPL; it is
 //! a building block for later wiring.
@@ -27,7 +26,6 @@ const events = @import("events.zig");
 
 pub const AppendOptions = struct {
     no_persist_tool_output: bool = false,
-    max_body: usize = 256 * 1024,
 };
 
 /// Pure mapping from a transcript variant to the corresponding event
@@ -38,7 +36,7 @@ pub const AppendOptions = struct {
 /// NOTE: `.assistant_tool_use` carries a slice of `OwnedToolCall`. This
 /// helper maps only the first call. For the multi-call case, use
 /// `appendEntry`, which emits exactly one event per `ToolCall` in the
-/// slice — matching the "every tool_use has a matching tool_result"
+/// slice, matching the "every tool_use has a matching tool_result"
 /// invariant.
 fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
     return switch (entry.*) {
@@ -78,9 +76,7 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
 /// per call). All other variants emit exactly one line.
 ///
 /// `.tool_result` is skipped entirely when `opts.no_persist_tool_output`
-/// is true. When present and `body.len > opts.max_body`, the body is
-/// capped via `transcript.capToolResultBody` before writing; the input
-/// entry is never mutated.
+/// is true. Otherwise the provider-visible projection is written exactly.
 pub fn appendEntry(
     allocator: std.mem.Allocator,
     events_path: []const u8,
@@ -90,17 +86,11 @@ pub fn appendEntry(
     switch (entry.*) {
         .tool_result => |tr| {
             if (opts.no_persist_tool_output) return;
-            const over_cap = tr.llm_text.len > opts.max_body;
-            const body = if (over_cap)
-                try transcript.capToolResultBody(allocator, tr.llm_text, opts.max_body)
-            else
-                tr.llm_text;
-            defer if (over_cap) allocator.free(body);
             try events.appendEvent(allocator, events_path, .{ .tool_result = .{
                 .tool_use_id = tr.tool_use_id,
                 .tool_name = tr.tool_name,
                 .ok = tr.ok,
-                .llm_text = body,
+                .llm_text = tr.llm_text,
                 .ui_payload = tr.ui_payload,
             } });
         },
@@ -241,7 +231,7 @@ test "appendEntry on tool_result under cap writes body unchanged" {
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } };
-    try appendEntry(allocator, path, &entry, .{ .max_body = 1024 });
+    try appendEntry(allocator, path, &entry, .{});
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -254,7 +244,7 @@ test "appendEntry on tool_result under cap writes body unchanged" {
     try testing.expectEqual(true, d.get("ok").?.bool);
 }
 
-test "appendEntry on tool_result over cap writes a truncated body with dropped byte count" {
+test "appendEntry preserves a large projected tool result exactly" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -271,7 +261,7 @@ test "appendEntry on tool_result over cap writes a truncated body with dropped b
         .ok = true,
         .llm_text = &big,
     } };
-    try appendEntry(allocator, path, &entry, .{ .max_body = 100 });
+    try appendEntry(allocator, path, &entry, .{});
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -280,16 +270,7 @@ test "appendEntry on tool_result over cap writes a truncated body with dropped b
     defer parsed.deinit();
 
     const body = parsed.value.object.get("d").?.object.get("body").?.string;
-    try testing.expect(body.len <= 100);
-    try testing.expect(std.mem.indexOf(u8, body, "[truncated") != null);
-
-    // Verify the suffix encodes the exact number of dropped bytes.
-    const suffix_prefix = "\n...[truncated ";
-    const idx = std.mem.indexOf(u8, body, suffix_prefix) orelse return error.TestFailed;
-    const digits_start = idx + suffix_prefix.len;
-    const digits_end = std.mem.indexOfScalarPos(u8, body, digits_start, ' ') orelse return error.TestFailed;
-    const dropped = try std.fmt.parseInt(usize, body[digits_start..digits_end], 10);
-    try testing.expectEqual(big.len - idx, dropped);
+    try testing.expectEqualSlices(u8, &big, body);
 
     // Input entry must not have been mutated.
     switch (entry) {

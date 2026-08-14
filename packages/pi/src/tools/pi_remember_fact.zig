@@ -27,6 +27,7 @@ pub const tool: registry_mod.ToolDef = .{
     .name = name,
     .label = "remember-fact",
     .effect = .persist_agent_state,
+    .context_policy = .exact,
     .description =
     \\Persist a project-scoped fact to .zttp/memory.jsonl so it survives
     \\across expert sessions. Use this for load-bearing observations the
