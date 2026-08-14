@@ -93,7 +93,7 @@ step "init test app"
 cat > "$APP_DIR/src/handler.ts" <<'HANDLER'
 import type { Spec } from "zttp:types";
 
-type Guardrails = Spec<
+structural Guardrails = Spec<
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"
