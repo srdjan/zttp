@@ -418,16 +418,25 @@ zttp expert --handler src/handler.ts --goal no_secret_leakage
 
 | Flag | Purpose |
 |---|---|
-| `--resume` | Continue the last session for the current project. |
+| `--resume`, `--continue` | Continue the newest session for the current project. |
+| `--session-id <id>` | Resume or create a session under this id. |
+| `--fork <id>` | Branch a new session from an existing one. |
 | `--yes` | Apply every verified edit without prompting. |
 | `--no-edit` | Let the model read and analyze files but block all writes. |
 | `--provider <name>` | Select `local`, `claude`, `openai`, or `deepseek` for this launch. |
 | `--model <id>` | Start on a model registered for the active provider. |
+| `--tools minimal\|full` | Choose the tool preset. `full` is the default; `minimal` is workspace-read-only. |
+| `--no-session` | Do not persist this run to `~/.zttp/sessions`. |
+| `--no-persist-tool-output` | Persist the session without tool output bodies. |
+| `--no-context-files` | Skip the `AGENTS.md` / `CLAUDE.md` project-context walk. The persona and live snapshots still ship. |
+| `--no-perf-receipt` | Do not sign a `kind=perf` receipt on an applied edit. On by default. |
+| `--no-equivalence-receipt` | Do not sign a `kind=equivalence` receipt on an applied edit. On by default. |
 | `--print <text>` | Non-interactive: send one message, print the response, and exit. |
 | `--mode json` | Emit JSON-encoded turn events to stdout (pairs with `--print`). |
 | `--mode rpc` | Run in RPC mode for editor integrations. |
 | `--handler <file>` | Override the handler file (default: auto-detected from `zttp.json`). |
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
+| `--max-iters <n>` | Autoloop iteration budget for a `--goal` run. Defaults to 8. |
 
 The explicit local provider uses `LiquidAI/LFM2.5-2.6B-MLX-8bit` through
 non-streaming Chat Completions at the loopback-only `ZTTP_MLX_BASE_URL`, which defaults to

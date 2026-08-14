@@ -114,8 +114,10 @@ exposing a binary publicly. Two boundaries are easy to miss:
 - No TLS. The runtime serves plain HTTP and binds `127.0.0.1` by default.
   Terminate TLS at a reverse proxy and set the host explicitly before exposing a
   deployed binary to public traffic.
-- `expert` currently defaults to Claude. Select `--provider local` to use
-  `LiquidAI/LFM2.5-2.6B-MLX-8bit` through a developer-managed loopback MLX-LM
+- `expert` defaults to DeepSeek, so a turn sends handler source to a third
+  party. The destination line under the banner states this before the first
+  turn. Select `--provider local` to keep the source on the machine, through
+  `LiquidAI/LFM2.5-2.6B-MLX-8bit` on a developer-managed loopback MLX-LM
   server. Zttp checks readiness but never manages the process or falls back to
   another provider. Attestation is on by default and publishes a stable
   per-user public-key fingerprint at `/.well-known/zttp-attest`.

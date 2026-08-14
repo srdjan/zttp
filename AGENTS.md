@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `packages/runtime/zruntime_tests.zig` is the end-to-end test root behind `zig build test-zruntime`, not a peer of the unit tests beside the code.
+- `packages/runtime/src/zruntime_tests.zig` is the end-to-end test root behind `zig build test-zruntime`, not a peer of the unit tests beside the code.
 - `zig-out/` and `.zig-cache/` are generated output directories; do not edit or commit them.
 
 ## Documentation

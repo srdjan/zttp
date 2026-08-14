@@ -2,10 +2,10 @@
 
 The coding agent behind the `zttp expert` and `zttp ledger` CLI commands.
 Linked only into the developer `zttp` binary, never into the pi-free `zts`
-analyzer binary or the deployed `zttp-runtime`. Built in Zig against local MLX
-Chat Completions, Anthropic Messages, and OpenAI Responses APIs, driven by a
-pure turn state machine with a compiler-aware tool registry and a mandatory
-compile-check veto on every edit.
+analyzer binary or the deployed `zttp-runtime`. Built in Zig against DeepSeek
+and local MLX Chat Completions, Anthropic Messages, and OpenAI Responses APIs,
+driven by a pure turn state machine with a compiler-aware tool registry and a
+mandatory compile-check veto on every edit.
 
 Companion to Mario Zechner's TypeScript [pi-mono](https://github.com/badlogic/pi-mono).
 Ported to Zig, scoped to this repo's lockdown policy: everything the
@@ -64,10 +64,12 @@ packages/pi/
       reconstructor.zig   # events.jsonl → Transcript
     skills/
       catalog.zig         # @embedFile + comptime parse
-      *.md                # five baked-in skills
+      *.md                # six baked-in skills
     prompts/
-      catalog.zig         # same shape, six templates
+      catalog.zig         # same shape, seven templates
       *.md
+    simulator/            # cassette recorder, replay runner, promotion, corpus testdata
+    standin/              # deterministic stand-in model server for offline loop tests
     test_support/
       tmp.zig             # shared IsolatedTmp for filesystem tests
       env.zig             # EnvOverride for setenv/unsetenv

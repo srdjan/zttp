@@ -527,8 +527,9 @@ ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER=local \
 ```
 
 What remains is a full passing corpus measurement. The structural real-model flow has
-passed, but the measured local corpus currently blocks the default cutover.
-The approved execution path is [Plan 027](plans/2026-08-13-027-local-lfm-default-cutover-plan.md).
+passed, but the measured local corpus is incomplete, so local never became the default.
+[Plan 027](plans/2026-08-13-027-local-lfm-default-cutover-plan.md) was the approved
+execution path for that cutover; the default went to DeepSeek on 2026-08-14 instead.
 
 Status as of 2026-08-14: the local corpus holds 16 of 19 cases and is parked until a
 more capable local model replaces LiquidAI/LFM2.5-2.6B-MLX-8bit. The three missing cases
@@ -542,7 +543,7 @@ ceiling. A raised roundtrip and tool-call budget does not recover them either. R
 `loop.RunOptions` from 18/16 to 44/40 converted none of the five budget-bound cases to
 green and made recording less reliable, because a longer turn is more exposure to an
 empty or truncated response. The five cases that pinned at 18 roundtrips had all also hit
-`max_tool_calls_per_turn = 16`, and `loop.zig:664` lets a turn continue past that budget
+`max_tool_calls_per_turn = 16`, and `loop.zig:665` lets a turn continue past that budget
 with every further tool batch refused, so the roundtrip cap is where those turns stop
 rather than what ends them. Every completed run reports `retries=4` against
 `interactive_max_attempts = 5`, so verification attempts bind once the budgets do not.
@@ -570,10 +571,11 @@ carries `runtime_name` and `runtime_version` where an MLX-LM recording carries
 `mlx_lm_version`. A local manifest that names its stack by neither route is refused.
 
 Nothing blocks while this is parked. The replay falls back to `headline_provider`, which
-is `.anthropic`, so `zig build test`, `zig build test-expert-app`, `scripts/verify.sh`,
-`scripts/update-convergence.sh`, and `scripts/update-coverage.sh` all replay the frozen
-Claude corpus and never read the local one. The local corpus fails only under an explicit
-`ZTTP_CODEGEN_REPLAY_PROVIDER=local`, with `MissingCodegenCassette`.
+derives from `models.default_provider` and is `.deepseek` since 2026-08-14, so
+`zig build test`, `zig build test-expert-app`, `scripts/verify.sh`,
+`scripts/update-convergence.sh`, and `scripts/update-coverage.sh` all replay the 19-case
+DeepSeek corpus and never read the local one. The local corpus fails only under an
+explicit `ZTTP_CODEGEN_REPLAY_PROVIDER=local`, with `MissingCodegenCassette`.
 
 Leave that a hard failure. Do not make the replay skip the missing cases to get it green.
 The three absentees are exactly the cases the model cannot finish, so a rate computed over

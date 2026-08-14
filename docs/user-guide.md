@@ -456,8 +456,8 @@ entries and `zttp proofs gate` for pull-request checks.
 ## Expert Mode
 
 `zttp expert` is the compiler-in-the-loop coding agent. It proposes edits and
-routes every one through the same compiler checks before they land. Claude
-remains the current default. The developer-managed local MLX-LM provider and
+routes every one through the same compiler checks before they land. DeepSeek is
+the current default. The developer-managed local MLX-LM provider, Claude, and
 OpenAI are available through explicit `--provider` selection.
 
 ### What a turn sends

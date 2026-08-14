@@ -131,7 +131,7 @@ handler's budget already bounds it.
 
 The capability vocabulary is the runtime capability set: `env`, `clock`,
 `random`, `crypto`, `stderr`, `runtime_callback`, `sqlite`,
-`filesystem`, `network`, `policy_check`, `websocket`. The check is `inferred ⊆
+`filesystem`, `network`, `policy_check`. The check is `inferred ⊆
 declared`: a function that reaches a capability outside its ceiling
 fails with ZTS503; an unknown capability name fails with ZTS504; a
 declared capability the function never reaches is the warning ZTS505.

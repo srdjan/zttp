@@ -14,3 +14,7 @@ overlapping plans at the same time.
 |---|---|---|---|---|
 | 001 | TigerBeetle-inspired predictable performance | P1 | XL | PROPOSED |
 | 002 | [Complete the local LFM measurement and default cutover](../docs/plans/2026-08-13-027-local-lfm-default-cutover-plan.md) | P1 | L | PROMOTED, BLOCKED (`durable-order` returns `EmptyResponse`) |
+
+Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
+2026-08-14. Its measurement half stands, and the local corpus is still parked at
+16 of 19 cases.

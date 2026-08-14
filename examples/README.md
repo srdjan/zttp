@@ -73,7 +73,8 @@ with an explicit outbound host allow-list.
 - **durable/** - `run`, `step`, `waitSignal` from `zttp:durable`. Replay-safe execution. See [approval.ts](durable/approval.ts) (illustrative; the gated durable coverage lives in `workflow/`, run live by `scripts/test-examples.sh`).
 - **workflow/** - start with [dsl-orchestrator.ts](workflow/dsl-orchestrator.ts) for the embedded workflow DSL path, then use the primitive fixtures for `call`, `fanout`, `follow`, durable workflow queue, signal resume, timeout, and dead-letter replay. See [../docs/durable-workflows.md](../docs/durable-workflows.md).
 - **parallel/** - `parallel` and `race` from `zttp:io` (illustrative; not in the gated example suite).
-- **websocket/** - WebSocket events with `serializeAttachment` and rooms.
+- **hypermedia/** - [order.ts](hypermedia/order.ts) declares one resource with `resource(data, affordances)` and serves HAL-JSON or an HTMX fragment from the same affordance set, chosen by `Accept` and `HX-Request`.
+- **patterns/** - the TypeScript canon mapped onto the zts subset, one file per pattern. These are the targets of the table in [../docs/typescript.md](../docs/typescript.md#typescript-patterns-in-the-zts-subset).
 - **sql/** - the `sql` tagged template from `zttp:sql`.
 - **system/** - the cross-handler linking story (`zts link`).
 - **autoloop/** - the agent autoloop demo (`zttp expert`); the handler deliberately fails a proof so the agent has something to repair (illustrative; not in the gated example suite).

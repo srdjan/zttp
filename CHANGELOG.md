@@ -22,6 +22,32 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   command names; their runtime interfaces and reported identities remain
   historical.
 
+- **WebSocket support removed.** The `zttp:websocket` module, its runtime frame
+  loop, and its contract capability are gone. Handlers that imported it no
+  longer compile. The built-in module surface is 26 specifiers.
+
+### Added
+
+- **DeepSeek provider for `zttp expert`.** `--provider deepseek` and
+  `zttp auth deepseek` reach `deepseek-v4-flash` and `deepseek-v4-pro` over the
+  same non-streaming Chat Completions shape the local provider uses, at
+  `DEEPSEEK_BASE_URL` (default `https://api.deepseek.com`). The endpoint policy
+  admits only an HTTPS root that carries no credential of its own.
+
+### Changed
+
+- **`zttp expert` defaults to DeepSeek.** A bare `zttp expert` now resolves to
+  `deepseek-v4-flash` and needs `DEEPSEEK_API_KEY` or `zttp auth deepseek`.
+  Claude, OpenAI, and the developer-managed local MLX-LM server stay available
+  through explicit `--provider`. A DeepSeek turn sends handler source to a third
+  party; the destination line under the banner states this before the first
+  turn.
+- **The published convergence and coverage numbers describe DeepSeek.** The
+  headline corpus is the 19-case DeepSeek recording, so
+  `scripts/update-convergence.sh` and `scripts/update-coverage.sh` measure the
+  model a user actually gets. The Claude and OpenAI corpora stay measured but
+  are no longer ratcheted.
+
 ## [0.18.0] - 2026-07-16
 
 Security, memory-correctness and expert-agent release. The diagnostic rule

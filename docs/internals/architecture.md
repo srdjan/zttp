@@ -119,8 +119,8 @@ current module list is in [Virtual Modules](../virtual-modules/README.md).
 
 Precompiled handlers can carry a contract and derived policy. At startup and
 per request, the runtime uses that policy to gate native capabilities such as
-env access, cache, SQL, outbound HTTP, filesystem-backed state, WebSocket, and
-runtime callbacks.
+env access, cache, SQL, outbound HTTP, filesystem-backed state, and runtime
+callbacks.
 
 The same contract feeds:
 
