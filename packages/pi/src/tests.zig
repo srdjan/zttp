@@ -40,6 +40,7 @@ comptime {
     _ = @import("turn.zig");
     _ = @import("veto.zig");
     _ = @import("transcript.zig");
+    _ = @import("context_budget_test.zig");
     _ = @import("expert_workflow.zig");
     _ = @import("expert_eval.zig");
     _ = @import("expert_codegen_eval.zig");

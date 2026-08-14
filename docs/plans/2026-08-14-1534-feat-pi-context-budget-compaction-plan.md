@@ -3,6 +3,7 @@ title: "feat: Add bounded Pi context and model-backed compaction"
 type: feat
 date: 2026-08-14
 deepened: 2026-08-14
+refreshed: 2026-08-15
 artifact_contract: ce-unified-plan/v1
 artifact_readiness: implementation-ready
 product_contract_source: ce-plan-bootstrap
@@ -15,7 +16,7 @@ execution: code
 
 - **Objective:** Replace Pi's local transcript flattening with model-backed compaction adapted from upstream Pi, and make every normal provider request pass through a measurable, bounded context projection so the agent no longer sends unnecessarily large messages.
 - **Authority order:** User decisions in this plan, repository safety and proof contracts, current Pi documentation, then implementation convenience.
-- **Execution profile:** Characterization-first. Preserve the dirty live checkout, add request and persistence probes before changing behavior, then land small units in dependency order.
+- **Execution profile:** Characterization-first from clean `main` at `f045706c`. Add request and persistence probes before changing behavior, preserve the newly landed DeepSeek/local provider and simulator work, then land small units in dependency order.
 - **Stop conditions:** Stop before a provider call if mandatory instructions, the current user request, an unresolved tool pair, or active proof input cannot fit safely. Edit baselines, approval state, and proof receipts remain exact in host-owned state and do not need to enter the provider request. Never silently truncate or summarize protected provider inputs.
 - **Tail ownership:** The implementation owns code, schema-version cutover, provider cassettes, full-flow simulator coverage, user documentation, formatting, focused Pi gates, and the full repository verification gate.
 
@@ -31,7 +32,7 @@ Compaction will follow upstream Pi's useful semantics: keep recent work, summari
 
 ### Problem Frame
 
-The current implementation treats transcript bytes divided by four plus a fixed 20,000-token allowance as the whole request estimate. The actual fixed prefix is much larger and variable: `expert_persona.zig` permits a 128 KiB system prompt, the full model tool catalog is sent on every request, project instructions are appended, and every later round trip resends the active transcript. In the checked-in evidence, 195 local requests use 28,463 to 36,393 prompt tokens with a median of 29,590. Anthropic cassette inputs begin near 31,000 cached tokens and reach 49,909; one flow grows by 18,821 tokens inside a single turn.
+The current implementation treats transcript bytes divided by four plus a fixed 20,000-token allowance as the whole request estimate. The actual fixed prefix is much larger and variable: `expert_persona.zig` permits a 128 KiB system prompt, the full model tool catalog is sent on every request, project instructions are appended, and every later round trip resends the active transcript. The current product default and 19-case headline use DeepSeek. Its checked-in empirical corpus contains 83 requests from 28,747 to 51,573 prompt tokens, with a 33,123 median and 42,053 p95. The local corpus remains a calibration fixture with 195 requests from 28,463 to 36,393 and a 29,590 median; Anthropic cache fixtures remain relevant for provider-usage normalization.
 
 The current generic 32 KiB tool-result truncation is not a safe fix. It can cut JSON and UTF-8 mid-value, and this repository has already recorded a file-destroying failure caused by treating a truncated read as an empty edit baseline. The request must become smaller through stable prompt design, typed projection policies, pagination, safe checkpoints, and fail-closed admission.
 
@@ -41,10 +42,10 @@ The current `compact()` is also not durable compaction. It renders the entire tr
 
 - **Adapt upstream Pi semantics to Zttp's proof and persistence boundaries.** (session-settled: user-directed - chosen over exact parity and a minimal local summary because proof state and append-only audit history must remain authoritative.) Governs R5-R14.
 - **Load persistent settings from built-in defaults, then user settings, then project settings.** (session-settled: user-directed - chosen over fixed constants and typed settings without persistence so compaction policy is consistent across launches.) Governs R17.
-- **Cut the JSON-RPC `compact` method directly to a structured result.** (session-settled: user-directed - chosen over preserving the legacy string response or adding a second RPC version because the caller needs typed outcomes and metrics.) Governs R18.
+- **Cut the JSON-RPC `compact` method directly to a structured result.** (session-settled: user-approved - chosen over preserving the legacy string response or adding a second RPC version because the caller needs typed outcomes and metrics.) Governs R18.
 - **Treat oversized normal requests as a first-class product defect.** (session-settled: user-directed - chosen over implementing compaction alone because the current fixed prompt and repeated tool payloads are already large before the context window is near overflow.) Governs R1-R4, R15-R16.
-- **Make edit baselines host-authoritative in this slice.** Keeping model-authored `before` content would both duplicate a full file in later requests and preserve a known false-baseline hazard, so the baseline cutover is a prerequisite safety milestone rather than optional cleanup. Governs R8-R9.
-- **Use a direct v3 persistence cutover.** New compaction identity and checkpoints replace the v2 session format without deterministic ID synthesis or dual writes; old v2 sessions fail with a specific unsupported-version diagnostic. Governs R15-R16.
+- **Make edit baselines host-authoritative in this slice.** (session-settled: user-approved - chosen over retaining model-authored `before` content, which would both duplicate a full file in later requests and preserve a known false-baseline hazard.) The baseline cutover is a prerequisite safety milestone rather than optional cleanup. Governs R8-R9.
+- **Use a direct v3 persistence cutover.** (session-settled: user-approved - chosen over migration, deterministic ID synthesis, or dual writes.) New compaction identity and checkpoints replace the v2 session format; old v2 sessions fail with a specific unsupported-version diagnostic. Governs R15-R16.
 
 ### Requirements
 
@@ -179,8 +180,8 @@ The pure core owns IDs, turn classification, token estimation, cut selection, se
 
 ### Assumptions and Constraints
 
-- The implementation rebases against the live dirty `main` checkout and preserves unrelated provider, simulator, documentation, and local-model work. It must not reset or overwrite overlapping changes.
-- Current provider-neutral `ModelClient`, request snapshots, capture sink, cassettes, and simulator are the integration seam. Provider-specific request builders must not rederive a different transcript.
+- The implementation starts from clean `main` at `f045706c` and preserves the landed DeepSeek, local-provider, simulator, documentation, and corpus work. It must not reset or overwrite later user changes if the checkout becomes dirty during execution.
+- Provider-neutral `ModelClient`, capture sink, cassettes, and simulator remain the integration boundary. `ModelRequestSnapshot` is the target universal request authority, not yet the universal seam: current local and DeepSeek clients rebuild wire bodies from `Transcript`, and simulator capture is conditional. U1 must make snapshot construction unconditional and require provider serializers to consume the admitted snapshot rather than re-read the transcript.
 - v3 is a direct session-format cutover. Old v2 logs remain on disk but resume and fork return `SessionSchemaUnsupported` with the session path and version; no migration, deterministic ID synthesis, or dual-write mode is added.
 - Project instructions are authoritative. If complete applicable instructions plus the protected core cannot fit, initialization or request admission fails with an actionable error rather than silently dropping the tail.
 - `no_persist_tool_output` remains supported by persisting structural redacted tool-result placeholders so resume never creates dangling tool calls.
@@ -204,8 +205,8 @@ The pure core owns IDs, turn classification, token estimation, cut selection, se
 
 - **Goal:** Create one pure request-size authority and pin the current regression baseline before behavior changes.
 - **Requirements:** R1, R2, R4, R20.
-- **Files:** `packages/pi/src/providers/model_request.zig`, new `packages/pi/src/context_budget.zig`, `packages/pi/src/providers/capture_sink.zig`, `packages/pi/src/providers/models.zig`, `packages/pi/src/providers/*/client.zig`, `packages/pi/src/simulator/model_client.zig`, `packages/pi/src/simulator/artifact_contract.zig`, `packages/pi/src/tests.zig`, `packages/pi/src/simulator_tests.zig`.
-- **Approach:** Add component spans and a versioned pure estimator to the provider-neutral snapshot. Normalize logical provider input usage, route local, Anthropic, OpenAI, and DeepSeek through the same preparation path, and pin actual usage against the no-undercount and bounded-overestimate contract. Record provider-neutral request snapshots for the exact fixed-prefix fixture, standardized first request, representative tool-heavy growth, cumulative `estimated_logical_input_v1`, normal call counts, and verified outcomes. Record normalized provider-reported input separately when empirical capture is available. Keep request output byte-identical in this unit.
+- **Files:** `packages/pi/src/providers/model_request.zig`, new `packages/pi/src/context_budget.zig`, `packages/pi/src/providers/capture_sink.zig`, `packages/pi/src/providers/models.zig`, `packages/pi/src/providers/chat_completions.zig`, `packages/pi/src/providers/*/client.zig`, `packages/pi/src/agent.zig`, `packages/pi/src/simulator/model_client.zig`, `packages/pi/src/simulator/artifact_contract.zig`, `packages/pi/src/tests.zig`, `packages/pi/src/simulator_tests.zig`.
+- **Approach:** Add component spans and a versioned pure estimator to the provider-neutral snapshot. Make snapshot construction unconditional for normal requests, route local, Anthropic, OpenAI, and DeepSeek through the same preparation path, and make provider serialization consume the admitted snapshot instead of re-reading `Transcript`. Normalize logical provider input usage and pin actual usage against the no-undercount and bounded-overestimate contract. Use the DeepSeek 19-case product-default corpus as the primary before-state; retain local and Anthropic measurements as estimator-calibration fixtures. Record provider-neutral request snapshots for the exact fixed-prefix fixture, standardized first request, representative tool-heavy growth, cumulative `estimated_logical_input_v1`, normal call counts, and verified outcomes. Record normalized provider-reported input separately when empirical capture is available. Keep request output byte-identical in this unit.
 - **Test scenarios:** Empty transcript; current `AGENTS.md`; minimal and full tool presets; transient retry text; multi-tool entry; model switch invalidates exact usage and revalidates settings; checkpoint invalidates exact usage; Anthropic cached-input normalization; other-provider total-input normalization; actual usage plus trailing estimate; fallback full estimate; soft and hard equality and greater-than; the 40,960-token Qwen model; estimator undercount and overestimate failure.
 - **Verification:** `zig build test-expert-app --summary all`; `zig build test-simulator --summary all`.
 

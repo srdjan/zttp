@@ -18,6 +18,7 @@ const transcript_mod = @import("../transcript.zig");
 const registry_mod = @import("../registry/registry.zig");
 const tool_catalog = @import("tool_catalog.zig");
 const json_writer = @import("json_writer.zig");
+const model_request = @import("model_request.zig");
 
 const writeJsonString = json_writer.writeString;
 
@@ -25,6 +26,7 @@ const writeJsonString = json_writer.writeString;
 /// projects its own Config into this so neither client's Config type has to
 /// be visible here.
 pub const BodyParams = struct {
+    provider: model_request.Provider = .local,
     model: []const u8,
     max_tokens: u32,
     system_prompt: []const u8,
@@ -39,32 +41,67 @@ pub fn buildRequestBody(
     transcript: *const transcript_mod.Transcript,
     extra_user_text: ?[]const u8,
 ) ![]u8 {
+    var snapshot = try model_request.createSnapshot(arena, .{
+        .config = .{
+            .provider = params.provider,
+            .model = params.model,
+            .max_output_tokens = params.max_tokens,
+            .stream = false,
+            .system_prompt = params.system_prompt,
+            .tools_json = params.tools_json,
+        },
+        .transcript = transcript,
+        .extra_user_text = extra_user_text,
+    });
+    defer snapshot.deinit(arena);
+    return buildRequestBodyFromSnapshot(arena, &snapshot);
+}
+
+/// Serialize from the provider-neutral prepared view. Item-group boundaries
+/// retain the exact multi-tool assistant messages emitted by the previous
+/// Transcript-based writer.
+pub fn buildRequestBodyFromSnapshot(
+    arena: std.mem.Allocator,
+    snapshot: *const model_request.ModelRequestSnapshot,
+) ![]u8 {
+    if (snapshot.config.provider != .local and snapshot.config.provider != .deepseek) {
+        return error.InvalidProvider;
+    }
     var buf = TextBuffer.init(arena);
     defer buf.deinit();
     const writer = buf.writer();
 
     try writer.writeAll("{\"model\":");
-    try writeJsonString(writer, params.model);
-    try writer.print(",\"max_tokens\":{d},\"stream\":false,\"messages\":[", .{params.max_tokens});
-    try writeMessage(writer, "system", params.system_prompt);
+    try writeJsonString(writer, snapshot.config.model);
+    try writer.print(",\"max_tokens\":{d},\"stream\":false,\"messages\":[", .{snapshot.config.max_output_tokens});
+    try writeMessage(writer, "system", snapshot.config.system_prompt);
 
-    for (transcript.entries.items) |entry| {
-        switch (entry) {
+    for (snapshot.item_groups) |group| {
+        const group_items = snapshot.items[group.start..][0..group.len];
+        if (group_items.len == 0) return error.InvalidSnapshot;
+        switch (group_items[0]) {
             .user_text => |body| {
+                if (group_items.len != 1) return error.InvalidSnapshot;
                 try writer.writeByte(',');
                 try writeMessage(writer, "user", body);
             },
             .model_text => |body| {
+                if (group_items.len != 1) return error.InvalidSnapshot;
                 try writer.writeByte(',');
                 try writeMessage(writer, "assistant", body);
             },
             .system_note => |body| {
+                if (group_items.len != 1) return error.InvalidSnapshot;
                 try writer.writeByte(',');
                 try writeMessage(writer, "user", body);
             },
-            .assistant_tool_use => |calls| {
+            .tool_use => {
                 try writer.writeAll(",{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[");
-                for (calls, 0..) |call, index| {
+                for (group_items, 0..) |item, index| {
+                    const call = switch (item) {
+                        .tool_use => |value| value,
+                        else => return error.InvalidSnapshot,
+                    };
                     if (index > 0) try writer.writeByte(',');
                     try writer.writeAll("{\"id\":");
                     try writeJsonString(writer, call.id);
@@ -77,6 +114,7 @@ pub fn buildRequestBody(
                 try writer.writeAll("]}");
             },
             .tool_result => |result| {
+                if (group_items.len != 1) return error.InvalidSnapshot;
                 try writer.writeAll(",{\"role\":\"tool\",\"tool_call_id\":");
                 try writeJsonString(writer, result.tool_use_id);
                 try writer.writeAll(",\"name\":");
@@ -85,15 +123,14 @@ pub fn buildRequestBody(
                 try writeJsonString(writer, if (result.llm_text.len == 0) "(no output)" else result.llm_text);
                 try writer.writeByte('}');
             },
-            .proof_card, .diagnostic_box, .verified_patch => {},
         }
     }
-    if (extra_user_text) |body| {
+    if (snapshot.extra_user_text) |body| {
         try writer.writeByte(',');
         try writeMessage(writer, "user", body);
     }
     try writer.writeByte(']');
-    if (params.tools_json) |tools| {
+    if (snapshot.config.tools_json) |tools| {
         try writer.writeAll(",\"tools\":");
         try writer.writeAll(tools);
         try writer.writeAll(",\"tool_choice\":\"auto\"");

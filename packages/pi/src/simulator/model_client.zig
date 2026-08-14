@@ -10,11 +10,15 @@ const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const chat_completions = @import("../providers/chat_completions.zig");
+const anthropic_client = @import("../providers/anthropic/client.zig");
+const openai_client = @import("../providers/openai/client.zig");
 const model_request = @import("../providers/model_request.zig");
+const context_budget = @import("../context_budget.zig");
 
 pub const Script = struct {
     provider: artifact.Provider,
     model: []const u8,
+    evidence_class: artifact.EvidenceClass = .deterministic_harness,
     checkpoints: []const artifact.ModelCheckpoint,
     responses: []const artifact.ResponseFixture,
     fixtures: []const artifact.LoadedFixture,
@@ -23,6 +27,7 @@ pub const Script = struct {
         return .{
             .provider = flow_case.manifest.provider,
             .model = flow_case.manifest.model,
+            .evidence_class = flow_case.manifest.evidence_class,
             .checkpoints = flow_case.trace.model_calls,
             .responses = flow_case.manifest.model_responses,
             .fixtures = flow_case.fixtures,
@@ -35,6 +40,8 @@ pub const Client = struct {
     request_config: model_request.Config,
     cursor: usize = 0,
     last_mismatch: ?artifact.ReplayMismatch = null,
+    exact_input_usage: ?context_budget.ExactInputUsage = null,
+    previous_budget: ?context_budget.RequestBudget = null,
 
     pub fn init(script: Script, request_config: model_request.Config) Client {
         return .{ .script = script, .request_config = request_config };
@@ -84,22 +91,17 @@ pub const Client = struct {
             .extra_user_text = extra_user_text,
         });
         defer snapshot.deinit(arena);
-        // Every Chat Completions provider records the digest of its exact wire
-        // body, so replay has to rebuild that body to compare against it. The
-        // two SSE providers record no wire digest and need no rebuild here.
-        // Gating on the provider list rather than on `.local` alone is what
-        // keeps a newly added Chat Completions provider from failing every
-        // replay with an absent-versus-present digest.
+        // Every replay builds the exact provider body so request accounting is
+        // complete even when historical SSE checkpoints store no wire digest.
+        // Chat Completions providers additionally bind that body by hash.
+        const body = switch (self.script.provider) {
+            .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot),
+            .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, &snapshot),
+            .openai => try openai_client.buildRequestBodyFromSnapshot(arena, &snapshot),
+        };
+        try snapshot.completePreparation(body);
         switch (self.script.provider) {
-            .local, .deepseek => {
-                const body = try chat_completions.buildRequestBody(arena, .{
-                    .system_prompt = self.request_config.system_prompt,
-                    .model = self.request_config.model,
-                    .max_tokens = self.request_config.max_output_tokens,
-                    .tools_json = self.request_config.tools_json,
-                }, transcript, extra_user_text);
-                snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
-            },
+            .local, .deepseek => snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body),
             .anthropic, .openai => {},
         }
 
@@ -128,6 +130,48 @@ pub const Client = struct {
             error.OutOfMemory => return err,
             else => return self.failResponseFixture(.malformed),
         };
+        const logical_input = try context_budget.normalizeLogicalInput(self.script.provider, result.usage);
+        if (self.script.evidence_class == .empirical_model and logical_input > 0) {
+            const budget = snapshot.budget orelse return error.IncompleteRequestPreparation;
+            const epoch: context_budget.UsageEpoch = .{
+                .provider = self.script.provider,
+                .model = self.script.model,
+                .checkpoint_generation = 0,
+            };
+            const trailing = if (self.previous_budget) |previous|
+                context_budget.estimateTrailing(previous, budget)
+            else
+                0;
+            const selected = try context_budget.selectInputEstimate(.{
+                .epoch = epoch,
+                .fallback_estimated_tokens = budget.tokens.total,
+                .trailing_estimated_tokens = trailing orelse 0,
+                .exact_usage = if (trailing != null) self.exact_input_usage else null,
+            });
+            context_budget.validateCalibration(selected.tokens, logical_input) catch |err| {
+                std.debug.print(
+                    "[request-budget] {s} call {d}: estimated={d} ({s}) actual={d}" ++
+                        " bytes(system={d}, tools={d}, history={d}, transient={d}, framing={d}, wire={d}): {s}\n",
+                    .{
+                        self.script.model,
+                        self.cursor,
+                        selected.tokens,
+                        @tagName(selected.source),
+                        logical_input,
+                        budget.bytes.system,
+                        budget.bytes.tools,
+                        budget.bytes.history,
+                        budget.bytes.transient,
+                        budget.bytes.framing,
+                        budget.bytes.wire,
+                        @errorName(err),
+                    },
+                );
+                return err;
+            };
+            self.exact_input_usage = .{ .epoch = epoch, .logical_input_tokens = logical_input };
+            self.previous_budget = budget;
+        }
         self.cursor += 1;
         return result;
     }

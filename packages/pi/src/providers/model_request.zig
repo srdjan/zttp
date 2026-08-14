@@ -5,6 +5,7 @@
 //! validation. Callers normally allocate the slice in their per-request arena.
 
 const std = @import("std");
+const context_budget = @import("../context_budget.zig");
 const transcript_mod = @import("../transcript.zig");
 const models = @import("models.zig");
 
@@ -42,6 +43,14 @@ pub const Item = union(enum) {
 
 pub const ItemTag = std.meta.Tag(Item);
 
+/// One model-visible transcript entry. Multi-tool assistant entries span more
+/// than one flattened item; preserving that boundary lets serializers consume
+/// the snapshot without changing their existing wire grouping.
+pub const ItemGroup = struct {
+    start: usize,
+    len: usize,
+};
+
 pub const Sha256Hex = struct {
     bytes: [64]u8,
 
@@ -70,7 +79,12 @@ pub const Sha256Hex = struct {
 pub const ModelRequestSnapshot = struct {
     config: Config,
     items: []const Item,
+    item_groups: []const ItemGroup,
     extra_user_text: ?[]const u8,
+    component_bytes: context_budget.ComponentBytes,
+    /// Present once the provider serializer has supplied the exact wire body.
+    /// Transport and capture happen only after this preparation step.
+    budget: ?context_budget.RequestBudget = null,
     request_context_sha256: Sha256Hex,
     transcript_sha256: Sha256Hex,
     transient_user_text_sha256: ?Sha256Hex,
@@ -80,7 +94,17 @@ pub const ModelRequestSnapshot = struct {
 
     pub fn deinit(self: *ModelRequestSnapshot, allocator: std.mem.Allocator) void {
         allocator.free(self.items);
+        allocator.free(self.item_groups);
         self.* = undefined;
+    }
+
+    pub fn completePreparation(self: *ModelRequestSnapshot, wire_body: []const u8) !void {
+        const wire_bytes = std.math.cast(u64, wire_body.len) orelse return error.RequestSizeOverflow;
+        self.budget = try context_budget.estimate(
+            self.component_bytes,
+            wire_bytes,
+            context_budget.limitsForModel(self.config.provider, self.config.model),
+        );
     }
 };
 
@@ -93,8 +117,11 @@ pub const Input = struct {
 pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestSnapshot {
     var items: std.ArrayListUnmanaged(Item) = .empty;
     errdefer items.deinit(allocator);
+    var item_groups: std.ArrayListUnmanaged(ItemGroup) = .empty;
+    errdefer item_groups.deinit(allocator);
 
     for (input.transcript.entries.items) |entry| {
+        const start = items.items.len;
         switch (entry) {
             .user_text => |body| try items.append(allocator, .{ .user_text = body }),
             .model_text => |body| try items.append(allocator, .{ .model_text = body }),
@@ -114,9 +141,18 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
             .system_note => |body| try items.append(allocator, .{ .system_note = body }),
             .proof_card, .diagnostic_box, .verified_patch => {},
         }
+        if (items.items.len > start) {
+            try item_groups.append(allocator, .{
+                .start = start,
+                .len = items.items.len - start,
+            });
+        }
     }
 
     const owned_items = try items.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_items);
+    const owned_groups = try item_groups.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_groups);
     const system_prompt_sha256 = Sha256Hex.fromBytes("zttp-model-request-system-v1", input.config.system_prompt);
     const tools_sha256 = if (input.config.tools_json) |tools|
         Sha256Hex.fromBytes("zttp-model-request-tools-v1", tools)
@@ -126,7 +162,14 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
     return .{
         .config = input.config,
         .items = owned_items,
+        .item_groups = owned_groups,
         .extra_user_text = input.extra_user_text,
+        .component_bytes = .{
+            .system = try byteLen(input.config.system_prompt),
+            .tools = if (input.config.tools_json) |tools| try byteLen(tools) else 0,
+            .history = try historyBytes(owned_items),
+            .transient = if (input.extra_user_text) |text| try byteLen(text) else 0,
+        },
         .request_context_sha256 = hashRequestContext(input.config, system_prompt_sha256, tools_sha256),
         .transcript_sha256 = hashTranscript(owned_items),
         .transient_user_text_sha256 = if (input.extra_user_text) |text|
@@ -134,6 +177,35 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
         else
             null,
     };
+}
+
+fn historyBytes(items: []const Item) !u64 {
+    var total: u64 = 0;
+    for (items) |item| switch (item) {
+        .user_text, .model_text, .system_note => |body| try addBytes(&total, body),
+        .tool_use => |call| {
+            try addBytes(&total, call.id);
+            try addBytes(&total, call.name);
+            try addBytes(&total, call.args_json);
+        },
+        .tool_result => |result| {
+            try addBytes(&total, result.tool_use_id);
+            try addBytes(&total, result.tool_name);
+            try addBytes(&total, result.llm_text);
+        },
+    };
+    return total;
+}
+
+fn addBytes(total: *u64, bytes: []const u8) !void {
+    const len = try byteLen(bytes);
+    const sum, const overflow = @addWithOverflow(total.*, len);
+    if (overflow != 0) return error.RequestSizeOverflow;
+    total.* = sum;
+}
+
+fn byteLen(bytes: []const u8) !u64 {
+    return std.math.cast(u64, bytes.len) orelse error.RequestSizeOverflow;
 }
 
 fn hashRequestContext(config: Config, system_digest: Sha256Hex, tools_digest: ?Sha256Hex) Sha256Hex {

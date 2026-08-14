@@ -92,6 +92,7 @@ pub const Client = struct {
         defer snapshot.deinit(arena);
 
         const body = try buildRequestBodyFromSnapshot(arena, &snapshot);
+        try snapshot.completePreparation(body);
         const response_body = try post_fn(arena, self.config, body);
         if (self.capture) |sink| try sink.record(&snapshot, response_body);
 

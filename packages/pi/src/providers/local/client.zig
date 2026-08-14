@@ -105,27 +105,24 @@ pub const Client = struct {
         extra_user_text: ?[]const u8,
         post_fn: anytype,
     ) !loop.ModelCallResult {
-        var snapshot: ?model_request.ModelRequestSnapshot = if (self.capture != null)
-            try model_request.createSnapshot(arena, .{
-                .config = .{
-                    .provider = .local,
-                    .model = self.config.model,
-                    .max_output_tokens = self.config.max_tokens,
-                    .stream = false,
-                    .system_prompt = self.config.system_prompt,
-                    .tools_json = self.config.tools_json,
-                },
-                .transcript = transcript,
-                .extra_user_text = extra_user_text,
-            })
-        else
-            null;
-        defer if (snapshot) |*value| value.deinit(arena);
-        const body = try buildRequestBody(arena, self.config, transcript, extra_user_text);
+        try validateBaseUrl(self.config.base_url);
+        var snapshot = try model_request.createSnapshot(arena, .{
+            .config = .{
+                .provider = .local,
+                .model = self.config.model,
+                .max_output_tokens = self.config.max_tokens,
+                .stream = false,
+                .system_prompt = self.config.system_prompt,
+                .tools_json = self.config.tools_json,
+            },
+            .transcript = transcript,
+            .extra_user_text = extra_user_text,
+        });
+        defer snapshot.deinit(arena);
+        const body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
+        try snapshot.completePreparation(body);
         const request_digest = sha256(body);
-        if (snapshot) |*value| {
-            value.wire_request_sha256 = .{ .bytes = std.fmt.bytesToHex(request_digest, .lower) };
-        }
+        snapshot.wire_request_sha256 = .{ .bytes = std.fmt.bytesToHex(request_digest, .lower) };
         const diagnostics_enabled = if (self.capture) |sink| sink.diagnostics_fn != null else false;
         const started_ns = if (diagnostics_enabled) monotonicNowNs() else null;
         const raw_response = post_fn(arena, self.config, body) catch |err| {
@@ -158,19 +155,17 @@ pub const Client = struct {
             return err;
         };
         if (self.capture) |sink| {
-            if (snapshot) |*value| {
-                sink.record(value, response.bytes) catch |err| {
-                    if (diagnostics_enabled) {
-                        inspection.addWarning(.capture_rejected_response);
-                        self.recordResponseDiagnostics(
-                            &inspection,
-                            latency_ms,
-                            err,
-                        );
-                    }
-                    return err;
-                };
-            } else unreachable;
+            sink.record(&snapshot, response.bytes) catch |err| {
+                if (diagnostics_enabled) {
+                    inspection.addWarning(.capture_rejected_response);
+                    self.recordResponseDiagnostics(
+                        &inspection,
+                        latency_ms,
+                        err,
+                    );
+                }
+                return err;
+            };
         }
         const result = decodeResponseValue(
             arena,
@@ -356,6 +351,7 @@ pub fn buildRequestBody(
 ) ![]u8 {
     try validateBaseUrl(config.base_url);
     return chat_completions.buildRequestBody(arena, .{
+        .provider = .local,
         .model = config.model,
         .max_tokens = config.max_tokens,
         .system_prompt = config.system_prompt,
