@@ -20,6 +20,7 @@ comptime {
     _ = @import("tools/zts_expert_modules.zig");
     _ = @import("tools/zts_expert_verify_modules.zig");
     _ = @import("tools/zts_agent_client.zig");
+    _ = @import("tools/zts_repair_writer.zig");
     _ = @import("tools/common.zig");
     _ = @import("tools/workspace_list_files.zig");
     _ = @import("tools/workspace_read_file.zig");
