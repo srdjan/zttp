@@ -12,7 +12,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "search text",
     .effect = .execute_process,
     .context_policy = .replayable_preview,
-    .description = "Search a bounded page of path/line matches. Continue with next_offset until it is null; read the cited line for complete text.",
+    .description = "Search a bounded page of path/line matches. Continue with next_offset until it is null; read the cited line for complete text. inventory_complete is false when the match inventory itself hit its ceiling, so narrow the query or path.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"maxLength\":512},\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50}},\"required\":[\"query\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,
     .execute = execute,
@@ -151,13 +151,10 @@ fn renderSearchOutput(
     semantic_ok: bool,
     output: *const SearchOutput,
 ) !registry_mod.ToolResult {
-    if (!output.complete) {
-        return registry_mod.ToolResult.errFmt(
-            allocator,
-            name ++ ": search exceeds the {d}-match inventory limit; narrow the query or path\n",
-            .{max_search_matches},
-        );
-    }
+    // An inventory that hit its ceiling still answers the query for the page the
+    // caller asked for. Refusing the whole search there returns zero matches for
+    // a common term, which is strictly less useful than a bounded page plus the
+    // statement that the inventory was cut.
     var records = std.ArrayList([]const u8).empty;
     defer records.deinit(allocator);
     var raw_lines = std.mem.splitScalar(u8, output.stdout, '\n');
@@ -187,7 +184,7 @@ fn renderSearchOutput(
 
     var seen: usize = 0;
     var returned: usize = 0;
-    var has_more = false;
+    var has_more = !output.complete;
     for (records.items) |line| {
         if (seen < offset) {
             seen += 1;
@@ -229,6 +226,8 @@ fn renderSearchOutput(
     try w.print("{d}", .{returned});
     try w.writeAll(",\"truncated\":");
     try w.writeAll(if (has_more) "true" else "false");
+    try w.writeAll(",\"inventory_complete\":");
+    try w.writeAll(if (output.complete) "true" else "false");
     try w.writeAll(",\"next_offset\":");
     if (has_more) {
         try w.print("{d}", .{offset + returned});
@@ -397,7 +396,10 @@ fn grepFile(
     const contents = zts.file_io.readFile(allocator, file_abs, 16 * 1024 * 1024) catch return;
     defer allocator.free(contents);
     if (std.mem.indexOfScalar(u8, contents, 0) != null) return; // skip binary files
-    if (!std.unicode.utf8ValidateSlice(contents)) return;
+    // A stray non-UTF-8 byte does not make a text file unsearchable: the match
+    // preview is cut on a codepoint boundary and `json_writer.writeString`
+    // replaces any invalid sequence, so the envelope stays well-formed. Skipping
+    // the whole file instead reports "no matches" for a symbol that exists.
 
     const rel = common.relativeToRoot(root, file_abs);
     var line_no: usize = 0;
