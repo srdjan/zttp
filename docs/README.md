@@ -19,7 +19,7 @@ they are designs rather than a backlog. Finished plans live under
 - [Durable Workflows](durable-workflows.md) - durable run/step/signal,
   workflow queue, dead-letter handling, proof receipts, and replay boundaries.
 - [Roadmap](roadmap.md) - supported platforms, current limitations, planned
-  runtime work, the `zts-advanced-1` language program, and what remains of the
+  runtime work, the `zts-model-1` language program, and what remains of the
   reset.
 - [First Durable Workflow](tutorials/first-durable-workflow.md) - run the
   durable workflow examples from a clean checkout and inspect replay state.
@@ -77,7 +77,7 @@ they are designs rather than a backlog. Finished plans live under
 - [Agent Protocol v2](internals/agent-protocol-v2.md) - the
   `zts agent --stdin-json` request and response envelope, its closed operation
   set, and version negotiation.
-- [zts-advanced-1 Formal Spec](zts-formal-spec-northstar-advanced.md) - the
+- [zts-model-1 Formal Spec](zts-formal-spec-northstar-advanced.md) - the
   north-star language specification the roadmap's language program implements.
   It describes the target profile, not today's compiler.
 

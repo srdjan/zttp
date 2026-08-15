@@ -523,8 +523,8 @@ test "bound repair preview rejects mixed identity before protocol invocation" {
         std.json.Value,
         testing.allocator,
         \\[
-        \\  {"bound":{"source_digest":"same","profile_id":"zts-advanced-1","policy_hash":"policy-a","module_graph_hash":"graph"}},
-        \\  {"bound":{"source_digest":"same","profile_id":"zts-advanced-1","policy_hash":"policy-b","module_graph_hash":"graph"}}
+        \\  {"bound":{"source_digest":"same","profile_id":"zts-model-1","policy_hash":"policy-a","module_graph_hash":"graph"}},
+        \\  {"bound":{"source_digest":"same","profile_id":"zts-model-1","policy_hash":"policy-b","module_graph_hash":"graph"}}
         \\]
     ,
         .{},

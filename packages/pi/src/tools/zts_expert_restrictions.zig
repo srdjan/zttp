@@ -38,7 +38,7 @@ test "restrictions registry returns its full version-2 envelope" {
     const envelope = parsed.value.object;
     try testing.expectEqual(@as(i64, 2), envelope.get("schema_version").?.integer);
     try testing.expectEqualStrings("restrictions", envelope.get("operation").?.string);
-    try testing.expectEqualStrings("zts-advanced-1", envelope.get("profile_id").?.string);
+    try testing.expectEqualStrings("zts-model-1", envelope.get("profile_id").?.string);
     try testing.expectEqual(@as(usize, 64), envelope.get("policy_hash").?.string.len);
     try testing.expectEqual(@as(usize, 64), envelope.get("module_graph_hash").?.string.len);
     try testing.expect(envelope.get("payload").?.object.get("restrictions") != null);

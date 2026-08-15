@@ -1569,9 +1569,9 @@ fn protocolPreviewExecute(
         allocator,
         "handler.ts",
         protocol_after_handler,
-        "[{\"intent\":\"replace_let_with_const\",\"bound\":{\"source_digest\":\"source\",\"profile_id\":\"zts-advanced-1\",\"policy_hash\":\"policy\",\"module_graph_hash\":\"graph\"}}]",
+        "[{\"intent\":\"replace_let_with_const\",\"bound\":{\"source_digest\":\"source\",\"profile_id\":\"zts-model-1\",\"policy_hash\":\"policy\",\"module_graph_hash\":\"graph\"}}]",
         "source",
-        "zts-advanced-1",
+        "zts-model-1",
         "policy",
         "graph",
         "0 new, 0 preexisting",
@@ -2580,7 +2580,7 @@ fn postApplyCheckProbe(
         .ok = false,
         .llm_text = try allocator.dupe(
             u8,
-            "{\"schema_version\":2,\"operation\":\"check\",\"profile_id\":\"zts-advanced-1\",\"compiler_version\":\"test\",\"policy_version\":\"test\",\"policy_hash\":\"p\",\"module_graph_hash\":\"m\",\"success\":false,\"payload\":{\"file\":\"handler.ts\"},\"diagnostics\":[]}",
+            "{\"schema_version\":2,\"operation\":\"check\",\"profile_id\":\"zts-model-1\",\"compiler_version\":\"test\",\"policy_version\":\"test\",\"policy_hash\":\"p\",\"module_graph_hash\":\"m\",\"success\":false,\"payload\":{\"file\":\"handler.ts\"},\"diagnostics\":[]}",
         ),
     };
 }

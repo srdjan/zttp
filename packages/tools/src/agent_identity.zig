@@ -6,10 +6,8 @@
 //! canonical path form (absolute, symlinks resolved, dot segments removed,
 //! project-root-relative, `/` separators).
 //!
-//! This lives in `tools` rather than `zts` because the neighbouring identity
-//! constants (`compiler_version`, `policy_version`, `mode`) already live in
-//! `expert_meta.zig`; moving it into the engine would need a new
-//! `scripts/module-boundary.allow` row for no gain.
+//! Path canonicalization lives in tools. The language-profile authority lives
+//! with the grammar registry and is only re-exported here for protocol callers.
 //!
 //! The path functions take an `std.Io` because Zig 0.16 removed `std.fs.cwd()`:
 //! every filesystem call goes through an `Io` instance now. Callers that have
@@ -17,10 +15,11 @@
 //! (`std.Io.Threaded.init(allocator, .{ .environ = .empty })`).
 
 const std = @import("std");
+const zts = @import("zts");
 
 /// The profile this binary implements. Published in every response envelope and
 /// compared against `expected.profile_id`.
-pub const profile_id = "zts-advanced-1";
+pub const profile_id = zts.GrammarCatalog.profile_id;
 
 /// The only schema version this binary serves. A request naming any other
 /// version gets the frozen negotiation response.

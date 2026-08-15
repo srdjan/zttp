@@ -141,7 +141,7 @@ test "verify-paths registry performs one file-bound version-2 check" {
     try testing.expect(!result.ok);
     try testing.expectEqual(@as(i64, 2), envelope.get("schema_version").?.integer);
     try testing.expectEqualStrings("check", envelope.get("operation").?.string);
-    try testing.expectEqualStrings("zts-advanced-1", envelope.get("profile_id").?.string);
+    try testing.expectEqualStrings("zts-model-1", envelope.get("profile_id").?.string);
     try testing.expectEqual(@as(usize, 64), envelope.get("policy_hash").?.string.len);
     try testing.expectEqual(@as(usize, 64), envelope.get("module_graph_hash").?.string.len);
     try testing.expectEqualStrings(

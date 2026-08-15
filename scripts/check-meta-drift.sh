@@ -42,7 +42,7 @@ fi
 # grammar no longer admits interpolated templates, the idiom table names joins
 # as the one text-construction form, and the restriction matrix refuses both
 # interpolation and string-valued addition.
-EXPECTED_PROFILE="zts-advanced-1"
+EXPECTED_PROFILE="zts-model-1"
 EXPECTED_POLICY_HASH="36fbd29e0fe71693d73c8278d3786ffca1eb184da9d3f66b11310bad5033aeb5"
 # Moved when template expressions were removed from the core grammar. TSX is a
 # separately hashed frontend that lowers into this exact core identity.

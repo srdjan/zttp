@@ -435,6 +435,7 @@ pub const AmbientCatalog = struct {
 /// over-approximation by its own preamble and a client reading only the
 /// productions would write programs this compiler refuses.
 pub const GrammarCatalog = struct {
+    pub const profile_id = compiler.grammar_registry.profile_id;
     pub const Production = compiler.grammar_registry.Production;
     pub const Enforcement = compiler.grammar_registry.Enforcement;
 
@@ -475,6 +476,7 @@ pub fn tsxFrontendGrammarHash() [64]u8 {
 
 test "stable GrammarCatalog exposes the productions and their enforcement points" {
     const rows = GrammarCatalog.productions();
+    try std.testing.expectEqualStrings("zts-model-1", GrammarCatalog.profile_id);
     try std.testing.expectEqual(compiler.grammar_registry.productions.len, rows.len);
     const match_expr = GrammarCatalog.findByName("MatchExpr") orelse
         return error.TestExpectedProduction;

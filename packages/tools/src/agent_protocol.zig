@@ -2572,7 +2572,7 @@ test "meta response carries the full identity block" {
     const obj = parsed.value.object;
     try testing.expectEqual(@as(i64, 2), obj.get("schema_version").?.integer);
     try testing.expectEqualStrings("meta", obj.get("operation").?.string);
-    try testing.expectEqualStrings("zts-advanced-1", obj.get("profile_id").?.string);
+    try testing.expectEqualStrings("zts-model-1", obj.get("profile_id").?.string);
     try testing.expectEqual(@as(usize, 64), obj.get("policy_hash").?.string.len);
     try testing.expectEqual(@as(usize, 64), obj.get("module_graph_hash").?.string.len);
     try testing.expect(obj.get("success").?.bool);
@@ -2819,7 +2819,7 @@ test "an error response still carries the identity block" {
     defer parsed.deinit();
     const obj = parsed.value.object;
     try testing.expectEqualStrings(&zts.policyHash(), obj.get("policy_hash").?.string);
-    try testing.expectEqualStrings("zts-advanced-1", obj.get("profile_id").?.string);
+    try testing.expectEqualStrings("zts-model-1", obj.get("profile_id").?.string);
 }
 
 test "a matching expected block passes the guard" {
@@ -2828,7 +2828,7 @@ test "a matching expected block passes the guard" {
     const graph = module_graph_record.contextFreeHash();
     const req = try std.fmt.allocPrint(a,
         \\{{"schema_version":2,"operation":"meta","project_root":".","input":{{}},
-        \\ "expected":{{"profile_id":"zts-advanced-1","policy_hash":"{s}","module_graph_hash":"{s}"}}}}
+        \\ "expected":{{"profile_id":"zts-model-1","policy_hash":"{s}","module_graph_hash":"{s}"}}}}
     , .{ policy, graph });
     defer a.free(req);
 

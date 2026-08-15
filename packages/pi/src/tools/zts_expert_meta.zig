@@ -82,7 +82,7 @@ fn expectEnvelope(result: registry_mod.ToolResult, operation: []const u8) !void 
     const envelope = parsed.value.object;
     try testing.expectEqual(@as(i64, 2), envelope.get("schema_version").?.integer);
     try testing.expectEqualStrings(operation, envelope.get("operation").?.string);
-    try testing.expectEqualStrings("zts-advanced-1", envelope.get("profile_id").?.string);
+    try testing.expectEqualStrings("zts-model-1", envelope.get("profile_id").?.string);
     try testing.expectEqual(@as(usize, 64), envelope.get("policy_hash").?.string.len);
     try testing.expectEqual(@as(usize, 64), envelope.get("module_graph_hash").?.string.len);
 }

@@ -26,7 +26,7 @@ Request:
   "project_root": "/absolute/project/root",
   "input": { "file": "src/handler.ts" },
   "expected": {
-    "profile_id": "zts-advanced-1",
+    "profile_id": "zts-model-1",
     "policy_hash": "...",
     "module_graph_hash": "..."
   }
@@ -39,7 +39,7 @@ Response:
 {
   "schema_version": 2,
   "operation": "check",
-  "profile_id": "zts-advanced-1",
+  "profile_id": "zts-model-1",
   "compiler_version": "0.18.0",
   "policy_version": "2026.04.2",
   "policy_hash": "...",

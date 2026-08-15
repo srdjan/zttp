@@ -75,6 +75,8 @@ reach clients through the version-2 `restrictions` operation.
 | unary `+` | visible numeric conversion at an admitted boundary parser | `replaced` | `ZTS001` |
 | optional call | explicit absence branch before invocation | `replaced` | `ZTS001` |
 | optional computed access | explicit absence branch before dynamic indexed access | `replaced` | `ZTS001` |
+| template interpolation | one explicit text-construction operation | `replaced` | `ZTS001` |
+| string `+` | numeric addition has one result type and text construction is explicit | `replaced` | `ZTS105` |
 
 ## Rows No Diagnostic Rejects
 
@@ -141,3 +143,5 @@ Per-restriction rationale, one sentence each.
 - **unary `+`** - remove it from a number expression, or use an admitted boundary parser for text
 - **optional call** - check for `undefined`, then call the function directly
 - **optional computed access** - check for `undefined`, then use indexed access
+- **template interpolation** - build a string array with explicit `String(...)` conversions and call `.join("")`
+- **string `+`** - build a string array with explicit `String(...)` conversions and call `.join("")`

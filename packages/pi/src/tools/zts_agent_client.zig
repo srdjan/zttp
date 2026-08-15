@@ -319,7 +319,7 @@ test "zts agent client projects an exact version-2 request" {
         .operation = .check,
         .input_json = "{\"file\":\"handler.ts\"}",
         .expected = .{
-            .profile_id = "zts-advanced-1",
+            .profile_id = "zts-model-1",
             .policy_hash = "policy",
             .module_graph_hash = "modules",
         },
@@ -327,14 +327,14 @@ test "zts agent client projects an exact version-2 request" {
     defer testing.allocator.free(encoded);
 
     try testing.expectEqualStrings(
-        "{\"schema_version\":2,\"operation\":\"check\",\"project_root\":\"/workspace\",\"input\":{\"file\":\"handler.ts\"},\"expected\":{\"profile_id\":\"zts-advanced-1\",\"policy_hash\":\"policy\",\"module_graph_hash\":\"modules\"}}",
+        "{\"schema_version\":2,\"operation\":\"check\",\"project_root\":\"/workspace\",\"input\":{\"file\":\"handler.ts\"},\"expected\":{\"profile_id\":\"zts-model-1\",\"policy_hash\":\"policy\",\"module_graph_hash\":\"modules\"}}",
         encoded,
     );
 }
 
 test "zts agent client decodes success and refusal envelopes" {
     const success_json =
-        \\{"schema_version":2,"operation":"meta","profile_id":"zts-advanced-1","compiler_version":"1","policy_version":"1","policy_hash":"p","module_graph_hash":"m","success":true,"payload":{},"diagnostics":[]}
+        \\{"schema_version":2,"operation":"meta","profile_id":"zts-model-1","compiler_version":"1","policy_version":"1","policy_hash":"p","module_graph_hash":"m","success":true,"payload":{},"diagnostics":[]}
     ;
     var success = decodeResponse(testing.allocator, .meta, success_json);
     defer success.deinit();
@@ -344,7 +344,7 @@ test "zts agent client decodes success and refusal envelopes" {
     }
 
     const refusal_json =
-        \\{"schema_version":2,"operation":"meta","profile_id":"zts-advanced-1","compiler_version":"1","policy_version":"1","policy_hash":"p","module_graph_hash":"m","success":false,"payload":{},"diagnostics":[],"error":{"code":"identity_mismatch","message":"stale","field":"expected.policy_hash"}}
+        \\{"schema_version":2,"operation":"meta","profile_id":"zts-model-1","compiler_version":"1","policy_version":"1","policy_hash":"p","module_graph_hash":"m","success":false,"payload":{},"diagnostics":[],"error":{"code":"identity_mismatch","message":"stale","field":"expected.policy_hash"}}
     ;
     var refusal = decodeResponse(testing.allocator, .meta, refusal_json);
     defer refusal.deinit();

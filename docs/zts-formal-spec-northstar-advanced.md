@@ -1,7 +1,7 @@
 # ZTS advanced formal-spec northstar
 
 **Status:** proposed language and assurance profile  
-**Profile name:** `zts-advanced-1`  
+**Profile name:** `zts-model-1`
 **Grounded against:** ZTS 0.18.0, policy 2026.04.2, 2026-07-30  
 **Revision:** 4, 2026-07-30. Revision 2 applied the multi-lens design review:
 stronger `match`, effect-aware `Result` combinators, a completed pure
@@ -109,7 +109,7 @@ no hidden profile knowledge, an agent can:
 Application breadth is the evidence used to expand or reject language
 features. It is not allowed to outrank the integrity of this loop.
 
-`zts-advanced-1` is intended to support these application classes without
+`zts-model-1` is intended to support these application classes without
 checker bypasses or routine native extensions:
 
 - HTTP and JSON APIs, including validation, authentication, CRUD, caching,
@@ -460,7 +460,7 @@ The compiler-in-the-loop interface is part of the advanced language contract.
 It is not an optional editor convenience.
 
 The current JSON commands are useful seeds, but their version-1 shapes are not
-the advanced protocol. `zts-advanced-1` introduces an explicit version-2
+the advanced protocol. `zts-model-1` introduces an explicit version-2
 cutover through one canonical CLI transport:
 
 ```sh
@@ -484,7 +484,7 @@ The request envelope is:
     "file": "dashboard.ts"
   },
   "expected": {
-    "profile_id": "zts-advanced-1",
+    "profile_id": "zts-model-1",
     "policy_hash": "...",
     "module_graph_hash": "..."
   }
@@ -497,7 +497,7 @@ The response envelope is:
 {
   "schema_version": 2,
   "operation": "check",
-  "profile_id": "zts-advanced-1",
+  "profile_id": "zts-model-1",
   "compiler_version": "...",
   "policy_version": "...",
   "policy_hash": "...",
@@ -2498,7 +2498,7 @@ property that the familiar alternative cannot preserve.
 
 At least one end-to-end application for each target class in Section 2:
 
-- compiles under only `zts-advanced-1`,
+- compiles under only `zts-model-1`,
 - passes type and policy checks,
 - runs through its main success and failure flows,
 - has boundary and replay tests where effects occur,
@@ -2897,7 +2897,7 @@ Human readability is not a competing language mode. It is the floor beneath
 the agent-first design: familiar lexical forms, explicit names, visible
 control, and no machine-only source dialect.
 
-That is the balance `zts-advanced-1` should preserve: minimal uncertainty for
+That is the balance `zts-model-1` should preserve: minimal uncertainty for
 agents, sufficient power for general applications, and durable source for
 humans.
 

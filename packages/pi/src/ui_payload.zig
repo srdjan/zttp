@@ -1901,7 +1901,7 @@ test "protocol repair payload round-trips exact binding" {
         "const answer = 42;",
         "[{\"intent\":\"replace_let_with_const\",\"bound\":{\"source_digest\":\"source\"}}]",
         "source",
-        "zts-advanced-1",
+        "zts-model-1",
         "policy",
         "graph",
         "0 new, 1 preexisting",
@@ -1916,7 +1916,7 @@ test "protocol repair payload round-trips exact binding" {
         .protocol_repair => |repair| {
             try testing.expectEqualStrings("handler.ts", repair.path);
             try testing.expectEqualStrings("const answer = 42;", repair.proposed_content);
-            try testing.expectEqualStrings("zts-advanced-1", repair.profile_id);
+            try testing.expectEqualStrings("zts-model-1", repair.profile_id);
             try testing.expectEqualStrings("policy", repair.policy_hash);
             try testing.expectEqualStrings("graph", repair.module_graph_hash);
             try testing.expect(std.mem.indexOf(u8, repair.repairs_json, "replace_let_with_const") != null);
