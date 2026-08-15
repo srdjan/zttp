@@ -336,6 +336,15 @@ Run the full workspace suite:
 zig build test
 ```
 
+`test-expert-app` includes the offline codegen replay, which fails when a
+cassette no longer matches the live prompt or tool schemas. Editing
+`expert_persona.zig`, any skill or example it embeds, or any tool's name,
+description, or input schema makes every cassette stale at once. Re-recording
+is a live run and is documented in
+[Cassette Recording](../../docs/internals/cassette-recording.md), with the
+command for DeepSeek (the default provider and the headline), a local MLX
+server, Claude, and OpenAI.
+
 Add a skill:
 
 1. Create `packages/pi/src/skills/<name>.md` with YAML frontmatter

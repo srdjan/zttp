@@ -515,7 +515,9 @@ modes.
 
 Recording is live and costs tokens. `ZTTP_CODEGEN_RECORD=1` with an API key
 drives real expert turns through the real tool registry and tees each
-round-trip to a per-case cassette, which is then committed.
+round-trip to a per-case cassette, which is then committed. The per-provider
+commands, the environment, and what to republish afterwards are in
+[Cassette Recording](internals/cassette-recording.md).
 
 Replay is deterministic and free. It reads the committed cassettes and re-runs
 the recorded tool calls through the real veto, the real apply path, and the
@@ -546,9 +548,12 @@ intended program literally.
 Four mechanisms keep such a number off this page, and none of them is a
 convention somebody has to remember:
 
-- The corpus recorder refuses any session that is not a live Anthropic key, so
-  a stand-in session cannot become model-measurement input. A separate loopback
-  smoke test exercises transport capture and replay without publishing a row.
+- The corpus recorder refuses any session that is not a live provider session,
+  so a stand-in session cannot become model-measurement input. A hosted
+  provider needs its own key in the environment, and the recorder checks that
+  the session it built actually reports the provider it was asked for. A
+  separate loopback smoke test exercises transport capture and replay without
+  publishing a row.
 - The replay hard-fails unless every case yields a model name from its own
   cassette header, so a row can never be published without cassettes behind it.
 - `scripts/check-convergence-emitter.sh` holds `[codegen-convergence]` and
