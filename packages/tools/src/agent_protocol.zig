@@ -331,7 +331,7 @@ pub fn handleRequest(
         };
     }
 
-    const identity = Identity{
+    var identity = Identity{
         .policy_hash = zts.policyHash(),
         .module_graph_hash = if (graph) |g| g.hash else module_graph_record.contextFreeHash(),
     };
@@ -380,8 +380,8 @@ pub fn handleRequest(
             file_rel.?,
         ),
         .verify => try runVerify(allocator, &payload_json, canonical_root, file_rel.?, input),
-        .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, input),
-        .apply_repair => try runApplyRepair(allocator, &payload_json, canonical_root, file_rel.?, input),
+        .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, identity.module_graph_hash, input),
+        .apply_repair => try runApplyRepair(allocator, io, &payload_json, canonical_root, file_rel.?, &identity, input),
     };
     // No `else` prong: spec 4.8's operation set is closed and every member is
     // served, so an unhandled one is a compile error rather than a runtime
@@ -1093,9 +1093,11 @@ fn writeModulesPayload(
 /// was rather than half-repaired.
 fn runApplyRepair(
     allocator: std.mem.Allocator,
+    io: std.Io,
     json: *std.json.Stringify,
     canonical_root: []const u8,
     file_rel: []const u8,
+    identity: *Identity,
     input: ?std.json.Value,
 ) !bool {
     const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
@@ -1107,10 +1109,10 @@ fn runApplyRepair(
 
     var repairs: std.ArrayListUnmanaged(canonicalize.Repair) = .empty;
     defer repairs.deinit(allocator);
-    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, input, source)) |refused| return refused;
+    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, identity.module_graph_hash, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
-        return try writeApplyRefusal(json, file_rel, before_digest, .no_repairs, "`repairs` must carry at least one repair");
+        return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .no_repairs, "`repairs` must carry at least one repair");
     }
 
     // Gradability first, before anything is applied: refusing early keeps the
@@ -1118,10 +1120,11 @@ fn runApplyRepair(
     // reached.
     for (repairs.items) |r| {
         if (!repairPolicy.isGradable(r.intent)) {
-            return try writeApplyRefusal(
+            return try writeApplyRefusalWithGraph(
                 json,
                 file_rel,
                 before_digest,
+                identity.module_graph_hash,
                 .ungraded_intent,
                 "this operation applies only repairs a registered validator discharges; read meta.validators, and use simulate_edit to preview an ungraded one",
             );
@@ -1136,9 +1139,9 @@ fn runApplyRepair(
     // result is discarded; only the verdict is wanted here.
     {
         const dry = canonicalize.applyRepairs(allocator, source, repairs.items) catch |err| switch (err) {
-            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, .stale_repair, "a repair's `original` does not match the file as it stands"),
-            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, .overlapping_repairs, "two repairs cover the same bytes"),
-            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
+            error.StaleRepair => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .stale_repair, "a repair's `original` does not match the file as it stands"),
+            error.OverlappingRepairs => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .overlapping_repairs, "two repairs cover the same bytes"),
+            error.RepairOutOfBounds => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
             else => return err,
         };
         allocator.free(dry);
@@ -1172,9 +1175,9 @@ fn runApplyRepair(
         const r = repairs.items[idx];
         var one = [_]canonicalize.Repair{r};
         const next = canonicalize.applyRepairs(allocator, current, &one) catch |err| switch (err) {
-            error.StaleRepair => return try writeApplyRefusal(json, file_rel, before_digest, .stale_repair, "a repair's `original` does not match the file as it stands"),
-            error.OverlappingRepairs => return try writeApplyRefusal(json, file_rel, before_digest, .overlapping_repairs, "two repairs cover the same bytes"),
-            error.RepairOutOfBounds => return try writeApplyRefusal(json, file_rel, before_digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
+            error.StaleRepair => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .stale_repair, "a repair's `original` does not match the file as it stands"),
+            error.OverlappingRepairs => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .overlapping_repairs, "two repairs cover the same bytes"),
+            error.RepairOutOfBounds => return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it"),
             else => return err,
         };
 
@@ -1182,11 +1185,11 @@ fn runApplyRepair(
             .equivalent => {},
             .not_law_shape => |why| {
                 allocator.free(next);
-                return try writeApplyRefusal(json, file_rel, before_digest, .not_law_shape, why);
+                return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .not_law_shape, why);
             },
             .no_validator => {
                 allocator.free(next);
-                return try writeApplyRefusal(json, file_rel, before_digest, .ungraded_intent, "no validator discharges this intent");
+                return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .ungraded_intent, "no validator discharges this intent");
             },
             // The validator ran and formed no answer. That is its own refusal
             // code rather than one of the two above: the edit was neither
@@ -1194,7 +1197,7 @@ fn runApplyRepair(
             // tell the client something that did not happen.
             .undecided => |why| {
                 allocator.free(next);
-                return try writeApplyRefusal(json, file_rel, before_digest, .undecided_equivalence, why);
+                return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .undecided_equivalence, why);
             },
         }
 
@@ -1209,17 +1212,42 @@ fn runApplyRepair(
     });
     defer verdict.deinit(allocator);
     if (verdict.new_count > 0) {
-        return try writeApplyRefusal(
+        return try writeApplyRefusalWithGraph(
             json,
             file_rel,
             before_digest,
+            identity.module_graph_hash,
             .veto,
             "the repaired file carries diagnostics the original did not; nothing was written",
         );
     }
 
+    // Derive the identity of the bytes that passed validation before mutating
+    // the file. Imported modules still come from disk, while the entry module
+    // is read from `current`, so an edit that changes imports is represented in
+    // the post-edit graph without a write-first failure window.
+    var post_graph = module_graph_record.buildWithEntrySource(
+        allocator,
+        io,
+        canonical_root,
+        file_rel,
+        current,
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return try writeApplyRefusalWithGraph(
+            json,
+            file_rel,
+            before_digest,
+            identity.module_graph_hash,
+            .veto,
+            "the repaired module graph could not be resolved; nothing was written",
+        ),
+    };
+    defer post_graph.deinit(allocator);
+
     try zts.file_io.writeFile(allocator, abs, current);
     const after_digest = agent_identity.sourceDigest(current);
+    identity.module_graph_hash = post_graph.hash;
 
     try json.beginObject();
     try json.objectField("file");
@@ -1231,18 +1259,18 @@ fn runApplyRepair(
     try json.objectField("source_digest");
     try json.write(&after_digest);
     try json.objectField("module_graph_hash");
-    const graph_hash = module_graph_record.contextFreeHash();
-    try json.write(&graph_hash);
+    try json.write(&identity.module_graph_hash);
     try json.objectField("refusal");
     try json.write(null);
     try json.endObject();
     return true;
 }
 
-fn writeApplyRefusal(
+fn writeApplyRefusalWithGraph(
     json: *std.json.Stringify,
     file_rel: []const u8,
     digest: [64]u8,
+    module_graph_hash: [64]u8,
     decision: decision_registry.Id,
     message: []const u8,
 ) !bool {
@@ -1256,8 +1284,7 @@ fn writeApplyRefusal(
     try json.objectField("source_digest");
     try json.write(&digest);
     try json.objectField("module_graph_hash");
-    const graph_hash = module_graph_record.contextFreeHash();
-    try json.write(&graph_hash);
+    try json.write(&module_graph_hash);
     try json.objectField("refusal");
     try json.beginObject();
     try json.objectField("reason");
@@ -1285,6 +1312,7 @@ fn parseRepairs(
     out: *std.ArrayListUnmanaged(canonicalize.Repair),
     file_rel: []const u8,
     digest: [64]u8,
+    module_graph_hash: [64]u8,
     input: ?std.json.Value,
     /// The bytes the digest covers. A `line`-form repair is resolved to its
     /// span against these, so both forms reach the applier as spans.
@@ -1298,15 +1326,15 @@ fn parseRepairs(
     };
 
     for (items) |item| {
-        if (item != .object) return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "each entry in `repairs` must be an object");
+        if (item != .object) return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "each entry in `repairs` must be an object");
         const o = item.object;
 
         const intent_value = o.get("intent") orelse
-            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must name its `intent`");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must name its `intent`");
         if (intent_value != .string)
-            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`intent` must be a string");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`intent` must be a string");
         const intent = zts.RepairIntent.fromString(intent_value.string) orelse
-            return try writeApplyRefusal(json, file_rel, digest, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
 
         // A repair is keyed on a byte span. `line` is the older spelling of the
         // same thing for a whole-line rewrite, and it keeps working: within
@@ -1319,42 +1347,42 @@ fn parseRepairs(
         var line: u32 = 0;
         if (o.get("span")) |span_value| {
             if (span_value != .object)
-                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span` must be an object with `start` and `end`");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span` must be an object with `start` and `end`");
             const start_value = span_value.object.get("start") orelse
-                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span` must carry `start`");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span` must carry `start`");
             const end_value = span_value.object.get("end") orelse
-                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span` must carry `end`");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span` must carry `end`");
             if (start_value != .integer or start_value.integer < 0 or
                 end_value != .integer or end_value.integer < start_value.integer)
-                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`span.start` and `span.end` must be byte offsets with start <= end");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span.start` and `span.end` must be byte offsets with start <= end");
             start_offset = @intCast(start_value.integer);
             end_offset = @intCast(end_value.integer);
             if (end_offset > source.len)
-                return try writeApplyRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             line = canonicalize.offsetLine(source, start_offset);
         } else if (o.get("line")) |line_value| {
             if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
-                return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`line` must be a positive integer");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`line` must be a positive integer");
             line = @intCast(line_value.integer);
             const span = canonicalize.lineSpan(source, line) orelse
-                return try writeApplyRefusal(json, file_rel, digest, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             start_offset = span.start;
             end_offset = span.end;
         } else {
-            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
         }
 
         const replacement_value = o.get("replacement") orelse
-            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry its `replacement`");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must carry its `replacement`");
         if (replacement_value != .string)
-            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`replacement` must be a string");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`replacement` must be a string");
 
         // Required, not optional. An absent snapshot would make the staleness
         // check silently skip, which is the one thing this field exists for.
         const original_value = o.get("original") orelse
-            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "a repair must carry `original`, the snapshot of the bytes it replaces");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must carry `original`, the snapshot of the bytes it replaces");
         if (original_value != .string)
-            return try writeApplyRefusal(json, file_rel, digest, .malformed_repair, "`original` must be a string");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`original` must be a string");
 
         try out.append(allocator, .{
             .intent = intent,
@@ -1388,6 +1416,7 @@ fn runSimulateEdit(
     json: *std.json.Stringify,
     canonical_root: []const u8,
     file_rel: []const u8,
+    module_graph_hash: [64]u8,
     input: ?std.json.Value,
 ) !bool {
     const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
@@ -1403,7 +1432,7 @@ fn runSimulateEdit(
     // applied it must not find the second call parsing it differently. The
     // refusal shape differs by operation, so the parser writes `apply_repair`'s
     // and simulate maps it - both carry the same `reason` strings.
-    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, input, source)) |refused| return refused;
+    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, module_graph_hash, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
         return try writeSimulateRefusal(json, file_rel, digest, .no_repairs, "`repairs` must carry at least one repair; simulating nothing has no answer to give");
@@ -3110,12 +3139,30 @@ test "apply_repair writes a graded repair and rebinds the digest" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const source =
+        \\import type { Spec } from "zttp:types";
+        \\import { marker } from "./util.ts";
+        \\
+        \\structural Guardrails = Spec<"state_isolated">;
+        \\
+        \\export function handler(req: Request): Response & Guardrails {
+        \\    let name = "world";
+        \\    return Response.json({ hello: name, marker });
+        \\}
+        \\
+    ;
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "util.ts", .data = "export const marker = 1;\n" });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
+    var before_graph = try module_graph_record.build(a, testing.io, root, "h.ts");
+    const before_hash = before_graph.hash;
+    before_graph.deinit(a);
+    try testing.expect(!std.mem.eql(u8, &before_hash, &module_graph_record.contextFreeHash()));
+
     const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":7,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
     , .{root});
     defer a.free(req);
     const out = try respond(a, req);
@@ -3137,6 +3184,26 @@ test "apply_repair writes a graded repair and rebinds the digest" {
     // to the file it just changed rather than the one it read.
     const digest = agent_identity.sourceDigest(on_disk);
     try testing.expectEqualStrings(&digest, payload.get("source_digest").?.string);
+
+    var after_graph = try module_graph_record.build(a, testing.io, root, "h.ts");
+    defer after_graph.deinit(a);
+    try testing.expect(!std.mem.eql(u8, &before_hash, &after_graph.hash));
+    try testing.expect(!std.mem.eql(u8, &after_graph.hash, &module_graph_record.contextFreeHash()));
+    try testing.expectEqualStrings(&after_graph.hash, payload.get("module_graph_hash").?.string);
+    try testing.expectEqualStrings(
+        parsed.value.object.get("module_graph_hash").?.string,
+        payload.get("module_graph_hash").?.string,
+    );
+
+    const followup_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"h.ts"}},"expected":{{"module_graph_hash":"{s}"}}}}
+    , .{ root, payload.get("module_graph_hash").?.string });
+    defer a.free(followup_req);
+    const followup_out = try respond(a, followup_req);
+    defer a.free(followup_out);
+    var followup = try parse(a, followup_out);
+    defer followup.deinit();
+    try testing.expect(followup.value.object.get("success").?.bool);
 }
 
 test "apply_repair accepts a repair keyed on a byte span" {
@@ -4280,6 +4347,10 @@ test "a refusal on the wire carries a published kind and its next action" {
     try testing.expectEqualStrings(@tagName(row.next_action), refusal.get("next_action").?.string);
     // A malformed request is not evidence the file moved, and the wire says so.
     try testing.expectEqualStrings("fix_the_request", refusal.get("next_action").?.string);
+    const envelope_hash = parsed.value.object.get("module_graph_hash").?.string;
+    const payload_hash = parsed.value.object.get("payload").?.object.get("module_graph_hash").?.string;
+    try testing.expectEqualStrings(envelope_hash, payload_hash);
+    try testing.expect(!std.mem.eql(u8, payload_hash, &module_graph_record.contextFreeHash()));
 }
 
 test "every admitted surface form has an example, and every example names one" {

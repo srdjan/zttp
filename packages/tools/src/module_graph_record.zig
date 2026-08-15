@@ -122,6 +122,30 @@ pub fn build(
     canonical_root: []const u8,
     entry_rel: []const u8,
 ) BuildError!GraphRecord {
+    return buildInternal(allocator, io, canonical_root, entry_rel, null);
+}
+
+/// Build the resolved graph as if `entry_source` were the entry module's bytes,
+/// without writing them to disk. Imported modules still come from the project.
+/// This lets a writer derive and validate the post-edit identity before the
+/// mutation it will bind to that identity.
+pub fn buildWithEntrySource(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    canonical_root: []const u8,
+    entry_rel: []const u8,
+    entry_source: []const u8,
+) BuildError!GraphRecord {
+    return buildInternal(allocator, io, canonical_root, entry_rel, entry_source);
+}
+
+fn buildInternal(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    canonical_root: []const u8,
+    entry_rel: []const u8,
+    entry_source: ?[]const u8,
+) BuildError!GraphRecord {
     var modules: std.ArrayList(ModuleRecord) = .empty;
     errdefer {
         for (modules.items) |m| {
@@ -167,12 +191,15 @@ pub fn build(
         const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, rel });
         defer allocator.free(abs);
 
-        const source = zts.file_io.readFile(allocator, abs, max_source_bytes) catch {
-            // The entry file must exist; a missing import is a rejection the
-            // importer already recorded, so this module is simply dropped.
-            if (head == 0) return error.EntryUnreadable;
-            continue;
-        };
+        const source = if (head == 0 and entry_source != null)
+            try allocator.dupe(u8, entry_source.?)
+        else
+            zts.file_io.readFile(allocator, abs, max_source_bytes) catch {
+                // The entry file must exist; a missing import is a rejection the
+                // importer already recorded, so this module is simply dropped.
+                if (head == 0) return error.EntryUnreadable;
+                continue;
+            };
         defer allocator.free(source);
 
         var imports: std.ArrayList(ImportRecord) = .empty;
@@ -485,6 +512,35 @@ test "graph hash changes when a source byte changes" {
     defer after.deinit(a);
 
     try testing.expect(!std.mem.eql(u8, &first, &after.hash));
+}
+
+test "entry source override recomputes the graph without writing" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const original =
+        "import { one } from \"./one.ts\";\nexport const value = one;\n";
+    const proposed =
+        "import { two } from \"./two.ts\";\nexport const value = two;\n";
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "h.ts", .data = original });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "one.ts", .data = "export const one = 1;\n" });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "two.ts", .data = "export const two = 2;\n" });
+
+    const root = try tmpRoot(&tmp, a);
+    defer a.free(root);
+
+    var before = try build(a, std.testing.io, root, "h.ts");
+    defer before.deinit(a);
+    var after = try buildWithEntrySource(a, std.testing.io, root, "h.ts", proposed);
+    defer after.deinit(a);
+
+    try testing.expect(!std.mem.eql(u8, &before.hash, &after.hash));
+    try testing.expectEqual(@as(usize, 2), after.modules.len);
+    try testing.expectEqualStrings("two.ts", after.modules[0].imports[0].target);
+
+    const on_disk = try tmp.dir.readFileAlloc(std.testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(original, on_disk);
 }
 
 test "an import escaping the project root is rejected, not resolved" {
