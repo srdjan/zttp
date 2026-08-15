@@ -13,10 +13,10 @@ schemaCompile("FormatInput", JSON.stringify({
   required: ["email"]
 }));
 
-export default (req: Request): Response => {
+export function handler(req: Request): Response {
   const result = validateJson("FormatInput", req.body ?? "");
   if (!result.ok) {
     return Response.json({ errors: result.errors }, { status: 400 });
   }
   return Response.json({ valid: true, value: result.value }, { status: 200 });
-};
+}

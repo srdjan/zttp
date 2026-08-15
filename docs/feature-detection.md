@@ -94,7 +94,6 @@ The parser supports ES6 `import`/`export` syntax for built-in virtual modules
 |--------|-------------|
 | `export function handler(req) {}` | Named function export |
 | `export const version = "1.0"` | Named const export |
-| `export let count = 0` | Named let export |
 
 ### Unsupported Module Forms
 
@@ -105,7 +104,8 @@ These produce helpful error messages directing users to named imports/exports:
 | `import X from "mod"` | Default imports not supported; use named imports |
 | `import * as X from "mod"` | Namespace imports not supported; use named imports |
 | `import "mod"` | Side-effect imports not supported; use named imports |
-| `export default function handler() {}` | Supported for named functions; anonymous defaults are rejected |
+| `export default function handler() {}` | ZTS056: write a named export such as `export function handler() {}` |
+| `export let count = 0` | ZTS057: use `export const`; keep reassignment inside a function activation |
 | `export { x } from "mod"` | Re-exports not supported; use named exports |
 | `export * from "mod"` | Export star not supported; use named exports |
 
@@ -270,6 +270,8 @@ The strict checker enforces the **canonical ZigTS profile** on every `zttp check
 | `ZTS616` | call-site spread `f(...args)` | positional args or widen the helper signature |
 | `ZTS054` | default parameter | use `T | undefined` and resolve the default at the start of the body |
 | `ZTS055` | optional parameter shorthand | write the parameter type as `T | undefined` |
+| `ZTS056` | default export | write a statically named export |
+| `ZTS057` | mutable top-level export | use `export const`; keep reassignment activation-local |
 | `ZTS618` | nested destructuring `{a: {b}}` | drill in with follow-up `const` bindings |
 | `ZTS619` | unused index alias in `for...of` | iterate the array directly; drop `.entries()` and the destructure |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |

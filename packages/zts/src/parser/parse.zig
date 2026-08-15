@@ -1787,25 +1787,11 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.advance(); // consume 'export'
 
-        // export default function X() {}
+        // A public declaration has one spelling and one stable imported name.
         if (self.check(.kw_default)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "default exports are not supported; write a named export, for example `export function handler(...) { ... }`");
             self.advance();
-            if (!self.check(.kw_function)) {
-                self.errorAt(loc, "'export default' must be followed by a named function");
-                return error.ParseError;
-            }
-            const decl = try self.parseFunctionDeclaration();
-            return try self.nodes.add(.{
-                .tag = .export_decl,
-                .loc = loc,
-                .data = .{ .export_decl = .{
-                    .kind = .default,
-                    .declaration = decl,
-                    .specifiers_start = null_node,
-                    .specifiers_count = 0,
-                    .from_module_idx = 0,
-                } },
-            });
+            return error.ParseError;
         }
 
         // export { ... } - re-exports, not supported
@@ -1853,8 +1839,14 @@ pub const Parser = struct {
             });
         }
 
+        if (self.check(.kw_let)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "mutable exports are not supported; use `export const` for module values and keep reassignment inside a function activation");
+            self.advance();
+            return error.ParseError;
+        }
+
         // export const X = ...
-        if (self.check(.kw_const) or self.check(.kw_let)) {
+        if (self.check(.kw_const)) {
             const decl = try self.parseVarDeclaration();
             return try self.nodes.add(.{
                 .tag = .export_decl,
@@ -4851,7 +4843,7 @@ test "unsupported: import namespace star" {
     try std.testing.expect(false);
 }
 
-test "export default named function" {
+test "export default is refused with a named export repair" {
     const allocator = std.testing.allocator;
     const source =
         \\export default function handler() {}
@@ -4860,13 +4852,23 @@ test "export default named function" {
     var parser = try Parser.init(allocator, source);
     defer parser.deinit();
 
-    const root = try parser.parse();
-    const program = parser.nodes.get(root).?;
-    const export_idx = parser.nodes.getListIndex(program.data.block.stmts_start, 0);
-    try std.testing.expectEqual(NodeTag.export_decl, parser.nodes.getTag(export_idx));
-    const ir_view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const export_decl = ir_view.getExportDecl(export_idx).?;
-    try std.testing.expectEqual(Node.ExportDecl.ExportKind.default, export_decl.kind);
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "named export") != null);
+}
+
+test "export let is refused with an export const repair" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export let version = 1;
+    ;
+
+    var parser = try Parser.init(allocator, source);
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "export const") != null);
 }
 
 test "unsupported: export re-export braces" {

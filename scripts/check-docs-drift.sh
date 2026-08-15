@@ -463,4 +463,15 @@ if [[ -n "${removed_parameter_hits//[[:space:]]/}" ]]; then
   fail "tracked TypeScript still uses a default or optional parameter; use T | undefined and resolve absence in the body"
 fi
 
+# Public declarations have one spelling and module state is constant. Keep the
+# refusal probes in Zig, but no tracked handler may retain either legacy form.
+removed_module_export_hits="$({
+  git ls-files -z -- '*.ts' '*.tsx' |
+    xargs -0 rg -n --pcre2 -- '^\s*export\s+(?:default|let)\b' 2>/dev/null || true
+} | grep -v -E '^docs/' || true)"
+if [[ -n "${removed_module_export_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$removed_module_export_hits" >&2
+  fail "tracked TypeScript still uses a default or mutable export; use a statically named export function or export const"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

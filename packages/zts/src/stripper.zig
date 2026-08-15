@@ -54,6 +54,10 @@ pub const StripError = error{
     DefaultParameter,
     /// `name?: T` has two spellings for the same undefined union
     OptionalParameter,
+    /// Default exports create a second public declaration spelling
+    DefaultExport,
+    /// Module state cannot be reassigned by request handlers
+    MutableExport,
 };
 
 /// Kind of unsupported-TypeScript construct rejected by the stripper. Each
@@ -95,6 +99,10 @@ pub const StripDiagnosticKind = enum {
     /// TypeScript's optional-parameter shorthand. Model-1 spells the same
     /// contract as an explicit union with `undefined`.
     optional_parameter,
+    /// A default export. Public declarations have one statically named form.
+    default_export,
+    /// A mutable top-level export. Mutable state is activation-local.
+    mutable_export,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -109,6 +117,8 @@ pub const StripDiagnosticKind = enum {
             .legacy_types_import => "`zttp:types` is not a module in this profile; remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
             .default_parameter => "default parameters are not part of this profile; replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
             .optional_parameter => "optional parameter shorthand is not part of this profile; replace `name?: T` with `name: T | undefined`",
+            .default_export => "default exports are not part of this profile; write a named export, for example `export function handler(...) { ... }`",
+            .mutable_export => "mutable exports are not part of this profile; use `export const` for module values and keep reassignment inside a function activation",
         };
     }
 };
@@ -474,6 +484,7 @@ const Stripper = struct {
         while (self.pos < self.source.len) {
             // Check for unsupported constructs at statement boundaries
             if (self.isAtStatementStart()) {
+                if (try self.tryRejectModuleForm()) continue;
                 if (try self.tryStripTypeDeclaration()) continue;
                 if (try self.tryStripImportType()) continue;
                 if (try self.tryStripExportType()) continue;
@@ -1401,6 +1412,54 @@ const Stripper = struct {
 
     fn tryStripTypeDeclaration(self: *Self) StripError!bool {
         return self.stripTypeOrInterfaceBody(self.pos, self.line, self.col);
+    }
+
+    fn tryRejectModuleForm(self: *Self) StripError!bool {
+        const saved_pos = self.pos;
+        const saved_line = self.line;
+        const saved_col = self.col;
+
+        const keyword = self.peekKeyword() orelse return false;
+        if (!std.mem.eql(u8, keyword, "export")) return false;
+
+        self.pos += keyword.len;
+        self.col += @intCast(keyword.len);
+        self.skipWhitespaceTracked();
+
+        const form = self.peekKeyword() orelse {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+            return false;
+        };
+        const rejection: struct { diagnostic: StripDiagnosticKind, failure: StripError } = if (std.mem.eql(u8, form, "default"))
+            .{ .diagnostic = .default_export, .failure = StripError.DefaultExport }
+        else if (std.mem.eql(u8, form, "let"))
+            .{ .diagnostic = .mutable_export, .failure = StripError.MutableExport }
+        else {
+            self.pos = saved_pos;
+            self.line = saved_line;
+            self.col = saved_col;
+            return false;
+        };
+
+        if (rejection.diagnostic == .default_export) {
+            self.pos += form.len;
+            self.col += @intCast(form.len);
+            self.skipWhitespaceTracked();
+        }
+        if (self.report_errors) {
+            std.log.err("{}:{}: {s}", .{ saved_line, saved_col, rejection.diagnostic.message() });
+        }
+        self.recordDiagnosticAt(rejection.diagnostic, saved_line, saved_col);
+        if (!self.collect_all_diagnostics) return rejection.failure;
+
+        // Diagnostics-only recovery removes the rejected module modifier and
+        // keeps scanning the declaration body. The caller refuses the file
+        // because the diagnostic is present; this transformed text is never a
+        // program that can be executed or certified.
+        self.blankSpan(saved_pos, self.pos);
+        return true;
     }
 
     /// Shared body for stripping [distinct] type/interface declarations, and
@@ -3366,6 +3425,40 @@ test "optional structural record fields remain admitted" {
     const result = try strip(std.testing.allocator, "structural User = { name?: string };", .{});
     defer @constCast(&result).deinit();
     try std.testing.expectEqual(@as(usize, 1), result.type_map.entries.items.len);
+}
+
+test "default export is refused with one named public spelling" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.DefaultExport,
+        strip(std.testing.allocator, "export default function handler(): Response { return Response.json({ ok: true }); }", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.default_export, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.column);
+}
+
+test "mutable export is refused because module bindings are constant" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.MutableExport,
+        strip(std.testing.allocator, "export let version: number = 1;", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.mutable_export, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.column);
+}
+
+test "module-form diagnostics recovery keeps scanning later source" {
+    var result = try strip(
+        std.testing.allocator,
+        "export let version: number = 1;\nconst next = value as number;",
+        .{ .collect_all_diagnostics = true },
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), result.diagnostics.len);
+    try std.testing.expectEqual(StripDiagnosticKind.mutable_export, result.diagnostics[0].kind);
+    try std.testing.expectEqual(StripDiagnosticKind.as_assertion, result.diagnostics[1].kind);
 }
 
 test "export type stripped" {

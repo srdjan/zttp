@@ -512,6 +512,22 @@ pub const entries = [_]RestrictionEntry{
         .note = "write `name: T | undefined`",
         .enforced_by = &.{"ZTS055"},
     },
+    .{
+        .id = "restriction.default-export",
+        .feature = "default export",
+        .boundary = "one statically named public declaration form",
+        .nature = .language_simplicity,
+        .note = "write a named export such as `export function handler(...) { ... }`",
+        .enforced_by = &.{"ZTS056"},
+    },
+    .{
+        .id = "restriction.mutable-export",
+        .feature = "mutable top-level export",
+        .boundary = "pure module initialization and activation-local mutation",
+        .nature = .language_simplicity,
+        .note = "use `export const`; keep reassignment inside a function activation",
+        .enforced_by = &.{"ZTS057"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

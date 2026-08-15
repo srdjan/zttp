@@ -1107,6 +1107,12 @@ minimum-arity, type-check, IR flag, and bytecode-default paths were deleted.
 Calls now supply every fixed positional argument, including explicit
 `undefined` when selecting a body-level fallback.
 
+Module declarations now have one public spelling as well. ZTS056 refuses every
+default export in favor of a statically named declaration, and ZTS057 refuses
+`export let` because mutable state is activation-local. The raw parser no
+longer builds a default export node or a mutable export declaration, and the
+last live default handler fixture now uses `export function handler`.
+
 **Owed, and this is the debt the cutover has been accumulating toward.** The
 recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases
 write `type X =`, so `zig build test` now fails two of them: `weather-egress`

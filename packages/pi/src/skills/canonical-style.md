@@ -18,6 +18,7 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | External effects | `Effects<T, "...">` on public helpers that touch capabilities |
 | Proof obligations | Ambient `Proof<T, P>` on handlers and helpers that participate in declared proofs |
 | Module imports | Named imports from a literal `zttp:*` or registered `zttp-ext:*` specifier |
+| Module exports | Statically named `export function` or `export const`; no default or mutable exports |
 | Capability keys | String literals or compiler-visible `const` literal aliases |
 | Arithmetic update | `x = x + 1`; never `x += 1` or `x++` |
 | Function call args | Positional. No `f(...args)` spread |
@@ -28,7 +29,7 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Template interpolation | `${identifier}` or `${obj.literalField}` only; hoist anything else to a `const` |
 | Fallback | `??` for nullish defaults. Never `||` unless both operands are boolean |
 
-Most of these rows have a corresponding `ZTS6xx` diagnostic and the compiler will reject violations. Three rows are advisory style only and not yet mechanically enforced: destructure rename (`{a: b}`), optional-parameter syntax (`(a?: T)`), and truthy `||` fallback. Write canonical code for them anyway - those checks will land in a later slice.
+Most rows have a corresponding diagnostic and the compiler rejects violations. Destructure rename (`{a: b}`) remains an advisory style rule in this slice. Truthy `||` fallback is already rejected by the boolean-only operator contract.
 
 ## Before / after pairs
 

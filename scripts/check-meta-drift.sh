@@ -38,9 +38,9 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-15 after phase 7 removed default and optional parameter
-# shorthand. ZTS054/ZTS055 replaced ZTS617, and the grammar now admits only
-# fixed-arity `name: Type` parameters.
+# Pinned 2026-08-15 after phase 7 made parameter arity and module exports
+# explicit. The grammar admits fixed-arity parameters and statically named,
+# immutable top-level exports only.
 EXPECTED_PROFILE="zts-advanced-1"
 EXPECTED_POLICY_HASH="807d3613e3c934f785eb0c310380296deaeca0c1d277028186ca4d3a2f5e1ac4"
 # Moved when JSX was removed from the core grammar. TSX is now a separately
@@ -49,9 +49,9 @@ EXPECTED_GRAMMAR_HASH="8e832800e21e352785bcbcb230a3f787c1314219fa02f753ab10ced37
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
 EXPECTED_FRONTEND_GRAMMAR_HASH="67b7ec97cc658df59440c087d46e3b386f0863c3f461d12512ee4f458a757763"
 EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
-# Moved when phase 7 added the default-parameter and optional-parameter rows,
-# enforced at source preparation by ZTS054 and ZTS055.
-EXPECTED_RESTRICTION_HASH="781cf01d45fba62b69e7c4492a623de1e545e78dff046581d9d5105a245216d0"
+# Moved when phase 7 added the default-export and mutable-export rows,
+# enforced at source preparation by ZTS056 and ZTS057.
+EXPECTED_RESTRICTION_HASH="50a5df70f0052cb40f1a0020bcd3546d1940a6509bbea094d0bed972fb0067ea"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

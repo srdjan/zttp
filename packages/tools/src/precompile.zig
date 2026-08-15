@@ -4814,6 +4814,51 @@ test "runCheckOnlyFromSource refuses optional parameter shorthand with ZTS055" {
     try std.testing.expect(result.contract == null);
 }
 
+test "runCheckOnlyFromSource refuses default exports with ZTS056" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export default function handler(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS056", diagnostic.code);
+    try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
+    try std.testing.expectEqualStrings(
+        "write a named export, for example `export function handler(...) { ... }`",
+        diagnostic.suggestion.?,
+    );
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses mutable exports with ZTS057" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export let version: number = 1;
+        \\export function handler(req: Request): Response {
+        \\  return Response.json({ version });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS057", diagnostic.code);
+    try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
+    try std.testing.expectEqualStrings(
+        "use `export const` for module values and keep reassignment inside a function activation",
+        diagnostic.suggestion.?,
+    );
+    try std.testing.expect(result.contract == null);
+}
+
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =

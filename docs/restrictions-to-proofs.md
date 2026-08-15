@@ -59,6 +59,8 @@ reach clients through the version-2 `restrictions` operation.
 | `zttp:types` import | proof and effect witnesses are ambient type names | `language_simplicity` | `ZTS053` |
 | default parameter | one explicit absence branch in the function body | `language_simplicity` | `ZTS054` |
 | optional parameter shorthand | one spelling for undefined absence | `language_simplicity` | `ZTS055` |
+| default export | one statically named public declaration form | `language_simplicity` | `ZTS056` |
+| mutable top-level export | pure module initialization and activation-local mutation | `language_simplicity` | `ZTS057` |
 
 ## Rows No Diagnostic Rejects
 
@@ -109,3 +111,5 @@ Per-restriction rationale, one sentence each.
 - **`zttp:types` import** - remove the import and write `Proof<T, P>` or `Effects<T, R>` directly
 - **default parameter** - accept `T \| undefined` and resolve the default at the start of the body
 - **optional parameter shorthand** - write `name: T \| undefined`
+- **default export** - write a named export such as `export function handler(...) { ... }`
+- **mutable top-level export** - use `export const`; keep reassignment inside a function activation

@@ -729,8 +729,8 @@ import { name, other as local } from "./module.ts";
 import { fetch } from "zttp:fetch";
 import type { Order } from "./order.ts";
 
-export type User = { readonly id: UserId; name: string };
-export distinct type UserId = string;
+export structural User = { readonly id: UserId; name: string };
+export nominal UserId = string;
 export function loadUser(id: UserId): Result<User, LoadError> { ... }
 export const version: string = "1";
 ```
@@ -742,7 +742,7 @@ Rules:
 - Relative application modules and registered `zttp:*` or `zttp-ext:*`
   modules are permitted.
 - Type-only imports are erased.
-- Default imports, anonymous default exports, namespace imports, side-effect
+- Default imports and exports, namespace imports, side-effect
   imports, dynamic imports, and export-star forms are excluded.
 - Re-exports are excluded. Importing and then exporting a named declaration
   is also excluded. Consumers import the original declaration, or the module

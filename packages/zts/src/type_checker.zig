@@ -4836,15 +4836,6 @@ test "TypeChecker: exported handler local const rejects incompatible initializer
     , 1, 0);
 }
 
-test "TypeChecker: exported default handler local annotation is checked" {
-    try checkTypedSource(
-        \\export default function handler(req: Request): Response {
-        \\  const n: number = "x";
-        \\  return Response.json({});
-        \\}
-    , 1, 0);
-}
-
 test "TypeChecker: exported arrow handler local annotation is checked" {
     try checkTypedSource(
         \\export const handler = () => {
