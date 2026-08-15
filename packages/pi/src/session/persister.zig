@@ -12,8 +12,9 @@
 //!     internally and emits one event per call.
 //!
 //!   - `appendEntry` writes the entry to disk honoring `AppendOptions`:
-//!       * `no_persist_tool_output = true` skips `.tool_result` entries
-//!         entirely. All other variants still persist.
+//!       * `no_persist_tool_output = true` persists a structural redacted
+//!         `.tool_result`, so resumed provider history never has a dangling
+//!         tool call. All other variants still persist.
 //!       * Otherwise tool results are preserved exactly. Provider-context
 //!         bounds belong to each tool's typed projection, not the raw journal.
 //!
@@ -27,6 +28,8 @@ const events = @import("events.zig");
 pub const AppendOptions = struct {
     no_persist_tool_output: bool = false,
 };
+
+pub const redacted_tool_output = "[tool output not persisted]";
 
 /// Pure mapping from a transcript variant to the corresponding event
 /// variant. Borrows slices from `entry`; do not persist the returned
@@ -75,35 +78,36 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
 /// `.assistant_tool_use` with N calls emits N lines (one `tool_use` event
 /// per call). All other variants emit exactly one line.
 ///
-/// `.tool_result` is skipped entirely when `opts.no_persist_tool_output`
-/// is true. Otherwise the provider-visible projection is written exactly.
+/// `.tool_result` uses a structural redacted placeholder when
+/// `opts.no_persist_tool_output` is true. Otherwise the raw result is written
+/// exactly.
 pub fn appendEntry(
     allocator: std.mem.Allocator,
     events_path: []const u8,
+    entry_id: events.EntryId,
     entry: *const transcript.OwnedEntry,
     opts: AppendOptions,
 ) !void {
     switch (entry.*) {
         .tool_result => |tr| {
-            if (opts.no_persist_tool_output) return;
-            try events.appendEvent(allocator, events_path, .{ .tool_result = .{
+            try events.appendEntryEvent(allocator, events_path, entry_id, null, .{ .tool_result = .{
                 .tool_use_id = tr.tool_use_id,
                 .tool_name = tr.tool_name,
                 .ok = tr.ok,
-                .llm_text = tr.llm_text,
-                .ui_payload = tr.ui_payload,
+                .llm_text = if (opts.no_persist_tool_output) redacted_tool_output else tr.llm_text,
+                .ui_payload = if (opts.no_persist_tool_output) null else tr.ui_payload,
             } });
         },
         .assistant_tool_use => |calls| {
-            for (calls) |call| {
-                try events.appendEvent(allocator, events_path, .{ .tool_use = .{
+            for (calls, 0..) |call, part_index| {
+                try events.appendEntryEvent(allocator, events_path, entry_id, @intCast(part_index), .{ .tool_use = .{
                     .id = call.id,
                     .name = call.name,
                     .args_json = call.args_json,
                 } });
             }
         },
-        else => try events.appendEvent(allocator, events_path, entryToEvent(entry)),
+        else => try events.appendEntryEvent(allocator, events_path, entry_id, null, entryToEvent(entry)),
     }
 }
 
@@ -112,7 +116,6 @@ pub fn appendEntry(
 // ===========================================================================
 
 const testing = std.testing;
-const zts = @import("zts");
 
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
@@ -121,18 +124,26 @@ fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
 }
 
 fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return try zts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
+    var reader = try events.Reader.open(allocator, path);
+    defer reader.deinit();
+    return (try reader.next()) orelse error.MissingEventFrame;
 }
 
-fn splitLines(allocator: std.mem.Allocator, raw: []const u8) !std.ArrayList([]const u8) {
-    var lines: std.ArrayList([]const u8) = .empty;
-    errdefer lines.deinit(allocator);
-    var it = std.mem.splitScalar(u8, raw, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        try lines.append(allocator, line);
+fn readFrames(allocator: std.mem.Allocator, path: []const u8) !std.ArrayList([]u8) {
+    var frames: std.ArrayList([]u8) = .empty;
+    errdefer {
+        for (frames.items) |frame| allocator.free(frame);
+        frames.deinit(allocator);
     }
-    return lines;
+    var reader = try events.Reader.open(allocator, path);
+    defer reader.deinit();
+    while (try reader.next()) |frame| try frames.append(allocator, frame);
+    return frames;
+}
+
+fn freeFrames(allocator: std.mem.Allocator, frames: *std.ArrayList([]u8)) void {
+    for (frames.items) |frame| allocator.free(frame);
+    frames.deinit(allocator);
 }
 
 test "appendEntry persists a user_text entry" {
@@ -144,7 +155,7 @@ test "appendEntry persists a user_text entry" {
     defer allocator.free(path);
 
     const entry: transcript.OwnedEntry = .{ .user_text = "hello user" };
-    try appendEntry(allocator, path, &entry, .{});
+    try appendEntry(allocator, path, 1, &entry, .{});
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -166,7 +177,7 @@ test "appendEntry persists a model_text entry" {
     defer allocator.free(path);
 
     const entry: transcript.OwnedEntry = .{ .model_text = "Thinking..." };
-    try appendEntry(allocator, path, &entry, .{});
+    try appendEntry(allocator, path, 1, &entry, .{});
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -192,13 +203,10 @@ test "appendEntry on assistant_tool_use with 2 calls writes 2 distinct tool_use 
         .{ .id = "toolu_b", .name = "workspace_read_file", .args_json = "{\"path\":\"x.ts\"}" },
     };
     const entry: transcript.OwnedEntry = .{ .assistant_tool_use = calls[0..] };
-    try appendEntry(allocator, path, &entry, .{});
+    try appendEntry(allocator, path, 1, &entry, .{});
 
-    const raw = try readWhole(allocator, path);
-    defer allocator.free(raw);
-
-    var lines = try splitLines(allocator, raw);
-    defer lines.deinit(allocator);
+    var lines = try readFrames(allocator, path);
+    defer freeFrames(allocator, &lines);
     try testing.expectEqual(@as(usize, 2), lines.items.len);
 
     var p1 = try std.json.parseFromSlice(std.json.Value, allocator, lines.items[0], .{});
@@ -231,7 +239,7 @@ test "appendEntry on tool_result under cap writes body unchanged" {
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } };
-    try appendEntry(allocator, path, &entry, .{});
+    try appendEntry(allocator, path, 1, &entry, .{});
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -261,7 +269,7 @@ test "appendEntry preserves a large projected tool result exactly" {
         .ok = true,
         .llm_text = &big,
     } };
-    try appendEntry(allocator, path, &entry, .{});
+    try appendEntry(allocator, path, 1, &entry, .{});
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -279,7 +287,7 @@ test "appendEntry preserves a large projected tool result exactly" {
     }
 }
 
-test "appendEntry with no_persist_tool_output skips tool_result entries" {
+test "appendEntry with no_persist_tool_output writes a structural placeholder" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -293,10 +301,15 @@ test "appendEntry with no_persist_tool_output skips tool_result entries" {
         .ok = true,
         .llm_text = "secret output",
     } };
-    try appendEntry(allocator, path, &entry, .{ .no_persist_tool_output = true });
+    try appendEntry(allocator, path, 1, &entry, .{ .no_persist_tool_output = true });
 
-    // File must not have been created by the skipped write.
-    try testing.expect(!zts.file_io.fileExists(allocator, path));
+    const raw = try readWhole(allocator, path);
+    defer allocator.free(raw);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
+    defer parsed.deinit();
+    const body = parsed.value.object.get("d").?.object.get("body").?.string;
+    try testing.expectEqualStrings(redacted_tool_output, body);
+    try testing.expect(std.mem.indexOf(u8, raw, "secret output") == null);
 }
 
 test "appendEntry with no_persist_tool_output still persists user_text" {
@@ -308,7 +321,7 @@ test "appendEntry with no_persist_tool_output still persists user_text" {
     defer allocator.free(path);
 
     const entry: transcript.OwnedEntry = .{ .user_text = "still persisted" };
-    try appendEntry(allocator, path, &entry, .{ .no_persist_tool_output = true });
+    try appendEntry(allocator, path, 1, &entry, .{ .no_persist_tool_output = true });
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -331,14 +344,11 @@ test "appendEntry on proof_card and diagnostic_box round-trip correctly" {
 
     const proof: transcript.OwnedEntry = .{ .proof_card = .{ .llm_text = "contract ok" } };
     const diag: transcript.OwnedEntry = .{ .diagnostic_box = .{ .llm_text = "ZTS001 veto" } };
-    try appendEntry(allocator, path, &proof, .{});
-    try appendEntry(allocator, path, &diag, .{});
+    try appendEntry(allocator, path, 1, &proof, .{});
+    try appendEntry(allocator, path, 2, &diag, .{});
 
-    const raw = try readWhole(allocator, path);
-    defer allocator.free(raw);
-
-    var lines = try splitLines(allocator, raw);
-    defer lines.deinit(allocator);
+    var lines = try readFrames(allocator, path);
+    defer freeFrames(allocator, &lines);
     try testing.expectEqual(@as(usize, 2), lines.items.len);
 
     var p1 = try std.json.parseFromSlice(std.json.Value, allocator, lines.items[0], .{});

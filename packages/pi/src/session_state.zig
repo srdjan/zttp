@@ -171,6 +171,19 @@ test "currentProperties returns the latest patch for the matching file" {
     try testing.expect(current.?.retry_safe);
 }
 
+test "provider projection does not hide raw proof state" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var props = zeroProps();
+    props.retry_safe = true;
+    try appendPatch(testing.allocator, &tr, "handler.ts", null, props);
+    try tr.replaceProjection(testing.allocator, "summary", tr.nextEntryId());
+
+    const current = currentProperties(&tr, "handler.ts") orelse return error.TestExpectedProperties;
+    try testing.expect(current.retry_safe);
+    try testing.expectEqual(@as(usize, 1), tr.len());
+}
+
 test "currentProperties returns null when no patch matches the file" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);

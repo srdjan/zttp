@@ -1,16 +1,14 @@
-//! Rebuild an owned `Transcript` from an `events.jsonl` NDJSON log.
+//! Rebuild an owned raw `Transcript` plus its latest provider projection from
+//! a framed v3 event journal.
 //!
 //! Pure, wire-free helper used by resume flows to restore a previous session
-//! into memory. Each `k="tool_use"` event becomes one single-call
-//! `.assistant_tool_use` entry (one event -> one entry, matching the
-//! persister's one-tool_use-per-ToolCall emission shape). No coalescing.
+//! into memory. Tool-use frames that share one logical entry ID are coalesced
+//! back into the original multi-call assistant entry.
 //!
 //! Errors:
-//!   - `error.SchemaVersionTooNew` — any line's `v` exceeds the binary's
-//!     `events.schema_version`.
-//!   - `error.CorruptEventsLog` — JSON parse failure, missing required
-//!     fields, wrong field types, or unknown `k`. When `diag` is non-null,
-//!     `line_number` (1-based) and a short message are populated.
+//!   - `error.SchemaVersionUnsupported` - the journal is not direct-cutover v3.
+//!   - `error.CorruptEventsLog` - frame or JSON corruption, invalid stable IDs,
+//!     a malformed checkpoint, or an unknown event kind.
 //!   - Underlying file-IO errors propagate (`error.FileNotFound`, etc.).
 //!
 //! Empty file returns a fresh empty `Transcript`.
@@ -27,34 +25,44 @@ pub const Diagnostic = struct {
     message: []const u8 = "",
 };
 
-/// Reads the NDJSON events log at `events_path` and returns an owned
+/// Streams the framed event journal at `events_path` and returns an owned
 /// `Transcript`. Caller frees via `transcript.deinit(allocator)`.
 pub fn reconstructTranscript(
     allocator: std.mem.Allocator,
     events_path: []const u8,
     diag: ?*Diagnostic,
 ) !transcript.Transcript {
-    const raw = try zts.file_io.readFile(allocator, events_path, 64 * 1024 * 1024);
-    defer allocator.free(raw);
-
     var tr: transcript.Transcript = .{};
     errdefer tr.deinit(allocator);
 
-    if (raw.len == 0) return tr;
+    try events.recoverIncompleteTail(allocator, events_path);
+    var reader = try events.Reader.open(allocator, events_path);
+    defer reader.deinit();
 
-    var line_number: usize = 0;
-    var it = std.mem.splitScalar(u8, raw, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
-        line_number += 1;
-        appendFromLine(allocator, &tr, line) catch |err| switch (err) {
-            error.SchemaVersionTooNew => {
-                return error.SchemaVersionTooNew;
-            },
-            error.CorruptEventsLog => {
+    var record_number: usize = 0;
+    while (true) {
+        const record_json = reader.next() catch |err| switch (err) {
+            error.SchemaVersionUnsupported => return error.SchemaVersionUnsupported,
+            error.CorruptEventsLog,
+            error.IncompleteEventFrame,
+            error.EventTooLarge,
+            => {
                 if (diag) |d| d.* = .{
-                    .line_number = line_number,
-                    .message = "invalid or malformed events.jsonl line",
+                    .line_number = record_number + 1,
+                    .message = "invalid or malformed v3 event frame",
+                };
+                return error.CorruptEventsLog;
+            },
+            else => |other| return other,
+        } orelse break;
+        defer allocator.free(record_json);
+        record_number += 1;
+        appendFromLine(allocator, &tr, record_json) catch |err| switch (err) {
+            error.SchemaVersionUnsupported => return error.SchemaVersionUnsupported,
+            error.CorruptEventsLog, error.InvalidProjectionCut => {
+                if (diag) |d| d.* = .{
+                    .line_number = record_number,
+                    .message = "invalid or malformed v3 event frame",
                 };
                 return error.CorruptEventsLog;
             },
@@ -82,8 +90,8 @@ fn appendFromLine(
     if (version_val != .integer) return error.CorruptEventsLog;
     const version_i = version_val.integer;
     if (version_i < 0) return error.CorruptEventsLog;
-    const version: u32 = std.math.cast(u32, version_i) orelse return error.SchemaVersionTooNew;
-    if (version > events.schema_version) return error.SchemaVersionTooNew;
+    const version: u32 = std.math.cast(u32, version_i) orelse return error.SchemaVersionUnsupported;
+    if (version != events.schema_version) return error.SchemaVersionUnsupported;
 
     const kind_val = obj.get("k") orelse return error.CorruptEventsLog;
     if (kind_val != .string) return error.CorruptEventsLog;
@@ -91,6 +99,24 @@ fn appendFromLine(
     const payload = obj.get("d") orelse return error.CorruptEventsLog;
 
     const kind = kind_val.string;
+    const entry_id = try parseOptionalEntryId(obj);
+    const part_index = try parseOptionalPartIndex(obj);
+    const transcript_kind = isTranscriptKind(kind);
+    if (transcript_kind and entry_id == null) return error.CorruptEventsLog;
+    if (!transcript_kind and (entry_id != null or part_index != null)) return error.CorruptEventsLog;
+
+    if (transcript_kind) {
+        const id = entry_id.?;
+        if (std.mem.eql(u8, kind, "tool_use") and id == tr.nextEntryId() - 1) {
+            try appendToolUsePart(allocator, tr, payload, part_index orelse return error.CorruptEventsLog);
+            return;
+        }
+        if (id != tr.nextEntryId()) return error.CorruptEventsLog;
+        if (std.mem.eql(u8, kind, "tool_use")) {
+            if (part_index != 0) return error.CorruptEventsLog;
+        } else if (part_index != null) return error.CorruptEventsLog;
+    }
+
     if (std.mem.eql(u8, kind, "user_text")) {
         try appendText(allocator, tr, payload, .user_text);
     } else if (std.mem.eql(u8, kind, "model_text")) {
@@ -116,9 +142,51 @@ fn appendFromLine(
     } else if (std.mem.eql(u8, kind, "session_summary")) {
         // Session-level metrics row; not rebuilt into the transcript.
         return;
+    } else if (std.mem.eql(u8, kind, "compaction_checkpoint")) {
+        try applyCheckpoint(allocator, tr, payload);
     } else {
         return error.CorruptEventsLog;
     }
+}
+
+fn isTranscriptKind(kind: []const u8) bool {
+    return std.mem.eql(u8, kind, "user_text") or
+        std.mem.eql(u8, kind, "model_text") or
+        std.mem.eql(u8, kind, "proof_card") or
+        std.mem.eql(u8, kind, "diagnostic_box") or
+        std.mem.eql(u8, kind, "verified_patch") or
+        std.mem.eql(u8, kind, "tool_use") or
+        std.mem.eql(u8, kind, "tool_result") or
+        std.mem.eql(u8, kind, "system_note");
+}
+
+fn parseOptionalEntryId(obj: std.json.ObjectMap) !?events.EntryId {
+    const value = obj.get("entry_id") orelse return null;
+    if (value != .integer or value.integer <= 0) return error.CorruptEventsLog;
+    return std.math.cast(events.EntryId, value.integer) orelse error.CorruptEventsLog;
+}
+
+fn parseOptionalPartIndex(obj: std.json.ObjectMap) !?u32 {
+    const value = obj.get("part_index") orelse return null;
+    if (value != .integer or value.integer < 0) return error.CorruptEventsLog;
+    return std.math.cast(u32, value.integer) orelse error.CorruptEventsLog;
+}
+
+fn applyCheckpoint(
+    allocator: std.mem.Allocator,
+    tr: *transcript.Transcript,
+    payload: std.json.Value,
+) !void {
+    if (payload != .object) return error.CorruptEventsLog;
+    const summary = payload.object.get("summary") orelse return error.CorruptEventsLog;
+    const first_kept = payload.object.get("first_kept_entry_id") orelse return error.CorruptEventsLog;
+    const reason = payload.object.get("reason") orelse return error.CorruptEventsLog;
+    if (summary != .string or first_kept != .integer or first_kept.integer <= 0 or reason != .string) {
+        return error.CorruptEventsLog;
+    }
+    _ = std.meta.stringToEnum(events.CompactionReason, reason.string) orelse return error.CorruptEventsLog;
+    const cut = std.math.cast(events.EntryId, first_kept.integer) orelse return error.CorruptEventsLog;
+    try tr.replaceProjection(allocator, summary.string, cut);
 }
 
 const TextKind = enum { user_text, model_text, system_note };
@@ -194,6 +262,39 @@ fn appendToolUse(
 
     calls[0] = .{ .id = id_copy, .name = name_copy, .args_json = args_copy };
     try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
+}
+
+fn appendToolUsePart(
+    allocator: std.mem.Allocator,
+    tr: *transcript.Transcript,
+    payload: std.json.Value,
+    part_index: u32,
+) !void {
+    if (tr.entries.items.len == 0) return error.CorruptEventsLog;
+    const last = &tr.entries.items[tr.entries.items.len - 1];
+    if (last.* != .assistant_tool_use) return error.CorruptEventsLog;
+    if (part_index != last.assistant_tool_use.len) return error.CorruptEventsLog;
+    if (payload != .object) return error.CorruptEventsLog;
+    const id_val = payload.object.get("id") orelse return error.CorruptEventsLog;
+    const name_val = payload.object.get("name") orelse return error.CorruptEventsLog;
+    const args_val = payload.object.get("args_json") orelse return error.CorruptEventsLog;
+    if (id_val != .string or name_val != .string or args_val != .string) return error.CorruptEventsLog;
+
+    const id_copy = try allocator.dupe(u8, id_val.string);
+    errdefer allocator.free(id_copy);
+    const name_copy = try allocator.dupe(u8, name_val.string);
+    errdefer allocator.free(name_copy);
+    const args_copy = try allocator.dupe(u8, args_val.string);
+    errdefer allocator.free(args_copy);
+
+    const old_len = last.assistant_tool_use.len;
+    const calls = try allocator.realloc(last.assistant_tool_use, old_len + 1);
+    last.assistant_tool_use = calls;
+    calls[old_len] = .{
+        .id = id_copy,
+        .name = name_copy,
+        .args_json = args_copy,
+    };
 }
 
 fn appendToolResult(
@@ -298,20 +399,25 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEvent(allocator, path, .{ .user_text = "hi" });
-    try events.appendEvent(allocator, path, .{ .model_text = "hello back" });
-    try events.appendEvent(allocator, path, .{ .tool_use = .{
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "hi" });
+    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "hello back" });
+    try events.appendEntryEvent(allocator, path, 3, 0, .{ .tool_use = .{
         .id = "toolu_1",
         .name = "zts_expert_meta",
         .args_json = "{\"verbose\":true}",
     } });
-    try events.appendEvent(allocator, path, .{ .tool_result = .{
+    try events.appendEntryEvent(allocator, path, 3, 1, .{ .tool_use = .{
+        .id = "toolu_2",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+    } });
+    try events.appendEntryEvent(allocator, path, 4, null, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
         .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } });
-    try events.appendEvent(allocator, path, .{ .proof_card = .{ .llm_text = "contract ok" } });
+    try events.appendEntryEvent(allocator, path, 5, null, .{ .proof_card = .{ .llm_text = "contract ok" } });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -328,10 +434,12 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     }
     switch (tr.at(2).*) {
         .assistant_tool_use => |calls| {
-            try testing.expectEqual(@as(usize, 1), calls.len);
+            try testing.expectEqual(@as(usize, 2), calls.len);
             try testing.expectEqualStrings("toolu_1", calls[0].id);
             try testing.expectEqualStrings("zts_expert_meta", calls[0].name);
             try testing.expectEqualStrings("{\"verbose\":true}", calls[0].args_json);
+            try testing.expectEqualStrings("toolu_2", calls[1].id);
+            try testing.expectEqualStrings("workspace_read_file", calls[1].name);
         },
         else => return error.TestFailed,
     }
@@ -350,7 +458,7 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     }
 }
 
-test "reconstructTranscript tolerates a retired UI payload kind" {
+test "reconstructTranscript rejects a v2 journal after the direct cutover" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -358,34 +466,8 @@ test "reconstructTranscript tolerates a retired UI payload kind" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    // Written plainly on purpose. This is the one place the retired kind still
-    // has to appear, because the fixture is a session recorded before it was
-    // removed, and someone grepping for why it survives should find this test.
-    const retired_kind = "forge_run";
-    const jsonl = try std.fmt.allocPrint(
-        allocator,
-        "{{\"v\":{d},\"k\":\"tool_result\",\"d\":{{\"tool_use_id\":\"toolu_legacy\",\"tool_name\":\"retired_source_tool\",\"ok\":true,\"llm_text\":\"legacy output\",\"ui_payload\":{{\"kind\":\"{s}\",\"run_id\":\"legacy-run\",\"file\":\"handler.ts\",\"feature_kind\":\"route\",\"method\":\"GET\",\"path\":\"/health\",\"handler_name\":\"handleHealth\",\"steps\":[],\"final_content\":\"export function handler() {{}}\",\"unified_diff\":\"\",\"success\":true,\"terminal_reason\":\"verified\",\"verification_summary\":\"0 new violations\",\"stats\":{{\"total\":0,\"new\":0,\"preexisting\":0}}}}}}}}\n",
-        .{ events.schema_version, retired_kind },
-    );
-    defer allocator.free(jsonl);
-    try zts.file_io.writeFile(allocator, path, jsonl);
-
-    var tr = try reconstructTranscript(allocator, path, null);
-    defer tr.deinit(allocator);
-
-    try testing.expectEqual(@as(usize, 1), tr.len());
-    switch (tr.at(0).*) {
-        .tool_result => |result| {
-            try testing.expect(result.ui_payload != null);
-            switch (result.ui_payload.?) {
-                .plain_text => |text| {
-                    try testing.expect(std.mem.indexOf(u8, text, retired_kind) != null);
-                },
-                else => return error.TestFailed,
-            }
-        },
-        else => return error.TestFailed,
-    }
+    try zts.file_io.writeFile(allocator, path, "{\"v\":2,\"k\":\"user_text\",\"d\":\"legacy\"}\n");
+    try testing.expectError(error.SchemaVersionUnsupported, reconstructTranscript(allocator, path, null));
 }
 
 test "reconstructTranscript skips turn_end records" {
@@ -396,9 +478,9 @@ test "reconstructTranscript skips turn_end records" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEvent(allocator, path, .{ .user_text = "before" });
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "before" });
     try events.appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_roundtrips } });
-    try events.appendEvent(allocator, path, .{ .model_text = "after" });
+    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "after" });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -464,7 +546,7 @@ test "reconstructTranscript round-trips a verified_patch event with ui_payload" 
     } };
     defer patch.deinit(allocator);
 
-    try events.appendEvent(allocator, path, .{ .verified_patch = .{
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .verified_patch = .{
         .llm_text = "verified: handler.ts",
         .ui_payload = patch,
     } });
@@ -497,7 +579,7 @@ test "reconstructTranscript round-trips a verified_patch event with ui_payload" 
     }
 }
 
-test "reconstructTranscript rejects schema versions newer than this binary" {
+test "reconstructTranscript restores the latest projection checkpoint" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -505,14 +587,59 @@ test "reconstructTranscript rejects schema versions newer than this binary" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try zts.file_io.writeFile(allocator, path, "{\"v\":9999,\"k\":\"user_text\",\"d\":\"x\"}\n");
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "old" });
+    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "old answer" });
+    try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+        .summary = "summary",
+        .first_kept_entry_id = 3,
+        .reason = .manual,
+    } });
+    try events.appendEntryEvent(allocator, path, 3, null, .{ .user_text = "new" });
 
-    var diag: Diagnostic = .{};
-    const result = reconstructTranscript(allocator, path, &diag);
-    try testing.expectError(error.SchemaVersionTooNew, result);
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    try testing.expectEqual(@as(usize, 3), tr.len());
+    try testing.expectEqualStrings("summary", tr.projection.?.summary);
+    try testing.expectEqual(@as(events.EntryId, 3), tr.projection.?.first_kept_entry_id);
 }
 
-test "reconstructTranscript reports line 1 on a truncated first line" {
+test "reconstructTranscript rejects a checkpoint with a missing cut identity" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "only" });
+    try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+        .summary = "invalid",
+        .first_kept_entry_id = 99,
+        .reason = .manual,
+    } });
+    try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
+}
+
+test "reconstructTranscript streams a journal larger than the former 64 MiB ceiling" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    const body = try allocator.alloc(u8, 33 * 1024 * 1024);
+    defer allocator.free(body);
+    @memset(body, 'a');
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .system_note = body });
+    try events.appendEntryEvent(allocator, path, 2, null, .{ .system_note = body });
+
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    try testing.expectEqual(@as(usize, 2), tr.len());
+    try testing.expectEqual(body.len, tr.at(0).system_note.len);
+    try testing.expectEqual(body.len, tr.at(1).system_note.len);
+}
+
+test "reconstructTranscript recovers a provably incomplete final frame" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -520,12 +647,14 @@ test "reconstructTranscript reports line 1 on a truncated first line" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try zts.file_io.writeFile(allocator, path, "{\"v\":1,\"k\":\"user_text\",\"d\"\n");
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "complete" });
+    const fd = try zts.file_io.openAppend(allocator, path);
+    defer std.Io.Threaded.closeFd(fd);
+    _ = std.c.write(fd, "ZTE3partial".ptr, "ZTE3partial".len);
 
-    var diag: Diagnostic = .{};
-    const result = reconstructTranscript(allocator, path, &diag);
-    try testing.expectError(error.CorruptEventsLog, result);
-    try testing.expectEqual(@as(usize, 1), diag.line_number);
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), tr.len());
 }
 
 test "reconstructTranscript reports the line number of the first corrupt record" {
@@ -536,16 +665,20 @@ test "reconstructTranscript reports the line number of the first corrupt record"
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEvent(allocator, path, .{ .user_text = "one" });
-    try events.appendEvent(allocator, path, .{ .user_text = "two" });
-    // Append a hand-rolled garbage line so line 3 fails parsing.
-    const fd = try zts.file_io.openAppend(allocator, path);
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "one" });
+    try events.appendEntryEvent(allocator, path, 2, null, .{ .user_text = "two" });
+    const raw = try zts.file_io.readFile(allocator, path, 1024 * 1024);
+    defer allocator.free(raw);
+    const corrupt_at = std.mem.indexOf(u8, raw, "two") orelse return error.TestExpectedPayload;
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
     defer std.Io.Threaded.closeFd(fd);
-    const junk = "not json at all\n";
-    _ = std.c.write(fd, junk.ptr, junk.len);
+    const replacement = "x";
+    _ = std.c.pwrite(fd, replacement.ptr, replacement.len, @intCast(corrupt_at));
 
     var diag: Diagnostic = .{};
     const result = reconstructTranscript(allocator, path, &diag);
     try testing.expectError(error.CorruptEventsLog, result);
-    try testing.expectEqual(@as(usize, 3), diag.line_number);
+    try testing.expectEqual(@as(usize, 2), diag.line_number);
 }

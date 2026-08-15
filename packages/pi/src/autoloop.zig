@@ -751,7 +751,7 @@ fn applyPlans(
         } });
 
         if (options.events_path) |path| {
-            try session_events.appendEvent(allocator, path, .{ .verified_patch = .{
+            try session_events.appendEntryEvent(allocator, path, transcript.entryIdAt(transcript.len() - 1), null, .{ .verified_patch = .{
                 .llm_text = summary,
                 .ui_payload = ui,
             } });
@@ -782,7 +782,8 @@ fn applyPlans(
                     .{ plan.id, options.file },
                 );
                 defer allocator.free(note);
-                try session_events.appendEvent(allocator, path, .{ .system_note = note });
+                try transcript.append(allocator, .{ .system_note = note });
+                try session_events.appendEntryEvent(allocator, path, transcript.entryIdAt(transcript.len() - 1), null, .{ .system_note = note });
             }
             return .{ .applied = applied, .regression = true };
         }
@@ -908,7 +909,7 @@ fn emitWitnessReplaySummary(
     note_owned_by_transcript = true;
 
     if (options.events_path) |path| {
-        try session_events.appendEvent(allocator, path, .{ .system_note = note });
+        try session_events.appendEntryEvent(allocator, path, transcript.entryIdAt(transcript.len() - 1), null, .{ .system_note = note });
     }
 }
 

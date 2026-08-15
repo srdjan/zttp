@@ -120,7 +120,13 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
     var item_groups: std.ArrayListUnmanaged(ItemGroup) = .empty;
     errdefer item_groups.deinit(allocator);
 
-    for (input.transcript.entries.items) |entry| {
+    if (input.transcript.projection) |projection| {
+        try items.append(allocator, .{ .system_note = projection.summary });
+        try item_groups.append(allocator, .{ .start = 0, .len = 1 });
+    }
+
+    const active_start = try input.transcript.activeStartIndex();
+    for (input.transcript.entries.items[active_start..]) |entry| {
         const start = items.items.len;
         switch (entry) {
             .user_text => |body| try items.append(allocator, .{ .user_text = body }),
@@ -264,4 +270,36 @@ fn finish(hasher: *std.crypto.hash.sha2.Sha256) Sha256Hex {
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     return .{ .bytes = std.fmt.bytesToHex(digest, .lower) };
+}
+
+test "snapshot uses checkpoint summary and retained suffix without mutating raw history" {
+    const testing = std.testing;
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "old request" });
+    try transcript.append(testing.allocator, .{ .model_text = "old answer" });
+    try transcript.append(testing.allocator, .{ .user_text = "retained request" });
+    try transcript.replaceProjection(testing.allocator, "durable summary", 3);
+
+    var snapshot = try createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .deepseek,
+            .model = "deepseek-chat",
+            .max_output_tokens = 1024,
+            .system_prompt = "system",
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), transcript.len());
+    try testing.expectEqual(@as(usize, 2), snapshot.items.len);
+    switch (snapshot.items[0]) {
+        .system_note => |body| try testing.expectEqualStrings("durable summary", body),
+        else => return error.TestExpectedSummary,
+    }
+    switch (snapshot.items[1]) {
+        .user_text => |body| try testing.expectEqualStrings("retained request", body),
+        else => return error.TestExpectedSuffix,
+    }
 }

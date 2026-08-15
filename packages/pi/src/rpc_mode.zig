@@ -576,7 +576,7 @@ fn handleTurn(
     const tr = &session.transcript;
     var idx: usize = start_len;
     while (idx < tr.len()) : (idx += 1) {
-        try emitEntryNotification(allocator, out, tr.at(idx));
+        try emitEntryNotification(allocator, out, tr.entryIdAt(idx), tr.at(idx));
     }
 
     var buf = TextBuffer.init(allocator);
@@ -584,6 +584,14 @@ fn handleTurn(
     const w = buf.writer();
     try w.writeAll("{\"appended\":");
     try w.print("{d}", .{tr.len() - start_len});
+    try w.writeAll(",\"first_entry_id\":");
+    if (start_len < tr.len()) {
+        try w.print("{d}", .{tr.entryIdAt(start_len)});
+    } else try w.writeAll("null");
+    try w.writeAll(",\"last_entry_id\":");
+    if (start_len < tr.len()) {
+        try w.print("{d}", .{tr.entryIdAt(tr.len() - 1)});
+    } else try w.writeAll("null");
     try w.writeAll(",\"rendered\":");
     try json_writer.writeString(w, rendered);
     try w.writeByte('}');
@@ -689,6 +697,7 @@ fn emitErrorFmt(
 fn emitEntryNotification(
     allocator: std.mem.Allocator,
     out: ?*std.Io.Writer,
+    entry_id: session_events.EntryId,
     entry: *const transcript_mod.OwnedEntry,
 ) !void {
     const record: ?session_events.EventRecord = switch (entry.*) {
@@ -718,13 +727,13 @@ fn emitEntryNotification(
     };
 
     if (record) |r| {
-        try emitNotification(allocator, out, r);
+        try emitEntryEventNotification(allocator, out, entry_id, null, r);
         return;
     }
     // Fan out one notification per tool call.
     const calls = entry.assistant_tool_use;
-    for (calls) |c| {
-        try emitNotification(allocator, out, .{ .tool_use = .{
+    for (calls, 0..) |c, part_index| {
+        try emitEntryEventNotification(allocator, out, entry_id, @intCast(part_index), .{ .tool_use = .{
             .id = c.id,
             .name = c.name,
             .args_json = c.args_json,
@@ -737,12 +746,36 @@ fn emitNotification(
     out: ?*std.Io.Writer,
     record: session_events.EventRecord,
 ) !void {
+    return emitNotificationEnvelope(allocator, out, null, null, record);
+}
+
+fn emitEntryEventNotification(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    entry_id: session_events.EntryId,
+    part_index: ?u32,
+    record: session_events.EventRecord,
+) !void {
+    return emitNotificationEnvelope(allocator, out, entry_id, part_index, record);
+}
+
+fn emitNotificationEnvelope(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    entry_id: ?session_events.EntryId,
+    part_index: ?u32,
+    record: session_events.EventRecord,
+) !void {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
     const w = buf.writer();
 
     try w.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"event\",\"params\":");
-    try session_events.writeEventLine(w, record);
+    if (entry_id) |id| {
+        try session_events.writeEntryEventLine(w, id, part_index, record);
+    } else {
+        try session_events.writeEventLine(w, record);
+    }
     // Drop the trailing '\n' written by writeEventLine so the wrapping
     // notification object stays on one line, then close it ourselves.
     const written = buf.written();
@@ -1134,9 +1167,13 @@ test "rpc: turn with stub session emits event notifications and a final result" 
     try testing.expect(std.mem.indexOf(u8, out, "\"method\":\"event\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"k\":\"user_text\"") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"k\":\"model_text\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"entry_id\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"entry_id\":2") != null);
     // Final result: two entries appended (user + stub reply).
     try testing.expect(std.mem.indexOf(u8, out, "\"id\":1,\"result\":") != null);
     try testing.expect(std.mem.indexOf(u8, out, "\"appended\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"first_entry_id\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"last_entry_id\":2") != null);
 }
 
 test "rpc: tools.invoke missing name returns INVALID_PARAMS" {

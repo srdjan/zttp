@@ -22,6 +22,7 @@ const tools_schema = @import("providers/anthropic/tools_schema.zig");
 const openai_client = @import("providers/openai/client.zig");
 const local_client = @import("providers/local/client.zig");
 const deepseek_client = @import("providers/deepseek/client.zig");
+const model_request = @import("providers/model_request.zig");
 const models_registry = @import("providers/models.zig");
 const provider_selection = @import("providers/selection.zig");
 const expert_persona = @import("expert_persona.zig");
@@ -820,10 +821,7 @@ fn initFromEnvWithPreparedResume(
         const tr = try reconstructor.reconstructTranscript(allocator, src_events, null);
         session.transcript.deinit(allocator);
         session.transcript = tr;
-        // Re-persist forked transcript to the new session's events.jsonl.
-        for (session.transcript.entries.items) |*entry| {
-            try persister.appendEntry(allocator, events_path, entry, session.persist_opts);
-        }
+        try session_events.copyJournal(allocator, src_events, events_path);
         session.last_persisted_len = session.transcript.len();
         try session_events.writeMeta(allocator, meta_path, .{
             .session_id = sid,
@@ -886,7 +884,11 @@ const non_transcript_token_allowance: usize = 20_000;
 pub fn estimateContextTokens(session: *const AgentSession) usize {
     var scratch: [256]u8 = undefined;
     var discarding = std.Io.Writer.Discarding.init(&scratch);
-    for (session.transcript.entries.items) |*entry| {
+    if (session.transcript.projection) |projection| {
+        discarding.writer.writeAll(projection.summary) catch {};
+    }
+    const active_start = session.transcript.activeStartIndex() catch 0;
+    for (session.transcript.entries.items[active_start..]) |*entry| {
         transcript_mod.renderPlain(&discarding.writer, entry) catch break;
     }
     const bytes: usize = @intCast(discarding.fullCount());
@@ -976,6 +978,7 @@ fn injectDriftNote(
             try persister.appendEntry(
                 allocator,
                 path,
+                session.transcript.entryIdAt(session.transcript.entries.items.len - 1),
                 &session.transcript.entries.items[session.transcript.entries.items.len - 1],
                 session.persist_opts,
             );
@@ -1102,7 +1105,13 @@ pub fn runOneTurnWithClient(
         if (session.events_path) |path| {
             const entries = session.transcript.entries.items;
             while (session.last_persisted_len < entries.len) : (session.last_persisted_len += 1) {
-                persister.appendEntry(allocator, path, &entries[session.last_persisted_len], session.persist_opts) catch {};
+                persister.appendEntry(
+                    allocator,
+                    path,
+                    session.transcript.entryIdAt(session.last_persisted_len),
+                    &entries[session.last_persisted_len],
+                    session.persist_opts,
+                ) catch {};
             }
             session_events.appendEvent(allocator, path, .{ .turn_end = .{
                 .reason = .error_exit,
@@ -1121,6 +1130,7 @@ pub fn runOneTurnWithClient(
             try persister.appendEntry(
                 allocator,
                 path,
+                tr.entryIdAt(session.last_persisted_len),
                 &entries[session.last_persisted_len],
                 session.persist_opts,
             );
@@ -1133,10 +1143,9 @@ pub fn runOneTurnWithClient(
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
 }
 
-/// Compact the session transcript: render all existing entries to plain text,
-/// replace them with a single `system_note` carrying that rendered history,
-/// and reset the persistence cursor so the note is persisted next time.
-/// The model will see the compacted history as a user-role context block.
+/// Compact the provider-visible projection without deleting the raw transcript.
+/// The temporary plain-text summary is replaced by the dedicated model
+/// summarizer in U6; the durable checkpoint and raw-journal semantics land here.
 pub fn compact(
     allocator: std.mem.Allocator,
     session: *AgentSession,
@@ -1149,22 +1158,43 @@ pub fn compact(
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
     try buf.writer().writeAll("[COMPACTED CONVERSATION HISTORY]\n");
-    for (tr.entries.items) |*entry| {
+    if (tr.projection) |projection| {
+        try buf.writer().writeAll(projection.summary);
+        try buf.writer().writeByte('\n');
+    }
+    const active_start = try tr.activeStartIndex();
+    for (tr.entries.items[active_start..]) |*entry| {
         try transcript_mod.renderPlain(buf.writer(), entry);
     }
-    const note = try buf.toOwnedSlice();
-    errdefer allocator.free(note);
+    const summary = try buf.toOwnedSlice();
+    const first_kept_entry_id = tr.nextEntryId();
+    const active_entry_count = tr.len() - active_start;
+    errdefer allocator.free(summary);
 
-    const entry_count = tr.len();
-    for (tr.entries.items) |*entry| entry.deinit(allocator);
-    tr.entries.clearAndFree(allocator);
-    try tr.entries.append(allocator, .{ .system_note = note });
-    session.last_persisted_len = 0;
+    if (session.events_path) |path| {
+        while (session.last_persisted_len < tr.len()) : (session.last_persisted_len += 1) {
+            try persister.appendEntry(
+                allocator,
+                path,
+                tr.entryIdAt(session.last_persisted_len),
+                tr.at(session.last_persisted_len),
+                session.persist_opts,
+            );
+        }
+        try session_events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+            .summary = summary,
+            .first_kept_entry_id = first_kept_entry_id,
+            .reason = .manual,
+            .tokens_before = estimateContextTokens(session),
+        } });
+    }
+
+    tr.installProjectionOwned(allocator, summary, first_kept_entry_id);
 
     return std.fmt.allocPrint(
         allocator,
-        "Compacted {d} entries into a single context note.\n",
-        .{entry_count},
+        "Compacted {d} active entries into a durable context projection.\n",
+        .{active_entry_count},
     );
 }
 
@@ -1198,9 +1228,17 @@ pub fn fork(
     const new_meta_path = try std.fs.path.join(allocator, &.{ new_dir, "meta.json" });
     errdefer allocator.free(new_meta_path);
 
-    for (session.transcript.entries.items) |*entry| {
-        try persister.appendEntry(allocator, new_events_path, entry, session.persist_opts);
+    const old_events_path = session.events_path orelse return error.MissingSessionPath;
+    while (session.last_persisted_len < session.transcript.len()) : (session.last_persisted_len += 1) {
+        try persister.appendEntry(
+            allocator,
+            old_events_path,
+            session.transcript.entryIdAt(session.last_persisted_len),
+            session.transcript.at(session.last_persisted_len),
+            session.persist_opts,
+        );
     }
+    try session_events.copyJournal(allocator, old_events_path, new_events_path);
 
     try session_events.writeMeta(allocator, new_meta_path, .{
         .session_id = new_sid,
@@ -2061,7 +2099,7 @@ test "named session resume preserves transcript bytes and stored identity" {
         });
         defer source.deinit(allocator);
         const source_events_path = source.events_path orelse return error.TestUnexpectedResult;
-        try session_events.appendEvent(allocator, source_events_path, .{ .user_text = "preserve me" });
+        try session_events.appendEntryEvent(allocator, source_events_path, 1, null, .{ .user_text = "preserve me" });
         const bytes = try zts.file_io.readFile(allocator, source_events_path, 1024 * 1024);
         errdefer allocator.free(bytes);
         break :blk .{
@@ -2146,9 +2184,11 @@ test "model-free legacy resume bypasses provider identity and preserves metadata
     const meta_path = blk: {
         var source = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
         defer source.deinit(allocator);
-        try session_events.appendEvent(
+        try session_events.appendEntryEvent(
             allocator,
             source.events_path orelse return error.TestUnexpectedResult,
+            1,
+            null,
             .{ .user_text = "compiler witness" },
         );
         const source_meta_path = source.meta_path orelse return error.TestUnexpectedResult;
@@ -2434,7 +2474,7 @@ test "compact: empty transcript returns early message" {
     try testing.expectEqual(@as(usize, 0), session.transcript.len());
 }
 
-test "compact: collapses entries into one system_note" {
+test "compact preserves raw entries and installs one active projection" {
     var session = AgentSession.initStub();
     defer session.deinit(testing.allocator);
     var registry: Registry = .{};
@@ -2450,16 +2490,92 @@ test "compact: collapses entries into one system_note" {
     const msg = try compact(testing.allocator, &session);
     defer testing.allocator.free(msg);
 
-    try testing.expectEqual(@as(usize, 1), session.transcript.len());
-    switch (session.transcript.at(0).*) {
-        .system_note => |body| {
-            try testing.expect(std.mem.indexOf(u8, body, "first turn") != null);
-            try testing.expect(std.mem.indexOf(u8, body, "[COMPACTED CONVERSATION HISTORY]") != null);
-        },
-        else => return error.TestFailed,
-    }
+    try testing.expectEqual(before_len, session.transcript.len());
+    const projection = session.transcript.projection orelse return error.TestExpectedProjection;
+    try testing.expect(std.mem.indexOf(u8, projection.summary, "first turn") != null);
+    try testing.expect(std.mem.indexOf(u8, projection.summary, "[COMPACTED CONVERSATION HISTORY]") != null);
+    try testing.expectEqual(session.transcript.nextEntryId(), projection.first_kept_entry_id);
+    try testing.expectEqual(before_len, try session.transcript.activeStartIndex());
     try testing.expect(std.mem.indexOf(u8, msg, "Compacted") != null);
     try testing.expectEqual(@as(usize, 0), session.last_persisted_len);
+}
+
+test "compact checkpoint survives immediate session close and resume" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    const SourceProjection = struct {
+        session_id: []u8,
+        transcript_sha256: model_request.Sha256Hex,
+        history_bytes: u64,
+    };
+    const source_projection: SourceProjection = blk: {
+        var source = try initFromEnvWithSessionConfig(allocator, null, .{
+            .no_context_files = true,
+            .provider = .anthropic,
+            .model = "claude-opus-4-8",
+        });
+        defer source.deinit(allocator);
+        try source.transcript.append(allocator, .{ .user_text = "durable request" });
+        try source.transcript.append(allocator, .{ .model_text = "durable answer" });
+        const msg = try compact(allocator, &source);
+        defer allocator.free(msg);
+        var snapshot = try model_request.createSnapshot(allocator, .{
+            .config = .{
+                .provider = .anthropic,
+                .model = "claude-opus-4-8",
+                .max_output_tokens = 1024,
+                .system_prompt = "test system",
+            },
+            .transcript = &source.transcript,
+        });
+        defer snapshot.deinit(allocator);
+        break :blk .{
+            .session_id = try allocator.dupe(u8, source.session_id orelse return error.TestExpectedSession),
+            .transcript_sha256 = snapshot.transcript_sha256,
+            .history_bytes = snapshot.component_bytes.history,
+        };
+    };
+    defer allocator.free(source_projection.session_id);
+
+    var resumed = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .session_id = source_projection.session_id,
+    });
+    defer resumed.deinit(allocator);
+    try testing.expectEqual(@as(usize, 2), resumed.transcript.len());
+    const projection = resumed.transcript.projection orelse return error.TestExpectedProjection;
+    try testing.expect(std.mem.indexOf(u8, projection.summary, "durable request") != null);
+    try testing.expectEqual(@as(transcript_mod.EntryId, 3), projection.first_kept_entry_id);
+
+    var resumed_snapshot = try model_request.createSnapshot(allocator, .{
+        .config = .{
+            .provider = .anthropic,
+            .model = "claude-opus-4-8",
+            .max_output_tokens = 1024,
+            .system_prompt = "test system",
+        },
+        .transcript = &resumed.transcript,
+    });
+    defer resumed_snapshot.deinit(allocator);
+    try testing.expect(source_projection.transcript_sha256.eql(resumed_snapshot.transcript_sha256));
+    try testing.expectEqual(source_projection.history_bytes, resumed_snapshot.component_bytes.history);
+}
+
+test "compact checkpoint write failure leaves the active projection unchanged" {
+    var session = AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+    try session.transcript.append(testing.allocator, .{ .user_text = "must remain active" });
+    session.events_path = try testing.allocator.dupe(u8, "/nonexistent/zttp-events/checkpoint.jsonl");
+
+    try testing.expectError(error.FileOpenFailed, compact(testing.allocator, &session));
+    try testing.expect(session.transcript.projection == null);
+    try testing.expectEqual(@as(usize, 1), session.transcript.len());
 }
 
 test "fork: ephemeral session returns error message" {
@@ -2469,6 +2585,52 @@ test "fork: ephemeral session returns error message" {
     const msg = try fork(testing.allocator, &session);
     defer testing.allocator.free(msg);
     try testing.expect(std.mem.indexOf(u8, msg, "ephemeral") != null);
+}
+
+test "fork copies raw ancestry and projection checkpoints before independent divergence" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .provider = .anthropic,
+        .model = "claude-opus-4-8",
+    });
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "ancestor" });
+    try session.transcript.append(allocator, .{ .model_text = "answer" });
+    const compacted = try compact(allocator, &session);
+    defer allocator.free(compacted);
+    const repeated = try compact(allocator, &session);
+    defer allocator.free(repeated);
+
+    const source_events_path = try allocator.dupe(u8, session.events_path orelse return error.TestExpectedEvents);
+    defer allocator.free(source_events_path);
+    const source_before = try zts.file_io.readFile(allocator, source_events_path, 1024 * 1024);
+    defer allocator.free(source_before);
+
+    const forked = try fork(allocator, &session);
+    defer allocator.free(forked);
+    const fork_events_path = session.events_path orelse return error.TestExpectedEvents;
+    const fork_before = try zts.file_io.readFile(allocator, fork_events_path, 1024 * 1024);
+    defer allocator.free(fork_before);
+    try testing.expectEqualSlices(u8, source_before, fork_before);
+    try testing.expect(session.transcript.projection != null);
+
+    try session.transcript.append(allocator, .{ .user_text = "fork-only" });
+    const compacted_again = try compact(allocator, &session);
+    defer allocator.free(compacted_again);
+    const source_after = try zts.file_io.readFile(allocator, source_events_path, 1024 * 1024);
+    defer allocator.free(source_after);
+    try testing.expectEqualSlices(u8, source_before, source_after);
+    const fork_after = try zts.file_io.readFile(allocator, fork_events_path, 1024 * 1024);
+    defer allocator.free(fork_after);
+    try testing.expect(fork_after.len > fork_before.len);
 }
 
 test "initFromEnvWithSessionConfig appends AGENTS and CLAUDE files as read-only project context" {

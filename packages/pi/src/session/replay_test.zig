@@ -99,7 +99,13 @@ fn runOneTurnWithClient(
     if (session.events_path) |path| {
         const entries = tr.entries.items;
         while (session.last_persisted_len < entries.len) : (session.last_persisted_len += 1) {
-            try persister.appendEntry(allocator, path, &entries[session.last_persisted_len], session.persist_opts);
+            try persister.appendEntry(
+                allocator,
+                path,
+                tr.entryIdAt(session.last_persisted_len),
+                &entries[session.last_persisted_len],
+                session.persist_opts,
+            );
         }
     }
 

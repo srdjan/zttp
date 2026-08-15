@@ -434,16 +434,15 @@ fn summaryU32(obj: std.json.ObjectMap, key: []const u8) u32 {
 /// null for a session that never wrote one (empty or in-progress). Best-effort:
 /// an unreadable file or a malformed line is skipped, never fatal.
 fn readLastSessionSummary(allocator: std.mem.Allocator, events_path: []const u8) !?SummaryStat {
-    const bytes = zts.file_io.readFile(allocator, events_path, 16 * 1024 * 1024) catch return null;
-    defer allocator.free(bytes);
+    var reader = session_events.Reader.open(allocator, events_path) catch return null;
+    defer reader.deinit();
 
     var found: ?SummaryStat = null;
-    var it = std.mem.splitScalar(u8, bytes, '\n');
-    while (it.next()) |line| {
-        if (line.len == 0) continue;
+    while (reader.next() catch return found) |record_json| {
+        defer allocator.free(record_json);
         // Cheap pre-filter before the JSON parse.
-        if (std.mem.indexOf(u8, line, "\"session_summary\"") == null) continue;
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch continue;
+        if (std.mem.indexOf(u8, record_json, "\"session_summary\"") == null) continue;
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, record_json, .{}) catch continue;
         defer parsed.deinit();
         if (parsed.value != .object) continue;
         const root_obj = parsed.value.object;
@@ -958,6 +957,6 @@ test "readLastSessionSummary returns null when a session wrote no summary" {
     defer tmp.cleanup(testing.allocator);
     const events_path = try tmp.childPath(testing.allocator, "events.jsonl");
     defer testing.allocator.free(events_path);
-    try session_events.appendEvent(testing.allocator, events_path, .{ .user_text = "hello" });
+    try session_events.appendEntryEvent(testing.allocator, events_path, 1, null, .{ .user_text = "hello" });
     try testing.expect((try readLastSessionSummary(testing.allocator, events_path)) == null);
 }

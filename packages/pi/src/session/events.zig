@@ -1,8 +1,8 @@
-//! Session persistence primitives: NDJSON events log + meta.json.
+//! Session persistence primitives: checksummed event frames + meta.json.
 //!
-//! Event schema `v2` keeps text fields provider-friendly (`llm_text`) while
-//! carrying optional structured `ui_payload` objects for replay, RPC, JSON
-//! mode, and CLI rendering.
+//! Event schema `v3` keeps the raw journal append-only, assigns stable logical
+//! entry IDs, and persists model-projection checkpoints independently from the
+//! proof and ledger history.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -10,7 +10,13 @@ const ui_payload = @import("../ui_payload.zig");
 const json_writer = @import("../providers/json_writer.zig");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 
-pub const schema_version: u32 = 2;
+pub const schema_version: u32 = 3;
+
+const frame_magic = "ZTE3";
+const frame_header_len = frame_magic.len + @sizeOf(u64) + 32;
+const frame_footer_magic = "3ETZ";
+const frame_footer_len = @sizeOf(u64) + frame_footer_magic.len;
+const max_frame_payload_bytes: usize = 64 * 1024 * 1024;
 
 const EventKind = enum {
     user_text,
@@ -24,6 +30,23 @@ const EventKind = enum {
     autoloop_outcome,
     turn_end,
     session_summary,
+    compaction_checkpoint,
+};
+
+pub const EntryId = u64;
+
+pub const CompactionReason = enum { manual, threshold, overflow };
+
+pub const CompactionCheckpoint = struct {
+    summary: []const u8,
+    first_kept_entry_id: EntryId,
+    reason: CompactionReason,
+    tokens_before: u64 = 0,
+    estimated_tokens_after: u64 = 0,
+    summary_input_tokens: u64 = 0,
+    summary_output_tokens: u64 = 0,
+    read_files: []const []const u8 = &.{},
+    modified_files: []const []const u8 = &.{},
 };
 
 pub const TurnEndReason = enum {
@@ -142,6 +165,13 @@ pub const EventRecord = union(EventKind) {
     autoloop_outcome: AutoloopOutcome,
     turn_end: TurnEnd,
     session_summary: SessionSummary,
+    compaction_checkpoint: CompactionCheckpoint,
+};
+
+const Envelope = struct {
+    record: EventRecord,
+    entry_id: ?EntryId = null,
+    part_index: ?u32 = null,
 };
 
 pub const Meta = struct {
@@ -167,33 +197,363 @@ pub fn appendEvent(
     events_path: []const u8,
     record: EventRecord,
 ) !void {
+    if (isTranscriptRecord(record)) return error.InvalidEventIdentity;
+    return appendEnvelope(allocator, events_path, .{ .record = record });
+}
+
+pub fn appendEntryEvent(
+    allocator: std.mem.Allocator,
+    events_path: []const u8,
+    entry_id: EntryId,
+    part_index: ?u32,
+    record: EventRecord,
+) !void {
+    if (!isTranscriptRecord(record) or entry_id == 0) return error.InvalidEventIdentity;
+    return appendEnvelope(allocator, events_path, .{
+        .record = record,
+        .entry_id = entry_id,
+        .part_index = part_index,
+    });
+}
+
+fn appendEnvelope(
+    allocator: std.mem.Allocator,
+    events_path: []const u8,
+    envelope: Envelope,
+) !void {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
 
-    try writeEventLine(buf.writer(), record);
+    try writeEnvelopeJson(buf.writer(), envelope);
+    const payload = buf.written();
+    if (payload.len > max_frame_payload_bytes) return error.EventTooLarge;
 
-    const bytes = buf.written();
+    try prepareForAppend(allocator, events_path);
 
     const fd = try zts.file_io.openAppend(allocator, events_path);
     defer std.Io.Threaded.closeFd(fd);
 
+    var header: [frame_header_len]u8 = undefined;
+    @memcpy(header[0..frame_magic.len], frame_magic);
+    std.mem.writeInt(u64, header[frame_magic.len .. frame_magic.len + @sizeOf(u64)], @intCast(payload.len), .big);
+    std.crypto.hash.sha2.Sha256.hash(payload, header[frame_magic.len + @sizeOf(u64) ..], .{});
+    var footer: [frame_footer_len]u8 = undefined;
+    std.mem.writeInt(u64, footer[0..@sizeOf(u64)], @intCast(payload.len), .big);
+    @memcpy(footer[@sizeOf(u64)..], frame_footer_magic);
+
+    try writeAllFd(fd, &header);
+    try writeAllFd(fd, payload);
+    try writeAllFd(fd, &footer);
+    try writeAllFd(fd, "\n");
+    if (std.c.fsync(fd) != 0) return error.SyncFailure;
+}
+
+fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) !void {
     var total: usize = 0;
     while (total < bytes.len) {
         const rc = std.c.write(fd, bytes[total..].ptr, bytes.len - total);
+        if (rc < 0 and std.posix.errno(rc) == .INTR) continue;
         if (rc <= 0) return error.WriteFailure;
         total += @intCast(rc);
     }
 }
 
-pub fn writeEventLine(writer: *std.Io.Writer, record: EventRecord) !void {
+fn writeEnvelopeJson(writer: *std.Io.Writer, envelope: Envelope) !void {
     try writer.writeAll("{\"v\":");
     try writer.print("{d}", .{schema_version});
+    if (envelope.entry_id) |entry_id| {
+        try writer.writeAll(",\"entry_id\":");
+        try writer.print("{d}", .{entry_id});
+    }
+    if (envelope.part_index) |part_index| {
+        try writer.writeAll(",\"part_index\":");
+        try writer.print("{d}", .{part_index});
+    }
     try writer.writeAll(",\"k\":");
-    try json_writer.writeString(writer, kindTag(record));
+    try json_writer.writeString(writer, kindTag(envelope.record));
     try writer.writeAll(",\"d\":");
-    try writePayload(writer, record);
+    try writePayload(writer, envelope.record);
     try writer.writeByte('}');
+}
+
+pub const Reader = struct {
+    allocator: std.mem.Allocator,
+    fd: std.c.fd_t,
+    offset: u64 = 0,
+    size: u64,
+
+    pub fn open(allocator: std.mem.Allocator, path: []const u8) !Reader {
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+        const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+        errdefer std.Io.Threaded.closeFd(fd);
+        return .{ .allocator = allocator, .fd = fd, .size = (try zts.file_io.fstatFd(fd)).size };
+    }
+
+    pub fn deinit(self: *Reader) void {
+        std.Io.Threaded.closeFd(self.fd);
+        self.* = undefined;
+    }
+
+    pub fn next(self: *Reader) !?[]u8 {
+        if (self.offset == self.size) return null;
+        if (self.size - self.offset < frame_header_len + frame_footer_len + 1) {
+            var first: [1]u8 = undefined;
+            try preadExact(self.fd, &first, self.offset);
+            if (self.offset == 0 and first[0] == '{') return error.SchemaVersionUnsupported;
+            return error.IncompleteEventFrame;
+        }
+
+        var header: [frame_header_len]u8 = undefined;
+        try preadExact(self.fd, &header, self.offset);
+        if (!std.mem.eql(u8, header[0..frame_magic.len], frame_magic)) {
+            if (self.offset == 0 and header[0] == '{') return error.SchemaVersionUnsupported;
+            return error.CorruptEventsLog;
+        }
+        const payload_len_u64 = std.mem.readInt(u64, header[frame_magic.len .. frame_magic.len + @sizeOf(u64)], .big);
+        const payload_len = std.math.cast(usize, payload_len_u64) orelse return error.EventTooLarge;
+        if (payload_len > max_frame_payload_bytes) return error.EventTooLarge;
+        const frame_len = std.math.add(
+            u64,
+            frame_header_len + frame_footer_len + 1,
+            payload_len_u64,
+        ) catch return error.EventTooLarge;
+        if (frame_len > self.size - self.offset) return error.IncompleteEventFrame;
+
+        const payload = try self.allocator.alloc(u8, payload_len);
+        errdefer self.allocator.free(payload);
+        try preadExact(self.fd, payload, self.offset + frame_header_len);
+        var footer: [frame_footer_len]u8 = undefined;
+        try preadExact(self.fd, &footer, self.offset + frame_header_len + payload_len_u64);
+        if (std.mem.readInt(u64, footer[0..@sizeOf(u64)], .big) != payload_len_u64 or
+            !std.mem.eql(u8, footer[@sizeOf(u64)..], frame_footer_magic))
+        {
+            return error.CorruptEventsLog;
+        }
+        var terminator: [1]u8 = undefined;
+        try preadExact(
+            self.fd,
+            &terminator,
+            self.offset + frame_header_len + payload_len_u64 + frame_footer_len,
+        );
+        if (terminator[0] != '\n') return error.CorruptEventsLog;
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
+        if (!std.mem.eql(u8, &digest, header[frame_magic.len + @sizeOf(u64) ..])) {
+            return error.CorruptEventsLog;
+        }
+        self.offset += frame_len;
+        return payload;
+    }
+};
+
+fn preadExact(fd: std.c.fd_t, bytes: []u8, offset: u64) !void {
+    var read_total: usize = 0;
+    while (read_total < bytes.len) {
+        const rc = std.c.pread(fd, bytes[read_total..].ptr, bytes.len - read_total, @intCast(offset + read_total));
+        if (rc < 0 and std.posix.errno(rc) == .INTR) continue;
+        if (rc <= 0) return error.IncompleteEventFrame;
+        read_total += @intCast(rc);
+    }
+}
+
+pub fn recoverIncompleteTail(allocator: std.mem.Allocator, events_path: []const u8) !void {
+    return recoverTail(allocator, events_path, false);
+}
+
+fn prepareForAppend(allocator: std.mem.Allocator, events_path: []const u8) !void {
+    return recoverTail(allocator, events_path, true);
+}
+
+fn recoverTail(
+    allocator: std.mem.Allocator,
+    events_path: []const u8,
+    validate_complete_tail: bool,
+) !void {
+    if (!zts.file_io.fileExists(allocator, events_path)) return;
+    const path_z = try allocator.dupeZ(u8, events_path);
+    defer allocator.free(path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    const size = (try zts.file_io.fstatFd(fd)).size;
+    if (size == 0) return;
+
+    var first: [1]u8 = undefined;
+    try preadExact(fd, &first, 0);
+    if (first[0] == '{') return error.SchemaVersionUnsupported;
+
+    var last: [1]u8 = undefined;
+    try preadExact(fd, &last, size - 1);
+    if (last[0] == '\n') {
+        if (validate_complete_tail) try validateCompleteTail(allocator, fd, size);
+        return;
+    }
+
+    var offset: u64 = 0;
+    while (offset < size) {
+        if (size - offset < frame_header_len + frame_footer_len + 1) break;
+        var header: [frame_header_len]u8 = undefined;
+        try preadExact(fd, &header, offset);
+        if (!std.mem.eql(u8, header[0..frame_magic.len], frame_magic)) {
+            return error.CorruptEventsLog;
+        }
+        const payload_len = std.mem.readInt(u64, header[frame_magic.len .. frame_magic.len + @sizeOf(u64)], .big);
+        if (payload_len > max_frame_payload_bytes) return error.EventTooLarge;
+        const frame_len = std.math.add(
+            u64,
+            frame_header_len + frame_footer_len + 1,
+            payload_len,
+        ) catch return error.EventTooLarge;
+        if (frame_len > size - offset) break;
+        var footer: [frame_footer_len]u8 = undefined;
+        try preadExact(fd, &footer, offset + frame_header_len + payload_len);
+        if (std.mem.readInt(u64, footer[0..@sizeOf(u64)], .big) != payload_len or
+            !std.mem.eql(u8, footer[@sizeOf(u64)..], frame_footer_magic))
+        {
+            return error.CorruptEventsLog;
+        }
+        var terminator: [1]u8 = undefined;
+        try preadExact(fd, &terminator, offset + frame_header_len + payload_len + frame_footer_len);
+        if (terminator[0] != '\n') return error.CorruptEventsLog;
+        const payload = try allocator.alloc(u8, @intCast(payload_len));
+        defer allocator.free(payload);
+        try preadExact(fd, payload, offset + frame_header_len);
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
+        if (!std.mem.eql(u8, &digest, header[frame_magic.len + @sizeOf(u64) ..])) {
+            return error.CorruptEventsLog;
+        }
+        offset += frame_len;
+    }
+    if (std.c.ftruncate(fd, @intCast(offset)) != 0) return error.TruncateFailure;
+    if (std.c.fsync(fd) != 0) return error.SyncFailure;
+}
+
+fn validateCompleteTail(
+    allocator: std.mem.Allocator,
+    fd: std.c.fd_t,
+    size: u64,
+) !void {
+    const minimum = frame_header_len + frame_footer_len + 1;
+    if (size < minimum) return error.CorruptEventsLog;
+
+    var footer: [frame_footer_len]u8 = undefined;
+    try preadExact(fd, &footer, size - 1 - frame_footer_len);
+    if (!std.mem.eql(u8, footer[@sizeOf(u64)..], frame_footer_magic)) {
+        return error.CorruptEventsLog;
+    }
+    const payload_len = std.mem.readInt(u64, footer[0..@sizeOf(u64)], .big);
+    if (payload_len > max_frame_payload_bytes) return error.EventTooLarge;
+    const frame_len = std.math.add(u64, minimum, payload_len) catch return error.EventTooLarge;
+    if (frame_len > size) return error.CorruptEventsLog;
+    const frame_start = size - frame_len;
+
+    var header: [frame_header_len]u8 = undefined;
+    try preadExact(fd, &header, frame_start);
+    if (!std.mem.eql(u8, header[0..frame_magic.len], frame_magic)) {
+        return error.CorruptEventsLog;
+    }
+    if (std.mem.readInt(u64, header[frame_magic.len .. frame_magic.len + @sizeOf(u64)], .big) != payload_len) {
+        return error.CorruptEventsLog;
+    }
+
+    const payload_len_usize = std.math.cast(usize, payload_len) orelse return error.EventTooLarge;
+    const payload = try allocator.alloc(u8, payload_len_usize);
+    defer allocator.free(payload);
+    try preadExact(fd, payload, frame_start + frame_header_len);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(payload, &digest, .{});
+    if (!std.mem.eql(u8, &digest, header[frame_magic.len + @sizeOf(u64) ..])) {
+        return error.CorruptEventsLog;
+    }
+}
+
+pub fn nextEntryId(allocator: std.mem.Allocator, events_path: []const u8) !EntryId {
+    if (!zts.file_io.fileExists(allocator, events_path)) return 1;
+    try recoverIncompleteTail(allocator, events_path);
+    var reader = try Reader.open(allocator, events_path);
+    defer reader.deinit();
+    var max_id: EntryId = 0;
+    while (try reader.next()) |record_json| {
+        defer allocator.free(record_json);
+        var parsed = std.json.parseFromSlice(std.json.Value, allocator, record_json, .{}) catch return error.CorruptEventsLog;
+        defer parsed.deinit();
+        if (parsed.value != .object) return error.CorruptEventsLog;
+        if (parsed.value.object.get("entry_id")) |value| {
+            if (value != .integer or value.integer <= 0) return error.CorruptEventsLog;
+            const id = std.math.cast(EntryId, value.integer) orelse return error.CorruptEventsLog;
+            max_id = @max(max_id, id);
+        }
+    }
+    return std.math.add(EntryId, max_id, 1) catch error.EventIdentityOverflow;
+}
+
+pub fn copyJournal(
+    allocator: std.mem.Allocator,
+    source_path: []const u8,
+    destination_path: []const u8,
+) !void {
+    try recoverIncompleteTail(allocator, source_path);
+    var validator = try Reader.open(allocator, source_path);
+    defer validator.deinit();
+    while (try validator.next()) |payload| allocator.free(payload);
+
+    const source_z = try allocator.dupeZ(u8, source_path);
+    defer allocator.free(source_z);
+    const destination_z = try allocator.dupeZ(u8, destination_path);
+    defer allocator.free(destination_z);
+    const source_fd = try std.posix.openatZ(std.posix.AT.FDCWD, source_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(source_fd);
+    const destination_fd = try std.posix.openatZ(
+        std.posix.AT.FDCWD,
+        destination_z,
+        .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true },
+        0o600,
+    );
+    defer std.Io.Threaded.closeFd(destination_fd);
+
+    var buffer: [64 * 1024]u8 = undefined;
+    while (true) {
+        const count = std.posix.read(source_fd, &buffer) catch return error.ReadFailure;
+        if (count == 0) break;
+        try writeAllFd(destination_fd, buffer[0..count]);
+    }
+    if (std.c.fsync(destination_fd) != 0) return error.SyncFailure;
+}
+
+pub fn writeEventLine(writer: *std.Io.Writer, record: EventRecord) !void {
+    try writeEnvelopeJson(writer, .{ .record = record });
     try writer.writeByte('\n');
+}
+
+pub fn writeEntryEventLine(
+    writer: *std.Io.Writer,
+    entry_id: EntryId,
+    part_index: ?u32,
+    record: EventRecord,
+) !void {
+    if (!isTranscriptRecord(record) or entry_id == 0) return error.InvalidEventIdentity;
+    try writeEnvelopeJson(writer, .{
+        .record = record,
+        .entry_id = entry_id,
+        .part_index = part_index,
+    });
+    try writer.writeByte('\n');
+}
+
+fn isTranscriptRecord(record: EventRecord) bool {
+    return switch (record) {
+        .user_text,
+        .model_text,
+        .tool_use,
+        .tool_result,
+        .proof_card,
+        .diagnostic_box,
+        .verified_patch,
+        .system_note,
+        => true,
+        .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => false,
+    };
 }
 
 fn kindTag(record: EventRecord) []const u8 {
@@ -209,6 +569,7 @@ fn kindTag(record: EventRecord) []const u8 {
         .autoloop_outcome => "autoloop_outcome",
         .turn_end => "turn_end",
         .session_summary => "session_summary",
+        .compaction_checkpoint => "compaction_checkpoint",
     };
 }
 
@@ -254,7 +615,33 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
             try writer.writeByte('}');
         },
         .session_summary => |s| try writeSessionSummaryPayload(writer, s),
+        .compaction_checkpoint => |checkpoint| try writeCompactionCheckpointPayload(writer, checkpoint),
     }
+}
+
+fn writeCompactionCheckpointPayload(writer: *std.Io.Writer, checkpoint: CompactionCheckpoint) !void {
+    try writer.writeByte('{');
+    try writer.writeAll("\"summary\":");
+    try json_writer.writeString(writer, checkpoint.summary);
+    try writer.writeAll(",\"first_kept_entry_id\":");
+    try writer.print("{d}", .{checkpoint.first_kept_entry_id});
+    try writer.writeAll(",\"reason\":");
+    try json_writer.writeString(writer, @tagName(checkpoint.reason));
+    try writer.print(",\"tokens_before\":{d}", .{checkpoint.tokens_before});
+    try writer.print(",\"estimated_tokens_after\":{d}", .{checkpoint.estimated_tokens_after});
+    try writer.print(",\"summary_input_tokens\":{d}", .{checkpoint.summary_input_tokens});
+    try writer.print(",\"summary_output_tokens\":{d}", .{checkpoint.summary_output_tokens});
+    try writer.writeAll(",\"read_files\":[");
+    for (checkpoint.read_files, 0..) |file, i| {
+        if (i > 0) try writer.writeByte(',');
+        try json_writer.writeString(writer, file);
+    }
+    try writer.writeAll("],\"modified_files\":[");
+    for (checkpoint.modified_files, 0..) |file, i| {
+        if (i > 0) try writer.writeByte(',');
+        try json_writer.writeString(writer, file);
+    }
+    try writer.writeAll("]}");
 }
 
 fn writeSessionSummaryPayload(writer: *std.Io.Writer, s: SessionSummary) !void {
@@ -342,8 +729,8 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
 
     const version_val = obj.get("schema_version") orelse return error.InvalidMetaJson;
     if (version_val != .integer or version_val.integer < 0) return error.InvalidMetaJson;
-    const version: u32 = std.math.cast(u32, version_val.integer) orelse return error.SchemaVersionTooNew;
-    if (version > schema_version) return error.SchemaVersionTooNew;
+    const version: u32 = std.math.cast(u32, version_val.integer) orelse return error.SchemaVersionUnsupported;
+    if (version != schema_version) return error.SchemaVersionUnsupported;
 
     const session_id = getRequiredString(obj, "session_id") orelse return error.InvalidMetaJson;
     const workspace_realpath = getRequiredString(obj, "workspace_realpath") orelse return error.InvalidMetaJson;
@@ -484,7 +871,7 @@ fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return try zts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
 }
 
-test "appendEvent round-trips a user_text event as NDJSON" {
+test "appendEntryEvent frames a v3 user_text event with stable identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -492,18 +879,17 @@ test "appendEvent round-trips a user_text event as NDJSON" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try appendEvent(allocator, path, .{ .user_text = "hello world" });
+    try appendEntryEvent(allocator, path, 1, null, .{ .user_text = "hello world" });
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"v\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"v\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"entry_id\":1") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"user_text\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"hello world\"") != null);
 }
 
-test "model_text event matches the documented v2 envelope" {
-    // Guards docs/internals/zts-expert-contract.md: the documented example is
-    // { "v": 2, "k": "model_text", "d": "..." } with a bare-string payload.
+test "model_text JSON projection uses the documented v3 envelope" {
     const allocator = testing.allocator;
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
@@ -513,7 +899,7 @@ test "model_text event matches the documented v2 envelope" {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try testing.expectEqual(@as(i64, 2), obj.get("v").?.integer);
+    try testing.expectEqual(@as(i64, 3), obj.get("v").?.integer);
     try testing.expectEqualStrings("model_text", obj.get("k").?.string);
     // `d` is a bare string for model_text (not an object), as documented.
     try testing.expectEqualStrings("hello", obj.get("d").?.string);
@@ -527,7 +913,7 @@ test "appendEvent serializes tool_result with llm_text body alias and ui_payload
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try appendEvent(allocator, path, .{ .tool_result = .{
+    try appendEntryEvent(allocator, path, 1, null, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
         .tool_name = "zts_expert_verify_paths",
         .ok = false,
@@ -570,7 +956,7 @@ test "appendEvent serializes verified_patch with ui_payload" {
     } };
     defer patch.deinit(allocator);
 
-    try appendEvent(allocator, path, .{ .verified_patch = .{
+    try appendEntryEvent(allocator, path, 1, null, .{ .verified_patch = .{
         .llm_text = "verified: handler.ts",
         .ui_payload = patch,
     } });
@@ -591,7 +977,7 @@ test "appendEvent serializes proof_card as a display object" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try appendEvent(allocator, path, .{ .proof_card = .{
+    try appendEntryEvent(allocator, path, 1, null, .{ .proof_card = .{
         .llm_text = "{\"summary\":{\"total\":0}}",
         .ui_payload = null,
     } });
@@ -682,7 +1068,7 @@ test "appendEvent omits final_patch_hash when null" {
     try testing.expect(std.mem.indexOf(u8, raw, "final_patch_hash") == null);
 }
 
-test "readMeta accepts older schema versions" {
+test "readMeta rejects older schema versions after the direct v3 cutover" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -697,11 +1083,7 @@ test "readMeta accepts older schema versions" {
         ,
     );
 
-    var meta = try readMeta(allocator, path);
-    defer freeMeta(allocator, &meta);
-    try testing.expectEqual(@as(u32, 1), meta.schema_version);
-    try testing.expect(meta.provider == null);
-    try testing.expect(meta.model == null);
+    try testing.expectError(error.SchemaVersionUnsupported, readMeta(allocator, path));
 }
 
 test "appendEvent serializes turn_end with reason" {
@@ -735,6 +1117,89 @@ test "appendEvent serializes a wall-clock timeout end reason distinctly" {
     try testing.expect(std.mem.indexOf(u8, raw, "\"reason\":\"budget_timeout\"") != null);
     // Must not collapse into the round-trip bucket the scorecard reads.
     try testing.expect(std.mem.indexOf(u8, raw, "budget_roundtrips") == null);
+}
+
+test "appendEvent removes an incomplete crash tail before the next frame" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .approved } });
+    const fd = try zts.file_io.openAppend(allocator, path);
+    _ = std.c.write(fd, "ZTE3partial".ptr, "ZTE3partial".len);
+    std.Io.Threaded.closeFd(fd);
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_timeout } });
+
+    var reader = try Reader.open(allocator, path);
+    defer reader.deinit();
+    const first = (try reader.next()) orelse return error.TestExpectedFirstFrame;
+    defer allocator.free(first);
+    const second = (try reader.next()) orelse return error.TestExpectedSecondFrame;
+    defer allocator.free(second);
+    try testing.expect((try reader.next()) == null);
+    try testing.expect(std.mem.indexOf(u8, first, "\"approved\"") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "\"budget_timeout\"") != null);
+}
+
+test "appendEvent rolls back a partially written payload before appending" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .approved } });
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_roundtrips } });
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    {
+        const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
+        defer std.Io.Threaded.closeFd(fd);
+        const size = (try zts.file_io.fstatFd(fd)).size;
+        if (std.c.ftruncate(fd, @intCast(size - 5)) != 0) return error.TestTruncateFailed;
+    }
+
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_timeout } });
+    var reader = try Reader.open(allocator, path);
+    defer reader.deinit();
+    const first = (try reader.next()) orelse return error.TestExpectedFirstFrame;
+    defer allocator.free(first);
+    const second = (try reader.next()) orelse return error.TestExpectedSecondFrame;
+    defer allocator.free(second);
+    try testing.expect((try reader.next()) == null);
+    try testing.expect(std.mem.indexOf(u8, first, "\"approved\"") != null);
+    try testing.expect(std.mem.indexOf(u8, second, "\"budget_timeout\"") != null);
+}
+
+test "appendEvent rejects a complete checksum-corrupt predecessor" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .approved } });
+    const original = try readWhole(allocator, path);
+    defer allocator.free(original);
+    const corrupt_at = std.mem.indexOf(u8, original, "approved") orelse return error.TestExpectedPayload;
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    {
+        const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
+        defer std.Io.Threaded.closeFd(fd);
+        const replacement = "x";
+        _ = std.c.pwrite(fd, replacement.ptr, replacement.len, @intCast(corrupt_at));
+    }
+
+    try testing.expectError(
+        error.CorruptEventsLog,
+        appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_timeout } }),
+    );
+    const after = try readWhole(allocator, path);
+    defer allocator.free(after);
+    try testing.expectEqual(original.len, after.len);
 }
 
 test "appendEvent serializes session_summary with metrics" {

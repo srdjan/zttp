@@ -115,7 +115,7 @@ fn appendBaseline(
     allocator: std.mem.Allocator,
     events_path: []const u8,
 ) !void {
-    try session_events.appendEvent(allocator, events_path, .{
+    try session_events.appendEntryEvent(allocator, events_path, try session_events.nextEntryId(allocator, events_path), null, .{
         .system_note = "Proof Passport baseline: Studio loaded a green demo workspace with declared specs for injection_safe and no_secret_leakage.",
     });
 }
@@ -137,7 +137,7 @@ fn appendWitness(
     var payload: ui_payload.UiPayload = .{ .plain_text = payload_text };
     defer payload.deinit(allocator);
 
-    try session_events.appendEvent(allocator, events_path, .{ .diagnostic_box = .{
+    try session_events.appendEntryEvent(allocator, events_path, try session_events.nextEntryId(allocator, events_path), null, .{ .diagnostic_box = .{
         .llm_text = body,
         .ui_payload = payload,
     } });
@@ -165,7 +165,7 @@ fn appendVerifiedPatch(
     });
     defer patch.deinit(allocator);
 
-    try session_events.appendEvent(allocator, events_path, .{ .verified_patch = .{
+    try session_events.appendEntryEvent(allocator, events_path, try session_events.nextEntryId(allocator, events_path), null, .{ .verified_patch = .{
         .llm_text = "Verified patch: repaired src/handler.tsx and restored no_secret_leakage.",
         .ui_payload = .{ .verified_patch = patch },
     } });
@@ -183,7 +183,7 @@ fn appendDeployed(
         .{artifact},
     );
     defer allocator.free(body);
-    try session_events.appendEvent(allocator, events_path, .{ .system_note = body });
+    try session_events.appendEntryEvent(allocator, events_path, try session_events.nextEntryId(allocator, events_path), null, .{ .system_note = body });
 }
 
 fn readOrCreateSessionId(

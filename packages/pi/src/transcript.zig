@@ -123,9 +123,24 @@ pub const OwnedEntry = union(enum) {
 };
 
 pub const Tag = std.meta.Tag(OwnedEntry);
+pub const EntryId = u64;
+
+pub const Projection = struct {
+    summary: []const u8,
+    first_kept_entry_id: EntryId,
+
+    fn deinit(self: *Projection, allocator: std.mem.Allocator) void {
+        allocator.free(self.summary);
+        self.* = undefined;
+    }
+};
 
 pub const Transcript = struct {
     entries: std.ArrayListUnmanaged(OwnedEntry) = .empty,
+    /// Latest provider-visible projection checkpoint. Raw entries are never
+    /// removed by compaction; proof, ledger, and replay consumers continue to
+    /// scan the append-only `entries` list.
+    projection: ?Projection = null,
     /// Optional observer fired after each successful append, with the entry
     /// just stored. `--print --mode json` uses it to stream NDJSON events live,
     /// so a turn that later crashes or is killed still leaves its transcript on
@@ -142,6 +157,7 @@ pub const Transcript = struct {
     pub fn deinit(self: *Transcript, allocator: std.mem.Allocator) void {
         for (self.entries.items) |*entry| entry.deinit(allocator);
         self.entries.deinit(allocator);
+        if (self.projection) |*projection| projection.deinit(allocator);
         self.* = .{};
     }
 
@@ -162,6 +178,56 @@ pub const Transcript = struct {
 
     pub fn at(self: *const Transcript, index: usize) *const OwnedEntry {
         return &self.entries.items[index];
+    }
+
+    pub fn entryIdAt(self: *const Transcript, index: usize) EntryId {
+        std.debug.assert(index < self.entries.items.len);
+        return @intCast(index + 1);
+    }
+
+    pub fn nextEntryId(self: *const Transcript) EntryId {
+        return @intCast(self.entries.items.len + 1);
+    }
+
+    pub fn activeStartIndex(self: *const Transcript) !usize {
+        const projection = self.projection orelse return 0;
+        if (projection.first_kept_entry_id == 0 or
+            projection.first_kept_entry_id > self.nextEntryId())
+        {
+            return error.InvalidProjectionCut;
+        }
+        return @intCast(projection.first_kept_entry_id - 1);
+    }
+
+    pub fn replaceProjection(
+        self: *Transcript,
+        allocator: std.mem.Allocator,
+        summary: []const u8,
+        first_kept_entry_id: EntryId,
+    ) !void {
+        if (first_kept_entry_id == 0 or first_kept_entry_id > self.nextEntryId()) {
+            return error.InvalidProjectionCut;
+        }
+        const summary_copy = try allocator.dupe(u8, summary);
+        if (self.projection) |*projection| projection.deinit(allocator);
+        self.projection = .{
+            .summary = summary_copy,
+            .first_kept_entry_id = first_kept_entry_id,
+        };
+    }
+
+    pub fn installProjectionOwned(
+        self: *Transcript,
+        allocator: std.mem.Allocator,
+        summary: []u8,
+        first_kept_entry_id: EntryId,
+    ) void {
+        std.debug.assert(first_kept_entry_id > 0 and first_kept_entry_id <= self.nextEntryId());
+        if (self.projection) |*projection| projection.deinit(allocator);
+        self.projection = .{
+            .summary = summary,
+            .first_kept_entry_id = first_kept_entry_id,
+        };
     }
 };
 

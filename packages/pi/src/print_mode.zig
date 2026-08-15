@@ -367,7 +367,7 @@ test "runWithClient: json mode emits user_text, model_text, end in order" {
     try testing.expect(model_line < end_line);
     try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "hello") != null);
     try testing.expect(std.mem.indexOf(u8, lines.items[model_line], "hi") != null);
-    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":3") != null);
 }
 
 test "runWithClient: non-json mode writes rendered text" {
@@ -406,7 +406,7 @@ test "emitErrorEvent: known provider error carries name and remediation in-band"
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try testing.expectEqual(@as(i64, 2), obj.get("v").?.integer);
+    try testing.expectEqual(@as(i64, 3), obj.get("v").?.integer);
     try testing.expectEqualStrings("error", obj.get("k").?.string);
     const d = obj.get("d").?.object;
     try testing.expectEqualStrings("AuthFailed", d.get("error").?.string);
