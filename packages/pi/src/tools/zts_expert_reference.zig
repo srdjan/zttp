@@ -17,7 +17,7 @@ pub const tool: registry_mod.ToolDef = .{
     .effect = .analyze,
     .context_policy = .replayable_preview,
     .description = "Retrieve one bounded page of a canonical embedded zts expert reference. Continue with next_offset until it is null.",
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"enum\":[\"agent-guide\",\"virtual-modules\",\"testing-replay\",\"jsx-patterns\",\"examples\"]},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1024}},\"required\":[\"topic\"]}",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"topic\":{\"type\":\"string\",\"enum\":[\"agent-guide\",\"virtual-modules\",\"testing-replay\",\"jsx-patterns\",\"examples\"]},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":6144}},\"required\":[\"topic\"]}",
     .decode_json = decodeJson,
     .execute = execute,
 };
@@ -35,9 +35,9 @@ fn decodeJson(
         break :blk @as(usize, @intCast(value.integer));
     } else 0;
     const max_bytes = if (parsed.object.get("max_bytes")) |value| blk: {
-        if (value != .integer or value.integer <= 0 or value.integer > 1024) return error.InvalidToolArgsJson;
+        if (value != .integer or value.integer <= 0 or value.integer > common.max_text_page_bytes) return error.InvalidToolArgsJson;
         break :blk @as(usize, @intCast(value.integer));
-    } else 1024;
+    } else common.max_text_page_bytes;
     const out = try allocator.alloc([]const u8, 3);
     out[0] = topic.string;
     out[1] = try std.fmt.allocPrint(allocator, "{d}", .{offset});
@@ -55,7 +55,10 @@ fn execute(
 
     const topic = args[0];
     const offset = if (args.len >= 2) std.fmt.parseInt(usize, args[1], 10) catch 0 else 0;
-    const max_bytes = if (args.len >= 3) std.fmt.parseInt(usize, args[2], 10) catch 1024 else 1024;
+    const max_bytes = if (args.len >= 3)
+        std.fmt.parseInt(usize, args[2], 10) catch common.max_text_page_bytes
+    else
+        common.max_text_page_bytes;
     var owned_source: ?[]u8 = null;
     defer if (owned_source) |source| allocator.free(source);
     const source: []const u8 = if (std.mem.eql(u8, topic, "agent-guide"))
@@ -74,7 +77,7 @@ fn execute(
         name ++ ": unknown topic; use agent-guide, virtual-modules, testing-replay, jsx-patterns, or examples\n",
     );
 
-    return renderPage(allocator, topic, source, offset, @min(max_bytes, 1024));
+    return renderPage(allocator, topic, source, offset, @min(max_bytes, common.max_text_page_bytes));
 }
 
 fn examples(allocator: std.mem.Allocator) ![]u8 {
@@ -90,7 +93,31 @@ fn examples(allocator: std.mem.Allocator) ![]u8 {
     );
 }
 
+/// Render the largest page whose complete envelope stays inside
+/// `max_projected_tool_result_bytes`, measured rather than assumed.
 fn renderPage(
+    allocator: std.mem.Allocator,
+    topic: []const u8,
+    source: []const u8,
+    offset: usize,
+    max_bytes: usize,
+) !registry_mod.ToolResult {
+    var budget = max_bytes;
+    while (true) {
+        const result = renderPageWithin(allocator, topic, source, offset, budget) catch |err| switch (err) {
+            error.ToolContextProjectionTooLarge => {
+                const page = try common.textPage(source, offset, budget);
+                if (page.content.len <= 1) return err;
+                budget = page.content.len / 2;
+                continue;
+            },
+            else => return err,
+        };
+        return result;
+    }
+}
+
+fn renderPageWithin(
     allocator: std.mem.Allocator,
     topic: []const u8,
     source: []const u8,

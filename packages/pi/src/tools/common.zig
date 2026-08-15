@@ -363,14 +363,25 @@ pub fn utf8SuffixStart(bytes: []const u8, minimum: usize) usize {
     return start;
 }
 
+/// Largest page a replayable read tool requests by default. The rendered
+/// envelope is measured against `max_projected_tool_result_bytes` and the page
+/// is shrunk when it overflows, so this is a request ceiling rather than a
+/// worst-case escaping bound. A page an order of magnitude below the cap would
+/// keep a handler unreadable inside one turn's tool-call budget.
+pub const max_text_page_bytes: usize = 6 * 1024;
+
 pub const TextPage = struct {
     offset: usize,
     end: usize,
     total_bytes: usize,
     content: []const u8,
 
+    /// True when this page reaches the end of the content, which is the
+    /// termination condition the read tools publish ("continue with next_offset
+    /// until complete"). It is exactly `nextOffset() == null`; a caller that
+    /// needs the whole content in one page must also require `offset == 0`.
     pub fn complete(self: TextPage) bool {
-        return self.offset == 0 and self.end == self.total_bytes;
+        return self.end == self.total_bytes;
     }
 
     pub fn nextOffset(self: TextPage) ?usize {

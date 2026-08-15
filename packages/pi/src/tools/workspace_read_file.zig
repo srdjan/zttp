@@ -7,7 +7,7 @@ const cwd_support = @import("../test_support/cwd.zig");
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
 const name = "workspace_read_file";
-const default_page_bytes: usize = 1024;
+const default_page_bytes: usize = common.max_text_page_bytes;
 
 pub const tool: registry_mod.ToolDef = .{
     .name = name,
@@ -15,7 +15,7 @@ pub const tool: registry_mod.ToolDef = .{
     .effect = .read_workspace,
     .context_policy = .replayable_preview,
     .description = "Read a bounded, replayable page of a workspace file. Continue with next_offset until complete.",
-    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"start_line\":{\"type\":\"integer\",\"minimum\":1},\"end_line\":{\"type\":\"integer\",\"minimum\":1},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":1024}},\"required\":[\"path\"]}",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"start_line\":{\"type\":\"integer\",\"minimum\":1},\"end_line\":{\"type\":\"integer\",\"minimum\":1},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":6144}},\"required\":[\"path\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,
     .execute = execute,
 };
@@ -60,7 +60,7 @@ fn execute(
         }
         if (obj.get("max_bytes")) |value| {
             if (value != .integer or value.integer <= 0 or value.integer > default_page_bytes) {
-                return registry_mod.ToolResult.err(allocator, name ++ ": max_bytes must be between 1 and 1024\n");
+                return registry_mod.ToolResult.err(allocator, name ++ ": max_bytes must be between 1 and 6144\n");
             }
             max_bytes = @intCast(value.integer);
         }
@@ -106,7 +106,35 @@ fn execute(
     );
 }
 
+/// Render the largest page at `offset` whose complete envelope stays inside
+/// `max_projected_tool_result_bytes`. The envelope is measured rather than
+/// bounded by the worst-case six-byte JSON expansion, because assuming that
+/// expansion for ordinary source costs the model eight round trips per page.
 fn renderPage(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    start_line: usize,
+    end_line: ?usize,
+    selected: []const u8,
+    offset: usize,
+    max_bytes: usize,
+) !registry_mod.ToolResult {
+    var budget = max_bytes;
+    while (true) {
+        const result = renderPageWithin(allocator, path, start_line, end_line, selected, offset, budget) catch |err| switch (err) {
+            error.ToolContextProjectionTooLarge => {
+                const page = try common.textPage(selected, offset, budget);
+                if (page.content.len <= 1) return err;
+                budget = page.content.len / 2;
+                continue;
+            },
+            else => return err,
+        };
+        return result;
+    }
+}
+
+fn renderPageWithin(
     allocator: std.mem.Allocator,
     path: []const u8,
     start_line: usize,

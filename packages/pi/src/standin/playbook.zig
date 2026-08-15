@@ -11,6 +11,10 @@ const request = @import("request.zig");
 pub const version = range.version;
 pub const protocol = "openai-responses-sse";
 
+/// Identifier base for read continuation calls, kept clear of every playbook
+/// step index so no two calls in one turn share a call id.
+const read_page_call_base: usize = 900;
+
 pub const kinds = [_]expert_workflow.TaskKind{
     .route_add,
     .review_explain,
@@ -35,6 +39,20 @@ pub fn renderResponse(
 ) ![]u8 {
     const hint = expert_workflow.classify(parsed.ask);
     if (!range.hasKind(hint.kind)) return renderMiss(allocator, parsed.ask);
+
+    // A file larger than one read page needs its remaining pages before any
+    // playbook can author from a faithful baseline. These round trips carry
+    // their own call identifiers and do not advance the playbook's step index.
+    if (parsed.pending_read) |pending| {
+        const args = try renderReadArgsAt(allocator, pending.path, pending.offset);
+        defer allocator.free(args);
+        return try renderToolCall(
+            allocator,
+            read_page_call_base + pending.page_index,
+            "workspace_read_file",
+            args,
+        );
+    }
 
     return switch (hint.kind) {
         .route_add => renderRouteAdd(allocator, parsed),
@@ -1145,6 +1163,15 @@ fn renderReadArgs(allocator: std.mem.Allocator, file: []const u8) ![]u8 {
     try buf.writer().writeAll("{\"path\":");
     try writeJsonString(buf.writer(), file);
     try buf.writer().writeByte('}');
+    return try buf.toOwnedSlice();
+}
+
+fn renderReadArgsAt(allocator: std.mem.Allocator, file: []const u8, offset: usize) ![]u8 {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    try buf.writer().writeAll("{\"path\":");
+    try writeJsonString(buf.writer(), file);
+    try buf.writer().print(",\"offset\":{d}}}", .{offset});
     return try buf.toOwnedSlice();
 }
 

@@ -8,10 +8,20 @@ pub const ParsedRequest = struct {
     /// The target file's bytes, recovered from a read tool's output.
     ///
     /// Null means no complete read has succeeded yet, which is NOT the same as
-    /// an empty file. A paged read is valid JSON but carries `complete:false`;
-    /// a failed read has no content field. Both arrive here as null. A playbook
-    /// that authored from either would rewrite from an incomplete baseline.
+    /// an empty file. A failed read has no content field, and a read whose pages
+    /// have not reached the end of the file is still in progress; both arrive
+    /// here as null. A playbook that authored from either would rewrite from an
+    /// incomplete baseline.
+    ///
+    /// Pages are concatenated in offset order, so a file larger than one page
+    /// is readable: `pending_read` names the next page to request.
     source: ?[]const u8 = null,
+    /// The next page the stand-in must request before authoring can proceed.
+    ///
+    /// Set while a read is in progress. Paging round trips deliberately do not
+    /// advance `step_index`, so a multi-page read leaves every playbook's step
+    /// numbering unchanged.
+    pending_read: ?PendingRead = null,
     /// Raw `output` string of the LAST function_call_output in the current turn.
     ///
     /// Null before any tool result. Read it through a real JSON parse and refuse
@@ -22,6 +32,14 @@ pub const ParsedRequest = struct {
     /// "past it because the compiler bounced it", which the step index alone
     /// cannot express since both advance it by one.
     rejected_drafts: usize = 0,
+};
+
+pub const PendingRead = struct {
+    path: []const u8,
+    offset: usize,
+    /// Zero-based index of the continuation page, used only to keep each
+    /// paging tool call's identifier distinct from its predecessors.
+    page_index: usize,
 };
 
 pub const ParseError = error{
@@ -76,6 +94,11 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
     var source: ?[]const u8 = null;
     var last_output: ?[]const u8 = null;
     var rejected_drafts: usize = 0;
+    var read_path: ?[]const u8 = null;
+    var pending_read: ?PendingRead = null;
+    var pages = std.ArrayList(u8).empty;
+    var page_bytes: usize = 0;
+    var continuation_pages: usize = 0;
 
     // Everything here is scoped to the CURRENT turn, and a plain user message
     // is what starts one. The transcript is cumulative, so counting across the
@@ -88,15 +111,54 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
 
         if (item.get("type")) |type_value| {
             if (type_value != .string) return ParseError.InvalidRequest;
+            if (std.mem.eql(u8, type_value.string, "function_call")) {
+                if (readCallPath(arena, item)) |path| read_path = path;
+            }
             if (std.mem.eql(u8, type_value.string, "function_call_output")) {
-                step_index += 1;
                 if (item.get("output")) |output_value| {
                     if (output_value != .string) return ParseError.InvalidRequest;
-                    if (try readSource(arena, output_value.string)) |content| source = content;
+                    if (try readPage(arena, output_value.string)) |page| {
+                        // A continuation page answers the stand-in's own paging
+                        // call, not a playbook step, so it must not advance the
+                        // step index the playbooks are written against.
+                        if (page.offset == 0) {
+                            step_index += 1;
+                            pages.clearRetainingCapacity();
+                            page_bytes = 0;
+                        } else if (page.offset != page_bytes) {
+                            // A page out of order cannot be concatenated into a
+                            // faithful baseline; drop the read rather than
+                            // author from spliced bytes.
+                            pages.clearRetainingCapacity();
+                            page_bytes = 0;
+                            pending_read = null;
+                            last_output = output_value.string;
+                            continue;
+                        }
+                        try pages.appendSlice(arena, page.content);
+                        page_bytes += page.content.len;
+                        if (page.next_offset) |next| {
+                            pending_read = .{
+                                .path = read_path orelse "",
+                                .offset = next,
+                                .page_index = continuation_pages,
+                            };
+                            continuation_pages += 1;
+                        } else {
+                            // Duped because a later read in the same turn reuses
+                            // this buffer's capacity.
+                            source = try arena.dupe(u8, pages.items);
+                            pending_read = null;
+                        }
+                    } else {
+                        step_index += 1;
+                    }
                     last_output = output_value.string;
                     if (std.mem.startsWith(u8, output_value.string, veto_reject_preamble)) {
                         rejected_drafts += 1;
                     }
+                } else {
+                    step_index += 1;
                 }
             }
         }
@@ -110,6 +172,11 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
                     source = null;
                     last_output = null;
                     rejected_drafts = 0;
+                    pending_read = null;
+                    read_path = null;
+                    pages.clearRetainingCapacity();
+                    page_bytes = 0;
+                    continuation_pages = 0;
                 }
                 continue;
             }
@@ -122,6 +189,11 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
                 source = null;
                 last_output = null;
                 rejected_drafts = 0;
+                pending_read = null;
+                read_path = null;
+                pages.clearRetainingCapacity();
+                page_bytes = 0;
+                continuation_pages = 0;
             }
         }
     }
@@ -130,6 +202,7 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
         .ask = ask orelse return ParseError.MissingAsk,
         .step_index = step_index,
         .source = source,
+        .pending_read = pending_read,
         .last_output = last_output,
         .rejected_drafts = rejected_drafts,
     };
@@ -179,18 +252,57 @@ fn originalRequestFromSummary(summary: []const u8) ?[]const u8 {
     return if (request.len == 0) null else request;
 }
 
-fn readSource(arena: std.mem.Allocator, output: []const u8) !?[]const u8 {
+const ReadPage = struct {
+    offset: usize,
+    next_offset: ?usize,
+    content: []const u8,
+};
+
+/// Decode one `workspace_read_file` page. Null for any other tool output,
+/// including a failed read, which carries no content field.
+///
+/// Identified by shape rather than by the preceding call, because a compacted
+/// history can carry an output whose call is gone. `zts_expert_reference` pages
+/// share the shape and are excluded by their `topic` field, which a file read
+/// never has.
+fn readPage(arena: std.mem.Allocator, output: []const u8) !?ReadPage {
     const value = std.json.parseFromSliceLeaky(std.json.Value, arena, output, .{}) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return null,
     };
     if (value != .object) return null;
-    const complete = value.object.get("complete") orelse return null;
+    if (value.object.get("topic") != null) return null;
     const offset = value.object.get("offset") orelse return null;
-    if (complete != .bool or !complete.bool or offset != .integer or offset.integer != 0) return null;
+    if (offset != .integer or offset.integer < 0) return null;
     const content = value.object.get("content") orelse return null;
     if (content != .string) return null;
-    return content.string;
+    const complete = value.object.get("complete") orelse return null;
+    if (complete != .bool) return null;
+    var next: ?usize = null;
+    if (!complete.bool) {
+        const next_value = value.object.get("next_offset") orelse return null;
+        if (next_value != .integer or next_value.integer < 0) return null;
+        next = @intCast(next_value.integer);
+    }
+    return .{
+        .offset = @intCast(offset.integer),
+        .next_offset = next,
+        .content = content.string,
+    };
+}
+
+/// The path a `workspace_read_file` call names, so a continuation page can be
+/// requested for the same file. Null for every other call.
+fn readCallPath(arena: std.mem.Allocator, item: std.json.ObjectMap) ?[]const u8 {
+    const name_value = item.get("name") orelse return null;
+    if (name_value != .string or !std.mem.eql(u8, name_value.string, "workspace_read_file")) return null;
+    const args_value = item.get("arguments") orelse return null;
+    if (args_value != .string) return null;
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, args_value.string, .{}) catch return null;
+    if (parsed != .object) return null;
+    const path_value = parsed.object.get("path") orelse return null;
+    if (path_value != .string) return null;
+    return path_value.string;
 }
 
 const testing = std.testing;
@@ -213,6 +325,41 @@ test "stand-in request parsing recovers the ask, source, and stateless step inde
     try testing.expectEqualStrings("Add a GET /health route to handler.ts", parsed.ask);
     try testing.expectEqual(@as(usize, 2), parsed.step_index);
     try testing.expectEqualStrings("function handler() {}", parsed.source.?);
+}
+
+test "stand-in request parsing pages a file larger than one read page" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const first_page =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Add a GET /health route to handler.ts"}]},
+        \\  {"type":"function_call","call_id":"call-0","name":"workspace_read_file","arguments":"{\"path\":\"handler.ts\"}"},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":false,\"offset\":0,\"next_offset\":9,\"content\":\"function \"}"}
+        \\]}
+    ;
+    const mid = try parse(arena.allocator(), first_page);
+    // The read step is consumed once, and the baseline is refused until the
+    // last page lands.
+    try testing.expectEqual(@as(usize, 1), mid.step_index);
+    try testing.expect(mid.source == null);
+    try testing.expectEqualStrings("handler.ts", mid.pending_read.?.path);
+    try testing.expectEqual(@as(usize, 9), mid.pending_read.?.offset);
+
+    const both_pages =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[{"type":"input_text","text":"Add a GET /health route to handler.ts"}]},
+        \\  {"type":"function_call","call_id":"call-0","name":"workspace_read_file","arguments":"{\"path\":\"handler.ts\"}"},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":false,\"offset\":0,\"next_offset\":9,\"content\":\"function \"}"},
+        \\  {"type":"function_call","call_id":"call-900","name":"workspace_read_file","arguments":"{\"path\":\"handler.ts\",\"offset\":9}"},
+        \\  {"type":"function_call_output","call_id":"call-900","output":"{\"ok\":true,\"complete\":true,\"offset\":9,\"next_offset\":null,\"content\":\"handler() {}\"}"}
+        \\]}
+    ;
+    const done = try parse(arena.allocator(), both_pages);
+    // Paging round trips leave the playbook's step numbering untouched.
+    try testing.expectEqual(@as(usize, 1), done.step_index);
+    try testing.expect(done.pending_read == null);
+    try testing.expectEqualStrings("function handler() {}", done.source.?);
 }
 
 test "stand-in request parsing restores a split-turn ask from compacted context" {
