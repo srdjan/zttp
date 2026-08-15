@@ -55,6 +55,7 @@ const contract_builder_mod = @import("contract_builder.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const bytecode_mod = @import("zts-engine").bytecode;
 const stripper_mod = @import("zts-engine").stripper;
+const source_frontend_mod = @import("zts-engine").source_frontend;
 const compat_mod = @import("zts-base").compat;
 const string_mod = @import("zts-engine").string;
 
@@ -530,39 +531,35 @@ pub fn extractContract(
     filename: []const u8,
     opts: ExtractContractOptions,
 ) !HandlerContract {
-    var source_to_parse = source;
-    var strip_result: ?stripper_mod.StripResult = null;
-    defer if (strip_result) |*result| result.deinit();
-
-    const is_ts = std.mem.endsWith(u8, filename, ".ts");
-    const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
-    if (is_ts or is_tsx) {
-        var timestamp_buf: [24]u8 = undefined;
-        const build_time = opts.build_time orelse formatIsoTimestamp(&timestamp_buf, blk: {
+    const source_kind = source_frontend_mod.classifyPath(filename);
+    var timestamp_buf: [24]u8 = undefined;
+    const build_time: ?[]const u8 = if (opts.build_time) |provided|
+        provided
+    else if (source_kind.isTyped())
+        formatIsoTimestamp(&timestamp_buf, blk: {
             const milliseconds = compat_mod.realtimeNowMs() catch break :blk 0;
             break :blk @divTrunc(milliseconds, 1000);
-        });
-        strip_result = try stripper_mod.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = .{
-                .build_time = build_time,
-                .git_commit = opts.git_commit,
-                .version = opts.version,
-                .env_vars = null,
-            },
-        });
-        const stripped = strip_result orelse unreachable;
-        source_to_parse = stripped.code;
-    }
+        })
+    else
+        null;
+    var frontend = try source_frontend_mod.PreparedSource.init(allocator, source, filename, .{
+        .enable_comptime = true,
+        .comptime_env = .{
+            .build_time = build_time,
+            .git_commit = opts.git_commit,
+            .version = opts.version,
+            .env_vars = null,
+        },
+    });
+    defer frontend.deinit();
 
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = try parser_mod.JsParser.init(allocator, source_to_parse);
+    var js_parser = try parser_mod.JsParser.init(allocator, frontend.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (std.mem.endsWith(u8, filename, ".jsx") or is_tsx) {
+    if (frontend.enablesJsx()) {
         js_parser.tokenizer.enableJsx();
     }
 
@@ -576,14 +573,14 @@ pub fn extractContract(
 
     const ir_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = ParsedModule.fromExisting(ir_view, root, &atoms);
-    const effective_type_map = if (strip_result) |*result| &result.type_map else opts.type_map;
+    const effective_type_map = frontend.typeMap() orelse opts.type_map;
     var contract_opts = opts;
     contract_opts.type_map = effective_type_map;
     if (hasFileImports(ir_view)) {
         const read_file = opts.read_file orelse return error.FileImportReaderRequired;
         return extractMultiModuleContract(
             allocator,
-            source_to_parse,
+            frontend.parserInput(),
             filename,
             read_file,
             &atoms,
