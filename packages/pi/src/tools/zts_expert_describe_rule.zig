@@ -1,11 +1,8 @@
-//! Both this tool and `zts describe-rule --json` go through
-//! `describe_rule.writeRuleJson`, so expert and CLI output stay byte-identical.
+//! Version-2 rule discovery through the in-process protocol.
 
 const std = @import("std");
-const zts = @import("zts");
-const policy_catalog = zts.PolicyCatalog;
-const describe_rule = @import("zts_cli").describe_rule;
 const registry_mod = @import("../registry/registry.zig");
+const client = @import("zts_agent_client.zig");
 
 const name = "zts_expert_describe_rule";
 
@@ -14,108 +11,74 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "describe rule",
     .effect = .analyze,
     .context_policy = .exact,
-    .description = "Describe a rule by name or code, or list all rules when called with no args.",
+    .description = "Discover a rule by name or code, or list all rules when called without a rule, through the schema-v2 compiler protocol.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"rule\":{\"type\":\"string\",\"description\":\"Optional rule code or name.\"}},\"required\":[]}",
     .decode_json = decodeJson,
     .execute = execute,
 };
 
-fn decodeJson(
-    allocator: std.mem.Allocator,
-    args_json: []const u8,
-) ![]const []const u8 {
+fn decodeJson(allocator: std.mem.Allocator, args_json: []const u8) ![]const []const u8 {
     return registry_mod.helpers.decodeOptionalSingleStringField(allocator, args_json, "rule");
 }
 
-fn execute(
-    allocator: std.mem.Allocator,
-    args: []const []const u8,
-) anyerror!registry_mod.ToolResult {
-    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
-    defer text_buf.deinit();
-    const w = text_buf.writer();
-
-    if (args.len == 0) {
-        try w.writeAll("[");
-        for (policy_catalog.rules(), 0..) |*entry, i| {
-            if (i > 0) try w.writeAll(",");
-            try describe_rule.writeRuleJson(w, entry);
-        }
-        try w.writeAll("]\n");
-
-        return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
-    }
-
-    const query = args[0];
-    const entry = policy_catalog.findByName(query) orelse
-        policy_catalog.findByCode(query) orelse
-        {
-            try w.print("Unknown rule: {s}\n", .{query});
-            return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
-        };
-
-    try describe_rule.writeRuleJson(w, entry);
-    try w.writeAll("\n");
-
-    return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
+fn execute(allocator: std.mem.Allocator, args: []const []const u8) anyerror!registry_mod.ToolResult {
+    if (args.len > 1) return registry_mod.ToolResult.err(allocator, name ++ ": accepts at most one rule\n");
+    const input_json = if (args.len == 1)
+        try stringInput(allocator, "rule", args[0])
+    else
+        try allocator.dupe(u8, "{}");
+    defer allocator.free(input_json);
+    const projection = try client.invokeForTool(allocator, .{ .operation = .describe_rule, .input_json = input_json });
+    return .{ .ok = projection.ok, .llm_text = projection.llm_text };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+fn stringInput(allocator: std.mem.Allocator, field: []const u8, value: []const u8) ![]u8 {
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = out.writer() };
+    try json.beginObject();
+    try json.objectField(field);
+    try json.write(value);
+    try json.endObject();
+    return out.toOwnedSlice();
+}
 
 const testing = std.testing;
 
-test "list mode emits JSON array of rules" {
-    var result = try execute(testing.allocator, &.{});
+test "describe-rule registry returns its full version-2 envelope" {
+    var reg: registry_mod.Registry = .{};
+    defer reg.deinit(testing.allocator);
+    try reg.register(testing.allocator, tool);
+    var result = try reg.invokeJson(testing.allocator, name, "{\"rule\":\"ZTS303\"}");
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(result.llm_text.len > 2);
-    try testing.expectEqual(@as(u8, '['), result.llm_text[0]);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":") != null);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"category\":") != null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    const envelope = parsed.value.object;
+    try testing.expectEqual(@as(i64, 2), envelope.get("schema_version").?.integer);
+    try testing.expectEqualStrings("describe_rule", envelope.get("operation").?.string);
+    try testing.expectEqualStrings("zts-advanced-1", envelope.get("profile_id").?.string);
+    try testing.expectEqual(@as(usize, 64), envelope.get("policy_hash").?.string.len);
+    try testing.expectEqual(@as(usize, 64), envelope.get("module_graph_hash").?.string.len);
+    const rules = envelope.get("payload").?.object.get("rules").?.array;
+    try testing.expectEqual(@as(usize, 1), rules.items.len);
+    try testing.expectEqualStrings("ZTS303", rules.items[0].object.get("code").?.string);
 }
 
-test "lookup by code returns single rule object" {
-    var result = try execute(testing.allocator, &.{"ZTS303"});
+test "describe-rule registry preserves the protocol's empty unknown-rule result" {
+    var reg: registry_mod.Registry = .{};
+    defer reg.deinit(testing.allocator);
+    try reg.register(testing.allocator, tool);
+    var result = try reg.invokeJson(testing.allocator, name, "{\"rule\":\"not-a-real-rule\"}");
     defer result.deinit(testing.allocator);
-
     try testing.expect(result.ok);
-    try testing.expectEqual(@as(u8, '{'), result.llm_text[0]);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":\"ZTS303\"") != null);
-}
-
-test "unknown query returns not-ok body" {
-    var result = try execute(testing.allocator, &.{"not-a-real-rule"});
-    defer result.deinit(testing.allocator);
-
-    try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "Unknown rule") != null);
-}
-
-test "lookup by code surfaces repair_intent when present" {
-    // The agent reads `repair_intent` from describe-rule output to pick an
-    // apply primitive directly. ZTS612
-    // (canonical_ternary_impure) maps to `replace_ternary_with_if`.
-    var result = try execute(testing.allocator, &.{"ZTS612"});
-    defer result.deinit(testing.allocator);
-
-    try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(
-        u8,
-        result.llm_text,
-        "\"repair_intent\":\"replace_ternary_with_if\"",
-    ) != null);
-}
-
-test "lookup by code omits repair_intent when unset" {
-    // Some diagnostics deliberately have no canonical repair primitive
-    // (e.g. ZTS600 implicit_unknown needs a type annotation that can
-    // take several shapes). The field is omitted, not emitted as null.
-    var result = try execute(testing.allocator, &.{"ZTS600"});
-    defer result.deinit(testing.allocator);
-
-    try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"repair_intent\"") == null);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("describe_rule", parsed.value.object.get("operation").?.string);
+    try testing.expect(parsed.value.object.get("success").?.bool);
+    try testing.expectEqual(
+        @as(usize, 0),
+        parsed.value.object.get("payload").?.object.get("rules").?.array.items.len,
+    );
 }

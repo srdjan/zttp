@@ -16,6 +16,7 @@ comptime {
     _ = @import("tools/zts_expert_prove_patch.zig");
     _ = @import("tools/zts_expert_system_proof.zig");
     _ = @import("tools/zts_expert_features.zig");
+    _ = @import("tools/zts_expert_restrictions.zig");
     _ = @import("tools/zts_expert_modules.zig");
     _ = @import("tools/zts_expert_verify_modules.zig");
     _ = @import("tools/zts_agent_client.zig");

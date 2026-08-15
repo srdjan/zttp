@@ -28,6 +28,7 @@ const review_patch_tool = @import("tools/zts_expert_review_patch.zig");
 const prove_patch_tool = @import("tools/zts_expert_prove_patch.zig");
 const system_proof_tool = @import("tools/zts_expert_system_proof.zig");
 const features_tool = @import("tools/zts_expert_features.zig");
+const restrictions_tool = @import("tools/zts_expert_restrictions.zig");
 const modules_tool = @import("tools/zts_expert_modules.zig");
 const verify_modules_tool = @import("tools/zts_expert_verify_modules.zig");
 const workspace_list_files_tool = @import("tools/workspace_list_files.zig");
@@ -139,6 +140,7 @@ const analysis_bundle = [_]ToolDef{
     prove_patch_tool.tool,
     system_proof_tool.tool,
     features_tool.tool,
+    restrictions_tool.tool,
     modules_tool.tool,
     verify_modules_tool.tool,
     effects_tool.tool,
@@ -664,6 +666,7 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zts_expert_prove_patch",
         "zts_expert_system_proof",
         "zts_expert_features",
+        "zts_expert_restrictions",
         "zts_expert_modules",
         "zts_expert_verify_modules",
         "workspace_list_files",

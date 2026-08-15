@@ -102,6 +102,7 @@ const prologue =
     \\  Rules by code/name or complete registry -> zts_expert_describe_rule
     \\  Rule keyword search                    -> zts_expert_search
     \\  Allowed and blocked language features -> zts_expert_features
+    \\  Language restrictions and rationale   -> zts_expert_restrictions
     \\  Built-in module exports               -> zts_expert_modules
     \\  Compiler and policy metadata          -> zts_expert_meta
     \\  Embedded guide/references/examples    -> zts_expert_reference
@@ -247,6 +248,7 @@ test "stable core routes removed reference material through read-only tools" {
 
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_describe_rule") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_features") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_restrictions") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_modules") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_reference") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_witnesses") != null);

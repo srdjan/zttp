@@ -20,7 +20,8 @@ const CommandRow = struct {
 pub const command_table = [_]CommandRow{
     .{ .slash = "/meta", .explicit = "meta", .tool = "zts_expert_meta", .takes_trailing_args = false },
     .{ .slash = "/features", .explicit = "features", .tool = "zts_expert_features", .takes_trailing_args = false },
-    .{ .slash = "/modules", .explicit = "modules", .tool = "zts_expert_modules", .takes_trailing_args = false },
+    .{ .slash = "/restrictions", .explicit = "restrictions", .tool = "zts_expert_restrictions", .takes_trailing_args = false },
+    .{ .slash = "/modules", .explicit = "modules", .tool = "zts_expert_modules", .takes_trailing_args = true },
     .{ .slash = "/rule", .explicit = "describe-rule", .tool = "zts_expert_describe_rule", .takes_trailing_args = true },
     .{ .slash = "/search", .explicit = "search", .tool = "zts_expert_search", .takes_trailing_args = true },
     .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zts_expert_verify_paths", .takes_trailing_args = true },
@@ -176,6 +177,19 @@ test "lookup /rule forwards trailing args" {
     try testing.expectEqualStrings("zts_expert_describe_rule", cmd.tool_name);
     try testing.expectEqual(@as(usize, 1), cmd.args.len);
     try testing.expectEqualStrings("ZTS303", cmd.args[0]);
+}
+
+test "lookup discovery commands routes restrictions and requires a modules argument" {
+    const restrictions_argv = [_][]const u8{"/restrictions"};
+    const restrictions = lookup(&restrictions_argv) orelse return error.TestFailed;
+    try testing.expectEqualStrings("zts_expert_restrictions", restrictions.tool_name);
+    try testing.expectEqual(@as(usize, 0), restrictions.args.len);
+
+    const modules_argv = [_][]const u8{ "/modules", "handler.ts" };
+    const modules = lookup(&modules_argv) orelse return error.TestFailed;
+    try testing.expectEqualStrings("zts_expert_modules", modules.tool_name);
+    try testing.expectEqual(@as(usize, 1), modules.args.len);
+    try testing.expectEqualStrings("handler.ts", modules.args[0]);
 }
 
 test "isQuit and isHelp recognize aliases" {

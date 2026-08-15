@@ -98,6 +98,11 @@ pub const Outcome = union(enum) {
 
 pub const RequestError = error{InvalidInputJson};
 
+pub const ToolProjection = struct {
+    ok: bool,
+    llm_text: []u8,
+};
+
 /// Serialize the exact request object accepted by `zts agent --stdin-json`.
 /// `input_json` is parsed before projection so malformed or multiple values
 /// cannot be spliced into the envelope.
@@ -224,6 +229,33 @@ pub fn invokeFromCwd(
     return invokeAtRoot(allocator, io, ".", request);
 }
 
+/// Execute one discovery/read request with the package's explicit threaded-I/O
+/// boundary and preserve the complete version-2 envelope for the model-facing
+/// tool result. Invalid transport output is an internal error, never a guessed
+/// protocol response.
+pub fn invokeForTool(
+    allocator: std.mem.Allocator,
+    request: Request,
+) anyerror!ToolProjection {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+
+    var outcome = invokeFromCwd(allocator, io_backend.io(), request);
+    defer outcome.deinit();
+    return switch (outcome) {
+        .success => |*envelope| .{
+            .ok = true,
+            .llm_text = try renderEnvelope(allocator, envelope),
+        },
+        .refusal => |*refusal| .{
+            .ok = false,
+            .llm_text = try renderEnvelope(allocator, &refusal.envelope),
+        },
+        .malformed_response => error.MalformedProtocolResponse,
+        .transport_or_internal_error => |err| err,
+    };
+}
+
 fn malformed(
     parsed: *std.json.Parsed(std.json.Value),
     reason: MalformedReason,
@@ -253,6 +285,15 @@ fn validProtocolError(value: std.json.Value) bool {
     if (stringField(object, "code") == null or stringField(object, "message") == null) return false;
     const field = object.get("field") orelse return false;
     return field == .null or field == .string;
+}
+
+fn renderEnvelope(allocator: std.mem.Allocator, envelope: *const Envelope) ![]u8 {
+    var out = TextBuffer.init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = out.writer() };
+    try json.write(envelope.document.value);
+    try out.writer().writeByte('\n');
+    return out.toOwnedSlice();
 }
 
 const testing = std.testing;
@@ -350,4 +391,22 @@ test "zts agent client returns an out-of-root protocol refusal" {
         },
         else => return error.TestExpectedRefusal,
     }
+}
+
+test "zts agent tool projection preserves a stale-identity refusal envelope" {
+    const projection = try invokeForTool(testing.allocator, .{
+        .operation = .meta,
+        .input_json = "{}",
+        .expected = .{ .policy_hash = "stale-policy-hash" },
+    });
+    defer testing.allocator.free(projection.llm_text);
+
+    try testing.expect(!projection.ok);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, projection.llm_text, .{});
+    defer parsed.deinit();
+    try testing.expectEqual(@as(i64, 2), parsed.value.object.get("schema_version").?.integer);
+    try testing.expectEqualStrings(
+        "identity_mismatch",
+        parsed.value.object.get("error").?.object.get("code").?.string,
+    );
 }
