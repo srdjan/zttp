@@ -531,7 +531,15 @@ every operation. `meta.payload.verifiers` MUST enumerate each property
 identifier, required inputs, prerequisites, possible assurance grades, and
 result schema. An agent never chooses among undocumented verification commands.
 
-The `meta` payload MUST also publish:
+The `meta` operation accepts an optional `input.view`. `"full"` is the
+default and publishes the complete payload below. `"bootstrap"` publishes
+only the complete identity block, registry hashes, operation identifiers and
+input fields, plus the exact request and section list for the full view. The
+bootstrap view is the bounded initial agent context; it MUST remain at or
+below 8 KiB. This projection does not remove a discovery surface because the
+full view remains one explicit `meta` request away.
+
+The full `meta` payload MUST also publish:
 
 - `grammar`: the machine-readable productions of Section 8, member for
   member, registry-generated and drift-gated,
@@ -2434,11 +2442,11 @@ tasks cover:
 - behavior-preserving refactoring,
 - and explicit recognition of unsupported requirements.
 
-Each client begins with the user task and the version-2 `meta` operation
-through `zts agent --stdin-json`, not hidden syntax instructions. It must
-discover every other language fact through the normative agent protocol; the
-`grammar` and `examples` payloads of `meta` are part of that permitted
-discovery surface.
+Each client begins with the user task and the bounded `bootstrap` view of the
+version-2 `meta` operation through `zts agent --stdin-json`, not hidden syntax
+instructions. It must discover every other language fact through the
+normative agent protocol. The `grammar` and `examples` payloads of the full
+`meta` view are part of that permitted discovery surface.
 
 For every corpus task declared supported:
 

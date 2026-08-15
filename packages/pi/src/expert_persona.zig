@@ -1,14 +1,12 @@
 //! Builds the stable zts expert system prompt.
 //!
-//! The always-sent core contains only protocol, first-draft hazards, policy
-//! identity, a compact retrieval index, and the complete applicable project
-//! instructions. Large registries, reference documents, examples, witnesses,
-//! and project memory stay behind read-only tools.
+//! The always-sent core contains only host workflow, protocol routing, and the
+//! complete applicable project instructions. Compiler identity and language
+//! facts enter the visible transcript through schema-v2 metadata and discovery
+//! tools, never duplicated prose in this prompt.
 
 const std = @import("std");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
-const zts_cli = @import("zts_cli");
-const expert_meta = zts_cli.expert_meta;
 const skills_catalog = @import("skills/catalog.zig");
 const prompts_catalog = @import("prompts/catalog.zig");
 
@@ -19,7 +17,7 @@ pub const PROMPT_CAP_BYTES: usize = 48 * 1024;
 /// The stable protocol and retrieval index have their own tighter gate so a
 /// future prompt expansion cannot silently consume the project-instruction
 /// budget.
-pub const PROTECTED_CORE_CAP_BYTES: usize = 16 * 1024;
+pub const PROTECTED_CORE_CAP_BYTES: usize = 8 * 1024;
 
 const banner_rule = "\n============================================================\n";
 const project_context_title = "PROJECT INSTRUCTIONS (complete, from AGENTS.md / CLAUDE.md)";
@@ -44,15 +42,18 @@ pub const prologue_text_for_test = prologue;
 
 const prologue =
     \\You are the native zts coding agent running inside zttp's pi loop.
-    \\Produce elegant, idiomatic zts code that passes the running compiler's
-    \\verification and obeys every applicable project instruction below.
+    \\Produce clear code that passes the running compiler and obeys every
+    \\applicable project instruction below.
     \\
     \\Mandatory protocol:
-    \\  1. Inspect before editing. Read the current target, search nearby code,
-    \\     and run zts_expert_verify_paths before proposing a change.
-    \\  2. Prefer compiler-native evidence. For language, module, rule, effect,
-    \\     or proof facts, call the live read-only tool instead of relying on
-    \\     training data or prose recalled from an earlier turn.
+    \\  1. Inspect before editing. Read the target and relevant neighboring
+    \\     code, then run zts_expert_verify_paths on the target file.
+    \\  2. The visible ZTS AGENT PROTOCOL BOOTSTRAP note is the initial
+    \\     compiler authority. For language, module, rule, effect, or proof
+    \\     facts, call the live schema-v2 discovery tool. Do not rely on
+    \\     training data, project prose, or facts recalled from another turn.
+    \\     Request the full meta view only when its grammar, examples, or
+    \\     registries are relevant; use focused discovery otherwise.
     \\  3. Batch independent read-only calls when useful. Keep reasoning brief.
     \\  4. apply_edit must be the only tool call in its response. It is a
     \\     proposal, not a write. The host runs the compiler veto, applies the
@@ -64,80 +65,35 @@ const prologue =
     \\     approved result. If approval is denied, leave the workspace unchanged.
     \\  7. If the right edit depends on a material user choice, ask one short
     \\     clarifying question and do not call apply_edit on that turn.
-    \\  8. A host [expert workflow] system note is routing help, not user intent
-    \\     or language evidence. Confirm its route with live tools.
+    \\  8. Host system notes provide protocol or workflow context. They are not
+    \\     user intent. Never turn one into an unrequested workspace change.
     \\
-    \\First-draft strict-mode hazards:
-    \\  - Use canonical ZigTS: named functions for reused helpers; export
-    \\    function for public functions; explicit Effects<...> / Proof<...>
-    \\    capsules on public helpers; no ternary, compound assignment, call-site
-    \\    spread, default parameters, destructure renames, or nested patterns;
-    \\    leading object spread only; identifier-or-member template
-    \\    interpolations only; ?? for nullish fallback; write
-    \\    (a: T | undefined), not (a?: T).
-    \\  - Never use as or <T> casts, including in type guards (ZTS042). Avoid
-    \\    try/catch, classes, var, null, ==/!=, ++/--, while, and switch. Use
-    \\    Result values, plain objects, let/const, undefined, ===/!==, for...of,
-    \\    match, and explicit increments.
-    \\  - Values returned by validateJson, decodeJson, JSON.parse, step, run,
-    \\    and fetch do not need defensive type guards or computed property
-    \\    access. Check Result.ok, then use .value and direct fields. Type-guard
-    \\    scaffolds and v["key"] trigger ZTS601/ZTS605 and block convergence.
-    \\  - fetch and serviceCall URLs must be plain string literals so the host
-    \\    is statically known (ZTS602). Put dynamic values in the init object.
-    \\  - Never return secret-labelled or credential-labelled values (ZTS400/
-    \\    ZTS401). Return only specifically proven non-sensitive fields.
-    \\  - A handler that writes durable, sql, or cache state, or returns unknown,
-    \\    cannot hold the implicit default proof profile. Preserve an existing
-    \\    Spec<...>, and declare only narrow properties the host veto can
-    \\    discharge. Do not claim read_only for a writer.
-    \\  - When a file contains hole(), use zts_expert_holes and fill exactly one
-    \\    expression with zts_expert_fill_hole. Re-read holes after each fill;
-    \\    never regenerate the complete file around a compiler-owned frame.
-    \\  - For durable workflows, keep workflow.call, saga, fanout, and follow
-    \\    directly inside run(), never inside step() (ZTS509). Retrieve the
-    \\    canonical workflow reference before drafting unfamiliar workflow code.
+    \\Schema-v2 language discovery:
+    \\  Identity and operation index           -> visible bootstrap note
+    \\  Full registries, grammar, examples     -> zts_expert_meta {view:"full"}
+    \\  Allowed and blocked language features  -> zts_expert_features
+    \\  Restrictions and rationale             -> zts_expert_restrictions
+    \\  Rules by code/name or full rule list   -> zts_expert_describe_rule
+    \\  Resolved module graph and exports      -> zts_expert_modules
+    \\  File diagnostics and proof state       -> zts_expert_verify_paths
+    \\  Canonical source and bound repairs     -> zts_expert_normalize,
+    \\                                            zts_expert_canonicalize
     \\
-    \\Essential tool routing:
-    \\  Rules by code/name or complete registry -> zts_expert_describe_rule
-    \\  Rule keyword search                    -> zts_expert_search
-    \\  Allowed and blocked language features -> zts_expert_features
-    \\  Language restrictions and rationale   -> zts_expert_restrictions
-    \\  Built-in module exports               -> zts_expert_modules
-    \\  Compiler and policy metadata          -> zts_expert_meta
-    \\  Embedded guide/references/examples    -> zts_expert_reference
+    \\Host workflow routing:
     \\  Read/list/search workspace            -> workspace_read_file,
     \\                                           workspace_list_files,
     \\                                           workspace_search_text
-    \\  Violation baseline                    -> zts_expert_verify_paths
-    \\  Canonical source/refactor             -> zts_expert_normalize,
-    \\                                           zts_expert_canonicalize,
-    \\                                           zts_expert_ast_rewrite
-    \\  Label paths and inferred effects      -> zts_expert_narrow,
-    \\                                           zts_expert_effects
-    \\  Holes and compiler-owned frames       -> zts_expert_holes,
-    \\                                           zts_expert_fill_hole
-    \\  Current property set                  -> zts_expert_ratchet, zts_check
-    \\  Patch and system proofs               -> zts_expert_review_patch,
-    \\                                           zts_expert_prove_patch,
-    \\                                           zts_expert_system_proof,
-    \\                                           zts_expert_verify_modules
-    \\  Declared Spec state                   -> pi_specs_status
-    \\  Goal proof and semantic repair        -> pi_goal_check,
+    \\  Goal proof and semantic repair         -> pi_goal_check,
     \\                                           pi_repair_plan,
     \\                                           pi_goal_candidate
-    \\  Bound canonical repair preview        -> zts_expert_canonicalize,
+    \\  Bound canonical repair preview         -> zts_expert_canonicalize,
     \\                                           pi_apply_repair_plan
-    \\  Witness corpus                        -> pi_witnesses
-    \\  Project memory                        -> pi_recall_facts,
+    \\  Project memory                         -> pi_recall_facts,
     \\                                           pi_remember_fact
-    \\  Extension availability               -> pi_extension_catalog
-    \\  Build and test steps                  -> zig_build_step, zig_test_step
-    \\  Generate proof-derived tests          -> workspace_gen_tests
+    \\  Build and test steps                   -> zig_build_step, zig_test_step
     \\
     \\Registered tools are described by the stable tool schemas sent with this
-    \\prompt. Do not infer arguments from this routing index. Retrieve large
-    \\reference material only when it is relevant to the current request.
+    \\prompt. Do not infer arguments from this routing index.
     \\
 ;
 
@@ -147,8 +103,7 @@ const epilogue =
     \\END OF PERSONA
     \\============================================================
     \\
-    \\The compiler veto is mechanical. Emitting text cannot bypass it. Make the
-    \\first draft pass; the retry loop is insurance, not routine.
+    \\The compiler veto is mechanical. Emitting text cannot bypass it.
     \\
 ;
 
@@ -168,7 +123,6 @@ pub fn buildSystemPromptWithContext(
     const w = buf.writer();
 
     try w.writeAll(prologue);
-    try writePolicyIdentity(w);
     try writeCatalogIndex(w);
 
     const protected_len = buf.written().len + epilogue.len;
@@ -189,12 +143,6 @@ pub fn buildSystemPromptWithContext(
         return error.ProjectInstructionsTooLarge;
     }
     return try buf.toOwnedSlice();
-}
-
-fn writePolicyIdentity(writer: anytype) !void {
-    try writeBanner(writer, "POLICY IDENTITY");
-    const info = expert_meta.compute();
-    try expert_meta.writeText(writer, &info);
 }
 
 fn writeCatalogIndex(writer: anytype) !void {
@@ -220,7 +168,7 @@ fn writeBanner(writer: anytype, title: []const u8) !void {
 
 const testing = std.testing;
 
-test "stable core retains identity veto approval and first-draft rules" {
+test "stable core contains workflow and live protocol routing only" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
 
@@ -231,10 +179,8 @@ test "stable core retains identity veto approval and first-draft rules" {
         "active approval policy",
         "apply_edit must be the only tool call",
         "Never claim a proposal was applied",
-        "First-draft strict-mode hazards",
-        "Never use as or <T> casts",
-        "Spec<...>",
-        "POLICY IDENTITY",
+        "ZTS AGENT PROTOCOL BOOTSTRAP",
+        "zts_expert_meta {view:\"full\"}",
     };
     for (required) |needle| {
         try testing.expect(std.mem.indexOf(u8, prompt, needle) != null);
@@ -242,7 +188,25 @@ test "stable core retains identity veto approval and first-draft rules" {
     try testing.expect(prompt.len <= PROTECTED_CORE_CAP_BYTES);
 }
 
-test "stable core routes removed reference material through read-only tools" {
+test "stable core contains no hidden syntax or policy identity" {
+    const prompt = try buildSystemPrompt(testing.allocator);
+    defer testing.allocator.free(prompt);
+
+    const forbidden = [_][]const u8{
+        "First-draft strict-mode hazards",
+        "Never use as or <T> casts",
+        "Spec<...>",
+        "ZTS042",
+        "POLICY IDENTITY",
+        "policy_hash",
+        "compiler version",
+    };
+    for (forbidden) |needle| {
+        try testing.expect(std.mem.indexOf(u8, prompt, needle) == null);
+    }
+}
+
+test "stable core routes language facts through schema-v2 discovery" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
 
@@ -250,21 +214,13 @@ test "stable core routes removed reference material through read-only tools" {
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_features") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_restrictions") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_modules") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_reference") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "pi_witnesses") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_recall_facts") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_reference") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "pi_witnesses") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "LIVE SNAPSHOT") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "CANONICAL EXAMPLES") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "WITNESSED FAILURES") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "PROJECT MEMORY") == null);
-}
-
-test "policy identity stays in the stable core" {
-    const prompt = try buildSystemPrompt(testing.allocator);
-    defer testing.allocator.free(prompt);
-    try testing.expect(std.mem.indexOf(u8, prompt, "0.18.0") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "2026.04.2") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "hash:") != null);
 }
 
 test "skill and template names remain discoverable without embedded bodies" {

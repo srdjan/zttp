@@ -30,6 +30,7 @@ const chat_completions = @import("providers/chat_completions.zig");
 const models_registry = @import("providers/models.zig");
 const provider_selection = @import("providers/selection.zig");
 const expert_persona = @import("expert_persona.zig");
+const meta_bootstrap = @import("meta_bootstrap.zig");
 const zts_cli = @import("zts_cli");
 const expert_meta = zts_cli.expert_meta;
 const session_id_mod = @import("session/session_id.zig");
@@ -1002,7 +1003,18 @@ fn initFromEnvWithPreparedResume(
         }
     }
 
-    if (config.no_session) return session;
+    const bootstrap_note: ?[]u8 = switch (session.backend) {
+        .stub => null,
+        else => try meta_bootstrap.buildFromCwd(allocator),
+    };
+    defer if (bootstrap_note) |note| allocator.free(note);
+
+    if (config.no_session) {
+        if (bootstrap_note) |note| {
+            try ensureCurrentMetaBootstrap(allocator, &session, note, false);
+        }
+        return session;
+    }
 
     session.persist_opts = .{ .no_persist_tool_output = config.no_persist_tool_output };
 
@@ -1077,6 +1089,9 @@ fn initFromEnvWithPreparedResume(
             .provider = persisted_provider,
             .model = persisted_model,
         });
+        if (bootstrap_note) |note| {
+            try ensureCurrentMetaBootstrap(allocator, &session, note, true);
+        }
     } else if (config.fork_session_id) |fork_id| {
         const src_dir = try session_paths.sessionDir(allocator, fork_id);
         defer allocator.free(src_dir);
@@ -1100,6 +1115,9 @@ fn initFromEnvWithPreparedResume(
             .provider = persisted_provider,
             .model = persisted_model,
         });
+        if (bootstrap_note) |note| {
+            try ensureCurrentMetaBootstrap(allocator, &session, note, true);
+        }
     } else {
         try session_events.writeMeta(allocator, meta_path, .{
             .session_id = sid,
@@ -1110,9 +1128,38 @@ fn initFromEnvWithPreparedResume(
             .provider = persisted_provider,
             .model = persisted_model,
         });
+        if (bootstrap_note) |note| {
+            try ensureCurrentMetaBootstrap(allocator, &session, note, true);
+        }
     }
 
     return session;
+}
+
+fn ensureCurrentMetaBootstrap(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    note: []const u8,
+    persist: bool,
+) !void {
+    for (session.transcript.entries.items) |entry| {
+        switch (entry) {
+            .system_note => |body| {
+                if (std.mem.eql(u8, body, note)) return;
+            },
+            else => {},
+        }
+    }
+
+    try session.transcript.append(allocator, .{ .system_note = note });
+    if (!persist) return;
+    const index = session.transcript.len() - 1;
+    try session.appendPersistedEntry(
+        allocator,
+        session.transcript.entryIdAt(index),
+        session.transcript.at(index),
+    );
+    session.last_persisted_len = session.transcript.len();
 }
 
 fn readSessionMeta(allocator: std.mem.Allocator, session_id: []const u8) !session_events.Meta {
@@ -2936,6 +2983,50 @@ test "bare persisted session follows the global default regardless of cloud keys
     );
 }
 
+test "new model session persists one bounded meta bootstrap across resume" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    defer deepseek.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    {
+        var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
+            .no_context_files = true,
+        });
+        defer session.deinit(allocator);
+        try testing.expectEqual(@as(usize, 1), session.transcript.len());
+        try testing.expectEqual(session.transcript.len(), session.last_persisted_len);
+        switch (session.transcript.at(0).*) {
+            .system_note => |note| {
+                try testing.expect(note.len <= meta_bootstrap.MAX_NOTE_BYTES);
+                try testing.expect(std.mem.startsWith(u8, note, meta_bootstrap.note_prefix));
+                try testing.expect(std.mem.indexOf(u8, note, "\"view\":\"bootstrap\"") != null);
+                try testing.expect(std.mem.indexOf(u8, note, "First-draft strict-mode hazards") == null);
+            },
+            else => return error.TestUnexpectedResult,
+        }
+    }
+
+    var resumed = try initFromEnvWithSessionConfig(allocator, &registry, .{
+        .resume_latest = true,
+        .no_context_files = true,
+    });
+    defer resumed.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), resumed.transcript.len());
+    try testing.expectEqual(resumed.transcript.len(), resumed.last_persisted_len);
+    switch (resumed.transcript.at(0).*) {
+        .system_note => |note| try testing.expect(std.mem.startsWith(u8, note, meta_bootstrap.note_prefix)),
+        else => return error.TestUnexpectedResult,
+    }
+}
+
 test "resume fork override and model mutation preserve provider identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
@@ -3055,10 +3146,11 @@ test "rebuild resumes the current session through a transferred journal lock" {
     );
     defer allocator.free(session_id);
     try session.transcript.append(allocator, .{ .user_text = "persist before resume" });
+    const user_index = session.transcript.len() - 1;
     try session.appendPersistedEntry(
         allocator,
-        session.transcript.entryIdAt(0),
-        session.transcript.at(0),
+        session.transcript.entryIdAt(user_index),
+        session.transcript.at(user_index),
     );
     session.last_persisted_len = session.transcript.len();
 
@@ -3072,7 +3164,7 @@ test "rebuild resumes the current session through a transferred journal lock" {
         session.session_id orelse return error.TestUnexpectedResult,
     );
     try testing.expect(session.journal_writer != null);
-    try testing.expectEqual(@as(usize, 1), session.transcript.len());
+    try testing.expectEqual(@as(usize, 2), session.transcript.len());
     try session.appendPersistedEvent(allocator, .{ .turn_end = .{ .reason = .approved } });
     const events_path = session.events_path orelse return error.TestUnexpectedResult;
     try testing.expectError(
@@ -4113,6 +4205,8 @@ test "compact checkpoint survives immediate session close and resume" {
         session_id: []u8,
         transcript_sha256: model_request.Sha256Hex,
         history_bytes: u64,
+        transcript_len: usize,
+        first_kept_entry_id: transcript_mod.EntryId,
     };
     const source_projection: SourceProjection = blk: {
         var source = try initFromEnvWithSessionConfig(allocator, &registry, .{
@@ -4147,6 +4241,8 @@ test "compact checkpoint survives immediate session close and resume" {
             .session_id = try allocator.dupe(u8, source.session_id orelse return error.TestExpectedSession),
             .transcript_sha256 = snapshot.transcript_sha256,
             .history_bytes = snapshot.component_bytes.history,
+            .transcript_len = source.transcript.len(),
+            .first_kept_entry_id = source.transcript.projection.?.first_kept_entry_id,
         };
     };
     defer allocator.free(source_projection.session_id);
@@ -4156,10 +4252,10 @@ test "compact checkpoint survives immediate session close and resume" {
         .session_id = source_projection.session_id,
     });
     defer resumed.deinit(allocator);
-    try testing.expectEqual(@as(usize, 4), resumed.transcript.len());
+    try testing.expectEqual(source_projection.transcript_len, resumed.transcript.len());
     const projection = resumed.transcript.projection orelse return error.TestExpectedProjection;
     try testing.expect(std.mem.indexOf(u8, projection.summary, "## Goal") != null);
-    try testing.expectEqual(@as(transcript_mod.EntryId, 3), projection.first_kept_entry_id);
+    try testing.expectEqual(source_projection.first_kept_entry_id, projection.first_kept_entry_id);
 
     var resumed_snapshot = try model_request.createSnapshot(allocator, .{
         .config = .{

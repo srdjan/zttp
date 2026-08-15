@@ -81,7 +81,7 @@ pub const operations = [_]OperationSpec{
     // compares key for key, so a field advertised here and not written is a
     // failing test rather than a promise on the wire. Task 11 grows both
     // together.
-    .{ .op = .meta, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{
+    .{ .op = .meta, .status = .implemented, .input_fields = &.{"view"}, .payload_fields = &.{
         "compiler_version",      "profile_id",        "policy_version",
         "policy_hash",           "idiom_table_hash",  "restriction_matrix_hash",
         "builtin_registry_hash", "operations",        "error_codes",
@@ -426,8 +426,17 @@ pub fn handleRequest(
     var diagnostics: std.Io.Writer.Allocating = .init(allocator);
     defer diagnostics.deinit();
 
+    const meta_view = if (op == .meta)
+        parseMetaView(input) catch return writeErrorEnvelope(&json, op_name, identity, .{
+            .code = .malformed_request,
+            .message = "input.view must be either bootstrap or full",
+            .field = "input.view",
+        })
+    else
+        null;
+
     const success = switch (op) {
-        .meta => try writeMetaPayload(&payload_json),
+        .meta => try writeMetaPayload(&payload_json, meta_view.?),
         .features => try writeFeaturesPayload(&payload_json),
         .restrictions => try writeRestrictionsPayload(&payload_json),
         .describe_rule => try writeDescribeRulePayload(&payload_json, input),
@@ -609,7 +618,89 @@ fn writeRaw(json: *std.json.Stringify, bytes: []const u8) !void {
 // meta
 // ---------------------------------------------------------------------------
 
-fn writeMetaPayload(json: *std.json.Stringify) !bool {
+const MetaView = enum { bootstrap, full };
+
+fn parseMetaView(input: std.json.Value) error{InvalidMetaView}!MetaView {
+    const view = switch (input) {
+        .null => return .full,
+        .object => |object| object.get("view") orelse return .full,
+        else => return error.InvalidMetaView,
+    };
+    if (view != .string) return error.InvalidMetaView;
+    return std.meta.stringToEnum(MetaView, view.string) orelse error.InvalidMetaView;
+}
+
+fn writeMetaPayload(json: *std.json.Stringify, view: MetaView) !bool {
+    return switch (view) {
+        .bootstrap => writeBootstrapMetaPayload(json),
+        .full => writeFullMetaPayload(json),
+    };
+}
+
+fn writeOperationCatalog(json: *std.json.Stringify, include_payload_fields: bool) !void {
+    try json.beginArray();
+    for (&operations) |*spec| {
+        try json.beginObject();
+        try json.objectField("id");
+        try json.write(@tagName(spec.op));
+        try json.objectField("status");
+        try json.write(@tagName(spec.status));
+        try json.objectField("input_fields");
+        try json.beginArray();
+        for (spec.input_fields) |f| try json.write(f);
+        try json.endArray();
+        if (include_payload_fields) {
+            try json.objectField("payload_fields");
+            try json.beginArray();
+            for (spec.payload_fields) |f| try json.write(f);
+            try json.endArray();
+            try json.objectField("deferred_note");
+            if (spec.deferred_note) |n| try json.write(n) else try json.write(null);
+        }
+        try json.endObject();
+    }
+    try json.endArray();
+}
+
+fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
+    try json.beginObject();
+    try json.objectField("view");
+    try json.write("bootstrap");
+    try json.objectField("compiler_version");
+    try json.write(expert_meta.compiler_version);
+    try json.objectField("profile_id");
+    try json.write(agent_identity.profile_id);
+    try json.objectField("policy_version");
+    try json.write(expert_meta.policy_version);
+    try json.objectField("policy_hash");
+    try json.write(&zts.policyHash());
+    try json.objectField("idiom_table_hash");
+    try json.write(&zts.idiomTableHash());
+    try json.objectField("restriction_matrix_hash");
+    try json.write(&zts.restrictionMatrixHash());
+    try json.objectField("builtin_registry_hash");
+    try json.write(&moduleMetadata.builtinRegistryHash());
+    try json.objectField("operations");
+    try writeOperationCatalog(json, false);
+    try json.objectField("full_meta_request");
+    try json.beginObject();
+    try json.objectField("operation");
+    try json.write("meta");
+    try json.objectField("input");
+    try json.beginObject();
+    try json.objectField("view");
+    try json.write("full");
+    try json.endObject();
+    try json.endObject();
+    try json.objectField("full_meta_sections");
+    try json.beginArray();
+    for (specFor(.meta).payload_fields) |field| try json.write(field);
+    try json.endArray();
+    try json.endObject();
+    return true;
+}
+
+fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.beginObject();
 
     try json.objectField("compiler_version");
@@ -622,26 +713,7 @@ fn writeMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(&zts.policyHash());
 
     try json.objectField("operations");
-    try json.beginArray();
-    for (&operations) |*spec| {
-        try json.beginObject();
-        try json.objectField("id");
-        try json.write(@tagName(spec.op));
-        try json.objectField("status");
-        try json.write(@tagName(spec.status));
-        try json.objectField("input_fields");
-        try json.beginArray();
-        for (spec.input_fields) |f| try json.write(f);
-        try json.endArray();
-        try json.objectField("payload_fields");
-        try json.beginArray();
-        for (spec.payload_fields) |f| try json.write(f);
-        try json.endArray();
-        try json.objectField("deferred_note");
-        if (spec.deferred_note) |n| try json.write(n) else try json.write(null);
-        try json.endObject();
-    }
-    try json.endArray();
+    try writeOperationCatalog(json, true);
 
     try json.objectField("error_codes");
     try json.beginArray();
@@ -2463,6 +2535,55 @@ test "meta response carries the full identity block" {
     try testing.expect(obj.get("payload").? == .object);
     try testing.expect(obj.get("diagnostics").? == .array);
     try testing.expect(obj.get("error") == null);
+}
+
+test "meta bootstrap view is bounded and routes to full discovery" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{"view":"bootstrap"}}
+    );
+    defer a.free(out);
+
+    // This response is injected into every new agent transcript. A full meta
+    // response is intentionally much larger and remains available on demand.
+    try testing.expect(out.len <= 8 * 1024);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(root.get("success").?.bool);
+    const payload = root.get("payload").?.object;
+    try testing.expectEqualStrings("bootstrap", payload.get("view").?.string);
+    try testing.expectEqualStrings(&zts.policyHash(), payload.get("policy_hash").?.string);
+    try testing.expectEqualStrings(&zts.idiomTableHash(), payload.get("idiom_table_hash").?.string);
+    try testing.expectEqualStrings(&zts.restrictionMatrixHash(), payload.get("restriction_matrix_hash").?.string);
+    try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);
+
+    const ops = payload.get("operations").?.array;
+    try testing.expectEqual(operations.len, ops.items.len);
+    const full = payload.get("full_meta_request").?.object;
+    try testing.expectEqualStrings("meta", full.get("operation").?.string);
+    try testing.expectEqualStrings("full", full.get("input").?.object.get("view").?.string);
+    const sections = payload.get("full_meta_sections").?.array;
+    try testing.expect(sections.items.len > 0);
+    try testing.expect(payload.get("grammar") == null);
+    try testing.expect(payload.get("examples") == null);
+}
+
+test "meta refuses an unknown view" {
+    const a = testing.allocator;
+    const out = try respond(a,
+        \\{"schema_version":2,"operation":"meta","project_root":".","input":{"view":"verbose"}}
+    );
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    try testing.expect(!root.get("success").?.bool);
+    const protocol_error = root.get("error").?.object;
+    try testing.expectEqualStrings("malformed_request", protocol_error.get("code").?.string);
+    try testing.expectEqualStrings("input.view", protocol_error.get("field").?.string);
 }
 
 test "meta payload publishes every operation and its status" {

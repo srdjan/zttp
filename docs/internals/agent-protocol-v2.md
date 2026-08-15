@@ -64,12 +64,16 @@ context-free digest, which is the built-in registry with an empty module set.
 
 ## Operations
 
-Send `meta` first. Its payload publishes this table, the identity hashes, and the
-sections this compiler does not yet generate.
+Send `meta` first. New coding-agent sessions use
+`{"view":"bootstrap"}` to receive a bounded identity and operation index.
+Use `{"view":"full"}` or `{}` to receive the complete registries, grammar,
+examples, and deferred-section inventory. The bootstrap response includes the
+exact full-view request and section list, so it is a projection rather than a
+second metadata contract.
 
 | Operation | Status | `input` fields | Note |
 |---|---|---|---|
-| `meta` | implemented | - | |
+| `meta` | implemented | `view` | `bootstrap` or `full`; default `full` |
 | `features` | implemented | - | |
 | `restrictions` | implemented | - | |
 | `describe_rule` | implemented | `rule` | |

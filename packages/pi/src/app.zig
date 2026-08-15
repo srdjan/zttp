@@ -1163,18 +1163,24 @@ test "splitCsv trims whitespace and drops empty entries" {
     try testing.expectEqualStrings("c", parts[2]);
 }
 
-test "every registered tool is documented in the expert persona" {
-    // The persona is the model's map of the catalog. A tool absent from it is
-    // one the model has to guess at. `workspace_gen_tests` was absent until
-    // this gate existed.
+test "expert persona documents the protocol and approval-critical tools" {
+    // Provider tool schemas carry the complete model-visible catalog. The
+    // always-sent persona names only routing-critical seams so adding a tool
+    // cannot silently grow every request.
     const persona_text = @import("expert_persona.zig").prologue_text_for_test;
-    inline for (comptime std.enums.values(Bundle)) |bundle| {
-        for (bundleTools(bundle)) |tool| {
-            std.testing.expect(std.mem.indexOf(u8, persona_text, tool.name) != null) catch |err| {
-                std.debug.print("expert persona does not document `{s}`\n", .{tool.name});
-                return err;
-            };
-        }
+    const required = [_][]const u8{
+        "zts_expert_meta",
+        "zts_expert_features",
+        "zts_expert_restrictions",
+        "zts_expert_describe_rule",
+        "zts_expert_modules",
+        "zts_expert_verify_paths",
+        "zts_expert_canonicalize",
+        "pi_apply_repair_plan",
+        "apply_edit",
+    };
+    for (required) |name| {
+        try std.testing.expect(std.mem.indexOf(u8, persona_text, name) != null);
     }
 }
 

@@ -11,16 +11,36 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "policy meta",
     .effect = .analyze,
     .context_policy = .exact,
-    .description = "Discover the active schema-v2 compiler profile, identities, operations, registries, grammar, examples, and decisions. Takes no arguments.",
-    .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
-    .decode_json = registry_mod.helpers.decodeNoArgs,
+    .description = "Discover the active schema-v2 compiler profile and operation index. Use view full for registries, grammar, examples, and decisions; new sessions already contain the bounded bootstrap view.",
+    .input_schema = "{\"type\":\"object\",\"properties\":{\"view\":{\"type\":\"string\",\"enum\":[\"bootstrap\",\"full\"],\"description\":\"Optional metadata projection; defaults to full.\"}},\"required\":[]}",
+    .decode_json = decodeJson,
     .execute = execute,
 };
 
+fn decodeJson(allocator: std.mem.Allocator, args_json: []const u8) ![]const []const u8 {
+    return registry_mod.helpers.decodeOptionalSingleStringField(allocator, args_json, "view");
+}
+
 fn execute(allocator: std.mem.Allocator, args: []const []const u8) anyerror!registry_mod.ToolResult {
-    if (args.len != 0) return registry_mod.ToolResult.err(allocator, name ++ ": takes no arguments\n");
-    const projection = try client.invokeForTool(allocator, .{ .operation = .meta, .input_json = "{}" });
+    if (args.len > 1) return registry_mod.ToolResult.err(allocator, name ++ ": accepts at most one view\n");
+    const input_json = if (args.len == 1)
+        try viewInput(allocator, args[0])
+    else
+        try allocator.dupe(u8, "{}");
+    defer allocator.free(input_json);
+    const projection = try client.invokeForTool(allocator, .{ .operation = .meta, .input_json = input_json });
     return .{ .ok = projection.ok, .llm_text = projection.llm_text };
+}
+
+fn viewInput(allocator: std.mem.Allocator, view: []const u8) ![]u8 {
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = out.writer() };
+    try json.beginObject();
+    try json.objectField("view");
+    try json.write(view);
+    try json.endObject();
+    return out.toOwnedSlice();
 }
 
 const testing = std.testing;
@@ -37,6 +57,22 @@ test "discovery registry returns the full version-2 meta envelope" {
     defer payload.parsed.deinit();
     try testing.expect(payload.object.get("operations") != null);
     try testing.expect(payload.object.get("grammar") != null);
+}
+
+test "discovery registry returns a bounded bootstrap projection" {
+    var reg: registry_mod.Registry = .{};
+    defer reg.deinit(testing.allocator);
+    try reg.register(testing.allocator, tool);
+
+    var result = try reg.invokeJson(testing.allocator, name, "{\"view\":\"bootstrap\"}");
+    defer result.deinit(testing.allocator);
+    try expectEnvelope(result, "meta");
+    try testing.expect(result.llm_text.len <= 8 * 1024);
+    const payload = try payloadObject(result.llm_text);
+    defer payload.parsed.deinit();
+    try testing.expectEqualStrings("bootstrap", payload.object.get("view").?.string);
+    try testing.expect(payload.object.get("grammar") == null);
+    try testing.expect(payload.object.get("full_meta_request") != null);
 }
 
 fn expectEnvelope(result: registry_mod.ToolResult, operation: []const u8) !void {
