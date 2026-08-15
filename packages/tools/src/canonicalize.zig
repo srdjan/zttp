@@ -167,24 +167,15 @@ fn buildSemicolonRepairs(
     virtual_path: []const u8,
     result: *Result,
 ) !void {
-    const is_ts = std.mem.endsWith(u8, virtual_path, ".ts");
-    const is_tsx = std.mem.endsWith(u8, virtual_path, ".tsx");
+    var prepared = zts.PreparedSource.init(allocator, source, virtual_path, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    }) catch return;
+    defer prepared.deinit();
 
-    var stripped: ?zts.StripResult = null;
-    defer if (stripped) |*sr| sr.deinit();
-    var to_parse = source;
-    if (is_ts or is_tsx) {
-        stripped = zts.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = .{},
-        }) catch return;
-        to_parse = stripped.?.code;
-    }
-
-    var parser = zts.parser.JsParser.init(allocator, to_parse) catch return;
+    var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return;
     defer parser.deinit();
-    if (is_tsx) parser.enableJsx();
+    if (prepared.enablesJsx()) parser.enableJsx();
     // The source this reads is one the refusing parser rejects - that is why it
     // needs a repair. Finding where the `;` belongs means parsing it the way
     // the old acceptance did.
@@ -2093,7 +2084,7 @@ fn isCanonicalBandCode(code: []const u8) bool {
 /// JSX and TSX sources are outside the formatter's coverage: a bare tokenizer
 /// run is not in JSX mode, so element text would be re-read as code.
 fn isJsxLike(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".tsx") or std.mem.endsWith(u8, path, ".jsx");
+    return zts.classifySourcePath(path).enablesJsx();
 }
 
 pub const NormalizeResult = struct {
