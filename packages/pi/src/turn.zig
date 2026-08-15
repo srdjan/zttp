@@ -35,11 +35,19 @@ pub const ToolCall = struct {
     id: []const u8,
     name: []const u8,
     args_json: []const u8,
+    /// Opaque provider continuation required by DeepSeek thinking-mode tool
+    /// calls. Only the first call in a batch carries it. It is never rendered
+    /// to users, but must survive transcript persistence and replay verbatim.
+    reasoning_content: ?[]const u8 = null,
 };
 
 pub const Edit = struct {
     file: []const u8,
     content: []const u8,
+    /// Continuation from the model's original apply_edit tool call. The loop
+    /// records the edit as a synthetic tool pair, so the continuation has to
+    /// move with the edit until that transcript entry is created.
+    reasoning_content: ?[]const u8 = null,
 };
 
 pub const DisplayMessage = struct {

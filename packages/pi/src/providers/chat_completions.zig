@@ -103,7 +103,17 @@ pub fn buildRequestBodyFromSnapshot(
                 try writeMessage(writer, "user", body);
             },
             .tool_use => {
-                try writer.writeAll(",{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[");
+                try writer.writeAll(",{\"role\":\"assistant\",\"content\":");
+                if (snapshot.config.provider == .deepseek) {
+                    try writer.writeAll("\"\"");
+                    if (group_items[0].tool_use.reasoning_content) |reasoning| {
+                        try writer.writeAll(",\"reasoning_content\":");
+                        try writeJsonString(writer, reasoning);
+                    }
+                } else {
+                    try writer.writeAll("null");
+                }
+                try writer.writeAll(",\"tool_calls\":[");
                 for (group_items, 0..) |item, index| {
                     const call = switch (item) {
                         .tool_use => |value| value,
@@ -140,7 +150,9 @@ pub fn buildRequestBodyFromSnapshot(
     if (snapshot.config.tools_json) |tools| {
         try writer.writeAll(",\"tools\":");
         try writer.writeAll(tools);
-        try writer.writeAll(",\"tool_choice\":\"auto\"");
+        if (snapshot.config.provider != .deepseek) {
+            try writer.writeAll(",\"tool_choice\":\"auto\"");
+        }
     }
     try writer.writeByte('}');
     return buf.toOwnedSlice();
@@ -210,6 +222,39 @@ test "buildRequestBody carries system, user, tool call, and tool result turns" {
     try testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"tool\",\"tool_call_id\":\"call_1\"") != null);
     try testing.expect(std.mem.indexOf(u8, body, "{\"role\":\"user\",\"content\":\"and then stop\"}") != null);
     try testing.expect(std.mem.endsWith(u8, body, ",\"tools\":[],\"tool_choice\":\"auto\"}"));
+}
+
+test "DeepSeek tool turns preserve opaque reasoning and omit tool_choice" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ta = arena.allocator();
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(ta);
+    const calls = [_]turn.ToolCall{.{
+        .id = "call_reasoning",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+        .reasoning_content = "opaque continuation",
+    }};
+    try transcript.append(ta, .{ .assistant_tool_use = &calls });
+    try transcript.append(ta, .{ .tool_result = .{
+        .tool_use_id = "call_reasoning",
+        .tool_name = "workspace_read_file",
+        .ok = true,
+        .llm_text = "ok",
+    } });
+
+    const body = try buildRequestBody(ta, .{
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+        .max_tokens = 128,
+        .system_prompt = "be exact",
+        .tools_json = "[]",
+    }, &transcript, null);
+
+    try testing.expect(std.mem.indexOf(u8, body, "\"content\":\"\",\"reasoning_content\":\"opaque continuation\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"tool_choice\"") == null);
 }
 
 test "buildRequestBody omits the tools field when no catalog is supplied" {

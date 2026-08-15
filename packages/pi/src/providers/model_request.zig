@@ -33,6 +33,7 @@ pub const ToolUse = struct {
     id: []const u8,
     name: []const u8,
     args_json: []const u8,
+    reasoning_content: ?[]const u8 = null,
 };
 
 pub const ToolResult = struct {
@@ -216,6 +217,7 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
                     .id = call.id,
                     .name = call.name,
                     .args_json = projected orelse call.args_json,
+                    .reasoning_content = call.reasoning_content,
                 } });
             },
             .tool_result => |result| try items.append(allocator, .{ .tool_result = .{
@@ -297,6 +299,7 @@ fn historyBytes(items: []const Item) !u64 {
             try addBytes(&total, call.id);
             try addBytes(&total, call.name);
             try addBytes(&total, call.args_json);
+            if (call.reasoning_content) |body| try addBytes(&total, body);
         },
         .tool_result => |result| {
             try addBytes(&total, result.tool_use_id);
@@ -350,6 +353,10 @@ fn hashTranscript(items: []const Item) Sha256Hex {
                 hashFrame(&hasher, call.id);
                 hashFrame(&hasher, call.name);
                 hashFrame(&hasher, call.args_json);
+                if (call.reasoning_content) |body| {
+                    hashFrame(&hasher, "reasoning-present");
+                    hashFrame(&hasher, body);
+                }
             },
             .tool_result => |result| {
                 hashFrame(&hasher, result.tool_use_id);

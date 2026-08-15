@@ -65,6 +65,7 @@ pub fn maybeRemap(
                 .response = .{ .edit = .{
                     .file = file_v.string,
                     .content = content_v.string,
+                    .reasoning_content = calls[0].reasoning_content,
                 } },
             };
         },
@@ -99,7 +100,12 @@ test "maybeRemap: single apply_edit tool call produces .edit reply" {
     defer arena.deinit();
 
     const calls = [_]turn.ToolCall{
-        .{ .id = "toolu_edit", .name = tool_name, .args_json = "{\"file\":\"handler.ts\",\"content\":\"function handler(req) { return Response.json({ok:true}); }\"}" },
+        .{
+            .id = "toolu_edit",
+            .name = tool_name,
+            .args_json = "{\"file\":\"handler.ts\",\"content\":\"function handler(req) { return Response.json({ok:true}); }\"}",
+            .reasoning_content = "opaque continuation",
+        },
     };
     const reply: turn.AssistantReply = .{
         .response = .{ .tool_calls = &calls },
@@ -110,6 +116,7 @@ test "maybeRemap: single apply_edit tool call produces .edit reply" {
         .edit => |edit| {
             try testing.expectEqualStrings("handler.ts", edit.file);
             try testing.expect(std.mem.indexOf(u8, edit.content, "Response.json") != null);
+            try testing.expectEqualStrings("opaque continuation", edit.reasoning_content.?);
         },
         else => return error.TestFailed,
     }

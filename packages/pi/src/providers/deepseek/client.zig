@@ -308,10 +308,10 @@ pub fn decodeResponse(
     return decodeResponseValue(arena, response.value);
 }
 
-/// The response with every reasoning field removed, plus the parsed value.
-/// A chain of thought is not transcript material and must not reach a
-/// cassette, so the scrub happens before capture, exactly as it does for the
-/// local adapter.
+/// The response with unneeded reasoning fields removed, plus the parsed value.
+/// DeepSeek V4 requires reasoning_content from tool-call messages to be passed
+/// back verbatim on subsequent requests. That one opaque continuation is kept;
+/// final-answer reasoning and gateway-specific reasoning fields are scrubbed.
 pub fn sanitizeResponse(arena: std.mem.Allocator, response_body: []const u8) ![]u8 {
     return (try parseSanitizedResponse(arena, response_body)).bytes;
 }
@@ -495,7 +495,7 @@ fn parseSanitizedResponseWithInspection(
         return ClientError.InvalidResponseJson;
     };
     if (inspection) |value| inspectResponseValue(value, root);
-    removeReasoning(&root);
+    removeUnneededReasoning(&root);
     var out = TextBuffer.init(arena);
     defer out.deinit();
     std.json.Stringify.value(root, .{}, out.writer()) catch return ClientError.InvalidResponseJson;
@@ -512,16 +512,21 @@ fn validateResponseDepth(arena: std.mem.Allocator, response_body: []const u8) !v
     }
 }
 
-/// `reasoning_content` is what the DeepSeek reasoning models emit;
-/// `reasoning` covers an OpenAI-compatible gateway in front of the same API.
-fn removeReasoning(value: *std.json.Value) void {
+/// Keep only the official DeepSeek continuation attached to a non-empty tool
+/// call batch. Generic gateway reasoning and final-answer reasoning remain
+/// private and never enter transcripts or cassettes.
+fn removeUnneededReasoning(value: *std.json.Value) void {
     switch (value.*) {
         .object => |*object| {
-            _ = object.orderedRemove("reasoning_content");
+            const has_tool_calls = if (object.get("tool_calls")) |calls|
+                calls == .array and calls.array.items.len > 0
+            else
+                false;
+            if (!has_tool_calls) _ = object.orderedRemove("reasoning_content");
             _ = object.orderedRemove("reasoning");
-            for (object.values()) |*child| removeReasoning(child);
+            for (object.values()) |*child| removeUnneededReasoning(child);
         },
-        .array => |*array| for (array.items) |*child| removeReasoning(child),
+        .array => |*array| for (array.items) |*child| removeUnneededReasoning(child),
         else => {},
     }
 }
@@ -543,6 +548,7 @@ fn decodeResponseValue(
     const message = choice.object.get("message") orelse return ClientError.UnexpectedResponseShape;
     if (message != .object) return ClientError.UnexpectedResponseShape;
     const content = try optionalString(message.object.get("content"));
+    const reasoning_content = try optionalString(message.object.get("reasoning_content"));
     const usage = try decodeUsage(root.object.get("usage"));
 
     if (message.object.get("tool_calls")) |tool_calls_value| {
@@ -560,7 +566,12 @@ fn decodeResponseValue(
                 if (!validToolName(name)) return ClientError.MalformedToolCall;
                 const args = try requiredString(function.object.get("arguments"));
                 try validateJsonArguments(arena, args);
-                calls[index] = .{ .id = id, .name = name, .args_json = args };
+                calls[index] = .{
+                    .id = id,
+                    .name = name,
+                    .args_json = args,
+                    .reasoning_content = if (index == 0) reasoning_content else null,
+                };
             }
             const reply: turn.AssistantReply = .{
                 .preamble = nonEmpty(content),
@@ -856,9 +867,23 @@ test "sanitizeResponse strips reasoning fields before capture" {
     try testing.expect(std.mem.indexOf(u8, sanitized, "\"content\":\"ok\"") != null);
 }
 
+test "sanitizeResponse retains only tool-call reasoning continuation" {
+    const response =
+        "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{" ++
+        "\"reasoning_content\":\"continue exactly\",\"reasoning\":\"discard gateway field\"," ++
+        "\"content\":null,\"tool_calls\":[{\"id\":\"c\",\"type\":\"function\"," ++
+        "\"function\":{\"name\":\"workspace_read_file\",\"arguments\":\"{}\"}}]}}]}";
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const sanitized = try sanitizeResponse(arena.allocator(), response);
+    try testing.expect(std.mem.indexOf(u8, sanitized, "continue exactly") != null);
+    try testing.expect(std.mem.indexOf(u8, sanitized, "discard gateway field") == null);
+}
+
 test "tool calls keep the ids DeepSeek assigned" {
     const response =
         "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":null," ++
+        "\"reasoning_content\":\"must be replayed\"," ++
         "\"tool_calls\":[{\"id\":\"call_0_abc\",\"type\":\"function\",\"function\":{" ++
         "\"name\":\"workspace_read_file\",\"arguments\":\"{\\\"path\\\":\\\"handler.ts\\\"}\"}}]}}]," ++
         "\"usage\":{\"prompt_tokens\":11,\"completion_tokens\":7}}";
@@ -870,6 +895,7 @@ test "tool calls keep the ids DeepSeek assigned" {
     try testing.expectEqualStrings("call_0_abc", calls[0].id);
     try testing.expectEqualStrings("workspace_read_file", calls[0].name);
     try testing.expectEqualStrings("{\"path\":\"handler.ts\"}", calls[0].args_json);
+    try testing.expectEqualStrings("must be replayed", calls[0].reasoning_content.?);
     try testing.expect(result.reply.preamble == null);
     try testing.expectEqualStrings("tool_calls", result.stop_reason.?);
 }

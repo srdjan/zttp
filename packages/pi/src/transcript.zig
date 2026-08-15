@@ -52,12 +52,14 @@ pub const OwnedToolCall = struct {
     id: []const u8,
     name: []const u8,
     args_json: []const u8,
+    reasoning_content: ?[]const u8 = null,
 
     pub fn deinit(self: *OwnedToolCall, allocator: std.mem.Allocator) void {
         allocator.free(self.id);
         allocator.free(self.name);
         allocator.free(self.args_json);
-        self.* = .{ .id = &.{}, .name = &.{}, .args_json = &.{} };
+        if (self.reasoning_content) |body| allocator.free(body);
+        self.* = .{ .id = &.{}, .name = &.{}, .args_json = &.{}, .reasoning_content = null };
     }
 };
 
@@ -312,6 +314,10 @@ fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedEntry {
                     .id = try allocator.dupe(u8, call.id),
                     .name = try allocator.dupe(u8, call.name),
                     .args_json = try allocator.dupe(u8, call.args_json),
+                    .reasoning_content = if (call.reasoning_content) |body|
+                        try allocator.dupe(u8, body)
+                    else
+                        null,
                 };
             }
             break :blk .{ .assistant_tool_use = owned };

@@ -58,6 +58,7 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
             .id = calls[0].id,
             .name = calls[0].name,
             .args_json = calls[0].args_json,
+            .reasoning_content = calls[0].reasoning_content,
         } },
         .tool_result => |tr| .{ .tool_result = .{
             .tool_use_id = tr.tool_use_id,
@@ -115,6 +116,7 @@ pub fn appendEntryToWriter(
                     .id = call.id,
                     .name = call.name,
                     .args_json = call.args_json,
+                    .reasoning_content = call.reasoning_content,
                 };
             }
             try writer.appendEntryEvent(allocator, entry_id, null, .{ .tool_use_batch = batch });
@@ -211,7 +213,12 @@ test "appendEntry on assistant_tool_use writes one atomic tool_use_batch frame" 
     defer allocator.free(path);
 
     var calls = [_]transcript.OwnedToolCall{
-        .{ .id = "toolu_a", .name = "zts_expert_meta", .args_json = "{}" },
+        .{
+            .id = "toolu_a",
+            .name = "zts_expert_meta",
+            .args_json = "{}",
+            .reasoning_content = "opaque continuation",
+        },
         .{ .id = "toolu_b", .name = "workspace_read_file", .args_json = "{\"path\":\"x.ts\"}" },
     };
     const entry: transcript.OwnedEntry = .{ .assistant_tool_use = calls[0..] };
@@ -230,6 +237,7 @@ test "appendEntry on assistant_tool_use writes one atomic tool_use_batch frame" 
     const d2 = batch[1].object;
     try testing.expectEqualStrings("toolu_a", d1.get("id").?.string);
     try testing.expectEqualStrings("zts_expert_meta", d1.get("name").?.string);
+    try testing.expectEqualStrings("opaque continuation", d1.get("reasoning_content").?.string);
     try testing.expectEqualStrings("toolu_b", d2.get("id").?.string);
     try testing.expectEqualStrings("workspace_read_file", d2.get("name").?.string);
 }

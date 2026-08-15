@@ -140,6 +140,7 @@ pub const ToolUse = struct {
     id: []const u8,
     name: []const u8,
     args_json: []const u8,
+    reasoning_content: ?[]const u8 = null,
 };
 
 pub const DisplayMessage = struct {
@@ -733,6 +734,9 @@ fn validateToolUseValue(value: std.json.Value) !void {
     const name = value.object.get("name") orelse return error.CorruptEventsLog;
     const args = value.object.get("args_json") orelse return error.CorruptEventsLog;
     if (id != .string or name != .string or args != .string) return error.CorruptEventsLog;
+    if (value.object.get("reasoning_content")) |reasoning| {
+        if (reasoning != .string) return error.CorruptEventsLog;
+    }
 }
 
 pub fn nextEntryId(allocator: std.mem.Allocator, events_path: []const u8) !EntryId {
@@ -848,6 +852,10 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
             try json_writer.writeString(writer, tu.name);
             try writer.writeAll(",\"args_json\":");
             try json_writer.writeString(writer, tu.args_json);
+            if (tu.reasoning_content) |reasoning| {
+                try writer.writeAll(",\"reasoning_content\":");
+                try json_writer.writeString(writer, reasoning);
+            }
             try writer.writeByte('}');
         },
         .tool_use_batch => |batch| {
@@ -861,6 +869,10 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
                 try json_writer.writeString(writer, tu.name);
                 try writer.writeAll(",\"args_json\":");
                 try json_writer.writeString(writer, tu.args_json);
+                if (tu.reasoning_content) |reasoning| {
+                    try writer.writeAll(",\"reasoning_content\":");
+                    try json_writer.writeString(writer, reasoning);
+                }
                 try writer.writeByte('}');
             }
             try writer.writeByte(']');

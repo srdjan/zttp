@@ -562,7 +562,12 @@ pub fn runTurnWith(
                 const prepared = prepareEdit(ta, options.workspace_root, edit) catch |err| {
                     if (err == error.OutOfMemory) return err;
                     const args_json = try buildApplyEditArgs(ta, edit, null);
-                    const calls = [_]turn.ToolCall{.{ .id = edit_call_id, .name = "apply_edit", .args_json = args_json }};
+                    const calls = [_]turn.ToolCall{.{
+                        .id = edit_call_id,
+                        .name = "apply_edit",
+                        .args_json = args_json,
+                        .reasoning_content = edit.reasoning_content,
+                    }};
                     try transcript.append(allocator, .{ .assistant_tool_use = &calls });
                     const msg = if (err == error.PathOutsideWorkspace)
                         try std.fmt.allocPrint(
@@ -587,7 +592,12 @@ pub fn runTurnWith(
                 };
                 {
                     const args_json = try buildApplyEditArgs(ta, edit, &prepared);
-                    const calls = [_]turn.ToolCall{.{ .id = edit_call_id, .name = "apply_edit", .args_json = args_json }};
+                    const calls = [_]turn.ToolCall{.{
+                        .id = edit_call_id,
+                        .name = "apply_edit",
+                        .args_json = args_json,
+                        .reasoning_content = edit.reasoning_content,
+                    }};
                     try transcript.append(allocator, .{ .assistant_tool_use = &calls });
                 }
                 if (!sql_schema_resolved) {

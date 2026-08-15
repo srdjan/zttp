@@ -278,8 +278,18 @@ fn appendToolUse(
     errdefer allocator.free(name_copy);
     const args_copy = try allocator.dupe(u8, args_val.string);
     errdefer allocator.free(args_copy);
+    const reasoning_copy = if (obj.get("reasoning_content")) |value| blk: {
+        if (value != .string) return error.CorruptEventsLog;
+        break :blk try allocator.dupe(u8, value.string);
+    } else null;
+    errdefer if (reasoning_copy) |body| allocator.free(body);
 
-    calls[0] = .{ .id = id_copy, .name = name_copy, .args_json = args_copy };
+    calls[0] = .{
+        .id = id_copy,
+        .name = name_copy,
+        .args_json = args_copy,
+        .reasoning_content = reasoning_copy,
+    };
     try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
 }
 
@@ -309,7 +319,17 @@ fn appendToolUseBatch(
         errdefer allocator.free(name_copy);
         const args_copy = try allocator.dupe(u8, args_val.string);
         errdefer allocator.free(args_copy);
-        calls[index] = .{ .id = id_copy, .name = name_copy, .args_json = args_copy };
+        const reasoning_copy = if (item.object.get("reasoning_content")) |value| blk: {
+            if (value != .string) return error.CorruptEventsLog;
+            break :blk try allocator.dupe(u8, value.string);
+        } else null;
+        errdefer if (reasoning_copy) |body| allocator.free(body);
+        calls[index] = .{
+            .id = id_copy,
+            .name = name_copy,
+            .args_json = args_copy,
+            .reasoning_content = reasoning_copy,
+        };
         initialized += 1;
     }
     try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
@@ -337,6 +357,11 @@ fn appendToolUsePart(
     errdefer allocator.free(name_copy);
     const args_copy = try allocator.dupe(u8, args_val.string);
     errdefer allocator.free(args_copy);
+    const reasoning_copy = if (payload.object.get("reasoning_content")) |value| blk: {
+        if (value != .string) return error.CorruptEventsLog;
+        break :blk try allocator.dupe(u8, value.string);
+    } else null;
+    errdefer if (reasoning_copy) |body| allocator.free(body);
 
     const old_len = last.assistant_tool_use.len;
     const calls = try allocator.realloc(last.assistant_tool_use, old_len + 1);
@@ -345,6 +370,7 @@ fn appendToolUsePart(
         .id = id_copy,
         .name = name_copy,
         .args_json = args_copy,
+        .reasoning_content = reasoning_copy,
     };
 }
 
@@ -453,7 +479,12 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "hi" });
     try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "hello back" });
     const tool_batch = [_]events.ToolUse{
-        .{ .id = "toolu_1", .name = "zts_expert_meta", .args_json = "{\"verbose\":true}" },
+        .{
+            .id = "toolu_1",
+            .name = "zts_expert_meta",
+            .args_json = "{\"verbose\":true}",
+            .reasoning_content = "opaque continuation",
+        },
         .{ .id = "toolu_2", .name = "workspace_read_file", .args_json = "{\"path\":\"handler.ts\"}" },
     };
     try events.appendEntryEvent(allocator, path, 3, null, .{ .tool_use_batch = &tool_batch });
@@ -484,6 +515,7 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
             try testing.expectEqualStrings("toolu_1", calls[0].id);
             try testing.expectEqualStrings("zts_expert_meta", calls[0].name);
             try testing.expectEqualStrings("{\"verbose\":true}", calls[0].args_json);
+            try testing.expectEqualStrings("opaque continuation", calls[0].reasoning_content.?);
             try testing.expectEqualStrings("toolu_2", calls[1].id);
             try testing.expectEqualStrings("workspace_read_file", calls[1].name);
         },
