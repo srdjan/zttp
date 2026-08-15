@@ -1707,8 +1707,7 @@ fn nestedDestructureRewrite(
     // The replacement captures the RHS only up to this line's newline. If the
     // expression does not finish on this line (an unbalanced `(`/`[`/`{` or an
     // unterminated string, e.g. `= makeUser(\n ...\n)`), refuse rather than emit
-    // a truncated, broken two-line replacement. Mirrors the multiline guard the
-    // ZTS617 lift rewriter applies to its signature.
+    // a truncated, broken two-line replacement.
     if (!delimitersBalanced(rhs)) return error.UnsupportedRefactor;
 
     const pattern = std.mem.trim(u8, line_text[open + 1 .. close], " \t");

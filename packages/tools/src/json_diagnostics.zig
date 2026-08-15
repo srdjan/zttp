@@ -187,6 +187,8 @@ fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
         .type_alias_declaration => "ZTS050",
         .distinct_type_declaration => "ZTS051",
         .legacy_types_import => "ZTS053",
+        .default_parameter => "ZTS054",
+        .optional_parameter => "ZTS055",
         // The parser band's existing code for the same fault. The stripper
         // reaches it first, so the code is shared rather than minted: a client
         // that handles ZTS008 handles it wherever it was raised.

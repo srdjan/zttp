@@ -110,9 +110,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "DeclParam",
-        .rhs = "Ident \":\" Type [\"=\" Expr]",
-        .enforcement = .check_time,
-        .rule_code = "ZTS617",
+        .rhs = "Ident \":\" Type",
     },
     .{
         .name = "ValueParams",

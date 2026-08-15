@@ -50,6 +50,10 @@ pub const StripError = error{
     DistinctTypeDeclaration,
     /// `zttp:types` was the pre-model-1 source of proof marker types
     LegacyTypesImport,
+    /// A parameter default hides an omission branch in the declaration
+    DefaultParameter,
+    /// `name?: T` has two spellings for the same undefined union
+    OptionalParameter,
 };
 
 /// Kind of unsupported-TypeScript construct rejected by the stripper. Each
@@ -85,6 +89,12 @@ pub const StripDiagnosticKind = enum {
     /// Proof and effect witnesses are ambient in model-1, so erasing this
     /// import would hide stale source instead of teaching the direct repair.
     legacy_types_import,
+    /// A declaration-level default. Model-1 makes the absence branch explicit
+    /// in both the parameter type and the function body.
+    default_parameter,
+    /// TypeScript's optional-parameter shorthand. Model-1 spells the same
+    /// contract as an explicit union with `undefined`.
+    optional_parameter,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -97,6 +107,8 @@ pub const StripDiagnosticKind = enum {
             .type_alias_declaration => "`type` is not a declaration form in this profile; write `structural Name = ...;`",
             .distinct_type_declaration => "`distinct type` is not a declaration form in this profile; write `nominal Name = string;`",
             .legacy_types_import => "`zttp:types` is not a module in this profile; remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
+            .default_parameter => "default parameters are not part of this profile; replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
+            .optional_parameter => "optional parameter shorthand is not part of this profile; replace `name?: T` with `name: T | undefined`",
         };
     }
 };
@@ -694,6 +706,7 @@ const Stripper = struct {
                 if (self.looksLikeGenericArrow()) {
                     const generic_start = self.pos;
                     if (self.skipBalancedAngles()) {
+                        try self.rejectOptionalParameterInType(generic_start + 1, self.pos - 1);
                         // Record generic params (content inside angle brackets)
                         self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, 0, 0);
                         self.blankSpan(generic_start, self.pos);
@@ -825,6 +838,7 @@ const Stripper = struct {
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
             const generic_start = self.pos;
             if (self.skipBalancedAngles()) {
+                try self.rejectOptionalParameterInType(generic_start + 1, self.pos - 1);
                 // Record generic params in TypeMap (inside the angle brackets)
                 self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, fn_name_start, fn_name_end);
                 // Blank the generic params
@@ -864,6 +878,7 @@ const Stripper = struct {
                     self.skipWhitespaceTracked();
                 }
                 const ret_type_end = self.pos;
+                try self.rejectOptionalParameterInType(ret_type_start, ret_type_end);
                 // Skip whitespace after type
                 self.skipWhitespaceTracked();
                 const kind = classifyReturnType(self.source[ret_type_start..ret_type_end]);
@@ -949,6 +964,11 @@ const Stripper = struct {
 
             // A top-level `=` begins a default value for the current parameter.
             if (c == '=' and paren_depth == 1 and brace_depth == 0 and bracket_depth == 0) {
+                if (self.report_errors) {
+                    std.log.err("{}:{}: {s}", .{ self.line, self.col, StripDiagnosticKind.default_parameter.message() });
+                }
+                self.recordDiagnostic(.default_parameter);
+                if (!self.collect_all_diagnostics) return StripError.DefaultParameter;
                 seen_default_eq = true;
             }
 
@@ -980,6 +1000,11 @@ const Stripper = struct {
                 self.col += 1;
                 self.skipWhitespaceTracked();
                 if (self.pos < self.source.len and self.source[self.pos] == ':') {
+                    if (self.report_errors) {
+                        std.log.err("{}:{}: {s}", .{ question_line, question_col, StripDiagnosticKind.optional_parameter.message() });
+                    }
+                    self.recordDiagnosticAt(.optional_parameter, question_line, question_col);
+                    if (!self.collect_all_diagnostics) return StripError.OptionalParameter;
                     self.blankSpan(question_pos, self.pos);
                     continue;
                 }
@@ -1006,6 +1031,7 @@ const Stripper = struct {
                     try self.skipParamType();
                     // Trim trailing whitespace from type text
                     const type_end = trimTrailingWs(self.source, type_start, self.pos);
+                    try self.rejectOptionalParameterInType(type_start, type_end);
                     // Record param annotation
                     self.recordTypeAnnotation(.param_annotation, type_start, type_end, last_ident_start, last_ident_end);
                     self.blankSpan(colon_pos, self.pos);
@@ -1077,6 +1103,7 @@ const Stripper = struct {
                     self.skipWhitespaceTracked();
                 }
                 const ret_type_end = self.pos;
+                try self.rejectOptionalParameterInType(ret_type_start, ret_type_end);
                 // Check for =>
                 self.skipWhitespaceTracked();
                 if (self.pos + 1 < self.source.len and
@@ -1454,6 +1481,7 @@ const Stripper = struct {
                 return false;
             }
             generic_end = self.pos;
+            try self.rejectOptionalParameterInType(generic_start + 1, generic_end - 1);
             self.skipWhitespaceTracked();
         }
 
@@ -1509,6 +1537,14 @@ const Stripper = struct {
             type_body_start = self.pos;
             self.skipBalancedBraces();
             type_body_end = self.pos;
+        }
+
+        // A structural alias is otherwise blanked before the parser sees it.
+        // Refuse optional parameters inside any function type here, while the
+        // authored span is still available. Optional record fields are inside
+        // braces and remain admitted.
+        if (!keyword_is_type and !is_interface and !is_distinct) {
+            try self.rejectOptionalParameterInType(type_body_start, type_body_end);
         }
 
         self.skipWhitespaceTracked();
@@ -1766,6 +1802,7 @@ const Stripper = struct {
         }
         // Trim trailing whitespace from type text
         const type_end = trimTrailingWs(self.source, type_start, self.pos);
+        try self.rejectOptionalParameterInType(type_start, type_end);
 
         // Find the identifier name before the colon in original source
         const name_range = self.findIdentifierBefore(colon_pos);
@@ -2014,6 +2051,7 @@ const Stripper = struct {
             self.col = start_col;
             return false;
         }
+        try self.rejectOptionalParameterInType(start + 1, self.pos - 1);
 
         // Generic params are typically followed by ( or extends
         self.skipWhitespaceTracked();
@@ -2199,6 +2237,73 @@ const Stripper = struct {
     fn isScalarBaseText(text: []const u8) bool {
         const trimmed = std.mem.trim(u8, text, " \t\r\n;");
         return std.mem.eql(u8, trimmed, "string") or std.mem.eql(u8, trimmed, "number");
+    }
+
+    /// Find `name?: Type` in a function-type parameter list. Record fields use
+    /// the same token sequence, so braces suppress the match. Tuple containers
+    /// do not: a function type nested in a tuple still has parameter parens and
+    /// must be refused.
+    fn findOptionalParameterInType(source: []const u8, start: usize, end: usize) ?usize {
+        var i = start;
+        var paren_depth: u16 = 0;
+        var brace_depth: u16 = 0;
+        while (i < end) : (i += 1) {
+            const c = source[i];
+            if (c == '"' or c == '\'' or c == '`') {
+                const quote = c;
+                i += 1;
+                while (i < end) : (i += 1) {
+                    if (source[i] == '\\' and i + 1 < end) {
+                        i += 1;
+                        continue;
+                    }
+                    if (source[i] == quote) break;
+                }
+                continue;
+            }
+            if (c == '/' and i + 1 < end and source[i + 1] == '/') {
+                i += 2;
+                while (i < end and source[i] != '\n') : (i += 1) {}
+                continue;
+            }
+            if (c == '/' and i + 1 < end and source[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < end and !(source[i] == '*' and source[i + 1] == '/')) : (i += 1) {}
+                if (i + 1 < end) i += 1;
+                continue;
+            }
+            switch (c) {
+                '(' => paren_depth += 1,
+                ')' => if (paren_depth > 0) {
+                    paren_depth -= 1;
+                },
+                '{' => brace_depth += 1,
+                '}' => if (brace_depth > 0) {
+                    brace_depth -= 1;
+                },
+                '?' => {
+                    if (paren_depth == 0 or brace_depth != 0) continue;
+                    var before = i;
+                    while (before > start and std.ascii.isWhitespace(source[before - 1])) : (before -= 1) {}
+                    if (before == start or !isIdentifierContinue(source[before - 1])) continue;
+                    var after = i + 1;
+                    while (after < end and std.ascii.isWhitespace(source[after])) : (after += 1) {}
+                    if (after < end and source[after] == ':') return i;
+                },
+                else => {},
+            }
+        }
+        return null;
+    }
+
+    fn rejectOptionalParameterInType(self: *Self, start: usize, end: usize) StripError!void {
+        const offset = findOptionalParameterInType(self.source, start, end) orelse return;
+        const position = positionOfOffset(self.source, @intCast(offset));
+        if (self.report_errors) {
+            std.log.err("{}:{}: {s}", .{ position.line, position.column, StripDiagnosticKind.optional_parameter.message() });
+        }
+        self.recordDiagnosticAt(.optional_parameter, position.line, position.column);
+        if (!self.collect_all_diagnostics) return StripError.OptionalParameter;
     }
 
     /// The same, at a position the caller kept rather than the cursor's. A
@@ -3199,6 +3304,70 @@ test "legacy zttp types import is refused with ambient repair" {
     );
 }
 
+test "default parameter is refused with an explicit body-default repair" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.DefaultParameter,
+        strip(std.testing.allocator, "function label(prefix: string = \"item\"): string { return prefix; }", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.default_parameter, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 31), diag.?.column);
+    try std.testing.expectEqualStrings(
+        "default parameters are not part of this profile; replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
+        diag.?.kind.message(),
+    );
+}
+
+test "optional parameter shorthand is refused with an explicit union repair" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.OptionalParameter,
+        strip(std.testing.allocator, "function label(prefix?: string): string { return prefix ?? \"item\"; }", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.optional_parameter, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 22), diag.?.column);
+    try std.testing.expectEqualStrings(
+        "optional parameter shorthand is not part of this profile; replace `name?: T` with `name: T | undefined`",
+        diag.?.kind.message(),
+    );
+}
+
+test "optional parameter shorthand in a function type is also refused" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.OptionalParameter,
+        strip(std.testing.allocator, "structural Loader = (id?: string) => string;", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.optional_parameter, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 24), diag.?.column);
+}
+
+test "optional parameter shorthand cannot hide in an erased type annotation" {
+    const sources = [_][]const u8{
+        "const load: (id?: string) => string = (id: string | undefined): string => id ?? \"default\";",
+        "function use(load: (id?: string) => string): string { return load(undefined); }",
+        "function make(): (id?: string) => string { return (id: string | undefined): string => id ?? \"default\"; }",
+        "function map<T extends (id?: string) => string>(load: T): string { return load(undefined); }",
+    };
+    for (sources) |source| {
+        var diag: ?StripDiagnostic = null;
+        try std.testing.expectError(
+            StripError.OptionalParameter,
+            strip(std.testing.allocator, source, .{ .diagnostic_out = &diag }),
+        );
+        try std.testing.expectEqual(StripDiagnosticKind.optional_parameter, diag.?.kind);
+    }
+}
+
+test "optional structural record fields remain admitted" {
+    const result = try strip(std.testing.allocator, "structural User = { name?: string };", .{});
+    defer @constCast(&result).deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.type_map.entries.items.len);
+}
+
 test "export type stripped" {
     const result = try strip(std.testing.allocator, "export type { Foo };", .{});
     defer @constCast(&result).deinit();
@@ -3425,14 +3594,6 @@ test "postfix non-null assertion after a call result is still stripped" {
     defer @constCast(&result).deinit();
     try std.testing.expect(std.mem.indexOf(u8, result.code, "()!") == null);
     try std.testing.expect(std.mem.indexOf(u8, result.code, "foo()") != null);
-}
-
-test "optional function param annotation stripped" {
-    const result = try strip(std.testing.allocator, "function greet(name?: string) { return name; }", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "name?") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, ": string") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "function greet(name") != null);
 }
 
 test "function-typed param annotation stripped" {

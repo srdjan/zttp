@@ -1092,6 +1092,21 @@ stripping, so both malformed-tag diagnostics and later core diagnostics point
 back to the authored file. The core tokenizer, parser, IR, checkers, and
 bytecode generator no longer contain a JSX mode or JSX-specific nodes.
 
+Proof and effect capsules are ambient now. `Proof<T, P>` replaces the old
+intersection marker, `Effects<T, R>` keeps its ceiling role, and the synthetic
+proof-type module is gone. A stale import reports ZTS053 rather than being
+silently erased. The raw event and provider recordings remain historical; live
+source, examples, scaffolds, diagnostics, and owned goldens use the ambient
+forms.
+
+Parameter defaults and optional-parameter shorthand are also gone. ZTS054
+directs `name: T = value` to `name: T | undefined` plus a visible resolution at
+the start of the body, and ZTS055 directs `name?: T` to the same explicit union.
+The raw parser refuses both forms after source preparation, and the former
+minimum-arity, type-check, IR flag, and bytecode-default paths were deleted.
+Calls now supply every fixed positional argument, including explicit
+`undefined` when selecting a body-level fallback.
+
 **Owed, and this is the debt the cutover has been accumulating toward.** The
 recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases
 write `type X =`, so `zig build test` now fails two of them: `weather-egress`
@@ -1109,11 +1124,12 @@ repair path operates on. The second is a live re-record, which is owed anyway:
 the plan wants paired pre-cutover and post-cutover flows, and only a recorded
 live model can publish that row.
 
-Left alone deliberately: the normative sections of
-[the northstar spec](zts-formal-spec-northstar-advanced.md) still describe
-`type`, `distinct type`, `interface`, and `|>`. It specifies `zts-advanced-1`,
-which is what `profile_id` still publishes, and amending it is its own step in
-the phase's delivery order rather than something to do a form at a time.
+The parameter contract and compact grammar in
+[the northstar spec](zts-formal-spec-northstar-advanced.md) now describe the
+fixed-arity cut. Its declaration and text sections still describe legacy forms
+and remain owed. The document and compiler continue to publish
+`zts-advanced-1` until the whole removal list is true; the final identity flip
+must be one deliberate boundary, not a name applied to a partial cutover.
 
 The last thing the compose import held up was rate limiting. `detectRateLimiting`
 required that import plus a `cacheIncr` call, and no handler in the repository

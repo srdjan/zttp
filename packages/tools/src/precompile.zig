@@ -4591,88 +4591,6 @@ test "an unreached exported helper with a nonempty row reports ZTS610" {
     try std.testing.expect(std.mem.indexOf(u8, found, "env") != null);
 }
 
-test "a call may omit a trailing defaulted argument" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\function step(base: number, delta: number = 5): number {
-        \\  return base + delta;
-        \\}
-        \\
-        \\function handler(req: Request): Response {
-        \\  return Response.text(`${step(1)}`);
-        \\}
-    ;
-    var result = try runCheckOnlyFromSource(allocator, source, "trailing-default.ts", null, true, null, false);
-    defer result.deinit(allocator);
-
-    for (result.json_diagnostics.items) |d| {
-        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS202"));
-    }
-}
-
-test "a const-bound arrow's trailing default is honored at its call sites" {
-    // The arity pass walked program, block, export_decl and function_decl, so
-    // a default on a function bound to a `const` recorded nothing and every
-    // call was measured against the full parameter list: `step(1)` reported
-    // "expected 2, got 1" for a call the runtime completes.
-    const allocator = std.testing.allocator;
-    const source =
-        \\const step = (base: number, delta: number = 5): number => base + delta;
-        \\
-        \\function handler(req: Request): Response {
-        \\  return Response.text(`${step(1)}`);
-        \\}
-    ;
-    var result = try runCheckOnlyFromSource(allocator, source, "arrow-default.ts", null, true, null, false);
-    defer result.deinit(allocator);
-
-    for (result.json_diagnostics.items) |d| {
-        try std.testing.expect(!std.mem.eql(u8, d.code, "ZTS202"));
-    }
-}
-
-test "a call omitting a non-defaulted position still reports the arity error" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\function step(base: number, delta: number = 5): number {
-        \\  return base + delta;
-        \\}
-        \\
-        \\function handler(req: Request): Response {
-        \\  return Response.text(`${step()}`);
-        \\}
-    ;
-    var result = try runCheckOnlyFromSource(allocator, source, "missing-required.ts", null, true, null, false);
-    defer result.deinit(allocator);
-
-    var saw_202 = false;
-    for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS202")) saw_202 = true;
-    }
-    try std.testing.expect(saw_202);
-}
-
-test "a default not assignable to the declared parameter type is rejected" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\function step(base: number, delta: number = "five"): number {
-        \\  return base;
-        \\}
-        \\
-        \\function handler(req: Request): Response {
-        \\  return Response.text(`${step(1)}`);
-        \\}
-    ;
-    var result = try runCheckOnlyFromSource(allocator, source, "default-mismatch.ts", null, true, null, false);
-    defer result.deinit(allocator);
-
-    var saw_mismatch = false;
-    for (result.json_diagnostics.items) |d| {
-        if (std.mem.eql(u8, d.code, "ZTS200")) saw_mismatch = true;
-    }
-    try std.testing.expect(saw_mismatch);
-}
-
 test "zts check --types path rejects exported handler local mismatch" {
     const source =
         \\export function handler(req: Request): Response {
@@ -4847,6 +4765,50 @@ test "runCheckOnlyFromSource refuses legacy zttp types import with ZTS053" {
     try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
     try std.testing.expectEqualStrings(
         "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
+        diagnostic.suggestion.?,
+    );
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses default parameters with ZTS054" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function label(prefix: string = "item"): string {
+        \\  return prefix;
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS054", diagnostic.code);
+    try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
+    try std.testing.expectEqualStrings(
+        "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
+        diagnostic.suggestion.?,
+    );
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses optional parameter shorthand with ZTS055" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function label(prefix?: string): string {
+        \\  return prefix ?? "item";
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS055", diagnostic.code);
+    try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
+    try std.testing.expectEqualStrings(
+        "replace `name?: T` with `name: T | undefined`",
         diagnostic.suggestion.?,
     );
     try std.testing.expect(result.contract == null);

@@ -928,14 +928,12 @@ pub const Parser = struct {
                     return error.TooManyLocals;
                 };
 
-                // Check for default value. Default params are accepted here and
-                // flagged downstream by the strict checker's
-                // `canonical_default_parameter` rule (which `normalize` can also
-                // auto-fix); rejecting them at parse time would bypass that.
-                var default_value: NodeIndex = null_node;
+                // Source preparation reports ZTS054 with the model-1 repair.
+                // Keep the raw parser fail-closed too, so callers cannot bypass
+                // that boundary and construct executable default-parameter IR.
                 if (self.match(.assign)) {
-                    param_flags.has_default_params = true;
-                    default_value = try self.parseExpression(.assignment);
+                    self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
+                    return error.ParseError;
                 }
 
                 const param_node = try self.nodes.add(.{
@@ -946,7 +944,7 @@ pub const Parser = struct {
                         .binding = param_binding,
                         .key = null_node,
                         .key_atom = 0,
-                        .default_value = default_value,
+                        .default_value = null_node,
                     } },
                 });
                 try params.append(params_alloc, param_node);
@@ -3014,12 +3012,9 @@ pub const Parser = struct {
                         false,
                     ) catch return error.TooManyLocals;
 
-                    // Default params accepted here; flagged by the strict
-                    // checker's canonical_default_parameter rule downstream.
-                    var default_value: NodeIndex = null_node;
                     if (self.match(.assign)) {
-                        flags.has_default_params = true;
-                        default_value = try self.parseExpression(.assignment);
+                        self.errors.addErrorAt(.unsupported_feature, self.previous, "default parameters are not supported; accept `T | undefined` and resolve the default at the start of the body");
+                        return error.ParseError;
                     }
 
                     const param_node = try self.nodes.add(.{
@@ -3030,7 +3025,7 @@ pub const Parser = struct {
                             .binding = param_binding,
                             .key = null_node,
                             .key_atom = 0,
-                            .default_value = default_value,
+                            .default_value = null_node,
                         } },
                     });
                     try params.append(params_alloc, param_node);
@@ -5055,6 +5050,23 @@ test "unsupported: rest parameter" {
     for (parser.getErrors()) |err| {
         if (err.kind == error_mod.ErrorKind.unsupported_feature and
             std.mem.indexOf(u8, err.message, "rest parameters") != null) found = true;
+    }
+    try std.testing.expect(found);
+}
+
+test "unsupported: default parameter" {
+    const allocator = std.testing.allocator;
+    const source = "function label(prefix = 'item') { return prefix; }";
+
+    var parser = try Parser.init(allocator, source);
+    defer parser.deinit();
+    _ = parser.parse() catch {};
+
+    try std.testing.expect(parser.hasErrors());
+    var found = false;
+    for (parser.getErrors()) |err| {
+        if (err.kind == error_mod.ErrorKind.unsupported_feature and
+            std.mem.indexOf(u8, err.message, "default parameters") != null) found = true;
     }
     try std.testing.expect(found);
 }

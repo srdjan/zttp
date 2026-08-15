@@ -74,7 +74,7 @@ This profile therefore makes five decisions:
 | New control-flow operators | Pure boolean `condition ? value : value` |
 | Removed redundant forms | Pipe composition and fallback `assert` |
 | Restored data literals | `null`, only as an explicit value |
-| Added declaration syntax | Trailing parameters with closed compile-time scalar defaults |
+| Removed parameter syntax | Defaults and `name?: T`; absence is `T | undefined` and resolved in the body |
 | Added pattern syntax | Binding fields and type-test patterns in `match` |
 | Added type syntax | Bounded generic parameters with `extends` |
 | Added type capability | Sound function generics and contractive recursive aliases |
@@ -760,7 +760,7 @@ The profile permits:
 - `const` for every binding that is assigned once
 - `let` only when the binding is reassigned
 - named function declarations for reusable behavior
-- trailing parameters with closed compile-time scalar defaults
+- parameters written as `name: Type`, with absence named as `T | undefined`
 - direct arrow expressions only as arguments to typed, finite callback APIs
 - one-level object or array destructuring, idiomatic when two or more fields
   of a single record type are read in one block with no narrowing guard
@@ -774,7 +774,7 @@ It excludes:
 
 - `var`
 - nested or rest destructuring
-- rest parameters, non-trailing defaults, and runtime-evaluated defaults
+- rest parameters, default parameters, and optional-parameter shorthand
 - function expressions
 - reusable or exported arrow helpers
 - object methods, getters, and setters
@@ -783,31 +783,20 @@ It excludes:
 Object literals contain data fields only. Reusable behavior is a named
 function with explicit inputs and outputs.
 
-A default parameter has the form:
+A default is explicit in the parameter type, call, and function body:
 
 ```ts
-function pageSize(limit: number = 50): number {
-  return limit;
+function pageSize(limit: number | undefined): number {
+  const resolvedLimit = limit ?? 50;
+  return resolvedLimit;
 }
+pageSize(undefined);
 ```
 
-The default expression MUST be accepted by `comptime()`, be assignable to the
-declared parameter type, and produce only `null`, a boolean, a finite number, a
-string, or a `distinct type` over `number` or `string` (the only declarable
-distinct bases). Arrays, records,
-`Bytes`, `Dict`, closures, capabilities, and other identity-bearing or
-resource-owning values are excluded. Once a parameter has a default, every
-following parameter MUST also have a default.
-
-The form elaborates locally to a `T | undefined` ingress value and one
-embedded constant selected before body entry. Omission and an explicit
-`undefined` select the precomputed default; the function body sees the declared
-non-optional type. There is no runtime default evaluation, allocation, effect,
-halt, or resource-order question.
-The checked declaration and module registry record its minimum and maximum
-arity. A call may omit only trailing defaulted positions. When the function is
-viewed through a fixed-arity function type, omission is not inferred from that
-type alone.
+Every call supplies every declared argument. This keeps arity fixed and makes
+the absence branch visible to the type checker, verifier, and runtime. The
+body may resolve a pure value with `??`, or use explicit `if` flow when the
+fallback performs work.
 
 ### 5.3 Values
 
@@ -889,8 +878,7 @@ The profile permits:
 - direct and optional static member access
 - numeric array and tuple indexing
 - literal bracket access to a quoted fixed record field
-- calls with fixed positional arguments, with omission only for trailing
-  defaulted parameters
+- calls with fixed positional arguments
 - array and record literals
 - finite array spread
 - one leading record spread
@@ -1907,8 +1895,7 @@ to one of the specified roles.
 
 This grammar describes admitted structure as a structural over-approximation:
 several productions admit forms the normative prose of Section 5 excludes
-(for example arrow expressions outside callback argument positions, and
-non-scalar parameter defaults). Legality is defined by the prose rules and
+(for example arrow expressions outside callback argument positions). Legality is defined by the prose rules and
 the machine-readable registry together; the registry records, per rule,
 whether enforcement happens at parse time or at check time. Unexpanded
 leaves such as `Ident`, `String`, `Number`, `Literal`, `Template`, and
@@ -1938,7 +1925,7 @@ TypeParam    ::= Ident ["extends" Type]
 FunctionDecl ::= "function" Ident TypeParams?
                  "(" DeclParams? ")" ":" ReturnType Block
 DeclParams   ::= DeclParam ("," DeclParam)* [","]
-DeclParam    ::= Ident ":" Type ["=" Expr]
+DeclParam    ::= Ident ":" Type
 ValueParams  ::= ValueParam ("," ValueParam)* [","]
 ValueParam   ::= Ident ":" Type
 ReturnType   ::= Type | TypePredicate
@@ -2602,9 +2589,9 @@ The corpus MUST include:
 - binding fields and type-test patterns in `match`
 - the closed narrowing rule list
 - decidable branch-choice and iteration-choice rules
-- trailing parameters with closed compile-time scalar defaults - shipped in
-  phase 5; ZTS617 narrowed from every parameter default to a non-trailing one
-  and to one that is not a compile-time scalar
+- explicit parameter absence - phase 5's default-parameter support was removed
+  in phase 7; ZTS054 and ZTS055 direct both declaration shorthands to
+  `T | undefined` plus a visible body-level resolution
 - contractive recursive aliases
 - precise `Result<T, E>` with effect-row polymorphic combinators,
   `unwrapOr`, `orElse`, and `collectAll`

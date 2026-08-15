@@ -38,21 +38,20 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-15 after ambient Proof replaced Spec and the removed
-# legacy synthetic types module gained a typed restriction.
+# Pinned 2026-08-15 after phase 7 removed default and optional parameter
+# shorthand. ZTS054/ZTS055 replaced ZTS617, and the grammar now admits only
+# fixed-arity `name: Type` parameters.
 EXPECTED_PROFILE="zts-advanced-1"
-EXPECTED_POLICY_HASH="cc4150b0823718d56519fcc7782235eeed8fcdf3fbb5aaef091b45144dbe4da4"
+EXPECTED_POLICY_HASH="807d3613e3c934f785eb0c310380296deaeca0c1d277028186ca4d3a2f5e1ac4"
 # Moved when JSX was removed from the core grammar. TSX is now a separately
 # hashed frontend that lowers into this exact core identity.
-EXPECTED_GRAMMAR_HASH="0838cc5e3a0e7f6c3e32edd5b8aba236b27c539de0bf0e44e53542332edd589b"
+EXPECTED_GRAMMAR_HASH="8e832800e21e352785bcbcb230a3f787c1314219fa02f753ab10ced37eee5d5b"
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
-EXPECTED_FRONTEND_GRAMMAR_HASH="6b6cf61dc3238e93dfd689f161393d2d9de98f59b070b6d741bd83756374a29a"
+EXPECTED_FRONTEND_GRAMMAR_HASH="67b7ec97cc658df59440c087d46e3b386f0863c3f461d12512ee4f458a757763"
 EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
-# Moved when phase 7 restricted source files to `.ts` and `.tsx`: the matrix
-# gained `restriction.javascript-source-extension`, enforced by the new ZTS052
-# source-boundary diagnostic. Earlier moves recorded the removal of `type`,
-# `distinct type`, `|>`, `pipe()`, `guard()`, and `interface`.
-EXPECTED_RESTRICTION_HASH="b638cf1ead4754cb408a3848c1e7b289d59b011dfc1f09aff6c32fd17a845319"
+# Moved when phase 7 added the default-parameter and optional-parameter rows,
+# enforced at source preparation by ZTS054 and ZTS055.
+EXPECTED_RESTRICTION_HASH="781cf01d45fba62b69e7c4492a623de1e545e78dff046581d9d5105a245216d0"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

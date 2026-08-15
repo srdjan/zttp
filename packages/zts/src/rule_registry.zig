@@ -325,14 +325,6 @@ const strict_meta = [_]struct {
         .repair = .widen_signature_drop_spread,
     },
     .{
-        .kind = .canonical_default_parameter,
-        .code = "ZTS617",
-        .description = "A parameter default must be trailing and a compile-time scalar.",
-        .example = "function greet(name: string = someCall(), loud: boolean) { /* ... */ }",
-        .help = "Put the defaulted parameters last, and give each one `null`, a boolean, a finite number, or a string - or fold the expression first with `comptime(...)`.",
-        .repair = null,
-    },
-    .{
         .kind = .canonical_destructure_depth,
         .code = "ZTS618",
         .description = "Destructuring patterns must be at most one level deep.",

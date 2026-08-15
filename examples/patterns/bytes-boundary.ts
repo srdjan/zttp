@@ -59,10 +59,10 @@ function kindOf(value: unknown): string {
   };
 }
 
-// The trailing default: `label(k)` selects "payload", `label(k, "body")`
-// overrides it.
-function label(kind: string, prefix: string = "payload"): string {
-  return `${prefix}:${kind}`;
+// Absence is explicit: the parameter type names it, and the body resolves it.
+function label(kind: string, prefix: string | undefined): string {
+  const resolvedPrefix = prefix ?? "payload";
+  return `${resolvedPrefix}:${kind}`;
 }
 
 // Exported, never called from this handler, and still owing a ceiling.
@@ -72,7 +72,7 @@ export function describeOctets(
   const scope = env("BYTES_SCOPE");
   const kind = kindOf(raw);
   if (scope === undefined) {
-    return label(kind);
+    return label(kind, undefined);
   }
   return label(kind, scope);
 }
@@ -107,7 +107,7 @@ function handler(
       size,
       octetKind,
       documentKind,
-      named: label(documentKind),
+      named: label(documentKind, undefined),
       overridden: label(documentKind, "body"),
       reEncoded: kindOf(encodeUtf8(documentKind)),
     });

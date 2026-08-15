@@ -344,7 +344,8 @@ where the rewrite is provable, and otherwise left in place. Rows whose
 | ZTS614 | Non-leading object spread | Put spread first or write explicit fields. |
 | ZTS615 | Complex template interpolation | Bind the value first, then interpolate the binding. |
 | ZTS616 | Call-site spread | Pass explicit arguments. |
-| ZTS617 | Non-trailing or non-scalar parameter default | Put the defaulted parameters last and give each a compile-time scalar. |
+| ZTS054 | Default parameter | Use `T | undefined` and resolve the default at the start of the body. |
+| ZTS055 | Optional parameter shorthand | Write `name: T | undefined`. |
 | ZTS618 | Nested destructuring | Destructure one level at a time. |
 | ZTS619 | Unused index alias in `for...of` | Iterate the array directly. |
 | ZTS620 | Boolean compared to boolean literal | Use the boolean expression or negation directly. |

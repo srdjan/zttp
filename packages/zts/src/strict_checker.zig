@@ -102,7 +102,6 @@ pub const DiagnosticKind = enum {
     canonical_non_leading_spread,
     canonical_template_complex_interp,
     canonical_call_spread,
-    canonical_default_parameter,
     canonical_destructure_depth,
     canonical_unused_index_alias,
     canonical_redundant_bool_compare,
@@ -309,7 +308,6 @@ pub const StrictChecker = struct {
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 self.checkFunctionAnnotation(decl.init);
-                self.checkFunctionParams(decl.init);
                 if (self.ir_view.getFunction(decl.init)) |func| {
                     self.walkStmt(func.body);
                 }
@@ -794,7 +792,6 @@ pub const StrictChecker = struct {
             },
             .function_expr, .arrow_function => {
                 self.checkFunctionAnnotation(node);
-                self.checkFunctionParams(node);
                 if (self.ir_view.getFunction(node)) |func| self.walkStmt(func.body);
             },
             else => {},
@@ -873,80 +870,6 @@ pub const StrictChecker = struct {
             },
             else => {},
         }
-    }
-
-    /// Walk a function's parameter list and flag canonical violations:
-    /// a default in a non-trailing position, and a default that is not a
-    /// compile-time scalar (ZTS617). Param walking is separate from
-    /// `checkFunctionAnnotation` because parameter shape matters even when the
-    /// function carries no type annotation - the canonical rules apply
-    /// unconditionally.
-    ///
-    /// A trailing scalar default is admitted (spec 5.2). What stays refused is
-    /// what would make the form cost something: a non-trailing default is
-    /// unreachable by omission and so says nothing, and a runtime-evaluated
-    /// default would put allocation, effect, and evaluation order in front of
-    /// the body. Rest parameters are refused earlier, at parse time.
-    fn checkFunctionParams(self: *StrictChecker, node: NodeIndex) void {
-        const func = self.ir_view.getFunction(node) orelse return;
-        for (0..func.params_count) |i| {
-            const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
-            const elem = self.ir_view.getPatternElem(param_idx) orelse continue;
-            if (elem.default_value == null_node) continue;
-
-            if (!self.isTrailingDefault(func, @intCast(i))) {
-                self.addDiagnostic(.{
-                    .severity = self.canonicalSeverity(),
-                    .kind = .canonical_default_parameter,
-                    .node = param_idx,
-                    .message = "only a trailing parameter may declare a default",
-                    .help = "move the defaulted parameters to the end of the list, so a call can reach the default by omitting arguments",
-                });
-                continue;
-            }
-
-            if (!self.isScalarDefault(elem.default_value)) {
-                self.addDiagnostic(.{
-                    .severity = self.canonicalSeverity(),
-                    .kind = .canonical_default_parameter,
-                    .node = param_idx,
-                    .message = "a parameter default must be a compile-time scalar",
-                    .help = "use `null`, a boolean, a finite number, or a string - or fold the expression first with `comptime(...)`; resolve anything else in the body",
-                });
-            }
-        }
-    }
-
-    /// True when every parameter after `index` also declares a default, which
-    /// is what makes `index` reachable by omitting trailing arguments.
-    fn isTrailingDefault(self: *StrictChecker, func: ir.Node.FunctionExpr, index: u8) bool {
-        var i: u8 = index + 1;
-        while (i < func.params_count) : (i += 1) {
-            const later_idx = self.ir_view.getListIndex(func.params_start, i);
-            const later = self.ir_view.getPatternElem(later_idx) orelse return false;
-            if (later.default_value == null_node) return false;
-        }
-        return true;
-    }
-
-    /// True when `node` is one of spec 5.2's admitted default values: `null`,
-    /// a boolean, a finite number, or a string. A negated numeric literal
-    /// counts - `-1` is a finite number and the parser spells it as a unary
-    /// operator over the literal. `comptime(...)` folds to a literal before
-    /// this runs, so a folded expression arrives here already admitted, and
-    /// `Infinity` and `NaN` arrive as identifiers and are refused.
-    fn isScalarDefault(self: *StrictChecker, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        return switch (tag) {
-            .lit_null, .lit_bool, .lit_int, .lit_float, .lit_string => true,
-            .unary_op => blk: {
-                const unary = self.ir_view.getUnary(node) orelse break :blk false;
-                if (unary.op != .neg) break :blk false;
-                const operand = self.ir_view.getTag(unary.operand) orelse break :blk false;
-                break :blk operand == .lit_int or operand == .lit_float;
-            },
-            else => false,
-        };
     }
 
     /// ZTS619 canonical_unused_index_alias: detect for-of loops whose iterable
@@ -2757,54 +2680,6 @@ test "canonical_call_spread accepts positional args" {
     defer checker.deinit();
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .canonical_call_spread);
-    }
-}
-
-test "canonical_default_parameter admits a trailing scalar default" {
-    var checker = try checkSource("function greet(name = 'world') { return name; } function handler(req) { return Response.text(greet()); }");
-    defer checker.deinit();
-    for (checker.getDiagnostics()) |diag| {
-        try testing.expect(diag.kind != .canonical_default_parameter);
-    }
-}
-
-test "canonical_default_parameter admits every scalar the spec names" {
-    var checker = try checkSource("function pick(a = null, b = true, c = 1, d = -2.5, e = 'x') { return e; } function handler(req) { return Response.text(pick()); }");
-    defer checker.deinit();
-    for (checker.getDiagnostics()) |diag| {
-        try testing.expect(diag.kind != .canonical_default_parameter);
-    }
-}
-
-test "canonical_default_parameter fires on a non-trailing default" {
-    var checker = try checkSource("function greet(name = 'world', loud) { return name; } function handler(req) { return Response.text(greet('a', true)); }");
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_default_parameter);
-}
-
-test "canonical_default_parameter fires on a call-valued default" {
-    var checker = try checkSource("function fallback() { return 'world'; } function greet(name = fallback()) { return name; } function handler(req) { return Response.text(greet()); }");
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_default_parameter);
-}
-
-test "canonical_default_parameter fires on a record default" {
-    var checker = try checkSource("function greet(opts = {loud: true}) { return 'x'; } function handler(req) { return Response.text(greet()); }");
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_default_parameter);
-}
-
-test "canonical_default_parameter fires on an array default" {
-    var checker = try checkSource("function greet(names = ['a']) { return 'x'; } function handler(req) { return Response.text(greet()); }");
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_default_parameter);
-}
-
-test "canonical_default_parameter accepts explicit undefined-resolved defaults" {
-    var checker = try checkSource("function greet(name) { const resolved = name === undefined ? 'world' : name; return resolved; } function handler(req) { return Response.text(greet(undefined)); }");
-    defer checker.deinit();
-    for (checker.getDiagnostics()) |diag| {
-        try testing.expect(diag.kind != .canonical_default_parameter);
     }
 }
 

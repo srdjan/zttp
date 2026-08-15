@@ -445,4 +445,22 @@ if [[ -n "${legacy_types_hits//[[:space:]]/}" ]]; then
   fail "live source still references removed zttp:types; use ambient Proof<T, P> and Effects<T, R>"
 fi
 
+# Model-1 function parameters have one fixed-arity spelling. Check authored
+# TypeScript rather than every `:` and `=` in Zig, where configuration defaults
+# are ordinary host-language code. `-U` is load-bearing: multiline signatures
+# are the common place a line-only expression would miss the removed form.
+parameter_surface_count="$(git ls-files -z -- '*.ts' '*.tsx' | tr -cd '\0' | wc -c | tr -d '[:space:]')"
+if (( parameter_surface_count < 50 )); then
+  fail "parameter-form gate scanned only $parameter_surface_count TypeScript files"
+fi
+
+removed_parameter_hits="$({
+  git ls-files -z -- '*.ts' '*.tsx' |
+    xargs -0 rg -n -U --pcre2 -- '(?s)(?:function\s+[A-Za-z_$][A-Za-z0-9_$]*(?:\s*<[^>{}]*>)?\s*\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)|\([^)]*\b[A-Za-z_$][A-Za-z0-9_$]*\s*(?:\?\s*:|:\s*[^,)=]+?\s*=)[^)]*\)\s*=>)' 2>/dev/null || true
+} | grep -v -E '^docs/' || true)"
+if [[ -n "${removed_parameter_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$removed_parameter_hits" >&2
+  fail "tracked TypeScript still uses a default or optional parameter; use T | undefined and resolve absence in the body"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

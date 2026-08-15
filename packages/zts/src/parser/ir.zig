@@ -129,11 +129,10 @@ pub const FunctionFlags = packed struct(u8) {
     is_async: bool = false,
     is_arrow: bool = false,
     has_rest_param: bool = false,
-    has_default_params: bool = false,
     is_method: bool = false,
     // Object getters and setters are rejected at parse time
     // (parse.zig: "object getters are not supported"), so no flag for them.
-    _reserved: u2 = 0,
+    _reserved: u3 = 0,
 };
 
 /// IR Node tag - determines which payload union field is active

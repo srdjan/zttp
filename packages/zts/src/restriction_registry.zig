@@ -496,6 +496,22 @@ pub const entries = [_]RestrictionEntry{
         .note = "remove the import and write `Proof<T, P>` or `Effects<T, R>` directly",
         .enforced_by = &.{"ZTS053"},
     },
+    .{
+        .id = "restriction.default-parameter",
+        .feature = "default parameter",
+        .boundary = "one explicit absence branch in the function body",
+        .nature = .language_simplicity,
+        .note = "accept `T | undefined` and resolve the default at the start of the body",
+        .enforced_by = &.{"ZTS054"},
+    },
+    .{
+        .id = "restriction.optional-parameter",
+        .feature = "optional parameter shorthand",
+        .boundary = "one spelling for undefined absence",
+        .nature = .language_simplicity,
+        .note = "write `name: T | undefined`",
+        .enforced_by = &.{"ZTS055"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {
