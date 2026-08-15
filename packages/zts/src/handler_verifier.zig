@@ -848,22 +848,6 @@ pub const HandlerVerifier = struct {
                     self.checkOptionalUse(prop.value);
                 }
             },
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(node) orelse return;
-                var i: u8 = 0;
-                while (i < tmpl.parts_count) : (i += 1) {
-                    const part_idx = self.ir_view.getListIndex(tmpl.parts_start, i);
-                    const part_tag = self.ir_view.getTag(part_idx) orelse continue;
-                    if (part_tag == .template_part_expr) {
-                        const opt_val = self.ir_view.getOptValue(part_idx);
-                        if (opt_val) |val| {
-                            self.walkExprForRefs(val);
-                            // Check 6: optional in template literal
-                            self.checkOptionalUse(val);
-                        }
-                    }
-                }
-            },
             .spread => {
                 const unary = self.ir_view.getUnary(node) orelse return;
                 self.walkExprForRefs(unary.operand);

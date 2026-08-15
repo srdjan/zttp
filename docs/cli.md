@@ -346,7 +346,6 @@ as `default:` rather than `when _:`.
 | ZTS612 | Effectful `?:` arm | A `?:` arm must be a pure value. Bind the effectful call first, or use `match`. |
 | ZTS613 | Compound assignment | Write the full assignment. |
 | ZTS614 | Non-leading object spread | Put spread first or write explicit fields. |
-| ZTS615 | Complex template interpolation | Bind the value first, then interpolate the binding. |
 | ZTS616 | Call-site spread | Pass explicit arguments. |
 | ZTS054 | Default parameter | Use `T | undefined` and resolve the default at the start of the body. |
 | ZTS055 | Optional parameter shorthand | Write `name: T | undefined`. |

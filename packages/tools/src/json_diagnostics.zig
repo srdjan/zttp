@@ -708,7 +708,6 @@ const allowed_features = [_]Feature{
     .{ .name = "function", .status = .allowed, .alternative = null },
     .{ .name = "arrow functions", .status = .allowed, .alternative = null },
     .{ .name = "spread/rest", .status = .allowed, .alternative = null },
-    .{ .name = "template literals", .status = .allowed, .alternative = null },
     .{ .name = "if/else", .status = .allowed, .alternative = null },
     .{ .name = "for...of", .status = .allowed, .alternative = null },
     .{ .name = "ternary", .status = .allowed, .alternative = null },
@@ -1103,7 +1102,7 @@ test "parserErrorCode maps all kinds" {
 
 test "DiagnosticProjection maps boolean checker codes" {
     try std.testing.expectEqualStrings("ZTS100", diagnostic_projection.code(.boolean, .condition_not_boolean));
-    try std.testing.expectEqualStrings("ZTS105", diagnostic_projection.code(.boolean, .mixed_type_add));
+    try std.testing.expectEqualStrings("ZTS105", diagnostic_projection.code(.type, .string_add));
 }
 
 test "DiagnosticProjection maps type checker codes" {

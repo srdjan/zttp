@@ -48,7 +48,6 @@ assert laws that hold under the engine's value model, not merely over the
 integers. Three are deliberately excluded for this reason:
 
 - associativity of `+`, which fails on f64 rounding,
-- commutativity of `+`, which fails on string concatenation,
 - `!` involution, which fails on truthiness coercion.
 
 The solver is injected from `packages/tools/src/smt_solver.zig`, so

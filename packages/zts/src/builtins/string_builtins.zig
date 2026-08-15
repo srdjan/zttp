@@ -4,6 +4,7 @@ const value = h.value;
 const context = h.context;
 const string = h.string;
 const object = h.object;
+const arena_mod = @import("../arena.zig");
 
 const getStringData = h.getStringData;
 const getStringDataCtx = h.getStringDataCtx;
@@ -770,7 +771,7 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
 pub fn stringConstructor(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) {
-        return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
+        return ctx.createString("") catch return value.JSValue.undefined_val;
     }
     const val = args[0];
 
@@ -781,12 +782,12 @@ pub fn stringConstructor(ctx: *context.Context, this: value.JSValue, args: []con
     if (val.isInt()) {
         var buf: [32]u8 = undefined;
         const slice = std.fmt.bufPrint(&buf, "{d}", .{val.getInt()}) catch return value.JSValue.undefined_val;
-        return value.JSValue.fromPtr(string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val);
+        return ctx.createString(slice) catch return value.JSValue.undefined_val;
     }
     if (val.isFloat()) {
         var buf: [64]u8 = undefined;
         const slice = string.formatFloatToBuf(&buf, val.getFloat64());
-        return value.JSValue.fromPtr(string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val);
+        return ctx.createString(slice) catch return value.JSValue.undefined_val;
     }
 
     const literal: []const u8 = if (val.isUndefined())
@@ -800,7 +801,31 @@ pub fn stringConstructor(ctx: *context.Context, this: value.JSValue, args: []con
     else
         "[object Object]";
 
-    return value.JSValue.fromPtr(string.createString(ctx.allocator, literal) catch return value.JSValue.undefined_val);
+    return ctx.createString(literal) catch return value.JSValue.undefined_val;
+}
+
+test "String conversion uses the request arena" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var request_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
+    defer request_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &request_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const before = request_arena.alloc_count;
+    const converted = stringConstructor(ctx, value.JSValue.undefined_val, &.{value.JSValue.fromInt(42)});
+    try std.testing.expect(converted.isString());
+    try std.testing.expectEqualStrings("42", getStringDataCtx(converted, ctx).?);
+    try std.testing.expect(request_arena.alloc_count > before);
 }
 
 /// String.fromCharCode(...charCodes) - Create string from char codes

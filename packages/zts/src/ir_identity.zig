@@ -209,7 +209,7 @@ const Comparer = struct {
                 }
                 return .identical;
             },
-            .lit_string, .template_part_string => {
+            .lit_string => {
                 return self.strings(a, b, "two string literals hold different text");
             },
             .lit_bool => {
@@ -320,7 +320,7 @@ const Comparer = struct {
                     .{ av.value, bv.value },
                 }, depth);
             },
-            .spread, .object_spread, .expr_stmt, .template_part_expr, .return_stmt => {
+            .spread, .object_spread, .expr_stmt, .return_stmt => {
                 // The payload is optional by construction: `return;` stores no
                 // value and `getOptValue` answers null for it. Absent on both
                 // sides is agreement, not a missing payload, and reporting it
@@ -349,17 +349,6 @@ const Comparer = struct {
                 if (params != .identical) return params;
                 return self.nodes(af.body, bf.body, depth + 1);
             },
-            .template_literal => {
-                const av = self.left.getTemplate(a) orelse return payloadMissing();
-                const bv = self.right.getTemplate(b) orelse return payloadMissing();
-                if (av.parts_count != bv.parts_count) {
-                    return .{ .differs = "two template literals hold different part counts" };
-                }
-                const tag = self.nodes(av.tag, bv.tag, depth + 1);
-                if (tag != .identical) return tag;
-                return self.lists(av.parts_start, bv.parts_start, av.parts_count, depth);
-            },
-
             // ---- match ----
             .match_expr => {
                 const av = self.left.getMatchExpr(a) orelse return payloadMissing();
@@ -739,7 +728,7 @@ test "the constructs the unmodeled arm names cannot reach this file" {
     }
 
     // The alphabet pin, read off the enum rather than off a list beside it.
-    try testing.expectEqual(@as(usize, 72), std.enums.values(NodeTag).len);
+    try testing.expectEqual(@as(usize, 69), std.enums.values(NodeTag).len);
 }
 
 /// One source exercising every form a handler is written in, used twice below:
@@ -754,7 +743,7 @@ const admitted_surface =
     \\  const orders: Order[] = [{ id: "a", total: 1 }, { id: "b", total: 2 }];
     \\  const firstOrder = orders[0];
     \\  const id = firstOrder.id;
-    \\  const labels = orders.map((o: Order): string => `${o.id}:${o.total}`);
+    \\  const labels = orders.map((o: Order): string => [o.id, ":", String(o.total)].join(""));
     \\  let sum = 0;
     \\  for (const o of orders) {
     \\    sum = sum + o.total;
@@ -799,7 +788,7 @@ test "a change anywhere in the admitted surface is caught" {
         .{ .from = "sum + o.total", .to = "sum - o.total", .what = "a binary operator" },
         .{ .from = "when \"a\": \"first\"", .to = "when \"a\": \"second\"", .what = "a match arm body" },
         .{ .from = "when \"a\":", .to = "when \"b\":", .what = "a match arm pattern" },
-        .{ .from = "`${o.id}:${o.total}`", .to = "`${o.total}:${o.id}`", .what = "template part order" },
+        .{ .from = "[o.id, \":\", String(o.total)]", .to = "[String(o.total), \":\", o.id]", .what = "join operand order" },
         .{ .from = "{ ...orders[0], kind: kind }", .to = "{ kind: kind, ...orders[0] }", .what = "property order" },
         .{ .from = "orders[0];", .to = "orders[1];", .what = "an index literal" },
         .{ .from = "sum >= 0", .to = "sum > 0", .what = "an assert condition" },

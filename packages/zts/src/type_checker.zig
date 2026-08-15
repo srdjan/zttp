@@ -75,6 +75,7 @@ pub const DiagnosticKind = enum {
     type_argument_count_mismatch, // explicit type arguments, wrong count
     non_contractive_alias, // a recursive alias whose cycle no data constructor guards
     unencodable_json_payload, // a `Response.json` payload whose type cannot be JSON
+    string_add, // string-valued use of + instead of explicit join
 };
 
 pub const Diagnostic = struct {
@@ -708,7 +709,6 @@ pub const TypeChecker = struct {
             .method_call,
             .assignment,
             .match_expr,
-            .template_literal,
             => {
                 self.walkExpr(node);
             },
@@ -749,6 +749,18 @@ pub const TypeChecker = struct {
                 const bin = self.ir_view.getBinary(node) orelse return;
                 self.walkExpr(bin.left);
                 self.walkExpr(bin.right);
+                if (bin.op == .add and
+                    (self.typeMayBeString(self.inferType(bin.left)) or
+                        self.typeMayBeString(self.inferType(bin.right))))
+                {
+                    self.addDiagnostic(.{
+                        .severity = .err,
+                        .kind = .string_add,
+                        .node = node,
+                        .message = "string addition is not supported",
+                        .help = "build a string array with explicit `String(...)` conversions and call `.join(\"\")`",
+                    });
+                }
             },
 
             .unary_op => {
@@ -851,19 +863,6 @@ pub const TypeChecker = struct {
                         .message = "match expression is not provably exhaustive",
                         .help = "add a 'default:' arm, or cover every union variant",
                     });
-                }
-            },
-
-            .template_literal => {
-                const tpl = self.ir_view.getTemplate(node) orelse return;
-                for (0..tpl.parts_count) |i| {
-                    const part = self.ir_view.getListIndex(tpl.parts_start, @intCast(i));
-                    const part_tag = self.ir_view.getTag(part) orelse continue;
-                    if (part_tag == .template_part_expr) {
-                        if (self.ir_view.getOptValue(part)) |expr| {
-                            self.walkExpr(expr);
-                        }
-                    }
                 }
             },
 
@@ -1501,7 +1500,6 @@ pub const TypeChecker = struct {
                 const str = self.ir_view.getString(str_idx) orelse break :blk pool.idx_string;
                 break :blk pool.addLiteralString(self.allocator, str);
             },
-            .template_literal => pool.idx_string,
             .lit_null => pool.idx_null,
             .lit_undefined => pool.idx_undefined,
             .object_literal => self.inferObjectLiteralType(node),
@@ -2361,6 +2359,21 @@ pub const TypeChecker = struct {
                 if (lt != null_type_idx) return lt; // non-nullable ?? anything -> left
                 return null_type_idx;
             },
+        };
+    }
+
+    fn typeMayBeString(self: *const TypeChecker, idx: TypeIndex) bool {
+        if (idx == null_type_idx) return false;
+        const pool = self.env.pool;
+        return switch (pool.getTag(idx) orelse return false) {
+            .t_string, .t_literal_string, .t_template_literal => true,
+            .t_union => blk: {
+                for (pool.getUnionMembers(idx)) |member| {
+                    if (self.typeMayBeString(member)) break :blk true;
+                }
+                break :blk false;
+            },
+            else => false,
         };
     }
 

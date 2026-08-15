@@ -164,12 +164,6 @@ pub const rows = [_]Row{
         .precondition = "both arms are pure, so the conditional and the statement form share one elaboration",
     },
     .{
-        .intent = .name_const_above_template,
-        .method = .kernel_identity,
-        .status = .planned,
-        .precondition = "the extracted expression is pure and evaluated exactly once",
-    },
-    .{
         .intent = .lead_with_spread,
         .method = .kernel_identity,
         .status = .planned,

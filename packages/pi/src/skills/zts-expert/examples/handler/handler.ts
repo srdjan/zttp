@@ -12,7 +12,7 @@ structural ResponseData = {
 
 function processData(data: RequestData): ResponseData {
     return {
-        message: "Hello, " + data.name,
+        message: ["Hello, ", data.name].join(""),
         timestamp: Date.now()
     };
 }

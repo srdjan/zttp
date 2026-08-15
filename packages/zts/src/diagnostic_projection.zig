@@ -132,7 +132,6 @@ fn booleanCode(kind: bool_checker.DiagnosticKind) []const u8 {
         .not_operand_not_boolean => "ZTS102",
         .nullish_on_non_nullable => "ZTS103",
         .arithmetic_on_non_numeric => "ZTS104",
-        .mixed_type_add => "ZTS105",
         .add_on_non_addable => "ZTS106",
         .tautological_comparison => "ZTS107",
     };
@@ -152,6 +151,7 @@ fn typeCode(kind: type_checker.DiagnosticKind) []const u8 {
         .invalid_type_predicate => "ZTS211",
         .non_contractive_alias => "ZTS212",
         .unencodable_json_payload => "ZTS213",
+        .string_add => "ZTS105",
     };
 }
 
@@ -202,7 +202,6 @@ fn strictCode(kind: strict_checker.DiagnosticKind) []const u8 {
         .canonical_ternary_impure => "ZTS612",
         .canonical_compound_assignment => "ZTS613",
         .canonical_non_leading_spread => "ZTS614",
-        .canonical_template_complex_interp => "ZTS615",
         .canonical_call_spread => "ZTS616",
         .canonical_redundant_bool_compare => "ZTS620",
         .canonical_ternary_chain => "ZTS621",
@@ -255,7 +254,7 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    try std.testing.expectEqual(@as(usize, 66), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 65), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

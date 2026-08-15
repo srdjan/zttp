@@ -96,9 +96,9 @@ const fixtures = [_]Fixture{
     .{
         .name = "large_module",
         .source =
-        \\function greet(name) { return "hello, " + name; }
-        \\function shout(s) { return s + "!"; }
-        \\function wrap(s) { return "<" + s + ">"; }
+        \\function greet(name) { return ["hello, ", name].join(""); }
+        \\function shout(s) { return [s, "!"].join(""); }
+        \\function wrap(s) { return ["<", s, ">"].join(""); }
         \\function pair(a, b) { return { a: a, b: b }; }
         \\function triple(a, b, c) { return { a: a, b: b, c: c }; }
         \\function sumArr(xs) {
@@ -140,19 +140,19 @@ const fixtures = [_]Fixture{
 
     // The four fixtures above are plain functions, objects, arrays, and
     // for-of loops. The four below exist because that shape leaves whole
-    // front-end paths unexercised - JSX children and attributes, template
-    // literal parts, import specifiers, and member/optional chains - so
+    // front-end paths unexercised - JSX children and attributes, explicit text
+    // joins, import specifiers, and member/optional chains - so
     // parser work on those paths measured as exactly zero.
     .{
-        .name = "template_strings",
+        .name = "explicit_text_joins",
         .source =
         \\function handler(req) {
         \\  const name = "world";
         \\  const n = 42;
-        \\  const greeting = `hello, ${name}!`;
-        \\  const detail = `count=${n} doubled=${n * 2} nested=${`inner-${name}`}`;
-        \\  const lines = [`a-${n}`, `b-${n}`, `c-${n}`, `d-${n}`];
-        \\  const joined = `${greeting} / ${detail} / ${lines.length}`;
+        \\  const greeting = ["hello, ", name, "!"].join("");
+        \\  const detail = ["count=", String(n), " doubled=", String(n * 2), " nested=inner-", name].join("");
+        \\  const lines = [["a-", String(n)].join(""), ["b-", String(n)].join(""), ["c-", String(n)].join(""), ["d-", String(n)].join("")];
+        \\  const joined = [greeting, " / ", detail, " / ", String(lines.length)].join("");
         \\  return Response.text(joined);
         \\}
         ,

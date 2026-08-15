@@ -287,7 +287,7 @@ pub const Error = error{
 fn testReadFile(allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8 {
     // Mock: return allocated source based on path (caller owns result)
     const source: []const u8 = if (std.mem.endsWith(u8, path, "utils.ts"))
-        "export function greet(name) { return \"Hello \" + name; }"
+        "export function greet(name) { return [\"Hello \", name].join(\"\"); }"
     else if (std.mem.endsWith(u8, path, "helpers.ts"))
         "export function add(a, b) { return a + b; }"
     else if (std.mem.endsWith(u8, path, "circular_a.ts"))

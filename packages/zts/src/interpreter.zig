@@ -411,7 +411,7 @@ pub const Interpreter = struct {
                     self.ctx.sp = sp - 1;
                     continue :sw @enumFromInt(self.pc[0]);
                 } else {
-                    // Slow path for strings/floats
+                    // Slow path for numeric values that are not tagged integers.
                     @branchHint(.cold);
                     self.ctx.sp = sp - 2;
                     self.ctx.pushUnchecked(try arith.addValuesSlow(self, a, b));
@@ -559,15 +559,6 @@ pub const Interpreter = struct {
                     return error.TypeError;
                 }
             },
-            .concat_n => {
-                self.advanceOp();
-                const count = self.pc[0];
-                self.pc += 1;
-                const result = try arith.concatNValues(self, count);
-                try self.ctx.push(result);
-                continue :sw @enumFromInt(self.pc[0]);
-            },
-
             // ========================================
             // Math Builtins
             // ========================================
@@ -2195,14 +2186,6 @@ pub const Interpreter = struct {
                 self.ctx.sp = sp - 1;
                 continue :sw @enumFromInt(self.pc[0]);
             },
-            .concat_2 => {
-                self.advanceOp();
-                const b = self.ctx.pop();
-                const a = self.ctx.pop();
-                self.ctx.pushUnchecked(try arith.concatToString(self, a, b));
-                continue :sw @enumFromInt(self.pc[0]);
-            },
-
             // ========================================
             // Unimplemented / Reserved
             // ========================================
@@ -3347,7 +3330,7 @@ test "End-to-end: function declaration" {
     try std.testing.expect(result.isUndefined());
 }
 
-test "Interpreter string concatenation" {
+test "Interpreter refuses string addition in malformed bytecode" {
     const allocator = std.testing.allocator;
     const gc_mod = @import("gc.zig");
 
@@ -3361,9 +3344,12 @@ test "Interpreter string concatenation" {
 
     // Create two string constants
     const str1 = try string.createString(allocator, "hello");
+    defer string.freeString(allocator, str1);
     const str2 = try string.createString(allocator, " world");
+    defer string.freeString(allocator, str2);
 
-    // Test: push "hello", push " world", add (concat), ret
+    // The source frontend rejects this operation. Keep the runtime edge closed
+    // for malformed or stale bytecode as well.
     const code = [_]u8{
         @intFromEnum(bytecode.Opcode.push_const),
         0,
@@ -3393,15 +3379,7 @@ test "Interpreter string concatenation" {
         .line_table = null,
     };
 
-    const result = try interp.run(&func);
-    try std.testing.expect(result.isString());
-    const result_str = result.toPtr(string.JSString);
-    try std.testing.expectEqualStrings("hello world", result_str.data());
-
-    // Cleanup
-    string.freeString(allocator, result_str);
-    string.freeString(allocator, str1);
-    string.freeString(allocator, str2);
+    try std.testing.expectError(error.TypeError, interp.run(&func));
 }
 
 test "Interpreter typeof" {

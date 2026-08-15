@@ -88,7 +88,6 @@ pub const Opcode = enum(u8) {
     neg = 0x26,
     inc = 0x27,
     dec = 0x28,
-    concat_n = 0x29, // +u8 count - concatenate N values from stack into single string
 
     // Math builtins (compile-time specialized)
     math_floor = 0x2A, // pop 1, push floor(arg)
@@ -219,7 +218,6 @@ pub const Opcode = enum(u8) {
     gt_num = 0xCA, // pop 2 numbers, push boolean (greater-than)
     lte_num = 0xCB, // pop 2 numbers, push boolean (less-or-equal)
     gte_num = 0xCC, // pop 2 numbers, push boolean (greater-or-equal)
-    concat_2 = 0xCD, // pop 2 strings, push concatenation
     drop_goto = 0xCE, // +i16 offset (fused drop + goto)
 
     // Reserved for future
@@ -283,7 +281,6 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .neg => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "neg" },
         .inc => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "inc" },
         .dec => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "dec" },
-        .concat_n => .{ .size = 2, .n_pop = 0, .n_push = 1, .name = "concat_n" }, // n_pop is dynamic (from operand)
 
         // Math builtins
         .math_floor => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "math_floor" },
@@ -413,7 +410,6 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
         .gt_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "gt_num" },
         .lte_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "lte_num" },
         .gte_num => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "gte_num" },
-        .concat_2 => .{ .size = 1, .n_pop = 2, .n_push = 1, .name = "concat_2" },
         .drop_goto => .{ .size = 3, .n_pop = 1, .n_push = 0, .name = "drop_goto" },
 
         // Unknown/reserved opcodes
@@ -541,13 +537,6 @@ pub const HandlerPattern = struct {
     /// When set, can be written directly without any header construction
     prebuilt_response: ?[]const u8 = null,
 
-    // Template fields for prefix patterns with dynamic parameter interpolation
-    // Example: /api/greet/:name -> '{"greeting":"Hello, ' + name + '!"}'
-    // response_template_prefix = '{"greeting":"Hello, '
-    // response_template_suffix = '!"}'
-    response_template_prefix: ?[]const u8 = null,
-    response_template_suffix: ?[]const u8 = null,
-
     pub fn deinit(self: *HandlerPattern, allocator: std.mem.Allocator) void {
         if (self.url_bytes.len > 0) {
             allocator.free(self.url_bytes);
@@ -557,12 +546,6 @@ pub const HandlerPattern = struct {
         }
         if (self.prebuilt_response) |prebuilt| {
             allocator.free(prebuilt);
-        }
-        if (self.response_template_prefix) |prefix| {
-            allocator.free(prefix);
-        }
-        if (self.response_template_suffix) |suffix| {
-            allocator.free(suffix);
         }
     }
 

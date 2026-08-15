@@ -34,8 +34,7 @@ pub const tool: registry_mod.ToolDef = .{
     \\replace_let_with_const, canonicalize_for_of_const,
     \\replace_arrow_with_function, replace_export_arrow_with_function,
     \\replace_compound_assign_with_explicit, drop_redundant_bool_compare,
-    \\canonicalize_capability_key_alias, replace_ternary_with_if,
-    \\name_const_above_template.
+    \\canonicalize_capability_key_alias, replace_ternary_with_if.
     \\The tool never writes files; it returns the proposed content and an
     \\edit_simulate veto verdict.
     ,
@@ -55,7 +54,6 @@ const SupportedKind = enum {
     drop_redundant_bool_compare,
     canonicalize_capability_key_alias,
     replace_ternary_with_if,
-    name_const_above_template,
 
     fn fromIntent(intent: RepairIntent) ?SupportedKind {
         return switch (intent) {
@@ -67,7 +65,6 @@ const SupportedKind = enum {
             .drop_redundant_bool_compare => .drop_redundant_bool_compare,
             .canonicalize_capability_key_alias => .canonicalize_capability_key_alias,
             .replace_ternary_with_if => .replace_ternary_with_if,
-            .name_const_above_template => .name_const_above_template,
             else => null,
         };
     }
@@ -83,7 +80,6 @@ const SupportedKind = enum {
         return switch (self) {
             .canonicalize_capability_key_alias,
             .replace_ternary_with_if,
-            .name_const_above_template,
             => true,
             else => false,
         };
@@ -208,9 +204,7 @@ fn produceProposed(
             .line = line,
             .template = "",
         }),
-        .replace_ternary_with_if,
-        .name_const_above_template,
-        => try repair_apply.applyStatementIntent(allocator, source, absolute, kind.asString(), line),
+        .replace_ternary_with_if => try repair_apply.applyStatementIntent(allocator, source, absolute, kind.asString(), line),
         .canonicalize_capability_key_alias => try applyCapabilityAlias(allocator, absolute, source, line),
     };
 }

@@ -161,9 +161,6 @@ pub const NodeTag = enum(u8) {
     object_spread,
     function_expr,
     arrow_function,
-    template_literal,
-    template_part_string,
-    template_part_expr,
     spread,
     await_expr,
     yield_expr,
@@ -271,9 +268,6 @@ pub const Node = struct {
 
         // Function expression
         function: FunctionExpr,
-
-        // Template literal
-        template: TemplateExpr,
 
         // Variable declaration
         var_decl: VarDecl,
@@ -404,12 +398,6 @@ pub const Node = struct {
         params_count: u8,
         body: NodeIndex,
         flags: FunctionFlags,
-    };
-
-    pub const TemplateExpr = struct {
-        parts_start: NodeIndex, // Interleaved string/expr nodes
-        parts_count: u8,
-        tag: NodeIndex, // Tagged template function, null_node if none
     };
 
     pub const VarDecl = struct {
@@ -1126,17 +1114,6 @@ pub const IRStore = struct {
                 break :blk self.addNode(.function_decl, loc, .{ .a = extra_start, .b = 0 });
             },
 
-            // --- Template literals ---
-            .template_literal => blk: {
-                const t = node.data.template;
-                break :blk self.addNode(.template_literal, loc, .{
-                    .a = t.parts_start,
-                    .b = @as(u32, t.parts_count) | (@as(u32, @as(u16, @truncate(t.tag))) << 8),
-                });
-            },
-            .template_part_string => self.addNode(.template_part_string, loc, .{ .a = node.data.string_idx, .b = 0 }),
-            .template_part_expr => self.addNode(.template_part_expr, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
-
             // --- Statements ---
             .var_decl => blk: {
                 const v = node.data.var_decl;
@@ -1410,7 +1387,6 @@ pub const IRStore = struct {
                 .object_spread,
                 .yield_expr,
                 .await_expr,
-                .template_part_expr,
                 => .{ .opt_value = if (d.a == null_node) null else d.a },
                 .block, .program => .{ .block = .{
                     .stmts_start = d.a,
@@ -1903,22 +1879,6 @@ pub const IrView = struct {
                     .params_count = @truncate(extra[extra_start + 3]),
                     .body = extra[extra_start + 4],
                     .flags = @bitCast(@as(u8, @truncate(extra[extra_start + 5]))),
-                };
-            },
-        };
-    }
-
-    /// Get template literal data
-    pub fn getTemplate(self: IrView, idx: NodeIndex) ?Node.TemplateExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.template else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .parts_start = d.a,
-                    .parts_count = @truncate(d.b),
-                    .tag = @truncate(d.b >> 8),
                 };
             },
         };

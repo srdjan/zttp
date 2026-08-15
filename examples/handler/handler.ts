@@ -25,7 +25,7 @@ structural ResponseData = {
 };
 
 function processData(data: RequestData): ResponseData {
-  return { message: "Hello, " + data.name, timestamp: Date.now() };
+  return { message: ["Hello, ", data.name].join(""), timestamp: Date.now() };
 }
 
 function handler(req: Request): Guardrails<Response> {

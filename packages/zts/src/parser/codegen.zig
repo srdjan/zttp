@@ -382,7 +382,6 @@ pub const CodeGen = struct {
             .array_literal => try self.emitArrayLiteral(self.ir.getArray(index).?),
             .object_literal => try self.emitObjectLiteral(self.ir.getObject(index).?),
             .function_expr, .arrow_function => try self.emitFunctionExpr(index, self.ir.getFunction(index).?),
-            .template_literal => try self.emitTemplateLiteral(self.ir.getTemplate(index).?),
             .match_expr => try self.emitMatchExpr(self.ir.getMatchExpr(index).?),
 
             // Statements
@@ -649,84 +648,6 @@ pub const CodeGen = struct {
         self.popStack(1); // Two operands -> one result
     }
 
-    /// Try to detect and emit a string concatenation chain.
-    /// Pattern: 'str' + a + b + c  (left-associative chain where leftmost is string literal)
-    /// Returns true if chain was emitted, false if not a valid string concat chain.
-    fn tryEmitStringConcatChain(self: *CodeGen, binary: Node.BinaryExpr) bool {
-        // Collect all operands in the chain by walking left-associative tree
-        // Maximum 16 operands to avoid stack overflow
-        var operands: [16]NodeIndex = undefined;
-        var count: u8 = 0;
-
-        // Start with the right operand of the current node
-        operands[0] = binary.right;
-        count = 1;
-
-        // Walk left through the chain
-        var current = binary.left;
-        while (count < 16) {
-            const tag = self.ir.getTag(current) orelse break;
-
-            if (tag == .binary_op) {
-                const inner = self.ir.getBinary(current) orelse break;
-                if (inner.op != .add) break;
-
-                // Shift existing operands right and add this right operand
-                var i: u8 = count;
-                while (i > 0) : (i -= 1) {
-                    operands[i] = operands[i - 1];
-                }
-                operands[0] = inner.right;
-                count += 1;
-                current = inner.left;
-            } else {
-                // Reached the end of the chain
-                break;
-            }
-        }
-
-        // Add the leftmost operand
-        if (count >= 16) return false;
-        {
-            var i: u8 = count;
-            while (i > 0) : (i -= 1) {
-                operands[i] = operands[i - 1];
-            }
-            operands[0] = current;
-            count += 1;
-        }
-
-        // Check if we have at least 3 operands (otherwise regular add is fine)
-        if (count < 3) return false;
-
-        // Only fold the chain when the LEFTMOST operand is a string literal.
-        // JS `+` is left-associative, so `a + b + 'x'` evaluates as
-        // `(a + b) + 'x'`: if `a`/`b` are numbers the leading `a + b` is
-        // arithmetic addition, not concatenation (`5 + 3 + 'x'` === '8x', not
-        // '53x'). concat_n stringifies every operand, so it is only equivalent
-        // to the source when string concatenation governs from the very first
-        // operand - which is guaranteed exactly when operands[0] is a string.
-        const left_tag = self.ir.getTag(operands[0]) orelse return false;
-        if (left_tag != .lit_string) return false;
-
-        // Emit all operands left-to-right
-        for (0..count) |i| {
-            self.emitNode(operands[i]) catch return false;
-        }
-
-        // Emit concat_n opcode
-        self.emit(.concat_n) catch return false;
-        self.emitByte(count) catch return false;
-
-        // Stack: pushed count values, popped count, pushed 1 result
-        // Net effect: no stack change from before first emitNode
-        // (each emitNode pushed 1, concat_n pops count and pushes 1)
-        // We already tracked pushes in emitNode calls, now account for concat_n
-        self.popStack(count - 1);
-
-        return true;
-    }
-
     fn emitBinaryOp(self: *CodeGen, binary: Node.BinaryExpr, node_idx: NodeIndex) !void {
         // Short-circuit operators need special handling
         switch (binary.op) {
@@ -816,15 +737,6 @@ pub const CodeGen = struct {
             }
         }
 
-        // Pattern: string concatenation chain -> concat_n
-        // Detects patterns like 'str' + a + b + c and emits single concat_n opcode
-        // This avoids N-1 intermediate string allocations
-        if (binary.op == .add) {
-            if (self.tryEmitStringConcatChain(binary)) {
-                return;
-            }
-        }
-
         // Pattern: x + small_constant -> add_const_i8
         if (binary.op == .add) {
             if (self.tryGetConstantInt(binary.right)) |val| {
@@ -835,11 +747,8 @@ pub const CodeGen = struct {
                     return;
                 }
             }
-            // No `small_constant + x -> add_const_i8` fast path: `+` is only
-            // commutative on numbers. add_const_i8 computes `operand + const`, so
-            // for a literal-int LHS it would evaluate `x + const` and reverse
-            // string concatenation (e.g. `5 + x` would yield x+"5" not "5"+x).
-            // Fall through to generic two-operand emission, which preserves order.
+            // No `small_constant + x -> add_const_i8` fast path: operand order
+            // is preserved even though the admitted numeric operation commutes.
         }
 
         // Pattern: x - small_constant -> sub_const_i8
@@ -885,11 +794,7 @@ pub const CodeGen = struct {
         if (self.node_types) |nt| {
             if (nt.get(node_idx)) |expr_type| {
                 const specialized: ?Opcode = switch (binary.op) {
-                    .add => switch (expr_type) {
-                        .number => .add_num,
-                        .string => .concat_2,
-                        else => null,
-                    },
+                    .add => if (expr_type == .number) .add_num else null,
                     .sub => if (expr_type == .number) .sub_num else null,
                     .mul => if (expr_type == .number) .mul_num else null,
                     .div => if (expr_type == .number) .div_num else null,
@@ -1773,38 +1678,6 @@ pub const CodeGen = struct {
             try self.emitU16(func_idx);
         }
         self.pushStack(1);
-    }
-
-    fn emitTemplateLiteral(self: *CodeGen, template: Node.TemplateExpr) !void {
-        // Emit first string part
-        var i: u8 = 0;
-
-        while (i < template.parts_count) : (i += 1) {
-            const part_idx = self.ir.getListIndex(template.parts_start, i);
-            const part_tag = self.ir.getTag(part_idx) orelse continue;
-
-            if (part_tag == .template_part_string) {
-                const str_idx = self.ir.getStringIdx(part_idx).?;
-                try self.emitString(str_idx);
-            } else if (part_tag == .template_part_expr) {
-                if (self.ir.getOptValue(part_idx)) |expr| {
-                    try self.emitNode(expr);
-                    // Convert to string if needed (simplified)
-                }
-            }
-
-            // Concatenate parts
-            if (i > 0) {
-                try self.emit(.add);
-                self.popStack(1);
-            }
-        }
-
-        if (template.parts_count == 0) {
-            const empty_idx = try self.addStringConstant("");
-            try self.emitPushConst(empty_idx);
-            self.pushStack(1);
-        }
     }
 
     // ============ Statement Emission ============

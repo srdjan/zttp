@@ -201,20 +201,6 @@ fn serializePatternDispatch(dispatch: ?*bytecode.PatternDispatchTable, writer: a
             // Status and content type
             try writer.writeInt(u16, pattern.status, .little);
             try writer.writeByte(pattern.content_type_idx);
-            // Template prefix (optional)
-            if (pattern.response_template_prefix) |prefix| {
-                try writer.writeInt(u16, @intCast(prefix.len), .little);
-                try writer.writeAll(prefix);
-            } else {
-                try writer.writeInt(u16, 0, .little);
-            }
-            // Template suffix (optional)
-            if (pattern.response_template_suffix) |suffix| {
-                try writer.writeInt(u16, @intCast(suffix.len), .little);
-                try writer.writeAll(suffix);
-            } else {
-                try writer.writeInt(u16, 0, .little);
-            }
         }
     } else {
         try writer.writeInt(u16, 0, .little);
@@ -461,8 +447,6 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
             .status = 200,
             .content_type_idx = 0,
             .prebuilt_response = null,
-            .response_template_prefix = null,
-            .response_template_suffix = null,
         };
         initialized_count += 1;
 
@@ -490,26 +474,6 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
         pattern.status = try reader.readInt(u16, .little);
         pattern.content_type_idx = try reader.readByte();
 
-        // Template prefix (optional)
-        const prefix_len = try reader.readInt(u16, .little);
-        if (prefix_len > 0) {
-            pattern.response_template_prefix = try allocator.alloc(u8, prefix_len);
-            const prefix_read = try reader.readAll(@constCast(pattern.response_template_prefix.?));
-            if (prefix_read != prefix_len) return error.IncompleteRead;
-        } else {
-            pattern.response_template_prefix = null;
-        }
-
-        // Template suffix (optional)
-        const suffix_len = try reader.readInt(u16, .little);
-        if (suffix_len > 0) {
-            pattern.response_template_suffix = try allocator.alloc(u8, suffix_len);
-            const suffix_read = try reader.readAll(@constCast(pattern.response_template_suffix.?));
-            if (suffix_read != suffix_len) return error.IncompleteRead;
-        } else {
-            pattern.response_template_suffix = null;
-        }
-
         // Build exact match hash map entry
         if (pattern.pattern_type == .exact) {
             const hash = std.hash.Wyhash.hash(0, pattern.url_bytes);
@@ -522,7 +486,7 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
 }
 
 /// Bytecode serialization format version
-pub const CACHE_VERSION: u32 = 4;
+pub const CACHE_VERSION: u32 = 5;
 
 /// Cache file magic bytes "ZTSC" (zts cache)
 pub const CACHE_MAGIC: u32 = 0x5A545343;
@@ -1115,8 +1079,6 @@ fn serializePatternDispatchFixture(buffer: []u8) ![]const u8 {
             .static_body = "alpha",
             .status = 200,
             .content_type_idx = 0,
-            .response_template_prefix = "prefix-a",
-            .response_template_suffix = "suffix-a",
         },
         .{
             .pattern_type = .prefix,
@@ -1125,8 +1087,6 @@ fn serializePatternDispatchFixture(buffer: []u8) ![]const u8 {
             .static_body = "beta",
             .status = 201,
             .content_type_idx = 1,
-            .response_template_prefix = "prefix-b",
-            .response_template_suffix = "suffix-b",
         },
     };
     var dispatch = bytecode.PatternDispatchTable.init(std.testing.allocator);

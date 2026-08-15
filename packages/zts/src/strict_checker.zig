@@ -100,7 +100,6 @@ pub const DiagnosticKind = enum {
     canonical_ternary_chain,
     canonical_compound_assignment,
     canonical_non_leading_spread,
-    canonical_template_complex_interp,
     canonical_call_spread,
     canonical_redundant_bool_compare,
     /// An absence operator (`??` or `?.`) applied where the operand's static
@@ -477,15 +476,6 @@ pub const StrictChecker = struct {
                 }
                 break :blk true;
             },
-            .template_literal => blk: {
-                const tmpl = self.ir_view.getTemplate(node) orelse break :blk true;
-                for (0..tmpl.parts_count) |i| {
-                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-                    const value = self.ir_view.getOptValue(part) orelse continue;
-                    if (!self.isPureExpr(value)) break :blk false;
-                }
-                break :blk true;
-            },
             .match_expr => blk: {
                 const match = self.ir_view.getMatchExpr(node) orelse break :blk true;
                 if (!self.isPureExpr(match.discriminant)) break :blk false;
@@ -734,26 +724,6 @@ pub const StrictChecker = struct {
                     }
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
                     self.walkExpr(prop.value);
-                }
-            },
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(node) orelse return;
-                for (0..tmpl.parts_count) |i| {
-                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-                    const value = self.ir_view.getOptValue(part) orelse continue;
-                    const part_tag = self.ir_view.getTag(part);
-                    const interp = part_tag != null and part_tag.? == .template_part_expr;
-                    if (interp and !self.isSimpleTemplateInterp(value)) {
-                        self.addDiagnostic(.{
-                            .severity = self.canonicalSeverity(),
-                            .kind = .canonical_template_complex_interp,
-                            .node = part,
-                            .message = "template interpolation must be an identifier or a literal-keyed property access",
-                            .help = "hoist the expression into a `const` immediately above the template, then interpolate the new name",
-                            .repair_intent = .name_const_above_template,
-                        });
-                    }
-                    self.walkExpr(value);
                 }
             },
             .match_expr => {
@@ -1747,23 +1717,6 @@ pub const StrictChecker = struct {
         };
     }
 
-    /// Canonical template interpolations are restricted to identifiers and
-    /// chains of literal-keyed member access (`user.profile.name`). Anything
-    /// else - function calls, arithmetic, ternaries, computed access - must
-    /// be hoisted into a `const` above the template.
-    fn isSimpleTemplateInterp(self: *const StrictChecker, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        return switch (tag) {
-            .identifier => true,
-            .member_access => blk: {
-                const member = self.ir_view.getMember(node) orelse break :blk false;
-                if (member.computed != null_node) break :blk false;
-                break :blk self.isSimpleTemplateInterp(member.object);
-            },
-            else => false,
-        };
-    }
-
     fn isLiteralOrStaticTemplate(self: *const StrictChecker, node: NodeIndex) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
         if (tag == .lit_string) return true;
@@ -1772,13 +1725,7 @@ pub const StrictChecker = struct {
             const binding = self.ir_view.getBinding(node) orelse return false;
             return self.static_literal_bindings.contains(bindingKey(binding));
         }
-        if (tag != .template_literal) return false;
-        const tmpl = self.ir_view.getTemplate(node) orelse return false;
-        for (0..tmpl.parts_count) |i| {
-            const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-            if (self.ir_view.getTag(part) == .template_part_expr) return false;
-        }
-        return true;
+        return false;
     }
 
     fn resolveAtomName(self: *const StrictChecker, atom_value: u32) ?[]const u8 {
@@ -2415,20 +2362,6 @@ test "canonical_non_leading_spread accepts leading spread" {
     defer checker.deinit();
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .canonical_non_leading_spread);
-    }
-}
-
-test "canonical_template_complex_interp fires on a call inside interpolation" {
-    var checker = try checkSource("function getName() { return 'x'; } function handler(req) { return Response.text(`hi ${getName()}`); }");
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_template_complex_interp);
-}
-
-test "canonical_template_complex_interp accepts identifier and member access" {
-    var checker = try checkSource("function handler(req) { const user = {name: 'a'}; return Response.text(`hi ${user.name}`); }");
-    defer checker.deinit();
-    for (checker.getDiagnostics()) |diag| {
-        try testing.expect(diag.kind != .canonical_template_complex_interp);
     }
 }
 

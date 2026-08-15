@@ -653,7 +653,7 @@ test "runOneTest: req.query is populated from the url query string" {
         \\  if (lat === undefined) {
         \\    return Response.text("missing", { status: 400 });
         \\  }
-        \\  return Response.text("lat=" + lat);
+        \\  return Response.text(["lat=", lat].join(""));
         \\}
     ;
 

@@ -530,13 +530,6 @@ pub const Analyzer = struct {
                     try self.walkBaseExpr(prop.value, owner, row, seen_users);
                 }
             },
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(node) orelse return;
-                for (0..tmpl.parts_count) |i| {
-                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-                    if (self.ir_view.getOptValue(part)) |value| try self.walkBaseExpr(value, owner, row, seen_users);
-                }
-            },
             .match_expr => {
                 const match = self.ir_view.getMatchExpr(node) orelse return;
                 try self.walkBaseExpr(match.discriminant, owner, row, seen_users);

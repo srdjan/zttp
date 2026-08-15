@@ -21,7 +21,7 @@ function getUserById(req: Request): Response {
 
   const user = {
     id: id,
-    name: "User " + id,
+    name: ["User ", String(id)].join(""),
     orders: orders.json(),
   };
 

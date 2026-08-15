@@ -139,7 +139,6 @@ predicate callbacks face the same rule at runtime.
 | non-nullable `A ?? B` | `A` |
 | `(T \| undefined) ?? B` | `T \| B` |
 | `undefined ?? B` | `B` |
-| `+` (string + any) | string |
 | `+` (number + number) | number |
 | `-`, `*`, `/`, `%`, `**` | number |
 | `&`, `\|`, `^`, `<<`, `>>`, `>>>` | number |
@@ -186,13 +185,16 @@ unknownParam - 1                   // OK: unknown defers to runtime
 
 ## Type-Directed `+` Safety
 
-The `+` operator accepts `number + number` (addition) and `string + string` (concatenation). Mixing types is an error - use template literals for string interpolation.
+The `+` operator accepts only `number + number`. Build text with a string
+array and `.join("")`, converting non-string values explicitly with
+`String(value)`.
 
 ### What is rejected
 
 ```javascript
-42 + "px"                          // ERROR: implicit type coercion; number and string operands
-"count: " + 5                     // ERROR: use template literal: `count: ${n}`
+42 + "px"                          // ERROR: string addition is excluded
+"count: " + 5                     // ERROR: use ["count: ", String(5)].join("")
+"a" + "b"                         // ERROR: use ["a", "b"].join("")
 true + 1                          // ERROR: 'boolean' operand in '+'
 env("X") + "suffix"               // ERROR: 'optional string' operand in '+'
 ```
@@ -201,9 +203,9 @@ env("X") + "suffix"               // ERROR: 'optional string' operand in '+'
 
 ```javascript
 1 + 2                              // OK: number + number
-"a" + "b"                         // OK: string + string
-`count: ${n}`                     // OK: template literal handles conversion
-(env("X") ?? "") + "suffix"       // OK: ?? unwraps optional to string
+["a", "b"].join("")               // OK: explicit text construction
+["count: ", String(n)].join("")    // OK: explicit conversion
+[(env("X") ?? ""), "suffix"].join("") // OK: optional is resolved first
 x + 1                             // OK: unknown defers to runtime
 ```
 
@@ -244,11 +246,12 @@ env("KEY") === undefined           // No warning: env() returns optional
 
 ## Type-Directed Codegen
 
-When the compiler can prove both operands of a binary operation are numbers (or both are strings for `+`), it emits specialized opcodes that skip runtime type dispatch.
+When the compiler can prove both operands of a binary operation are numbers,
+it emits specialized opcodes that skip runtime type dispatch.
 
 | Generic opcode | Specialized opcode | Difference |
 |---|---|---|
-| `add` | `add_num` | skips string concatenation check |
+| `add` | `add_num` | skips the numeric type slow path |
 | `sub` | `sub_num` | skips type coercion slow path |
 | `mul` | `mul_num` | skips type coercion slow path |
 | `div` | `div_num` | skips type coercion slow path |
@@ -256,7 +259,6 @@ When the compiler can prove both operands of a binary operation are numbers (or 
 | `gt` | `gt_num` | skips general comparison path |
 | `lte` | `lte_num` | skips general comparison path |
 | `gte` | `gte_num` | skips general comparison path |
-| `add` (string) | `concat_2` | direct string concatenation |
 
 Type-directed codegen is active only in precompiled handlers (`-Dhandler=...`). Dev mode (`zig build run`) uses generic opcodes because the BoolChecker's type annotations are not wired to the dev-mode CodeGen path.
 

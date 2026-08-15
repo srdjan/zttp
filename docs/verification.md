@@ -137,7 +137,10 @@ Four virtual module functions return optional values (`T | undefined`):
 - `parseBearer(header)` - returns `string | undefined`
 - `routerMatch(routes, req)` - returns `object | undefined`
 
-The verifier tracks these optional bindings and requires them to be narrowed before use. Using an optional value as a function argument, object property value, template literal expression, or in arithmetic/string concatenation without first checking for `undefined` is an error.
+The verifier tracks these optional bindings and requires them to be narrowed
+before use. Using an optional value as a function argument, object property
+value, numeric operand, or string-array element without first checking for
+`undefined` is an error.
 
 ```javascript
 import { env } from "zttp:env";

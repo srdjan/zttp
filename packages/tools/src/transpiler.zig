@@ -418,7 +418,6 @@ pub const IrTranspiler = struct {
                 break :blk self.inferExprType(t.then_branch);
             },
             .object_literal, .array_literal => .jsvalue_type,
-            .template_literal => .string_type,
             else => .jsvalue_type,
         };
     }
@@ -1730,10 +1729,7 @@ pub const IrTranspiler = struct {
                 // Function call result - check if it's a known integer function
                 return self.emitDynamicJsonCallResult(idx);
             },
-            .binary_op => {
-                // String concatenation in JSON value
-                return self.emitDynamicJsonBinaryOp(idx);
-            },
+            .binary_op => return false,
             .member_access => {
                 // string.length in JSON value context
                 const member = self.ir.getMember(idx) orelse return false;
@@ -1895,94 +1891,6 @@ pub const IrTranspiler = struct {
             }
         }
 
-        return false;
-    }
-
-    fn emitDynamicJsonBinaryOp(self: *IrTranspiler, idx: NodeIndex) bool {
-        const bin = self.ir.getBinary(idx) orelse return false;
-        if (bin.op != .add) return false;
-
-        // Determine if this is string concatenation
-        const lt = self.inferExprType(bin.left);
-        const rt = self.inferExprType(bin.right);
-        if (lt != .string_type and rt != .string_type) return false;
-
-        // String concatenation in JSON value - wrap with quotes
-        self.emitIndent();
-        self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
-        self.emitIndent();
-        self.emit("json_buf[json_pos] = '\"';\n");
-        self.emitIndent();
-        self.emit("json_pos += 1;\n");
-
-        if (!self.emitDynamicJsonConcat(idx)) return false;
-
-        self.emitIndent();
-        self.emit("if (json_pos + 1 > json_buf.len) return error.AotBail;\n");
-        self.emitIndent();
-        self.emit("json_buf[json_pos] = '\"';\n");
-        self.emitIndent();
-        self.emit("json_pos += 1;\n");
-        return true;
-    }
-
-    fn emitDynamicJsonConcat(self: *IrTranspiler, idx: NodeIndex) bool {
-        const tag = self.ir.getTag(idx) orelse return false;
-        if (tag == .binary_op) {
-            const bin = self.ir.getBinary(idx) orelse return false;
-            if (bin.op == .add) {
-                if (!self.emitDynamicJsonConcat(bin.left)) return false;
-                if (!self.emitDynamicJsonConcat(bin.right)) return false;
-                return true;
-            }
-        }
-        // Base case: emit as string part
-        if (tag == .lit_string) {
-            const str_idx = self.ir.getStringIdx(idx) orelse return false;
-            const str = self.ir.getString(str_idx) orelse return false;
-            self.emitIndent();
-            self.emitFmt("if (json_pos + {d} > json_buf.len) return error.AotBail;\n", .{str.len});
-            self.emitIndent();
-            self.emitFmt("@memcpy(json_buf[json_pos..][0..{d}], ", .{str.len});
-            self.emitZigString(str);
-            self.emit(");\n");
-            self.emitIndent();
-            self.emitFmt("json_pos += {d};\n", .{str.len});
-            return true;
-        }
-        if (tag == .identifier) {
-            const binding = self.ir.getBinding(idx) orelse return false;
-            const name = self.localName(binding);
-            const inferred = self.inferExprType(idx);
-            if (inferred == .string_type) {
-                // String variable - needs JSON escaping (escaper bails on overflow)
-                self.emitIndent();
-                self.emitFmt("json_pos += jsonEscapeInto(json_buf[json_pos..], {s}) catch return error.AotBail;\n", .{name});
-                return true;
-            } else if (inferred == .i32_type) {
-                // Integer variable - format inline
-                self.emitIndent();
-                self.emit("{\n");
-                self.pushIndent();
-                self.emitIndent();
-                self.emitFmt("const s = std.fmt.bufPrint(json_buf[json_pos..], \"{{d}}\", .{{{s}}}) catch return error.AotBail;\n", .{name});
-                self.emitIndent();
-                self.emit("json_pos += s.len;\n");
-                self.popIndent();
-                self.emitIndent();
-                self.emit("}\n");
-                return true;
-            }
-            // Unknown type - direct copy (assume string-like). May be
-            // request-derived and unbounded, so bail rather than overflow.
-            self.emitIndent();
-            self.emitFmt("if (json_pos + {s}.len > json_buf.len) return error.AotBail;\n", .{name});
-            self.emitIndent();
-            self.emitFmt("@memcpy(json_buf[json_pos..][0..{s}.len], {s});\n", .{ name, name });
-            self.emitIndent();
-            self.emitFmt("json_pos += {s}.len;\n", .{name});
-            return true;
-        }
         return false;
     }
 

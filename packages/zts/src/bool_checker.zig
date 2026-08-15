@@ -102,7 +102,6 @@ pub const DiagnosticKind = enum {
     not_operand_not_boolean, // ! operand is non-boolean
     nullish_on_non_nullable, // ?? LHS is provably non-nullable
     arithmetic_on_non_numeric, // arithmetic operator on provably non-numeric type
-    mixed_type_add, // number + string or string + number
     add_on_non_addable, // + operator on non-numeric/non-string type
     tautological_comparison, // comparison is always true or always false
 };
@@ -398,7 +397,6 @@ pub const BoolChecker = struct {
             .method_call,
             .assignment,
             .match_expr,
-            .template_literal,
             => {
                 self.walkExpr(node);
             },
@@ -451,23 +449,13 @@ pub const BoolChecker = struct {
                         self.requireNumeric(bin.left, op_name);
                         self.requireNumeric(bin.right, op_name);
                     },
-                    // S6: + operator requires matching types
+                    // S6: + is numeric only; text construction uses join.
                     .add => {
                         const left_type = self.inferType(bin.left);
                         const right_type = self.inferType(bin.right);
-                        // Mixed type: number + string or string + number
-                        if ((left_type == .number and right_type == .string) or
-                            (left_type == .string and right_type == .number))
-                        {
-                            self.addDiagnostic(.{
-                                .severity = .err,
-                                .kind = .mixed_type_add,
-                                .node = node,
-                                .message = "implicit type coercion in '+'; number and string operands",
-                                .help = "use template literal for string interpolation, or parseInt()/parseFloat() for numeric conversion",
-                            });
-                        } else {
-                            // Check each operand is addable (number, string, or unknown)
+                        if (left_type != .string and right_type != .string) {
+                            // Unknown is handled by strict-mode inference; every
+                            // known operand that reaches `+` must be numeric.
                             self.requireAddable(bin.left, left_type);
                             self.requireAddable(bin.right, right_type);
                         }
@@ -586,19 +574,6 @@ pub const BoolChecker = struct {
                 }
             },
 
-            .template_literal => {
-                const tpl = self.ir_view.getTemplate(node) orelse return;
-                for (0..tpl.parts_count) |i| {
-                    const part = self.ir_view.getListIndex(tpl.parts_start, @intCast(i));
-                    const part_tag = self.ir_view.getTag(part) orelse continue;
-                    if (part_tag == .template_part_expr) {
-                        if (self.ir_view.getOptValue(part)) |expr| {
-                            self.walkExpr(expr);
-                        }
-                    }
-                }
-            },
-
             // Function expressions: walk body for boolean checks
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
@@ -635,7 +610,7 @@ pub const BoolChecker = struct {
             // Literals
             .lit_bool => .boolean,
             .lit_int, .lit_float => .number,
-            .lit_string, .template_literal => .string,
+            .lit_string => .string,
             // `null` is not `undefined`. This lattice has no member for it, and
             // answering `.undefined` here would let a `null` value satisfy an
             // absence test it does not satisfy, so it answers "cannot tell".
@@ -1035,14 +1010,15 @@ pub const BoolChecker = struct {
 
     fn requireAddable(self: *BoolChecker, node: NodeIndex, inferred: ExprType) void {
         switch (inferred) {
-            .number, .string, .unknown => return, // valid operands for +
+            .number, .unknown => return,
+            .string => unreachable,
             .boolean => {
                 self.addDiagnostic(.{
                     .severity = .err,
                     .kind = .add_on_non_addable,
                     .node = node,
                     .message = "'boolean' operand in '+' operator",
-                    .help = "use explicit conversion: (b ? 1 : 0) for numeric addition, or `${b}` for string",
+                    .help = "use explicit conversion: (b ? 1 : 0) for numeric addition, or [String(b)].join(\"\") for text",
                 });
             },
             .undefined => {
@@ -2291,18 +2267,6 @@ test "sound: number + number passes" {
     try checkSource("const r = 1 + 2;", 0);
 }
 
-test "sound: string + string passes" {
-    try checkSource("const r = \"a\" + \"b\";", 0);
-}
-
-test "sound: number + string fails (mixed type)" {
-    try checkSource("const r = 42 + \"px\";", 1);
-}
-
-test "sound: string + number fails (mixed type)" {
-    try checkSource("const r = \"count: \" + 5;", 1);
-}
-
 test "sound: boolean in + fails" {
     try checkSource("const r = true + 1;", 1);
 }
@@ -2313,13 +2277,6 @@ test "sound: undefined in + fails" {
 
 test "sound: object in + fails" {
     try checkSource("const r = {} + 1;", 1);
-}
-
-test "sound: optional string in + fails" {
-    try checkSource(
-        \\import { env } from "zttp:env";
-        \\const r = env("X") + "suffix";
-    , 1);
 }
 
 test "sound: unknown + number passes (runtime decides)" {
@@ -2415,23 +2372,15 @@ test "sound: env() ?? default resolves to string, catches arithmetic" {
     , 1);
 }
 
-test "sound: env() ?? default resolves to string, string + string passes" {
-    try checkSource(
-        \\import { env } from "zttp:env";
-        \\const key = env("KEY") ?? "default";
-        \\const r = key + "_suffix";
-    , 0);
-}
-
 test "sound: bare optional condition does not narrow derived binding" {
     try checkSource(
         \\import { env } from "zttp:env";
         \\const val = env("K");
         \\if (val) {
         \\  const s = val;
-        \\  const r = s + "_ok";
+        \\  const r = [s, "_ok"].join("");
         \\}
-    , 2);
+    , 1);
 }
 
 test "sound: result.ok is boolean, catches arithmetic on it" {

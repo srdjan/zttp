@@ -2167,89 +2167,22 @@ pub const Parser = struct {
     fn parseTemplateLiteral(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
 
-        if (self.current.type == .template_literal) {
-            // Simple template with no interpolation
-            const text = self.current.text(self.source);
-            self.advance();
-            if (self.expression_profile != null and (text.len < 2 or text[text.len - 1] != '`')) {
-                self.errors.addError(.unterminated_template, loc, "unterminated template literal");
-                return error.UnexpectedToken;
-            }
-            const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            const str_idx = try self.unescapedStringOrDiagnostic(content, loc);
-            return try self.nodes.add(Node.litString(loc, str_idx));
+        if (self.current.type == .template_head) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "template interpolation is not supported; build a string array with explicit `String(...)` conversions and call `.join(\"\")`");
+            return error.ParseError;
         }
 
-        // Template with interpolation
-        var parts = std.ArrayList(NodeIndex).empty;
-        defer parts.deinit(self.allocator);
-
-        // template_head: `string${
-        var text = self.current.text(self.source);
+        // A no-substitution template is only a lexical spelling of a string;
+        // it does not survive as a distinct core IR node.
+        const text = self.current.text(self.source);
         self.advance();
-        var content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-        var str_idx = try self.unescapedStringOrDiagnostic(content, loc);
-        var str_node = try self.nodes.add(.{
-            .tag = .template_part_string,
-            .loc = loc,
-            .data = .{ .string_idx = str_idx },
-        });
-        try parts.append(self.allocator, str_node);
-
-        while (self.current.type != .template_tail and self.current.type != .eof) {
-            // Expression
-            const expr = try self.parseExpression(.none);
-            const expr_node = try self.nodes.add(.{
-                .tag = .template_part_expr,
-                .loc = loc,
-                .data = .{ .opt_value = expr },
-            });
-            try parts.append(self.allocator, expr_node);
-
-            if (self.current.type == .template_middle) {
-                text = self.current.text(self.source);
-                self.advance();
-                content = if (text.len >= 3) text[1 .. text.len - 2] else "";
-                str_idx = try self.unescapedStringOrDiagnostic(content, loc);
-                str_node = try self.nodes.add(.{
-                    .tag = .template_part_string,
-                    .loc = loc,
-                    .data = .{ .string_idx = str_idx },
-                });
-                try parts.append(self.allocator, str_node);
-            } else if (self.current.type == .template_tail) {
-                break;
-            } else {
-                self.errorAtCurrent("expected template continuation");
-                break;
-            }
+        if (self.expression_profile != null and (text.len < 2 or text[text.len - 1] != '`')) {
+            self.errors.addError(.unterminated_template, loc, "unterminated template literal");
+            return error.UnexpectedToken;
         }
-
-        // template_tail: }string`
-        if (self.current.type == .template_tail) {
-            text = self.current.text(self.source);
-            self.advance();
-            content = if (text.len >= 2) text[1 .. text.len - 1] else "";
-            str_idx = try self.unescapedStringOrDiagnostic(content, loc);
-            str_node = try self.nodes.add(.{
-                .tag = .template_part_string,
-                .loc = loc,
-                .data = .{ .string_idx = str_idx },
-            });
-            try parts.append(self.allocator, str_node);
-        }
-
-        const parts_count = try self.checkedU8Count(loc, parts.items.len, "too many template literal parts; limit is 255");
-        const parts_start = try self.addNodeList(parts.items);
-        return try self.nodes.add(.{
-            .tag = .template_literal,
-            .loc = loc,
-            .data = .{ .template = .{
-                .parts_start = parts_start,
-                .parts_count = parts_count,
-                .tag = null_node,
-            } },
-        });
+        const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
+        const str_idx = try self.unescapedStringOrDiagnostic(content, loc);
+        return try self.nodes.add(Node.litString(loc, str_idx));
     }
 
     fn parseIdentifier(self: *Parser) anyerror!NodeIndex {
@@ -3344,8 +3277,8 @@ test "parse arrow function" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "parse template literal" {
-    var parser = try Parser.init(std.testing.allocator, "const s = `hello ${name}!`;");
+test "parse no-substitution template as string literal" {
+    var parser = try Parser.init(std.testing.allocator, "const s = `hello!`;");
     defer parser.deinit();
 
     const result = parser.parse() catch {

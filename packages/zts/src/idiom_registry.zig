@@ -7,7 +7,7 @@
 //! `advisory` severity, rewritten where the rewrite is provable, and otherwise
 //! left alone.
 //!
-//! The table is complete against spec 4.2.1: 23 rows, in the document's own
+//! The table is complete against spec 4.2.1: 21 rows, in the document's own
 //! order, held there by `scripts/check-idiom-table.sh`. Phase 0 seeded the rows
 //! that needed no language the engine lacked; the Dict rows arrived with
 //! `Dict`; the `Result`, selection, record-update, fold, and search-loop rows
@@ -80,35 +80,19 @@ pub const entries = [_]IdiomEntry{
         .rewrite_rule = null,
     },
     .{
-        .id = "idiom.number-in-text",
-        .operation = "number in text",
-        .idiomatic = "`${n}`",
-        .superseded = "`${String(n)}`",
-        .precondition = "interpolation of a number",
-        .rewrite_rule = null,
-    },
-    .{
         .id = "idiom.scalar-to-text",
         .operation = "scalar to text",
         .idiomatic = "String(n)",
-        .superseded = "a template whose entire content is one number interpolation",
-        .precondition = "value position outside a template",
-        .rewrite_rule = null,
-    },
-    .{
-        .id = "idiom.redundant-template",
-        .operation = "redundant template",
-        .idiomatic = "the interpolated expression itself",
-        .superseded = "a template whose entire content is one string interpolation",
-        .precondition = "value position outside a template, and the interpolation's static type is exactly string",
+        .superseded = "implicit conversion through template interpolation or string addition",
+        .precondition = "the source value is scalar",
         .rewrite_rule = null,
     },
     .{
         .id = "idiom.string-concatenation",
         .operation = "string concatenation",
-        .idiomatic = "left-associated a + b + c",
-        .superseded = "a template with no literal text and two or more interpolations, all string",
-        .precondition = "value position outside a template",
+        .idiomatic = "[a, b, c].join(\"\")",
+        .superseded = "left-associated a + b + c, template interpolation",
+        .precondition = "every non-string operand is converted explicitly with String(value)",
         .rewrite_rule = null,
     },
     .{
@@ -310,7 +294,7 @@ test "idiom registry has unique stable ids" {
     // here fails `scripts/check-idiom-table.sh`; a row added here and not there
     // fails it too. This asserts the number itself so a same-size swap of one
     // row for another still has to face the text comparison.
-    try std.testing.expectEqual(@as(usize, 23), entries.len);
+    try std.testing.expectEqual(@as(usize, 21), entries.len);
 }
 
 test "idiom registry rows are fully populated" {

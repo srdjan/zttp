@@ -17,17 +17,21 @@ function rangeProbe() {
   for (const i of range(8)) {
     if (i === 1) continue;
     if (i === 5) break;
-    seen = seen + i;
+    seen = [seen, String(i)].join("");
     total = total + i;
   }
 
   return Response.json({ seen: seen, total: total });
 }
 
+structural UserEntry = { profile: { name: string } | undefined };
+structural Users = { active: UserEntry, empty: UserEntry, absent: UserEntry | undefined };
+
 function optionalProbe() {
-  const users = {
+  const users: Users = {
     active: { profile: { name: "Ada" } },
-    empty: {},
+    empty: { profile: undefined },
+    absent: undefined,
   };
 
   const active = users.active?.profile?.name ?? "missing";

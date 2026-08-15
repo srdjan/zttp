@@ -16,7 +16,7 @@ function Greeting(props: GreetingProps): JSX.Element {
 function Card(props: Props): JSX.Element {
     return (
         <div class="card">
-            <Greeting message={"Hello, " + props.name} />
+            <Greeting message={["Hello, ", props.name].join("")} />
             <p>Count: {props.count}</p>
         </div>
     );

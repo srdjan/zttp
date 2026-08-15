@@ -6,7 +6,6 @@
 //! Optimizations:
 //!   - Boolean constant folding: !true -> false, !false -> true
 //!   - Float arithmetic: 1.5 + 2.5 -> 4.0
-//!   - String concatenation: "hello" + "world" -> "helloworld"
 //!   - Short-circuit simplification: true && x -> x, false || x -> x
 //!
 //! Design: Single-pass O(n) traversal for cold-start friendliness.
@@ -29,12 +28,10 @@ const DataPayload = ir.DataPayload;
 pub const IROptStats = struct {
     bool_folds: u32 = 0,
     float_folds: u32 = 0,
-    string_concats: u32 = 0,
     short_circuit_simplifications: u32 = 0,
 
     pub fn totalOptimizations(self: IROptStats) u32 {
-        return self.bool_folds + self.float_folds +
-            self.string_concats + self.short_circuit_simplifications;
+        return self.bool_folds + self.float_folds + self.short_circuit_simplifications;
     }
 };
 
@@ -235,28 +232,6 @@ pub const IROptimizer = struct {
             }
         }
 
-        // String concatenation: lit_string + lit_string -> lit_string
-        if (op == .add and left_tag == .lit_string and right_tag == .lit_string) {
-            const left_idx: u16 = @truncate(self.ir_store.getData(opt_left).a);
-            const right_idx: u16 = @truncate(self.ir_store.getData(opt_right).a);
-
-            if (self.constants.getString(left_idx)) |left_str| {
-                if (self.constants.getString(right_idx)) |right_str| {
-                    // Concatenate strings - ConstantPool stores slices without copying,
-                    // so the concatenated string is owned by the allocator and lives
-                    // for the duration of compilation (same as other constant strings)
-                    const concat = try std.mem.concat(self.allocator, u8, &.{ left_str, right_str });
-                    // Note: Do NOT free concat - ConstantPool.addString stores the slice directly
-
-                    const result_idx = try self.constants.addString(concat);
-                    const result = try self.ir_store.addLitString(loc, result_idx);
-                    try self.replacements.put(self.allocator, idx, result);
-                    self.stats.string_concats += 1;
-                    return result;
-                }
-            }
-        }
-
         // Short-circuit simplification for &&
         if (op == .and_op and left_tag == .lit_bool) {
             const left_val = self.ir_store.getData(opt_left).a != 0;
@@ -433,36 +408,6 @@ test "IROptimizer: float arithmetic folding" {
     // Result should be 4.0
     const result_idx: u16 = @truncate(store.getData(result).a);
     try std.testing.expectEqual(@as(f64, 4.0), constants.getFloat(result_idx).?);
-}
-
-test "IROptimizer: string concatenation" {
-    // Use arena allocator since concatenated strings are stored in ConstantPool
-    // without being copied (the pool stores slices directly)
-    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    var store = IRStore.init(allocator);
-    var constants = ConstantPool.init(allocator);
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Create "hello" + "world" -> should become "helloworld"
-    const left_idx = try constants.addString("hello");
-    const right_idx = try constants.addString("world");
-    const left_node = try store.addLitString(loc, left_idx);
-    const right_node = try store.addLitString(loc, right_idx);
-    const add_node = try store.addBinary(loc, .add, left_node, right_node);
-
-    var optimizer = IROptimizer.init(allocator, &store, &constants);
-
-    const result = try optimizer.visitNode(add_node);
-
-    try std.testing.expectEqual(@as(u32, 1), optimizer.stats.string_concats);
-    try std.testing.expectEqual(NodeTag.lit_string, store.getTag(result));
-    // Result should be "helloworld"
-    const result_idx: u16 = @truncate(store.getData(result).a);
-    try std.testing.expectEqualStrings("helloworld", constants.getString(result_idx).?);
 }
 
 test "IROptimizer: short-circuit && with true" {

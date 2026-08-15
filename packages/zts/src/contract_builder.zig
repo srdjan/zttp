@@ -417,7 +417,7 @@ pub const ContractBuilder = struct {
             for (d.patterns) |pattern| {
                 const is_aot = switch (pattern.pattern_type) {
                     .exact => true,
-                    .prefix => pattern.response_template_prefix != null,
+                    .prefix => false,
                     else => false,
                 };
                 if (!is_aot) continue;
@@ -450,9 +450,7 @@ pub const ContractBuilder = struct {
             for (d.patterns) |pattern| {
                 switch (pattern.pattern_type) {
                     .exact => pattern_count += 1,
-                    .prefix => {
-                        if (pattern.response_template_prefix != null) pattern_count += 1;
-                    },
+                    .prefix => {},
                     // exhaustive: PatternType has three members and the third is
                     // `.dynamic`, which the enum itself documents as "not
                     // optimizable". Leaving it out of the fast-path count is the
@@ -1672,12 +1670,6 @@ pub const ContractBuilder = struct {
                 const func = self.ir_view.getFunction(root) orelse return false;
                 return self.subtreeContains(func.body, target);
             },
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(root) orelse return false;
-                for (0..tmpl.parts_count) |i| {
-                    if (self.subtreeContains(self.ir_view.getListIndex(tmpl.parts_start, @intCast(i)), target)) return true;
-                }
-            },
             .match_expr => {
                 const match = self.ir_view.getMatchExpr(root) orelse return false;
                 if (self.subtreeContains(match.discriminant, target)) return true;
@@ -2252,8 +2244,9 @@ pub const ContractBuilder = struct {
 
     fn isUnhandledWorkflowCall(self: *const ContractBuilder, expr: NodeIndex) bool {
         const tag = self.ir_view.getTag(expr) orelse return false;
-        if (tag == .method_call) return true;
+        if (tag == .method_call) return !self.isPureTextConstructionCall(expr);
         if (tag == .call) {
+            if (self.isPureTextConstructionCall(expr)) return false;
             const call = self.ir_view.getCall(expr) orelse return true;
             return !self.isModeledWorkflowCall(call);
         }
@@ -2273,7 +2266,7 @@ pub const ContractBuilder = struct {
         if (root == null_node) return false;
         const tag = self.ir_view.getTag(root) orelse return false;
         switch (tag) {
-            .call, .method_call => return true,
+            .call, .method_call => return !self.isPureTextConstructionCall(root),
             .binary_op => {
                 const expr = self.ir_view.getBinary(root) orelse return false;
                 return self.containsUnmodeledCall(expr.left) or self.containsUnmodeledCall(expr.right);
@@ -2312,12 +2305,6 @@ pub const ContractBuilder = struct {
                 const prop = self.ir_view.getProperty(root) orelse return false;
                 return self.containsUnmodeledCall(prop.key) or self.containsUnmodeledCall(prop.value);
             },
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(root) orelse return false;
-                for (0..tmpl.parts_count) |i| {
-                    if (self.containsUnmodeledCall(self.ir_view.getListIndex(tmpl.parts_start, @intCast(i)))) return true;
-                }
-            },
             .match_expr => {
                 const match = self.ir_view.getMatchExpr(root) orelse return false;
                 if (self.containsUnmodeledCall(match.discriminant)) return true;
@@ -2347,6 +2334,30 @@ pub const ContractBuilder = struct {
             self.isModuleBindingName(call.callee, "waitSignal") or
             self.isModuleBindingName(call.callee, "signal") or
             self.isModuleBindingName(call.callee, "signalAt");
+    }
+
+    fn isPureTextConstructionCall(self: *const ContractBuilder, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        const call = self.ir_view.getCall(node) orelse return false;
+
+        if (tag == .call and self.isModuleBindingName(call.callee, "String")) {
+            if (call.args_count != 1) return false;
+            return !self.containsUnmodeledCall(self.ir_view.getListIndex(call.args_start, 0));
+        }
+
+        if (tag != .call and tag != .method_call) return false;
+        const member = self.ir_view.getMember(call.callee) orelse return false;
+        if (member.property != @intFromEnum(object.Atom.join)) return false;
+        if (self.ir_view.getTag(member.object) != .array_literal) return false;
+
+        const array = self.ir_view.getArray(member.object) orelse return false;
+        for (0..array.elements_count) |i| {
+            if (self.containsUnmodeledCall(self.ir_view.getListIndex(array.elements_start, @intCast(i)))) return false;
+        }
+        for (0..call.args_count) |i| {
+            if (self.containsUnmodeledCall(self.ir_view.getListIndex(call.args_start, @intCast(i)))) return false;
+        }
+        return true;
     }
 
     fn deriveDurableWorkflowProperties(self: *ContractBuilder) !void {
@@ -2510,7 +2521,7 @@ pub const ContractBuilder = struct {
             }
             return true;
         }
-        if (tag == .method_call) return true;
+        if (tag == .method_call) return !self.isPureTextConstructionCall(ret_val);
         return self.containsUnmodeledCall(ret_val);
     }
 
@@ -4281,15 +4292,6 @@ pub const ContractBuilder = struct {
                     const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
                     try self.includeReachableNodeEffects(prop.value, summary, seen_functions);
-                }
-            },
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(node) orelse return;
-                for (0..tmpl.parts_count) |i| {
-                    const part = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-                    if (self.ir_view.getOptValue(part)) |value| {
-                        try self.includeReachableNodeEffects(value, summary, seen_functions);
-                    }
                 }
             },
             .match_expr => {

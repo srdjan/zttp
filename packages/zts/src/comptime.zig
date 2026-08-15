@@ -296,8 +296,6 @@ pub const ComptimeEvaluator = struct {
             .object_setter,
             .object_spread,
             .function_expr,
-            .template_part_string,
-            .template_part_expr,
             .spread,
             .await_expr,
             .yield_expr,
@@ -344,7 +342,6 @@ pub const ComptimeEvaluator = struct {
             .stmt_list,
             => ComptimeError.UnsupportedOp,
             .assignment, .arrow_function => ComptimeError.UnexpectedToken,
-            .template_literal => ComptimeError.UnsupportedOp,
         };
     }
 
@@ -949,19 +946,7 @@ pub const ComptimeEvaluator = struct {
     // ========================================================================
 
     fn add(self: *Self, left: ComptimeValue, right: ComptimeValue) ComptimeError!ComptimeValue {
-        // String concatenation. Allocate from the evaluator's allocator - the
-        // same one the caller frees the result with (`result.deinit(allocator)`
-        // in the stripper); the previous page_allocator made that a
-        // cross-allocator free.
-        if (left == .string or right == .string) {
-            const ls = try valueToStringAlloc(self.allocator, left);
-            defer if (left == .number) self.allocator.free(ls);
-            const rs = try valueToStringAlloc(self.allocator, right);
-            defer if (right == .number) self.allocator.free(rs);
-            const result = std.fmt.allocPrint(self.allocator, "{s}{s}", .{ ls, rs }) catch return ComptimeError.OutOfMemory;
-            return .{ .string = result };
-        }
-
+        _ = self;
         const ln = left.toNumber() orelse return ComptimeError.TypeMismatch;
         const rn = right.toNumber() orelse return ComptimeError.TypeMismatch;
         return .{ .number = ln + rn };
@@ -1365,38 +1350,6 @@ fn isIdentifierChar(c: u8) bool {
     return isIdentifierStart(c) or isDigit(c);
 }
 
-fn valueToString(value: ComptimeValue) []const u8 {
-    return switch (value) {
-        .string => |s| s,
-        .number => |n| blk: {
-            if (std.math.isNan(n)) break :blk "NaN";
-            if (std.math.isInf(n)) break :blk if (n < 0) "-Infinity" else "Infinity";
-            break :blk ""; // finite numbers need allocation; use valueToStringAlloc
-        },
-        .boolean => |b| if (b) "true" else "false",
-        .null_val => "null",
-        .undefined_val => "undefined",
-        .nan_val => "NaN",
-        .infinity => |i| if (i.negative) "-Infinity" else "Infinity",
-        .array => "",
-        .object => "[object Object]",
-    };
-}
-
-fn valueToStringAlloc(allocator: std.mem.Allocator, value: ComptimeValue) error{OutOfMemory}![]const u8 {
-    if (value == .number) {
-        const n = value.number;
-        if (std.math.isNan(n)) return try allocator.dupe(u8, "NaN");
-        if (std.math.isInf(n)) return try allocator.dupe(u8, if (n < 0) "-Infinity" else "Infinity");
-        // Format like JS: integer values as integers, floats with minimal digits.
-        if (n == @trunc(n) and @abs(n) < 1e15) {
-            return std.fmt.allocPrint(allocator, "{d}", .{@as(i64, @intFromFloat(n))});
-        }
-        return std.fmt.allocPrint(allocator, "{}", .{n});
-    }
-    return valueToString(value);
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -1705,18 +1658,6 @@ test "comptime string method chaining" {
     const r = try eval.evaluate();
     defer r.deinit(allocator);
     try std.testing.expectEqualStrings("HELLO WORLD", r.string);
-}
-
-test "comptime string concatenation frees with the evaluator allocator" {
-    // Regression: `add` allocated the concatenation from page_allocator while
-    // the caller freed it with the evaluator's allocator. Under the leak-
-    // detecting testing allocator that cross-allocator free is caught here.
-    const allocator = std.testing.allocator;
-
-    var eval = ComptimeEvaluator.init(allocator, "\"foo\" + \"bar\"");
-    const r = try eval.evaluate();
-    defer r.deinit(allocator);
-    try std.testing.expectEqualStrings("foobar", r.string);
 }
 
 test "comptime behavior matrix preserves exact values operators builtins and capabilities" {

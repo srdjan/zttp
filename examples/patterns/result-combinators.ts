@@ -48,8 +48,8 @@ function handler(req: Request): Guardrails<Response> {
   // A chain: transform the value, then the failure, then recover from it.
   const doubled = mapResult(ok(21), (n) => n * 2);
   const chained = andThen(doubled, (n) => ok(n + 1));
-  const relabelled = mapError(err("boom"), (e) => `${e}-relabelled`);
-  const recovered = orElse(relabelled, (e) => ok(`recovered from ${e}`));
+  const relabelled = mapError(err("boom"), (e) => [e, "-relabelled"].join(""));
+  const recovered = orElse(relabelled, (e) => ok(["recovered from ", e].join("")));
 
   // Consumption rule 1: the site's type is the value type and the error arm
   // supplies a constant of it.

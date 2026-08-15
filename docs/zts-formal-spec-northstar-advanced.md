@@ -154,7 +154,7 @@ The live compiler already has most of the right shape:
 - block-scoped `const` and necessary `let`
 - named functions, direct arrow callbacks, lexical closures, and recursion
 - records, arrays, tuples, fixed-shape mutation, explicit member reads, spread,
-  templates, optional chaining, and nullish coalescing
+  string literals, explicit text joins, optional chaining, and nullish coalescing
 - `if`/`else`, `for...of`, `match`, `assert`, `return`, `break`, and
   `continue`
 - static named modules and type-only imports
@@ -332,10 +332,8 @@ registry-generated and drift-gated; this document is its readable view.
 | absent member read | `x?.f` | `x === undefined ? undefined : x.f` | same as above |
 | two-way pure selection | `c ? a : b` | a two-arm `match` over a `boolean` scrutinee whose arms are both pure | none |
 | record update | an explicit literal | a leading spread that overrides every field | the spread operand is pure |
-| number in text | `` `${n}` `` | `` `${String(n)}` `` | interpolation of a `number` |
-| scalar to text | `String(n)` | a template whose entire content is one `number` interpolation | value position outside a template |
-| redundant template | the interpolated expression itself | a template whose entire content is one `string` interpolation | value position outside a template, and the interpolation's static type is exactly `string` |
-| string concatenation | left-associated `a + b + c` | a template with no literal text and two or more interpolations, all `string` | value position outside a template |
+| scalar to text | `String(n)` | implicit conversion through template interpolation or string addition | the source value is scalar |
+| string concatenation | `[a, b, c].join("")` | left-associated `a + b + c`, template interpolation | every non-string operand is converted explicitly with `String(value)` |
 | array concatenation | `[...a, ...b]` | `a.concat(b)` | none |
 | membership test | `items.includes(v)` | `items.indexOf(v) !== -1`, `items.indexOf(v) >= 0` | element type excludes `number` (`NaN` distinguishes the two equalities) |
 | existence test | `items.some(p)` | `items.find(p) !== undefined` | element type excludes `undefined` |
@@ -379,9 +377,8 @@ this table resolves forms that are not.
 Rows compose, so normalization is a fixed-point computation rather than a
 single pass: a `let` loop over `dictEntries` becomes a `reduce` by one row
 and then `dictFold` by another. Rewrites apply innermost first, so a row that
-matches an interpolation fires before a row that matches the enclosing
-template, and a row that matches a loop head fires before a row that matches
-the loop. The rewrite relation MUST be confluent under that order, including
+matches a loop head fires before a row that matches the loop. The rewrite
+relation MUST be confluent under that order, including
 rows that only become applicable after an earlier rewrite fires: two rewrites
 that can match one program reach the same result. Confluence is required of
 the relation, not totality of the table, since a row whose precondition fails
@@ -876,8 +873,7 @@ value selection.
 The profile permits:
 
 - arithmetic, comparison, bitwise, and boolean operators
-- `+` over two `string` operands, yielding `string`, the idiomatic
-  concatenation
+- `+` over two `number` operands, yielding `number`
 - strict equality `===` and `!==`
 - `typeof` in value position
 - direct and optional static member access
@@ -887,7 +883,8 @@ The profile permits:
 - array and record literals
 - finite array spread
 - one leading record spread
-- pure template interpolation
+- no-substitution template strings, as a lexical spelling of a string literal
+- string-array `.join("")` for text construction
 - `??` and `?.`
 - pure boolean conditional expressions
 - `comptime()` over closed, pure expressions
@@ -914,6 +911,8 @@ The profile excludes:
 - `this` and `super`
 - `yield`, generators, `async`, `await`, and `Promise`
 - unary `void`
+- template interpolation
+- string-valued `+`
 
 Conditions in `if`, `assert`, and `?:`, operands of boolean operators, and
 predicate callback results MUST have type `boolean`. There is no general
@@ -995,21 +994,14 @@ published through `meta.payload.type_serialization`, so an independent
 implementation can reproduce every digest.
 
 The pure intrinsic `String(value)` is the explicit conversion from a number or
-boolean to text in value position; inside a template, a `number`
-interpolation elaborates through the same intrinsic without the wrapper.
+boolean to text.
 Number formatting uses the ECMAScript base-10 shortest-round-trip
 representation; negative zero renders as `0`. That intrinsic is the only
-scalar-to-text conversion, with those two spellings partitioned by position;
-instance `.toString()` conversion is excluded.
-
-Template interpolation MAY contain any pure expression of type `string` or
-`number`. A `number` interpolation elaborates through the same implicit
-`String` intrinsic as a JSX numeric child; the formatting is fully
-deterministic, so the implicit form loses nothing. A `boolean` MUST use
-explicit `String(...)`: the JSX child rule renders booleans as no text, so an
-implicit boolean conversion would give one value two context-dependent
-meanings. An effectful expression MUST be evaluated into a named `const`
-before the template so effect order remains visible.
+scalar-to-text conversion; instance `.toString()` conversion is excluded.
+Text construction uses a string array followed by `.join("")`. Every operand
+that is not already `string` MUST be converted explicitly with `String(...)`.
+Template interpolation and string-valued `+` are excluded, so source order,
+conversion, and the numeric meaning of `+` are visible in the program.
 
 ### 5.5 Control flow
 
@@ -1043,7 +1035,7 @@ never costs a human or agent a hand edit.
 An assignment statement evaluates its target subexpressions left to right and
 then the right-hand side. Subexpressions of an assignment target MUST be
 pure; an effectful receiver or index is evaluated into a named `const` before
-the assignment, the same hoisting rule templates use.
+the assignment so evaluation order remains explicit.
 
 #### `match`
 
@@ -1366,8 +1358,9 @@ type Component<P> = (
 HtmlNode`. Its variadic tail is an intrinsic contract, not a source-declarable
 rest parameter. `renderToString(HtmlNode) -> string` is the corresponding
 renderer. `null`, `undefined`, and boolean children render no text. Nested
-child arrays flatten in source order. A numeric child elaborates through the
-same implicit `String` elaboration as template interpolation (Section 5.4).
+child arrays flatten in source order. A numeric child is rendered by the
+versioned TSX frontend using the same deterministic formatting contract as
+`String` (Section 5.4).
 Text and attribute values are escaped.
 
 ## 6. Application data abstractions
@@ -1908,7 +1901,7 @@ several productions admit forms the normative prose of Section 5 excludes
 (for example arrow expressions outside callback argument positions). Legality is defined by the prose rules and
 the machine-readable registry together; the registry records, per rule,
 whether enforcement happens at parse time or at check time. Unexpanded
-leaves such as `Ident`, `String`, `Number`, `Literal`, `Template`, and
+leaves such as `Ident`, `String`, `Number`, `Literal`, and
 `TemplateLiteralType` are lexical or separately specified syntactic classes.
 
 ```ebnf
@@ -1979,7 +1972,6 @@ PrimaryExpr  ::= Literal
                | Ident
                | ArrayExpr
                | RecordExpr
-               | Template
                | MatchExpr
                | "(" Expr ")"
 UnaryOp      ::= "!" | "-" | "~" | "typeof"
@@ -2693,7 +2685,7 @@ function describeRatio(numerator: number, denominator: number): string {
   const result = divide(numerator, denominator);
   return match (result) {
     when { ok: true, value }:
-      `ratio ${value}`
+      ["ratio ", String(value)].join("")
     when { ok: false }:
       "undefined ratio"
   };
@@ -2701,7 +2693,7 @@ function describeRatio(numerator: number, denominator: number): string {
 ```
 
 The binding field `value` removes the scrutinee double-read, and the numeric
-interpolation elaborates through the implicit `String` intrinsic.
+conversion is explicit at the text-construction site.
 
 ### 16.2 Keyed aggregation
 
@@ -2822,15 +2814,15 @@ and needs no import. No Promise or ambient scheduler enters the program.
 ### 16.5 Familiar pure shorthand
 
 ```ts
-function greeting(name: string, excited: boolean = false): string {
-  const punctuation = excited ? "!" : ".";
-  return `Hello, ${name}${punctuation}`;
+function greeting(name: string, excited: boolean | undefined): string {
+  const isExcited = excited ?? false;
+  const punctuation = isExcited ? "!" : ".";
+  return ["Hello, ", name, punctuation].join("");
 }
 ```
 
-The default is a closed compile-time scalar, the conditional selects pure
-values, and the template preserves direct source order. None introduces a new
-kernel operation.
+The absence default and conditional select pure values, and the join preserves
+direct source order. None introduces a new kernel operation.
 
 ### 16.6 Agent repair sequence
 

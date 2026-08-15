@@ -476,8 +476,6 @@ fn stackEffect(code: []const u8, pc: usize, op: Opcode, info: bytecode.OpcodeInf
         .call_method => @as(i32, code[pc + 1]) + 2,
         // call_ic: pop argc + 1
         .call_ic => @as(i32, code[pc + 1]) + 1,
-        // concat_n: pop N values
-        .concat_n => @as(i32, code[pc + 1]),
         // push_const_call fuses `push_const` of the final argument with `call`.
         // The opcode contributes one argument itself, so the pre-op stack only
         // contains the callee plus argc-1 already-pushed arguments.

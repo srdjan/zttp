@@ -1562,26 +1562,6 @@ pub const HandlerInstance = struct {
             }
         }
 
-        // Linear scan for prefix matches (typically 2-3 patterns)
-        for (dispatch.patterns) |*pattern| {
-            if (pattern.pattern_type == .prefix) {
-                const target = switch (pattern.url_atom) {
-                    .path => effective_path,
-                    else => url,
-                };
-
-                if (std.mem.startsWith(u8, target, pattern.url_bytes)) {
-                    // Check if we have a template for native interpolation
-                    if (pattern.response_template_prefix != null) {
-                        const param = target[pattern.url_bytes.len..];
-                        return self.buildTemplatedResponse(pattern, param) catch null;
-                    }
-                    // No template - fall back to bytecode
-                    continue;
-                }
-            }
-        }
-
         return null; // Fall back to bytecode execution
     }
 
@@ -1603,43 +1583,6 @@ pub const HandlerInstance = struct {
         if (pattern.body_source != .static) return null;
 
         return self.buildFastResponse(pattern, borrow_body) catch null;
-    }
-
-    /// Build a response by interpolating a dynamic parameter into a template.
-    /// Used for prefix patterns like /api/greet/:name -> {"greeting":"Hello, {name}!"}
-    fn buildTemplatedResponse(
-        self: *Self,
-        pattern: *const zq.HandlerPattern,
-        param: []const u8,
-    ) !HttpResponse {
-        const prefix = pattern.response_template_prefix orelse return error.NoTemplate;
-        const suffix = pattern.response_template_suffix orelse "";
-
-        // Build the response body: prefix + param + suffix
-        const body_len = prefix.len + param.len + suffix.len;
-        const body = try self.allocator.alloc(u8, body_len);
-        errdefer self.allocator.free(body);
-
-        var pos: usize = 0;
-        @memcpy(body[pos..][0..prefix.len], prefix);
-        pos += prefix.len;
-        @memcpy(body[pos..][0..param.len], param);
-        pos += param.len;
-        @memcpy(body[pos..][0..suffix.len], suffix);
-
-        var response = HttpResponse.init(self.allocator);
-        response.status = pattern.status;
-        response.body = body;
-        response.body_owned = true;
-
-        const content_type = switch (pattern.content_type_idx) {
-            0 => "application/json",
-            1 => "text/plain; charset=utf-8",
-            else => "text/html; charset=utf-8",
-        };
-        try response.putHeaderBorrowed("Content-Type", content_type);
-
-        return response;
     }
 
     /// Build a response from a pre-serialized static pattern.

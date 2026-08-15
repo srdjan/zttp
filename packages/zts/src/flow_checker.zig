@@ -737,19 +737,6 @@ pub const FlowChecker = struct {
                 const t = self.ir_view.getTernary(node) orelse return null;
                 return self.findGuardInExpr(t.then_branch) orelse self.findGuardInExpr(t.else_branch);
             },
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(node) orelse return null;
-                for (0..tmpl.parts_count) |i| {
-                    const part_idx = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-                    const part_tag = self.ir_view.getTag(part_idx) orelse continue;
-                    if (part_tag == .template_part_expr) {
-                        if (self.ir_view.getOptValue(part_idx)) |expr| {
-                            if (self.findGuardInExpr(expr)) |g| return g;
-                        }
-                    }
-                }
-                return null;
-            },
             .object_literal => {
                 const obj = self.ir_view.getObject(node) orelse return null;
                 var i: u16 = 0;
@@ -1304,21 +1291,6 @@ pub const FlowChecker = struct {
                     self.inferLabels(t.condition),
                     LabelSet.mergeConditional(self.inferLabels(t.then_branch), self.inferLabels(t.else_branch)),
                 );
-            },
-
-            .template_literal => {
-                const tmpl = self.ir_view.getTemplate(node) orelse return LabelSet.empty;
-                var labels = LabelSet.empty;
-                for (0..tmpl.parts_count) |i| {
-                    const part_idx = self.ir_view.getListIndex(tmpl.parts_start, @intCast(i));
-                    const part_tag = self.ir_view.getTag(part_idx) orelse continue;
-                    if (part_tag == .template_part_expr) {
-                        if (self.ir_view.getOptValue(part_idx)) |expr| {
-                            labels = LabelSet.merge(labels, self.inferLabels(expr));
-                        }
-                    }
-                }
-                return labels;
             },
 
             .member_access, .optional_chain => {
@@ -4028,7 +4000,7 @@ test "an imported function carrying nothing keeps the property" {
     // The point of the cross-file summary: an ordinary helper in another file
     // must not cost the proof the way an untraceable call does.
     const imported =
-        \\export function greet(name) { return "hello " + name; }
+        \\export function greet(name) { return ["hello ", name].join(""); }
     ;
     const source =
         \\import { greet } from "./utils.ts";

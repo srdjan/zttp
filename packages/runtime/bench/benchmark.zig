@@ -207,7 +207,7 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
         \\function runStringConcat(iterations) {
         \\    let result = '';
         \\    for (let i of range(iterations)) {
-        \\        result = result + 'x';
+        \\        result = [result, 'x'].join('');
         \\        if (result.length > 1000) {
         \\            result = '';
         \\        }
@@ -387,7 +387,7 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
         \\        let headers = {
         \\            'content-type': baseHeaders['content-type'],
         \\            'cache-control': baseHeaders['cache-control'],
-        \\            'x-request-id': 'req-' + (i % 1000)
+        \\            'x-request-id': ['req-', String(i % 1000)].join('')
         \\        };
         \\        let response = {
         \\            status: (reqPath === '/api/users') ? 200 : 201,

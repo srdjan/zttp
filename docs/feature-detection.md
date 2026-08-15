@@ -274,7 +274,6 @@ The strict checker enforces the **canonical ZigTS profile** on every `zttp check
 | `ZTS621` | conditional nested in a conditional arm | `match` over one scrutinee, or an if/else chain |
 | `ZTS613` | compound assignment (`+=`, `-=`, ...) | `x = x + e` |
 | `ZTS614` | non-leading object spread `{x: 1, ...base}` | leading spread: `{...base, x: 1}` |
-| `ZTS615` | complex template interpolation `${getX()}` | hoist into a `const` above the template |
 | `ZTS616` | call-site spread `f(...args)` | positional args or widen the helper signature |
 | `ZTS054` | default parameter | use `T | undefined` and resolve the default at the start of the body |
 | `ZTS055` | optional parameter shorthand | write the parameter type as `T | undefined` |

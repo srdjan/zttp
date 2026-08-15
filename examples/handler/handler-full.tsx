@@ -86,7 +86,7 @@ function handler(req: Request): Response {
 
     if (url.indexOf("/api/greet/") === 0) {
         const name = url.substring("/api/greet/".length);
-        return Response.json({ greeting: "Hello, " + name + "!" });
+        return Response.json({ greeting: ["Hello, ", name, "!"].join("") });
     }
 
     return Response.json({ error: "Not Found", url: url }, { status: 404 });

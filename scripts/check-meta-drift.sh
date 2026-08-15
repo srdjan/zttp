@@ -38,19 +38,19 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-15 after phase 7 made record construction explicit. The core
-# grammar requires a key and value for every field, the match-only shorthand
-# idiom is named as such, and the restriction matrix refuses object shorthand
-# and computed record keys.
+# Pinned 2026-08-15 after phase 7 made text construction explicit. The core
+# grammar no longer admits interpolated templates, the idiom table names joins
+# as the one text-construction form, and the restriction matrix refuses both
+# interpolation and string-valued addition.
 EXPECTED_PROFILE="zts-advanced-1"
-EXPECTED_POLICY_HASH="dd420c0ffb35e1b43ea17e4a79765169da292dd2a9417d9819429f0eceb59e3c"
-# Moved when JSX was removed from the core grammar. TSX is now a separately
-# hashed frontend that lowers into this exact core identity.
-EXPECTED_GRAMMAR_HASH="c5caa05447cc6288b9c2ba84055e297ea72681597bd64cada577e3c4a2a3eb0a"
+EXPECTED_POLICY_HASH="36fbd29e0fe71693d73c8278d3786ffca1eb184da9d3f66b11310bad5033aeb5"
+# Moved when template expressions were removed from the core grammar. TSX is a
+# separately hashed frontend that lowers into this exact core identity.
+EXPECTED_GRAMMAR_HASH="6201baf9b3b206ae89c59443478fc58305935e5142f9a4672a66b71bb2ddc955"
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
-EXPECTED_FRONTEND_GRAMMAR_HASH="a5777bbacf655c8b34abee2e622cf147eac70048ba24bd066db7a907512c0641"
-EXPECTED_IDIOM_HASH="acc50fe37ba8bfe6306c5d6db821ef081b6e67f284676765097784d696436ba1"
-EXPECTED_RESTRICTION_HASH="9e0ad04b2a8e5c0016e164598e400d7be4ee87fbf92cdabb8b9f6f0a40fc02c8"
+EXPECTED_FRONTEND_GRAMMAR_HASH="80d4ca8ff675262efc2bca83a4bfeb066f36a66a9c5c29bca27d7dce691033db"
+EXPECTED_IDIOM_HASH="740830f33b0ea1dd2be2f244e4e978e8d60e9ae4418d53effca305f86244be6e"
+EXPECTED_RESTRICTION_HASH="be9e7992e7afb176eb4dbb47638b596204660a6127be9a59cf72a506375b8895"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

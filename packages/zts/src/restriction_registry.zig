@@ -640,6 +640,22 @@ pub const entries = [_]RestrictionEntry{
         .note = "check for `undefined`, then use indexed access",
         .enforced_by = &.{"ZTS001"},
     },
+    .{
+        .id = "restriction.template-interpolation",
+        .feature = "template interpolation",
+        .boundary = "one explicit text-construction operation",
+        .nature = .replaced,
+        .note = "build a string array with explicit `String(...)` conversions and call `.join(\"\")`",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.string-addition",
+        .feature = "string `+`",
+        .boundary = "numeric addition has one result type and text construction is explicit",
+        .nature = .replaced,
+        .note = "build a string array with explicit `String(...)` conversions and call `.join(\"\")`",
+        .enforced_by = &.{"ZTS105"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {
@@ -728,10 +744,11 @@ test "every enforcing code resolves to a live rule or a known non-registry band"
     for (entries) |entry| {
         for (entry.enforced_by) |code| {
             if (rule_registry.findByCode(code) != null) continue;
-            // ZTS0xx parser errors and ZTS2xx type-checker errors are real
+            // ZTS0xx parser errors and ZTS1xx/ZTS2xx checker errors are real
             // diagnostic codes that deliberately live outside the policy-hashed
             // registry (see describe_rule.zig's type-checker fallback).
             if (std.mem.startsWith(u8, code, "ZTS0")) continue;
+            if (std.mem.startsWith(u8, code, "ZTS1")) continue;
             if (std.mem.startsWith(u8, code, "ZTS2")) continue;
             std.debug.print("restriction {s} names unknown code {s}\n", .{ entry.id, code });
             try std.testing.expect(false);

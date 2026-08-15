@@ -4045,7 +4045,7 @@ test "object property access works" {
         \\  const obj = { name: 'Alice', age: 30 };
         \\  const name = obj.name;
         \\  const age = obj.age;
-        \\  return Response.text(name + '-' + age);
+        \\  return Response.text([name, '-', String(age)].join(''));
         \\}
     ;
     try rt.loadHandler(handler_code, "<test>");
@@ -4084,7 +4084,7 @@ test "ENG-2: zero-arg user-named method on object literal is callable" {
         \\  const b = ({x:1,wave:()=>9}).wave();
         \\  const o = { hi: () => 4 };
         \\  const c = o.hi();
-        \\  return Response.text(a + '-' + b + '-' + c);
+        \\  return Response.text([String(a), '-', String(b), '-', String(c)].join(''));
         \\}
     ;
     try rt.loadHandler(handler_code, "<test>");
@@ -4117,7 +4117,7 @@ test "array indexing works" {
         \\  const a = arr[0];
         \\  const b = arr[1];
         \\  const c = arr[2];
-        \\  return Response.text(a + '-' + b + '-' + c);
+        \\  return Response.text([String(a), '-', String(b), '-', String(c)].join(''));
         \\}
     ;
     try rt.loadHandler(handler_code, "<test>");

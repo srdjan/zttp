@@ -62,7 +62,7 @@ function kindOf(value: unknown): string {
 // Absence is explicit: the parameter type names it, and the body resolves it.
 function label(kind: string, prefix: string | undefined): string {
   const resolvedPrefix = prefix ?? "payload";
-  return `${resolvedPrefix}:${kind}`;
+  return [resolvedPrefix, ":", kind].join("");
 }
 
 // Exported, never called from this handler, and still owing a ceiling.

@@ -38,7 +38,7 @@ pub const broken_source =
     \\    if (req.method === "GET" && req.path === "/") {
     \\        const renderedAt = Date.now();
     \\        return Response.html(
-    \\            `<main><h1>Hello, world!</h1><p>Rendered at ${renderedAt}</p></main>`
+    \\            ["<main><h1>Hello, world!</h1><p>Rendered at ", String(renderedAt), "</p></main>"].join("")
     \\        );
     \\    }
     \\    return Response.json({ error: "not found" }, { status: 404 });
@@ -56,7 +56,7 @@ pub const break_diff =
     \\+        const renderedAt = Date.now();
     \\         return Response.html(
     \\-            "<main><h1>Hello, world!</h1><p>Proven at compile time.</p></main>"
-    \\+            `<main><h1>Hello, world!</h1><p>Rendered at ${renderedAt}</p></main>`
+    \\+            ["<main><h1>Hello, world!</h1><p>Rendered at ", String(renderedAt), "</p></main>"].join("")
     \\         );
     \\     }
 ;
@@ -69,7 +69,7 @@ pub const repair_diff =
     \\     if (req.method === "GET" && req.path === "/") {
     \\-        const renderedAt = Date.now();
     \\         return Response.html(
-    \\-            `<main><h1>Hello, world!</h1><p>Rendered at ${renderedAt}</p></main>`
+    \\-            ["<main><h1>Hello, world!</h1><p>Rendered at ", String(renderedAt), "</p></main>"].join("")
     \\+            "<main><h1>Hello, world!</h1><p>Proven at compile time.</p></main>"
     \\         );
     \\     }

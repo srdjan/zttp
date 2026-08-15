@@ -2532,9 +2532,7 @@ fn countAotPatterns(dispatch: *const zts.PatternDispatchTable) usize {
     for (dispatch.patterns) |pattern| {
         switch (pattern.pattern_type) {
             .exact => count += 1,
-            .prefix => {
-                if (pattern.response_template_prefix != null) count += 1;
-            },
+            .prefix => {},
             else => {},
         }
     }
@@ -3121,50 +3119,7 @@ fn writeZigFile(
                         }
                         try writer.writeAll("    }\n");
                     },
-                    .prefix => {
-                        if (pattern.response_template_prefix == null) continue;
-                        const prefix = pattern.url_bytes;
-                        const tpl_prefix = pattern.response_template_prefix.?;
-                        const tpl_suffix = pattern.response_template_suffix orelse "";
-                        const route_target = if (pattern.url_atom == .path) "path" else "url";
-                        try writer.writeAll("    if (std.mem.startsWith(u8, ");
-                        try writer.writeAll(route_target);
-                        try writer.writeAll(", ");
-                        try writeZigStringLiteral(writer, prefix);
-                        try writer.writeAll(")) {\n");
-                        try writer.writeAll("        const param = ");
-                        try writer.writeAll(route_target);
-                        try writer.writeAll("[");
-                        try writer.print("{d}", .{prefix.len});
-                        try writer.writeAll("..];\n");
-                        try writer.writeAll("        const body_len = ");
-                        try writer.print("{d}", .{tpl_prefix.len});
-                        try writer.writeAll(" + param.len + ");
-                        try writer.print("{d}", .{tpl_suffix.len});
-                        try writer.writeAll(";\n");
-                        try writer.writeAll("        var body = try ctx.allocator.alloc(u8, body_len);\n");
-                        try writer.writeAll("        defer ctx.allocator.free(body);\n");
-                        try writer.writeAll("        @memcpy(body[0..");
-                        try writer.print("{d}", .{tpl_prefix.len});
-                        try writer.writeAll("], ");
-                        try writeZigStringLiteral(writer, tpl_prefix);
-                        try writer.writeAll(");\n");
-                        try writer.writeAll("        @memcpy(body[");
-                        try writer.print("{d}", .{tpl_prefix.len});
-                        try writer.writeAll("..][0..param.len], param);\n");
-                        try writer.writeAll("        @memcpy(body[");
-                        try writer.print("{d}", .{tpl_prefix.len});
-                        try writer.writeAll(" + param.len ..][0..");
-                        try writer.print("{d}", .{tpl_suffix.len});
-                        try writer.writeAll("], ");
-                        try writeZigStringLiteral(writer, tpl_suffix);
-                        try writer.writeAll(");\n");
-                        try writer.writeAll("        return zq.http.createResponse(ctx, body, ");
-                        try writer.print("{d}, ", .{pattern.status});
-                        try writeZigStringLiteral(writer, contentTypeFor(pattern.content_type_idx));
-                        try writer.writeAll(");\n");
-                        try writer.writeAll("    }\n");
-                    },
+                    .prefix => {},
                     else => {},
                 }
             }
@@ -3673,7 +3628,7 @@ test "buildTestContractForSource extracts durable workflow contract" {
         \\  return run("job:123", () => {
         \\    const order = step("load", () => 1);
         \\    if (isPost) {
-        \\      return Response.text(`loaded:${order}`, { status: 202 });
+        \\      return Response.text(["loaded:", String(order)].join(""), { status: 202 });
         \\    }
         \\    const payload = waitSignal("approved");
         \\    return Response.json(payload);
@@ -4486,7 +4441,7 @@ test "runCheckOnlyFromSource keeps diagnostics off stderr in test mode" {
     const source =
         \\function handler(req: Request): Response {
         \\  const path = req.path;
-        \\  const data = fetchSync(`https://example.internal${path}`);
+        \\  const data = fetchSync(["https://example.internal", path].join(""));
         \\  return Response.json(data);
         \\}
     ;
@@ -5091,6 +5046,62 @@ test "runCheckOnlyFromSource refuses optional computed access" {
     const diagnostic = result.json_diagnostics.items[0];
     try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
     try std.testing.expectEqualStrings("check for `undefined`, then use indexed access", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses template interpolation" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const message = `hello ${req.method}`;
+        \\  return Response.text(message);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("build a string array with explicit `String(...)` conversions and call `.join(\"\")`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses string addition" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function concatText(left: string, right: string): string {
+        \\  return left + right;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.text(concatText("hello ", "world"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, true);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS105", diagnostic.code);
+    try std.testing.expectEqualStrings("build a string array with explicit `String(...)` conversions and call `.join(\"\")`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource keeps numeric addition" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const total = 20 + 22;
+        \\  return Response.json({ total: total });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, true);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
     try std.testing.expect(result.contract == null);
 }
 

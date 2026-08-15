@@ -15,15 +15,15 @@ function handler(req: Request): Response {
   const subject = auth.value.sub;
 
   function _fetchUser(): unknown {
-    return fetch("https://users.internal/api/v1/" + subject, {});
+    return fetch(["https://users.internal/api/v1/", subject].join(""), {});
   }
 
   function _fetchOrders(): unknown {
-    return fetch("https://orders.internal/api/v1?user=" + subject + "&limit=10", {});
+    return fetch(["https://orders.internal/api/v1?user=", subject, "&limit=10"].join(""), {});
   }
 
   function _fetchRecommendations(): unknown {
-    return fetch("https://ml.internal/api/v1/recommend/" + subject, {});
+    return fetch(["https://ml.internal/api/v1/recommend/", subject].join(""), {});
   }
 
   // Three API calls concurrently - ~50ms instead of ~150ms

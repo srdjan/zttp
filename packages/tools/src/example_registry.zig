@@ -145,20 +145,6 @@ pub const examples = [_]Example{
         ,
     },
     .{
-        .feature = "template literals",
-        .evidence = .{ .node = .template_literal },
-        .source =
-        \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
-        \\
-        \\export function handler(req: Request): Guard<Response> {
-        \\  const name: string = "world";
-        \\  return Response.text(`hello, ${name}`);
-        \\}
-        \\
-        ,
-    },
-    .{
         .feature = "if/else",
         .evidence = .{ .node = .if_stmt },
         .source =

@@ -104,17 +104,6 @@ const next = {status: "ok", ...base};
 const next = {...base, status: "ok"};
 ```
 
-### Complex template interpolation (ZTS615)
-```ts
-// before
-return Response.text(`user ${getUser().name} at ${Date.now()}`);
-
-// after
-const user = getUser();
-const now = Date.now();
-return Response.text(`user ${user.name} at ${now}`);
-```
-
 ### Spread in function call (ZTS616)
 ```ts
 // before

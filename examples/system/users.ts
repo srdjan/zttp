@@ -25,7 +25,7 @@ function getUserById(req: Request): Response {
     return Response.json({ error: "orders unavailable" }, { status: 502 });
   }
 
-  const user = { id: id, name: "User " + id, orders: orders.json() };
+  const user = { id: id, name: ["User ", String(id)].join(""), orders: orders.json() };
 
   cacheSet("users", id, user);
   return Response.json({ user: user });

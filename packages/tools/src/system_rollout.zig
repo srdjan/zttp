@@ -1156,7 +1156,7 @@ test "rollout rejects dynamic internal edges at compile time" {
     const dynamic_gateway =
         \\function fetchJson(req: Request): Response {
         \\    const suffix = req.path === "/alt" ? "42" : "42";
-        \\    const resp = fetchSync(`https://users.internal/api/users/${suffix}`);
+        \\    const resp = fetchSync(["https://users.internal/api/users/", suffix].join(""));
         \\    if (resp.status !== 200) {
         \\        return Response.json({ error: "upstream" }, { status: 502 });
         \\    }

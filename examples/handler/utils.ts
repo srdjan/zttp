@@ -1,7 +1,7 @@
 // Shared utility functions for handler examples
 
 export function greet(name: string): string {
-  return "Hello, " + name + "!";
+  return ["Hello, ", name, "!"].join("");
 }
 
 export function formatJson(data: object): string {
