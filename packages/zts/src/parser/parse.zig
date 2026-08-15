@@ -3935,11 +3935,6 @@ pub const Parser = struct {
     }
 
     // ============ Public API ============
-
-    pub fn enableJsx(self: *Parser) void {
-        self.tokenizer.enableJsx();
-    }
-
     pub fn hasErrors(self: *const Parser) bool {
         return self.errors.hasErrors();
     }
@@ -4710,30 +4705,6 @@ test "a non-ASCII identifier reports once, not once per cascade" {
     const errors = parser.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(error_mod.ErrorKind.non_ascii_identifier, errors[0].kind);
-}
-
-test "non-ASCII text inside a JSX element is text, not an identifier" {
-    // JSX children are collected by consuming ordinary tokens between the tag
-    // boundaries, so a byte above ASCII in a text run reaches the same code an
-    // identifier does. Reporting it there refused every handler that renders a
-    // non-English string, which is a rule about identifiers applied to prose.
-    //
-    // Stripped first, because that is the path a .tsx file takes through the
-    // CLI. A bare parse of the same source does not reproduce it.
-    const allocator = std.testing.allocator;
-    const source = "function App() { return <p>Caf\xc3\xa9</p>; }\n";
-
-    var stripped = try @import("../stripper.zig").strip(allocator, source, .{ .tsx_mode = true });
-    defer stripped.deinit();
-
-    var parser = try Parser.init(allocator, stripped.code);
-    defer parser.deinit();
-    parser.enableJsx();
-    _ = parser.parse() catch 0;
-    for (parser.getErrors()) |err| {
-        std.debug.print("JSX text reported {s}: {s}\n", .{ @tagName(err.kind), err.message });
-    }
-    try std.testing.expect(!parser.hasErrors());
 }
 
 test "an ASCII identifier with digits and underscores still parses" {

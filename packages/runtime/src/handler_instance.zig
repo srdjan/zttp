@@ -1008,11 +1008,6 @@ pub const HandlerInstance = struct {
         var p = try zq.Parser.init(self.allocator, prepared.parserInput(), self.strings, &self.ctx.atoms);
         defer p.deinit();
 
-        // Enable JSX mode only for the accepted TSX frontend.
-        if (prepared.enablesJsx()) {
-            p.enableJsx();
-        }
-
         const bytecode_data = p.parse() catch |err| {
             // Print parse errors
             const errors = p.js_parser.getErrors();

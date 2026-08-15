@@ -166,7 +166,6 @@ fn execute(
     var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (prepared.enablesJsx()) js_parser.enableJsx();
 
     const program_root = js_parser.parse() catch |e| {
         return registry_mod.ToolResult.errFmt(

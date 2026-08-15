@@ -96,10 +96,6 @@ fn executeBuildTimeHandler(
 
     var p = try zts.Parser.init(allocator, prepared.parserInput(), &strings, &ctx.atoms);
     defer p.deinit();
-    if (prepared.enablesJsx()) {
-        p.enableJsx();
-    }
-
     const bytecode_data = p.parse() catch return error.ParseFailed;
 
     const shapes = p.getShapes();

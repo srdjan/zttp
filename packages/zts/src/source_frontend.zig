@@ -26,10 +26,6 @@ pub const SourceKind = enum {
         return self == .typescript or self == .tsx;
     }
 
-    pub fn enablesJsx(self: SourceKind) bool {
-        return self == .tsx;
-    }
-
     pub fn isSupportedFile(self: SourceKind) bool {
         return self == .typescript or self == .tsx;
     }
@@ -124,11 +120,6 @@ pub const PreparedSource = struct {
         return if (self.strip_result) |result| result.code else self.original_source;
     }
 
-    pub fn enablesJsx(self: *const PreparedSource) bool {
-        _ = self;
-        return false;
-    }
-
     pub fn typeMap(self: *PreparedSource) ?*TypeMap {
         return if (self.strip_result) |*result| &result.type_map else null;
     }
@@ -182,21 +173,18 @@ test "PreparedSource derives stripping and lowers TSX before parsing" {
     var typed = try PreparedSource.init(allocator, "const name: string = \"Ada\";", "handler.ts", .{});
     defer typed.deinit();
     try std.testing.expect(typed.typeMap() != null);
-    try std.testing.expect(!typed.enablesJsx());
     try std.testing.expect(std.mem.indexOf(u8, typed.parserInput(), ": string") == null);
     try std.testing.expectEqualStrings("const name: string = \"Ada\";", typed.sourceView().text);
 
     var tsx = try PreparedSource.init(allocator, "const view: string = <div />;", "view.tsx", .{});
     defer tsx.deinit();
     try std.testing.expect(tsx.typeMap() != null);
-    try std.testing.expect(!tsx.enablesJsx());
     try std.testing.expect(std.mem.indexOf(u8, tsx.parserInput(), "<div />") == null);
     try std.testing.expect(std.mem.indexOf(u8, tsx.parserInput(), "h(\"div\", null)") != null);
 
     var untyped = try PreparedSource.init(allocator, "const value = 1;", "<eval>", .{});
     defer untyped.deinit();
     try std.testing.expect(untyped.typeMap() == null);
-    try std.testing.expect(!untyped.enablesJsx());
     try std.testing.expectEqualStrings(untyped.original_source, untyped.parserInput());
 }
 

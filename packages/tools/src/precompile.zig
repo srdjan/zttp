@@ -334,10 +334,6 @@ fn buildContractForServiceContext(
     var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (prepared.enablesJsx()) {
-        js_parser.tokenizer.enableJsx();
-    }
-
     const root = try js_parser.parse();
     try validateVirtualModuleImports(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
@@ -506,7 +502,6 @@ fn importedFunctionLabels(
     var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return null;
     defer parser.deinit();
     parser.setAtomTable(&atoms);
-    if (prepared.enablesJsx()) parser.enableJsx();
     _ = parser.parse() catch return null;
 
     const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1228,10 +1223,6 @@ fn runCheckOnPreparedSource(
     var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (prepared.enablesJsx()) {
-        js_parser.tokenizer.enableJsx();
-    }
-
     const root = js_parser.parse() catch {
         const errors = js_parser.errors.getErrors();
         if (json_mode) {
@@ -1618,10 +1609,6 @@ pub fn runGenTests(
     var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (prepared.enablesJsx()) {
-        js_parser.tokenizer.enableJsx();
-    }
-
     const root = js_parser.parse() catch {
         const errors = js_parser.errors.getErrors();
         for (errors) |parse_error| {
@@ -1733,11 +1720,6 @@ pub fn compileHandler(
     var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-
-    // Enable JSX mode only for the accepted TSX frontend.
-    if (prepared.enablesJsx()) {
-        js_parser.tokenizer.enableJsx();
-    }
 
     const root = js_parser.parse() catch |err| {
         // Print parse errors
@@ -5425,8 +5407,8 @@ test "serialized bytecode matches the committed goldens" {
     var drifted: usize = 0;
 
     for (bytecode_golden_cases) |case| {
-        // The extension drives type stripping and JSX mode, so it is derived from
-        // the case rather than fixed.
+        // The extension selects the TypeScript or TSX frontend, so derive it
+        // from the case rather than fixing one path for every golden.
         const filename = if (std.mem.eql(u8, case.name, "jsx")) "golden.tsx" else "golden.ts";
         var compiled = compileHandler(allocator, case.source, filename, .{}) catch |err| {
             std.debug.print("\nbytecode golden: {s} failed to compile: {t}\n", .{ case.name, err });

@@ -569,6 +569,17 @@ test "does not lower comparisons strings comments or templates" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "h(No, null)") != null);
 }
 
+test "preserves UTF-8 text while lowering an element" {
+    const source = "function App() { return <p>Caf\xc3\xa9</p>; }";
+    var result = try lower(std.testing.allocator, source, null);
+    defer result.deinit();
+
+    try std.testing.expectEqualStrings(
+        "function App() { return h(\"p\", null, \"Caf\xc3\xa9\"); }",
+        result.code,
+    );
+}
+
 test "reports a mismatched closing tag at the authored location" {
     var diagnostic: ?Diagnostic = null;
     try std.testing.expectError(

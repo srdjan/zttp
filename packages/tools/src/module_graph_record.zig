@@ -265,11 +265,6 @@ fn collectImports(
 
     var js_parser = parser.JsParser.init(allocator, parse_source) catch return;
     defer js_parser.deinit();
-    const jsx_enabled = if (prepared) |*owned|
-        owned.enablesJsx()
-    else
-        zts.classifySourcePath(importer_rel).enablesJsx();
-    if (jsx_enabled) js_parser.tokenizer.enableJsx();
     _ = js_parser.parse() catch {};
 
     const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);

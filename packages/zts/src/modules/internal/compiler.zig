@@ -71,11 +71,6 @@ pub const ModuleCompiler = struct {
             var js_parser = try zts_parser.JsParser.init(self.allocator, source);
             js_parser.setAtomTable(self.atoms);
 
-            // Enable JSX if needed
-            if (module.enablesJsx()) {
-                js_parser.tokenizer.enableJsx();
-            }
-
             const root = js_parser.parse() catch |err| {
                 std.log.err("Parse error in module '{s}': {}", .{ module.path, err });
                 var err_buf: [1024]u8 = undefined;

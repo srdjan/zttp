@@ -57,13 +57,6 @@ pub const Module = struct {
             self.source;
     }
 
-    pub fn enablesJsx(self: *const Module) bool {
-        return if (self.prepared_source) |*prepared|
-            prepared.enablesJsx()
-        else
-            source_frontend.classifyPath(self.path).enablesJsx();
-    }
-
     fn deinit(self: *Module, allocator: std.mem.Allocator) void {
         if (self.prepared_source) |*prepared| prepared.deinit();
         allocator.free(self.path);
@@ -183,11 +176,6 @@ pub const ModuleGraph = struct {
         // Quick-parse to extract import declarations
         var js_parser = try zts_parser.JsParser.init(self.allocator, source);
         defer js_parser.deinit();
-
-        // Enable JSX if needed
-        if (module.enablesJsx()) {
-            js_parser.tokenizer.enableJsx();
-        }
 
         _ = js_parser.parse() catch return; // Parse errors handled later during compilation
         const view = zts_parser.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);

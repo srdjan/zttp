@@ -13,7 +13,7 @@
 
 const std = @import("std");
 const parser = @import("../parser/root.zig");
-const stripper = @import("../stripper.zig");
+const source_frontend = @import("../source_frontend.zig");
 const file_io = @import("../file_io.zig");
 
 /// Parse `source` and report how many statements it terminated by insertion.
@@ -22,22 +22,15 @@ fn insertionsIn(allocator: std.mem.Allocator, source: []const u8, is_ts: bool, i
     after_rbrace: u32,
     first_line: u32,
 } {
-    var stripped: ?stripper.StripResult = null;
-    defer if (stripped) |*sr| sr.deinit();
+    const path = if (is_tsx) "census.tsx" else if (is_ts) "census.ts" else "<census>";
+    var prepared = source_frontend.PreparedSource.init(allocator, source, path, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    }) catch return .{ .insertions = 0, .after_rbrace = 0, .first_line = 0 };
+    defer prepared.deinit();
 
-    var to_parse = source;
-    if (is_ts or is_tsx) {
-        stripped = stripper.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = .{},
-        }) catch return .{ .insertions = 0, .after_rbrace = 0, .first_line = 0 };
-        to_parse = stripped.?.code;
-    }
-
-    var p = try parser.JsParser.init(allocator, to_parse);
+    var p = try parser.JsParser.init(allocator, prepared.parserInput());
     defer p.deinit();
-    if (is_tsx) p.enableJsx();
     // The census measures what the old acceptance would have accepted, which
     // is a question the refusing parser cannot answer: it stops at the first
     // unterminated statement.

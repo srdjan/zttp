@@ -14,6 +14,7 @@ const bytecode = @import("zts-engine").bytecode;
 const value = @import("zts-engine").value;
 const string = @import("zts-engine").string;
 const context = @import("zts-engine").context;
+const source_frontend = @import("zts-engine").source_frontend;
 
 // ============================================================================
 // Simple Single-Threaded Compile API
@@ -63,7 +64,6 @@ pub fn compile(
 
 /// Compile with options
 pub const CompileOptions = struct {
-    jsx_enabled: bool = false,
     strict_mode: bool = true,
     filename: []const u8 = "<eval>",
 };
@@ -73,16 +73,13 @@ pub fn compileWithOptions(
     source: []const u8,
     options: CompileOptions,
 ) !*bytecode.FunctionBytecode {
+    var prepared = try source_frontend.PreparedSource.init(allocator, source, options.filename, .{});
+    defer prepared.deinit();
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try parser.Parser.init(allocator, source, &strings, null);
+    var p = try parser.Parser.init(allocator, prepared.parserInput(), &strings, null);
     defer p.deinit();
-
-    // Apply options
-    if (options.jsx_enabled) {
-        p.enableJsx();
-    }
     // Note: strict_mode is always true in zts (var keyword rejected)
 
     const code = try p.parse();

@@ -4182,7 +4182,7 @@ test "JSX rendering works" {
         \\  return Response.html(renderToString(elem));
         \\}
     ;
-    // Load through the TSX frontend to enable JSX mode.
+    // Load through the TSX frontend so element syntax is lowered before parsing.
     try rt.loadHandler(handler_code, "test.tsx");
 
     var request = HttpRequestOwned{

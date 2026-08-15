@@ -176,7 +176,6 @@ fn buildSemicolonRepairs(
 
     var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return;
     defer parser.deinit();
-    if (prepared.enablesJsx()) parser.enableJsx();
     // The source this reads is one the refusing parser rejects - that is why it
     // needs a repair. Finding where the `;` belongs means parsing it the way
     // the old acceptance did.
@@ -2085,7 +2084,7 @@ fn isCanonicalBandCode(code: []const u8) bool {
 /// JSX and TSX sources are outside the formatter's coverage: a bare tokenizer
 /// run is not in JSX mode, so element text would be re-read as code.
 fn isJsxLike(path: []const u8) bool {
-    return zts.classifySourcePath(path).enablesJsx();
+    return zts.classifySourcePath(path) == .tsx;
 }
 
 pub const NormalizeResult = struct {

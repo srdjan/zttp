@@ -559,10 +559,6 @@ pub fn extractContract(
     var js_parser = try parser_mod.JsParser.init(allocator, frontend.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (frontend.enablesJsx()) {
-        js_parser.tokenizer.enableJsx();
-    }
-
     const root = try js_parser.parse();
     _ = parser_mod.optimizeIR(
         allocator,

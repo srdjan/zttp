@@ -2957,6 +2957,7 @@ test "End-to-end: JSX parse, compile, and execute" {
     const allocator = arena.allocator();
     const gc_mod = @import("gc.zig");
     const parser_mod = @import("parser/root.zig");
+    const source_frontend = @import("source_frontend.zig");
     const string_mod = @import("string.zig");
     // builtins imported at module level
 
@@ -2975,9 +2976,11 @@ test "End-to-end: JSX parse, compile, and execute" {
         \\let link = renderToString(<a href="/api/health">GET /api/health</a>);
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var prepared = try source_frontend.PreparedSource.init(allocator, source, "interpreter.tsx", .{});
+    defer prepared.deinit();
+
+    var p = try parser_mod.Parser.init(allocator, prepared.parserInput(), &strings, &ctx.atoms);
     defer p.deinit();
-    p.enableJsx();
 
     const code = try p.parse();
     try std.testing.expect(code.len > 0);

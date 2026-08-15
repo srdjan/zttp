@@ -31,8 +31,8 @@ pub const std_options: std.Options = .{
 const Fixture = struct {
     name: []const u8,
     source: []const u8,
-    /// Fixtures containing JSX need the tokenizer's JSX mode switched on, the
-    /// same way the runtime enables it for .jsx/.tsx handlers.
+    /// Fixtures containing TSX are lowered through the same source frontend as
+    /// `.tsx` handlers before the core parser sees them.
     jsx: bool = false,
 };
 
@@ -296,12 +296,20 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !Compi
     const parser_alloc = parser_counting.allocator();
     const codegen_alloc = codegen_counting.allocator();
 
+    var prepared = try zq.PreparedSource.init(
+        parser_alloc,
+        source,
+        if (jsx) "benchmark.tsx" else "benchmark.ts",
+        .{},
+    );
+    defer prepared.deinit();
+
     var strings = zq.StringTable.init(parser_alloc);
     defer strings.deinit();
     var atoms = zq.AtomTable.init(parser_alloc);
     defer atoms.deinit();
 
-    var p = try zq.Parser.init(parser_alloc, source, &strings, &atoms);
+    var p = try zq.Parser.init(parser_alloc, prepared.parserInput(), &strings, &atoms);
     defer {
         // Nested `FunctionBytecode` payloads live in the codegen's constants and
         // are released by this hook, not by `CodeGen.deinit`, because in the
@@ -309,8 +317,6 @@ fn compileOnce(backing: std.mem.Allocator, source: []const u8, jsx: bool) !Compi
         if (p.code_gen) |*cg| cg.freeOwnedConstantPayloads();
         p.deinit();
     }
-    if (jsx) p.enableJsx();
-
     const bytecode_data = try p.parseWithCodegenAllocator(codegen_alloc);
     const ir_node_count: u64 = @intCast(p.js_parser.nodes.tags.items.len);
 
