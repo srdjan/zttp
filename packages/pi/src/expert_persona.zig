@@ -124,9 +124,10 @@ const prologue =
     \\                                           zts_expert_system_proof,
     \\                                           zts_expert_verify_modules
     \\  Declared Spec state                   -> pi_specs_status
-    \\  Goal proof and repair                 -> pi_goal_check,
+    \\  Goal proof and semantic repair        -> pi_goal_check,
     \\                                           pi_repair_plan,
-    \\                                           pi_goal_candidate,
+    \\                                           pi_goal_candidate
+    \\  Bound canonical repair preview        -> zts_expert_canonicalize,
     \\                                           pi_apply_repair_plan
     \\  Witness corpus                        -> pi_witnesses
     \\  Project memory                        -> pi_recall_facts,

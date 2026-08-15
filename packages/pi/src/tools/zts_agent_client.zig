@@ -240,9 +240,25 @@ pub fn invokeForTool(
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
 
-    var outcome = invokeFromCwd(allocator, io_backend.io(), request);
+    return invokeForToolAtRoot(allocator, io_backend.io(), ".", request);
+}
+
+/// Testable/effect-explicit form of `invokeForTool`. Production wrappers use
+/// cwd, while workflow controllers and E2E tests can inject the exact project
+/// root whose identity the request must bind.
+pub fn invokeForToolAtRoot(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    workspace_root: []const u8,
+    request: Request,
+) anyerror!ToolProjection {
+    var outcome = invokeAtRoot(allocator, io, workspace_root, request);
     defer outcome.deinit();
-    return switch (outcome) {
+    return projectToolOutcome(allocator, &outcome);
+}
+
+fn projectToolOutcome(allocator: std.mem.Allocator, outcome: *Outcome) anyerror!ToolProjection {
+    return switch (outcome.*) {
         .success => |*envelope| .{
             .ok = true,
             .llm_text = try renderEnvelope(allocator, envelope),

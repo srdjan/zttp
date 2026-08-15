@@ -8,6 +8,7 @@ const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
 const common = @import("common.zig");
 const repair_apply = @import("repair_apply.zig");
+const zts_agent_client = @import("zts_agent_client.zig");
 
 const writeJsonString = zts.writeJsonString;
 const repairPolicy = zts.RepairPolicy;
@@ -20,14 +21,13 @@ pub const tool: registry_mod.ToolDef = .{
     .effect = .read_workspace,
     .context_policy = .exact,
     .description =
-    \\Dry-run a single pi_repair_plan entry into proposed source and
-    \\compiler-verify the candidate. This tool never writes files. v1 only
-    \\supports deterministic line insertion intents: insert_guard_before_line
-    \\and add_trailing_return. Unsupported repair intents return ok:false
-    \\with a typed reason so the agent can fall back to manual editing.
+    \\Preview one or more exact bound repair candidates returned by
+    \\zts_expert_canonicalize. The compiler rechecks source, profile, policy,
+    \\and module-graph identity, applies the repairs in memory, and returns
+    \\proposed_content. This tool never writes files.
     ,
     .input_schema =
-    \\{"type":"object","properties":{"path":{"type":"string"},"plan":{"type":"object"},"source":{"type":"string","description":"Optional source snapshot; when omitted, the workspace file is read."}},"required":["path","plan"]}
+    \\{"type":"object","properties":{"path":{"type":"string"},"repairs":{"type":"array","items":{"type":"object"},"minItems":1}},"required":["path","repairs"]}
     ,
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,
     .execute = execute,
@@ -39,7 +39,150 @@ pub fn execute(
     allocator: std.mem.Allocator,
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {
-    return executeSemanticPlan(allocator, args);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    return executeAtRoot(allocator, io_backend.io(), ".", args);
+}
+
+fn executeAtRoot(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    workspace_root: []const u8,
+    args: []const []const u8,
+) anyerror!registry_mod.ToolResult {
+    if (args.len == 0) return registry_mod.ToolResult.err(allocator, name ++ ": requires a JSON input argument\n");
+
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
+        return registry_mod.ToolResult.err(allocator, name ++ ": invalid JSON input\n");
+    };
+    defer parsed.deinit();
+    if (parsed.value != .object) return registry_mod.ToolResult.err(allocator, name ++ ": expected JSON object\n");
+    const input = parsed.value.object;
+    const path_value = input.get("path") orelse return registry_mod.ToolResult.err(allocator, name ++ ": missing \"path\"\n");
+    const repairs_value = input.get("repairs") orelse return registry_mod.ToolResult.err(allocator, name ++ ": missing \"repairs\"\n");
+    if (path_value != .string or repairs_value != .array or repairs_value.array.items.len == 0) {
+        return registry_mod.ToolResult.err(allocator, name ++ ": \"path\" must be a string and \"repairs\" a non-empty array\n");
+    }
+
+    const identity = commonRepairIdentity(repairs_value.array.items) orelse {
+        return registry_mod.ToolResult.err(allocator, name ++ ": every repair must carry the same complete bound identity\n");
+    };
+
+    var repairs_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer repairs_buf.deinit();
+    try std.json.Stringify.value(repairs_value, .{}, repairs_buf.writer());
+
+    var input_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer input_buf.deinit();
+    var input_json: std.json.Stringify = .{ .writer = input_buf.writer() };
+    try input_json.beginObject();
+    try input_json.objectField("file");
+    try input_json.write(path_value.string);
+    try input_json.objectField("repairs");
+    try input_json.write(repairs_value);
+    try input_json.endObject();
+
+    const projection = try zts_agent_client.invokeForToolAtRoot(allocator, io, workspace_root, .{
+        .operation = .simulate_edit,
+        .input_json = input_buf.written(),
+        .expected = .{
+            .profile_id = identity.profile_id,
+            .policy_hash = identity.policy_hash,
+            .module_graph_hash = identity.module_graph_hash,
+        },
+    });
+    errdefer allocator.free(projection.llm_text);
+    if (!projection.ok) return .{ .ok = false, .llm_text = projection.llm_text };
+
+    var response = std.json.parseFromSlice(std.json.Value, allocator, projection.llm_text, .{}) catch
+        return error.MalformedProtocolResponse;
+    defer response.deinit();
+    const envelope = response.value.object;
+    const payload = envelope.get("payload").?.object;
+    const proposed = payload.get("proposed_content") orelse return error.MalformedProtocolResponse;
+    const source_digest = payload.get("source_digest") orelse return error.MalformedProtocolResponse;
+    const new_count_value = payload.get("new_count") orelse return error.MalformedProtocolResponse;
+    const preexisting_count_value = payload.get("preexisting_count") orelse return error.MalformedProtocolResponse;
+    if (proposed != .string or source_digest != .string or
+        !std.mem.eql(u8, source_digest.string, identity.source_digest)) return error.MalformedProtocolResponse;
+    const new_count = protocolCount(new_count_value) orelse return error.MalformedProtocolResponse;
+    const preexisting_count = protocolCount(preexisting_count_value) orelse return error.MalformedProtocolResponse;
+    const total = std.math.add(u32, new_count, preexisting_count) catch return error.MalformedProtocolResponse;
+
+    const summary = try std.fmt.allocPrint(
+        allocator,
+        "{d} new, {d} preexisting",
+        .{ new_count, preexisting_count },
+    );
+    defer allocator.free(summary);
+    var ui: ui_payload.UiPayload = .{ .protocol_repair = try ui_payload.ProtocolRepairPayload.init(
+        allocator,
+        path_value.string,
+        proposed.string,
+        repairs_buf.written(),
+        source_digest.string,
+        identity.profile_id,
+        identity.policy_hash,
+        identity.module_graph_hash,
+        summary,
+        .{
+            .total = total,
+            .new = new_count,
+            .preexisting = preexisting_count,
+        },
+    ) };
+    errdefer ui.deinit(allocator);
+    return .{
+        .ok = true,
+        .llm_text = projection.llm_text,
+        .ui_payload = ui,
+    };
+}
+
+const RepairIdentity = struct {
+    source_digest: []const u8,
+    profile_id: []const u8,
+    policy_hash: []const u8,
+    module_graph_hash: []const u8,
+};
+
+fn commonRepairIdentity(repairs: []const std.json.Value) ?RepairIdentity {
+    var identity: ?RepairIdentity = null;
+    for (repairs) |repair| {
+        if (repair != .object) return null;
+        const bound_value = repair.object.get("bound") orelse return null;
+        if (bound_value != .object) return null;
+        const bound = bound_value.object;
+        const current: RepairIdentity = .{
+            .source_digest = stringValue(bound.get("source_digest")) orelse return null,
+            .profile_id = stringValue(bound.get("profile_id")) orelse return null,
+            .policy_hash = stringValue(bound.get("policy_hash")) orelse return null,
+            .module_graph_hash = stringValue(bound.get("module_graph_hash")) orelse return null,
+        };
+        if (identity) |first| {
+            if (!sameRepairIdentity(first, current)) return null;
+        } else {
+            identity = current;
+        }
+    }
+    return identity;
+}
+
+fn stringValue(value: ?std.json.Value) ?[]const u8 {
+    const present = value orelse return null;
+    return if (present == .string) present.string else null;
+}
+
+fn protocolCount(value: std.json.Value) ?u32 {
+    if (value != .integer or value.integer < 0) return null;
+    return std.math.cast(u32, value.integer);
+}
+
+fn sameRepairIdentity(a: RepairIdentity, b: RepairIdentity) bool {
+    return std.mem.eql(u8, a.source_digest, b.source_digest) and
+        std.mem.eql(u8, a.profile_id, b.profile_id) and
+        std.mem.eql(u8, a.policy_hash, b.policy_hash) and
+        std.mem.eql(u8, a.module_graph_hash, b.module_graph_hash);
 }
 
 /// Internal compatibility seam for the autonomous semantic-repair lane.
@@ -280,6 +423,117 @@ fn jsonFailure(
 
 const testing = std.testing;
 
+test "bound canonicalize candidate previews through v2 without writing" {
+    const source =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\structural Guardrails = Spec<"state_isolated">;
+        \\
+        \\export function handler(req: Request): Response & Guardrails {
+        \\    let name = "world";
+        \\    return Response.json({ hello: name });
+        \\}
+        \\
+    ;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    var proposed = zts_agent_client.invokeAtRoot(testing.allocator, testing.io, root, .{
+        .operation = .canonicalize,
+        .input_json = "{\"file\":\"h.ts\"}",
+    });
+    defer proposed.deinit();
+    var candidate = switch (proposed) {
+        .success => |*envelope| envelope.root().get("payload").?.object.get("candidates").?.array.items[0],
+        else => return error.TestExpectedSuccess,
+    };
+
+    var args_buf = registry_mod.helpers.TextBuffer.init(testing.allocator);
+    defer args_buf.deinit();
+    var json: std.json.Stringify = .{ .writer = args_buf.writer() };
+    try json.beginObject();
+    try json.objectField("path");
+    try json.write("h.ts");
+    try json.objectField("repairs");
+    try json.beginArray();
+    try json.write(candidate);
+    try json.endArray();
+    try json.endObject();
+
+    var preview = try executeAtRoot(testing.allocator, testing.io, root, &.{args_buf.written()});
+    defer preview.deinit(testing.allocator);
+    try testing.expect(preview.ok);
+    switch (preview.ui_payload.?) {
+        .protocol_repair => |repair| {
+            try testing.expectEqualStrings("h.ts", repair.path);
+            try testing.expectEqualStrings(
+                candidate.object.get("bound").?.object.get("source_digest").?.string,
+                repair.source_digest,
+            );
+            try testing.expect(std.mem.indexOf(u8, repair.proposed_content, "const name") != null);
+            try testing.expect(std.mem.indexOf(u8, repair.repairs_json, "replace_let_with_const") != null);
+        },
+        else => return error.TestExpectedProtocolRepair,
+    }
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", testing.allocator, .limited(4096));
+    defer testing.allocator.free(on_disk);
+    try testing.expectEqualStrings(source, on_disk);
+
+    var candidate_bound = candidate.object.get("bound").?.object;
+    for ([_][]const u8{ "source_digest", "profile_id", "policy_hash", "module_graph_hash" }) |field| {
+        const field_ptr = candidate_bound.getPtr(field).?;
+        const original = field_ptr.*;
+        field_ptr.* = .{ .string = "stale-binding" };
+
+        var stale_binding_args = registry_mod.helpers.TextBuffer.init(testing.allocator);
+        defer stale_binding_args.deinit();
+        var stale_json: std.json.Stringify = .{ .writer = stale_binding_args.writer() };
+        try stale_json.beginObject();
+        try stale_json.objectField("path");
+        try stale_json.write("h.ts");
+        try stale_json.objectField("repairs");
+        try stale_json.beginArray();
+        try stale_json.write(candidate);
+        try stale_json.endArray();
+        try stale_json.endObject();
+
+        var stale_binding = try executeAtRoot(testing.allocator, testing.io, root, &.{stale_binding_args.written()});
+        defer stale_binding.deinit(testing.allocator);
+        try testing.expect(!stale_binding.ok);
+        try testing.expect(stale_binding.ui_payload == null);
+        field_ptr.* = original;
+    }
+
+    const moved = source ++ "// concurrent change\n";
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = moved });
+    var stale = try executeAtRoot(testing.allocator, testing.io, root, &.{args_buf.written()});
+    defer stale.deinit(testing.allocator);
+    try testing.expect(!stale.ok);
+    try testing.expect(stale.ui_payload == null);
+    const after_stale = try tmp.dir.readFileAlloc(testing.io, "h.ts", testing.allocator, .limited(4096));
+    defer testing.allocator.free(after_stale);
+    try testing.expectEqualStrings(moved, after_stale);
+}
+
+test "bound repair preview rejects mixed identity before protocol invocation" {
+    var parsed = try std.json.parseFromSlice(
+        std.json.Value,
+        testing.allocator,
+        \\[
+        \\  {"bound":{"source_digest":"same","profile_id":"zts-advanced-1","policy_hash":"policy-a","module_graph_hash":"graph"}},
+        \\  {"bound":{"source_digest":"same","profile_id":"zts-advanced-1","policy_hash":"policy-b","module_graph_hash":"graph"}}
+        \\]
+    ,
+        .{},
+    );
+    defer parsed.deinit();
+    try testing.expect(commonRepairIdentity(parsed.value.array.items) == null);
+}
+
 test "insertTemplateBeforeLine preserves target indentation" {
     const source =
         \\function handler(req: Request): Response {
@@ -342,7 +596,7 @@ test "execute dry-runs an add_trailing_return intent" {
     const input =
         \\{"path":"handler.ts","source":"function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const data = auth.value;\n}","plan":{"id":"rp_002","edit_intent":{"kind":"add_trailing_return","line":3,"column":1,"template":"return Response.json({ data: auth.value });"}}}
     ;
-    var result = try execute(testing.allocator, &.{input});
+    var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "return Response.json") != null);
@@ -363,7 +617,7 @@ test "a bool-compare candidate carries its discharged equivalence" {
     const input =
         \\{"path":"handler.ts","source":"const ready = true;\nconst go = ready === true;\n","plan":{"id":"rp_010","edit_intent":{"kind":"drop_redundant_bool_compare","line":2,"column":18,"template":""}}}
     ;
-    var result = try execute(testing.allocator, &.{input});
+    var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"discharged\":true") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"method\":\"M4\"") != null);
@@ -376,7 +630,7 @@ test "an intent with no implemented validator publishes a null equivalence" {
     const input =
         \\{"path":"handler.ts","source":"function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const data = auth.value;\n}","plan":{"id":"rp_011","edit_intent":{"kind":"add_trailing_return","line":3,"column":1,"template":"return Response.json({ data: auth.value });"}}}
     ;
-    var result = try execute(testing.allocator, &.{input});
+    var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"equivalence\":null") != null);
 }
@@ -385,7 +639,7 @@ test "execute returns typed failure for unsupported intent" {
     const input =
         \\{"path":"handler.ts","source":"function handler() {}","plan":{"id":"rp_003","edit_intent":{"kind":"replace_sink_expression","line":1,"column":1,"template":"replace"}}}
     ;
-    var result = try execute(testing.allocator, &.{input});
+    var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
@@ -396,7 +650,7 @@ test "execute dry-runs a source-backed guard insertion" {
     const input =
         \\{"path":"handler.ts","source":"function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const data = auth.value;\n  return Response.json({ data });\n}","plan":{"id":"rp_001","edit_intent":{"kind":"insert_guard_before_line","line":2,"column":14,"template":"if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });"}}}
     ;
-    var result = try execute(testing.allocator, &.{input});
+    var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"applied\":false") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (!auth.ok)") != null);

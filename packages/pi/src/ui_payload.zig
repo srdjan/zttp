@@ -131,6 +131,71 @@ pub const RepairCandidatePayload = struct {
     }
 };
 
+/// A v2 repair selection that the compiler simulated against one exact source
+/// and identity tuple. Unlike `RepairCandidatePayload`, this carries no legacy
+/// plan id: the protocol has no stable candidate id, so provenance is the
+/// exact repair array plus its binding.
+pub const ProtocolRepairPayload = struct {
+    path: []u8,
+    proposed_content: []u8,
+    repairs_json: []u8,
+    source_digest: []u8,
+    profile_id: []u8,
+    policy_hash: []u8,
+    module_graph_hash: []u8,
+    verification_summary: []u8,
+    stats: ProofStats,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        proposed_content: []const u8,
+        repairs_json: []const u8,
+        source_digest: []const u8,
+        profile_id: []const u8,
+        policy_hash: []const u8,
+        module_graph_hash: []const u8,
+        verification_summary: []const u8,
+        stats: ProofStats,
+    ) !ProtocolRepairPayload {
+        const path_owned = try allocator.dupe(u8, path);
+        errdefer allocator.free(path_owned);
+        const content_owned = try allocator.dupe(u8, proposed_content);
+        errdefer allocator.free(content_owned);
+        const repairs_owned = try allocator.dupe(u8, repairs_json);
+        errdefer allocator.free(repairs_owned);
+        const digest_owned = try allocator.dupe(u8, source_digest);
+        errdefer allocator.free(digest_owned);
+        const profile_owned = try allocator.dupe(u8, profile_id);
+        errdefer allocator.free(profile_owned);
+        const policy_owned = try allocator.dupe(u8, policy_hash);
+        errdefer allocator.free(policy_owned);
+        const graph_owned = try allocator.dupe(u8, module_graph_hash);
+        errdefer allocator.free(graph_owned);
+        const summary_owned = try allocator.dupe(u8, verification_summary);
+        errdefer allocator.free(summary_owned);
+        return .{
+            .path = path_owned,
+            .proposed_content = content_owned,
+            .repairs_json = repairs_owned,
+            .source_digest = digest_owned,
+            .profile_id = profile_owned,
+            .policy_hash = policy_owned,
+            .module_graph_hash = graph_owned,
+            .verification_summary = summary_owned,
+            .stats = stats,
+        };
+    }
+
+    pub fn clone(self: ProtocolRepairPayload, allocator: std.mem.Allocator) !ProtocolRepairPayload {
+        return payload_memory.cloneOwned(ProtocolRepairPayload, self, allocator);
+    }
+
+    pub fn deinit(self: *ProtocolRepairPayload, allocator: std.mem.Allocator) void {
+        payload_memory.freeOwned(ProtocolRepairPayload, self, allocator);
+    }
+};
+
 pub const PropertiesSnapshot = struct {
     pure: bool,
     read_only: bool,
@@ -474,6 +539,7 @@ pub const UiPayload = union(enum) {
     proof_card: ProofCardPayload,
     command_outcome: CommandOutcomePayload,
     repair_candidate: RepairCandidatePayload,
+    protocol_repair: ProtocolRepairPayload,
     verified_patch: VerifiedPatchPayload,
     plain_text: []u8,
 
@@ -487,6 +553,7 @@ pub const UiPayload = union(enum) {
             .proof_card => |payload| .{ .proof_card = try payload.clone(allocator) },
             .command_outcome => |payload| .{ .command_outcome = try payload.clone(allocator) },
             .repair_candidate => |payload| .{ .repair_candidate = try payload.clone(allocator) },
+            .protocol_repair => |payload| .{ .protocol_repair = try payload.clone(allocator) },
             .verified_patch => |payload| .{ .verified_patch = try payload.clone(allocator) },
             .plain_text => |text| .{ .plain_text = try allocator.dupe(u8, text) },
         };
@@ -499,6 +566,7 @@ pub const UiPayload = union(enum) {
             .proof_card => |*payload| payload.deinit(allocator),
             .command_outcome => |*payload| payload.deinit(allocator),
             .repair_candidate => |*payload| payload.deinit(allocator),
+            .protocol_repair => |*payload| payload.deinit(allocator),
             .verified_patch => |*payload| payload.deinit(allocator),
             .plain_text => |text| allocator.free(text),
         }
@@ -619,6 +687,33 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try writer.writeAll(",\"new\":");
             try writer.print("{d}", .{candidate.stats.new});
             if (candidate.stats.preexisting) |preexisting| {
+                try writer.writeAll(",\"preexisting\":");
+                try writer.print("{d}", .{preexisting});
+            }
+            try writer.writeByte('}');
+        },
+        .protocol_repair => |repair| {
+            try writer.writeAll("\"kind\":\"protocol_repair\",\"path\":");
+            try json_writer.writeString(writer, repair.path);
+            try writer.writeAll(",\"proposed_content\":");
+            try json_writer.writeString(writer, repair.proposed_content);
+            try writer.writeAll(",\"repairs\":");
+            try writer.writeAll(repair.repairs_json);
+            try writer.writeAll(",\"source_digest\":");
+            try json_writer.writeString(writer, repair.source_digest);
+            try writer.writeAll(",\"profile_id\":");
+            try json_writer.writeString(writer, repair.profile_id);
+            try writer.writeAll(",\"policy_hash\":");
+            try json_writer.writeString(writer, repair.policy_hash);
+            try writer.writeAll(",\"module_graph_hash\":");
+            try json_writer.writeString(writer, repair.module_graph_hash);
+            try writer.writeAll(",\"verification_summary\":");
+            try json_writer.writeString(writer, repair.verification_summary);
+            try writer.writeAll(",\"stats\":{\"total\":");
+            try writer.print("{d}", .{repair.stats.total});
+            try writer.writeAll(",\"new\":");
+            try writer.print("{d}", .{repair.stats.new});
+            if (repair.stats.preexisting) |preexisting| {
                 try writer.writeAll(",\"preexisting\":");
                 try writer.print("{d}", .{preexisting});
             }
@@ -1021,6 +1116,34 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             getString(obj, "intent_kind") orelse return error.InvalidUiPayload,
             getString(obj, "proposed_content") orelse return error.InvalidUiPayload,
             getBool(obj, "verification_ok") orelse return error.InvalidUiPayload,
+            getString(obj, "verification_summary") orelse return error.InvalidUiPayload,
+            .{
+                .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
+                .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
+                .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
+                    @intCast(preexisting)
+                else
+                    null,
+            },
+        ) };
+    }
+    if (std.mem.eql(u8, kind_val.string, "protocol_repair")) {
+        const stats_val = obj.get("stats") orelse return error.InvalidUiPayload;
+        const repairs_val = obj.get("repairs") orelse return error.InvalidUiPayload;
+        if (stats_val != .object or repairs_val != .array) return error.InvalidUiPayload;
+        var repairs_buf = TextBuffer.init(allocator);
+        defer repairs_buf.deinit();
+        try std.json.Stringify.value(repairs_val, .{}, repairs_buf.writer());
+        const stats_obj = stats_val.object;
+        return .{ .protocol_repair = try ProtocolRepairPayload.init(
+            allocator,
+            getString(obj, "path") orelse return error.InvalidUiPayload,
+            getString(obj, "proposed_content") orelse return error.InvalidUiPayload,
+            repairs_buf.written(),
+            getString(obj, "source_digest") orelse return error.InvalidUiPayload,
+            getString(obj, "profile_id") orelse return error.InvalidUiPayload,
+            getString(obj, "policy_hash") orelse return error.InvalidUiPayload,
+            getString(obj, "module_graph_hash") orelse return error.InvalidUiPayload,
             getString(obj, "verification_summary") orelse return error.InvalidUiPayload,
             .{
                 .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
@@ -1750,6 +1873,37 @@ test "repair candidate payload round-trips" {
             try testing.expect(candidate.verification_ok);
             try testing.expectEqual(@as(u32, 0), candidate.stats.new);
             try testing.expect(std.mem.indexOf(u8, candidate.proposed_content, "Response.json") != null);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "protocol repair payload round-trips exact binding" {
+    var payload: UiPayload = .{ .protocol_repair = try ProtocolRepairPayload.init(
+        testing.allocator,
+        "handler.ts",
+        "const answer = 42;",
+        "[{\"intent\":\"replace_let_with_const\",\"bound\":{\"source_digest\":\"source\"}}]",
+        "source",
+        "zts-advanced-1",
+        "policy",
+        "graph",
+        "0 new, 1 preexisting",
+        .{ .total = 1, .new = 0, .preexisting = 1 },
+    ) };
+    defer payload.deinit(testing.allocator);
+
+    var roundtripped = try roundTrip(testing.allocator, payload);
+    defer roundtripped.deinit(testing.allocator);
+
+    switch (roundtripped) {
+        .protocol_repair => |repair| {
+            try testing.expectEqualStrings("handler.ts", repair.path);
+            try testing.expectEqualStrings("const answer = 42;", repair.proposed_content);
+            try testing.expectEqualStrings("zts-advanced-1", repair.profile_id);
+            try testing.expectEqualStrings("policy", repair.policy_hash);
+            try testing.expectEqualStrings("graph", repair.module_graph_hash);
+            try testing.expect(std.mem.indexOf(u8, repair.repairs_json, "replace_let_with_const") != null);
         },
         else => return error.TestFailed,
     }
