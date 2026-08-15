@@ -580,7 +580,7 @@ test "run: actor queue flag installs queue runtime for declarative tests" {
         \\  if (!sent.ok) return Response.text(sent.error, { status: 500 });
         \\  const empty = receive("empty");
         \\  if (!empty.ok) return Response.text(empty.error, { status: 500 });
-        \\  if (empty.value) return Response.text("expected empty mailbox", { status: 500 });
+        \\  if (empty.value !== null) return Response.text("expected empty mailbox", { status: 500 });
         \\  const inbox = receive("worker");
         \\  if (!inbox.ok) return Response.text(inbox.error, { status: 500 });
         \\  const done = ack(inbox.value.id);

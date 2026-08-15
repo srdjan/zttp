@@ -101,6 +101,9 @@ pub const RuntimeContract = struct {
     /// len == 0 is a legitimate state for handlers that import only
     /// capability-free modules (e.g. zttp:router).
     capabilities: ?CapabilityMatrix = null,
+    /// Exact core and optional frontend identity used to compile the artifact.
+    source_identity: zq.SourceIdentity = .{},
+    source_is_tsx: bool = false,
     /// SHA-256 of the bytecode blob, stamped at build time. All-zero means
     /// the contract did not carry a sandbox block.
     artifact_sha256: [32]u8 = [_]u8{0} ** 32,
@@ -262,6 +265,7 @@ pub fn validate(
     var inner = raw.inner;
     errdefer inner.deinit();
     try verifyCapabilityMatrix(&inner);
+    try verifySourceIdentity(&inner);
     try verifyPolicyHash(&inner);
     try verifyArtifactHash(&inner, opts.bytecode);
     return validatedFromInner(inner);
@@ -445,6 +449,8 @@ pub fn fromHandlerContract(allocator: std.mem.Allocator, hc: *const HandlerContr
             .fault_covered = hc.durable.workflow.properties.fault_covered,
         },
         .capabilities = hc.capabilities,
+        .source_identity = hc.source_identity,
+        .source_is_tsx = std.mem.endsWith(u8, hc.handler.path, ".tsx"),
         .artifact_sha256 = hc.artifact_sha256,
         .policy_hash = hc.policy_hash,
         .modules = modules_out,
@@ -468,6 +474,31 @@ pub fn verifyCapabilityMatrix(contract: *const RuntimeContract) !void {
     const live = deriveLiveCapabilityMatrix(contract);
     if (!std.mem.eql(u8, &live.hash, &stored.hash)) {
         return error.CapabilityMatrixMismatch;
+    }
+}
+
+/// Verify that the artifact was produced by the linked core grammar,
+/// semantics registry, and optional source frontend. Missing identity is a
+/// refusal, not a compatibility skip: a runtime cannot safely infer which
+/// language accepted the embedded bytes.
+pub fn verifySourceIdentity(contract: *const RuntimeContract) !void {
+    const identity = contract.source_identity;
+    if (!identity.isStamped()) return error.SourceIdentityMissing;
+    if (identity.core_profile != .model_1) return error.SourceProfileMismatch;
+    const live = zq.sourceIdentityForPath(if (contract.source_is_tsx) "handler.tsx" else "handler.ts");
+    if (!std.mem.eql(u8, &identity.core_grammar_hash, &live.core_grammar_hash)) {
+        return error.CoreGrammarHashMismatch;
+    }
+    if (!std.mem.eql(u8, &identity.semantics_hash, &live.semantics_hash)) {
+        return error.SemanticsHashMismatch;
+    }
+
+    if (contract.source_is_tsx != (identity.frontend != null)) return error.SourceFrontendMismatch;
+    if (identity.frontend) |frontend| {
+        if (frontend.profile != .tsx_1) return error.SourceFrontendMismatch;
+        if (!std.mem.eql(u8, &frontend.grammar_hash, &live.frontend.?.grammar_hash)) {
+            return error.FrontendGrammarHashMismatch;
+        }
     }
 }
 
@@ -832,6 +863,7 @@ test "fromHandlerContract converts properties and env vars" {
             .deterministic = true,
             .has_egress = false,
         },
+        .source_identity = zq.sourceIdentityForPath("handler.ts"),
     };
     defer hc.deinit(allocator);
 
@@ -855,6 +887,9 @@ test "fromHandlerContract converts properties and env vars" {
     try std.testing.expect(rc.durable_workflow_properties.retry_safe);
     try std.testing.expect(rc.durable_workflow_properties.idempotent);
     try std.testing.expect(rc.durable_workflow_properties.fault_covered);
+    try std.testing.expectEqual(zq.CoreProfile.model_1, rc.source_identity.core_profile);
+    try std.testing.expect(rc.source_identity.isStamped());
+    try std.testing.expect(rc.source_identity.frontend == null);
 }
 
 // Drift guard: parseContractJson is a second, hand-rolled reader of the contract
@@ -987,7 +1022,8 @@ test "validate promotes Raw to Validated when integrity checks pass" {
         \\  "api": {"routes": [], "routesDynamic": false}
         \\}
     ;
-    const raw = try parseContractJson(allocator, source);
+    var raw = try parseContractJson(allocator, source);
+    raw.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
     var validated = try validate(raw, .{});
     defer validated.deinit();
 
@@ -1007,6 +1043,7 @@ test "validate rejects artifact-hash drift" {
         \\}
     ;
     var raw = try parseContractJson(allocator, source);
+    raw.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
     raw.inner.artifact_sha256 = [_]u8{0xAB} ** 32;
     try std.testing.expectError(
         error.ArtifactHashMismatch,
@@ -1354,7 +1391,7 @@ test "parseContractJson: errdefer ladders close every failure path" {
 // pin the behavior it proved.
 // ---------------------------------------------------------------------------
 
-test "a contract with no sandbox block still validates" {
+test "a stamped contract with no sandbox block still validates" {
     // A null capability matrix means "this contract makes no capability
     // statement", which makes verifyCapabilityMatrix skip. Collapsing that
     // into an empty matrix made the check compare the live matrix against an
@@ -1373,9 +1410,66 @@ test "a contract with no sandbox block still validates" {
 
     var raw = try parseContractJson(allocator, source);
     try std.testing.expect(raw.rawView().capabilities == null);
+    raw.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
 
     var validated = try validate(raw, .{});
     defer validated.deinit();
+}
+
+test "runtime validation refuses missing or stale source identity" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 18,
+        \\  "handler": {"path": "handler.ts", "line": 1, "column": 0},
+        \\  "modules": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+
+    const missing = try parseContractJson(allocator, source);
+    try std.testing.expectError(error.SourceIdentityMissing, validate(missing, .{}));
+
+    var stale_grammar = try parseContractJson(allocator, source);
+    stale_grammar.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
+    stale_grammar.inner.source_identity.core_grammar_hash[0] ^= 0xff;
+    try std.testing.expectError(error.CoreGrammarHashMismatch, validate(stale_grammar, .{}));
+
+    var stale_semantics = try parseContractJson(allocator, source);
+    stale_semantics.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
+    stale_semantics.inner.source_identity.semantics_hash[0] ^= 0xff;
+    try std.testing.expectError(error.SemanticsHashMismatch, validate(stale_semantics, .{}));
+}
+
+test "runtime validation binds the TSX frontend identity" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\{
+        \\  "version": 18,
+        \\  "handler": {"path": "handler.tsx", "line": 1, "column": 0},
+        \\  "modules": [],
+        \\  "env": {"literal": [], "dynamic": false},
+        \\  "egress": {"hosts": [], "dynamic": false},
+        \\  "api": {"routes": [], "routesDynamic": false}
+        \\}
+    ;
+
+    var missing_frontend = try parseContractJson(allocator, source);
+    missing_frontend.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
+    try std.testing.expectError(error.SourceFrontendMismatch, validate(missing_frontend, .{}));
+
+    var stale_frontend = try parseContractJson(allocator, source);
+    stale_frontend.inner.source_identity = zq.sourceIdentityForPath("handler.tsx");
+    stale_frontend.inner.source_identity.frontend.?.grammar_hash[0] ^= 0xff;
+    try std.testing.expectError(error.FrontendGrammarHashMismatch, validate(stale_frontend, .{}));
+
+    var valid = try parseContractJson(allocator, source);
+    valid.inner.source_identity = zq.sourceIdentityForPath("handler.tsx");
+    var validated = try validate(valid, .{});
+    defer validated.deinit();
+    try std.testing.expectEqual(zq.SourceFrontendProfile.tsx_1, validated.view().source_identity.frontend.?.profile);
 }
 
 test "the module list survives the read" {

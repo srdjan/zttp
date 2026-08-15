@@ -335,6 +335,18 @@ fn combineSandboxWire(previous: *SandboxWire, next: SandboxWire) void {
     if (next.artifactSha256.value != null) previous.artifactSha256 = next.artifactSha256;
 }
 
+const SourceFrontendIdentityWire = struct {
+    profileId: WireString = .{ .bytes = "" },
+    grammarHash: WireString = .{ .bytes = "" },
+};
+
+const SourceIdentityWire = struct {
+    coreProfileId: WireString = .{ .bytes = "" },
+    coreGrammarHash: WireString = .{ .bytes = "" },
+    semanticsHash: WireString = .{ .bytes = "" },
+    frontend: ?SourceFrontendIdentityWire = null,
+};
+
 const BehaviorConditionWire = struct {
     kind: WireString = .{ .bytes = "io_ok" },
     module: ?WireString = null,
@@ -422,6 +434,7 @@ const CostEnvelopeWire = struct {
 const ContractWire = struct {
     version: WireU32 = .{ .value = null },
     handler: HandlerWire = .{},
+    sourceIdentity: ?SourceIdentityWire = null,
     routes: []const RouteWire = &.{},
     modules: []const WireString = &.{},
     functions: FunctionMap = .{},
@@ -654,6 +667,8 @@ fn projectContract(
     contract.version = wire.version.value orelse contract.version;
     errdefer contract.deinit(allocator);
 
+    try projectSourceIdentity(wire.sourceIdentity, &contract);
+
     contract.routes = try projectRoutes(allocator, wire.routes);
     contract.modules = try projectStringList(allocator, wire.modules);
     try projectFunctions(allocator, &wire.functions, &contract);
@@ -688,6 +703,26 @@ fn projectContract(
     try projectRateLimit(allocator, wire.rateLimiting, &contract);
 
     return contract;
+}
+
+fn projectSourceIdentity(wire: ?SourceIdentityWire, contract: *HandlerContract) !void {
+    const identity = wire orelse return;
+    contract.source_identity.core_profile = contract_types.CoreProfile.parse(identity.coreProfileId.bytes) orelse
+        return error.InvalidJson;
+    if (!try parseOptionalHash(&contract.source_identity.core_grammar_hash, identity.coreGrammarHash.bytes)) {
+        return error.InvalidJson;
+    }
+    if (!try parseOptionalHash(&contract.source_identity.semantics_hash, identity.semanticsHash.bytes)) {
+        return error.InvalidJson;
+    }
+    if (identity.frontend) |frontend| {
+        var projected = contract_types.SourceFrontendIdentity{
+            .profile = contract_types.SourceFrontendProfile.parse(frontend.profileId.bytes) orelse return error.InvalidJson,
+            .grammar_hash = undefined,
+        };
+        if (!try parseOptionalHash(&projected.grammar_hash, frontend.grammarHash.bytes)) return error.InvalidJson;
+        contract.source_identity.frontend = projected;
+    }
 }
 
 fn dupeWireString(allocator: std.mem.Allocator, wire: WireString) ![]const u8 {
@@ -1793,7 +1828,7 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 17 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 18 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
@@ -1816,7 +1851,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 17), contract.version);
+    try std.testing.expectEqual(@as(u32, 18), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);

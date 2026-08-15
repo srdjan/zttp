@@ -36,6 +36,7 @@ zts-base known_globals.zig
 zts-base module_authorization.zig
 zts-base module_slots.zig
 zts-base module_specifier.zig
+zts-base profile_identity.zig
 zts-base route_match.zig
 zts-base type_map.zig
 
@@ -140,12 +141,14 @@ zts policy.zig
 zts printer.zig
 zts pool.zig
 zts security_events.zig
+zts source_frontend.zig
 zts sqlite.zig
 zts string.zig
 zts stripper.zig
 zts tests/asi_census.zig
 zts tests/opcode_parity.zig
 zts trace.zig
+zts tsx_lowerer.zig
 zts value.zig
 zts wasm/interpreter.zig
 zts wasm/loader.zig
@@ -195,6 +198,7 @@ zts-compiler semantics_check.zig
 zts-compiler semantics_corpus.zig
 zts-compiler semantics_render.zig
 zts-compiler semantics_smt.zig
+zts-compiler source_identity.zig
 zts-compiler spec_discharge.zig
 zts-compiler sql_analysis.zig
 zts-compiler strict_checker.zig
@@ -204,6 +208,7 @@ zts-compiler type_checker.zig
 zts-compiler type_env.zig
 zts-compiler type_key.zig
 zts-compiler type_pool.zig
+zts-compiler tsx_frontend_registry.zig
 zts-compiler witness_corpus.zig
 
 # zts-umbrella

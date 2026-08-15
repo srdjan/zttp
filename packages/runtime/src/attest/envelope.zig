@@ -16,7 +16,7 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
-pub const version_tag: []const u8 = "zttp-attest-v1";
+pub const version_tag: []const u8 = "zttp-attest-v2";
 pub const unpinned_runtime_policy_sha256: []const u8 = "0" ** 64;
 
 /// Forty-byte payload caller assembles; sign() embeds it into the JWS.
@@ -28,6 +28,11 @@ pub const Claims = struct {
     policy_sha256: []const u8,
     capability_hash: []const u8,
     runtime_policy_sha256: []const u8 = unpinned_runtime_policy_sha256,
+    core_profile_id: []const u8,
+    core_grammar_sha256: []const u8,
+    semantics_sha256: []const u8,
+    frontend_profile_id: ?[]const u8 = null,
+    frontend_grammar_sha256: ?[]const u8 = null,
     compiler_version: []const u8,
     signed_at_unix: i64,
     property_summary: []const u8,
@@ -70,6 +75,9 @@ pub const VerifyResult = struct {
 
 pub const SignError = error{
     InvalidHexLength,
+    InvalidHexEncoding,
+    InvalidProfileIdentity,
+    InvalidFrontendIdentity,
     OutOfMemory,
 };
 
@@ -102,11 +110,7 @@ pub fn sign(
     claims: Claims,
     key_pair: Ed25519.KeyPair,
 ) SignError!Envelope {
-    try validateHexField(claims.contract_sha256);
-    try validateHexField(claims.bytecode_sha256);
-    try validateHexField(claims.policy_sha256);
-    try validateHexField(claims.capability_hash);
-    try validateHexField(claims.runtime_policy_sha256);
+    try validateClaims(claims);
 
     const public_key_bytes = key_pair.public_key.bytes;
     const pubkey_b64 = encodeBase64Owned(allocator, &public_key_bytes) catch return error.OutOfMemory;
@@ -185,6 +189,30 @@ pub fn verify(
 
 fn validateHexField(field: []const u8) SignError!void {
     if (field.len != 64) return error.InvalidHexLength;
+    for (field) |byte| {
+        if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) {
+            return error.InvalidHexEncoding;
+        }
+    }
+}
+
+fn validateClaims(claims: Claims) SignError!void {
+    try validateHexField(claims.contract_sha256);
+    try validateHexField(claims.bytecode_sha256);
+    try validateHexField(claims.policy_sha256);
+    try validateHexField(claims.capability_hash);
+    try validateHexField(claims.runtime_policy_sha256);
+    try validateHexField(claims.core_grammar_sha256);
+    try validateHexField(claims.semantics_sha256);
+    if (claims.core_profile_id.len == 0) return error.InvalidProfileIdentity;
+
+    if ((claims.frontend_profile_id == null) != (claims.frontend_grammar_sha256 == null)) {
+        return error.InvalidFrontendIdentity;
+    }
+    if (claims.frontend_profile_id) |profile_id| {
+        if (profile_id.len == 0) return error.InvalidFrontendIdentity;
+        try validateHexField(claims.frontend_grammar_sha256.?);
+    }
 }
 
 const JwsParts = struct { header: []const u8, payload: []const u8, signature: []const u8 };
@@ -245,6 +273,11 @@ const wire_key = struct {
     const policy_sha256 = "policySha256";
     const capability_hash = "capabilityHash";
     const runtime_policy_sha256 = "runtimePolicySha256";
+    const core_profile_id = "coreProfileId";
+    const core_grammar_sha256 = "coreGrammarSha256";
+    const semantics_sha256 = "semanticsSha256";
+    const frontend_profile_id = "frontendProfileId";
+    const frontend_grammar_sha256 = "frontendGrammarSha256";
     const compiler_version = "compilerVersion";
     const signed_at = "signedAt";
     const property_summary = "propertySummary";
@@ -256,39 +289,47 @@ const wire_key = struct {
 };
 
 fn buildPayloadJson(allocator: std.mem.Allocator, claims: Claims) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "{{\"" ++ wire_key.v ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.contract_sha256 ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.bytecode_sha256 ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.policy_sha256 ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.capability_hash ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.runtime_policy_sha256 ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.compiler_version ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.signed_at ++ "\":{d}," ++
-            "\"" ++ wire_key.property_summary ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.routes_count ++ "\":{d}," ++
-            "\"" ++ wire_key.durable_workflow_proof_level ++ "\":\"{s}\"," ++
-            "\"" ++ wire_key.durable_workflow_retry_safe ++ "\":{}," ++
-            "\"" ++ wire_key.durable_workflow_idempotent ++ "\":{}," ++
-            "\"" ++ wire_key.durable_workflow_fault_covered ++ "\":{}}}",
-        .{
-            version_tag,
-            claims.contract_sha256,
-            claims.bytecode_sha256,
-            claims.policy_sha256,
-            claims.capability_hash,
-            claims.runtime_policy_sha256,
-            claims.compiler_version,
-            claims.signed_at_unix,
-            claims.property_summary,
-            claims.routes_count,
-            claims.durable_workflow_proof_level,
-            claims.durable_workflow_retry_safe,
-            claims.durable_workflow_idempotent,
-            claims.durable_workflow_fault_covered,
-        },
-    );
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    var json: std.json.Stringify = .{ .writer = &aw.writer };
+
+    try json.beginObject();
+    inline for (.{
+        .{ wire_key.v, version_tag },
+        .{ wire_key.contract_sha256, claims.contract_sha256 },
+        .{ wire_key.bytecode_sha256, claims.bytecode_sha256 },
+        .{ wire_key.policy_sha256, claims.policy_sha256 },
+        .{ wire_key.capability_hash, claims.capability_hash },
+        .{ wire_key.runtime_policy_sha256, claims.runtime_policy_sha256 },
+        .{ wire_key.core_profile_id, claims.core_profile_id },
+        .{ wire_key.core_grammar_sha256, claims.core_grammar_sha256 },
+        .{ wire_key.semantics_sha256, claims.semantics_sha256 },
+    }) |field| {
+        try json.objectField(field[0]);
+        try json.write(field[1]);
+    }
+    try json.objectField(wire_key.frontend_profile_id);
+    try json.write(claims.frontend_profile_id);
+    try json.objectField(wire_key.frontend_grammar_sha256);
+    try json.write(claims.frontend_grammar_sha256);
+    try json.objectField(wire_key.compiler_version);
+    try json.write(claims.compiler_version);
+    try json.objectField(wire_key.signed_at);
+    try json.write(claims.signed_at_unix);
+    try json.objectField(wire_key.property_summary);
+    try json.write(claims.property_summary);
+    try json.objectField(wire_key.routes_count);
+    try json.write(claims.routes_count);
+    try json.objectField(wire_key.durable_workflow_proof_level);
+    try json.write(claims.durable_workflow_proof_level);
+    try json.objectField(wire_key.durable_workflow_retry_safe);
+    try json.write(claims.durable_workflow_retry_safe);
+    try json.objectField(wire_key.durable_workflow_idempotent);
+    try json.write(claims.durable_workflow_idempotent);
+    try json.objectField(wire_key.durable_workflow_fault_covered);
+    try json.write(claims.durable_workflow_fault_covered);
+    try json.endObject();
+    return try allocator.dupe(u8, aw.writer.buffered());
 }
 
 const ParseHeaderError = error{
@@ -330,17 +371,22 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
     if (parsed.value != .object) return error.InvalidJson;
     const obj = parsed.value.object;
 
-    return .{
+    const payload_version = obj.get(wire_key.v) orelse return error.InvalidJson;
+    if (payload_version != .string or !std.mem.eql(u8, payload_version.string, version_tag)) {
+        return error.InvalidJson;
+    }
+
+    const claims = Claims{
         .contract_sha256 = try dupString(allocator, obj, wire_key.contract_sha256),
         .bytecode_sha256 = try dupString(allocator, obj, wire_key.bytecode_sha256),
         .policy_sha256 = try dupString(allocator, obj, wire_key.policy_sha256),
         .capability_hash = try dupString(allocator, obj, wire_key.capability_hash),
-        .runtime_policy_sha256 = try dupStringDefault(
-            allocator,
-            obj,
-            wire_key.runtime_policy_sha256,
-            unpinned_runtime_policy_sha256,
-        ),
+        .runtime_policy_sha256 = try dupString(allocator, obj, wire_key.runtime_policy_sha256),
+        .core_profile_id = try dupString(allocator, obj, wire_key.core_profile_id),
+        .core_grammar_sha256 = try dupString(allocator, obj, wire_key.core_grammar_sha256),
+        .semantics_sha256 = try dupString(allocator, obj, wire_key.semantics_sha256),
+        .frontend_profile_id = try dupOptionalString(allocator, obj, wire_key.frontend_profile_id),
+        .frontend_grammar_sha256 = try dupOptionalString(allocator, obj, wire_key.frontend_grammar_sha256),
         .compiler_version = try dupString(allocator, obj, wire_key.compiler_version),
         .property_summary = try dupString(allocator, obj, wire_key.property_summary),
         .signed_at_unix = try readI64(obj, wire_key.signed_at),
@@ -350,6 +396,8 @@ fn parseClaims(allocator: std.mem.Allocator, payload_bytes: []const u8) !Claims 
         .durable_workflow_idempotent = try readBoolDefault(obj, wire_key.durable_workflow_idempotent, false),
         .durable_workflow_fault_covered = try readBoolDefault(obj, wire_key.durable_workflow_fault_covered, false),
     };
+    validateClaims(claims) catch return error.InvalidJson;
+    return claims;
 }
 
 fn dupString(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) ![]const u8 {
@@ -362,6 +410,15 @@ fn dupStringDefault(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: 
     const val = obj.get(key) orelse return try allocator.dupe(u8, default);
     if (val != .string) return error.InvalidJson;
     return try allocator.dupe(u8, val.string);
+}
+
+fn dupOptionalString(allocator: std.mem.Allocator, obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+    const val = obj.get(key) orelse return error.InvalidJson;
+    return switch (val) {
+        .null => null,
+        .string => |value| try allocator.dupe(u8, value),
+        else => error.InvalidJson,
+    };
 }
 
 fn readI64(obj: std.json.ObjectMap, key: []const u8) !i64 {
@@ -400,6 +457,11 @@ fn testClaims() Claims {
         .policy_sha256 = "c" ** 64,
         .capability_hash = "d" ** 64,
         .runtime_policy_sha256 = "e" ** 64,
+        .core_profile_id = "zts-model-1",
+        .core_grammar_sha256 = "1" ** 64,
+        .semantics_sha256 = "2" ** 64,
+        .frontend_profile_id = "zts-tsx-1",
+        .frontend_grammar_sha256 = "3" ** 64,
         .compiler_version = "0.0.0-test",
         .signed_at_unix = 1_700_000_000,
         .property_summary = "pure,read_only,injection_safe",
@@ -425,6 +487,11 @@ test "sign then verify recovers the same claims" {
     try std.testing.expectEqualStrings("c" ** 64, result.claims.policy_sha256);
     try std.testing.expectEqualStrings("d" ** 64, result.claims.capability_hash);
     try std.testing.expectEqualStrings("e" ** 64, result.claims.runtime_policy_sha256);
+    try std.testing.expectEqualStrings("zts-model-1", result.claims.core_profile_id);
+    try std.testing.expectEqualStrings("1" ** 64, result.claims.core_grammar_sha256);
+    try std.testing.expectEqualStrings("2" ** 64, result.claims.semantics_sha256);
+    try std.testing.expectEqualStrings("zts-tsx-1", result.claims.frontend_profile_id.?);
+    try std.testing.expectEqualStrings("3" ** 64, result.claims.frontend_grammar_sha256.?);
     try std.testing.expectEqualStrings("0.0.0-test", result.claims.compiler_version);
     try std.testing.expectEqualStrings("pure,read_only,injection_safe", result.claims.property_summary);
     try std.testing.expectEqual(@as(i64, 1_700_000_000), result.claims.signed_at_unix);
@@ -463,7 +530,7 @@ fn signPayloadJsonForTest(
     return joinDot(allocator, signing_input, signature_b64);
 }
 
-test "verify defaults a missing runtime policy claim to unpinned" {
+test "verify refuses a legacy receipt without source identity" {
     const allocator = std.testing.allocator;
     const payload =
         "{\"v\":\"zttp-attest-v1\"," ++
@@ -479,23 +546,23 @@ test "verify defaults a missing runtime policy claim to unpinned" {
     const jws = try signPayloadJsonForTest(allocator, payload, key_pair);
     defer allocator.free(jws);
 
-    var result = try verify(allocator, jws);
-    defer result.deinit();
-
-    try std.testing.expectEqualStrings(
-        unpinned_runtime_policy_sha256,
-        result.claims.runtime_policy_sha256,
-    );
+    try std.testing.expectError(error.InvalidJson, verify(allocator, jws));
 }
 
 test "parseClaims defaults missing durable workflow fields" {
     const allocator = std.testing.allocator;
     const payload =
-        "{\"v\":\"zttp-attest-v1\"," ++
+        "{\"v\":\"zttp-attest-v2\"," ++
         "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
         "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
         "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
         "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
+        "\"coreProfileId\":\"zts-model-1\"," ++
+        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"frontendProfileId\":null," ++
+        "\"frontendGrammarSha256\":null," ++
         "\"compilerVersion\":\"0.0.0-test\"," ++
         "\"signedAt\":1700000000," ++
         "\"propertySummary\":\"pure\"," ++
@@ -508,13 +575,19 @@ test "parseClaims defaults missing durable workflow fields" {
         allocator.free(claims.policy_sha256);
         allocator.free(claims.capability_hash);
         allocator.free(claims.runtime_policy_sha256);
+        allocator.free(claims.core_profile_id);
+        allocator.free(claims.core_grammar_sha256);
+        allocator.free(claims.semantics_sha256);
         allocator.free(claims.compiler_version);
         allocator.free(claims.property_summary);
         allocator.free(claims.durable_workflow_proof_level);
     }
 
     try std.testing.expectEqualStrings("none", claims.durable_workflow_proof_level);
-    try std.testing.expectEqualStrings(unpinned_runtime_policy_sha256, claims.runtime_policy_sha256);
+    try std.testing.expectEqualStrings("e" ** 64, claims.runtime_policy_sha256);
+    try std.testing.expectEqualStrings("zts-model-1", claims.core_profile_id);
+    try std.testing.expect(claims.frontend_profile_id == null);
+    try std.testing.expect(claims.frontend_grammar_sha256 == null);
     try std.testing.expect(!claims.durable_workflow_retry_safe);
     try std.testing.expect(!claims.durable_workflow_idempotent);
     try std.testing.expect(!claims.durable_workflow_fault_covered);
@@ -596,6 +669,19 @@ test "rejects claims with a non-64-char hex field" {
     var bad = testClaims();
     bad.contract_sha256 = "tooShort";
     try std.testing.expectError(error.InvalidHexLength, sign(allocator, bad, kp));
+}
+
+test "rejects malformed and incomplete source identity claims" {
+    const allocator = std.testing.allocator;
+    const kp = try keyPairFromSeed(test_seed);
+
+    var bad_hex = testClaims();
+    bad_hex.core_grammar_sha256 = "g" ** 64;
+    try std.testing.expectError(error.InvalidHexEncoding, sign(allocator, bad_hex, kp));
+
+    var half_frontend = testClaims();
+    half_frontend.frontend_grammar_sha256 = null;
+    try std.testing.expectError(error.InvalidFrontendIdentity, sign(allocator, half_frontend, kp));
 }
 
 test "malformed JWS string is rejected before any crypto runs" {

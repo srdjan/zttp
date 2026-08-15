@@ -49,6 +49,34 @@ fn writeContractJsonVersion(
     try writer.print("    \"column\": {d}\n", .{contract.handler.column});
     try writer.writeAll("  },\n");
 
+    // Source-profile identity. The contract binds both the core grammar and
+    // executable semantics registry, plus the optional lowering frontend.
+    try writer.writeAll("  \"" ++ comptime contractKey(json_version, "sourceIdentity") ++ "\": {\n");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "coreProfileId") ++ "\": ");
+    try writeJsonString(writer, contract.source_identity.core_profile.id());
+    try writer.writeAll(",\n");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "coreGrammarHash") ++ "\": ");
+    try json_utils.writeJsonHex(writer, contract.source_identity.core_grammar_hash);
+    try writer.writeAll(",\n");
+    try writer.writeAll("    \"" ++ comptime contractKey(json_version, "semanticsHash") ++ "\": ");
+    try json_utils.writeJsonHex(writer, contract.source_identity.semantics_hash);
+    try writer.writeAll(",\n");
+    try writer.writeAll("    \"frontend\": ");
+    if (contract.source_identity.frontend) |frontend| {
+        try writer.writeAll("{\n      \"");
+        try writer.writeAll(comptime contractKey(json_version, "profileId"));
+        try writer.writeAll("\": ");
+        try writeJsonString(writer, frontend.profile.id());
+        try writer.writeAll(",\n      \"");
+        try writer.writeAll(comptime contractKey(json_version, "grammarHash"));
+        try writer.writeAll("\": ");
+        try json_utils.writeJsonHex(writer, frontend.grammar_hash);
+        try writer.writeAll("\n    }");
+    } else {
+        try writer.writeAll("null");
+    }
+    try writer.writeAll("\n  },\n");
+
     // routes
     try writer.writeAll("  \"routes\": [");
     for (contract.routes.items, 0..) |route, i| {
@@ -1215,6 +1243,14 @@ fn populateVersionTwoTestContract(
     contract.version = 2;
     contract.handler.line = 7;
     contract.handler.column = 3;
+    contract.source_identity = .{
+        .core_grammar_hash = [_]u8{0x11} ** 32,
+        .semantics_hash = [_]u8{0x22} ** 32,
+        .frontend = .{
+            .profile = .tsx_1,
+            .grammar_hash = [_]u8{0x33} ** 32,
+        },
+    };
 
     {
         const route_pattern = try allocator.dupe(u8, "/orders/:id");
@@ -1549,4 +1585,22 @@ test "version 2 round-trips a populated contract field for field" {
     defer allocator.free(version_one_after);
 
     try std.testing.expectEqualStrings(version_one_before, version_one_after);
+    try std.testing.expectEqual(handler_contract.CoreProfile.model_1, parsed.source_identity.core_profile);
+    try std.testing.expectEqualSlices(u8, &original.source_identity.core_grammar_hash, &parsed.source_identity.core_grammar_hash);
+    try std.testing.expectEqualSlices(u8, &original.source_identity.semantics_hash, &parsed.source_identity.semantics_hash);
+    try std.testing.expectEqual(handler_contract.SourceFrontendProfile.tsx_1, parsed.source_identity.frontend.?.profile);
+    try std.testing.expectEqualSlices(u8, &original.source_identity.frontend.?.grammar_hash, &parsed.source_identity.frontend.?.grammar_hash);
+}
+
+test "source identity rejects unknown profiles and malformed hashes" {
+    const allocator = std.testing.allocator;
+    const unknown_profile =
+        \\{"version":2,"handler":{"path":"handler.ts","line":1,"column":0},"source_identity":{"core_profile_id":"zts-advanced-1","core_grammar_hash":"1111111111111111111111111111111111111111111111111111111111111111","semantics_hash":"2222222222222222222222222222222222222222222222222222222222222222","frontend":null}}
+    ;
+    try std.testing.expectError(error.InvalidJson, handler_contract.parseFromJson(allocator, unknown_profile));
+
+    const malformed_hash =
+        \\{"version":2,"handler":{"path":"handler.ts","line":1,"column":0},"source_identity":{"core_profile_id":"zts-model-1","core_grammar_hash":"not-a-hash","semantics_hash":"2222222222222222222222222222222222222222222222222222222222222222","frontend":null}}
+    ;
+    try std.testing.expectError(error.InvalidJson, handler_contract.parseFromJson(allocator, malformed_hash));
 }

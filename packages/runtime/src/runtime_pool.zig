@@ -930,7 +930,7 @@ pub const HandlerPool = struct {
         }
 
         // Fallback: runtime compilation (for development without -Dhandler)
-        const key = zq.BytecodeCache.cacheKey(self.handler_code);
+        const key = zq.sourceCacheKey(self.handler_code, self.handler_filename);
 
         // Acquire lock for parsing (double-checked locking pattern).
         // The old lockless fast path was unsafe: getRaw() releases its internal

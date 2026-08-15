@@ -40,6 +40,7 @@ pub const Error = error{
     CapsuleNotFound,
     SchemaVersionMismatch,
     PolicyMismatch,
+    SourceIdentityMismatch,
     HandlerNotFound,
     ReplayRegression,
     EmptyCapsule,
@@ -54,6 +55,7 @@ pub fn isExpectedUserError(err: anyerror) bool {
         Error.CapsuleNotFound,
         Error.SchemaVersionMismatch,
         Error.PolicyMismatch,
+        Error.SourceIdentityMismatch,
         Error.HandlerNotFound,
         Error.ReplayRegression,
         Error.EmptyCapsule,
@@ -201,6 +203,15 @@ pub fn replayCapsule(
         return Error.PolicyMismatch;
     }
 
+    if (!allow_version_mismatch and !manifestSourceIdentityMatches(manifest)) {
+        std.debug.print(
+            "zttp proofs replay: capsule '{s}' was recorded under a different source grammar or semantics registry.\n" ++
+                "Pass --allow-version-mismatch to replay against the current source profile anyway.\n",
+            .{capsule_name},
+        );
+        return Error.SourceIdentityMismatch;
+    }
+
     const handler_source = file_io.readFile(allocator, manifest.handler_path, max_handler_bytes) catch {
         std.debug.print(
             "zttp proofs replay: capsule '{s}' references handler '{s}', which is not readable from here.\n",
@@ -211,6 +222,23 @@ pub fn replayCapsule(
     defer allocator.free(handler_source);
 
     return replayTraceFiles(allocator, dir, manifest.trace_files, handler_source, manifest.handler_path);
+}
+
+fn manifestSourceIdentityMatches(manifest: capsule.Manifest) bool {
+    const live = zts.sourceIdentityForPath(manifest.handler_path);
+    const core_grammar_hex = std.fmt.bytesToHex(live.core_grammar_hash, .lower);
+    const semantics_hex = std.fmt.bytesToHex(live.semantics_hash, .lower);
+    if (!std.mem.eql(u8, manifest.core_profile_id, live.core_profile.id())) return false;
+    if (!std.mem.eql(u8, manifest.core_grammar_hash, &core_grammar_hex)) return false;
+    if (!std.mem.eql(u8, manifest.semantics_hash, &semantics_hex)) return false;
+    if (live.frontend) |frontend| {
+        const profile_id = manifest.frontend_profile_id orelse return false;
+        const grammar_hash = manifest.frontend_grammar_hash orelse return false;
+        const frontend_grammar_hex = std.fmt.bytesToHex(frontend.grammar_hash, .lower);
+        return std.mem.eql(u8, profile_id, frontend.profile.id()) and
+            std.mem.eql(u8, grammar_hash, &frontend_grammar_hex);
+    }
+    return manifest.frontend_profile_id == null and manifest.frontend_grammar_hash == null;
 }
 
 /// Replay every group in every trace file against `handler_source`. Split out
@@ -370,6 +398,18 @@ pub fn writeManifest(
     capsule.hashHex(contract_json.items, &contract_hash);
 
     const policy = zts.policyHash();
+    if (!contract.source_identity.isStamped()) return error.SourceIdentityMissing;
+    const core_grammar_hash = std.fmt.bytesToHex(contract.source_identity.core_grammar_hash, .lower);
+    const semantics_hash = std.fmt.bytesToHex(contract.source_identity.semantics_hash, .lower);
+    var frontend_grammar_hash: [64]u8 = undefined;
+    const frontend_profile_id: ?[]const u8 = if (contract.source_identity.frontend) |frontend|
+        frontend.profile.id()
+    else
+        null;
+    const frontend_grammar_hash_slice: ?[]const u8 = if (contract.source_identity.frontend) |frontend| blk: {
+        frontend_grammar_hash = std.fmt.bytesToHex(frontend.grammar_hash, .lower);
+        break :blk &frontend_grammar_hash;
+    } else null;
 
     // Routes: prefer the api routes (carry method), fall back to plain routes.
     var routes: std.ArrayList(capsule.Route) = .empty;
@@ -410,6 +450,11 @@ pub fn writeManifest(
         .contract_hash = &contract_hash,
         .zttp_version = zts.version.string,
         .policy_hash = &policy,
+        .core_profile_id = contract.source_identity.core_profile.id(),
+        .core_grammar_hash = &core_grammar_hash,
+        .semantics_hash = &semantics_hash,
+        .frontend_profile_id = frontend_profile_id,
+        .frontend_grammar_hash = frontend_grammar_hash_slice,
         .proven_specs = proven.items,
         .declared_specs = declared.items,
         .routes = routes.items,
@@ -569,6 +614,40 @@ test "ReplayReport with zero recorded requests is not clean" {
     try testing.expect(ok.clean());
 }
 
+test "capsule source identity matches only the exact core and frontend" {
+    const core = zts.sourceIdentityForPath("handler.ts");
+    const core_grammar = std.fmt.bytesToHex(core.core_grammar_hash, .lower);
+    const semantics_hash = std.fmt.bytesToHex(core.semantics_hash, .lower);
+    var manifest = capsule.Manifest{
+        .name = "identity",
+        .handler_path = "handler.ts",
+        .handler_hash = "a" ** 64,
+        .contract_hash = "b" ** 64,
+        .zttp_version = "test",
+        .policy_hash = "c" ** 64,
+        .core_profile_id = core.core_profile.id(),
+        .core_grammar_hash = &core_grammar,
+        .semantics_hash = &semantics_hash,
+    };
+    try testing.expect(manifestSourceIdentityMatches(manifest));
+    manifest.core_grammar_hash = "0" ** 64;
+    try testing.expect(!manifestSourceIdentityMatches(manifest));
+
+    const frontend = zts.sourceIdentityForPath("handler.tsx");
+    const frontend_core_grammar = std.fmt.bytesToHex(frontend.core_grammar_hash, .lower);
+    const frontend_semantics = std.fmt.bytesToHex(frontend.semantics_hash, .lower);
+    const frontend_grammar = std.fmt.bytesToHex(frontend.frontend.?.grammar_hash, .lower);
+    manifest.handler_path = "handler.tsx";
+    manifest.core_grammar_hash = &frontend_core_grammar;
+    manifest.semantics_hash = &frontend_semantics;
+    manifest.frontend_profile_id = frontend.frontend.?.profile.id();
+    manifest.frontend_grammar_hash = &frontend_grammar;
+    try testing.expect(manifestSourceIdentityMatches(manifest));
+    manifest.frontend_profile_id = null;
+    manifest.frontend_grammar_hash = null;
+    try testing.expect(!manifestSourceIdentityMatches(manifest));
+}
+
 test "replayCapsule fails closed on a policy mismatch" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -584,6 +663,9 @@ test "replayCapsule fails closed on a policy mismatch" {
     try file_io.writeFile(testing.allocator, "handler.ts", matching_handler);
 
     // Manifest with a deliberately wrong policy hash.
+    const source_identity = zts.sourceIdentityForPath("handler.ts");
+    const core_grammar_hash = std.fmt.bytesToHex(source_identity.core_grammar_hash, .lower);
+    const semantics_hash = std.fmt.bytesToHex(source_identity.semantics_hash, .lower);
     const manifest: capsule.Manifest = .{
         .name = "checkout",
         .handler_path = "handler.ts",
@@ -591,6 +673,11 @@ test "replayCapsule fails closed on a policy mismatch" {
         .contract_hash = "b" ** 64,
         .zttp_version = "test",
         .policy_hash = "0" ** 64,
+        .core_profile_id = source_identity.core_profile.id(),
+        .core_grammar_hash = &core_grammar_hash,
+        .semantics_hash = &semantics_hash,
+        .frontend_profile_id = null,
+        .frontend_grammar_hash = null,
         .trace_files = &.{"traces/001.jsonl"},
     };
     const json = try manifest.toJsonAlloc(testing.allocator);

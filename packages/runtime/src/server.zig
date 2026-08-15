@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const zq = @import("zts");
 const engine = @import("engine_adapter.zig");
 const Io = std.Io;
 const net = std.Io.net;
@@ -1700,7 +1701,24 @@ pub const Server = struct {
     ) bool {
         if (!hexHashMatchesOrUnpinned(claims.policy_sha256, contract.policy_hash)) return false;
         if (!hexHashMatchesOrUnpinned(claims.bytecode_sha256, contract.artifact_sha256)) return false;
+        if (!std.mem.eql(u8, claims.core_profile_id, contract.source_identity.core_profile.id())) return false;
+        if (!hexHashMatches(claims.core_grammar_sha256, contract.source_identity.core_grammar_hash)) return false;
+        if (!hexHashMatches(claims.semantics_sha256, contract.source_identity.semantics_hash)) return false;
+        if (contract.source_identity.frontend) |frontend| {
+            const claim_profile = claims.frontend_profile_id orelse return false;
+            const claim_grammar = claims.frontend_grammar_sha256 orelse return false;
+            if (!std.mem.eql(u8, claim_profile, frontend.profile.id())) return false;
+            if (!hexHashMatches(claim_grammar, frontend.grammar_hash)) return false;
+        } else if (claims.frontend_profile_id != null or claims.frontend_grammar_sha256 != null) {
+            return false;
+        }
         return true;
+    }
+
+    fn hexHashMatches(claim_hex: []const u8, live: [32]u8) bool {
+        if (claim_hex.len != 64) return false;
+        const live_hex = std.fmt.bytesToHex(live, .lower);
+        return std.mem.eql(u8, &live_hex, claim_hex);
     }
 
     /// True when `live` is unpinned (all-zero) or its lowercase-hex form equals
@@ -1950,6 +1968,18 @@ pub const Server = struct {
                     ),
                     error.ArtifactHashMismatch => std.log.err(
                         "sandbox: embedded bytecode does not match contract artifact hash",
+                        .{},
+                    ),
+                    error.SourceIdentityMissing => std.log.err(
+                        "sandbox: source identity is missing - rebuild the handler contract",
+                        .{},
+                    ),
+                    error.CoreGrammarHashMismatch,
+                    error.SemanticsHashMismatch,
+                    error.SourceFrontendMismatch,
+                    error.FrontendGrammarHashMismatch,
+                    => std.log.err(
+                        "sandbox: source profile drift - rebuild the handler contract against this runtime",
                         .{},
                     ),
                 }
@@ -3757,6 +3787,9 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     const artifact_bytes = [_]u8{0x22} ** 32;
     const policy_hex = std.fmt.bytesToHex(policy_bytes, .lower);
     const artifact_hex = std.fmt.bytesToHex(artifact_bytes, .lower);
+    const source_identity = zq.sourceIdentityForPath("handler.ts");
+    const core_grammar_hex = std.fmt.bytesToHex(source_identity.core_grammar_hash, .lower);
+    const semantics_hex = std.fmt.bytesToHex(source_identity.semantics_hash, .lower);
 
     var live = RuntimeContract{
         .env_vars = &.{},
@@ -3766,6 +3799,7 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
         .properties = .{},
         .policy_hash = policy_bytes,
         .artifact_sha256 = artifact_bytes,
+        .source_identity = source_identity,
         .allocator = std.testing.allocator,
     };
 
@@ -3774,6 +3808,9 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
         .bytecode_sha256 = &artifact_hex,
         .policy_sha256 = &policy_hex,
         .capability_hash = &([_]u8{'0'} ** 64),
+        .core_profile_id = source_identity.core_profile.id(),
+        .core_grammar_sha256 = &core_grammar_hex,
+        .semantics_sha256 = &semantics_hex,
         .compiler_version = "test",
         .signed_at_unix = 0,
         .property_summary = "",
@@ -3797,6 +3834,50 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     // An unpinned (all-zero) live hash skips the field instead of rejecting,
     // mirroring contract_runtime's skip-on-zero semantics for live reload.
     live.policy_hash = [_]u8{0} ** 32;
+    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
+
+    const wrong_grammar = std.fmt.bytesToHex([_]u8{0x55} ** 32, .lower);
+    claims.core_grammar_sha256 = &wrong_grammar;
+    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
+}
+
+test "attestation source identity binds the optional TSX frontend" {
+    const source_identity = zq.sourceIdentityForPath("handler.tsx");
+    const core_grammar_hex = std.fmt.bytesToHex(source_identity.core_grammar_hash, .lower);
+    const semantics_hex = std.fmt.bytesToHex(source_identity.semantics_hash, .lower);
+    const frontend_grammar_hex = std.fmt.bytesToHex(source_identity.frontend.?.grammar_hash, .lower);
+    var live = RuntimeContract{
+        .env_vars = &.{},
+        .env_dynamic = false,
+        .routes = &.{},
+        .routes_dynamic = false,
+        .properties = .{},
+        .source_identity = source_identity,
+        .source_is_tsx = true,
+        .allocator = std.testing.allocator,
+    };
+    var claims = attest_envelope.Claims{
+        .contract_sha256 = "0" ** 64,
+        .bytecode_sha256 = "0" ** 64,
+        .policy_sha256 = "0" ** 64,
+        .capability_hash = "0" ** 64,
+        .core_profile_id = source_identity.core_profile.id(),
+        .core_grammar_sha256 = &core_grammar_hex,
+        .semantics_sha256 = &semantics_hex,
+        .frontend_profile_id = source_identity.frontend.?.profile.id(),
+        .frontend_grammar_sha256 = &frontend_grammar_hex,
+        .compiler_version = "test",
+        .signed_at_unix = 0,
+        .property_summary = "",
+        .routes_count = 0,
+    };
+
+    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
+    claims.frontend_profile_id = null;
+    claims.frontend_grammar_sha256 = null;
+    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
+
+    live.source_identity = zq.sourceIdentityForPath("handler.ts");
     try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
 }
 
@@ -3824,6 +3905,9 @@ fn runtimePolicyClaimsForTest(runtime_policy_sha256: []const u8) attest_envelope
         .policy_sha256 = "0" ** 64,
         .capability_hash = "0" ** 64,
         .runtime_policy_sha256 = runtime_policy_sha256,
+        .core_profile_id = "zts-model-1",
+        .core_grammar_sha256 = "1" ** 64,
+        .semantics_sha256 = "2" ** 64,
         .compiler_version = "test",
         .signed_at_unix = 0,
         .property_summary = "",

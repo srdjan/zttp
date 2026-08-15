@@ -22,6 +22,10 @@ const contract_types = @import("contract_types.zig");
 
 // Re-exports from contract_types.zig
 pub const HandlerLoc = contract_types.HandlerLoc;
+pub const CoreProfile = contract_types.CoreProfile;
+pub const SourceFrontendProfile = contract_types.SourceFrontendProfile;
+pub const SourceFrontendIdentity = contract_types.SourceFrontendIdentity;
+pub const SourceIdentity = contract_types.SourceIdentity;
 pub const PropertyCause = contract_types.PropertyCause;
 pub const PropertyProvenance = contract_types.PropertyProvenance;
 pub const RouteInfo = contract_types.RouteInfo;
@@ -1239,7 +1243,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 17") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 18") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\": []") != null);

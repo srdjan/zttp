@@ -25,9 +25,10 @@ const std = @import("std");
 
 const rule_registry = @import("rule_registry.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
+const profile_identity = @import("zts-base").profile_identity;
 
 /// The only core source profile implemented by this grammar.
-pub const profile_id = "zts-model-1";
+pub const profile_id = profile_identity.core_profile.id();
 
 /// Where the refusal of a form this production admits actually happens.
 pub const Enforcement = enum {

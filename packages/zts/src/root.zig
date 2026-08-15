@@ -260,6 +260,9 @@ pub const FunctionEffect = effect_inference.FunctionEffect;
 pub const BytecodeVerifier = bytecode_verifier;
 pub const ContractBuilder = contract_builder.ContractBuilder;
 pub const HandlerContract = handler_contract.HandlerContract;
+pub const CoreProfile = handler_contract.CoreProfile;
+pub const SourceFrontendProfile = handler_contract.SourceFrontendProfile;
+pub const SourceIdentity = handler_contract.SourceIdentity;
 
 /// What a build proved about a handler: pure, read-only, stateless, retry-safe,
 /// deterministic, and the rest. Curated alongside `HandlerContract` because it
@@ -474,6 +477,24 @@ pub fn tsxFrontendGrammarHash() [64]u8 {
     return compiler.tsx_frontend_registry.grammarHash();
 }
 
+/// Exact compiler identity for a source path. `.ts` binds only the core;
+/// `.tsx` additionally binds the lowering frontend.
+pub fn sourceIdentityForPath(path: []const u8) SourceIdentity {
+    return compiler.source_identity.forPath(path);
+}
+
+/// Content-addressed runtime cache key bound to the exact source language.
+pub fn sourceCacheKey(source: []const u8, path: []const u8) bytecode_cache.CacheKey {
+    const identity = sourceIdentityForPath(path);
+    return BytecodeCache.cacheKeyWithIdentity(source, .{
+        .core_profile_id = identity.core_profile.id(),
+        .core_grammar_hash = identity.core_grammar_hash,
+        .semantics_hash = identity.semantics_hash,
+        .frontend_profile_id = if (identity.frontend) |frontend| frontend.profile.id() else null,
+        .frontend_grammar_hash = if (identity.frontend) |frontend| frontend.grammar_hash else null,
+    });
+}
+
 test "stable GrammarCatalog exposes the productions and their enforcement points" {
     const rows = GrammarCatalog.productions();
     try std.testing.expectEqualStrings("zts-model-1", GrammarCatalog.profile_id);
@@ -492,6 +513,23 @@ test "stable TSX frontend catalog binds its grammar identity" {
         &compiler.tsx_frontend_registry.grammarHash(),
         &tsxFrontendGrammarHash(),
     );
+}
+
+test "stable source identity follows the source frontend" {
+    const ts = sourceIdentityForPath("handler.ts");
+    try std.testing.expect(ts.frontend == null);
+    try std.testing.expect(ts.isStamped());
+
+    const tsx = sourceIdentityForPath("handler.tsx");
+    try std.testing.expectEqual(SourceFrontendProfile.tsx_1, tsx.frontend.?.profile);
+    try std.testing.expect(tsx.isStamped());
+
+    const source = "export function handler() { return true; }";
+    try std.testing.expect(!std.mem.eql(
+        u8,
+        &sourceCacheKey(source, "handler.ts"),
+        &sourceCacheKey(source, "handler.tsx"),
+    ));
 }
 
 /// The canonical type serialization's published identity: what a client needs

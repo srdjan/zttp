@@ -247,6 +247,16 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     try json.write(result.claims.policy_sha256);
     try json.objectField("capabilityHash");
     try json.write(result.claims.capability_hash);
+    try json.objectField("coreProfileId");
+    try json.write(result.claims.core_profile_id);
+    try json.objectField("coreGrammarSha256");
+    try json.write(result.claims.core_grammar_sha256);
+    try json.objectField("semanticsSha256");
+    try json.write(result.claims.semantics_sha256);
+    try json.objectField("frontendProfileId");
+    try json.write(result.claims.frontend_profile_id);
+    try json.objectField("frontendGrammarSha256");
+    try json.write(result.claims.frontend_grammar_sha256);
     try json.objectField("routesCount");
     try json.write(result.claims.routes_count);
     try json.objectField("propertySummary");
@@ -331,6 +341,11 @@ test "renderClaimsJson uses JSON string escaping" {
             .bytecode_sha256 = "b" ** 64,
             .policy_sha256 = "c" ** 64,
             .capability_hash = "d" ** 64,
+            .core_profile_id = "zts-model-1",
+            .core_grammar_sha256 = "1" ** 64,
+            .semantics_sha256 = "2" ** 64,
+            .frontend_profile_id = "zts-tsx-1",
+            .frontend_grammar_sha256 = "3" ** 64,
             .compiler_version = "zttp\"dev\\test",
             .signed_at_unix = 1_700_000_000,
             .property_summary = "quote\" slash\\ newline\n",
@@ -355,6 +370,8 @@ test "renderClaimsJson uses JSON string escaping" {
 
     try testing.expectEqualStrings("https://example.test/a?x=\"y\"", root.get("url").?.string);
     try testing.expectEqualStrings("zttp\"dev\\test", root.get("compilerVersion").?.string);
+    try testing.expectEqualStrings("zts-model-1", root.get("coreProfileId").?.string);
+    try testing.expectEqualStrings("zts-tsx-1", root.get("frontendProfileId").?.string);
     try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
     try testing.expectEqualStrings("partial", root.get("durableWorkflowProofLevel").?.string);
     try testing.expect(!root.get("durableWorkflowRetrySafe").?.bool);

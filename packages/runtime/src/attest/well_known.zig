@@ -8,7 +8,7 @@
 //!
 //! Body shape:
 //! ```
-//! { "v": "zttp-attest-v1",
+//! { "v": "zttp-attest-v2",
 //!   "attest": "<compact JWS>",
 //!   "contract": { ...verbatim contract.json... },
 //!   "publicKey": { "kty": "OKP", "crv": "Ed25519",
@@ -117,7 +117,7 @@ test "build embeds attest, contract, and public key" {
     var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &sampleSha());
     defer doc.deinit(testing.allocator);
 
-    try testing.expect(std.mem.indexOf(u8, doc.body, "\"v\":\"zttp-attest-v1\"") != null);
+    try testing.expect(std.mem.indexOf(u8, doc.body, "\"v\":\"zttp-attest-v2\"") != null);
     try testing.expect(std.mem.indexOf(u8, doc.body, "\"attest\":\"eyJh.eyJ2.signature\"") != null);
     try testing.expect(std.mem.indexOf(u8, doc.body, "\"contract\":{\"version\":14") != null);
     try testing.expect(std.mem.indexOf(u8, doc.body, "\"publicKey\":{") != null);

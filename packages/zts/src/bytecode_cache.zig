@@ -507,6 +507,17 @@ pub const CacheHeader = extern struct {
 
 /// Bytecode cache for storing and retrieving compiled functions
 pub const BytecodeCache = struct {
+    /// Language identity that affects source-to-bytecode translation. This is
+    /// intentionally independent of compiler contract types so the engine
+    /// tier can remain below the compiler tier.
+    pub const SourceIdentity = struct {
+        core_profile_id: []const u8,
+        core_grammar_hash: [32]u8,
+        semantics_hash: [32]u8,
+        frontend_profile_id: ?[]const u8 = null,
+        frontend_grammar_hash: ?[32]u8 = null,
+    };
+
     allocator: std.mem.Allocator,
 
     /// In-memory cache: source hash -> serialized bytecode
@@ -556,6 +567,32 @@ pub const BytecodeCache = struct {
     pub fn cacheKey(source: []const u8) CacheKey {
         var hasher = std.crypto.hash.sha2.Sha256.init(.{});
         hasher.update(source);
+        return hasher.finalResult();
+    }
+
+    fn hashField(hasher: *std.crypto.hash.sha2.Sha256, value_bytes: []const u8) void {
+        var length: [4]u8 = undefined;
+        std.mem.writeInt(u32, &length, @intCast(value_bytes.len), .little);
+        hasher.update(&length);
+        hasher.update(value_bytes);
+    }
+
+    /// Generate a cache key from both authored source and every registry that
+    /// can change its accepted meaning or emitted bytecode.
+    pub fn cacheKeyWithIdentity(source: []const u8, identity: SourceIdentity) CacheKey {
+        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+        hasher.update("zts-bytecode-cache-identity-v1");
+        hashField(&hasher, source);
+        hashField(&hasher, identity.core_profile_id);
+        hashField(&hasher, &identity.core_grammar_hash);
+        hashField(&hasher, &identity.semantics_hash);
+        if (identity.frontend_profile_id) |profile_id| {
+            hasher.update("\x01");
+            hashField(&hasher, profile_id);
+            hashField(&hasher, &identity.frontend_grammar_hash.?);
+        } else {
+            hasher.update("\x00");
+        }
         return hasher.finalResult();
     }
 
@@ -860,6 +897,29 @@ test "BytecodeCache basic operations" {
     // Check stats
     try std.testing.expectEqual(@as(u64, 1), cache.hits.load(.monotonic));
     try std.testing.expectEqual(@as(u64, 1), cache.misses.load(.monotonic));
+}
+
+test "BytecodeCache identity changes invalidate the same source" {
+    const source = "function handler() { return true; }";
+    const base = BytecodeCache.SourceIdentity{
+        .core_profile_id = "zts-model-1",
+        .core_grammar_hash = [_]u8{0x11} ** 32,
+        .semantics_hash = [_]u8{0x22} ** 32,
+    };
+    const key = BytecodeCache.cacheKeyWithIdentity(source, base);
+
+    var changed_grammar = base;
+    changed_grammar.core_grammar_hash[0] ^= 0xff;
+    try std.testing.expect(!std.mem.eql(u8, &key, &BytecodeCache.cacheKeyWithIdentity(source, changed_grammar)));
+
+    var changed_semantics = base;
+    changed_semantics.semantics_hash[0] ^= 0xff;
+    try std.testing.expect(!std.mem.eql(u8, &key, &BytecodeCache.cacheKeyWithIdentity(source, changed_semantics)));
+
+    var frontend = base;
+    frontend.frontend_profile_id = "zts-tsx-1";
+    frontend.frontend_grammar_hash = [_]u8{0x33} ** 32;
+    try std.testing.expect(!std.mem.eql(u8, &key, &BytecodeCache.cacheKeyWithIdentity(source, frontend)));
 }
 
 test "BytecodeCache evicts oldest raw entry when bounded" {

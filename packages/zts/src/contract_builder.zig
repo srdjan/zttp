@@ -42,6 +42,7 @@ const type_checker_mod = @import("type_checker.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const rule_registry = @import("rule_registry.zig");
+const source_identity = @import("source_identity.zig");
 const spec_discharge = @import("spec_discharge.zig");
 const intent_extractor = @import("intent_extractor.zig");
 const saga_extractor = @import("saga_extractor.zig");
@@ -562,6 +563,7 @@ pub const ContractBuilder = struct {
             },
             .verification = verification,
             .aot = aot_info,
+            .source_identity = source_identity.forPath(handler_path),
             .rate_limiting = rate_limiting,
             .owned_rate_limit_namespace = rate_limit_namespace,
             .properties = properties,

@@ -12,6 +12,7 @@ const std = @import("std");
 // names, but reaching them there would pull the module bridge, the SDK
 // adapter and the engine into every consumer of a contract.
 const module_binding = @import("zts-base").module_authorization;
+const profile_identity = @import("zts-base").profile_identity;
 
 fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try allocator.dupe(u8, v) else null;
@@ -21,6 +22,29 @@ pub const HandlerLoc = struct {
     path: []const u8, // owned
     line: u32,
     column: u32,
+};
+
+pub const CoreProfile = profile_identity.CoreProfile;
+pub const SourceFrontendProfile = profile_identity.SourceFrontendProfile;
+
+pub const SourceFrontendIdentity = struct {
+    profile: SourceFrontendProfile,
+    grammar_hash: [32]u8,
+};
+
+/// Exact language identity used to turn authored source into core bytecode.
+/// Hashes are raw SHA-256 bytes on the domain type and lowercase hex on wire.
+pub const SourceIdentity = struct {
+    core_profile: CoreProfile = profile_identity.core_profile,
+    core_grammar_hash: [32]u8 = [_]u8{0} ** 32,
+    semantics_hash: [32]u8 = [_]u8{0} ** 32,
+    frontend: ?SourceFrontendIdentity = null,
+
+    pub fn isStamped(self: SourceIdentity) bool {
+        return !std.mem.allEqual(u8, &self.core_grammar_hash, 0) and
+            !std.mem.allEqual(u8, &self.semantics_hash, 0) and
+            (self.frontend == null or !std.mem.allEqual(u8, &self.frontend.?.grammar_hash, 0));
+    }
 };
 
 pub const RouteInfo = struct {
@@ -1722,7 +1746,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 17,
+    version: u32 = 18,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -1814,6 +1838,9 @@ pub const HandlerContract = struct {
     /// return type. Empty when the handler declares no budget. Serialized
     /// into contract.json under `sandbox.declaredBudget`.
     capability_budget: CapabilityMatrix = .empty,
+    /// Core and optional lowering-frontend identity used for this artifact.
+    /// A compiler-produced contract always carries non-zero hashes.
+    source_identity: SourceIdentity = .{},
     /// SHA-256 of the compiled handler bytecode. Stamped by the build
     /// pipeline after compile and verified at runtime startup.
     artifact_sha256: [32]u8 = [_]u8{0} ** 32,

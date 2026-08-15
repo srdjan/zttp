@@ -7,8 +7,9 @@
 
 const std = @import("std");
 const grammar_registry = @import("grammar_registry.zig");
+const profile_identity = @import("zts-base").profile_identity;
 
-pub const profile_id = "zts-tsx-1";
+pub const profile_id = profile_identity.tsx_frontend_profile.id();
 pub const lowering_target = "h(tag, props, ...children)";
 
 pub const Production = struct {

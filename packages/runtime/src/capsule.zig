@@ -21,7 +21,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 /// capsule whose `schemaVersion` differs unless the caller opts into an
 /// upgrade, so stale capsules fail closed rather than replay against a format
 /// the reader does not understand.
-pub const schema_version: u32 = 1;
+pub const schema_version: u32 = 2;
 
 /// Root directory for all capsules, relative to the project working dir.
 pub const capsules_root = ".zttp/capsules";
@@ -45,6 +45,11 @@ pub const Manifest = struct {
     zttp_version: []const u8,
     /// Hex policy-registry hash, ties the capsule to a rule set.
     policy_hash: []const u8,
+    core_profile_id: []const u8,
+    core_grammar_hash: []const u8,
+    semantics_hash: []const u8,
+    frontend_profile_id: ?[]const u8 = null,
+    frontend_grammar_hash: ?[]const u8 = null,
     proven_specs: []const []const u8 = &.{},
     declared_specs: []const []const u8 = &.{},
     routes: []const Route = &.{},
@@ -61,6 +66,9 @@ pub const Manifest = struct {
     /// Serialize as camelCase JSON, matching the `.zttp/proofs.jsonl`
     /// convention. Deterministic field order so the bytes hash stably.
     pub fn writeJson(self: *const Manifest, writer: anytype) !void {
+        if ((self.frontend_profile_id == null) != (self.frontend_grammar_hash == null)) {
+            return error.InvalidManifest;
+        }
         try writer.writeAll("{");
         try writer.print("\"schemaVersion\":{d}", .{self.schema_version});
         try writeStringField(writer, "name", self.name);
@@ -69,6 +77,15 @@ pub const Manifest = struct {
         try writeStringField(writer, "contractHash", self.contract_hash);
         try writeStringField(writer, "zttpVersion", self.zttp_version);
         try writeStringField(writer, "policyHash", self.policy_hash);
+        try writeStringField(writer, "coreProfileId", self.core_profile_id);
+        try writeStringField(writer, "coreGrammarHash", self.core_grammar_hash);
+        try writeStringField(writer, "semanticsHash", self.semantics_hash);
+        if (self.frontend_profile_id) |profile_id| {
+            try writeStringField(writer, "frontendProfileId", profile_id);
+            try writeStringField(writer, "frontendGrammarHash", self.frontend_grammar_hash.?);
+        } else {
+            try writer.writeAll(",\"frontendProfileId\":null,\"frontendGrammarHash\":null");
+        }
 
         try writer.writeAll(",\"provenSpecs\":");
         try writeStringArray(writer, self.proven_specs);
@@ -175,6 +192,11 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, opts: ParseOptions) !Load
         .contract_hash = try reqString(obj, "contractHash"),
         .zttp_version = try reqString(obj, "zttpVersion"),
         .policy_hash = try reqString(obj, "policyHash"),
+        .core_profile_id = try reqString(obj, "coreProfileId"),
+        .core_grammar_hash = try reqString(obj, "coreGrammarHash"),
+        .semantics_hash = try reqString(obj, "semanticsHash"),
+        .frontend_profile_id = try reqOptionalString(obj, "frontendProfileId"),
+        .frontend_grammar_hash = try reqOptionalString(obj, "frontendGrammarHash"),
         .proven_specs = try optStringArray(a, obj, "provenSpecs"),
         .declared_specs = try optStringArray(a, obj, "declaredSpecs"),
         .routes = try optRoutes(a, obj),
@@ -184,6 +206,9 @@ pub fn parse(gpa: std.mem.Allocator, json: []const u8, opts: ParseOptions) !Load
         .redaction_notes = try optStringArray(a, obj, "redactionNotes"),
         .attestation_ref = optString(obj, "attestationRef"),
     };
+    if ((manifest.frontend_profile_id == null) != (manifest.frontend_grammar_hash == null)) {
+        return error.InvalidManifest;
+    }
 
     return .{ .arena = arena, .manifest = manifest };
 }
@@ -198,6 +223,15 @@ fn optString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const v = obj.get(key) orelse return null;
     if (v != .string) return null;
     return v.string;
+}
+
+fn reqOptionalString(obj: std.json.ObjectMap, key: []const u8) !?[]const u8 {
+    const v = obj.get(key) orelse return error.MissingField;
+    return switch (v) {
+        .null => null,
+        .string => |value| value,
+        else => error.InvalidManifest,
+    };
 }
 
 fn optStringArray(
@@ -359,6 +393,9 @@ fn sampleManifest() Manifest {
         .contract_hash = "bb",
         .zttp_version = "0.18.0",
         .policy_hash = "cc",
+        .core_profile_id = "zts-model-1",
+        .core_grammar_hash = "dd",
+        .semantics_hash = "ee",
         .proven_specs = &.{ "pure", "injection_safe" },
         .declared_specs = &.{"injection_safe"},
         .routes = &.{.{ .method = "GET", .path = "/" }},
@@ -383,6 +420,9 @@ test "manifest round-trips through JSON" {
     try testing.expectEqualStrings("checkout", m.name);
     try testing.expectEqualStrings("src/handler.ts", m.handler_path);
     try testing.expectEqualStrings("0.18.0", m.zttp_version);
+    try testing.expectEqualStrings("zts-model-1", m.core_profile_id);
+    try testing.expectEqualStrings("dd", m.core_grammar_hash);
+    try testing.expect(m.frontend_profile_id == null);
     try testing.expectEqual(@as(usize, 2), m.proven_specs.len);
     try testing.expectEqualStrings("injection_safe", m.proven_specs[1]);
     try testing.expectEqual(@as(usize, 1), m.routes.len);
@@ -398,8 +438,8 @@ test "manifest round-trips through JSON" {
 
 test "optional fields default empty when absent" {
     const json =
-        \\{"schemaVersion":1,"name":"x","handlerPath":"h.ts","handlerHash":"a",
-        \\"contractHash":"b","zttpVersion":"v","policyHash":"c"}
+        \\{"schemaVersion":2,"name":"x","handlerPath":"h.ts","handlerHash":"a",
+        \\"contractHash":"b","zttpVersion":"v","policyHash":"c","coreProfileId":"zts-model-1","coreGrammarHash":"d","semanticsHash":"e","frontendProfileId":null,"frontendGrammarHash":null}
     ;
     var loaded = try parse(testing.allocator, json, .{});
     defer loaded.deinit();
@@ -411,7 +451,7 @@ test "optional fields default empty when absent" {
 test "version mismatch fails closed" {
     const json =
         \\{"schemaVersion":999,"name":"x","handlerPath":"h.ts","handlerHash":"a",
-        \\"contractHash":"b","zttpVersion":"v","policyHash":"c"}
+        \\"contractHash":"b","zttpVersion":"v","policyHash":"c","coreProfileId":"zts-model-1","coreGrammarHash":"d","semanticsHash":"e","frontendProfileId":null,"frontendGrammarHash":null}
     ;
     try testing.expectError(error.SchemaVersionMismatch, parse(testing.allocator, json, .{}));
 
@@ -422,15 +462,15 @@ test "version mismatch fails closed" {
 
 test "missing required field rejects" {
     const json =
-        \\{"schemaVersion":1,"name":"x"}
+        \\{"schemaVersion":2,"name":"x"}
     ;
     try testing.expectError(error.MissingField, parse(testing.allocator, json, .{}));
 }
 
 test "unknown fields are ignored for forward compatibility" {
     const json =
-        \\{"schemaVersion":1,"name":"x","handlerPath":"h.ts","handlerHash":"a",
-        \\"contractHash":"b","zttpVersion":"v","policyHash":"c","futureField":42}
+        \\{"schemaVersion":2,"name":"x","handlerPath":"h.ts","handlerHash":"a",
+        \\"contractHash":"b","zttpVersion":"v","policyHash":"c","coreProfileId":"zts-model-1","coreGrammarHash":"d","semanticsHash":"e","frontendProfileId":null,"frontendGrammarHash":null,"futureField":42}
     ;
     var loaded = try parse(testing.allocator, json, .{});
     defer loaded.deinit();

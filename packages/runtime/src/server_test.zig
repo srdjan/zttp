@@ -137,7 +137,7 @@ test "executeHandler echoes request method and url back to the handler" {
     var pool = try HandlerPool.init(
         allocator,
         .{},
-        "function handler(req) { return Response.text(req.method + ' ' + req.url); }",
+        "function handler(req) { return Response.text([req.method, ' ', req.url].join('')); }",
         "<server-test>",
         1,
         0,

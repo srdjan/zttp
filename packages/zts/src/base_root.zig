@@ -25,6 +25,9 @@ pub const json_utils = @import("json_utils.zig");
 /// Typed JSON reading: the wire structs and the parser that fills them.
 pub const json_wire = @import("json_wire.zig");
 
+/// Closed source-profile identifiers shared by contracts and compiler code.
+pub const profile_identity = @import("profile_identity.zig");
+
 /// The JavaScript global names the analyzer treats as known.
 pub const known_globals = @import("known_globals.zig");
 

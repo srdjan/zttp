@@ -1121,7 +1121,7 @@ test "initCommand scaffolds the v1 project layout" {
 
     const handler = try zts.file_io.readFile(testing.allocator, "demo/src/handler.ts", 64 * 1024);
     defer testing.allocator.free(handler);
-    try testing.expect(std.mem.indexOf(u8, handler, "function handler(req: Request): Response") != null);
+    try testing.expect(std.mem.indexOf(u8, handler, "function handler(req: Request): Guardrails<Response>") != null);
 }
 
 test "initCommand --expert scaffolds and asks the dispatcher to enter expert mode" {
