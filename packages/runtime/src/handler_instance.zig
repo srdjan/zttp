@@ -993,33 +993,21 @@ pub const HandlerInstance = struct {
     fn loadCodeWithCachingInternal(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8, refresh_handler: bool) !?[]const u8 {
         self.last_opt_stats = .{};
         self.interpreter.resetProfilingCounters();
-        var source_to_parse: []const u8 = code;
-        var strip_result: ?zq.StripResult = null;
-        defer if (strip_result) |*sr| sr.deinit();
-
-        // Type strip for .ts/.tsx files
-        const is_ts = std.mem.endsWith(u8, filename, ".ts");
-        const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
-        if (is_ts or is_tsx) {
-            strip_result = zq.strip(self.allocator, code, .{ .tsx_mode = is_tsx }) catch |err| {
-                std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
-                return err;
-            };
-            source_to_parse = strip_result.?.code;
-        }
+        var prepared = zq.PreparedSource.init(self.allocator, code, filename, .{}) catch |err| {
+            std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
+            return err;
+        };
+        defer prepared.deinit();
         // Logged diagnostics name the file the author wrote, not the stripped
         // text that was parsed.
-        const diag_view = if (strip_result) |*sr|
-            zq.SourceView.stripped(code, sr)
-        else
-            zq.SourceView.of(code);
+        const diag_view = prepared.sourceView();
 
         // Parse the source code
-        var p = try zq.Parser.init(self.allocator, source_to_parse, self.strings, &self.ctx.atoms);
+        var p = try zq.Parser.init(self.allocator, prepared.parserInput(), self.strings, &self.ctx.atoms);
         defer p.deinit();
 
         // Enable JSX mode for .jsx and .tsx files
-        if (std.mem.endsWith(u8, filename, ".jsx") or is_tsx) {
+        if (prepared.enablesJsx()) {
             p.enableJsx();
         }
 
@@ -1045,8 +1033,8 @@ pub const HandlerInstance = struct {
 
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
             defer type_env_storage.deinit(self.allocator);
-            if (strip_result) |sr| {
-                try type_env_storage.init(self.allocator, &sr.type_map);
+            if (prepared.typeMap()) |type_map| {
+                try type_env_storage.init(self.allocator, type_map);
             }
 
             var resolved = try zq.pipeline.resolve(

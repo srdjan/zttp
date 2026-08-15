@@ -81,31 +81,22 @@ fn executeBuildTimeHandler(
     var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
 
-    var source_to_parse: []const u8 = handler_source;
-    var strip_result: ?zts.StripResult = null;
-    defer if (strip_result) |*sr| sr.deinit();
+    var strip_diag: ?zts.StripDiagnostic = null;
+    var prepared = zts.PreparedSource.init(allocator, handler_source, handler_filename, .{
+        .diagnostic_out = &strip_diag,
+    }) catch |err| {
+        if (strip_diag) |d| {
+            std.debug.print("{s}:{d}:{d}: {s}\n", .{ handler_filename, d.line, d.column, d.kind.message() });
+        } else {
+            std.debug.print("TypeScript strip error in {s}: {}\n", .{ handler_filename, err });
+        }
+        return error.StripFailed;
+    };
+    defer prepared.deinit();
 
-    const is_ts = std.mem.endsWith(u8, handler_filename, ".ts");
-    const is_tsx = std.mem.endsWith(u8, handler_filename, ".tsx");
-    if (is_ts or is_tsx) {
-        var strip_diag: ?zts.StripDiagnostic = null;
-        strip_result = zts.strip(allocator, handler_source, .{
-            .tsx_mode = is_tsx,
-            .diagnostic_out = &strip_diag,
-        }) catch |err| {
-            if (strip_diag) |d| {
-                std.debug.print("{s}:{d}:{d}: {s}\n", .{ handler_filename, d.line, d.column, d.kind.message() });
-            } else {
-                std.debug.print("TypeScript strip error in {s}: {}\n", .{ handler_filename, err });
-            }
-            return error.StripFailed;
-        };
-        source_to_parse = strip_result.?.code;
-    }
-
-    var p = try zts.Parser.init(allocator, source_to_parse, &strings, &ctx.atoms);
+    var p = try zts.Parser.init(allocator, prepared.parserInput(), &strings, &ctx.atoms);
     defer p.deinit();
-    if (std.mem.endsWith(u8, handler_filename, ".jsx") or is_tsx) {
+    if (prepared.enablesJsx()) {
         p.enableJsx();
     }
 
