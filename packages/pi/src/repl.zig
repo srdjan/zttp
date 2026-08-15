@@ -832,7 +832,6 @@ pub fn run(
                         },
                     ) catch "";
                     _ = std.c.write(std.c.STDOUT_FILENO, token_line.ptr, token_line.len);
-                    maybeAutoCompact(allocator, &session);
                 }
             },
             .tool_result => |*result| {
@@ -1039,16 +1038,6 @@ const WorkingTicker = struct {
 /// ticker is running (e.g. dispatched tool commands).
 fn stopWorkingTicker() void {
     if (WorkingTicker.active) |t| t.finish();
-}
-
-/// Surface a one-line notice when the shared auto-compaction guard fired, so the
-/// user knows earlier turns were summarized. The decision and the compaction
-/// itself live in `agent.maybeAutoCompact`; this only prints.
-fn maybeAutoCompact(allocator: std.mem.Allocator, session: *agent.AgentSession) void {
-    const compacted = agent.maybeAutoCompact(allocator, session) catch return;
-    if (!compacted) return;
-    const notice = "[auto-compacted: the conversation neared the model's context window; earlier turns were summarized into one note]\n";
-    _ = std.c.write(std.c.STDOUT_FILENO, notice.ptr, notice.len);
 }
 
 /// One-line confirmation that a resumed/forked session was restored, plus an

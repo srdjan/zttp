@@ -597,14 +597,6 @@ fn handleTurn(
     try w.writeByte('}');
 
     try emitResultRaw(allocator, out, id, buf.written());
-
-    // Auto-compact after the turn, mirroring the interactive REPL (repl.zig), so
-    // a long-lived IDE session on the RPC surface never dead-ends on a
-    // PromptTooLong that the machine client cannot resolve with `/compact`. Emit
-    // a notification so the client can surface that the context was summarized.
-    if (agent.maybeAutoCompact(allocator, session) catch false) {
-        try emitNotification(allocator, out, .{ .system_note = "context auto-compacted to fit the model window" });
-    }
 }
 
 // ---------------------------------------------------------------------------

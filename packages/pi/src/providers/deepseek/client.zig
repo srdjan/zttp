@@ -140,8 +140,12 @@ pub const Client = struct {
         });
         defer snapshot.deinit(arena);
 
-        const body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
+        var body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
         try snapshot.completePreparation(body);
+        if (try snapshot.clampOutputToRemainingContext()) {
+            body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
+            try snapshot.completePreparation(body);
+        }
         try snapshot.requireHardAdmission();
         snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
         const diagnostics_enabled = if (self.capture) |sink| sink.diagnostics_fn != null else false;

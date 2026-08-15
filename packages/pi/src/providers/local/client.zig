@@ -123,8 +123,12 @@ pub const Client = struct {
             .extra_user_text = extra_user_text,
         });
         defer snapshot.deinit(arena);
-        const body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
+        var body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
         try snapshot.completePreparation(body);
+        if (try snapshot.clampOutputToRemainingContext()) {
+            body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
+            try snapshot.completePreparation(body);
+        }
         try snapshot.requireHardAdmission();
         const request_digest = sha256(body);
         snapshot.wire_request_sha256 = .{ .bytes = std.fmt.bytesToHex(request_digest, .lower) };

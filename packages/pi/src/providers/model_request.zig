@@ -117,6 +117,27 @@ pub const ModelRequestSnapshot = struct {
             return error.RequestTooLarge;
         }
     }
+
+    /// Clamp generation to the capacity left after the prepared input. Returns
+    /// true when the provider body must be rebuilt with the smaller value.
+    pub fn clampOutputToRemainingContext(self: *ModelRequestSnapshot) !bool {
+        const budget = self.budget orelse return error.RequestNotPrepared;
+        const limits = context_budget.limitsForModel(self.config.provider, self.config.model);
+        if (budget.tokens.total >= limits.context_window_tokens) return error.RequestTooLarge;
+        const remaining = limits.context_window_tokens - budget.tokens.total;
+        const clamped_u64 = @min(@as(u64, self.config.max_output_tokens), remaining);
+        const clamped = std.math.cast(u32, clamped_u64) orelse return error.RequestSizeOverflow;
+        if (clamped == self.config.max_output_tokens) return false;
+        self.config.max_output_tokens = clamped;
+        self.request_context_sha256 = hashRequestContext(
+            self.config,
+            Sha256Hex.fromRawBytes(self.config.system_prompt),
+            if (self.config.tools_json) |tools| Sha256Hex.fromRawBytes(tools) else null,
+        );
+        self.budget = null;
+        self.wire_request_sha256 = null;
+        return true;
+    }
 };
 
 pub const Input = struct {
@@ -344,4 +365,34 @@ test "snapshot uses checkpoint summary and retained suffix without mutating raw 
         .user_text => |body| try testing.expectEqualStrings("retained request", body),
         else => return error.TestExpectedSuffix,
     }
+}
+
+test "prepared snapshot clamps output to the model capacity left after input" {
+    const testing = std.testing;
+    const system_prompt = try testing.allocator.alloc(u8, 560_000);
+    defer testing.allocator.free(system_prompt);
+    @memset(system_prompt, 'x');
+    const wire_body = try testing.allocator.alloc(u8, system_prompt.len + 100);
+    defer testing.allocator.free(wire_body);
+    @memset(wire_body, 'x');
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    var snapshot = try createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .anthropic,
+            .model = "claude-sonnet-5",
+            .max_output_tokens = 64_000,
+            .system_prompt = system_prompt,
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+    const before_hash = snapshot.request_context_sha256;
+    try snapshot.completePreparation(wire_body);
+
+    try testing.expect(try snapshot.clampOutputToRemainingContext());
+    try testing.expect(snapshot.config.max_output_tokens < 64_000);
+    try testing.expect(snapshot.config.max_output_tokens > 0);
+    try testing.expect(snapshot.budget == null);
+    try testing.expect(!before_hash.eql(snapshot.request_context_sha256));
 }

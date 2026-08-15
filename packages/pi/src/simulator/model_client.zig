@@ -94,12 +94,21 @@ pub const Client = struct {
         // Every replay builds the exact provider body so request accounting is
         // complete even when historical SSE checkpoints store no wire digest.
         // Chat Completions providers additionally bind that body by hash.
-        const body = switch (self.script.provider) {
+        var body = switch (self.script.provider) {
             .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot),
             .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, &snapshot),
             .openai => try openai_client.buildRequestBodyFromSnapshot(arena, &snapshot),
         };
         try snapshot.completePreparation(body);
+        if (try snapshot.clampOutputToRemainingContext()) {
+            body = switch (self.script.provider) {
+                .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot),
+                .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, &snapshot),
+                .openai => try openai_client.buildRequestBodyFromSnapshot(arena, &snapshot),
+            };
+            try snapshot.completePreparation(body);
+        }
+        try snapshot.requireHardAdmission();
         switch (self.script.provider) {
             .local, .deepseek => snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body),
             .anthropic, .openai => {},

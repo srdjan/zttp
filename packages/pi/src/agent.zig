@@ -280,6 +280,10 @@ fn containsAny(haystack: []const u8, needles: []const []const u8) bool {
 pub const AgentSession = struct {
     transcript: Transcript = .{},
     backend: Backend = .{ .stub = .{} },
+    /// Long-lived allocator for projections installed from inside the model
+    /// request seam. The per-turn arena cannot own context that survives the
+    /// current request or turn.
+    session_allocator: ?std.mem.Allocator = null,
     /// Allocator-owned copy of the system prompt bytes backing the
     /// Anthropic client's Config. Null for the stub path.
     system_prompt_owned: ?[]u8 = null,
@@ -311,6 +315,14 @@ pub const AgentSession = struct {
     /// accounting, but remains separately observable from normal generation.
     summary_token_totals: turn.Usage = .{},
     summary_attempt_count: u64 = 0,
+    normal_request_attempt_count: u64 = 0,
+    checkpoint_generation: u64 = 0,
+    last_normal_input: ?context_budget.ExactInputUsage = null,
+    last_normal_budget: ?context_budget.RequestBudget = null,
+    overflow_turn_entry_id: transcript_mod.EntryId = 0,
+    overflow_recovery_used: bool = false,
+    compaction_enabled: bool = true,
+    compaction_settings: compaction.Settings = .{},
     /// Per-session expert metrics, folded each turn and emitted as a
     /// `session_summary` event by `writeSessionSummary` at session close.
     metrics: SessionMetrics = .{},
@@ -343,6 +355,7 @@ pub const AgentSession = struct {
         errdefer if (tools_owned) |json| allocator.free(json);
         const model = models_registry.defaultForProvider(.anthropic);
         return .{
+            .session_allocator = allocator,
             .backend = .{ .anthropic = anthropic_client.Client.init(.{
                 .api_key = key_owned,
                 .system_prompt = prompt_owned,
@@ -371,6 +384,7 @@ pub const AgentSession = struct {
         errdefer allocator.free(base_owned);
         const model = models_registry.defaultForProvider(.local);
         return .{
+            .session_allocator = allocator,
             .backend = .{ .local = local_client.Client.init(.{
                 .system_prompt = prompt_owned,
                 .tools_json = tools_owned,
@@ -427,6 +441,7 @@ pub const AgentSession = struct {
         }
 
         return .{
+            .session_allocator = allocator,
             .backend = .{ .openai = openai_client.Client.init(config) },
             .system_prompt_owned = prompt_owned,
             .tools_json_owned = tools_owned,
@@ -462,6 +477,7 @@ pub const AgentSession = struct {
 
         const model = models_registry.defaultForProvider(.deepseek);
         return .{
+            .session_allocator = allocator,
             .backend = .{ .deepseek = deepseek_client.Client.init(.{
                 .api_key = key_owned,
                 .system_prompt = prompt_owned,
@@ -497,6 +513,11 @@ pub const AgentSession = struct {
     }
 
     pub fn modelClient(self: *AgentSession) loop.ModelClient {
+        if (self.backend == .stub) return self.rawModelClient();
+        return .{ .context = self, .request_fn = requestNormal };
+    }
+
+    fn rawModelClient(self: *AgentSession) loop.ModelClient {
         return switch (self.backend) {
             .stub => (&self.backend.stub).asClient(),
             .local => (&self.backend.local).asModelClient(),
@@ -504,6 +525,25 @@ pub const AgentSession = struct {
             .openai => (&self.backend.openai).asModelClient(),
             .deepseek => (&self.backend.deepseek).asModelClient(),
         };
+    }
+
+    fn requestNormal(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        const self: *AgentSession = @ptrCast(@alignCast(context));
+        const allocator = self.session_allocator orelse return error.RequestLifecycleUnavailable;
+        return requestNormalWith(
+            allocator,
+            arena,
+            self,
+            self.rawModelClient(),
+            self.summarizer(),
+            @constCast(transcript),
+            extra_user_text,
+        );
     }
 
     pub fn summarizer(self: *AgentSession) ?compaction.Summarizer {
@@ -624,6 +664,8 @@ pub const AgentSession = struct {
             .stub => {},
         }
         self.resolved_model = model;
+        self.last_normal_input = null;
+        self.last_normal_budget = null;
     }
 
     /// Append the per-session metrics row at session close. Best-effort and a
@@ -859,6 +901,7 @@ fn initFromEnvWithPreparedResume(
         var tr = try reconstructor.reconstructTranscript(allocator, events_path, null);
         session.transcript.deinit(allocator);
         session.transcript = tr;
+        session.checkpoint_generation = @intFromBool(tr.projection != null);
         session.last_persisted_len = tr.len();
         session.replay_next_turn = true;
 
@@ -885,6 +928,7 @@ fn initFromEnvWithPreparedResume(
         const tr = try reconstructor.reconstructTranscript(allocator, src_events, null);
         session.transcript.deinit(allocator);
         session.transcript = tr;
+        session.checkpoint_generation = @intFromBool(tr.projection != null);
         try session_events.copyJournal(allocator, src_events, events_path);
         session.last_persisted_len = session.transcript.len();
         try session_events.writeMeta(allocator, meta_path, .{
@@ -933,61 +977,6 @@ fn sessionEventsExist(allocator: std.mem.Allocator, session_id: []const u8) !boo
 /// hash), append a `system_note` to the transcript so the model is aware the
 /// reasoning in prior turns was produced under a different rule set.
 pub const POLICY_DRIFT_PREFIX = "[policy drift]";
-
-/// Token budget reserved for everything in a request that is NOT the transcript:
-/// the system prompt (persona + project context + witnesses) and the tools
-/// schema. Added to the transcript estimate so compaction triggers before the
-/// assembled request actually overflows the model's context window.
-const non_transcript_token_allowance: usize = 20_000;
-
-/// Rough estimate of how many tokens the current transcript would contribute to
-/// the next request, plus a fixed allowance for the system prompt and tools.
-/// Uses a discarding writer to count rendered bytes without allocating, then the
-/// standard ~4-bytes-per-token approximation. Good enough to decide when to
-/// compact; it is never treated as exact.
-pub fn estimateContextTokens(session: *const AgentSession) usize {
-    var scratch: [256]u8 = undefined;
-    var discarding = std.Io.Writer.Discarding.init(&scratch);
-    if (session.transcript.projection) |projection| {
-        discarding.writer.writeAll(projection.summary) catch {};
-    }
-    const active_start = session.transcript.activeStartIndex() catch 0;
-    for (session.transcript.entries.items[active_start..]) |*entry| {
-        transcript_mod.renderPlain(&discarding.writer, entry) catch break;
-    }
-    const bytes: usize = @intCast(discarding.fullCount());
-    return bytes / 4 + non_transcript_token_allowance;
-}
-
-/// Fraction of the active model's context window at which a session is
-/// auto-compacted so a long conversation cannot dead-end on a 400 "prompt is too
-/// long".
-const compaction_threshold_pct: usize = 70;
-
-/// The active model's context window in tokens, or a conservative default.
-fn contextWindowTokens(session: *const AgentSession) usize {
-    const provider = session.activeProvider() orelse return 200_000;
-    if (session.currentModel()) |id| {
-        if (models_registry.resolveForProvider(provider, id)) |model| {
-            return model.capabilities.context_window_tokens;
-        } else |_| {}
-    }
-    return models_registry.defaultForProvider(provider).capabilities.context_window_tokens;
-}
-
-/// Compact the session in place when the estimated context size reaches the
-/// threshold for the active model's window; returns true if it compacted (the
-/// caller can then surface a one-line notice). Lives here next to the estimate
-/// and `compact` so every multi-turn surface gets the same proactive guard, not
-/// just the interactive REPL. Compaction is local (summarizes the transcript
-/// into one note), so this is cheap and never makes a model call.
-pub fn maybeAutoCompact(allocator: std.mem.Allocator, session: *AgentSession) !bool {
-    const window = contextWindowTokens(session);
-    if (estimateContextTokens(session) * 100 < window * compaction_threshold_pct) return false;
-    const msg = try compact(allocator, session);
-    allocator.free(msg);
-    return true;
-}
 
 /// The policy-drift `system_note` carried by a resumed transcript, if any. The
 /// returned slice borrows from the transcript. Lets an interactive surface echo
@@ -1264,7 +1253,30 @@ pub fn compactDetailed(
     focus: ?[]const u8,
     will_retry: bool,
 ) !CompactResult {
-    const tr = &session.transcript;
+    return compactTranscriptDetailed(
+        allocator,
+        session,
+        &session.transcript,
+        maybe_summarizer,
+        settings,
+        reason,
+        focus,
+        will_retry,
+        null,
+    );
+}
+
+fn compactTranscriptDetailed(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    tr: *transcript_mod.Transcript,
+    maybe_summarizer: ?compaction.Summarizer,
+    settings: compaction.Settings,
+    reason: session_events.CompactionReason,
+    focus: ?[]const u8,
+    will_retry: bool,
+    pending_extra_user_text: ?[]const u8,
+) !CompactResult {
     if (tr.len() == 0) return .no_change;
     const summarizer = maybe_summarizer orelse return .unavailable;
     const model = session.resolved_model orelse return .unavailable;
@@ -1279,7 +1291,12 @@ pub fn compactDetailed(
         fixed_tokens,
         fixed_budget.tokens.framing,
     ) catch |err| return .{ .failed = err };
-    const current_budget = try requestBudgetForProjection(allocator, session, tr, null);
+    const current_budget = try normalRequestBudget(
+        allocator,
+        session,
+        tr,
+        pending_extra_user_text,
+    );
     const preparation = try compaction.prepare(
         allocator,
         tr,
@@ -1378,15 +1395,23 @@ pub fn compactDetailed(
     );
     var summary_owned = true;
     defer if (summary_owned) allocator.free(summary);
-    const after_budget = try requestBudgetForProjection(allocator, session, tr, .{
-        .summary = summary,
-        .first_kept_entry_id = ready.first_kept_entry_id,
-    });
+    const after_budget = try requestBudgetForConfig(
+        allocator,
+        try normalRequestConfig(session),
+        tr,
+        .{
+            .summary = summary,
+            .first_kept_entry_id = ready.first_kept_entry_id,
+        },
+        pending_extra_user_text,
+        false,
+    );
     if (after_budget.tokens.total > capacity.admitted_input_tokens) {
         return .{ .failed = error.CompactedRequestStillTooLarge };
     }
 
-    if (session.events_path) |path| {
+    const persistent_transcript = tr == &session.transcript;
+    if (persistent_transcript) if (session.events_path) |path| {
         while (session.last_persisted_len < tr.len()) : (session.last_persisted_len += 1) {
             persister.appendEntry(
                 allocator,
@@ -1408,7 +1433,7 @@ pub fn compactDetailed(
             .read_files = file_ops.read_files,
             .modified_files = file_ops.modified_files,
         } }) catch |err| return .{ .failed = err };
-    }
+    };
 
     tr.installProjectionOwnedWithFiles(
         allocator,
@@ -1419,6 +1444,9 @@ pub fn compactDetailed(
     );
     summary_owned = false;
     file_ops_owned = false;
+    session.checkpoint_generation +|= 1;
+    session.last_normal_input = null;
+    session.last_normal_budget = null;
     return .{ .compacted = .{
         .reason = reason,
         .first_kept_entry_id = ready.first_kept_entry_id,
@@ -1439,6 +1467,184 @@ fn callSummarizer(
     session.summary_token_totals.add(response.usage);
     session.token_totals.add(response.usage);
     return response;
+}
+
+const ReductionOutcome = enum {
+    compacted,
+    protected_passthrough,
+};
+
+fn requestNormalWith(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    session: *AgentSession,
+    raw_client: loop.ModelClient,
+    maybe_summarizer: ?compaction.Summarizer,
+    transcript: *transcript_mod.Transcript,
+    extra_user_text: ?[]const u8,
+) !loop.ModelCallResult {
+    resetOverflowRecoveryForCurrentTurn(session, transcript);
+
+    var budget = try normalRequestBudget(allocator, session, transcript, extra_user_text);
+    var selected_tokens = try selectedNormalInputTokens(session, budget);
+    const hard_limit = budget.limits.hard_input_tokens;
+    const admitted_limit = @min(session.compaction_settings.max_input_tokens, hard_limit);
+
+    if (session.compaction_enabled and selected_tokens > admitted_limit) {
+        const reduction = try reducePendingRequest(
+            allocator,
+            session,
+            transcript,
+            maybe_summarizer,
+            .threshold,
+            extra_user_text,
+            false,
+            selected_tokens,
+            hard_limit,
+        );
+        if (reduction == .compacted) {
+            budget = try normalRequestBudget(allocator, session, transcript, extra_user_text);
+            selected_tokens = try selectedNormalInputTokens(session, budget);
+            if (selected_tokens > admitted_limit) return error.CompactedRequestStillTooLarge;
+        }
+    }
+
+    if (selected_tokens > hard_limit) return error.RequestTooLarge;
+
+    session.normal_request_attempt_count +|= 1;
+    const first = raw_client.request(arena, transcript, extra_user_text) catch |err| {
+        if (err != error.PromptTooLong or !session.compaction_enabled or session.overflow_recovery_used) {
+            return err;
+        }
+        session.overflow_recovery_used = true;
+        const reduction = reducePendingRequest(
+            allocator,
+            session,
+            transcript,
+            maybe_summarizer,
+            .overflow,
+            extra_user_text,
+            true,
+            selected_tokens,
+            hard_limit,
+        ) catch |reduction_err| return reduction_err;
+        if (reduction != .compacted) return err;
+
+        budget = try normalRequestBudget(allocator, session, transcript, extra_user_text);
+        selected_tokens = try selectedNormalInputTokens(session, budget);
+        if (selected_tokens > budget.limits.hard_input_tokens) return error.RequestTooLarge;
+
+        session.normal_request_attempt_count +|= 1;
+        const retried = try raw_client.request(arena, transcript, extra_user_text);
+        try rememberNormalInput(session, budget, retried.usage);
+        return retried;
+    };
+    try rememberNormalInput(session, budget, first.usage);
+    return first;
+}
+
+fn reducePendingRequest(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    transcript: *transcript_mod.Transcript,
+    maybe_summarizer: ?compaction.Summarizer,
+    reason: session_events.CompactionReason,
+    extra_user_text: ?[]const u8,
+    will_retry: bool,
+    selected_tokens: u64,
+    hard_limit: u64,
+) !ReductionOutcome {
+    const result = try compactTranscriptDetailed(
+        allocator,
+        session,
+        transcript,
+        maybe_summarizer,
+        session.compaction_settings,
+        reason,
+        null,
+        will_retry,
+        extra_user_text,
+    );
+    return switch (result) {
+        .compacted => .compacted,
+        .not_compactable => |why| switch (why) {
+            .oversized_current_user, .unresolved_tool_pair => if (selected_tokens <= hard_limit)
+                .protected_passthrough
+            else
+                error.RequestTooLarge,
+            .no_valid_cut => error.NoValidCompactionCut,
+            .invalid_tool_pair => error.InvalidCompactionToolPair,
+        },
+        .no_change => error.CompactionMadeNoProgress,
+        .unavailable => error.CompactionUnavailable,
+        .failed => |failure| failure,
+    };
+}
+
+fn selectedNormalInputTokens(
+    session: *const AgentSession,
+    current: context_budget.RequestBudget,
+) !u64 {
+    const provider = session.resolved_provider orelse return current.tokens.total;
+    const model = session.resolved_model orelse return current.tokens.total;
+    const epoch: context_budget.UsageEpoch = .{
+        .provider = provider,
+        .model = model.id,
+        .checkpoint_generation = session.checkpoint_generation,
+    };
+    const trailing = if (session.last_normal_budget) |previous|
+        context_budget.estimateTrailing(previous, current) orelse return current.tokens.total
+    else
+        0;
+    return (try context_budget.selectInputEstimate(.{
+        .epoch = epoch,
+        .fallback_estimated_tokens = current.tokens.total,
+        .trailing_estimated_tokens = trailing,
+        .exact_usage = session.last_normal_input,
+    })).tokens;
+}
+
+fn rememberNormalInput(
+    session: *AgentSession,
+    budget: context_budget.RequestBudget,
+    usage: turn.Usage,
+) !void {
+    const provider = session.resolved_provider orelse return;
+    const model = session.resolved_model orelse return;
+    const logical_input = try context_budget.normalizeLogicalInput(provider, usage);
+    if (logical_input == 0) {
+        session.last_normal_input = null;
+        session.last_normal_budget = null;
+        return;
+    }
+    session.last_normal_input = .{
+        .epoch = .{
+            .provider = provider,
+            .model = model.id,
+            .checkpoint_generation = session.checkpoint_generation,
+        },
+        .logical_input_tokens = logical_input,
+    };
+    session.last_normal_budget = budget;
+}
+
+fn resetOverflowRecoveryForCurrentTurn(
+    session: *AgentSession,
+    transcript: *const transcript_mod.Transcript,
+) void {
+    const turn_entry_id = currentExternalTurnEntryId(transcript);
+    if (turn_entry_id == session.overflow_turn_entry_id) return;
+    session.overflow_turn_entry_id = turn_entry_id;
+    session.overflow_recovery_used = false;
+}
+
+fn currentExternalTurnEntryId(transcript: *const transcript_mod.Transcript) transcript_mod.EntryId {
+    var index = transcript.len();
+    while (index > 0) {
+        index -= 1;
+        if (transcript.at(index).* == .user_text) return transcript.entryIdAt(index);
+    }
+    return 0;
 }
 
 fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
@@ -1488,6 +1694,23 @@ fn requestBudgetForProjection(
         try normalRequestConfig(session),
         transcript,
         projection_override,
+        null,
+        false,
+    );
+}
+
+fn normalRequestBudget(
+    allocator: std.mem.Allocator,
+    session: *const AgentSession,
+    transcript: *const transcript_mod.Transcript,
+    extra_user_text: ?[]const u8,
+) !context_budget.RequestBudget {
+    return requestBudgetForConfig(
+        allocator,
+        try normalRequestConfig(session),
+        transcript,
+        null,
+        extra_user_text,
         false,
     );
 }
@@ -1506,7 +1729,7 @@ fn admitSummaryRequest(
     config.max_output_tokens = request.max_output_tokens;
     config.purpose = .summarization;
     config.cache_policy = .disabled;
-    _ = try requestBudgetForConfig(allocator, config, &transcript, null, true);
+    _ = try requestBudgetForConfig(allocator, config, &transcript, null, null, true);
 }
 
 fn requestBudgetForConfig(
@@ -1514,11 +1737,13 @@ fn requestBudgetForConfig(
     config: model_request.Config,
     transcript: *const transcript_mod.Transcript,
     projection_override: ?model_request.ProjectionOverride,
+    extra_user_text: ?[]const u8,
     require_hard_admission: bool,
 ) !context_budget.RequestBudget {
     var snapshot = try model_request.createSnapshot(allocator, .{
         .config = config,
         .transcript = transcript,
+        .extra_user_text = extra_user_text,
         .projection_override = projection_override,
         .use_projection_override = projection_override != null,
     });
@@ -2015,12 +2240,12 @@ test "an endpoint that moves only the host keeps the registry model" {
     try testing.expectEqual(@as(u32, 8_192), session.backend.openai.config.max_tokens);
 }
 
-test "modelClient returns an anthropic client vtable when backend is anthropic" {
+test "modelClient wraps the active backend with the normal request lifecycle" {
     var session = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
     defer session.deinit(testing.allocator);
 
     const mc = session.modelClient();
-    try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session.backend.anthropic)));
+    try testing.expect(mc.context == @as(*anyopaque, @ptrCast(&session)));
 }
 
 test "registry defaults match provider client model defaults" {
@@ -2034,17 +2259,6 @@ test "registry defaults match provider client model defaults" {
         openai_defaults.model,
         models_registry.defaultForProvider(.openai).id,
     );
-}
-
-test "contextWindowTokens uses provider registry metadata" {
-    var openai = try AgentSession.initOpenAI(testing.allocator, "k", "p", null, null);
-    defer openai.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 128_000), contextWindowTokens(&openai));
-
-    var anthropic = try AgentSession.initAnthropic(testing.allocator, "k", "p", null);
-    defer anthropic.deinit(testing.allocator);
-    // The Anthropic default is registered, so its real window is used.
-    try testing.expectEqual(@as(usize, 200_000), contextWindowTokens(&anthropic));
 }
 
 test "setModel validates provider and commits model with request policy atomically" {
@@ -2786,20 +3000,6 @@ test "mid-turn provider failure persists one error exit without fallback" {
     try testing.expect(std.mem.indexOf(u8, events, "\"reason\":\"error_exit\"") != null);
 }
 
-test "estimateContextTokens grows with transcript and includes the fixed allowance" {
-    var session = AgentSession.initStub();
-    defer session.deinit(testing.allocator);
-
-    // An empty transcript still reserves the non-transcript allowance.
-    const empty = estimateContextTokens(&session);
-    try testing.expectEqual(non_transcript_token_allowance, empty);
-
-    try session.transcript.append(testing.allocator, .{ .user_text = "a" ** 4000 });
-    const grown = estimateContextTokens(&session);
-    // ~4000 bytes of text adds on the order of 1000 tokens over the allowance.
-    try testing.expect(grown > empty + 500);
-}
-
 test "compact: empty transcript returns early message" {
     var session = AgentSession.initStub();
     defer session.deinit(testing.allocator);
@@ -2854,6 +3054,160 @@ fn appendCompactableHistory(allocator: std.mem.Allocator, session: *AgentSession
     try session.transcript.append(allocator, .{ .model_text = "old response " ** 4000 });
     try session.transcript.append(allocator, .{ .user_text = "recent request" });
     try session.transcript.append(allocator, .{ .model_text = "recent response" });
+}
+
+const OverflowThenReplyClient = struct {
+    calls: usize = 0,
+    prompt_too_long_count: usize,
+
+    fn request(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        _: *const Transcript,
+        _: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        if (self.calls <= self.prompt_too_long_count) return error.PromptTooLong;
+        return .{
+            .reply = .{ .response = .{ .final_text = "continued" } },
+            .usage = .{ .input_tokens = 123, .output_tokens = 7 },
+        };
+    }
+
+    fn asClient(self: *@This()) loop.ModelClient {
+        return .{ .context = self, .request_fn = request };
+    }
+};
+
+test "normal request lifecycle compacts above the soft limit before transport" {
+    const allocator = testing.allocator;
+    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "old request " ** 10_000 });
+    try session.transcript.append(allocator, .{ .model_text = "old response " ** 10_000 });
+    try session.transcript.append(allocator, .{ .user_text = "current request" });
+    const before_len = session.transcript.len();
+    var summarizer: TestSummarizer = .{};
+    var raw: OverflowThenReplyClient = .{ .prompt_too_long_count = 0 };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const result = try requestNormalWith(
+        allocator,
+        arena.allocator(),
+        &session,
+        raw.asClient(),
+        summarizer.asSummarizer(),
+        &session.transcript,
+        null,
+    );
+
+    try testing.expectEqualStrings("continued", result.reply.response.final_text);
+    try testing.expectEqual(@as(usize, 1), raw.calls);
+    try testing.expectEqual(@as(usize, 1), summarizer.calls);
+    try testing.expectEqual(before_len, session.transcript.len());
+    try testing.expect(session.transcript.projection != null);
+    try testing.expectEqual(@as(u64, 1), session.normal_request_attempt_count);
+    try testing.expectEqual(@as(u64, 1), session.checkpoint_generation);
+}
+
+test "normal request lifecycle compacts and retries only one overflowing call" {
+    const allocator = testing.allocator;
+    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
+    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
+    try session.transcript.append(allocator, .{ .user_text = "current request" });
+    const before_len = session.transcript.len();
+    var summarizer: TestSummarizer = .{};
+    var raw: OverflowThenReplyClient = .{ .prompt_too_long_count = 1 };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const result = try requestNormalWith(
+        allocator,
+        arena.allocator(),
+        &session,
+        raw.asClient(),
+        summarizer.asSummarizer(),
+        &session.transcript,
+        "same transient retry text",
+    );
+
+    try testing.expectEqualStrings("continued", result.reply.response.final_text);
+    try testing.expectEqual(@as(usize, 2), raw.calls);
+    try testing.expectEqual(@as(usize, 1), summarizer.calls);
+    try testing.expectEqual(before_len, session.transcript.len());
+    try testing.expect(session.transcript.projection != null);
+    try testing.expect(session.overflow_recovery_used);
+    try testing.expectEqual(@as(u64, 2), session.normal_request_attempt_count);
+}
+
+test "normal request lifecycle surfaces a second overflow without another compaction" {
+    const allocator = testing.allocator;
+    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
+    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
+    try session.transcript.append(allocator, .{ .user_text = "current request" });
+    const before_len = session.transcript.len();
+    var summarizer: TestSummarizer = .{};
+    var raw: OverflowThenReplyClient = .{ .prompt_too_long_count = 2 };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    try testing.expectError(error.PromptTooLong, requestNormalWith(
+        allocator,
+        arena.allocator(),
+        &session,
+        raw.asClient(),
+        summarizer.asSummarizer(),
+        &session.transcript,
+        null,
+    ));
+    try testing.expectEqual(@as(usize, 2), raw.calls);
+    try testing.expectEqual(@as(usize, 1), summarizer.calls);
+    try testing.expectEqual(before_len, session.transcript.len());
+    try testing.expectEqual(@as(u64, 2), session.normal_request_attempt_count);
+}
+
+test "normal request lifecycle keeps soft compaction off while hard admission remains" {
+    const allocator = testing.allocator;
+    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer session.deinit(allocator);
+    session.compaction_enabled = false;
+    try session.transcript.append(allocator, .{ .user_text = "large current request " ** 10_000 });
+    var summarizer: TestSummarizer = .{};
+    var raw: OverflowThenReplyClient = .{ .prompt_too_long_count = 0 };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    _ = try requestNormalWith(
+        allocator,
+        arena.allocator(),
+        &session,
+        raw.asClient(),
+        summarizer.asSummarizer(),
+        &session.transcript,
+        null,
+    );
+    try testing.expectEqual(@as(usize, 1), raw.calls);
+    try testing.expectEqual(@as(usize, 0), summarizer.calls);
+    try testing.expect(session.transcript.projection == null);
+
+    try session.transcript.append(allocator, .{ .model_text = "too much history " ** 50_000 });
+    try testing.expectError(error.RequestTooLarge, requestNormalWith(
+        allocator,
+        arena.allocator(),
+        &session,
+        raw.asClient(),
+        summarizer.asSummarizer(),
+        &session.transcript,
+        null,
+    ));
+    try testing.expectEqual(@as(usize, 1), raw.calls);
+    try testing.expectEqual(@as(usize, 0), summarizer.calls);
 }
 
 test "compact preserves raw entries and installs one active projection" {
