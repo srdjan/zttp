@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # scripts/check-meta-drift.sh
 #
-# The four registry identities `meta` publishes, pinned.
+# The core and frontend identities `meta` publishes, pinned.
 #
 # A client binds work to these: `policy_hash` says which rule set judged a file,
-# `idiom_table_hash` which preference table, `restriction_matrix_hash` which
-# refusals, and `builtin_registry_hash` which module surface. A client that
-# cached an answer under one of them and receives the same value back is
-# entitled to reuse the answer, so a value that moves without anyone meaning it
-# to is a silent lie to every such client.
+# `grammar_hash` which core syntax, the TSX frontend hash which authored UI
+# syntax and lowering target, `idiom_table_hash` which preference table,
+# `restriction_matrix_hash` which refusals, and `builtin_registry_hash` which
+# module surface. A client that cached an answer under one of them and receives
+# the same value back is entitled to reuse the answer, so a value that moves
+# without anyone meaning it to is a silent lie to every such client.
 #
 # The unit tests inside `zig build test` already compare a live `meta` response
 # to the registries it renders from. They cannot catch this: they read both
@@ -21,7 +22,7 @@
 # that moved it, and say in the message what moved and why. That second edit is
 # the whole mechanism: it is what makes an unintended move visible.
 #
-# Floor: the response must parse and carry all four keys before any comparison
+# Floor: the response must parse and carry every key before any comparison
 # means anything. A `meta` that stopped emitting a hash would otherwise compare
 # empty against empty and pass.
 #
@@ -40,6 +41,11 @@ fi
 # Pinned 2026-08-12, read from the binary built at that commit.
 EXPECTED_PROFILE="zts-advanced-1"
 EXPECTED_POLICY_HASH="78c9fec96be277836842b2365a249ed26da46f1f0545f36753e33434cc3fd685"
+# Moved when JSX was removed from the core grammar. TSX is now a separately
+# hashed frontend that lowers into this exact core identity.
+EXPECTED_GRAMMAR_HASH="0838cc5e3a0e7f6c3e32edd5b8aba236b27c539de0bf0e44e53542332edd589b"
+EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
+EXPECTED_FRONTEND_GRAMMAR_HASH="6b6cf61dc3238e93dfd689f161393d2d9de98f59b070b6d741bd83756374a29a"
 EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
 # Moved when phase 7 restricted source files to `.ts` and `.tsx`: the matrix
 # gained `restriction.javascript-source-extension`, enforced by the new ZTS052
@@ -76,6 +82,7 @@ with open(sys.argv[1]) as handle:
 for key in (
     "profile_id",
     "policy_hash",
+    "grammar_hash",
     "idiom_table_hash",
     "restriction_matrix_hash",
     "builtin_registry_hash",
@@ -84,14 +91,28 @@ for key in (
     if not isinstance(value, str) or not value:
         raise SystemExit("empty %s" % key)
     print(value)
+
+frontends = payload["source_frontends"]
+if not isinstance(frontends, list) or len(frontends) != 1:
+    raise SystemExit("source_frontends must contain exactly one frontend")
+frontend = frontends[0]
+for key in ("profile_id", "grammar_hash", "target_grammar_hash"):
+    value = frontend[key]
+    if not isinstance(value, str) or not value:
+        raise SystemExit("empty source_frontends[0].%s" % key)
+    print(value)
 PY
 
 {
   read -r got_profile
   read -r got_policy
+  read -r got_grammar
   read -r got_idiom
   read -r got_restriction
   read -r got_builtin
+  read -r got_frontend_profile
+  read -r got_frontend_grammar
+  read -r got_frontend_target_grammar
 } < "$work/fields"
 
 check() {
@@ -104,8 +125,12 @@ If the move was intended, update this script in the same commit and say what mov
 
 check "profile_id" "$got_profile" "$EXPECTED_PROFILE"
 check "policy_hash" "$got_policy" "$EXPECTED_POLICY_HASH"
+check "grammar_hash" "$got_grammar" "$EXPECTED_GRAMMAR_HASH"
+check "source_frontends[0].profile_id" "$got_frontend_profile" "$EXPECTED_FRONTEND_PROFILE"
+check "source_frontends[0].grammar_hash" "$got_frontend_grammar" "$EXPECTED_FRONTEND_GRAMMAR_HASH"
+check "source_frontends[0].target_grammar_hash" "$got_frontend_target_grammar" "$EXPECTED_GRAMMAR_HASH"
 check "idiom_table_hash" "$got_idiom" "$EXPECTED_IDIOM_HASH"
 check "restriction_matrix_hash" "$got_restriction" "$EXPECTED_RESTRICTION_HASH"
 check "builtin_registry_hash" "$got_builtin" "$EXPECTED_BUILTIN_HASH"
 
-echo "meta drift OK (profile $got_profile, 4 registry hashes match their pins)"
+echo "meta drift OK (core $got_profile, frontend $got_frontend_profile, 6 registry hashes match their pins)"

@@ -457,6 +457,26 @@ pub fn grammarHash() [64]u8 {
     return compiler.grammar_registry.grammarHash();
 }
 
+/// The optional TSX source frontend. Its grammar hash includes the core grammar
+/// hash, so a lowered-source cache cannot survive a target-core change.
+pub const TsxFrontendCatalog = struct {
+    pub const profile_id = compiler.tsx_frontend_registry.profile_id;
+    pub const lowering_target = compiler.tsx_frontend_registry.lowering_target;
+    pub const Production = compiler.tsx_frontend_registry.Production;
+
+    pub fn productions() []const Production {
+        return &compiler.tsx_frontend_registry.productions;
+    }
+
+    pub fn findByName(name: []const u8) ?*const Production {
+        return compiler.tsx_frontend_registry.findByName(name);
+    }
+};
+
+pub fn tsxFrontendGrammarHash() [64]u8 {
+    return compiler.tsx_frontend_registry.grammarHash();
+}
+
 test "stable GrammarCatalog exposes the productions and their enforcement points" {
     const rows = GrammarCatalog.productions();
     try std.testing.expectEqual(compiler.grammar_registry.productions.len, rows.len);
@@ -465,6 +485,15 @@ test "stable GrammarCatalog exposes the productions and their enforcement points
     try std.testing.expectEqual(GrammarCatalog.Enforcement.check_time, match_expr.enforcement);
     try std.testing.expect(GrammarCatalog.findByName("NotAProduction") == null);
     try std.testing.expectEqualStrings(&compiler.grammar_registry.grammarHash(), &grammarHash());
+}
+
+test "stable TSX frontend catalog binds its grammar identity" {
+    try std.testing.expectEqualStrings("zts-tsx-1", TsxFrontendCatalog.profile_id);
+    try std.testing.expect(TsxFrontendCatalog.findByName("TsxElement") != null);
+    try std.testing.expectEqualStrings(
+        &compiler.tsx_frontend_registry.grammarHash(),
+        &tsxFrontendGrammarHash(),
+    );
 }
 
 /// The canonical type serialization's published identity: what a client needs

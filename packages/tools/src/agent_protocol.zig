@@ -89,8 +89,8 @@ pub const operations = [_]OperationSpec{
         "error_codes",             "severities",            "idioms",
         "limits",                  "module_catalog",        "deferred_sections",
         "validators",              "verifiers",             "ambient_names",
-        "type_serialization",      "grammar",               "examples",
-        "decisions",
+        "type_serialization",      "grammar",               "source_frontends",
+        "examples",                "decisions",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -669,6 +669,38 @@ fn writeOperationCatalog(json: *std.json.Stringify, include_payload_fields: bool
     try json.endArray();
 }
 
+fn writeSourceFrontends(json: *std.json.Stringify, include_grammar: bool) !void {
+    const frontend_hash = zts.tsxFrontendGrammarHash();
+    const core_hash = zts.grammarHash();
+    try json.beginArray();
+    try json.beginObject();
+    try json.objectField("profile_id");
+    try json.write(zts.TsxFrontendCatalog.profile_id);
+    try json.objectField("grammar_hash");
+    try json.write(&frontend_hash);
+    try json.objectField("target_profile_id");
+    try json.write(agent_identity.profile_id);
+    try json.objectField("target_grammar_hash");
+    try json.write(&core_hash);
+    try json.objectField("lowering_target");
+    try json.write(zts.TsxFrontendCatalog.lowering_target);
+    if (include_grammar) {
+        try json.objectField("grammar");
+        try json.beginArray();
+        for (zts.TsxFrontendCatalog.productions()) |production| {
+            try json.beginObject();
+            try json.objectField("name");
+            try json.write(production.name);
+            try json.objectField("rhs");
+            try json.write(production.rhs);
+            try json.endObject();
+        }
+        try json.endArray();
+    }
+    try json.endObject();
+    try json.endArray();
+}
+
 fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     try json.beginObject();
     try json.objectField("view");
@@ -689,6 +721,8 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(&zts.restrictionMatrixHash());
     try json.objectField("builtin_registry_hash");
     try json.write(&moduleMetadata.builtinRegistryHash());
+    try json.objectField("source_frontends");
+    try writeSourceFrontends(json, false);
     try json.objectField("operations");
     try writeOperationCatalog(json, false);
     try json.objectField("full_meta_request");
@@ -737,6 +771,8 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(&zts.restrictionMatrixHash());
     try json.objectField("builtin_registry_hash");
     try json.write(&moduleMetadata.builtinRegistryHash());
+    try json.objectField("source_frontends");
+    try writeSourceFrontends(json, true);
 
     try json.objectField("severities");
     try json.beginObject();
@@ -2570,6 +2606,11 @@ test "meta bootstrap view is bounded and routes to full discovery" {
     try testing.expectEqualStrings(&zts.idiomTableHash(), payload.get("idiom_table_hash").?.string);
     try testing.expectEqualStrings(&zts.restrictionMatrixHash(), payload.get("restriction_matrix_hash").?.string);
     try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);
+    const frontend = payload.get("source_frontends").?.array.items[0].object;
+    try testing.expectEqualStrings(zts.TsxFrontendCatalog.profile_id, frontend.get("profile_id").?.string);
+    try testing.expectEqualStrings(&zts.tsxFrontendGrammarHash(), frontend.get("grammar_hash").?.string);
+    try testing.expectEqualStrings(&zts.grammarHash(), frontend.get("target_grammar_hash").?.string);
+    try testing.expect(frontend.get("grammar") == null);
 
     const ops = payload.get("operations").?.array;
     try testing.expectEqual(operations.len, ops.items.len);
@@ -5005,6 +5046,31 @@ test "meta publishes section 8's grammar production for production, in order" {
         try testing.expectEqualStrings(p.enforcement.id(), row.get("enforcement").?.string);
     }
     try testing.expectEqualStrings("Module", rows.items[0].object.get("name").?.string);
+}
+
+test "meta publishes the TSX frontend grammar bound to its core target" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const payload = parsed.value.object.get("payload").?.object;
+    const frontends = payload.get("source_frontends").?.array;
+    try testing.expectEqual(@as(usize, 1), frontends.items.len);
+    const frontend = frontends.items[0].object;
+    try testing.expectEqualStrings(zts.TsxFrontendCatalog.profile_id, frontend.get("profile_id").?.string);
+    try testing.expectEqualStrings(&zts.tsxFrontendGrammarHash(), frontend.get("grammar_hash").?.string);
+    try testing.expectEqualStrings(agent_identity.profile_id, frontend.get("target_profile_id").?.string);
+    try testing.expectEqualStrings(&zts.grammarHash(), frontend.get("target_grammar_hash").?.string);
+    try testing.expectEqualStrings(zts.TsxFrontendCatalog.lowering_target, frontend.get("lowering_target").?.string);
+
+    const rows = frontend.get("grammar").?.array;
+    try testing.expectEqual(zts.TsxFrontendCatalog.productions().len, rows.items.len);
+    for (rows.items, zts.TsxFrontendCatalog.productions()) |item, production| {
+        try testing.expectEqualStrings(production.name, item.object.get("name").?.string);
+        try testing.expectEqualStrings(production.rhs, item.object.get("rhs").?.string);
+    }
 }
 
 test "a production that over-admits says which rule refuses the excess" {

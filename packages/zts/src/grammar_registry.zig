@@ -216,7 +216,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "PrimaryExpr",
-        .rhs = "Literal | Ident | ArrayExpr | RecordExpr | Template | MatchExpr | JSXExpr | \"(\" Expr \")\"",
+        .rhs = "Literal | Ident | ArrayExpr | RecordExpr | Template | MatchExpr | \"(\" Expr \")\"",
     },
     .{
         .name = "UnaryOp",

@@ -546,6 +546,9 @@ The full `meta` payload MUST also publish:
   exact grammar it describes,
 - `grammar`: the machine-readable productions of Section 8, member for
   member, registry-generated and drift-gated,
+- `source_frontends`: each optional authored-syntax frontend with its profile
+  identifier, grammar hash, target core profile and grammar hash, lowering
+  target, and machine-readable productions,
 - `examples`: one canonical minimal example per admitted surface form,
   registry-generated, so an agent can learn ZTS-specific syntax (`match`,
   `distinct type`, `assert`, `comptime()`, `parallel`) without hidden
@@ -1308,8 +1311,14 @@ core programs without erased annotations being used as runtime evidence.
 
 ### 5.8 JSX and TSX
 
-TSX is an optional surface elaboration into specified `jsxElement` and
-`jsxFragment` operations.
+TSX is the optional, versioned `zts-tsx-1` source frontend. JSX tokens are not
+part of the core grammar. A `.tsx` source is type-stripped, lowered to ordinary
+core calls, and only then parsed by the target core profile. A `.ts` source
+that contains raw JSX is rejected.
+
+The frontend identity publishes its own grammar hash together with the target
+core profile and grammar hash. A cached lowering is reusable only when all of
+those identities match.
 
 - `HtmlNode` is an opaque immutable virtual-node type.
 - `HtmlChild` is `HtmlNode | string | number | boolean | null | undefined |
@@ -1320,15 +1329,24 @@ TSX is an optional surface elaboration into specified `jsxElement` and
 - Children are finite arrays of `HtmlChild`.
 - Rendered text is escaped by default.
 - Raw HTML requires an explicit capability-reviewed API.
-- The tokenizer MUST parse ordinary `<`, `<=`, `>`, and `>=` expressions
-  inside TSX expression containers. Reversing a comparison to avoid a parser
-  ambiguity is not conforming source.
+- An expression container is copied as an expression into the lowered core.
+  Ordinary `<`, `<=`, `>`, and `>=` expressions inside it therefore retain
+  their core meaning. Reversing a comparison to avoid a frontend ambiguity is
+  not conforming source.
 - JSX spread follows the same one-leading-base rule as record spread.
 
 JSX introduces no component lifecycle, ambient state, hooks, class
 components, or hidden effect scheduling.
 
-The surface elaborates through these typed intrinsics:
+The surface elaborates through the ambient `h` constructor:
+
+```text
+<div a={x}>text {y}</div>  => h("div", { "a": x }, "text", y)
+<Component />              => h(Component, null)
+<>a {b}</>                  => h(null, null, "a", b)
+```
+
+The constructor has the equivalent typed surface:
 
 ```ts
 type HtmlChild =
@@ -1343,22 +1361,16 @@ type HtmlChild =
 type Component<P> = (
   props: P & { readonly children?: readonly HtmlChild[] },
 ) => HtmlNode;
-
-jsxElement<P>(
-  tag: string | Component<P>,
-  props: P | undefined,
-  children: readonly HtmlChild[],
-): HtmlNode
-
-jsxFragment(children: readonly HtmlChild[]): HtmlNode
-renderToString(node: HtmlNode): string
 ```
 
-The intrinsic names describe the semantics and are not additional source
-syntax. `null`, `undefined`, and boolean children render no text. Nested child
-arrays flatten in source order. A numeric child elaborates through the same
-implicit `String` elaboration as template interpolation (Section 5.4). Text
-and attribute values are escaped.
+`h` is a variadic ambient intrinsic with the conceptual signature
+`(string | Component<P> | null, P | null, HtmlChild_0, ..., HtmlChild_n) ->
+HtmlNode`. Its variadic tail is an intrinsic contract, not a source-declarable
+rest parameter. `renderToString(HtmlNode) -> string` is the corresponding
+renderer. `null`, `undefined`, and boolean children render no text. Nested
+child arrays flatten in source order. A numeric child elaborates through the
+same implicit `String` elaboration as template interpolation (Section 5.4).
+Text and attribute values are escaped.
 
 ## 6. Application data abstractions
 
@@ -1899,9 +1911,8 @@ several productions admit forms the normative prose of Section 5 excludes
 non-scalar parameter defaults). Legality is defined by the prose rules and
 the machine-readable registry together; the registry records, per rule,
 whether enforcement happens at parse time or at check time. Unexpanded
-leaves such as `Ident`, `String`, `Number`, `Literal`, `Template`,
-`TemplateLiteralType`, and `JSXExpr` are lexical or separately specified
-syntactic classes.
+leaves such as `Ident`, `String`, `Number`, `Literal`, `Template`, and
+`TemplateLiteralType` are lexical or separately specified syntactic classes.
 
 ```ebnf
 Module       ::= Import* TopDecl*
@@ -1977,7 +1988,6 @@ PrimaryExpr  ::= Literal
                | RecordExpr
                | Template
                | MatchExpr
-               | JSXExpr
                | "(" Expr ")"
 UnaryOp      ::= "!" | "+" | "-" | "~" | "typeof"
 BinaryOp     ::= "**" | "*" | "/" | "%"
@@ -2081,7 +2091,7 @@ The advanced surface is intentionally richer than the executable kernel.
 | `Result` | tagged record union |
 | `Result` combinator | one ordered call plus a branch on the tag |
 | `Dict` | immutable intrinsic with specified ordering and equality |
-| TSX | calls to specified `jsxElement` and `jsxFragment` intrinsics |
+| TSX | `h(tag, props, ...children)` calls emitted by `zts-tsx-1` |
 | `parallel` / `race` | explicit structured-effect operation |
 
 Each elaboration is validated independently. A surface form does not need its
@@ -2111,7 +2121,7 @@ The kernel needs only:
 - structured parallel and race operation
 
 `match`, `for...of`, conditional expressions, optional access, default
-parameters, spread, destructuring, JSX, `Result`, and higher-order array
+parameters, spread, destructuring, TSX, `Result`, and higher-order array
 methods are surface or library constructs, not distinct semantic foundations.
 
 ### 10.2 Machine state
