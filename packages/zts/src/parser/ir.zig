@@ -118,7 +118,6 @@ pub const UnaryOp = enum(u4) {
     not,
     bit_not,
     typeof_op,
-    void_op,
     pos, // Unary +: coerce to number
     // delete_op removed - delete operator not supported
 };

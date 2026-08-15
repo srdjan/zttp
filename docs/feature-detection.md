@@ -272,6 +272,9 @@ The strict checker enforces the **canonical ZigTS profile** on every `zttp check
 | `ZTS055` | optional parameter shorthand | write the parameter type as `T | undefined` |
 | `ZTS056` | default export | write a statically named export |
 | `ZTS057` | mutable top-level export | use `export const`; keep reassignment activation-local |
+| `ZTS058` | `Array<T>` type spelling | write `T[]` |
+| `ZTS059` | `ReadonlyArray<T>` type spelling | write `readonly T[]` |
+| `ZTS060` | `void` type spelling | write `undefined` |
 | `ZTS618` | nested destructuring `{a: {b}}` | drill in with follow-up `const` bindings |
 | `ZTS619` | unused index alias in `for...of` | iterate the array directly; drop `.entries()` and the destructure |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |

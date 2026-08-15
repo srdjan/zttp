@@ -26,6 +26,8 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Destructuring | One level deep; no rename. `const {a} = obj; const b = a;` not `const {a: b} = obj` |
 | Default parameter | Explicit `undefined` check in the body, not `(a: T = default)` |
 | Optional parameter | `(a: T | undefined)`, not `(a?: T)` |
+| Array type | `T[]` or `readonly T[]`, never `Array<T>` or `ReadonlyArray<T>` |
+| Ignored result | Evaluate the call as a statement; use `undefined` for absence, never `void` |
 | Template interpolation | `${identifier}` or `${obj.literalField}` only; hoist anything else to a `const` |
 | Fallback | `??` for nullish defaults. Never `||` unless both operands are boolean |
 

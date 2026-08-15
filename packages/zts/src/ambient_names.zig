@@ -74,7 +74,6 @@ pub const types = [_]AmbientType{
     .{ .name = "string", .origin = .primitive },
     .{ .name = "undefined", .origin = .primitive },
     .{ .name = "unknown", .origin = .primitive },
-    .{ .name = "void", .origin = .primitive },
 
     .{ .name = "Dict", .origin = .value_kind, .arity = 2 },
 
@@ -263,10 +262,8 @@ test "the two deliberate exclusions are decisions, not drift" {
     try testing.expect(fixture.resolves("bool"));
     try testing.expect(findType("bool") == null);
 
-    // `Array<T>`, `ReadonlyArray<T>` and `Readonly<T>` resolve in
-    // `parseGenericApp` as TS-familiar sugar. `T[]` is the canonical spelling
-    // of the first two, and the third is a modifier rather than a type name.
-    try testing.expect(fixture.resolves("Array<string>"));
+    // `Readonly<T>` remains a generic modifier rather than a type name. Array
+    // types use only `T[]` and `readonly T[]`, so no generic alias is ambient.
     try testing.expect(findType("Array") == null);
     try testing.expect(findType("ReadonlyArray") == null);
     try testing.expect(findType("Readonly") == null);

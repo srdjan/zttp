@@ -1027,22 +1027,12 @@ pub const CodeGen = struct {
 
         try self.emitNode(unary.operand);
 
-        // `void expr` evaluates the operand for side effects only; result is always undefined.
-        if (unary.op == .void_op) {
-            try self.emit(.drop);
-            self.popStack(1);
-            try self.emit(.push_undefined);
-            self.pushStack(1);
-            return;
-        }
-
         const opcode: Opcode = switch (unary.op) {
             .neg => .neg,
             .pos => .to_number,
             .not => .not,
             .bit_not => .bit_not,
             .typeof_op => .typeof,
-            .void_op => unreachable,
         };
 
         try self.emit(opcode);

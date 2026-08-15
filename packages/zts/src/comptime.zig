@@ -475,7 +475,7 @@ pub const ComptimeEvaluator = struct {
             },
             .neg => .{ .number = -(operand.toNumber() orelse return ComptimeError.TypeMismatch) },
             .pos => .{ .number = operand.toNumber() orelse return ComptimeError.TypeMismatch },
-            .typeof_op, .void_op => ComptimeError.UnsupportedOp,
+            .typeof_op => ComptimeError.UnsupportedOp,
         };
     }
 
@@ -832,7 +832,7 @@ pub const ComptimeEvaluator = struct {
             .invalid_number => ComptimeError.InvalidNumber,
             .invalid_escape_sequence, .invalid_unicode_escape => ComptimeError.InvalidEscape,
             .unexpected_eof => ComptimeError.UnexpectedEnd,
-            .unsupported_feature => ComptimeError.UnknownIdentifier,
+            .unsupported_feature => ComptimeError.UnsupportedOp,
             .expected_expression => if (starts_with_word)
                 ComptimeError.UnknownIdentifier
             else
@@ -1983,23 +1983,17 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "Date.now()", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "arbitrary()", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "variable", .expected = ComptimeError.UnknownIdentifier },
-        .{ .source = "new Thing()", .expected = ComptimeError.UnknownIdentifier },
-        .{ .source = "this", .expected = ComptimeError.UnknownIdentifier },
-        .{ .source = "eval(\"1\")", .expected = ComptimeError.UnknownIdentifier },
+        .{ .source = "new Thing()", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "this", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "eval(\"1\")", .expected = ComptimeError.UnsupportedOp },
         .{ .source = "1 = 2", .expected = ComptimeError.UnexpectedToken },
         .{ .source = "while (true) 1", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "const value = 1", .expected = ComptimeError.UnknownIdentifier },
         .{ .source = "() => 1", .expected = ComptimeError.UnexpectedToken },
-        // `|>` used to be refused here by a comptime-only branch that raised
-        // `unexpected_token`. It is refused everywhere now, as
-        // `unsupported_feature`, which `mapParserError` folds into
-        // `UnknownIdentifier` for that whole kind. The name is wrong for an
-        // operator - it sends the reader looking for a typo - and it is wrong
-        // for `new` and `while` on the same rows for the same reason. Pinned
-        // as it behaves; correcting the mapping means re-pinning every row
-        // that reaches it and is not this change.
-        .{ .source = "\"value\" |> hash", .expected = ComptimeError.UnknownIdentifier },
-        .{ .source = "1 |> Math.abs", .expected = ComptimeError.UnknownIdentifier },
+        // Parser-owned feature refusals keep their semantic identity in the
+        // comptime profile instead of being mislabeled as misspelled names.
+        .{ .source = "\"value\" |> hash", .expected = ComptimeError.UnsupportedOp },
+        .{ .source = "1 |> Math.abs", .expected = ComptimeError.UnsupportedOp },
 
         // Logical and ternary evaluation stays eager so an invalid expression
         // cannot hide in either selected or unselected children.

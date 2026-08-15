@@ -847,7 +847,12 @@ Rules:
   state effect and may prevent purity, determinism, or isolation proofs.
 - `Dict` is immutable and has deterministic insertion-order iteration.
 - Function and object equality is identity equality. `Dict` keys are
-  `string`, `number`, or a `distinct type` over either.
+  `string`, `number`, or a `nominal` type over either.
+- Array types use `T[]` and `readonly T[]` only. The generic aliases
+  `Array<T>` and `ReadonlyArray<T>` are excluded.
+- Absence is named `undefined` in both value and type positions. The `void`
+  type and unary operator are excluded; an effect whose result is ignored is
+  evaluated as its own statement.
 
 `null` and `undefined` remain distinct. Optional chaining and `??` follow
 TypeScript nullish behavior and therefore test both. Because that behavior
@@ -904,6 +909,7 @@ The profile excludes:
 - `new`
 - `this` and `super`
 - `yield`, generators, `async`, `await`, and `Promise`
+- unary `void`
 
 Conditions in `if`, `assert`, and `?:`, operands of boolean operators, and
 predicate callback results MUST have type `boolean`. There is no general

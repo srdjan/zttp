@@ -741,7 +741,6 @@ pub const BoolChecker = struct {
             .not => .boolean,
             .neg, .pos, .bit_not => .number,
             .typeof_op => .string,
-            .void_op => .undefined,
         };
     }
 

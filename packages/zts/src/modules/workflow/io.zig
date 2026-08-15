@@ -5,12 +5,12 @@
 //! the I/O layer.
 //!
 //! Exports:
-//!   parallel(thunks: Array<() => T>) -> Array<T>
+//!   parallel(thunks: (() => T)[]) -> T[]
 //!     Execute an array of zero-arg functions concurrently.
 //!     All I/O effects (fetchSync calls) within the thunks are overlapped.
 //!     Results are returned in declaration order regardless of completion order.
 //!
-//!   race(thunks: Array<() => T>) -> T
+//!   race(thunks: (() => T)[]) -> T
 //!     Execute an array of zero-arg functions concurrently.
 //!     All I/O effects run and are waited on; returns the first successful
 //!     result in declaration order, NOT by latency: every thunk's threads are

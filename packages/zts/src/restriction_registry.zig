@@ -528,6 +528,30 @@ pub const entries = [_]RestrictionEntry{
         .note = "use `export const`; keep reassignment inside a function activation",
         .enforced_by = &.{"ZTS057"},
     },
+    .{
+        .id = "restriction.array-generic-alias",
+        .feature = "`Array<T>` type spelling",
+        .boundary = "one postfix spelling for mutable arrays",
+        .nature = .language_simplicity,
+        .note = "write `T[]`",
+        .enforced_by = &.{"ZTS058"},
+    },
+    .{
+        .id = "restriction.readonly-array-generic-alias",
+        .feature = "`ReadonlyArray<T>` type spelling",
+        .boundary = "one modifier-plus-postfix spelling for readonly arrays",
+        .nature = .language_simplicity,
+        .note = "write `readonly T[]`",
+        .enforced_by = &.{"ZTS059"},
+    },
+    .{
+        .id = "restriction.void-spelling",
+        .feature = "`void` type and unary operator",
+        .boundary = "one explicit absence value and type",
+        .nature = .language_simplicity,
+        .note = "write `undefined`; evaluate a required effect as a separate statement",
+        .enforced_by = &.{ "ZTS001", "ZTS060" },
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

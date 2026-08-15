@@ -61,7 +61,7 @@ const Precedence = enum(u8) {
     additive = 14, // + -
     multiplicative = 15, // * / %
     exponent = 16, // **
-    unary = 17, // ! ~ - + typeof void delete
+    unary = 17, // ! ~ - + typeof
     postfix = 18, // ++ --
     call = 19, // () [] .
     primary = 20,
@@ -1969,7 +1969,11 @@ pub const Parser = struct {
             },
             .kw_await => self.parseAwaitExpression(),
             .kw_typeof => self.parseUnaryKeyword(.typeof_op),
-            .kw_void => self.parseUnaryKeyword(.void_op),
+            .kw_void => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "unary `void` is not supported; evaluate the operand as a statement when its effects are required, then use `undefined` explicitly");
+                self.advance();
+                return error.ParseError;
+            },
             .kw_delete => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'delete' is not supported; use object spread to omit properties");
                 return error.ParseError;
@@ -4686,6 +4690,18 @@ test "unsupported: delete operator" {
     };
 
     try std.testing.expect(false);
+}
+
+test "unsupported: unary void names the explicit undefined repair" {
+    const allocator = std.testing.allocator;
+    const source = "const ignored = void sideEffect();";
+
+    var parser = try Parser.init(allocator, source);
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "undefined") != null);
 }
 
 test "a statement error after a semicolon inside a block terminates" {

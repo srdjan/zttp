@@ -4859,6 +4859,76 @@ test "runCheckOnlyFromSource refuses mutable exports with ZTS057" {
     try std.testing.expect(result.contract == null);
 }
 
+test "runCheckOnlyFromSource refuses Array generic spelling with ZTS058" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function first(items: Array<number>): number {
+        \\  return items[0];
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS058", diagnostic.code);
+    try std.testing.expectEqualStrings("write `T[]`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses ReadonlyArray generic spelling with ZTS059" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function first(items: ReadonlyArray<number>): number {
+        \\  return items[0];
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS059", diagnostic.code);
+    try std.testing.expectEqualStrings("write `readonly T[]`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses void type spelling with ZTS060" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function ignore(value: string): void {
+        \\  _ = value;
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS060", diagnostic.code);
+    try std.testing.expectEqualStrings("write `undefined`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource explicitly refuses unary void" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const ignored = void 0;
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("evaluate the operand as a statement when its effects are required, then use `undefined` explicitly", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =

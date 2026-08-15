@@ -348,6 +348,9 @@ where the rewrite is provable, and otherwise left in place. Rows whose
 | ZTS055 | Optional parameter shorthand | Write `name: T | undefined`. |
 | ZTS056 | Default export | Write a statically named export, such as `export function handler(...) { ... }`. |
 | ZTS057 | Mutable top-level export | Use `export const`; keep reassignment inside a function activation. |
+| ZTS058 | Generic array alias | Write `T[]`. |
+| ZTS059 | Generic readonly-array alias | Write `readonly T[]`. |
+| ZTS060 | Void type | Write `undefined`; evaluate any required effect as a separate statement. |
 | ZTS618 | Nested destructuring | Destructure one level at a time. |
 | ZTS619 | Unused index alias in `for...of` | Iterate the array directly. |
 | ZTS620 | Boolean compared to boolean literal | Use the boolean expression or negation directly. |

@@ -1113,6 +1113,13 @@ default export in favor of a statically named declaration, and ZTS057 refuses
 longer builds a default export node or a mutable export declaration, and the
 last live default handler fixture now uses `export function handler`.
 
+The type vocabulary has one spelling per array and absence shape. ZTS058 and
+ZTS059 replace the generic array aliases with `T[]` and `readonly T[]`, and
+ZTS060 replaces the `void` type with `undefined`. Unary `void` is an explicit
+ZTS001 refusal because preserving an effectful operand requires a statement,
+not a token substitution. The alias normalization and unary IR/bytecode paths
+were deleted after the authored-source gates went green.
+
 **Owed, and this is the debt the cutover has been accumulating toward.** The
 recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases
 write `type X =`, so `zig build test` now fails two of them: `weather-egress`

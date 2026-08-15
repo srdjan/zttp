@@ -58,6 +58,12 @@ pub const StripError = error{
     DefaultExport,
     /// Module state cannot be reassigned by request handlers
     MutableExport,
+    /// `Array<T>` duplicates the postfix array spelling
+    ArrayTypeAlias,
+    /// `ReadonlyArray<T>` duplicates the readonly postfix spelling
+    ReadonlyArrayTypeAlias,
+    /// `void` duplicates `undefined` in the source type vocabulary
+    VoidType,
 };
 
 /// Kind of unsupported-TypeScript construct rejected by the stripper. Each
@@ -103,6 +109,13 @@ pub const StripDiagnosticKind = enum {
     default_export,
     /// A mutable top-level export. Mutable state is activation-local.
     mutable_export,
+    /// The generic mutable array alias. Arrays use postfix syntax.
+    array_type_alias,
+    /// The generic readonly array alias. Readonly arrays use a modifier plus
+    /// postfix syntax.
+    readonly_array_type_alias,
+    /// A source-level `void` type. Absence has one name.
+    void_type,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -119,6 +132,9 @@ pub const StripDiagnosticKind = enum {
             .optional_parameter => "optional parameter shorthand is not part of this profile; replace `name?: T` with `name: T | undefined`",
             .default_export => "default exports are not part of this profile; write a named export, for example `export function handler(...) { ... }`",
             .mutable_export => "mutable exports are not part of this profile; use `export const` for module values and keep reassignment inside a function activation",
+            .array_type_alias => "`Array<T>` is not a type spelling in this profile; write `T[]`",
+            .readonly_array_type_alias => "`ReadonlyArray<T>` is not a type spelling in this profile; write `readonly T[]`",
+            .void_type => "`void` is not a type spelling in this profile; write `undefined`",
         };
     }
 };
@@ -717,7 +733,7 @@ const Stripper = struct {
                 if (self.looksLikeGenericArrow()) {
                     const generic_start = self.pos;
                     if (self.skipBalancedAngles()) {
-                        try self.rejectOptionalParameterInType(generic_start + 1, self.pos - 1);
+                        try self.rejectRemovedTypeFormInType(generic_start + 1, self.pos - 1);
                         // Record generic params (content inside angle brackets)
                         self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, 0, 0);
                         self.blankSpan(generic_start, self.pos);
@@ -849,7 +865,7 @@ const Stripper = struct {
         if (self.pos < self.source.len and self.source[self.pos] == '<') {
             const generic_start = self.pos;
             if (self.skipBalancedAngles()) {
-                try self.rejectOptionalParameterInType(generic_start + 1, self.pos - 1);
+                try self.rejectRemovedTypeFormInType(generic_start + 1, self.pos - 1);
                 // Record generic params in TypeMap (inside the angle brackets)
                 self.recordTypeAnnotation(.generic_params, generic_start + 1, self.pos - 1, fn_name_start, fn_name_end);
                 // Blank the generic params
@@ -889,7 +905,7 @@ const Stripper = struct {
                     self.skipWhitespaceTracked();
                 }
                 const ret_type_end = self.pos;
-                try self.rejectOptionalParameterInType(ret_type_start, ret_type_end);
+                try self.rejectRemovedTypeFormInType(ret_type_start, ret_type_end);
                 // Skip whitespace after type
                 self.skipWhitespaceTracked();
                 const kind = classifyReturnType(self.source[ret_type_start..ret_type_end]);
@@ -1042,7 +1058,7 @@ const Stripper = struct {
                     try self.skipParamType();
                     // Trim trailing whitespace from type text
                     const type_end = trimTrailingWs(self.source, type_start, self.pos);
-                    try self.rejectOptionalParameterInType(type_start, type_end);
+                    try self.rejectRemovedTypeFormInType(type_start, type_end);
                     // Record param annotation
                     self.recordTypeAnnotation(.param_annotation, type_start, type_end, last_ident_start, last_ident_end);
                     self.blankSpan(colon_pos, self.pos);
@@ -1114,7 +1130,7 @@ const Stripper = struct {
                     self.skipWhitespaceTracked();
                 }
                 const ret_type_end = self.pos;
-                try self.rejectOptionalParameterInType(ret_type_start, ret_type_end);
+                try self.rejectRemovedTypeFormInType(ret_type_start, ret_type_end);
                 // Check for =>
                 self.skipWhitespaceTracked();
                 if (self.pos + 1 < self.source.len and
@@ -1540,7 +1556,7 @@ const Stripper = struct {
                 return false;
             }
             generic_end = self.pos;
-            try self.rejectOptionalParameterInType(generic_start + 1, generic_end - 1);
+            try self.rejectRemovedTypeFormInType(generic_start + 1, generic_end - 1);
             self.skipWhitespaceTracked();
         }
 
@@ -1603,7 +1619,7 @@ const Stripper = struct {
         // authored span is still available. Optional record fields are inside
         // braces and remain admitted.
         if (!keyword_is_type and !is_interface and !is_distinct) {
-            try self.rejectOptionalParameterInType(type_body_start, type_body_end);
+            try self.rejectRemovedTypeFormInType(type_body_start, type_body_end);
         }
 
         self.skipWhitespaceTracked();
@@ -1861,7 +1877,7 @@ const Stripper = struct {
         }
         // Trim trailing whitespace from type text
         const type_end = trimTrailingWs(self.source, type_start, self.pos);
-        try self.rejectOptionalParameterInType(type_start, type_end);
+        try self.rejectRemovedTypeFormInType(type_start, type_end);
 
         // Find the identifier name before the colon in original source
         const name_range = self.findIdentifierBefore(colon_pos);
@@ -2110,7 +2126,7 @@ const Stripper = struct {
             self.col = start_col;
             return false;
         }
-        try self.rejectOptionalParameterInType(start + 1, self.pos - 1);
+        try self.rejectRemovedTypeFormInType(start + 1, self.pos - 1);
 
         // Generic params are typically followed by ( or extends
         self.skipWhitespaceTracked();
@@ -2298,11 +2314,18 @@ const Stripper = struct {
         return std.mem.eql(u8, trimmed, "string") or std.mem.eql(u8, trimmed, "number");
     }
 
-    /// Find `name?: Type` in a function-type parameter list. Record fields use
-    /// the same token sequence, so braces suppress the match. Tuple containers
-    /// do not: a function type nested in a tuple still has parameter parens and
-    /// must be refused.
-    fn findOptionalParameterInType(source: []const u8, start: usize, end: usize) ?usize {
+    const RemovedTypeForm = struct {
+        offset: usize,
+        diagnostic: StripDiagnosticKind,
+        failure: StripError,
+    };
+
+    /// Find the first removed spelling in a type span. `name?: Type` is only a
+    /// parameter when it occurs inside parens and outside record braces;
+    /// optional record fields remain admitted. The named type spellings are
+    /// tokens, not substrings, and the array aliases count only when followed
+    /// by their generic argument list.
+    fn findRemovedTypeForm(source: []const u8, start: usize, end: usize) ?RemovedTypeForm {
         var i = start;
         var paren_depth: u16 = 0;
         var brace_depth: u16 = 0;
@@ -2331,6 +2354,26 @@ const Stripper = struct {
                 if (i + 1 < end) i += 1;
                 continue;
             }
+            if (isIdentifierStart(c)) {
+                const ident_start = i;
+                i += 1;
+                while (i < end and isIdentifierContinue(source[i])) : (i += 1) {}
+                const ident = source[ident_start..i];
+                if (std.mem.eql(u8, ident, "void")) {
+                    return .{ .offset = ident_start, .diagnostic = .void_type, .failure = StripError.VoidType };
+                }
+                if (std.mem.eql(u8, ident, "Array") or std.mem.eql(u8, ident, "ReadonlyArray")) {
+                    const after = skipTypeTrivia(source, i, end);
+                    if (after < end and source[after] == '<') {
+                        return if (std.mem.eql(u8, ident, "Array"))
+                            .{ .offset = ident_start, .diagnostic = .array_type_alias, .failure = StripError.ArrayTypeAlias }
+                        else
+                            .{ .offset = ident_start, .diagnostic = .readonly_array_type_alias, .failure = StripError.ReadonlyArrayTypeAlias };
+                    }
+                }
+                i -= 1;
+                continue;
+            }
             switch (c) {
                 '(' => paren_depth += 1,
                 ')' => if (paren_depth > 0) {
@@ -2347,7 +2390,9 @@ const Stripper = struct {
                     if (before == start or !isIdentifierContinue(source[before - 1])) continue;
                     var after = i + 1;
                     while (after < end and std.ascii.isWhitespace(source[after])) : (after += 1) {}
-                    if (after < end and source[after] == ':') return i;
+                    if (after < end and source[after] == ':') {
+                        return .{ .offset = i, .diagnostic = .optional_parameter, .failure = StripError.OptionalParameter };
+                    }
                 },
                 else => {},
             }
@@ -2355,14 +2400,37 @@ const Stripper = struct {
         return null;
     }
 
-    fn rejectOptionalParameterInType(self: *Self, start: usize, end: usize) StripError!void {
-        const offset = findOptionalParameterInType(self.source, start, end) orelse return;
-        const position = positionOfOffset(self.source, @intCast(offset));
-        if (self.report_errors) {
-            std.log.err("{}:{}: {s}", .{ position.line, position.column, StripDiagnosticKind.optional_parameter.message() });
+    fn skipTypeTrivia(source: []const u8, start: usize, end: usize) usize {
+        var i = start;
+        while (i < end) {
+            if (std.ascii.isWhitespace(source[i])) {
+                i += 1;
+                continue;
+            }
+            if (source[i] == '/' and i + 1 < end and source[i + 1] == '/') {
+                i += 2;
+                while (i < end and source[i] != '\n') : (i += 1) {}
+                continue;
+            }
+            if (source[i] == '/' and i + 1 < end and source[i + 1] == '*') {
+                i += 2;
+                while (i + 1 < end and !(source[i] == '*' and source[i + 1] == '/')) : (i += 1) {}
+                if (i + 1 < end) i += 2;
+                continue;
+            }
+            break;
         }
-        self.recordDiagnosticAt(.optional_parameter, position.line, position.column);
-        if (!self.collect_all_diagnostics) return StripError.OptionalParameter;
+        return i;
+    }
+
+    fn rejectRemovedTypeFormInType(self: *Self, start: usize, end: usize) StripError!void {
+        const rejection = findRemovedTypeForm(self.source, start, end) orelse return;
+        const position = positionOfOffset(self.source, @intCast(rejection.offset));
+        if (self.report_errors) {
+            std.log.err("{}:{}: {s}", .{ position.line, position.column, rejection.diagnostic.message() });
+        }
+        self.recordDiagnosticAt(rejection.diagnostic, position.line, position.column);
+        if (!self.collect_all_diagnostics) return rejection.failure;
     }
 
     /// The same, at a position the caller kept rather than the cursor's. A
@@ -4493,12 +4561,13 @@ test "several explicit type arguments on call stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "(a, b);") != null);
 }
 
-test "nested generic type arguments on call stripped" {
-    const result = try strip(std.testing.allocator, "const r = h<Array<number>>(x);", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "<") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "Array") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "(x);") != null);
+test "removed array alias in call type arguments is refused" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.ArrayTypeAlias,
+        strip(std.testing.allocator, "const r = h<Array<number>>(x);", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.array_type_alias, diag.?.kind);
 }
 
 test "string literal type argument with angle bracket inside stripped" {
@@ -4635,24 +4704,37 @@ test "block comment inside param annotation stripped" {
     try std.testing.expect(std.mem.indexOf(u8, result.code, "return b;") != null);
 }
 
-test "block comment inside generic annotation stripped" {
-    const result = try strip(std.testing.allocator, "let x: Array</* a<b */ number> = [];", .{});
-    defer @constCast(&result).deinit();
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "Array") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "/*") == null);
-    try std.testing.expect(std.mem.indexOf(u8, result.code, "= [];") != null);
+test "removed array alias is found across generic trivia" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.ArrayTypeAlias,
+        strip(std.testing.allocator, "let x: Array /* c */ </* a<b */ number> = [];", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.array_type_alias, diag.?.kind);
 }
 
 test "fn-type var annotation stripped without arrow leak" {
     const cases = [_][]const u8{
         "const f: (x: number) => string = g;",
         "let cb: (a: T) => U = h;",
-        "let p: (a: number) => void = cb;",
     };
     for (cases) |source| {
         const result = try strip(std.testing.allocator, source, .{});
         defer @constCast(&result).deinit();
         try std.testing.expect(std.mem.indexOf(u8, result.code, "=>") == null);
+    }
+}
+
+test "removed source type spellings are refused before annotations disappear" {
+    const cases = [_]struct { source: []const u8, failure: StripError, diagnostic: StripDiagnosticKind }{
+        .{ .source = "let xs: Array<number> = [];", .failure = StripError.ArrayTypeAlias, .diagnostic = .array_type_alias },
+        .{ .source = "let xs: ReadonlyArray<number> = [];", .failure = StripError.ReadonlyArrayTypeAlias, .diagnostic = .readonly_array_type_alias },
+        .{ .source = "let callback: (value: string) => void = cb;", .failure = StripError.VoidType, .diagnostic = .void_type },
+    };
+    for (cases) |case| {
+        var diag: ?StripDiagnostic = null;
+        try std.testing.expectError(case.failure, strip(std.testing.allocator, case.source, .{ .diagnostic_out = &diag }));
+        try std.testing.expectEqual(case.diagnostic, diag.?.kind);
     }
 }
 

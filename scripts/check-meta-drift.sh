@@ -38,9 +38,9 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-15 after phase 7 made parameter arity and module exports
-# explicit. The grammar admits fixed-arity parameters and statically named,
-# immutable top-level exports only.
+# Pinned 2026-08-15 after phase 7 made parameter arity, module exports, arrays,
+# and absence explicit. The core grammar was already canonical; the restriction
+# matrix now names every removed spelling and its refusal.
 EXPECTED_PROFILE="zts-advanced-1"
 EXPECTED_POLICY_HASH="807d3613e3c934f785eb0c310380296deaeca0c1d277028186ca4d3a2f5e1ac4"
 # Moved when JSX was removed from the core grammar. TSX is now a separately
@@ -49,9 +49,9 @@ EXPECTED_GRAMMAR_HASH="8e832800e21e352785bcbcb230a3f787c1314219fa02f753ab10ced37
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
 EXPECTED_FRONTEND_GRAMMAR_HASH="67b7ec97cc658df59440c087d46e3b386f0863c3f461d12512ee4f458a757763"
 EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
-# Moved when phase 7 added the default-export and mutable-export rows,
-# enforced at source preparation by ZTS056 and ZTS057.
-EXPECTED_RESTRICTION_HASH="50a5df70f0052cb40f1a0020bcd3546d1940a6509bbea094d0bed972fb0067ea"
+# Moved when phase 7 added the Array<T>, ReadonlyArray<T>, and void rows,
+# enforced by ZTS058-ZTS060 plus the unary-void ZTS001 refusal.
+EXPECTED_RESTRICTION_HASH="0d13bfaf7789a2a8b0e4d131b46275923d8bcf8dddb1ae1b9304184e2422e16a"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

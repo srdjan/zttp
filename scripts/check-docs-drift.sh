@@ -474,4 +474,15 @@ if [[ -n "${removed_module_export_hits//[[:space:]]/}" ]]; then
   fail "tracked TypeScript still uses a default or mutable export; use a statically named export function or export const"
 fi
 
+# Array and absence types have one spelling. This scans authored TypeScript,
+# where every hit is source syntax rather than a Zig host-language return type.
+removed_type_spelling_hits="$({
+  git ls-files -z -- '*.ts' '*.tsx' |
+    xargs -0 rg -n --pcre2 -- '(?:\b(?:Array|ReadonlyArray)\s*<|\bvoid\b)' 2>/dev/null || true
+} | grep -v -E '^docs/' || true)"
+if [[ -n "${removed_type_spelling_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$removed_type_spelling_hits" >&2
+  fail "tracked TypeScript still uses Array<T>, ReadonlyArray<T>, or void; use postfix arrays and undefined"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

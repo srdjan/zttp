@@ -2372,7 +2372,6 @@ pub const TypeChecker = struct {
             .not => pool.idx_boolean,
             .neg, .pos, .bit_not => pool.idx_number,
             .typeof_op => pool.idx_string,
-            .void_op => pool.idx_undefined,
         };
     }
 

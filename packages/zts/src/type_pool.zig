@@ -73,7 +73,7 @@ pub const TypeTag = enum(u8) {
     // References
     t_ref, // named type reference (Foo, Bar)
     t_generic_param, // type variable (T in <T>)
-    t_generic_app, // generic application (Array<number>)
+    t_generic_app, // generic application (Result<T>)
 
     // Template literal type
     t_template_literal, // `/api/${string}` (pattern of literal + type slot parts)
@@ -781,11 +781,9 @@ pub const TypePool = struct {
                 const new_elem = self.instantiate(allocator, elem, param_names, param_types, depth + 1);
                 if (new_elem == elem) return idx;
                 // `addArray` writes `data.b = 0`, which is the readonly flag.
-                // Rebuilding through it made `Frozen<T> = ReadonlyArray<T>`
-                // instantiate to a mutable array, so a value the author
-                // declared read-only was accepted by a parameter that may
-                // write through it - the A3 guarantee held for the direct
-                // spelling and not through any generic alias.
+                // Rebuilding a canonical `readonly T[]` through it would make
+                // the instantiated array mutable, so a parameter could write
+                // through a value the author declared read-only.
                 return if (self.isReadonlyArray(idx))
                     self.addReadonlyArray(allocator, new_elem)
                 else
@@ -2472,7 +2470,6 @@ const TypeExprParser = struct {
         if (std.mem.eql(u8, ident, "Bytes")) return self.maybeArrayWrap(self.pool.idx_bytes);
         if (std.mem.eql(u8, ident, "null")) return self.maybeArrayWrap(self.pool.idx_null);
         if (std.mem.eql(u8, ident, "undefined")) return self.maybeArrayWrap(self.pool.idx_undefined);
-        if (std.mem.eql(u8, ident, "void")) return self.maybeArrayWrap(self.pool.idx_void);
         if (std.mem.eql(u8, ident, "never")) return self.maybeArrayWrap(self.pool.idx_never);
         if (std.mem.eql(u8, ident, "unknown")) return self.maybeArrayWrap(self.pool.idx_unknown);
         if (std.mem.eql(u8, ident, "true")) return self.maybeArrayWrap(self.pool.addLiteralBool(self.allocator, true));
@@ -2512,9 +2509,6 @@ const TypeExprParser = struct {
     fn parseGenericApp(self: *TypeExprParser, base_name: []const u8) TypeIndex {
         if (!self.match('<')) return null_type_idx;
 
-        // Check if base is a known generic: Array<T> -> T[]
-        const is_array = std.mem.eql(u8, base_name, "Array");
-
         var args: std.ArrayListUnmanaged(TypeIndex) = .empty;
         defer args.deinit(self.allocator);
 
@@ -2527,16 +2521,6 @@ const TypeExprParser = struct {
             _ = self.match(',');
         }
         _ = self.match('>');
-
-        // Array<T> -> T[]
-        if (is_array and args.items.len == 1) {
-            return self.pool.addArray(self.allocator, args.items[0]);
-        }
-
-        // ReadonlyArray<T> -> readonly T[]
-        if (std.mem.eql(u8, base_name, "ReadonlyArray") and args.items.len == 1) {
-            return self.pool.addReadonlyArray(self.allocator, args.items[0]);
-        }
 
         // Dict<K, V> is a value kind of its own (spec 6.2), not a named alias
         // a user could shadow, so it resolves here rather than through the
@@ -2940,7 +2924,6 @@ test "parseTypeExpr primitives" {
     try std.testing.expectEqual(pool.idx_number, parseTypeExpr(&pool, allocator, "number"));
     try std.testing.expectEqual(pool.idx_string, parseTypeExpr(&pool, allocator, "string"));
     try std.testing.expectEqual(pool.idx_boolean, parseTypeExpr(&pool, allocator, "boolean"));
-    try std.testing.expectEqual(pool.idx_void, parseTypeExpr(&pool, allocator, "void"));
     try std.testing.expectEqual(pool.idx_null, parseTypeExpr(&pool, allocator, "null"));
 }
 
@@ -3053,7 +3036,7 @@ test "parseTypeExpr array" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "Array<number>");
+    const idx = parseTypeExpr(&pool, allocator, "number[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(idx).?);
     try std.testing.expectEqual(pool.idx_number, pool.getArrayElement(idx));
 }
@@ -3576,15 +3559,13 @@ test "readonly array variance holds in both directions" {
     try std.testing.expect(!pool.isAssignableTo(mutable, readonly_numbers));
 }
 
-test "readonly array spellings parse and print" {
+test "readonly array canonical spelling parses and prints" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
     const modifier = parseTypeExpr(&pool, allocator, "readonly string[]");
-    const generic = parseTypeExpr(&pool, allocator, "ReadonlyArray<string>");
     try std.testing.expect(pool.isReadonlyArray(modifier));
-    try std.testing.expect(pool.isReadonlyArray(generic));
     try std.testing.expectEqual(pool.idx_string, pool.getArrayElement(modifier));
 
     var buf: [64]u8 = undefined;
@@ -4041,9 +4022,8 @@ test "a union keeps the wider of two records" {
 }
 
 test "instantiate keeps the readonly flag on an array" {
-    // `addArray` writes `data.b = 0`, which is the flag, so rebuilding through
-    // it made `Frozen<T> = ReadonlyArray<T>` instantiate to a mutable array and
-    // the A3 guarantee held only for the direct spelling.
+    // `addArray` writes `data.b = 0`, which is the flag, so instantiation must
+    // preserve the readonly bit carried by the canonical `readonly T[]` form.
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
