@@ -202,21 +202,42 @@ pub fn prepare(
 
 fn entryTokens(entry: *const transcript_mod.OwnedEntry) u64 {
     const bytes: u64 = switch (entry.*) {
-        .user_text, .model_text, .system_note => |body| @intCast(body.len +| 24),
+        .user_text, .model_text, .system_note => |body| jsonStringPayloadBytes(body) +| 24,
         .assistant_tool_use => |calls| blk: {
-            var total: usize = 32;
+            var total: u64 = 32;
             for (calls) |call| {
-                total +|= call.id.len +| call.name.len +| call.args_json.len +| 32;
-                if (call.reasoning_content) |reasoning| total +|= reasoning.len;
+                total +|= jsonStringPayloadBytes(call.id) +|
+                    jsonStringPayloadBytes(call.name) +|
+                    jsonStringPayloadBytes(call.args_json) +| 32;
+                if (call.reasoning_content) |reasoning| {
+                    total +|= jsonStringPayloadBytes(reasoning);
+                }
             }
-            break :blk @intCast(total);
+            break :blk total;
         },
-        .tool_result => |result| @intCast(
-            result.tool_use_id.len +| result.tool_name.len +| result.llm_text.len +| 40,
-        ),
+        .tool_result => |result| jsonStringPayloadBytes(result.tool_use_id) +|
+            jsonStringPayloadBytes(result.tool_name) +|
+            jsonStringPayloadBytes(result.llm_text) +| 40,
         .proof_card, .diagnostic_box, .verified_patch => 0,
     };
     return context_budget.estimateBytes(bytes);
+}
+
+/// Provider request bodies are JSON. Count the encoded payload, excluding the
+/// two delimiter quotes, so retained suffix planning includes the framing that
+/// exact request admission later observes. Opaque reasoning and tool output
+/// commonly contain quotes, backslashes, and newlines, making raw byte counts
+/// unsafe near the limit.
+fn jsonStringPayloadBytes(value: []const u8) u64 {
+    var total: u64 = 0;
+    for (value) |byte| {
+        total +|= switch (byte) {
+            '"', '\\', '\n', '\r', '\t', 0x08, 0x0c => 2,
+            0x00...0x07, 0x0b, 0x0e...0x1f => 6,
+            else => 1,
+        };
+    }
+    return total;
 }
 
 fn firstWholeTurnBoundary(

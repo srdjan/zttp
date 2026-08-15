@@ -4435,6 +4435,88 @@ test "compact splits one oversized turn before a closed tool pair" {
     try testing.expect(session.transcript.at(3).* == .tool_result);
 }
 
+const EscapedReasoningSummarizer = struct {
+    calls: usize = 0,
+
+    fn summarize(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        request: compaction.SummaryRequest,
+    ) anyerror!compaction.SummaryResponse {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        const response = if (std.mem.eql(u8, request.system_prompt, compaction.prefix_system_prompt))
+            "## Original Request\nFinish the current repair\n\n" ++
+                "## Early Progress\nThe escaped reasoning and its closed tool result were summarized\n\n" ++
+                "## Context for Suffix\nContinue from the retained assistant response"
+        else
+            test_compaction_summary;
+        return .{
+            .response = .{ .final_text = response },
+            .usage = .{ .input_tokens = 100, .output_tokens = 50 },
+        };
+    }
+
+    fn asSummarizer(self: *@This()) compaction.Summarizer {
+        return .{ .context = self, .summarize_fn = summarize };
+    }
+};
+
+test "compact accounts for escaped tool reasoning before choosing a cut" {
+    const allocator = testing.allocator;
+    const model = try models_registry.resolveForProvider(.deepseek, "deepseek-v4-flash");
+    var session = AgentSession.initControlled(allocator, model, .{
+        .provider = .deepseek,
+        .model = model.id,
+        .max_output_tokens = model.request_policy.max_output_tokens,
+        .stream = false,
+        .system_prompt = "test system",
+    });
+    defer session.deinit(allocator);
+
+    try session.transcript.append(allocator, .{ .user_text = "old request " ** 3_000 });
+    try session.transcript.append(allocator, .{ .model_text = "old response " ** 3_000 });
+    try session.transcript.append(allocator, .{ .user_text = "finish the current repair" });
+
+    const reasoning = try allocator.alloc(u8, 55_100);
+    defer allocator.free(reasoning);
+    @memset(reasoning, '"');
+    const calls = [_]turn.ToolCall{.{
+        .id = "escaped",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+        .reasoning_content = reasoning,
+    }};
+    try session.transcript.append(allocator, .{ .assistant_tool_use = &calls });
+    try session.transcript.append(allocator, .{ .tool_result = .{
+        .tool_use_id = "escaped",
+        .tool_name = "workspace_read_file",
+        .ok = true,
+        .llm_text = "closed",
+    } });
+    try session.transcript.append(allocator, .{ .model_text = "continue safely" });
+
+    var summarizer: EscapedReasoningSummarizer = .{};
+    const result = try compactDetailed(
+        allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+
+    switch (result) {
+        .compacted => {},
+        .failed => |failure| return failure,
+        else => return error.TestExpectedCompaction,
+    }
+    try testing.expectEqual(@as(usize, 2), summarizer.calls);
+    const projection = session.transcript.projection orelse return error.TestExpectedProjection;
+    try testing.expectEqual(@as(transcript_mod.EntryId, 6), projection.first_kept_entry_id);
+}
+
 test "compact rejects an oversized standalone summary request before the effect" {
     const allocator = testing.allocator;
     var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
