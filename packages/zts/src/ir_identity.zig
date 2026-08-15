@@ -31,7 +31,7 @@ const std = @import("std");
 const engine = @import("zts-engine");
 
 const parser_mod = engine.parser;
-const stripper = engine.stripper;
+const source_frontend = engine.source_frontend;
 const AtomTable = engine.atom_table.AtomTable;
 const ir = parser_mod.ir;
 const IrView = ir.IrView;
@@ -98,7 +98,7 @@ pub fn compare(
 /// One side: the stripped text, the parser that owns the tree, and its root.
 const Parsed = struct {
     allocator: std.mem.Allocator,
-    strip: stripper.StripResult,
+    prepared: source_frontend.PreparedSource,
     parser: parser_mod.JsParser,
     root: NodeIndex,
 
@@ -113,13 +113,13 @@ const Parsed = struct {
         // The stripper runs first for the same reason the rest of the analyzer
         // runs it first: the parser reads JavaScript, and a `: T` it never saw
         // stripped is a syntax error rather than a type.
-        var strip = stripper.strip(allocator, source, .{}) catch |err| switch (err) {
+        var prepared = source_frontend.PreparedSource.init(allocator, source, "<identity>.ts", .{}) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => return error.NoTree,
         };
-        errdefer strip.deinit();
+        errdefer prepared.deinit();
 
-        var parser = try parser_mod.JsParser.init(allocator, strip.code);
+        var parser = try parser_mod.JsParser.init(allocator, prepared.parserInput());
         errdefer parser.deinit();
         parser.setAtomTable(atoms);
         // Both sides parse permissively, and the equivalence claim is tree
@@ -142,7 +142,7 @@ const Parsed = struct {
 
         return .{
             .allocator = allocator,
-            .strip = strip,
+            .prepared = prepared,
             .parser = parser,
             .root = root,
         };
@@ -154,7 +154,7 @@ const Parsed = struct {
 
     fn deinit(self: *Parsed) void {
         self.parser.deinit();
-        self.strip.deinit();
+        self.prepared.deinit();
     }
 };
 

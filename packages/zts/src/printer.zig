@@ -43,7 +43,7 @@ const Token = token_mod.Token;
 const TokenType = token_mod.TokenType;
 const Tokenizer = @import("parser/tokenizer.zig").Tokenizer;
 const trivia = @import("parser/trivia.zig");
-const stripper = @import("stripper.zig");
+const source_frontend = @import("source_frontend.zig");
 
 pub const Error = error{ UnprintableConstruct, OutOfMemory };
 
@@ -214,12 +214,13 @@ fn collectRegions(
     source: []const u8,
     options: Options,
 ) Error![]Region {
-    var strip_result = stripper.strip(arena, source, .{ .report_errors = false }) catch
+    var prepared = source_frontend.PreparedSource.init(arena, source, "<printer>.ts", .{ .report_errors = false }) catch
         return refuse(options, .strip_failed);
-    defer strip_result.deinit();
+    defer prepared.deinit();
+    const type_map = prepared.typeMap() orelse return refuse(options, .strip_failed);
 
     var regions: std.ArrayListUnmanaged(Region) = .empty;
-    for (strip_result.type_map.entries.items) |entry| {
+    for (type_map.entries.items) |entry| {
         if (entry.source_end <= entry.source_start) continue;
         const span: Region = switch (entry.kind) {
             // The recorded span is the interior of the `<...>`, so the

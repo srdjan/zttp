@@ -101,11 +101,11 @@ pub fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const 
 /// unchanged so plain-JS `-e` keeps its existing behavior and the parser
 /// produces the same diagnostic it always did.
 pub fn stripInlineSource(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
-    var strip_result = zts.strip(allocator, source, .{ .report_errors = false }) catch {
+    var prepared = zts.PreparedSource.init(allocator, source, "<eval>.ts", .{ .report_errors = false }) catch {
         return allocator.dupe(u8, source);
     };
-    defer strip_result.deinit();
-    return allocator.dupe(u8, strip_result.code);
+    defer prepared.deinit();
+    return allocator.dupe(u8, prepared.parserInput());
 }
 
 pub fn printVersion() void {
@@ -175,10 +175,7 @@ pub fn hasFlag(argv: []const []const u8, name: []const u8) bool {
 }
 
 fn looksLikeHandlerFile(path: []const u8) bool {
-    return std.mem.endsWith(u8, path, ".js") or
-        std.mem.endsWith(u8, path, ".jsx") or
-        std.mem.endsWith(u8, path, ".ts") or
-        std.mem.endsWith(u8, path, ".tsx");
+    return zts.classifySourcePath(path) != .virtual_javascript;
 }
 
 pub fn parseSize(str: []const u8) !usize {
