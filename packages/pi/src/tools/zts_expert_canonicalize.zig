@@ -1,9 +1,8 @@
 //! Preview compiler-authored canonical refactors for a handler file.
 
 const std = @import("std");
-const canonicalize = @import("zts_cli").canonicalize;
 const registry_mod = @import("../registry/registry.zig");
-const zts = @import("zts");
+const client = @import("zts_agent_client.zig");
 
 const name = "zts_expert_canonicalize";
 
@@ -48,23 +47,31 @@ fn execute(
         return registry_mod.ToolResult.err(allocator, "zts_expert_canonicalize requires a file and optional --simulate\n");
     }
 
-    var result = try canonicalize.collect(allocator, args[0]);
-    defer result.deinit(allocator);
-    const simulation = if (args.len == 2)
-        try canonicalize.simulateRepairs(allocator, args[0], &result)
-    else
-        null;
-
-    const llm_text = try registry_mod.helpers.renderAlloc(
-        allocator,
-        canonicalize.writeJsonWithSimulation,
-        .{ &result, simulation },
-    );
-
+    const input_json = try canonicalizeInput(allocator, args[0], args.len == 2);
+    defer allocator.free(input_json);
+    const projection = try client.invokeForTool(allocator, .{
+        .operation = .canonicalize,
+        .input_json = input_json,
+    });
     return .{
-        .ok = true,
-        .llm_text = llm_text,
+        .ok = projection.ok,
+        .llm_text = projection.llm_text,
     };
+}
+
+fn canonicalizeInput(allocator: std.mem.Allocator, file: []const u8, simulate: bool) ![]u8 {
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = out.writer() };
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file);
+    if (simulate) {
+        try json.objectField("simulate");
+        try json.write(true);
+    }
+    try json.endObject();
+    return out.toOwnedSlice();
 }
 
 const testing = std.testing;
@@ -86,7 +93,7 @@ test "tool decodes simulate arg" {
     try testing.expectEqualStrings("--simulate", args[1]);
 }
 
-test "tool execute returns canonicalize JSON envelope" {
+test "canonicalize registry returns bound version-2 candidates and optional simulation" {
     const source =
         \\const parse = (x: number): number => x;
         \\function handler(req: Request): Response & Spec<"state_isolated"> {
@@ -98,32 +105,62 @@ test "tool execute returns canonicalize JSON envelope" {
 
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    defer testing.allocator.free(root);
-    const file = try std.fs.path.join(testing.allocator, &.{ root, "handler.ts" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = source });
+    const file = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, "handler.ts", testing.allocator);
     defer testing.allocator.free(file);
-    try zts.file_io.writeFile(testing.allocator, file, source);
 
-    var result = try execute(testing.allocator, &.{ file, "--simulate" });
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+
+    const plain_args = try std.fmt.allocPrint(testing.allocator, "{{\"file\":{f}}}", .{std.json.fmt(file, .{})});
+    defer testing.allocator.free(plain_args);
+    var plain = try registry.invokeJson(testing.allocator, name, plain_args);
+    defer plain.deinit(testing.allocator);
+    try testing.expect(plain.ok);
+
+    var plain_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, plain.llm_text, .{});
+    defer plain_parsed.deinit();
+    const envelope = plain_parsed.value.object;
+    try testing.expectEqual(@as(i64, 2), envelope.get("schema_version").?.integer);
+    try testing.expectEqualStrings("canonicalize", envelope.get("operation").?.string);
+    try testing.expectEqualStrings("zts-advanced-1", envelope.get("profile_id").?.string);
+    try testing.expectEqual(@as(usize, 64), envelope.get("policy_hash").?.string.len);
+    try testing.expectEqual(@as(usize, 64), envelope.get("module_graph_hash").?.string.len);
+    const payload = envelope.get("payload").?.object;
+    try testing.expect(payload.get("source_digest").?.string.len == 64);
+    try testing.expect(payload.get("simulation").? == .null);
+    try testing.expect(payload.get("refactors") == null);
+    const candidate = payload.get("candidates").?.array.items[0].object;
+    try testing.expect(candidate.get("kind") == null);
+    const bound = candidate.get("bound").?.object;
+    try testing.expectEqualStrings(payload.get("source_digest").?.string, bound.get("source_digest").?.string);
+    try testing.expectEqualStrings(envelope.get("profile_id").?.string, bound.get("profile_id").?.string);
+    try testing.expectEqualStrings(envelope.get("policy_hash").?.string, bound.get("policy_hash").?.string);
+    try testing.expectEqualStrings(envelope.get("module_graph_hash").?.string, bound.get("module_graph_hash").?.string);
+
+    const simulated_args = try std.fmt.allocPrint(testing.allocator, "{{\"file\":{f},\"simulate\":true}}", .{std.json.fmt(file, .{})});
+    defer testing.allocator.free(simulated_args);
+    var simulated = try registry.invokeJson(testing.allocator, name, simulated_args);
+    defer simulated.deinit(testing.allocator);
+    var simulated_parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, simulated.llm_text, .{});
+    defer simulated_parsed.deinit();
+    const simulation = simulated_parsed.value.object.get("payload").?.object.get("simulation").?.object;
+    try testing.expect(simulation.get("ok").? == .bool);
+    try testing.expect(simulation.get("new_count").? == .integer);
+    try testing.expect(simulation.get("preexisting_count").? == .integer);
+}
+
+test "canonicalize registry preserves out-of-root refusal envelope" {
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+    var result = try registry.invokeJson(testing.allocator, name, "{\"file\":\"../outside.ts\"}");
     defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
 
-    try testing.expect(result.ok);
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
     defer parsed.deinit();
-    try testing.expect(parsed.value == .object);
-    const obj = parsed.value.object;
-    try testing.expect((obj.get("ok") orelse return error.MissingOk) == .bool);
-    try testing.expect((obj.get("ok") orelse return error.MissingOk).bool);
-    try testing.expectEqualStrings(file, (obj.get("file") orelse return error.MissingFile).string);
-    try testing.expectEqual(@as(usize, 64), (obj.get("policy_hash") orelse return error.MissingPolicyHash).string.len);
-    const refactors = obj.get("refactors") orelse return error.MissingRefactors;
-    try testing.expect(refactors == .array);
-    try testing.expectEqual(@as(usize, 1), refactors.array.items.len);
-    const refactor = refactors.array.items[0].object;
-    try testing.expectEqualStrings("canonicalize_arrow_helper", (refactor.get("kind") orelse return error.MissingKind).string);
-    try testing.expectEqualStrings("function parse(x: number): number { return x; }", (refactor.get("replacement") orelse return error.MissingReplacement).string);
-    const simulation = obj.get("simulation") orelse return error.MissingSimulation;
-    try testing.expect(simulation == .object);
-    try testing.expect((simulation.object.get("ok") orelse return error.MissingOk) == .bool);
-    try testing.expect((simulation.object.get("ok") orelse return error.MissingOk).bool);
+    try testing.expectEqualStrings("canonicalize", parsed.value.object.get("operation").?.string);
+    try testing.expectEqualStrings("path_outside_project_root", parsed.value.object.get("error").?.object.get("code").?.string);
 }

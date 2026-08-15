@@ -7,8 +7,8 @@
 //! per-node refactor intents - this returns the fixed point.
 
 const std = @import("std");
-const canonicalize = @import("zts_cli").canonicalize;
 const registry_mod = @import("../registry/registry.zig");
+const client = @import("zts_agent_client.zig");
 
 const name = "zts_expert_normalize";
 
@@ -30,7 +30,9 @@ fn decodeJson(
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, args_json, .{});
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidToolArgsJson;
-    const file_value = parsed.value.object.get("file") orelse return error.InvalidToolArgsJson;
+    const object = parsed.value.object;
+    if (object.get("write") != null) return error.InvalidToolArgsJson;
+    const file_value = object.get("file") orelse return error.InvalidToolArgsJson;
     if (file_value != .string) return error.InvalidToolArgsJson;
 
     var args: std.ArrayList([]const u8) = .empty;
@@ -47,19 +49,29 @@ fn execute(
         return registry_mod.ToolResult.err(allocator, "zts_expert_normalize requires a single file argument\n");
     }
 
-    var result = try canonicalize.normalize(allocator, args[0]);
-    defer result.deinit(allocator);
-
-    const llm_text = try registry_mod.helpers.renderAlloc(
-        allocator,
-        canonicalize.writeNormalizeJson,
-        .{ args[0], &result, false },
-    );
-
+    const input_json = try normalizeInput(allocator, args[0]);
+    defer allocator.free(input_json);
+    const projection = try client.invokeForTool(allocator, .{
+        .operation = .normalize,
+        .input_json = input_json,
+    });
     return .{
-        .ok = true,
-        .llm_text = llm_text,
+        .ok = projection.ok,
+        .llm_text = projection.llm_text,
     };
+}
+
+fn normalizeInput(allocator: std.mem.Allocator, file: []const u8) ![]u8 {
+    var out = registry_mod.helpers.TextBuffer.init(allocator);
+    errdefer out.deinit();
+    var json: std.json.Stringify = .{ .writer = out.writer() };
+    try json.beginObject();
+    try json.objectField("file");
+    try json.write(file);
+    try json.objectField("write");
+    try json.write(false);
+    try json.endObject();
+    return out.toOwnedSlice();
 }
 
 const testing = std.testing;
@@ -72,7 +84,13 @@ test "tool decodes file arg" {
     try testing.expectEqualStrings("handler.ts", args[0]);
 }
 
-test "tool execute returns a canonical-source envelope" {
+test "normalize request projection is explicitly read-only" {
+    const input_json = try normalizeInput(testing.allocator, "handler.ts");
+    defer testing.allocator.free(input_json);
+    try testing.expectEqualStrings("{\"file\":\"handler.ts\",\"write\":false}", input_json);
+}
+
+test "normalize registry returns a non-writing version-2 fixed point" {
     const source =
         \\function handler(req: Request): Response {
         \\  let msg = "hi";
@@ -81,25 +99,63 @@ test "tool execute returns a canonical-source envelope" {
     ;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
-    const root = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    defer testing.allocator.free(root);
-    const file = try std.fs.path.join(testing.allocator, &.{ root, "handler.ts" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = source });
+    const file = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, "handler.ts", testing.allocator);
     defer testing.allocator.free(file);
-    const zts = @import("zts");
-    try zts.file_io.writeFile(testing.allocator, file, source);
 
-    var result = try execute(testing.allocator, &.{file});
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+    const args_json = try std.fmt.allocPrint(testing.allocator, "{{\"file\":{f}}}", .{std.json.fmt(file, .{})});
+    defer testing.allocator.free(args_json);
+    var result = try registry.invokeJson(testing.allocator, name, args_json);
     defer result.deinit(testing.allocator);
     try testing.expect(result.ok);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
     defer parsed.deinit();
-    const obj = parsed.value.object;
-    try testing.expect((obj.get("ok") orelse return error.MissingOk).bool);
-    try testing.expect((obj.get("fullyCanonical") orelse return error.MissingFlag).bool);
-    const trace = (obj.get("rewriteTrace") orelse return error.MissingTrace).array;
+    const envelope = parsed.value.object;
+    try testing.expectEqual(@as(i64, 2), envelope.get("schema_version").?.integer);
+    try testing.expectEqualStrings("normalize", envelope.get("operation").?.string);
+    try testing.expectEqual(@as(usize, 64), envelope.get("policy_hash").?.string.len);
+    try testing.expectEqual(@as(usize, 64), envelope.get("module_graph_hash").?.string.len);
+    const payload = envelope.get("payload").?.object;
+    try testing.expect(payload.get("fullyCanonical") == null);
+    try testing.expect(payload.get("canonicalSource") == null);
+    try testing.expect(payload.get("rewriteTrace") == null);
+    try testing.expect(payload.get("converged").?.bool);
+    try testing.expect(payload.get("fully_canonical").?.bool);
+    const trace = payload.get("rewrite_trace").?.array;
     try testing.expectEqual(@as(usize, 1), trace.items.len);
-    try testing.expectEqualStrings("replace_let_with_const", trace.items[0].string);
-    const canonical_source = (obj.get("canonicalSource") orelse return error.MissingSource).string;
+    try testing.expectEqualStrings("replace_let_with_const", trace.items[0].object.get("intent").?.string);
+    const canonical_source = payload.get("canonical_source").?.string;
     try testing.expect(std.mem.indexOf(u8, canonical_source, "const msg") != null);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "handler.ts", testing.allocator, .limited(1024 * 1024));
+    defer testing.allocator.free(on_disk);
+    try testing.expectEqualStrings(source, on_disk);
+}
+
+test "normalize registry cannot request writes" {
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+    try testing.expectError(
+        error.InvalidToolArgsJson,
+        registry.invokeJson(testing.allocator, name, "{\"file\":\"handler.ts\",\"write\":true}"),
+    );
+}
+
+test "normalize registry preserves out-of-root refusal envelope" {
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+    var result = try registry.invokeJson(testing.allocator, name, "{\"file\":\"../outside.ts\"}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, result.llm_text, .{});
+    defer parsed.deinit();
+    try testing.expectEqualStrings("normalize", parsed.value.object.get("operation").?.string);
+    try testing.expectEqualStrings("path_outside_project_root", parsed.value.object.get("error").?.object.get("code").?.string);
 }
