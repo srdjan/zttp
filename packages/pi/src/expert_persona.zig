@@ -21,6 +21,11 @@ pub const PROMPT_CAP_BYTES: usize = 48 * 1024;
 /// budget.
 pub const PROTECTED_CORE_CAP_BYTES: usize = 16 * 1024;
 
+/// What is left of the prompt cap for project instructions. The loader reads
+/// against this, so an oversized file fails where its path is known rather than
+/// at prompt assembly, where only the total is.
+pub const PROJECT_CONTEXT_CAP_BYTES: usize = PROMPT_CAP_BYTES - PROTECTED_CORE_CAP_BYTES;
+
 // The registered tool schemas remain the canonical source of argument and
 // result details. This index gives the model stable routing names without
 // repeating those schemas or embedding their reference output.

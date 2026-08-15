@@ -402,6 +402,7 @@ pub fn modeErrorMessage(err: anyerror) ?[]const u8 {
         error.ProtectedPromptTooLarge => "error: Pi's protected expert prompt exceeds its 16 KiB safety gate; update the Pi build before launching\n",
         error.UnsupportedOpenAIModelOverride => "error: ZTS_OPENAI_MODEL is no longer supported; use --provider openai --model <registered-id>\n",
         error.LegacySessionIdentity => "error: this historical session has no provider identity; resume once with --provider local|claude|openai|deepseek and optional --model\n",
+        error.SchemaVersionUnsupported => "error: this session was journaled by an older schema that this build cannot read; its files are untouched under ~/.zttp/sessions, and a new session starts with `zttp expert`\n",
         error.InvalidStoredProvider => "error: the stored session provider is invalid; restart with --provider and optional --model to override it\n",
         error.LocalServerUnavailable,
         error.LocalHealthNotOk,

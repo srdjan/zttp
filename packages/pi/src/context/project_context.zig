@@ -34,12 +34,19 @@ pub const Options = struct {
 /// around `loadFromDir` that resolves cwd realpath. Returns null when no
 /// matching files were found.
 pub fn loadFromCwd(allocator: std.mem.Allocator) !?[]u8 {
+    return loadFromCwdWithOptions(allocator, .{});
+}
+
+/// The caps belong to whoever consumes the result: a loader that accepts more
+/// than its consumer can carry turns an oversized file into a launch refusal
+/// with no file named.
+pub fn loadFromCwdWithOptions(allocator: std.mem.Allocator, options: Options) !?[]u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
     const cwd_real = try std.Io.Dir.realPathFileAlloc(std.Io.Dir.cwd(), io, ".", allocator);
     defer allocator.free(cwd_real);
-    return try loadFromDir(allocator, cwd_real, .{});
+    return try loadFromDir(allocator, cwd_real, options);
 }
 
 /// Loads project context starting at `cwd_abs` (must be an absolute path).
@@ -146,7 +153,15 @@ fn readIfPresent(
             allocator.free(joined);
             return;
         },
-        error.FileTooBig => return error.ProjectInstructionsTooLarge,
+        error.FileTooBig => {
+            // Name the file: the caller's message can only state the budget,
+            // which leaves an ancestry of instruction files to search by hand.
+            std.debug.print(
+                "project instructions too large: {s} exceeds {d} bytes\n",
+                .{ joined, per_file_cap },
+            );
+            return error.ProjectInstructionsTooLarge;
+        },
         else => return err,
     };
     errdefer allocator.free(body);
