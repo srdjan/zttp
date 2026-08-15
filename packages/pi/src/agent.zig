@@ -593,16 +593,26 @@ pub const AgentSession = struct {
     }
 
     fn prepareProviderCall(self: *AgentSession) !void {
-        const deadline = self.request_deadline_ms orelse return;
+        // The client config outlives the turn, so a call made with no deadline
+        // must clear the previous turn's remaining budget rather than inherit
+        // it. `/compact` is the caller that has no deadline of its own, and it
+        // was being issued with whatever milliseconds the last turn had left.
+        const deadline = self.request_deadline_ms orelse {
+            self.setProviderRequestTimeout(null);
+            return;
+        };
         const now_ms: i64 = @intCast((zts.monotonicNowNs() catch 0) / 1_000_000);
         if (now_ms >= deadline) return error.RequestTimedOut;
-        const remaining: u64 = @intCast(deadline - now_ms);
+        self.setProviderRequestTimeout(@intCast(deadline - now_ms));
+    }
+
+    fn setProviderRequestTimeout(self: *AgentSession, timeout_ms: ?u64) void {
         switch (self.backend) {
             .stub => {},
-            .local => |*client| client.config.request_timeout_ms = remaining,
-            .anthropic => |*client| client.config.request_timeout_ms = remaining,
-            .openai => |*client| client.config.request_timeout_ms = remaining,
-            .deepseek => |*client| client.config.request_timeout_ms = remaining,
+            .local => |*client| client.config.request_timeout_ms = timeout_ms,
+            .anthropic => |*client| client.config.request_timeout_ms = timeout_ms,
+            .openai => |*client| client.config.request_timeout_ms = timeout_ms,
+            .deepseek => |*client| client.config.request_timeout_ms = timeout_ms,
         }
     }
 
@@ -905,7 +915,10 @@ fn initFromEnvWithPreparedResume(
     const project_ctx: ?[]u8 = if (config.no_context_files)
         null
     else
-        try project_context.loadFromCwd(allocator);
+        try project_context.loadFromCwdWithOptions(allocator, .{
+            .per_file_cap = expert_persona.PROJECT_CONTEXT_CAP_BYTES,
+            .total_cap = expert_persona.PROJECT_CONTEXT_CAP_BYTES,
+        });
     defer if (project_ctx) |p| allocator.free(p);
 
     var session = blk: {
@@ -1335,18 +1348,36 @@ pub fn runOneTurnWithClient(
     std.debug.assert(tr.len() >= 1);
 
     if (session.events_path != null) {
+        // The turn itself succeeded and the reply is already in the transcript,
+        // so a journal write failure must be reported rather than swallowed AND
+        // must not throw the answer away. Resume loses this turn; the user does
+        // not lose the reply they are waiting on.
+        var persistence_failure: ?anyerror = null;
         const entries = tr.entries.items;
         while (session.last_persisted_len < entries.len) {
-            try session.appendPersistedEntry(
+            session.appendPersistedEntry(
                 allocator,
                 tr.entryIdAt(session.last_persisted_len),
                 &entries[session.last_persisted_len],
-            );
+            ) catch |persist_err| {
+                persistence_failure = persist_err;
+                break;
+            };
             session.last_persisted_len += 1;
         }
-        try session.appendPersistedEvent(allocator, .{ .turn_end = .{
-            .reason = turn_result.end_reason,
-        } });
+        if (persistence_failure == null) {
+            session.appendPersistedEvent(allocator, .{ .turn_end = .{
+                .reason = turn_result.end_reason,
+            } }) catch |persist_err| {
+                persistence_failure = persist_err;
+            };
+        }
+        if (persistence_failure) |persist_err| {
+            std.debug.print(
+                "session journal write failed ({s}): this turn will be missing on resume\n",
+                .{@errorName(persist_err)},
+            );
+        }
     }
 
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
@@ -1743,7 +1774,13 @@ fn requestNormalWith(
     try session.prepareProviderCall();
     session.normal_request_attempt_count +|= 1;
     const first = raw_client.request(arena, transcript, extra_user_text) catch |err| {
-        if (err != error.PromptTooLong or !session.compaction_enabled or session.overflow_recovery_used) {
+        // A client admits on its own conservative byte-derived budget, which the
+        // calibration gate permits to sit above the exact-usage estimate this
+        // controller admitted on. Both of its refusals are the same overflow and
+        // both are recoverable by compacting; treating only PromptTooLong as one
+        // left the stale anchor in place and failed every later turn identically.
+        const overflowed = err == error.PromptTooLong or err == error.RequestTooLarge;
+        if (!overflowed or !session.compaction_enabled or session.overflow_recovery_used) {
             return err;
         }
         session.overflow_recovery_used = true;
