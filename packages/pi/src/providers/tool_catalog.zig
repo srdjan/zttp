@@ -40,6 +40,10 @@ pub fn projectArgsForModel(
     raw_args_json: []const u8,
 ) !?[]u8 {
     if (!std.mem.eql(u8, tool_name, apply_edit.name)) return null;
+    // Only the host writes these keys, and it writes them into well-formed
+    // JSON. Args without them carry nothing to hide, so they are borrowed
+    // verbatim rather than re-encoded on every request.
+    if (!mayCarryHostKeys(apply_edit.host_authoritative_keys, raw_args_json)) return null;
 
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
@@ -50,21 +54,31 @@ pub fn projectArgsForModel(
         .{ .duplicate_field_behavior = .@"error" },
     ) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => return error.InvalidApplyEditHistory,
+        // Args that do not parse are model-authored: `loop` records a raw tool
+        // batch before rejecting it, and the host only ever writes valid JSON.
+        // Refusing here would fail every later request in the session over one
+        // off-spec call, so the raw bytes pass through unchanged instead.
+        else => return null,
     };
-    if (parsed != .object) return error.InvalidApplyEditHistory;
-    const file = parsed.object.get("file") orelse return error.InvalidApplyEditHistory;
-    const content = parsed.object.get("content") orelse return error.InvalidApplyEditHistory;
-    if (file != .string or content != .string) return error.InvalidApplyEditHistory;
+    if (parsed != .object) return null;
 
+    var removed = false;
     for (apply_edit.host_authoritative_keys) |key| {
-        _ = parsed.object.orderedRemove(key);
+        if (parsed.object.orderedRemove(key)) removed = true;
     }
+    if (!removed) return null;
 
     var out = TextBuffer.init(allocator);
     defer out.deinit();
     try std.json.Stringify.value(parsed, .{}, out.writer());
     return try out.toOwnedSlice();
+}
+
+fn mayCarryHostKeys(keys: []const []const u8, raw_args_json: []const u8) bool {
+    for (keys) |key| {
+        if (std.mem.indexOf(u8, raw_args_json, key) != null) return true;
+    }
+    return false;
 }
 
 pub const Iterator = struct {
@@ -102,4 +116,41 @@ pub fn count(registry: *const registry_mod.Registry) usize {
         if (entry.allowedOn(.model)) total += 1;
     }
     return total;
+}
+
+const testing = std.testing;
+
+test "projectArgsForModel strips host keys and never refuses model-authored args" {
+    const stripped = (try projectArgsForModel(
+        testing.allocator,
+        "apply_edit",
+        "{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\"," ++
+            "\"baseline_state\":\"present\",\"baseline_sha256\":\"0123\",\"reason\":\"repair\"}",
+    )).?;
+    defer testing.allocator.free(stripped);
+    try testing.expectEqualStrings(
+        "{\"file\":\"handler.ts\",\"content\":\"new\",\"reason\":\"repair\"}",
+        stripped,
+    );
+
+    // Nothing to hide: borrowed verbatim rather than parsed and re-encoded.
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try projectArgsForModel(testing.allocator, "apply_edit", "{\"file\":\"a.ts\",\"content\":\"x\"}"),
+    );
+    // Another tool's args are never the host's to rewrite.
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try projectArgsForModel(testing.allocator, "workspace_read_file", "{\"before\":\"x\"}"),
+    );
+    // Truncated model-authored args must not fail the request that carries
+    // them: the host writes these keys only into well-formed JSON.
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try projectArgsForModel(testing.allocator, "apply_edit", "{\"file\":\"a.ts\",\"before\":"),
+    );
+    try testing.expectEqual(
+        @as(?[]u8, null),
+        try projectArgsForModel(testing.allocator, "apply_edit", "[\"baseline_sha256\"]"),
+    );
 }

@@ -149,28 +149,36 @@ test "canonical request snapshot hides host apply_edit baseline while raw histor
     try testing.expect(std.mem.indexOf(u8, wire_body, "\\\"before\\\"") == null);
 }
 
-test "canonical request snapshot refuses malformed apply_edit history" {
+test "canonical request snapshot carries malformed apply_edit history verbatim" {
+    // `loop` appends a raw tool batch before rejecting a mixed or truncated
+    // one, so model-authored args that never parsed are already in the
+    // transcript. Refusing them here would fail every later request in the
+    // session, including compaction, over one off-spec call.
+    const truncated_args = "{\"file\":\"handler.ts\",\"content\":";
     const calls = [_]turn.ToolCall{.{
         .id = "toolu_edit",
         .name = "apply_edit",
-        .args_json = "{\"file\":\"handler.ts\",\"content\":",
+        .args_json = truncated_args,
     }};
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(testing.allocator);
     try transcript.append(testing.allocator, .{ .assistant_tool_use = &calls });
 
-    try testing.expectError(
-        error.InvalidApplyEditHistory,
-        model_request.createSnapshot(testing.allocator, .{
-            .config = .{
-                .provider = .deepseek,
-                .model = "deepseek-chat",
-                .max_output_tokens = 1024,
-                .system_prompt = "system",
-            },
-            .transcript = &transcript,
-        }),
-    );
+    var snapshot = try model_request.createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .deepseek,
+            .model = "deepseek-chat",
+            .max_output_tokens = 1024,
+            .system_prompt = "system",
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+
+    switch (snapshot.items[0]) {
+        .tool_use => |call| try testing.expectEqualStrings(truncated_args, call.args_json),
+        else => return error.TestExpectedRawToolUse,
+    }
 }
 
 test "canonical request snapshot records the active projection cut" {
