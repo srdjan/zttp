@@ -1196,9 +1196,9 @@ fn postApplyCheck(
     const verify_paths_args = blk: {
         var buf = TextBuffer.init(arena);
         const w = buf.writer();
-        try w.writeAll("{\"paths\":[");
+        try w.writeAll("{\"file\":");
         try json_writer.writeString(w, prepared.edit.file);
-        try w.writeAll("]}");
+        try w.writeByte('}');
         break :blk buf.written();
     };
     runPostApplyTool(allocator, arena, registry, transcript, &report, .{
@@ -2187,6 +2187,80 @@ test "recorded apply_edit arguments carry a host digest without baseline bytes" 
     try testing.expectEqualStrings("present", object.get("baseline_state").?.string);
     try testing.expectEqual(@as(usize, 64), object.get("baseline_sha256").?.string.len);
     try testing.expect(std.mem.indexOf(u8, args, host_bytes) == null);
+}
+
+fn postApplyCheckProbe(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+) anyerror!registry_mod.ToolResult {
+    if (args.len != 1) return error.UnexpectedCheckInvocation;
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, args[0], .{});
+    defer parsed.deinit();
+    if (parsed.value != .object) return error.UnexpectedCheckInvocation;
+    const object = parsed.value.object;
+    if (object.count() != 1 or object.get("paths") != null) return error.UnexpectedCheckInvocation;
+    const file = object.get("file") orelse return error.UnexpectedCheckInvocation;
+    if (file != .string or !std.mem.eql(u8, file.string, "handler.ts")) {
+        return error.UnexpectedCheckInvocation;
+    }
+    return .{
+        .ok = false,
+        .llm_text = try allocator.dupe(
+            u8,
+            "{\"schema_version\":2,\"operation\":\"check\",\"profile_id\":\"zts-advanced-1\",\"compiler_version\":\"test\",\"policy_version\":\"test\",\"policy_hash\":\"p\",\"module_graph_hash\":\"m\",\"success\":false,\"payload\":{\"file\":\"handler.ts\"},\"diagnostics\":[]}",
+        ),
+    };
+}
+
+test "postApplyCheck rechecks the applied file exactly once with schema-v2 input" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const check_tool: registry_mod.ToolDef = .{
+        .name = "zts_expert_verify_paths",
+        .label = "test check",
+        .description = "test-only schema-v2 check probe",
+        .effect = .read_workspace,
+        .context_policy = .exact,
+        .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\"}},\"required\":[\"file\"]}",
+        .decode_json = registry_mod.helpers.decodeJsonPassthrough,
+        .execute = postApplyCheckProbe,
+    };
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, check_tool);
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    const prepared: PreparedEdit = .{
+        .edit = .{ .file = "handler.ts", .content = clean_handler },
+        .resolved_path = "/unused/handler.ts",
+        .before = null,
+        .baseline_sha256 = baselineDigest(null),
+    };
+
+    const report = try postApplyCheck(
+        testing.allocator,
+        arena.allocator(),
+        &registry,
+        &transcript,
+        prepared,
+        clean_handler,
+    );
+    defer if (report.summary) |summary| testing.allocator.free(summary);
+    try testing.expect(!report.ok);
+    try testing.expectEqualStrings("verify_paths regressed", report.summary.?);
+
+    var diagnostic_boxes: usize = 0;
+    for (transcript.entries.items) |entry| switch (entry) {
+        .diagnostic_box => |box| {
+            diagnostic_boxes += 1;
+            try testing.expect(std.mem.indexOf(u8, box.llm_text, "\"schema_version\":2") != null);
+            try testing.expect(std.mem.indexOf(u8, box.llm_text, "\"operation\":\"check\"") != null);
+            try testing.expect(std.mem.indexOf(u8, box.llm_text, "\"checked_files\"") == null);
+            try testing.expect(std.mem.indexOf(u8, box.llm_text, "\"violations\"") == null);
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), diagnostic_boxes);
 }
 
 test "autoApprove returns true for any preview" {

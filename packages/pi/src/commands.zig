@@ -15,6 +15,7 @@ const CommandRow = struct {
     explicit: ?[]const u8,
     tool: []const u8,
     takes_trailing_args: bool,
+    exact_trailing_args: ?usize = null,
 };
 
 pub const command_table = [_]CommandRow{
@@ -24,7 +25,7 @@ pub const command_table = [_]CommandRow{
     .{ .slash = "/modules", .explicit = "modules", .tool = "zts_expert_modules", .takes_trailing_args = true },
     .{ .slash = "/rule", .explicit = "describe-rule", .tool = "zts_expert_describe_rule", .takes_trailing_args = true },
     .{ .slash = "/search", .explicit = "search", .tool = "zts_expert_search", .takes_trailing_args = true },
-    .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zts_expert_verify_paths", .takes_trailing_args = true },
+    .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zts_expert_verify_paths", .takes_trailing_args = true, .exact_trailing_args = 1 },
     .{ .slash = null, .explicit = "verify-modules", .tool = "zts_expert_verify_modules", .takes_trailing_args = true },
     .{ .slash = "/check", .explicit = "check", .tool = "zts_check", .takes_trailing_args = true },
     .{ .slash = "/specs", .explicit = null, .tool = "pi_specs_status", .takes_trailing_args = true },
@@ -41,6 +42,7 @@ pub fn lookup(argv: []const []const u8) ?LocalCommand {
             if (row.slash) |slash| {
                 if (std.mem.eql(u8, argv[0], slash)) {
                     const args: []const []const u8 = if (row.takes_trailing_args) argv[1..] else &.{};
+                    if (row.exact_trailing_args) |count| if (args.len != count) return null;
                     return .{ .tool_name = row.tool, .args = args };
                 }
             }
@@ -54,6 +56,7 @@ pub fn lookup(argv: []const []const u8) ?LocalCommand {
             if (row.explicit) |name| {
                 if (std.mem.eql(u8, argv[1], name)) {
                     const args: []const []const u8 = if (row.takes_trailing_args) argv[2..] else &.{};
+                    if (row.exact_trailing_args) |count| if (args.len != count) return null;
                     return .{ .tool_name = row.tool, .args = args };
                 }
             }
@@ -190,6 +193,21 @@ test "lookup discovery commands routes restrictions and requires a modules argum
     try testing.expectEqualStrings("zts_expert_modules", modules.tool_name);
     try testing.expectEqual(@as(usize, 1), modules.args.len);
     try testing.expectEqualStrings("handler.ts", modules.args[0]);
+}
+
+test "lookup verify routes exactly one file" {
+    const one = [_][]const u8{ "/verify", "handler.ts" };
+    const command = lookup(&one) orelse return error.TestFailed;
+    try testing.expectEqualStrings("zts_expert_verify_paths", command.tool_name);
+    try testing.expectEqual(@as(usize, 1), command.args.len);
+    try testing.expectEqualStrings("handler.ts", command.args[0]);
+
+    const none = [_][]const u8{"/verify"};
+    try testing.expect(lookup(&none) == null);
+    const many = [_][]const u8{ "/verify", "a.ts", "b.ts" };
+    try testing.expect(lookup(&many) == null);
+    const explicit_many = [_][]const u8{ "zts", "verify-paths", "a.ts", "b.ts" };
+    try testing.expect(lookup(&explicit_many) == null);
 }
 
 test "isQuit and isHelp recognize aliases" {
