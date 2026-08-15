@@ -30,6 +30,7 @@ pub const Config = struct {
     anthropic_version: []const u8 = default_anthropic_version,
     purpose: model_request.Purpose = .normal,
     cache_policy: model_request.CachePolicy = .enabled,
+    request_timeout_ms: ?u64 = null,
 };
 
 pub const ClientError = error{
@@ -89,6 +90,7 @@ pub const Client = struct {
             try snapshot.completePreparation(body);
         }
         try snapshot.requireHardAdmission();
+        snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
         const response_body = try post_fn(arena, self.config, body);
         if (self.capture) |sink| try sink.record(&snapshot, response_body);
 
@@ -171,7 +173,13 @@ fn postAnthropic(
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedProtocol;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = try uri.getHost(&host_buf);
-    const connection = try http_errors.connect(&client, host, uri.port, protocol);
+    const connection = try http_errors.connectWithin(
+        &client,
+        host,
+        uri.port,
+        protocol,
+        config.request_timeout_ms,
+    );
 
     const extra_headers = [_]std.http.Header{
         .{ .name = "x-api-key", .value = config.api_key },
@@ -314,6 +322,7 @@ const CaptureProbe = struct {
         try testing.expectEqualStrings("capture-system", snapshot.config.system_prompt);
         try testing.expectEqualStrings("retry-context", snapshot.extra_user_text.?);
         try testing.expectEqual(@as(usize, 1), snapshot.items.len);
+        try testing.expect(snapshot.wire_request_sha256 != null);
         try testing.expectEqualStrings("capture-user", snapshot.items[0].user_text);
         try testing.expectEqualStrings(capture_test_sse, raw_response);
         if (self.fail) return error.InjectedCaptureFailure;

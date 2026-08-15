@@ -175,7 +175,7 @@ fn integer(value: std.json.Value) ParsedInteger {
 fn inRange(value: Compaction, model: *const models.Model) bool {
     const context: u64 = model.capabilities.context_window_tokens;
     return value.max_input_tokens > 0 and value.max_input_tokens <= context and
-        value.reserve_tokens >= 4 and value.reserve_tokens < context and
+        value.reserve_tokens >= compaction.minimum_reserve_tokens and value.reserve_tokens < context and
         value.keep_recent_tokens > 0 and value.keep_recent_tokens <= context;
 }
 
@@ -186,7 +186,7 @@ pub fn validateCompaction(value: Compaction, model: *const models.Model) !void {
 fn rangeKey(value: Compaction, model: *const models.Model) []const u8 {
     const context: u64 = model.capabilities.context_window_tokens;
     if (value.max_input_tokens == 0 or value.max_input_tokens > context) return "maxInputTokens";
-    if (value.reserve_tokens < 4 or value.reserve_tokens >= context) return "reserveTokens";
+    if (value.reserve_tokens < compaction.minimum_reserve_tokens or value.reserve_tokens >= context) return "reserveTokens";
     return "keepRecentTokens";
 }
 
@@ -196,9 +196,13 @@ fn diagnostic(
     key: ?[]const u8,
     issue: Issue,
 ) !Diagnostic {
+    const path_copy = try allocator.dupe(u8, path);
+    errdefer allocator.free(path_copy);
+    const key_copy = if (key) |present| try allocator.dupe(u8, present) else null;
+    errdefer if (key_copy) |owned| allocator.free(owned);
     return .{
-        .path = try allocator.dupe(u8, path),
-        .key = if (key) |present| try allocator.dupe(u8, present) else null,
+        .path = path_copy,
+        .key = key_copy,
         .issue = issue,
     };
 }
@@ -256,6 +260,7 @@ test "settings reject malformed wrong-type and model-out-of-range values" {
         .{ .body = "[]", .issue = .root_not_object, .key = null },
         .{ .body = "{\"compaction\":{\"enabled\":1}}", .issue = .wrong_type, .key = "enabled" },
         .{ .body = "{\"compaction\":{\"keepRecentTokens\":-1}}", .issue = .out_of_range, .key = "keepRecentTokens" },
+        .{ .body = "{\"compaction\":{\"reserveTokens\":4}}", .issue = .out_of_range, .key = "reserveTokens" },
         .{ .body = "{\"compaction\":{\"reserveTokens\":40960}}", .issue = .out_of_range, .key = "reserveTokens" },
     };
     for (cases) |case| {

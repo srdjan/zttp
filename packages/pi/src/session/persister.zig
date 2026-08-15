@@ -6,10 +6,9 @@
 //!
 //!   - `entryToEvent` is a pure mapping from one transcript variant to its
 //!     matching event variant. It borrows slices from the input entry and
-//!     does no allocation. For `.assistant_tool_use`, which carries N
-//!     `OwnedToolCall`s, this helper returns only the first call; callers
-//!     that need all of them should use `appendEntry`, which iterates
-//!     internally and emits one event per call.
+//!     does no allocation. `appendEntry` handles `.assistant_tool_use`
+//!     separately so an entire multi-call assistant entry occupies one
+//!     checksummed frame.
 //!
 //!   - `appendEntry` writes the entry to disk honoring `AppendOptions`:
 //!       * `no_persist_tool_output = true` persists a structural redacted
@@ -36,11 +35,8 @@ pub const redacted_tool_output = "[tool output not persisted]";
 /// record past `entry`'s lifetime unless `events.appendEvent` has already
 /// been called with it.
 ///
-/// NOTE: `.assistant_tool_use` carries a slice of `OwnedToolCall`. This
-/// helper maps only the first call. For the multi-call case, use
-/// `appendEntry`, which emits exactly one event per `ToolCall` in the
-/// slice, matching the "every tool_use has a matching tool_result"
-/// invariant.
+/// NOTE: `.assistant_tool_use` is handled separately by `appendEntry` so a
+/// partial write can never durably commit only part of a logical call batch.
 fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
     return switch (entry.*) {
         .user_text => |body| .{ .user_text = body },
@@ -75,8 +71,8 @@ fn entryToEvent(entry: *const transcript.OwnedEntry) events.EventRecord {
 
 /// Append one or more `events.jsonl` lines for `entry`, honoring `opts`.
 ///
-/// `.assistant_tool_use` with N calls emits N lines (one `tool_use` event
-/// per call). All other variants emit exactly one line.
+/// `.assistant_tool_use` with N calls emits one atomic `tool_use_batch` frame.
+/// All other variants emit exactly one frame.
 ///
 /// `.tool_result` uses a structural redacted placeholder when
 /// `opts.no_persist_tool_output` is true. Otherwise the raw result is written
@@ -88,9 +84,21 @@ pub fn appendEntry(
     entry: *const transcript.OwnedEntry,
     opts: AppendOptions,
 ) !void {
+    var writer = try events.JournalWriter.open(allocator, events_path);
+    defer writer.deinit();
+    return appendEntryToWriter(allocator, &writer, entry_id, entry, opts);
+}
+
+pub fn appendEntryToWriter(
+    allocator: std.mem.Allocator,
+    writer: *events.JournalWriter,
+    entry_id: events.EntryId,
+    entry: *const transcript.OwnedEntry,
+    opts: AppendOptions,
+) !void {
     switch (entry.*) {
         .tool_result => |tr| {
-            try events.appendEntryEvent(allocator, events_path, entry_id, null, .{ .tool_result = .{
+            try writer.appendEntryEvent(allocator, entry_id, null, .{ .tool_result = .{
                 .tool_use_id = tr.tool_use_id,
                 .tool_name = tr.tool_name,
                 .ok = tr.ok,
@@ -99,15 +107,19 @@ pub fn appendEntry(
             } });
         },
         .assistant_tool_use => |calls| {
-            for (calls, 0..) |call, part_index| {
-                try events.appendEntryEvent(allocator, events_path, entry_id, @intCast(part_index), .{ .tool_use = .{
+            if (calls.len == 0) return error.InvalidEventIdentity;
+            const batch = try allocator.alloc(events.ToolUse, calls.len);
+            defer allocator.free(batch);
+            for (calls, 0..) |call, index| {
+                batch[index] = .{
                     .id = call.id,
                     .name = call.name,
                     .args_json = call.args_json,
-                } });
+                };
             }
+            try writer.appendEntryEvent(allocator, entry_id, null, .{ .tool_use_batch = batch });
         },
-        else => try events.appendEntryEvent(allocator, events_path, entry_id, null, entryToEvent(entry)),
+        else => try writer.appendEntryEvent(allocator, entry_id, null, entryToEvent(entry)),
     }
 }
 
@@ -190,7 +202,7 @@ test "appendEntry persists a model_text entry" {
     try testing.expectEqualStrings("Thinking...", obj.get("d").?.string);
 }
 
-test "appendEntry on assistant_tool_use with 2 calls writes 2 distinct tool_use lines" {
+test "appendEntry on assistant_tool_use writes one atomic tool_use_batch frame" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -207,18 +219,15 @@ test "appendEntry on assistant_tool_use with 2 calls writes 2 distinct tool_use 
 
     var lines = try readFrames(allocator, path);
     defer freeFrames(allocator, &lines);
-    try testing.expectEqual(@as(usize, 2), lines.items.len);
+    try testing.expectEqual(@as(usize, 1), lines.items.len);
 
     var p1 = try std.json.parseFromSlice(std.json.Value, allocator, lines.items[0], .{});
     defer p1.deinit();
-    var p2 = try std.json.parseFromSlice(std.json.Value, allocator, lines.items[1], .{});
-    defer p2.deinit();
-
-    try testing.expectEqualStrings("tool_use", p1.value.object.get("k").?.string);
-    try testing.expectEqualStrings("tool_use", p2.value.object.get("k").?.string);
-
-    const d1 = p1.value.object.get("d").?.object;
-    const d2 = p2.value.object.get("d").?.object;
+    try testing.expectEqualStrings("tool_use_batch", p1.value.object.get("k").?.string);
+    const batch = p1.value.object.get("d").?.array.items;
+    try testing.expectEqual(@as(usize, 2), batch.len);
+    const d1 = batch[0].object;
+    const d2 = batch[1].object;
     try testing.expectEqualStrings("toolu_a", d1.get("id").?.string);
     try testing.expectEqualStrings("zts_expert_meta", d1.get("name").?.string);
     try testing.expectEqualStrings("toolu_b", d2.get("id").?.string);

@@ -14,6 +14,7 @@ const anthropic_client = @import("../providers/anthropic/client.zig");
 const openai_client = @import("../providers/openai/client.zig");
 const model_request = @import("../providers/model_request.zig");
 const context_budget = @import("../context_budget.zig");
+const compaction = @import("../compaction.zig");
 
 pub const Script = struct {
     provider: artifact.Provider,
@@ -51,6 +52,10 @@ pub const Client = struct {
         return .{ .context = self, .request_fn = requestFn };
     }
 
+    pub fn asSummarizer(self: *Client) compaction.Summarizer {
+        return .{ .context = self, .summarize_fn = summarizeFn };
+    }
+
     pub fn consumedCount(self: *const Client) usize {
         return self.cursor;
     }
@@ -84,35 +89,24 @@ pub const Client = struct {
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
     ) !loop.ModelCallResult {
+        return self.requestWithConfig(arena, self.request_config, transcript, extra_user_text);
+    }
+
+    fn requestWithConfig(
+        self: *Client,
+        arena: std.mem.Allocator,
+        request_config: model_request.Config,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+    ) !loop.ModelCallResult {
         self.last_mismatch = null;
         var snapshot = try model_request.createSnapshot(arena, .{
-            .config = self.request_config,
+            .config = request_config,
             .transcript = transcript,
             .extra_user_text = extra_user_text,
         });
         defer snapshot.deinit(arena);
-        // Every replay builds the exact provider body so request accounting is
-        // complete even when historical SSE checkpoints store no wire digest.
-        // Chat Completions providers additionally bind that body by hash.
-        var body = switch (self.script.provider) {
-            .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot),
-            .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, &snapshot),
-            .openai => try openai_client.buildRequestBodyFromSnapshot(arena, &snapshot),
-        };
-        try snapshot.completePreparation(body);
-        if (try snapshot.clampOutputToRemainingContext()) {
-            body = switch (self.script.provider) {
-                .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot),
-                .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, &snapshot),
-                .openai => try openai_client.buildRequestBodyFromSnapshot(arena, &snapshot),
-            };
-            try snapshot.completePreparation(body);
-        }
-        try snapshot.requireHardAdmission();
-        switch (self.script.provider) {
-            .local, .deepseek => snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body),
-            .anthropic, .openai => {},
-        }
+        _ = try prepareSnapshot(arena, &snapshot);
 
         const checkpoint = try self.validateSnapshot(&snapshot);
         const response = try self.responseFor(checkpoint);
@@ -140,6 +134,11 @@ pub const Client = struct {
             else => return self.failResponseFixture(.malformed),
         };
         const logical_input = try context_budget.normalizeLogicalInput(self.script.provider, result.usage);
+        if (checkpoint.normalized_input_tokens) |expected_input| {
+            if (logical_input != expected_input) {
+                return self.fail(.{ .normalized_input_mismatch = self.detailFor(.trace, checkpoint) });
+            }
+        }
         if (self.script.evidence_class == .empirical_model and logical_input > 0) {
             const budget = snapshot.budget orelse return error.IncompleteRequestPreparation;
             const epoch: context_budget.UsageEpoch = .{
@@ -183,6 +182,25 @@ pub const Client = struct {
         }
         self.cursor += 1;
         return result;
+    }
+
+    fn summarizeFn(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        summary_request: compaction.SummaryRequest,
+    ) anyerror!compaction.SummaryResponse {
+        const self: *Client = @ptrCast(@alignCast(context));
+        var transcript: transcript_mod.Transcript = .{};
+        defer transcript.deinit(arena);
+        try transcript.append(arena, .{ .user_text = summary_request.user_prompt });
+        var config = self.request_config;
+        config.system_prompt = summary_request.system_prompt;
+        config.tools_json = null;
+        config.max_output_tokens = summary_request.max_output_tokens;
+        config.purpose = .summarization;
+        config.cache_policy = .disabled;
+        const result = try self.requestWithConfig(arena, config, &transcript, null);
+        return .{ .response = result.reply.response, .usage = result.usage };
     }
 
     fn validateSnapshot(
@@ -247,8 +265,10 @@ pub const Client = struct {
             snapshot.wire_request_sha256,
             checkpoint.wire_request_sha256,
         );
-        if (item_count_differs or transcript_differs or transient_differs or wire_differs) {
-            // One mismatch kind covers four distinct inputs, and which one moved
+        const projection_differs = snapshot.projection_first_kept_entry_id !=
+            checkpoint.projection_first_kept_entry_id;
+        if (item_count_differs or transcript_differs or transient_differs or wire_differs or projection_differs) {
+            // One mismatch kind covers five distinct inputs, and which one moved
             // is the whole diagnosis: a differing item count is a transcript the
             // replay grew differently, while a differing wire digest with an
             // equal transcript is a request the client framed differently.
@@ -286,7 +306,23 @@ pub const Client = struct {
                     }
                 }
             }
+            if (projection_differs) {
+                std.debug.print(
+                    "[replay-detail]   projection cut {any} vs {any}\n",
+                    .{
+                        snapshot.projection_first_kept_entry_id,
+                        checkpoint.projection_first_kept_entry_id,
+                    },
+                );
+            }
             return self.fail(.{ .transcript_or_transient_prompt_mismatch = self.detailFor(.trace, checkpoint) });
+        }
+        if (checkpoint.request_budget) |expected_budget| {
+            const actual_budget = snapshot.budget orelse
+                return self.fail(.{ .request_budget_mismatch = self.detailFor(.trace, checkpoint) });
+            if (!requestBudgetEql(actual_budget, expected_budget)) {
+                return self.fail(.{ .request_budget_mismatch = self.detailFor(.trace, checkpoint) });
+            }
         }
         return checkpoint;
     }
@@ -356,6 +392,32 @@ pub const Client = struct {
     }
 };
 
+/// Complete the simulator's provider-neutral request preparation exactly once.
+/// Recorder tests use this same seam so capture and replay cannot drift on
+/// output clamping, hard admission, or Chat Completions wire hashing.
+pub fn prepareSnapshot(
+    arena: std.mem.Allocator,
+    snapshot: *model_request.ModelRequestSnapshot,
+) ![]const u8 {
+    var body = switch (snapshot.config.provider) {
+        .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, snapshot),
+        .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, snapshot),
+        .openai => try openai_client.buildRequestBodyFromSnapshot(arena, snapshot),
+    };
+    try snapshot.completePreparation(body);
+    if (try snapshot.clampOutputToRemainingContext()) {
+        body = switch (snapshot.config.provider) {
+            .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(arena, snapshot),
+            .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(arena, snapshot),
+            .openai => try openai_client.buildRequestBodyFromSnapshot(arena, snapshot),
+        };
+        try snapshot.completePreparation(body);
+    }
+    try snapshot.requireHardAdmission();
+    snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
+    return body;
+}
+
 /// A short, single-line window onto a tool payload. Diagnostics must not
 /// paste a whole tool result into the build log.
 fn boundedPrefix(text: []const u8) []const u8 {
@@ -368,5 +430,17 @@ fn optionalDigestEql(
     expected: ?artifact.Sha256Hex,
 ) bool {
     if (actual == null or expected == null) return actual == null and expected == null;
-    return std.mem.eql(u8, actual.?.slice(), expected.?.slice());
+    const actual_digest = actual orelse return false;
+    const expected_digest = expected orelse return false;
+    return std.mem.eql(u8, actual_digest.slice(), expected_digest.slice());
+}
+
+fn requestBudgetEql(
+    actual: context_budget.RequestBudget,
+    expected: context_budget.RequestBudget,
+) bool {
+    return std.mem.eql(u8, actual.estimator, expected.estimator) and
+        std.meta.eql(actual.bytes, expected.bytes) and
+        std.meta.eql(actual.tokens, expected.tokens) and
+        std.meta.eql(actual.limits, expected.limits);
 }

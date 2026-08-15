@@ -66,6 +66,7 @@ pub const DriveOptions = struct {
     goals: []const []const u8,
     budget: Budget = .{},
     events_path: ?[]const u8 = null,
+    journal_writer: ?*session_events.JournalWriter = null,
     policy_hash: []const u8 = "",
     /// Optional stable witness key. When set, the autoloop terminates
     /// `.achieved` as soon as no witness with this key remains, even
@@ -78,6 +79,27 @@ pub const DriveOptions = struct {
     /// boundary. Null disables cancellation.
     cancel: ?*const Cancel = null,
 };
+
+fn appendEvent(
+    allocator: std.mem.Allocator,
+    options: DriveOptions,
+    record: session_events.EventRecord,
+) !void {
+    if (options.journal_writer) |writer| return writer.appendEvent(allocator, record);
+    const path = options.events_path orelse return;
+    return session_events.appendEvent(allocator, path, record);
+}
+
+fn appendEntryEvent(
+    allocator: std.mem.Allocator,
+    options: DriveOptions,
+    entry_id: session_events.EntryId,
+    record: session_events.EventRecord,
+) !void {
+    if (options.journal_writer) |writer| return writer.appendEntryEvent(allocator, entry_id, null, record);
+    const path = options.events_path orelse return;
+    return session_events.appendEntryEvent(allocator, path, entry_id, null, record);
+}
 
 inline fn cancelRequested(options: DriveOptions) bool {
     if (options.cancel) |c| return c.requested();
@@ -255,8 +277,8 @@ fn finalize(
 
     const final_hash = session_state.lastPatchHash(transcript, options.file);
 
-    if (options.events_path) |path| {
-        try session_events.appendEvent(allocator, path, .{ .autoloop_outcome = .{
+    if (options.journal_writer != null or options.events_path != null) {
+        try appendEvent(allocator, options, .{ .autoloop_outcome = .{
             .verdict = verdict,
             .final_patch_hash = final_hash,
             .goals_met = met_buf.items,
@@ -750,8 +772,8 @@ fn applyPlans(
             .ui_payload = ui,
         } });
 
-        if (options.events_path) |path| {
-            try session_events.appendEntryEvent(allocator, path, transcript.entryIdAt(transcript.len() - 1), null, .{ .verified_patch = .{
+        if (options.journal_writer != null or options.events_path != null) {
+            try appendEntryEvent(allocator, options, transcript.entryIdAt(transcript.len() - 1), .{ .verified_patch = .{
                 .llm_text = summary,
                 .ui_payload = ui,
             } });
@@ -775,7 +797,7 @@ fn applyPlans(
             zts.file_io.writeFile(allocator, absolute, before) catch {
                 return error.FileWriteFailed;
             };
-            if (options.events_path) |path| {
+            if (options.journal_writer != null or options.events_path != null) {
                 const note = try std.fmt.allocPrint(
                     allocator,
                     "autoloop: plan {s} demoted a property; reverted {s} to the pre-patch snapshot.",
@@ -783,7 +805,7 @@ fn applyPlans(
                 );
                 defer allocator.free(note);
                 try transcript.append(allocator, .{ .system_note = note });
-                try session_events.appendEntryEvent(allocator, path, transcript.entryIdAt(transcript.len() - 1), null, .{ .system_note = note });
+                try appendEntryEvent(allocator, options, transcript.entryIdAt(transcript.len() - 1), .{ .system_note = note });
             }
             return .{ .applied = applied, .regression = true };
         }
@@ -908,8 +930,8 @@ fn emitWitnessReplaySummary(
     try transcript.entries.append(allocator, .{ .system_note = note });
     note_owned_by_transcript = true;
 
-    if (options.events_path) |path| {
-        try session_events.appendEntryEvent(allocator, path, transcript.entryIdAt(transcript.len() - 1), null, .{ .system_note = note });
+    if (options.journal_writer != null or options.events_path != null) {
+        try appendEntryEvent(allocator, options, transcript.entryIdAt(transcript.len() - 1), .{ .system_note = note });
     }
 }
 

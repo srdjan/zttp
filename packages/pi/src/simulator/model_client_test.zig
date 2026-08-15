@@ -3,14 +3,36 @@ const testing = std.testing;
 
 const artifact = @import("artifact.zig");
 const model_client = @import("model_client.zig");
+const compaction = @import("../compaction.zig");
 const local_client = @import("../providers/local/client.zig");
 const deepseek_client = @import("../providers/deepseek/client.zig");
 const chat_completions = @import("../providers/chat_completions.zig");
 const model_request = @import("../providers/model_request.zig");
+const models = @import("../providers/models.zig");
 const transcript_mod = @import("../transcript.zig");
 const turn = @import("../turn.zig");
 
 const openai_cassette = @embedFile("../providers/testdata/openai/chat_completion.jsonl");
+
+fn bindOpenAiCassette(
+    allocator: std.mem.Allocator,
+    request_sha256: model_request.Sha256Hex,
+) ![]u8 {
+    const newline = std.mem.indexOfScalar(u8, openai_cassette, '\n') orelse
+        return error.MalformedTestCassette;
+    if (newline == 0 or openai_cassette[newline - 1] != '}') {
+        return error.MalformedTestCassette;
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "{s},\"request_sha256\":\"{s}\"{s}",
+        .{
+            openai_cassette[0 .. newline - 1],
+            request_sha256.slice(),
+            openai_cassette[newline - 1 ..],
+        },
+    );
+}
 
 test "canonical request snapshot covers every model-visible input" {
     var transcript: transcript_mod.Transcript = .{};
@@ -79,6 +101,57 @@ test "canonical request snapshot covers every model-visible input" {
     try testing.expect(!snapshot.transcript_sha256.eql(changed_transcript.transcript_sha256));
 }
 
+test "canonical request snapshot records the active projection cut" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "old request" });
+    try transcript.append(testing.allocator, .{ .model_text = "retained response" });
+    try transcript.replaceProjection(testing.allocator, "validated summary", 2);
+
+    var snapshot = try model_request.createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .deepseek,
+            .model = deepseek_client.default_model,
+            .max_output_tokens = deepseek_client.default_max_tokens,
+            .stream = false,
+            .system_prompt = "persona",
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(?transcript_mod.EntryId, 2), snapshot.projection_first_kept_entry_id);
+    try testing.expectEqual(@as(usize, 2), snapshot.items.len);
+    try testing.expectEqual(model_request.ItemTag.compaction_summary, std.meta.activeTag(snapshot.items[0]));
+    try testing.expectEqual(model_request.ItemTag.model_text, std.meta.activeTag(snapshot.items[1]));
+}
+
+test "every provider preparation binds the exact serialized wire body" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "inspect handler.ts" });
+
+    const providers = [_]models.Provider{ .local, .anthropic, .openai, .deepseek };
+    for (providers) |provider| {
+        const model = models.defaultForProvider(provider);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var snapshot = try model_request.createSnapshot(arena.allocator(), .{
+            .config = .{
+                .provider = provider,
+                .model = model.id,
+                .max_output_tokens = model.request_policy.max_output_tokens,
+                .system_prompt = "persona",
+                .tools_json = "[]",
+            },
+            .transcript = &transcript,
+        });
+        const body = try model_client.prepareSnapshot(arena.allocator(), &snapshot);
+        const expected = model_request.Sha256Hex.fromRawBytes(body);
+        try testing.expect(snapshot.wire_request_sha256.?.eql(expected));
+    }
+}
+
 test "simulator client rejects a semantic mismatch without consuming the response" {
     var expected_transcript: transcript_mod.Transcript = .{};
     defer expected_transcript.deinit(testing.allocator);
@@ -97,23 +170,25 @@ test "simulator client rejects a semantic mismatch without consuming the respons
         .system_prompt = "persona",
         .tools_json = null,
     };
-    const expected = try model_request.createSnapshot(arena.allocator(), .{
+    var expected = try model_request.createSnapshot(arena.allocator(), .{
         .config = request_config,
         .transcript = &expected_transcript,
         .extra_user_text = null,
     });
+    _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
     const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
+    const bound_cassette = try bindOpenAiCassette(arena.allocator(), expected.wire_request_sha256.?);
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
         .turn_index = 0,
         .call_index = 0,
         .path = "responses/0.jsonl",
-        .sha256 = artifact.Sha256Hex.fromBytes(openai_cassette),
+        .sha256 = artifact.Sha256Hex.fromBytes(bound_cassette),
     }};
     const fixtures = [_]artifact.LoadedFixture{.{
         .role = .response,
         .path = "responses/0.jsonl",
-        .bytes = openai_cassette,
+        .bytes = bound_cassette,
     }};
     var client = model_client.Client.init(.{
         .provider = .openai,
@@ -161,6 +236,65 @@ test "simulator client rejects a semantic mismatch without consuming the respons
     try testing.expectEqual(@as(usize, 1), client.consumedCount());
 }
 
+test "simulator summarizer consumes a purpose-specific request checkpoint" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const request_config: model_request.Config = .{
+        .provider = .openai,
+        .model = "gpt-4o-mini",
+        .max_output_tokens = 8192,
+        .system_prompt = "normal persona",
+    };
+    const summary_request: compaction.SummaryRequest = .{
+        .system_prompt = "summary contract",
+        .user_prompt = "summarize this span",
+        .max_output_tokens = @as(u32, 512),
+    };
+    var summary_transcript: transcript_mod.Transcript = .{};
+    defer summary_transcript.deinit(allocator);
+    try summary_transcript.append(allocator, .{ .user_text = summary_request.user_prompt });
+    var summary_config = request_config;
+    summary_config.system_prompt = summary_request.system_prompt;
+    summary_config.tools_json = null;
+    summary_config.max_output_tokens = summary_request.max_output_tokens;
+    summary_config.purpose = .summarization;
+    summary_config.cache_policy = .disabled;
+    var snapshot = try model_request.createSnapshot(allocator, .{
+        .config = summary_config,
+        .transcript = &summary_transcript,
+    });
+    _ = try model_client.prepareSnapshot(allocator, &snapshot);
+    const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&snapshot)};
+    const bound_cassette = try bindOpenAiCassette(allocator, snapshot.wire_request_sha256.?);
+    const responses = [_]artifact.ResponseFixture{.{
+        .index = 0,
+        .turn_index = 0,
+        .call_index = 0,
+        .path = "responses/0.jsonl",
+        .sha256 = artifact.Sha256Hex.fromBytes(bound_cassette),
+    }};
+    const fixtures = [_]artifact.LoadedFixture{.{
+        .role = .response,
+        .path = "responses/0.jsonl",
+        .bytes = bound_cassette,
+    }};
+    var client = model_client.Client.init(.{
+        .provider = .openai,
+        .model = request_config.model,
+        .checkpoints = &checkpoints,
+        .responses = &responses,
+        .fixtures = &fixtures,
+    }, request_config);
+
+    const result = try client.asSummarizer().summarize(allocator, summary_request);
+    switch (result.response) {
+        .final_text => |text| try testing.expectEqualStrings("hello world", text),
+        else => return error.TestFailed,
+    }
+    try testing.expectEqual(@as(usize, 1), client.consumedCount());
+}
+
 test "local replay rejects a wire framing mismatch before releasing a response" {
     var transcript: transcript_mod.Transcript = .{};
     defer transcript.deinit(testing.allocator);
@@ -189,7 +323,6 @@ test "local replay rejects a wire framing mismatch before releasing a response" 
     expected.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
 
     var checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
-    checkpoints[0].wire_request_sha256 = .{ .bytes = expected.wire_request_sha256.?.bytes };
     const response =
         "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
     const cassette = try std.fmt.allocPrint(
@@ -279,7 +412,6 @@ test "every Chat Completions provider rebuilds its wire digest on replay" {
         expected.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
 
         var checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
-        checkpoints[0].wire_request_sha256 = .{ .bytes = expected.wire_request_sha256.?.bytes };
         const response =
             "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
         const cassette = try std.fmt.allocPrint(
@@ -320,6 +452,122 @@ test "every Chat Completions provider rebuilds its wire digest on replay" {
     }
 }
 
+test "simulator checkpoints bind request budgets normalized usage and projection identity" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "old request" });
+    try transcript.append(testing.allocator, .{ .model_text = "retained response" });
+    try transcript.replaceProjection(testing.allocator, "validated summary", 2);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const request_config: model_request.Config = .{
+        .provider = .deepseek,
+        .model = deepseek_client.default_model,
+        .max_output_tokens = deepseek_client.default_max_tokens,
+        .stream = false,
+        .system_prompt = "persona",
+        .tools_json = "[]",
+    };
+    var expected = try model_request.createSnapshot(arena.allocator(), .{
+        .config = request_config,
+        .transcript = &transcript,
+    });
+    _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
+
+    var checkpoint = checkpointFromSnapshot(&expected);
+    checkpoint.normalized_input_tokens = 9;
+    const response =
+        "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]," ++
+        "\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1}}";
+    const cassette = try std.fmt.allocPrint(
+        testing.allocator,
+        "{{\"v\":1,\"provider\":\"deepseek\",\"stream\":false," ++
+            "\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n",
+        .{ expected.wire_request_sha256.?.slice(), std.json.fmt(response, .{}) },
+    );
+    defer testing.allocator.free(cassette);
+    const responses = [_]artifact.ResponseFixture{.{
+        .index = 0,
+        .turn_index = 0,
+        .call_index = 0,
+        .path = "responses/0.jsonl",
+        .sha256 = artifact.Sha256Hex.fromBytes(cassette),
+    }};
+    const fixtures = [_]artifact.LoadedFixture{.{
+        .role = .response,
+        .path = "responses/0.jsonl",
+        .bytes = cassette,
+    }};
+
+    {
+        const checkpoints = [_]artifact.ModelCheckpoint{checkpoint};
+        var client = model_client.Client.init(.{
+            .provider = .deepseek,
+            .model = request_config.model,
+            .checkpoints = &checkpoints,
+            .responses = &responses,
+            .fixtures = &fixtures,
+        }, request_config);
+        const result = try client.asModelClient().request(arena.allocator(), &transcript, null);
+        try testing.expectEqualStrings("ok", result.reply.response.final_text);
+    }
+
+    {
+        var changed = checkpoint;
+        changed.projection_first_kept_entry_id = 1;
+        const checkpoints = [_]artifact.ModelCheckpoint{changed};
+        var client = model_client.Client.init(.{
+            .provider = .deepseek,
+            .model = request_config.model,
+            .checkpoints = &checkpoints,
+            .responses = &responses,
+            .fixtures = &fixtures,
+        }, request_config);
+        try testing.expectError(
+            error.ReplayMismatch,
+            client.asModelClient().request(arena.allocator(), &transcript, null),
+        );
+        try testing.expect(std.meta.activeTag(client.lastMismatch().?) == .transcript_or_transient_prompt_mismatch);
+    }
+
+    {
+        var changed = checkpoint;
+        changed.request_budget.?.tokens.total += 1;
+        const checkpoints = [_]artifact.ModelCheckpoint{changed};
+        var client = model_client.Client.init(.{
+            .provider = .deepseek,
+            .model = request_config.model,
+            .checkpoints = &checkpoints,
+            .responses = &responses,
+            .fixtures = &fixtures,
+        }, request_config);
+        try testing.expectError(
+            error.ReplayMismatch,
+            client.asModelClient().request(arena.allocator(), &transcript, null),
+        );
+        try testing.expect(std.meta.activeTag(client.lastMismatch().?) == .request_budget_mismatch);
+    }
+
+    {
+        var changed = checkpoint;
+        changed.normalized_input_tokens = 10;
+        const checkpoints = [_]artifact.ModelCheckpoint{changed};
+        var client = model_client.Client.init(.{
+            .provider = .deepseek,
+            .model = request_config.model,
+            .checkpoints = &checkpoints,
+            .responses = &responses,
+            .fixtures = &fixtures,
+        }, request_config);
+        try testing.expectError(
+            error.ReplayMismatch,
+            client.asModelClient().request(arena.allocator(), &transcript, null),
+        );
+        try testing.expect(std.meta.activeTag(client.lastMismatch().?) == .normalized_input_mismatch);
+    }
+}
+
 test "adversarial request mutations fail before releasing a response" {
     var expected_transcript: transcript_mod.Transcript = .{};
     defer expected_transcript.deinit(testing.allocator);
@@ -340,10 +588,11 @@ test "adversarial request mutations fail before releasing a response" {
         .system_prompt = "persona",
         .tools_json = "[{\"name\":\"workspace_read\"}]",
     };
-    const expected = try model_request.createSnapshot(arena.allocator(), .{
+    var expected = try model_request.createSnapshot(arena.allocator(), .{
         .config = request_config,
         .transcript = &expected_transcript,
     });
+    _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
     const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
@@ -431,11 +680,18 @@ test "simulator client maps malformed and unreadable response fixtures without a
         .max_output_tokens = 8192,
         .system_prompt = "persona",
     };
-    const expected = try model_request.createSnapshot(arena.allocator(), .{
+    var expected = try model_request.createSnapshot(arena.allocator(), .{
         .config = request_config,
         .transcript = &transcript,
     });
+    _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
     const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
+    const malformed_sse = try std.fmt.allocPrint(
+        arena.allocator(),
+        "{{\"v\":1,\"provider\":\"openai\",\"stream\":true," ++
+            "\"request_sha256\":\"{s}\"}}\n{{\"sse\":\"not an SSE event\"}}",
+        .{expected.wire_request_sha256.?.slice()},
+    );
     const cases = [_]struct {
         bytes: []const u8,
         failure: artifact.ResponseFixtureFailure,
@@ -446,10 +702,7 @@ test "simulator client maps malformed and unreadable response fixtures without a
             .failure = .unreadable,
         },
         .{
-            .bytes =
-            \\{"v":1,"provider":"openai","stream":true}
-            \\{"sse":"not an SSE event"}
-            ,
+            .bytes = malformed_sse,
             .failure = .malformed,
         },
     };
@@ -503,6 +756,12 @@ fn checkpointFromSnapshot(snapshot: *const model_request.ModelRequestSnapshot) a
             .{ .bytes = digest.bytes }
         else
             null,
+        .wire_request_sha256 = if (snapshot.wire_request_sha256) |digest|
+            .{ .bytes = digest.bytes }
+        else
+            null,
+        .request_budget = snapshot.budget,
+        .projection_first_kept_entry_id = snapshot.projection_first_kept_entry_id,
     };
 }
 

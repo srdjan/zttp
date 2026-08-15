@@ -2,12 +2,33 @@ const std = @import("std");
 const testing = std.testing;
 
 const artifact = @import("artifact.zig");
+const model_client = @import("model_client.zig");
 const model_request = @import("../providers/model_request.zig");
 const registry_mod = @import("../registry/registry.zig");
 const runner = @import("runner.zig");
 const transcript_mod = @import("../transcript.zig");
 
 const openai_cassette = @embedFile("../providers/testdata/openai/chat_completion.jsonl");
+
+fn bindOpenAiCassette(
+    allocator: std.mem.Allocator,
+    request_sha256: model_request.Sha256Hex,
+) ![]u8 {
+    const newline = std.mem.indexOfScalar(u8, openai_cassette, '\n') orelse
+        return error.MalformedTestCassette;
+    if (newline == 0 or openai_cassette[newline - 1] != '}') {
+        return error.MalformedTestCassette;
+    }
+    return std.fmt.allocPrint(
+        allocator,
+        "{s},\"request_sha256\":\"{s}\"{s}",
+        .{
+            openai_cassette[0 .. newline - 1],
+            request_sha256.slice(),
+            openai_cassette[newline - 1 ..],
+        },
+    );
+}
 
 fn zeroDigest() artifact.Sha256Hex {
     return .{ .bytes = [_]u8{'0'} ** 64 };
@@ -26,16 +47,26 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
     try expected_transcript.append(testing.allocator, .{ .user_text = "hello" });
     var snapshot_arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer snapshot_arena.deinit();
-    const first_snapshot = try model_request.createSnapshot(snapshot_arena.allocator(), .{
+    var first_snapshot = try model_request.createSnapshot(snapshot_arena.allocator(), .{
         .config = request_config,
         .transcript = &expected_transcript,
     });
+    _ = try model_client.prepareSnapshot(snapshot_arena.allocator(), &first_snapshot);
     try expected_transcript.append(testing.allocator, .{ .model_text = "hello world" });
     try expected_transcript.append(testing.allocator, .{ .user_text = "again" });
-    const second_snapshot = try model_request.createSnapshot(snapshot_arena.allocator(), .{
+    var second_snapshot = try model_request.createSnapshot(snapshot_arena.allocator(), .{
         .config = request_config,
         .transcript = &expected_transcript,
     });
+    _ = try model_client.prepareSnapshot(snapshot_arena.allocator(), &second_snapshot);
+    const first_cassette = try bindOpenAiCassette(
+        snapshot_arena.allocator(),
+        first_snapshot.wire_request_sha256.?,
+    );
+    const second_cassette = try bindOpenAiCassette(
+        snapshot_arena.allocator(),
+        second_snapshot.wire_request_sha256.?,
+    );
 
     const workspace_bytes = "keep these exact bytes\n";
     const checkpoints = [_]artifact.ModelCheckpoint{
@@ -47,6 +78,9 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
             .transcript_sha256 = .{ .bytes = first_snapshot.transcript_sha256.bytes },
             .request_context_sha256 = .{ .bytes = first_snapshot.request_context_sha256.bytes },
             .transient_user_text_sha256 = null,
+            .wire_request_sha256 = .{ .bytes = first_snapshot.wire_request_sha256.?.bytes },
+            .request_budget = first_snapshot.budget,
+            .projection_first_kept_entry_id = first_snapshot.projection_first_kept_entry_id,
         },
         .{
             .index = 1,
@@ -56,6 +90,9 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
             .transcript_sha256 = .{ .bytes = second_snapshot.transcript_sha256.bytes },
             .request_context_sha256 = .{ .bytes = second_snapshot.request_context_sha256.bytes },
             .transient_user_text_sha256 = null,
+            .wire_request_sha256 = .{ .bytes = second_snapshot.wire_request_sha256.?.bytes },
+            .request_budget = second_snapshot.budget,
+            .projection_first_kept_entry_id = second_snapshot.projection_first_kept_entry_id,
         },
     };
     const responses = [_]artifact.ResponseFixture{
@@ -64,14 +101,14 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
             .turn_index = 0,
             .call_index = 0,
             .path = "responses/0.jsonl",
-            .sha256 = artifact.Sha256Hex.fromBytes(openai_cassette),
+            .sha256 = artifact.Sha256Hex.fromBytes(first_cassette),
         },
         .{
             .index = 1,
             .turn_index = 1,
             .call_index = 0,
             .path = "responses/1.jsonl",
-            .sha256 = artifact.Sha256Hex.fromBytes(openai_cassette),
+            .sha256 = artifact.Sha256Hex.fromBytes(second_cassette),
         },
     };
     const workspace = [_]artifact.WorkspaceFixture{.{
@@ -143,8 +180,8 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
         },
     };
     const fixtures = [_]artifact.LoadedFixture{
-        .{ .role = .response, .path = "responses/0.jsonl", .bytes = openai_cassette },
-        .{ .role = .response, .path = "responses/1.jsonl", .bytes = openai_cassette },
+        .{ .role = .response, .path = "responses/0.jsonl", .bytes = first_cassette },
+        .{ .role = .response, .path = "responses/1.jsonl", .bytes = second_cassette },
         .{ .role = .initial_workspace, .path = "initial/handler.ts", .bytes = workspace_bytes },
         .{ .role = .turn_workspace, .path = "turns/0/handler.ts", .bytes = workspace_bytes },
         .{ .role = .expected_workspace, .path = "expected/handler.ts", .bytes = workspace_bytes },

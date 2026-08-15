@@ -95,6 +95,13 @@ pub fn buildRequestBodyFromSnapshot(
                 try writer.writeByte(',');
                 try writeMessage(writer, "user", body);
             },
+            .compaction_summary => |body| {
+                if (group_items.len != 1) return error.InvalidSnapshot;
+                try writer.writeByte(',');
+                try writeMessage(writer, "user", model_request.compaction_summary_marker);
+                try writer.writeByte(',');
+                try writeMessage(writer, "user", body);
+            },
             .tool_use => {
                 try writer.writeAll(",{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[");
                 for (group_items, 0..) |item, index| {

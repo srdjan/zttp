@@ -10,6 +10,7 @@ const runner_mod = @import("runner.zig");
 const capture_sink = @import("../providers/capture_sink.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
+const model_client = @import("model_client.zig");
 const local_client = @import("../providers/local/client.zig");
 const model_request = @import("../providers/model_request.zig");
 const loop = @import("../loop.zig");
@@ -203,6 +204,7 @@ const CapturingClient = struct {
             .extra_user_text = extra_user_text,
         });
         defer snapshot.deinit(arena);
+        _ = try model_client.prepareSnapshot(arena, &snapshot);
         try self.capture.record(&snapshot, openai_text_response);
         const bytes = try cassette_record.serializeCassette(arena, openai_text_response, .{
             .provider = .openai,
@@ -239,6 +241,7 @@ const LegacyCapturingClient = struct {
             .extra_user_text = extra_user_text,
         });
         defer snapshot.deinit(arena);
+        _ = try model_client.prepareSnapshot(arena, &snapshot);
         const cassette = try cassette_client.loadCassetteFromBytes(arena, self.steps[self.cursor], null);
         try self.capture.record(&snapshot, cassette.body);
         const result = try cassette_client.replay(arena, cassette);
@@ -477,6 +480,11 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
                 flow_case.manifest.turns[0].first_draft_veto_pass,
             );
             try testing.expectEqual(@as(usize, 2), flow_case.trace.model_calls.len);
+            for (flow_case.trace.model_calls) |checkpoint| {
+                try testing.expect(checkpoint.request_budget != null);
+                try testing.expectEqual(@as(?u64, 1), checkpoint.normalized_input_tokens);
+                try testing.expect(checkpoint.request_budget.?.bytes.wire > 0);
+            }
             var runner = runner_mod.Runner.init(testing.allocator, flow_case, &registry, request_config);
             const replay = try runner.run();
             try testing.expectEqual(@as(usize, 2), replay.turns);

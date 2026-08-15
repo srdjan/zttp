@@ -53,6 +53,7 @@ pub const continuation_prefixes = [_][]const u8{
 /// Opening words of the tool result the loop writes when the veto rejects a
 /// draft. Held against `loop.veto_reject_preamble` by the same gate.
 pub const veto_reject_preamble = "The compiler rejected this edit.";
+pub const compaction_summary_marker = "[zttp compaction summary v1]";
 
 fn isContinuation(text: []const u8) bool {
     for (continuation_prefixes) |prefix| {
@@ -101,12 +102,22 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
         }
 
         if (isUserMessage(item)) {
-            const text = try readInputText(item);
+            const message = try readInputText(item);
+            if (message.compaction_summary) {
+                if (originalRequestFromSummary(message.text)) |original_request| {
+                    ask = original_request;
+                    step_index = 0;
+                    source = null;
+                    last_output = null;
+                    rejected_drafts = 0;
+                }
+                continue;
+            }
             // The workflow note and the loop's retry messages ride along as
             // further user messages on the same turn, so none of them may reset
             // the turn they belong to.
-            if (!isContinuation(text)) {
-                ask = text;
+            if (!isContinuation(message.text)) {
+                ask = message.text;
                 step_index = 0;
                 source = null;
                 last_output = null;
@@ -129,9 +140,15 @@ fn isUserMessage(item: std.json.ObjectMap) bool {
     return role == .string and std.mem.eql(u8, role.string, "user");
 }
 
-fn readInputText(item: std.json.ObjectMap) ![]const u8 {
+const InputText = struct {
+    text: []const u8,
+    compaction_summary: bool = false,
+};
+
+fn readInputText(item: std.json.ObjectMap) !InputText {
     const content_value = item.get("content") orelse return ParseError.InvalidRequest;
     if (content_value != .array) return ParseError.InvalidRequest;
+    var first_text: ?[]const u8 = null;
     for (content_value.array.items) |part_value| {
         if (part_value != .object) return ParseError.InvalidRequest;
         const part = part_value.object;
@@ -140,9 +157,26 @@ fn readInputText(item: std.json.ObjectMap) ![]const u8 {
         if (!std.mem.eql(u8, type_value.string, "input_text")) continue;
         const text_value = part.get("text") orelse return ParseError.InvalidRequest;
         if (text_value != .string) return ParseError.InvalidRequest;
-        return text_value.string;
+        if (first_text == null) {
+            first_text = text_value.string;
+            continue;
+        }
+        const first = first_text orelse return ParseError.InvalidRequest;
+        if (std.mem.eql(u8, first, compaction_summary_marker)) {
+            return .{ .text = text_value.string, .compaction_summary = true };
+        }
     }
-    return ParseError.InvalidRequest;
+    return .{ .text = first_text orelse return ParseError.InvalidRequest };
+}
+
+fn originalRequestFromSummary(summary: []const u8) ?[]const u8 {
+    const heading = "## Original Request";
+    const start = std.mem.lastIndexOf(u8, summary, heading) orelse return null;
+    const content_start = start + heading.len;
+    const end = std.mem.indexOfPos(u8, summary, content_start, "\n## Early Progress") orelse
+        summary.len;
+    const request = std.mem.trim(u8, summary[content_start..end], " \t\r\n");
+    return if (request.len == 0) null else request;
 }
 
 fn readSource(arena: std.mem.Allocator, output: []const u8) !?[]const u8 {
@@ -179,6 +213,29 @@ test "stand-in request parsing recovers the ask, source, and stateless step inde
     try testing.expectEqualStrings("Add a GET /health route to handler.ts", parsed.ask);
     try testing.expectEqual(@as(usize, 2), parsed.step_index);
     try testing.expectEqualStrings("function handler() {}", parsed.source.?);
+}
+
+test "stand-in request parsing restores a split-turn ask from compacted context" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const body =
+        \\{"model":"standin","input":[
+        \\  {"role":"user","content":[
+        \\    {"type":"input_text","text":"[zttp compaction summary v1]"},
+        \\    {"type":"input_text","text":"## Goal\nOld SQLite work\n\n## Original Request\nAdd a GET /health route to handler.ts\n\n## Early Progress\nRead handler\n\n## Context for Suffix\nContinue verification"}
+        \\  ]},
+        \\  {"type":"function_call_output","call_id":"call-0","output":"{\"ok\":true,\"complete\":true,\"offset\":0,\"content\":\"function handler() {}\"}"}
+        \\]}
+    ;
+
+    const parsed = try parse(arena.allocator(), body);
+    try testing.expectEqualStrings("Add a GET /health route to handler.ts", parsed.ask);
+    try testing.expectEqual(@as(usize, 1), parsed.step_index);
+    try testing.expectEqualStrings(
+        "function handler() {}",
+        parsed.source orelse return error.TestExpectedSource,
+    );
 }
 
 test "stand-in request parsing scopes the turn to the latest ask" {

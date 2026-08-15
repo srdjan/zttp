@@ -315,6 +315,7 @@ pub const AgentSession = struct {
     session_dir: ?[]u8 = null,
     events_path: ?[]u8 = null,
     meta_path: ?[]u8 = null,
+    journal_writer: ?session_events.JournalWriter = null,
     persist_opts: persister.AppendOptions = .{},
     /// /resume sets this; the first `runOneTurn` after resume passes
     /// `replay_mode = true` to the loop and then clears the flag.
@@ -336,6 +337,11 @@ pub const AgentSession = struct {
     overflow_recovery_used: bool = false,
     compaction_enabled: bool = true,
     compaction_settings: compaction.Settings = .{},
+    /// Provider-neutral request identity used by deterministic replay and
+    /// other injected clients that still need the production admission and
+    /// compaction controller.
+    request_config_override: ?model_request.Config = null,
+    request_deadline_ms: ?i64 = null,
     compaction_observer: ?CompactionObserver = null,
     compaction_sequence: u64 = 0,
     last_compaction: ?CompactedDetails = null,
@@ -349,6 +355,19 @@ pub const AgentSession = struct {
 
     pub fn initStub() AgentSession {
         return .{};
+    }
+
+    pub fn initControlled(
+        allocator: std.mem.Allocator,
+        model: *const models_registry.Model,
+        config: model_request.Config,
+    ) AgentSession {
+        var session = AgentSession.initStub();
+        session.session_allocator = allocator;
+        session.resolved_provider = model.provider;
+        session.resolved_model = model;
+        session.request_config_override = config;
+        return session;
     }
 
     /// Constructs a session whose backend is a real Anthropic client.
@@ -452,8 +471,9 @@ pub const AgentSession = struct {
         var base_url_owned: ?[]u8 = null;
         errdefer if (base_url_owned) |s| allocator.free(s);
         if (override) |ep| {
-            base_url_owned = try allocator.dupe(u8, ep.base_url);
-            config.base_url = base_url_owned.?;
+            const owned = try allocator.dupe(u8, ep.base_url);
+            base_url_owned = owned;
+            config.base_url = owned;
         }
 
         return .{
@@ -511,6 +531,7 @@ pub const AgentSession = struct {
     }
 
     pub fn deinit(self: *AgentSession, allocator: std.mem.Allocator) void {
+        if (self.journal_writer) |*writer| writer.deinit();
         self.transcript.deinit(allocator);
         if (self.system_prompt_owned) |s| allocator.free(s);
         if (self.tools_json_owned) |json| allocator.free(json);
@@ -530,7 +551,11 @@ pub const AgentSession = struct {
 
     pub fn modelClient(self: *AgentSession) loop.ModelClient {
         if (self.backend == .stub) return self.rawModelClient();
-        return .{ .context = self, .request_fn = requestNormal };
+        return .{
+            .context = self,
+            .request_fn = requestNormal,
+            .set_deadline_fn = setRequestDeadline,
+        };
     }
 
     fn rawModelClient(self: *AgentSession) loop.ModelClient {
@@ -560,6 +585,25 @@ pub const AgentSession = struct {
             @constCast(transcript),
             extra_user_text,
         );
+    }
+
+    fn setRequestDeadline(context: *anyopaque, deadline_ms: ?i64) void {
+        const self: *AgentSession = @ptrCast(@alignCast(context));
+        self.request_deadline_ms = deadline_ms;
+    }
+
+    fn prepareProviderCall(self: *AgentSession) !void {
+        const deadline = self.request_deadline_ms orelse return;
+        const now_ms: i64 = @intCast((zts.monotonicNowNs() catch 0) / 1_000_000);
+        if (now_ms >= deadline) return error.RequestTimedOut;
+        const remaining: u64 = @intCast(deadline - now_ms);
+        switch (self.backend) {
+            .stub => {},
+            .local => |*client| client.config.request_timeout_ms = remaining,
+            .anthropic => |*client| client.config.request_timeout_ms = remaining,
+            .openai => |*client| client.config.request_timeout_ms = remaining,
+            .deepseek => |*client| client.config.request_timeout_ms = remaining,
+        }
     }
 
     pub fn summarizer(self: *AgentSession) ?compaction.Summarizer {
@@ -663,6 +707,20 @@ pub const AgentSession = struct {
             .reserve_tokens = self.compaction_settings.reserve_tokens,
             .keep_recent_tokens = self.compaction_settings.keep_recent_tokens,
         }, model);
+        switch (self.backend) {
+            .stub => {},
+            else => {
+                var next_request_config = try normalRequestConfig(self);
+                next_request_config.model = model.id;
+                next_request_config.max_output_tokens = model.request_policy.max_output_tokens;
+                try validateCompactionCapacityForConfig(
+                    allocator,
+                    self.compaction_settings,
+                    model,
+                    next_request_config,
+                );
+            },
+        }
         const backend_matches = switch (self.backend) {
             .local => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
             .anthropic => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
@@ -695,10 +753,32 @@ pub const AgentSession = struct {
     /// turns, so calling it from a session-end path is always safe.
     pub fn writeSessionSummary(self: *AgentSession, allocator: std.mem.Allocator) void {
         if (self.metrics.turn_count == 0) return;
-        const path = self.events_path orelse return;
-        session_events.appendEvent(allocator, path, .{
+        self.appendPersistedEvent(allocator, .{
             .session_summary = self.metrics.summary(),
         }) catch {};
+    }
+
+    pub fn appendPersistedEntry(
+        self: *AgentSession,
+        allocator: std.mem.Allocator,
+        entry_id: transcript_mod.EntryId,
+        entry: *const transcript_mod.OwnedEntry,
+    ) !void {
+        if (self.journal_writer) |*writer| {
+            return persister.appendEntryToWriter(allocator, writer, entry_id, entry, self.persist_opts);
+        }
+        const path = self.events_path orelse return error.MissingSessionPath;
+        return persister.appendEntry(allocator, path, entry_id, entry, self.persist_opts);
+    }
+
+    pub fn appendPersistedEvent(
+        self: *AgentSession,
+        allocator: std.mem.Allocator,
+        record: session_events.EventRecord,
+    ) !void {
+        if (self.journal_writer) |*writer| return writer.appendEvent(allocator, record);
+        const path = self.events_path orelse return error.MissingSessionPath;
+        return session_events.appendEvent(allocator, path, record);
     }
 };
 
@@ -714,7 +794,7 @@ pub fn initFromEnvWithSessionConfig(
     registry: ?*const Registry,
     config: SessionConfig,
 ) !AgentSession {
-    return initFromEnvWithPreparedResume(allocator, registry, config, null);
+    return initFromEnvWithPreparedResume(allocator, registry, config, null, null);
 }
 
 fn initFromEnvWithPreparedResume(
@@ -722,7 +802,10 @@ fn initFromEnvWithPreparedResume(
     registry: ?*const Registry,
     config: SessionConfig,
     prepared_resume: ?*const PreparedResume,
+    transferred_writer: ?session_events.JournalWriter,
 ) !AgentSession {
+    var writer_lease = transferred_writer;
+    defer if (writer_lease) |*writer| writer.deinit();
     std.debug.assert(!(config.resume_latest and config.session_id != null));
     std.debug.assert(!(config.fork_session_id != null and config.resume_latest));
     std.debug.assert(!(config.fork_session_id != null and config.session_id != null));
@@ -927,15 +1010,23 @@ fn initFromEnvWithPreparedResume(
 
     const dir = try session_paths.sessionDir(allocator, sid);
     session.session_dir = dir;
-    try session_paths.writeWorkspacePointer(allocator, dir, realpath);
-
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, dir);
     session.events_path = try std.fs.path.join(allocator, &.{ dir, "events.jsonl" });
     session.meta_path = try std.fs.path.join(allocator, &.{ dir, "meta.json" });
     const events_path = session.events_path orelse return error.MissingSessionPath;
     const meta_path = session.meta_path orelse return error.MissingSessionPath;
-    // A successfully created session is resumable even before its first turn.
-    // Forking an empty transcript likewise needs a real, empty event log.
-    if (!resumed) try zts.file_io.writeFile(allocator, events_path, "");
+    // Claim the journal before publishing any session files. This prevents two
+    // first launches with the same explicit ID from both creating or
+    // truncating the journal.
+    if (writer_lease) |writer| {
+        session.journal_writer = writer;
+        writer_lease = null;
+    } else if (resumed) {
+        session.journal_writer = try session_events.JournalWriter.openExisting(allocator, events_path);
+    } else {
+        session.journal_writer = try session_events.JournalWriter.open(allocator, events_path);
+    }
+    try session_paths.writeWorkspacePointer(allocator, dir, realpath);
 
     const current_hash_bytes = expert_meta.compute().policy_hash;
     const current_hash = current_hash_bytes[0..];
@@ -980,11 +1071,13 @@ fn initFromEnvWithPreparedResume(
         defer allocator.free(src_dir);
         const src_events = try std.fs.path.join(allocator, &.{ src_dir, "events.jsonl" });
         defer allocator.free(src_events);
-        const tr = try reconstructor.reconstructTranscript(allocator, src_events, null);
+        try session_events.copyJournal(allocator, src_events, events_path);
+        const destination_writer = if (session.journal_writer) |*writer| writer else return error.MissingJournalWriter;
+        try destination_writer.refresh(allocator, events_path);
+        const tr = try reconstructor.reconstructTranscript(allocator, events_path, null);
         session.transcript.deinit(allocator);
         session.transcript = tr;
         session.checkpoint_generation = @intFromBool(tr.projection != null);
-        try session_events.copyJournal(allocator, src_events, events_path);
         session.last_persisted_len = session.transcript.len();
         try session_events.writeMeta(allocator, meta_path, .{
             .session_id = sid,
@@ -1082,13 +1175,11 @@ fn injectDriftNote(
         errdefer allocator.free(note);
         try session.transcript.entries.append(allocator, .{ .system_note = note });
 
-        if (session.events_path) |path| {
-            try persister.appendEntry(
+        if (session.events_path != null) {
+            try session.appendPersistedEntry(
                 allocator,
-                path,
                 session.transcript.entryIdAt(session.transcript.entries.items.len - 1),
                 &session.transcript.entries.items[session.transcript.entries.items.len - 1],
-                session.persist_opts,
             );
             session.last_persisted_len = session.transcript.len();
         }
@@ -1195,6 +1286,9 @@ pub fn runOneTurnWithClient(
     user_text: []const u8,
     approval_fn: ?loop.ApprovalFn,
 ) ![]u8 {
+    if (session.journal_writer) |writer| {
+        if (writer.poisoned) return error.JournalWriterPoisoned;
+    }
     const replay = session.replay_next_turn;
     session.replay_next_turn = false;
 
@@ -1210,20 +1304,28 @@ pub fn runOneTurnWithClient(
             .max_attempts = loop.interactive_max_attempts,
         },
     ) catch |err| {
-        if (session.events_path) |path| {
+        if (session.events_path != null) {
+            var persistence_failure: ?anyerror = null;
             const entries = session.transcript.entries.items;
-            while (session.last_persisted_len < entries.len) : (session.last_persisted_len += 1) {
-                persister.appendEntry(
+            while (session.last_persisted_len < entries.len) {
+                session.appendPersistedEntry(
                     allocator,
-                    path,
                     session.transcript.entryIdAt(session.last_persisted_len),
                     &entries[session.last_persisted_len],
-                    session.persist_opts,
-                ) catch {};
+                ) catch |persist_err| {
+                    persistence_failure = persist_err;
+                    break;
+                };
+                session.last_persisted_len += 1;
             }
-            session_events.appendEvent(allocator, path, .{ .turn_end = .{
-                .reason = .error_exit,
-            } }) catch {};
+            if (persistence_failure == null) {
+                session.appendPersistedEvent(allocator, .{ .turn_end = .{
+                    .reason = .error_exit,
+                } }) catch |persist_err| {
+                    persistence_failure = persist_err;
+                };
+            }
+            if (persistence_failure) |persist_err| return persist_err;
         }
         return err;
     };
@@ -1232,20 +1334,19 @@ pub fn runOneTurnWithClient(
     const tr = &session.transcript;
     std.debug.assert(tr.len() >= 1);
 
-    if (session.events_path) |path| {
+    if (session.events_path != null) {
         const entries = tr.entries.items;
-        while (session.last_persisted_len < entries.len) : (session.last_persisted_len += 1) {
-            try persister.appendEntry(
+        while (session.last_persisted_len < entries.len) {
+            try session.appendPersistedEntry(
                 allocator,
-                path,
                 tr.entryIdAt(session.last_persisted_len),
                 &entries[session.last_persisted_len],
-                session.persist_opts,
             );
+            session.last_persisted_len += 1;
         }
-        session_events.appendEvent(allocator, path, .{ .turn_end = .{
+        try session.appendPersistedEvent(allocator, .{ .turn_end = .{
             .reason = turn_result.end_reason,
-        } }) catch {}; // best-effort: a log write failure must not crash the turn
+        } });
     }
 
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
@@ -1430,21 +1531,23 @@ fn compactTranscriptDetailed(
             request,
         ) catch |err| return .{ .failed = err };
         summary_usage.add(response.usage);
-        regular_summary = switch (response.response) {
+        const validated_summary = switch (response.response) {
             .final_text => |text| text,
             .tool_calls => return .{ .failed = error.SummaryReturnedToolCall },
             .edit => return .{ .failed = error.SummaryReturnedEdit },
         };
-        compaction.validateRegularSummary(regular_summary.?) catch |err| return .{ .failed = err };
+        compaction.validateRegularSummary(validated_summary) catch |err| return .{ .failed = err };
+        regular_summary = validated_summary;
     }
 
     var prefix_summary: ?[]const u8 = null;
     if (ready.prefix_start) |prefix_start| {
+        const prefix_end = ready.prefix_end orelse return .{ .failed = error.InvalidCompactionSpan };
         const conversation = try compaction.serializeSpan(
             temporary,
             tr,
             prefix_start,
-            ready.prefix_end.?,
+            prefix_end,
         );
         const prompt = try compaction.buildPrefixPrompt(temporary, conversation, focus);
         const request: compaction.SummaryRequest = .{
@@ -1460,12 +1563,13 @@ fn compactTranscriptDetailed(
             request,
         ) catch |err| return .{ .failed = err };
         summary_usage.add(response.usage);
-        prefix_summary = switch (response.response) {
+        const validated_summary = switch (response.response) {
             .final_text => |text| text,
             .tool_calls => return .{ .failed = error.SummaryReturnedToolCall },
             .edit => return .{ .failed = error.SummaryReturnedEdit },
         };
-        compaction.validatePrefixSummary(prefix_summary.?) catch |err| return .{ .failed = err };
+        compaction.validatePrefixSummary(validated_summary) catch |err| return .{ .failed = err };
+        prefix_summary = validated_summary;
     }
 
     const summary = try compaction.assembleSummary(
@@ -1492,17 +1596,15 @@ fn compactTranscriptDetailed(
     }
 
     const persistent_transcript = tr == &session.transcript;
-    if (persistent_transcript) if (session.events_path) |path| {
+    if (persistent_transcript and session.events_path != null) {
         while (session.last_persisted_len < tr.len()) : (session.last_persisted_len += 1) {
-            persister.appendEntry(
+            session.appendPersistedEntry(
                 allocator,
-                path,
                 tr.entryIdAt(session.last_persisted_len),
                 tr.at(session.last_persisted_len),
-                session.persist_opts,
             ) catch |err| return .{ .failed = err };
         }
-        session_events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+        session.appendPersistedEvent(allocator, .{ .compaction_checkpoint = .{
             .summary = summary,
             .first_kept_entry_id = ready.first_kept_entry_id,
             .reason = reason,
@@ -1514,7 +1616,7 @@ fn compactTranscriptDetailed(
             .read_files = file_ops.read_files,
             .modified_files = file_ops.modified_files,
         } }) catch |err| return .{ .failed = err };
-    };
+    }
 
     tr.installProjectionOwnedWithFiles(
         allocator,
@@ -1546,6 +1648,7 @@ fn callSummarizer(
     arena: std.mem.Allocator,
     request: compaction.SummaryRequest,
 ) !compaction.SummaryResponse {
+    try session.prepareProviderCall();
     session.summary_attempt_count +|= 1;
     const response = try summarizer.summarize(arena, request);
     session.summary_token_totals.add(response.usage);
@@ -1556,6 +1659,48 @@ fn callSummarizer(
 const ReductionOutcome = enum {
     compacted,
     protected_passthrough,
+};
+
+/// Provider-neutral production request controller. Injected clients, notably
+/// deterministic simulator replay, use this boundary so request admission,
+/// threshold compaction, and PromptTooLong recovery cannot drift from live
+/// providers.
+pub const RequestController = struct {
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    raw_client: loop.ModelClient,
+    summarizer: ?compaction.Summarizer,
+
+    pub fn asModelClient(self: *RequestController) loop.ModelClient {
+        return .{
+            .context = self,
+            .request_fn = request,
+            .set_deadline_fn = setDeadline,
+        };
+    }
+
+    fn setDeadline(context: *anyopaque, deadline_ms: ?i64) void {
+        const self: *RequestController = @ptrCast(@alignCast(context));
+        self.session.request_deadline_ms = deadline_ms;
+    }
+
+    fn request(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        const self: *RequestController = @ptrCast(@alignCast(context));
+        return requestNormalWith(
+            self.allocator,
+            arena,
+            self.session,
+            self.raw_client,
+            self.summarizer,
+            @constCast(transcript),
+            extra_user_text,
+        );
+    }
 };
 
 fn requestNormalWith(
@@ -1595,6 +1740,7 @@ fn requestNormalWith(
 
     if (selected_tokens > hard_limit) return error.RequestTooLarge;
 
+    try session.prepareProviderCall();
     session.normal_request_attempt_count +|= 1;
     const first = raw_client.request(arena, transcript, extra_user_text) catch |err| {
         if (err != error.PromptTooLong or !session.compaction_enabled or session.overflow_recovery_used) {
@@ -1618,6 +1764,7 @@ fn requestNormalWith(
         selected_tokens = try selectedNormalInputTokens(session, budget);
         if (selected_tokens > budget.limits.hard_input_tokens) return error.RequestTooLarge;
 
+        try session.prepareProviderCall();
         session.normal_request_attempt_count +|= 1;
         const retried = try raw_client.request(arena, transcript, extra_user_text);
         try rememberNormalInput(session, budget, retried.usage);
@@ -1665,7 +1812,10 @@ fn reducePendingRequest(
             .no_valid_cut => error.NoValidCompactionCut,
             .invalid_tool_pair => error.InvalidCompactionToolPair,
         },
-        .no_change => error.CompactionMadeNoProgress,
+        .no_change => if (reason == .threshold and selected_tokens <= hard_limit)
+            .protected_passthrough
+        else
+            error.CompactionMadeNoProgress,
         .unavailable => error.CompactionUnavailable,
         .failed => |failure| failure,
     };
@@ -1748,6 +1898,7 @@ fn currentExternalTurnEntryId(transcript: *const transcript_mod.Transcript) tran
 }
 
 fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
+    if (session.request_config_override) |config| return config;
     return switch (session.backend) {
         .stub => error.CompactionUnavailable,
         .local => |client| .{
@@ -1863,6 +2014,30 @@ fn requestBudgetForConfig(
     return snapshot.budget orelse error.RequestNotPrepared;
 }
 
+fn validateCompactionCapacityForConfig(
+    allocator: std.mem.Allocator,
+    settings: compaction.Settings,
+    model: *const models_registry.Model,
+    config: model_request.Config,
+) !void {
+    var empty_transcript: transcript_mod.Transcript = .{};
+    defer empty_transcript.deinit(allocator);
+    const fixed_budget = try requestBudgetForConfig(
+        allocator,
+        config,
+        &empty_transcript,
+        null,
+        null,
+        false,
+    );
+    _ = try compaction.deriveCapacity(
+        settings,
+        model,
+        fixed_budget.tokens.system +| fixed_budget.tokens.tools,
+        fixed_budget.tokens.framing,
+    );
+}
+
 /// Branch the current session: create a new session directory, copy the
 /// current transcript's persisted events to it, write a meta.json with
 /// `parent_id` pointing at the current session, then update the session's
@@ -1886,24 +2061,31 @@ pub fn fork(
     errdefer allocator.free(new_sid);
     const new_dir = try session_paths.sessionDir(allocator, new_sid);
     errdefer allocator.free(new_dir);
-    try session_paths.writeWorkspacePointer(allocator, new_dir, realpath);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, new_dir);
 
     const new_events_path = try std.fs.path.join(allocator, &.{ new_dir, "events.jsonl" });
     errdefer allocator.free(new_events_path);
     const new_meta_path = try std.fs.path.join(allocator, &.{ new_dir, "meta.json" });
     errdefer allocator.free(new_meta_path);
+    var next_writer = try session_events.JournalWriter.open(allocator, new_events_path);
+    var next_writer_owned = true;
+    errdefer if (next_writer_owned) next_writer.deinit();
+    try session_paths.writeWorkspacePointer(allocator, new_dir, realpath);
 
     const old_events_path = session.events_path orelse return error.MissingSessionPath;
     while (session.last_persisted_len < session.transcript.len()) : (session.last_persisted_len += 1) {
-        try persister.appendEntry(
+        try session.appendPersistedEntry(
             allocator,
-            old_events_path,
             session.transcript.entryIdAt(session.last_persisted_len),
             session.transcript.at(session.last_persisted_len),
-            session.persist_opts,
         );
     }
-    try session_events.copyJournal(allocator, old_events_path, new_events_path);
+    if (session.journal_writer != null) {
+        try session_events.copyJournalClaimed(allocator, old_events_path, new_events_path);
+    } else {
+        try session_events.copyJournal(allocator, old_events_path, new_events_path);
+    }
+    try next_writer.refresh(allocator, new_events_path);
 
     try session_events.writeMeta(allocator, new_meta_path, .{
         .session_id = new_sid,
@@ -1914,6 +2096,15 @@ pub fn fork(
         .model = session.currentModel(),
     });
 
+    const result = try std.fmt.allocPrint(
+        allocator,
+        "Forked to new session: {s}\nParent: {s}\n",
+        .{ new_sid, old_sid },
+    );
+    errdefer allocator.free(result);
+    if (session.journal_writer) |*writer| writer.deinit();
+    session.journal_writer = null;
+
     if (session.session_id) |s| allocator.free(s);
     if (session.session_dir) |s| allocator.free(s);
     if (session.events_path) |s| allocator.free(s);
@@ -1923,13 +2114,11 @@ pub fn fork(
     session.session_dir = new_dir;
     session.events_path = new_events_path;
     session.meta_path = new_meta_path;
+    session.journal_writer = next_writer;
+    next_writer_owned = false;
     session.last_persisted_len = session.transcript.len();
 
-    return std.fmt.allocPrint(
-        allocator,
-        "Forked to new session: {s}\nParent: {s}\n",
-        .{ new_sid, old_sid },
-    );
+    return result;
 }
 
 /// Tear down `session` and rebuild it in place from the same environment.
@@ -1988,12 +2177,34 @@ pub fn rebuildSession(
             return error.CrossProviderResume;
         }
     }
-    var next = try initFromEnvWithPreparedResume(
+    const same_session = if (prepared_resume) |*prepared|
+        if (session.session_id) |current_id| std.mem.eql(u8, current_id, prepared.session_id) else false
+    else
+        false;
+    var transferred_writer: ?session_events.JournalWriter = null;
+    if (same_session) {
+        session.writeSessionSummary(allocator);
+        const current_writer = if (session.journal_writer) |*writer| writer else return error.MissingJournalWriter;
+        if (current_writer.poisoned) {
+            const path = session.events_path orelse return error.MissingSessionPath;
+            current_writer.refresh(allocator, path) catch return error.SessionLockRecoveryFailed;
+        }
+        transferred_writer = try current_writer.duplicate();
+    }
+    var next = initFromEnvWithPreparedResume(
         allocator,
         registry,
         config,
         if (prepared_resume) |*prepared| prepared else null,
-    );
+        transferred_writer,
+    ) catch |err| {
+        if (same_session) {
+            const path = session.events_path orelse return error.MissingSessionPath;
+            const writer = if (session.journal_writer) |*present| present else return error.MissingJournalWriter;
+            writer.refresh(allocator, path) catch return error.SessionLockRecoveryFailed;
+        }
+        return err;
+    };
     errdefer next.deinit(allocator);
     if (config.resume_latest and next.activeProvider() != session.activeProvider()) {
         return error.CrossProviderResume;
@@ -2001,7 +2212,12 @@ pub fn rebuildSession(
 
     // Commit the swap only after the target session and provider constraint are
     // fully validated. A failed resume leaves the current session untouched.
-    session.writeSessionSummary(allocator);
+    if (!same_session) session.writeSessionSummary(allocator);
+    if (same_session) {
+        const current_writer = if (session.journal_writer) |*writer| writer else return error.MissingJournalWriter;
+        const next_writer = if (next.journal_writer) |*writer| writer else return error.MissingJournalWriter;
+        try session_events.JournalWriter.transferLockOwnership(current_writer, next_writer);
+    }
     session.deinit(allocator);
     session.* = next;
 }
@@ -2382,6 +2598,26 @@ test "setModel validates provider and commits model with request policy atomical
     try testing.expectEqualStrings("claude-sonnet-4-6", session.backend.anthropic.config.model);
 }
 
+test "setModel rejects compaction tuples with no post-summary request capacity" {
+    var session = try AgentSession.initAnthropic(
+        testing.allocator,
+        "k",
+        "fixed prompt " ** 1_000,
+        "[]",
+    );
+    defer session.deinit(testing.allocator);
+    session.compaction_settings.max_input_tokens = 100;
+
+    try testing.expectError(
+        error.NoPostSummaryCapacity,
+        session.setModel(testing.allocator, "claude-sonnet-4-6"),
+    );
+    try testing.expectEqualStrings(
+        models_registry.defaultForProvider(.anthropic).id,
+        session.backend.anthropic.config.model,
+    );
+}
+
 test "setModel persistence failure leaves the live model unchanged" {
     const FailRestamp = struct {
         fn run(
@@ -2696,7 +2932,7 @@ test "resume fork override and model mutation preserve provider identity" {
         .no_context_files = true,
         .fork_session_id = source_id,
     });
-    defer forked.deinit(allocator);
+    errdefer forked.deinit(allocator);
     try testing.expectEqual(
         Provider.anthropic,
         forked.activeProvider() orelse return error.TestUnexpectedResult,
@@ -2712,6 +2948,7 @@ test "resume fork override and model mutation preserve provider identity" {
     defer session_events.freeMeta(allocator, &fork_meta);
     try testing.expectEqualStrings(source_id, fork_meta.parent_id orelse return error.TestUnexpectedResult);
     try testing.expectEqualStrings("claude", fork_meta.provider orelse return error.TestUnexpectedResult);
+    forked.deinit(allocator);
 
     var overridden = try initFromEnvWithSessionConfig(allocator, null, .{
         .no_context_files = true,
@@ -2736,6 +2973,114 @@ test "resume fork override and model mutation preserve provider identity" {
     );
 }
 
+test "rebuild resumes the current session through a transferred journal lock" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    defer deepseek.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{ .no_context_files = true });
+    defer session.deinit(allocator);
+    const session_id = try allocator.dupe(
+        u8,
+        session.session_id orelse return error.TestUnexpectedResult,
+    );
+    defer allocator.free(session_id);
+    try session.transcript.append(allocator, .{ .user_text = "persist before resume" });
+    try session.appendPersistedEntry(
+        allocator,
+        session.transcript.entryIdAt(0),
+        session.transcript.at(0),
+    );
+    session.last_persisted_len = session.transcript.len();
+
+    try rebuildSession(allocator, &session, &registry, .{
+        .resume_latest = true,
+        .no_context_files = true,
+    });
+
+    try testing.expectEqualStrings(
+        session_id,
+        session.session_id orelse return error.TestUnexpectedResult,
+    );
+    try testing.expect(session.journal_writer != null);
+    try testing.expectEqual(@as(usize, 1), session.transcript.len());
+    try session.appendPersistedEvent(allocator, .{ .turn_end = .{ .reason = .approved } });
+    const events_path = session.events_path orelse return error.TestUnexpectedResult;
+    try testing.expectError(
+        error.SessionAlreadyActive,
+        session_events.JournalWriter.open(allocator, events_path),
+    );
+}
+
+test "failed same-session rebuild keeps the original journal lock" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    var fake_key = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    var fake_key_active = true;
+    defer if (fake_key_active) fake_key.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{ .no_context_files = true });
+    defer session.deinit(allocator);
+    fake_key.restore(allocator);
+    fake_key_active = false;
+    var missing_key = try EnvOverride.unset(allocator, "DEEPSEEK_API_KEY");
+    defer missing_key.restore(allocator);
+
+    try testing.expectError(
+        error.MissingDeepSeekCredential,
+        rebuildSession(allocator, &session, &registry, .{
+            .resume_latest = true,
+            .no_context_files = true,
+        }),
+    );
+    const events_path = session.events_path orelse return error.TestUnexpectedResult;
+    try testing.expectError(
+        error.SessionAlreadyActive,
+        session_events.JournalWriter.open(allocator, events_path),
+    );
+    try session.appendPersistedEvent(allocator, .{ .turn_end = .{ .reason = .approved } });
+}
+
+test "same-session rebuild refreshes a poisoned journal before lock transfer" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    defer deepseek.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{ .no_context_files = true });
+    defer session.deinit(allocator);
+    const writer = if (session.journal_writer) |*present| present else return error.TestUnexpectedResult;
+    writer.poisoned = true;
+
+    try rebuildSession(allocator, &session, &registry, .{
+        .resume_latest = true,
+        .no_context_files = true,
+    });
+    try session.appendPersistedEvent(allocator, .{ .turn_end = .{ .reason = .approved } });
+}
+
 test "named session resume preserves transcript bytes and stored identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
@@ -2753,7 +3098,13 @@ test "named session resume preserves transcript bytes and stored identity" {
         });
         defer source.deinit(allocator);
         const source_events_path = source.events_path orelse return error.TestUnexpectedResult;
-        try session_events.appendEntryEvent(allocator, source_events_path, 1, null, .{ .user_text = "preserve me" });
+        try source.transcript.append(allocator, .{ .user_text = "preserve me" });
+        try source.appendPersistedEntry(
+            allocator,
+            source.transcript.entryIdAt(0),
+            source.transcript.at(0),
+        );
+        source.last_persisted_len = 1;
         const bytes = try zts.file_io.readFile(allocator, source_events_path, 1024 * 1024);
         errdefer allocator.free(bytes);
         break :blk .{
@@ -2789,6 +3140,67 @@ test "named session resume preserves transcript bytes and stored identity" {
     try testing.expectEqualStrings(
         "claude-opus-4-8",
         resumed.currentModel() orelse return error.TestUnexpectedResult,
+    );
+}
+
+test "concurrent first launch of one named session is rejected before publication" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    var first = try initFromEnvWithSessionConfig(allocator, null, .{
+        .no_context_files = true,
+        .session_id = "shared-name",
+    });
+    defer first.deinit(allocator);
+    const events_path = first.events_path orelse return error.TestUnexpectedResult;
+    const before = try zts.file_io.readFile(allocator, events_path, 1024);
+    defer allocator.free(before);
+
+    try testing.expectError(
+        error.SessionAlreadyActive,
+        initFromEnvWithSessionConfig(allocator, null, .{
+            .no_context_files = true,
+            .session_id = "shared-name",
+        }),
+    );
+    const after = try zts.file_io.readFile(allocator, events_path, 1024);
+    defer allocator.free(after);
+    try testing.expectEqualSlices(u8, before, after);
+}
+
+test "resume fails closed when metadata exists but the journal is missing" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+
+    const session_id = blk: {
+        var source = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
+        defer source.deinit(allocator);
+        const id = try allocator.dupe(u8, source.session_id orelse return error.TestUnexpectedResult);
+        errdefer allocator.free(id);
+        const path = source.events_path orelse return error.TestUnexpectedResult;
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+        if (std.c.unlink(path_z) != 0) return error.TestUnlinkFailed;
+        break :blk id;
+    };
+    defer allocator.free(session_id);
+
+    try testing.expectError(
+        error.FileNotFound,
+        initFromEnvWithSessionConfig(allocator, null, .{
+            .no_context_files = true,
+            .session_id = session_id,
+        }),
     );
 }
 
@@ -2838,13 +3250,13 @@ test "model-free legacy resume bypasses provider identity and preserves metadata
     const meta_path = blk: {
         var source = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
         defer source.deinit(allocator);
-        try session_events.appendEntryEvent(
+        try source.transcript.append(allocator, .{ .user_text = "compiler witness" });
+        try source.appendPersistedEntry(
             allocator,
-            source.events_path orelse return error.TestUnexpectedResult,
-            1,
-            null,
-            .{ .user_text = "compiler witness" },
+            source.transcript.entryIdAt(0),
+            source.transcript.at(0),
         );
+        source.last_persisted_len = 1;
         const source_meta_path = source.meta_path orelse return error.TestUnexpectedResult;
         var meta = try session_events.readMeta(allocator, source_meta_path);
         defer session_events.freeMeta(allocator, &meta);
@@ -3104,6 +3516,147 @@ test "mid-turn provider failure persists one error exit without fallback" {
     try testing.expect(std.mem.indexOf(u8, events, "\"reason\":\"error_exit\"") != null);
 }
 
+test "failed error-path persistence is surfaced and keeps the durable cursor" {
+    const FailingClient = struct {
+        fn request(
+            _: *anyopaque,
+            _: std.mem.Allocator,
+            _: *const Transcript,
+            _: ?[]const u8,
+        ) anyerror!loop.ModelCallResult {
+            return error.LocalServerUnavailable;
+        }
+
+        fn modelClient(self: *@This()) loop.ModelClient {
+            return .{ .context = self, .request_fn = request };
+        }
+    };
+
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const unwritable_events_path = try tmp.childPath(allocator, "events-as-directory");
+    defer allocator.free(unwritable_events_path);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), unwritable_events_path);
+
+    var session = AgentSession.initStub();
+    defer session.deinit(allocator);
+    session.events_path = try allocator.dupe(u8, unwritable_events_path);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var failing: FailingClient = .{};
+
+    try testing.expectError(error.IsDir, runOneTurnWithClient(
+        allocator,
+        &session,
+        &registry,
+        failing.modelClient(),
+        "inspect the handler",
+        null,
+    ));
+    try testing.expect(session.transcript.len() > 0);
+    try testing.expectEqual(@as(usize, 0), session.last_persisted_len);
+}
+
+test "poisoned journal refuses a turn before the model can run" {
+    const CountingClient = struct {
+        calls: usize = 0,
+
+        fn request(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: *const Transcript,
+            _: ?[]const u8,
+        ) anyerror!loop.ModelCallResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return .{ .reply = .{ .response = .{ .final_text = "must not run" } } };
+        }
+
+        fn modelClient(self: *@This()) loop.ModelClient {
+            return .{ .context = self, .request_fn = request };
+        }
+    };
+
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var session = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
+    defer session.deinit(allocator);
+    const writer = if (session.journal_writer) |*present| present else return error.TestUnexpectedResult;
+    writer.poisoned = true;
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var client: CountingClient = .{};
+
+    try testing.expectError(
+        error.JournalWriterPoisoned,
+        runOneTurnWithClient(
+            allocator,
+            &session,
+            &registry,
+            client.modelClient(),
+            "do not execute",
+            null,
+        ),
+    );
+    try testing.expectEqual(@as(usize, 0), client.calls);
+    try testing.expectEqual(@as(usize, 0), session.transcript.len());
+}
+
+test "request controller refuses a provider call after the shared turn deadline" {
+    const CountingClient = struct {
+        calls: usize = 0,
+
+        fn request(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: *const Transcript,
+            _: ?[]const u8,
+        ) anyerror!loop.ModelCallResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return .{ .reply = .{ .response = .{ .final_text = "late" } } };
+        }
+
+        fn asClient(self: *@This()) loop.ModelClient {
+            return .{ .context = self, .request_fn = request };
+        }
+    };
+
+    const allocator = testing.allocator;
+    const model = try models_registry.resolveForProvider(.deepseek, "deepseek-v4-flash");
+    var session = AgentSession.initControlled(allocator, model, .{
+        .provider = .deepseek,
+        .model = model.id,
+        .max_output_tokens = model.request_policy.max_output_tokens,
+        .stream = false,
+        .system_prompt = "system",
+    });
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "request" });
+    session.request_deadline_ms = 0;
+    var raw: CountingClient = .{};
+    var controller: RequestController = .{
+        .allocator = allocator,
+        .session = &session,
+        .raw_client = raw.asClient(),
+        .summarizer = null,
+    };
+
+    try testing.expectError(
+        error.RequestTimedOut,
+        controller.asModelClient().request(allocator, &session.transcript, null),
+    );
+    try testing.expectEqual(@as(usize, 0), raw.calls);
+}
+
 test "compact: empty transcript returns early message" {
     var session = AgentSession.initStub();
     defer session.deinit(testing.allocator);
@@ -3184,6 +3737,86 @@ const OverflowThenReplyClient = struct {
     }
 };
 
+const overflow_flow_calls = [_]turn.ToolCall{.{
+    .id = "overflow_probe_1",
+    .name = "overflow_probe",
+    .args_json = "{}",
+}};
+
+const ToolThenOverflowClient = struct {
+    calls: usize = 0,
+
+    fn request(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        _: *const Transcript,
+        _: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        return switch (self.calls) {
+            1 => .{ .reply = .{ .response = .{ .tool_calls = &overflow_flow_calls } } },
+            2 => error.PromptTooLong,
+            3 => .{
+                .reply = .{ .response = .{ .final_text = "continued after compaction" } },
+                .usage = .{ .input_tokens = 123, .output_tokens = 7 },
+            },
+            else => error.TestUnexpectedModelCall,
+        };
+    }
+
+    fn asClient(self: *@This()) loop.ModelClient {
+        return .{ .context = self, .request_fn = request };
+    }
+};
+
+const ControlledFlowClient = struct {
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    raw: *ToolThenOverflowClient,
+    summary: *TestSummarizer,
+
+    fn request(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        transcript: *const Transcript,
+        extra_user_text: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        return requestNormalWith(
+            self.allocator,
+            arena,
+            self.session,
+            self.raw.asClient(),
+            self.summary.asSummarizer(),
+            @constCast(transcript),
+            extra_user_text,
+        );
+    }
+
+    fn asClient(self: *@This()) loop.ModelClient {
+        return .{ .context = self, .request_fn = request };
+    }
+};
+
+fn overflowProbeExecute(
+    allocator: std.mem.Allocator,
+    _: []const []const u8,
+) anyerror!registry_mod.ToolResult {
+    return .{ .ok = true, .llm_text = try allocator.dupe(u8, "observed once") };
+}
+
+const overflow_probe_tool: registry_mod.ToolDef = .{
+    .name = "overflow_probe",
+    .label = "Overflow probe",
+    .description = "One deterministic read-only effect for compaction flow coverage",
+    .effect = .analyze,
+    .context_policy = .exact,
+    .input_schema = "{}",
+    .decode_json = registry_mod.helpers.decodeNoArgs,
+    .execute = overflowProbeExecute,
+};
+
 test "normal request lifecycle compacts above the soft limit before transport" {
     const allocator = testing.allocator;
     var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
@@ -3246,6 +3879,64 @@ test "normal request lifecycle compacts and retries only one overflowing call" {
     try testing.expect(session.transcript.projection != null);
     try testing.expect(session.overflow_recovery_used);
     try testing.expectEqual(@as(u64, 2), session.normal_request_attempt_count);
+}
+
+test "full turn overflow retries only the pending request after a completed tool effect" {
+    const allocator = testing.allocator;
+    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
+    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
+    const before_turn_len = session.transcript.len();
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    try registry.register(allocator, overflow_probe_tool);
+    var raw: ToolThenOverflowClient = .{};
+    var summary: TestSummarizer = .{};
+    var controlled: ControlledFlowClient = .{
+        .allocator = allocator,
+        .session = &session,
+        .raw = &raw,
+        .summary = &summary,
+    };
+
+    const prompt = "inspect once, then continue";
+    const result = try loop.runTurnWith(
+        allocator,
+        controlled.asClient(),
+        &registry,
+        &session.transcript,
+        prompt,
+        .{ .turn_timeout_ms = 0 },
+    );
+
+    try testing.expectEqual(turn.TurnState.done, result.final_state);
+    try testing.expectEqual(@as(u8, 2), result.roundtrips);
+    try testing.expectEqual(@as(u32, 1), result.tool_call_count);
+    try testing.expectEqual(@as(usize, 3), raw.calls);
+    try testing.expectEqual(@as(usize, 1), summary.calls);
+    try testing.expectEqual(@as(u64, 3), session.normal_request_attempt_count);
+    try testing.expect(session.overflow_recovery_used);
+    try testing.expect(session.transcript.projection != null);
+    try testing.expect(session.transcript.len() > before_turn_len);
+
+    var current_user_count: usize = 0;
+    var probe_use_count: usize = 0;
+    var probe_result_count: usize = 0;
+    for (session.transcript.entries.items) |entry| switch (entry) {
+        .user_text => |text| current_user_count += @intFromBool(std.mem.eql(u8, text, prompt)),
+        .assistant_tool_use => |calls| for (calls) |call| {
+            probe_use_count += @intFromBool(std.mem.eql(u8, call.name, "overflow_probe"));
+        },
+        .tool_result => |tool_result| {
+            probe_result_count += @intFromBool(std.mem.eql(u8, tool_result.tool_name, "overflow_probe"));
+        },
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), current_user_count);
+    try testing.expectEqual(@as(usize, 1), probe_use_count);
+    try testing.expectEqual(@as(usize, 1), probe_result_count);
 }
 
 test "normal request lifecycle surfaces a second overflow without another compaction" {
@@ -3439,7 +4130,7 @@ test "compact checkpoint write failure leaves the active projection unchanged" {
         null,
         false,
     );
-    try testing.expectEqual(error.FileOpenFailed, result.failed);
+    try testing.expectEqual(error.FileNotFound, result.failed);
     try testing.expect(session.transcript.projection == null);
     try testing.expectEqual(@as(usize, 4), session.transcript.len());
 }

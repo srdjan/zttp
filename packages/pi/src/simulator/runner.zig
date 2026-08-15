@@ -4,6 +4,7 @@ const std = @import("std");
 const zts = @import("zts");
 const artifact = @import("artifact.zig");
 const loop = @import("../loop.zig");
+const agent = @import("../agent.zig");
 const model_client = @import("model_client.zig");
 const model_request = @import("../providers/model_request.zig");
 const observation = @import("observation.zig");
@@ -159,17 +160,32 @@ pub const Runner = struct {
             self.flow_case.manifest.approvals,
             self.flow_case.trace.approvals,
         );
-        var transcript: transcript_mod.Transcript = .{};
-        defer transcript.deinit(self.allocator);
+        const resolved_model = try @import("../providers/models.zig").resolveForProvider(
+            self.request_config.provider,
+            self.request_config.model,
+        );
+        var session = agent.AgentSession.initControlled(
+            self.allocator,
+            resolved_model,
+            self.request_config,
+        );
+        defer session.deinit(self.allocator);
+        var controller: agent.RequestController = .{
+            .allocator = self.allocator,
+            .session = &session,
+            .raw_client = replay_client.asModelClient(),
+            .summarizer = replay_client.asSummarizer(),
+        };
+        const transcript = &session.transcript;
 
         for (self.flow_case.manifest.turns, 0..) |expected, turn_position| {
             approvals.beginTurn(expected.index);
             const transcript_start = transcript.len();
             const result = loop.runTurnWith(
                 self.allocator,
-                replay_client.asModelClient(),
+                controller.asModelClient(),
                 self.registry,
-                &transcript,
+                transcript,
                 expected.user_input,
                 .{
                     .workspace_root = ".",
@@ -198,9 +214,10 @@ pub const Runner = struct {
                         );
                     }
                 }
+                std.debug.print("[replay] turn {d} failed: {s}\n", .{ turn_position, @errorName(err) });
                 return err;
             };
-            try self.validateTurn(expected, result, &transcript, transcript_start);
+            try self.validateTurn(expected, result, transcript, transcript_start);
             if (turn_position + 1 < self.flow_case.manifest.turns.len) {
                 const checkpoint = self.flow_case.manifest.turn_workspaces[turn_position];
                 const prefix = try std.fmt.allocPrint(self.allocator, "turns/{d}/", .{checkpoint.turn_index});

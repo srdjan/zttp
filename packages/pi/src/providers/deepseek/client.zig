@@ -68,6 +68,7 @@ pub const Config = struct {
     base_url: []const u8 = default_base_url,
     purpose: model_request.Purpose = .normal,
     cache_policy: model_request.CachePolicy = .enabled,
+    request_timeout_ms: ?u64 = null,
 };
 
 pub const ClientError = error{
@@ -649,15 +650,19 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     if (protocol != .tls) return ClientError.InvalidDeepSeekBaseUrl;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = uri.getHost(&host_buf) catch return ClientError.InvalidDeepSeekBaseUrl;
-    const connection = http_errors.connect(&client, host, uri.port, protocol) catch |err| switch (err) {
+    const connection = http_errors.connectWithin(
+        &client,
+        host,
+        uri.port,
+        protocol,
+        config.request_timeout_ms,
+    ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.RequestTimedOut => return error.RequestTimedOut,
         else => return ClientError.DeepSeekServerUnavailable,
     };
-    http_errors.setReadTimeoutMs(
-        connection.stream_reader.stream.socket.handle,
-        @intCast(generation_ceiling_ms),
-    );
+    const request_timeout_ms = effectiveRequestTimeoutMs(config.request_timeout_ms, generation_ceiling_ms);
+    http_errors.setReadTimeoutMs(connection.stream_reader.stream.socket.handle, @intCast(request_timeout_ms));
     const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{config.api_key});
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
@@ -681,12 +686,12 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     request_body.end() catch return ClientError.DeepSeekServerUnavailable;
     request.connection.?.flush() catch return ClientError.DeepSeekServerUnavailable;
 
-    try waitForReadable(connection.stream_reader.stream.socket.handle);
+    try waitForReadable(connection.stream_reader.stream.socket.handle, request_timeout_ms);
     var response = request.receiveHead(&.{}) catch return ClientError.DeepSeekServerUnavailable;
     // The head arrives before generation starts, so the long silence is here,
     // between the head and the first body byte. Poll for it rather than letting
     // a blocking read sit on the socket past its timeout.
-    try waitForReadable(connection.stream_reader.stream.socket.handle);
+    try waitForReadable(connection.stream_reader.stream.socket.handle, request_timeout_ms);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
@@ -707,15 +712,20 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
 /// ceiling. Used before the head and again before the body: a blocking read
 /// that outlives `SO_RCVTIMEO` panics instead of erroring, so the wait is done
 /// here where a timeout is a typed error.
-fn waitForReadable(fd: std.posix.fd_t) !void {
+fn waitForReadable(fd: std.posix.fd_t, timeout_ms: i32) !void {
     var fds = [_]std.posix.pollfd{.{
         .fd = fd,
         .events = std.posix.POLL.IN,
         .revents = 0,
     }};
-    const ready = std.posix.poll(&fds, generation_ceiling_ms) catch
+    const ready = std.posix.poll(&fds, timeout_ms) catch
         return ClientError.DeepSeekServerUnavailable;
     if (ready == 0) return error.RequestTimedOut;
+}
+
+fn effectiveRequestTimeoutMs(request_timeout_ms: ?u64, ceiling_ms: i32) i32 {
+    const ceiling: u64 = @intCast(ceiling_ms);
+    return @intCast(@max(@as(u64, 1), @min(request_timeout_ms orelse ceiling, ceiling)));
 }
 
 // -----------------------------------------------------------------------

@@ -42,6 +42,7 @@ pub const Config = struct {
     base_url: []const u8 = default_base_url,
     purpose: model_request.Purpose = .normal,
     cache_policy: model_request.CachePolicy = .enabled,
+    request_timeout_ms: ?u64 = null,
 };
 
 pub const ClientError = error{
@@ -102,6 +103,7 @@ pub const Client = struct {
             try snapshot.completePreparation(body);
         }
         try snapshot.requireHardAdmission();
+        snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
         const response_body = try post_fn(arena, self.config, body);
         if (self.capture) |sink| try sink.record(&snapshot, response_body);
 
@@ -223,6 +225,15 @@ fn writeSnapshotItem(
             first_entry.* = false;
             try writeUserMessage(w, body);
         },
+        .compaction_summary => |body| {
+            if (!first_entry.*) try w.writeByte(',');
+            first_entry.* = false;
+            try w.writeAll("{\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":");
+            try writeJsonString(w, model_request.compaction_summary_marker);
+            try w.writeAll("},{\"type\":\"input_text\",\"text\":");
+            try writeJsonString(w, body);
+            try w.writeAll("}]}");
+        },
         .model_text => |body| {
             if (!first_entry.*) try w.writeByte(',');
             first_entry.* = false;
@@ -301,7 +312,13 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return error.UnsupportedProtocol;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = try uri.getHost(&host_buf);
-    const connection = try http_errors.connect(&client, host, uri.port, protocol);
+    const connection = try http_errors.connectWithin(
+        &client,
+        host,
+        uri.port,
+        protocol,
+        config.request_timeout_ms,
+    );
 
     const auth_header = try std.fmt.allocPrint(arena, "Bearer {s}", .{config.api_key});
     const extra_headers = [_]std.http.Header{
@@ -421,6 +438,7 @@ const CaptureProbe = struct {
         try testing.expectEqualStrings("capture-system", snapshot.config.system_prompt);
         try testing.expectEqualStrings("retry-context", snapshot.extra_user_text.?);
         try testing.expectEqual(@as(usize, 1), snapshot.items.len);
+        try testing.expect(snapshot.wire_request_sha256 != null);
         try testing.expectEqualStrings("capture-user", snapshot.items[0].user_text);
         try testing.expectEqualStrings(apply_edit_sse, raw_response);
         if (self.fail) return error.InjectedCaptureFailure;

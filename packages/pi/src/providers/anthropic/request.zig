@@ -109,6 +109,10 @@ fn writeMessagesArray(
     for (items) |item| {
         switch (item) {
             .user_text, .system_note => |body| try appendBlock(allocator, &groups, .user, .{ .text = body }),
+            .compaction_summary => |body| {
+                try appendBlock(allocator, &groups, .user, .{ .text = model_request.compaction_summary_marker });
+                try appendBlock(allocator, &groups, .user, .{ .text = body });
+            },
             .model_text => |body| try appendBlock(allocator, &groups, .assistant, .{ .text = body }),
             .tool_use => |call| try appendBlock(allocator, &groups, .assistant, .{ .tool_use = call }),
             .tool_result => |result| try appendBlock(allocator, &groups, .user, .{ .tool_result = result }),

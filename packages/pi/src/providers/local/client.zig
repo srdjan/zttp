@@ -50,6 +50,7 @@ pub const Config = struct {
     base_url: []const u8 = default_base_url,
     purpose: model_request.Purpose = .normal,
     cache_policy: model_request.CachePolicy = .enabled,
+    request_timeout_ms: ?u64 = null,
 };
 
 pub const ClientError = error{
@@ -329,7 +330,7 @@ fn getReadiness(arena: std.mem.Allocator, url: []const u8, read_body: bool) !Rea
     }) catch return ClientError.LocalServerUnavailable;
     defer request.deinit();
     request.sendBodiless() catch return ClientError.LocalServerUnavailable;
-    try waitForResponseHead(connection.stream_reader.stream.socket.handle);
+    try waitForResponseHead(connection.stream_reader.stream.socket.handle, response_head_timeout_ms);
     var response = request.receiveHead(&.{}) catch return ClientError.LocalServerUnavailable;
     if (!read_body) return .{ .status = response.head.status, .body = "" };
     var transfer_buf: [4096]u8 = undefined;
@@ -1098,7 +1099,13 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     if (protocol != .plain) return ClientError.InvalidMlxBaseUrl;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
     const host = uri.getHost(&host_buf) catch return ClientError.InvalidMlxBaseUrl;
-    const connection = http_errors.connect(&client, host, uri.port, protocol) catch |err| switch (err) {
+    const connection = http_errors.connectWithin(
+        &client,
+        host,
+        uri.port,
+        protocol,
+        config.request_timeout_ms,
+    ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.RequestTimedOut => return error.RequestTimedOut,
         else => return ClientError.LocalServerUnavailable,
@@ -1124,7 +1131,10 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     request_body.end() catch return ClientError.LocalServerUnavailable;
     request.connection.?.flush() catch return ClientError.LocalServerUnavailable;
 
-    try waitForResponseHead(connection.stream_reader.stream.socket.handle);
+    try waitForResponseHead(
+        connection.stream_reader.stream.socket.handle,
+        effectiveRequestTimeoutMs(config.request_timeout_ms, response_head_timeout_ms),
+    );
     var response = request.receiveHead(&.{}) catch return ClientError.LocalServerUnavailable;
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
@@ -1147,15 +1157,20 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
 /// a long generation finishes can surface POSIX EAGAIN inside Zig's blocking
 /// reader. Poll first without consuming bytes, then let the HTTP parser read a
 /// ready header. This also provides a typed upper bound for a hung server.
-fn waitForResponseHead(fd: std.posix.fd_t) !void {
+fn waitForResponseHead(fd: std.posix.fd_t, timeout_ms: i32) !void {
     var fds = [_]std.posix.pollfd{.{
         .fd = fd,
         .events = std.posix.POLL.IN,
         .revents = 0,
     }};
-    const ready = std.posix.poll(&fds, response_head_timeout_ms) catch
+    const ready = std.posix.poll(&fds, timeout_ms) catch
         return ClientError.LocalServerUnavailable;
     if (ready == 0) return error.RequestTimedOut;
+}
+
+fn effectiveRequestTimeoutMs(request_timeout_ms: ?u64, ceiling_ms: i32) i32 {
+    const ceiling: u64 = @intCast(ceiling_ms);
+    return @intCast(@max(@as(u64, 1), @min(request_timeout_ms orelse ceiling, ceiling)));
 }
 
 const writeJsonString = json_writer.writeString;

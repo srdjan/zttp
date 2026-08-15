@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const models = @import("../providers/models.zig");
+const context_budget = @import("../context_budget.zig");
 
 pub const schema_version: u32 = 1;
 
@@ -209,6 +210,14 @@ pub const ModelCheckpoint = struct {
     request_context_sha256: Sha256Hex,
     transient_user_text_sha256: ?Sha256Hex,
     wire_request_sha256: ?Sha256Hex = null,
+    /// Complete provider-neutral request accounting. Historical artifacts
+    /// omit it; every new recording writes it.
+    request_budget: ?context_budget.RequestBudget = null,
+    /// Provider-reported logical input after cache fields are normalized.
+    /// Historical artifacts omit it; every new recording writes it.
+    normalized_input_tokens: ?u64 = null,
+    /// Stable raw-entry cut used by the active model projection, when any.
+    projection_first_kept_entry_id: ?u64 = null,
 };
 
 pub const ApprovalCheckpoint = struct {

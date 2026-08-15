@@ -12,7 +12,9 @@ const artifact = @import("artifact.zig");
 const observation = @import("observation.zig");
 const recording_storage = @import("recording_storage.zig");
 const capture_sink = @import("../providers/capture_sink.zig");
+const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
+const context_budget = @import("../context_budget.zig");
 const model_request = @import("../providers/model_request.zig");
 const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
@@ -303,6 +305,7 @@ pub const Recorder = struct {
         if (recordsWireDigest(self.options.provider) and snapshot.wire_request_sha256 == null) {
             return error.InconsistentModelExchange;
         }
+        const request_budget = snapshot.budget orelse return error.InconsistentModelExchange;
         if (self.model_calls.items.len >= artifact.Limits.model_checkpoints) return error.FlowLimitExceeded;
         if (raw_response.len > artifact.Limits.trace_or_response_bytes) return error.FlowLimitExceeded;
         if (self.options.provider == .local and self.options.mlx_lm_version == null) {
@@ -316,6 +319,23 @@ pub const Recorder = struct {
             .model = self.options.model,
             .request_sha256 = if (snapshot.wire_request_sha256) |digest| digest.slice() else null,
         });
+        var decode_arena = std.heap.ArenaAllocator.init(self.arena.child_allocator);
+        defer decode_arena.deinit();
+        const decoded = try cassette_client.replay(decode_arena.allocator(), .{
+            .header = .{
+                .provider = self.options.provider,
+                .stream = snapshot.config.stream,
+                .request_sha256 = if (snapshot.wire_request_sha256) |digest|
+                    digest.slice()
+                else
+                    null,
+            },
+            .body = raw_response,
+        });
+        const normalized_input_tokens = try context_budget.normalizeLogicalInput(
+            self.options.provider,
+            decoded.usage,
+        );
         try self.reserveFixtureBytes(response_bytes.len, artifact.Limits.trace_or_response_bytes);
         const response_path = try std.fmt.allocPrint(
             self.allocator(),
@@ -345,6 +365,9 @@ pub const Recorder = struct {
                 artifactDigest(digest)
             else
                 null,
+            .request_budget = request_budget,
+            .normalized_input_tokens = normalized_input_tokens,
+            .projection_first_kept_entry_id = snapshot.projection_first_kept_entry_id,
         });
         try self.fixtures.append(self.allocator(), .{
             .role = .response,
@@ -623,14 +646,11 @@ fn artifactDigest(digest: model_request.Sha256Hex) artifact.Sha256Hex {
     return .{ .bytes = digest.bytes };
 }
 
-/// True for the non-streaming Chat Completions providers, whose clients hash
-/// the exact request body they put on the wire. `simulator/model_client.zig`
-/// rebuilds that body on replay for the same set.
+/// Every provider hashes the exact serialized request body before transport.
+/// Replay rebuilds and hashes the same bytes before releasing a response.
 fn recordsWireDigest(provider: artifact.Provider) bool {
-    return switch (provider) {
-        .local, .deepseek => true,
-        .anthropic, .openai => false,
-    };
+    _ = provider;
+    return true;
 }
 
 fn mlxLmVersion(allocator: std.mem.Allocator, raw_response: []const u8) !?[]u8 {

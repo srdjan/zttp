@@ -10,12 +10,17 @@ const context_budget = @import("context_budget.zig");
 const models = @import("providers/models.zig");
 const transcript_mod = @import("transcript.zig");
 const turn_mod = @import("turn.zig");
+const ui_payload_mod = @import("ui_payload.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 pub const default_max_input_tokens: u64 = 40_000;
 pub const default_reserve_tokens: u64 = 16_384;
 pub const default_keep_recent_tokens: u64 = 20_000;
 pub const max_summary_tokens: u64 = 4_096;
+/// A smaller allowance cannot reliably emit the mandatory summary headings
+/// plus enough content to preserve a useful continuation.
+pub const minimum_summary_tokens: u64 = 512;
+pub const minimum_reserve_tokens: u64 = minimum_summary_tokens * 4;
 pub const max_summary_tool_result_bytes: usize = 2_000;
 
 pub const SummaryRequest = struct {
@@ -81,7 +86,7 @@ pub fn deriveCapacity(
         max_summary_tokens,
         @min(model.request_policy.max_output_tokens, settings.reserve_tokens / 4),
     );
-    if (allowance == 0) return error.InvalidCompactionSettings;
+    if (allowance < minimum_summary_tokens) return error.InvalidCompactionSettings;
     const reserved = fixed_input_tokens +| normal_request_framing_tokens +| allowance;
     if (reserved >= admitted) return error.NoPostSummaryCapacity;
     return .{
@@ -160,9 +165,21 @@ pub fn prepare(
         } };
     }
 
-    const current_turn_start = lastUserAtOrBefore(entries, threshold) orelse {
-        return .{ .not_compactable = .no_valid_cut };
-    };
+    const current_turn_start = lastUserAtOrBefore(entries, threshold) orelse active_start;
+    if (current_turn_start < active_start or entries[current_turn_start] != .user_text) {
+        const split_cut = splitBoundary(entries, active_start, threshold) orelse {
+            return .{ .not_compactable = .no_valid_cut };
+        };
+        if (split_cut <= active_start or split_cut >= entries.len) {
+            return .{ .not_compactable = .no_valid_cut };
+        }
+        return .{ .ready = .{
+            .summarize_start = active_start,
+            .summarize_end = split_cut,
+            .first_kept_index = split_cut,
+            .first_kept_entry_id = transcript.entryIdAt(split_cut),
+        } };
+    }
     const split_cut = splitBoundary(entries, current_turn_start, threshold) orelse {
         if (current_turn_start == active_start and entries[current_turn_start] == .user_text) {
             return .{ .not_compactable = .oversized_current_user };
@@ -249,23 +266,19 @@ fn validateToolPairs(
     allocator: std.mem.Allocator,
     entries: []const transcript_mod.OwnedEntry,
 ) !PairState {
-    var calls: std.StringHashMapUnmanaged(bool) = .empty;
-    defer calls.deinit(allocator);
+    var open_calls: std.StringHashMapUnmanaged(void) = .empty;
+    defer open_calls.deinit(allocator);
     for (entries) |entry| switch (entry) {
         .assistant_tool_use => |batch| for (batch) |call| {
-            const result = try calls.getOrPut(allocator, call.id);
+            const result = try open_calls.getOrPut(allocator, call.id);
             if (result.found_existing) return .invalid;
-            result.value_ptr.* = false;
         },
         .tool_result => |result| {
-            const matched = calls.getPtr(result.tool_use_id) orelse return .invalid;
-            if (matched.*) return .invalid;
-            matched.* = true;
+            if (!open_calls.remove(result.tool_use_id)) return .invalid;
         },
         else => {},
     };
-    var iterator = calls.valueIterator();
-    while (iterator.next()) |closed| if (!closed.*) return .unresolved;
+    if (open_calls.count() != 0) return .unresolved;
     return .valid;
 }
 
@@ -390,40 +403,61 @@ pub fn extractFileOps(
         for (projection.read_files) |file| try addUnique(allocator, &reads, file);
         for (projection.modified_files) |file| try addUnique(allocator, &modified, file);
     }
+    var successful_calls: std.StringHashMapUnmanaged(void) = .empty;
+    defer successful_calls.deinit(allocator);
+    for (transcript.entries.items[start..end]) |entry| switch (entry) {
+        .tool_result => |result| if (result.ok) {
+            try successful_calls.put(allocator, result.tool_use_id, {});
+        },
+        .verified_patch => |message| if (message.ui_payload) |payload| switch (payload) {
+            .verified_patch => |patch| try addUnique(allocator, &modified, patch.file),
+            else => {},
+        },
+        else => {},
+    };
     for (transcript.entries.items[start..end]) |entry| switch (entry) {
         .assistant_tool_use => |calls| for (calls) |call| {
-            try extractCallFiles(allocator, &reads, &modified, call.name, call.args_json);
+            if (std.mem.eql(u8, call.name, "apply_edit")) continue;
+            if (!successful_calls.contains(call.id)) continue;
+            try extractCallFiles(allocator, &reads, call.args_json);
         },
         else => {},
     };
     sortFiles(reads.items);
     sortFiles(modified.items);
+    const read_files = try reads.toOwnedSlice(allocator);
+    errdefer {
+        for (read_files) |file| allocator.free(file);
+        allocator.free(read_files);
+    }
+    const modified_files = try modified.toOwnedSlice(allocator);
+    errdefer {
+        for (modified_files) |file| allocator.free(file);
+        allocator.free(modified_files);
+    }
     return .{
-        .read_files = try reads.toOwnedSlice(allocator),
-        .modified_files = try modified.toOwnedSlice(allocator),
+        .read_files = read_files,
+        .modified_files = modified_files,
     };
 }
 
 fn extractCallFiles(
     allocator: std.mem.Allocator,
     reads: *std.ArrayList([]u8),
-    modified: *std.ArrayList([]u8),
-    tool_name: []const u8,
     args_json: []const u8,
 ) !void {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, args_json, .{}) catch return;
     defer parsed.deinit();
     if (parsed.value != .object) return;
-    const destination = if (std.mem.eql(u8, tool_name, "apply_edit")) modified else reads;
     if (parsed.value.object.get("path")) |value| if (value == .string) {
-        try addUnique(allocator, destination, value.string);
+        try addUnique(allocator, reads, value.string);
     };
     if (parsed.value.object.get("file")) |value| if (value == .string) {
-        try addUnique(allocator, destination, value.string);
+        try addUnique(allocator, reads, value.string);
     };
     if (parsed.value.object.get("files")) |value| if (value == .array) {
         for (value.array.items) |item| if (item == .string) {
-            try addUnique(allocator, destination, item.string);
+            try addUnique(allocator, reads, item.string);
         };
     };
 }
@@ -435,7 +469,9 @@ fn addUnique(
 ) !void {
     if (file.len == 0) return;
     for (files.items) |present| if (std.mem.eql(u8, present, file)) return;
-    try files.append(allocator, try allocator.dupe(u8, file));
+    const copy = try allocator.dupe(u8, file);
+    errdefer allocator.free(copy);
+    try files.append(allocator, copy);
 }
 
 fn sortFiles(files: [][]u8) void {
@@ -583,7 +619,9 @@ fn validateHeadings(
     }
     for (headings, 0..) |heading, index| {
         if (index > 0 and positions[index] <= positions[index - 1]) return error.MalformedSummary;
-        if (empty_content_heading != null and index == empty_content_heading.?) continue;
+        if (empty_content_heading) |empty_index| {
+            if (index == empty_index) continue;
+        }
         const content_start = positions[index] + heading.len;
         const content_end = if (index + 1 < headings.len) positions[index + 1] else trimmed.len;
         if (std.mem.trim(u8, trimmed[content_start..content_end], " \t\r\n").len == 0) {
@@ -654,6 +692,10 @@ test "deriveCapacity reserves summary output on the 40960-token Qwen model" {
     try testing.expectEqual(@as(u64, 4_096), capacity.summary_allowance_tokens);
     try testing.expectEqual(@as(u64, 11_980), capacity.effective_keep_recent_tokens);
     try testing.expectError(error.NoPostSummaryCapacity, deriveCapacity(.{}, model, 20_000, 500));
+    try testing.expectError(
+        error.InvalidCompactionSettings,
+        deriveCapacity(.{ .reserve_tokens = minimum_reserve_tokens - 1 }, model, 8_000, 500),
+    );
 }
 
 test "prepare returns no change for empty and small active history" {
@@ -697,6 +739,22 @@ test "prepare splits an oversized turn only at an assistant boundary" {
     try testing.expect(isAssistantBoundary(tr.entries.items[ready.first_kept_index]));
 }
 
+test "prepare repeatedly compacts an active split-turn suffix without its user entry" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try addText(&tr, .user, "original request");
+    try addText(&tr, .assistant, "early " ** 100);
+    try addText(&tr, .assistant, "middle " ** 100);
+    try addText(&tr, .assistant, "retained answer");
+    try tr.replaceProjection(testing.allocator, "validated prior split summary", 2);
+
+    const ready = (try prepare(testing.allocator, &tr, 10)).ready;
+    try testing.expectEqual(@as(usize, 1), ready.summarize_start);
+    try testing.expect(ready.summarize_end > ready.summarize_start);
+    try testing.expectEqual(ready.summarize_end, ready.first_kept_index);
+    try testing.expect(!ready.isSplitTurn());
+}
+
 test "prepare protects unresolved pairs and an oversized single user ask" {
     var unresolved: transcript_mod.Transcript = .{};
     defer unresolved.deinit(testing.allocator);
@@ -711,6 +769,27 @@ test "prepare protects unresolved pairs and an oversized single user ask" {
     try addText(&oversized, .user, "x" ** 1000);
     const user_result = try prepare(testing.allocator, &oversized, 1);
     try testing.expectEqual(NotCompactableReason.oversized_current_user, user_result.not_compactable);
+}
+
+test "tool pair validation permits an id reused after its result" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    const calls = [_]turn.ToolCall{.{
+        .id = "provider-reused-id",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"a.ts\"}",
+    }};
+    for (0..2) |_| {
+        try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
+        try tr.append(testing.allocator, .{ .tool_result = .{
+            .tool_use_id = "provider-reused-id",
+            .tool_name = "workspace_read_file",
+            .ok = true,
+            .llm_text = "ok",
+        } });
+    }
+
+    try testing.expectEqual(PairState.valid, try validateToolPairs(testing.allocator, tr.entries.items));
 }
 
 test "serializeSpan uses explicit labels exact args and a UTF-8-safe 2000-byte tool cap" {
@@ -750,8 +829,34 @@ test "extractFileOps is cumulative unique and deterministic" {
     for (calls) |call| try tr.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = call.id,
         .tool_name = call.name,
-        .ok = true,
+        .ok = !std.mem.eql(u8, call.id, "e1"),
         .llm_text = "ok",
+    } });
+    const patch_source: ui_payload_mod.UiPayload = .{ .verified_patch = .{
+        .file = @constCast("m.ts"),
+        .policy_hash = @constCast("a" ** 64),
+        .applied_at_unix_ms = 1,
+        .stats = .{ .total = 0, .new = 0 },
+        .before = null,
+        .after = @constCast("x"),
+        .unified_diff = @constCast(""),
+        .hunks = &.{},
+        .violations = &.{},
+        .before_properties = null,
+        .after_properties = null,
+        .prove = null,
+        .system = null,
+        .rule_citations = &.{},
+        .post_apply_ok = true,
+        .post_apply_summary = null,
+    } };
+    const patch_text = try testing.allocator.dupe(u8, "verified: m.ts");
+    errdefer testing.allocator.free(patch_text);
+    var patch_payload = try patch_source.clone(testing.allocator);
+    errdefer patch_payload.deinit(testing.allocator);
+    try tr.entries.append(testing.allocator, .{ .verified_patch = .{
+        .llm_text = patch_text,
+        .ui_payload = patch_payload,
     } });
     var ops = try extractFileOps(testing.allocator, &tr, 0, tr.len());
     defer ops.deinit(testing.allocator);
@@ -759,6 +864,27 @@ test "extractFileOps is cumulative unique and deterministic" {
     try testing.expectEqualStrings("a.ts", ops.read_files[0]);
     try testing.expectEqualStrings("z.ts", ops.read_files[1]);
     try testing.expectEqualStrings("m.ts", ops.modified_files[0]);
+}
+
+test "extractFileOps excludes failed reads and rejected edit attempts" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    const calls = [_]turn.ToolCall{
+        .{ .id = "read-failed", .name = "workspace_read_file", .args_json = "{\"path\":\"missing.ts\"}" },
+        .{ .id = "edit-rejected", .name = "apply_edit", .args_json = "{\"file\":\"rejected.ts\",\"content\":\"x\"}" },
+    };
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
+    for (calls) |call| try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = call.id,
+        .tool_name = call.name,
+        .ok = false,
+        .llm_text = "rejected",
+    } });
+
+    var ops = try extractFileOps(testing.allocator, &tr, 0, tr.len());
+    defer ops.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), ops.read_files.len);
+    try testing.expectEqual(@as(usize, 0), ops.modified_files.len);
 }
 
 const valid_regular =

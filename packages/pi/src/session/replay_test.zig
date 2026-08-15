@@ -13,7 +13,6 @@ const registry_mod = @import("../registry/registry.zig");
 const turn = @import("../turn.zig");
 const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
-const persister = @import("persister.zig");
 
 const testing = std.testing;
 
@@ -96,15 +95,13 @@ fn runOneTurnWithClient(
     );
     const tr = &session.transcript;
 
-    if (session.events_path) |path| {
+    if (session.events_path != null) {
         const entries = tr.entries.items;
         while (session.last_persisted_len < entries.len) : (session.last_persisted_len += 1) {
-            try persister.appendEntry(
+            try session.appendPersistedEntry(
                 allocator,
-                path,
                 tr.entryIdAt(session.last_persisted_len),
                 &entries[session.last_persisted_len],
-                session.persist_opts,
             );
         }
     }

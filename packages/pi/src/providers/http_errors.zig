@@ -87,11 +87,7 @@ pub fn setReadTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
 /// error once a stalled peer stops draining its receive window instead of
 /// blocking forever. Mirrors the runtime server's slow-client write guard.
 pub fn setWriteTimeout(fd: std.posix.fd_t) void {
-    const tv = std.posix.timeval{
-        .sec = @intCast(write_idle_timeout_ms / 1000),
-        .usec = @intCast((write_idle_timeout_ms % 1000) * 1000),
-    };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+    setWriteTimeoutMs(fd, write_idle_timeout_ms);
 }
 
 /// True for the connect/read errors that mean a network stall, so the wire
@@ -111,6 +107,18 @@ pub fn connect(
     explicit_port: ?u16,
     protocol: std.http.Client.Protocol,
 ) !*std.http.Client.Connection {
+    return connectWithin(client, host, explicit_port, protocol, null);
+}
+
+pub fn connectWithin(
+    client: *std.http.Client,
+    host: std.Io.net.HostName,
+    explicit_port: ?u16,
+    protocol: std.http.Client.Protocol,
+    request_timeout_ms: ?u64,
+) !*std.http.Client.Connection {
+    const remaining = @max(@as(u64, 1), request_timeout_ms orelse connect_timeout_ms);
+    const connect_budget_ms = @min(connect_timeout_ms, remaining);
     const connection = client.connectTcpOptions(.{
         .host = host,
         .port = explicit_port orelse switch (protocol) {
@@ -118,7 +126,10 @@ pub fn connect(
             .tls => 443,
         },
         .protocol = protocol,
-        .timeout = connectTimeout(),
+        .timeout = .{ .duration = .{
+            .raw = std.Io.Duration.fromMilliseconds(connect_budget_ms),
+            .clock = .awake,
+        } },
     }) catch |err| {
         if (isTimeout(err)) return error.RequestTimedOut;
         return err;
@@ -126,9 +137,17 @@ pub fn connect(
     // Bound a stalled stream so a hung response can't freeze the CLI forever,
     // on both the read side (SO_RCVTIMEO) and the body-write side (SO_SNDTIMEO).
     const sock_handle = connection.stream_reader.stream.socket.handle;
-    setReadTimeout(sock_handle);
-    setWriteTimeout(sock_handle);
+    setReadTimeoutMs(sock_handle, @min(read_idle_timeout_ms, remaining));
+    setWriteTimeoutMs(sock_handle, @min(write_idle_timeout_ms, remaining));
     return connection;
+}
+
+pub fn setWriteTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
+    const tv = std.posix.timeval{
+        .sec = @intCast(timeout_ms / 1000),
+        .usec = @intCast((timeout_ms % 1000) * 1000),
+    };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
 }
 
 /// Read the full response body, mapping an idle-read timeout to a clean

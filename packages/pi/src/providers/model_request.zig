@@ -12,6 +12,7 @@ const models = @import("models.zig");
 pub const Provider = models.Provider;
 pub const Purpose = enum { normal, summarization };
 pub const CachePolicy = enum { enabled, disabled };
+pub const compaction_summary_marker = "[zttp compaction summary v1]";
 
 pub const Config = struct {
     provider: Provider,
@@ -44,6 +45,7 @@ pub const Item = union(enum) {
     tool_use: ToolUse,
     tool_result: ToolResult,
     system_note: []const u8,
+    compaction_summary: []const u8,
 };
 
 pub const ItemTag = std.meta.Tag(Item);
@@ -93,6 +95,10 @@ pub const ModelRequestSnapshot = struct {
     request_context_sha256: Sha256Hex,
     transcript_sha256: Sha256Hex,
     transient_user_text_sha256: ?Sha256Hex,
+    /// Stable identity of the first raw entry retained by an active
+    /// compaction projection. Null means this request uses the raw transcript
+    /// from its first entry.
+    projection_first_kept_entry_id: ?transcript_mod.EntryId,
     /// Hash of the exact provider wire body when the transport supplies one.
     /// Semantic-only clients and historical recordings leave it null.
     wire_request_sha256: ?Sha256Hex = null,
@@ -176,7 +182,7 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
     else
         null;
     if (projection) |active_projection| {
-        try items.append(allocator, .{ .system_note = active_projection.summary });
+        try items.append(allocator, .{ .compaction_summary = active_projection.summary });
         try item_groups.append(allocator, .{ .start = 0, .len = 1 });
     }
 
@@ -240,6 +246,10 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
             Sha256Hex.fromBytes("zttp-model-request-transient-user-v1", text)
         else
             null,
+        .projection_first_kept_entry_id = if (projection) |active_projection|
+            active_projection.first_kept_entry_id
+        else
+            null,
     };
 }
 
@@ -257,6 +267,10 @@ fn historyBytes(items: []const Item) !u64 {
     var total: u64 = 0;
     for (items) |item| switch (item) {
         .user_text, .model_text, .system_note => |body| try addBytes(&total, body),
+        .compaction_summary => |body| {
+            try addBytes(&total, compaction_summary_marker);
+            try addBytes(&total, body);
+        },
         .tool_use => |call| {
             try addBytes(&total, call.id);
             try addBytes(&total, call.name);
@@ -309,7 +323,7 @@ fn hashTranscript(items: []const Item) Sha256Hex {
     for (items) |item| {
         hashFrame(&hasher, @tagName(std.meta.activeTag(item)));
         switch (item) {
-            .user_text, .model_text, .system_note => |body| hashFrame(&hasher, body),
+            .user_text, .model_text, .system_note, .compaction_summary => |body| hashFrame(&hasher, body),
             .tool_use => |call| {
                 hashFrame(&hasher, call.id);
                 hashFrame(&hasher, call.name);
@@ -366,7 +380,7 @@ test "snapshot uses checkpoint summary and retained suffix without mutating raw 
     try testing.expectEqual(@as(usize, 3), transcript.len());
     try testing.expectEqual(@as(usize, 2), snapshot.items.len);
     switch (snapshot.items[0]) {
-        .system_note => |body| try testing.expectEqualStrings("durable summary", body),
+        .compaction_summary => |body| try testing.expectEqualStrings("durable summary", body),
         else => return error.TestExpectedSummary,
     }
     switch (snapshot.items[1]) {

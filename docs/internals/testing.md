@@ -73,9 +73,15 @@ soft and hard boundaries, whole- and split-turn cuts, closed tool pairs,
 standalone summary validation, settings precedence and rejection, v3 checkpoint
 resume/fork, and one-shot overflow recovery. `test-cassette` verifies the four
 provider summary request shapes and cache controls. `test-simulator` verifies
-provider-neutral request checkpoints and hard admission; compaction flow
-fixtures assert that retry does not duplicate user input, tools, edits, or turn
-completion.
+provider-neutral request checkpoints and hard admission. New checkpoints
+record the complete `estimated_logical_input_v1` component budget, normalized
+provider-reported logical input, and the active compaction cut ID. Replay
+compares all three. Historical artifacts without those additive fields remain
+readable, but changed prompt or wire bytes still make them stale. Refresh
+empirical artifacts with their real provider. Do not rewrite request digests
+around an old response, because that would attribute it to a request the model
+never received. Compaction flow tests assert that retry does not duplicate user
+input, tools, edits, or turn completion.
 
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-review`, `test-release-check`, `test-server`, `test-compile-bench`.

@@ -18,6 +18,7 @@ const session_events = @import("session/events.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const auto_repair = @import("auto_repair.zig");
 const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
+const compaction = @import("compaction.zig");
 
 const PostApplyReport = struct {
     ok: bool,
@@ -52,6 +53,7 @@ pub const ModelClient = struct {
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
     ) anyerror!ModelCallResult,
+    set_deadline_fn: ?*const fn (ctx: *anyopaque, deadline_ms: ?i64) void = null,
 
     pub fn request(
         self: ModelClient,
@@ -60,6 +62,11 @@ pub const ModelClient = struct {
         extra_user_text: ?[]const u8,
     ) !ModelCallResult {
         return self.request_fn(self.context, arena, transcript, extra_user_text);
+    }
+
+    pub fn setDeadline(self: ModelClient, deadline_ms: ?i64) void {
+        const set_deadline = self.set_deadline_fn orelse return;
+        set_deadline(self.context, deadline_ms);
     }
 };
 
@@ -443,6 +450,16 @@ pub fn runTurnWith(
     // round-trip exhaustion text.
     var hit_timeout_budget = false;
     const turn_start_ms: i64 = nowMonotonicMs();
+    const turn_deadline_ms: ?i64 = if (options.turn_timeout_ms == 0)
+        null
+    else
+        std.math.add(
+            i64,
+            turn_start_ms,
+            std.math.cast(i64, options.turn_timeout_ms) orelse std.math.maxInt(i64),
+        ) catch std.math.maxInt(i64);
+    client.setDeadline(turn_deadline_ms);
+    defer client.setDeadline(null);
     // Compiler-authored repair guidance for the most recent failed draft, built
     // by the in-process repair lane on a veto failure and folded into that
     // draft's failed tool_result so the model gets the exact fix - persisted in
@@ -1043,13 +1060,14 @@ fn applyVerifiedEdit(
             .rewrite_trace = report.rewrite_trace,
         };
         if (!try approve.call(preview)) {
-            try transcript.append(allocator, .{ .tool_result = .{
-                .tool_use_id = "approval",
-                .tool_name = "apply_edit",
-                .ok = false,
-                .llm_text = "edit verified but not applied by user approval policy",
-                .ui_payload = null,
-            } });
+            // The synthetic apply_edit call was already closed with the
+            // compiler verdict before the approval boundary. Record the human
+            // decision as internal continuation context instead of inventing a
+            // second, unmatched tool result that would invalidate provider
+            // history and make later compaction impossible.
+            try transcript.append(allocator, .{
+                .system_note = "edit verified but not applied by user approval policy",
+            });
             return .{ .denied = true };
         }
     }
@@ -1175,7 +1193,7 @@ fn postApplyCheck(
         .overwrite_summary = false,
     }) catch return report;
 
-    if (prepared.before != null) {
+    if (prepared.before) |before| {
         const review_args = blk: {
             var buf = TextBuffer.init(arena);
             const w = buf.writer();
@@ -1187,7 +1205,7 @@ fn postApplyCheck(
             try w.writeAll(",\"content\":");
             try json_writer.writeString(w, applied_content);
             try w.writeAll(",\"before\":");
-            try json_writer.writeString(w, prepared.before.?);
+            try json_writer.writeString(w, before);
             try w.writeAll(",\"diff_only\":true}");
             break :blk buf.written();
         };
@@ -1232,7 +1250,7 @@ fn appendVerifiedPatchEntry(
             prepared.edit.file,
             prepared.edit.content,
         );
-        break :blk owned_links.?.repair_plan_ids;
+        break :blk (owned_links orelse return error.MissingRepairLinks).repair_plan_ids;
     };
 
     // `after` (the equivalence-receipt after-image), the disk write, and the
@@ -1922,8 +1940,18 @@ test "approval callback can block an otherwise verified edit from being written"
     );
 
     switch (tr.at(tr.len() - 1).*) {
-        .tool_result => |result| try testing.expect(std.mem.indexOf(u8, result.llm_text, "not applied") != null),
+        .system_note => |note| try testing.expect(std.mem.indexOf(u8, note, "not applied") != null),
         else => return error.TestFailed,
+    }
+    var apply_results: usize = 0;
+    for (tr.entries.items) |entry| switch (entry) {
+        .tool_result => |result| apply_results += @intFromBool(std.mem.eql(u8, result.tool_name, "apply_edit")),
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), apply_results);
+    switch (try compaction.prepare(testing.allocator, &tr, 1)) {
+        .not_compactable => |reason| try testing.expect(reason != .invalid_tool_pair),
+        .no_change, .ready => {},
     }
     try testing.expect(!file_io.fileExists(testing.allocator, written_path));
 }

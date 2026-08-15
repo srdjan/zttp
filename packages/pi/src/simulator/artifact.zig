@@ -137,6 +137,8 @@ pub const ReplayMismatch = union(enum) {
     initial_state_mismatch: MismatchDetail,
     model_context_mismatch: MismatchDetail,
     transcript_or_transient_prompt_mismatch: MismatchDetail,
+    request_budget_mismatch: MismatchDetail,
+    normalized_input_mismatch: MismatchDetail,
     provider_request_mismatch: MismatchDetail,
     response_underflow: MismatchDetail,
     response_overflow: MismatchDetail,

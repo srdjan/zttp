@@ -36,6 +36,38 @@ const JsonStreamCtx = struct {
     }
 };
 
+const PrintCompactionCtx = struct {
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    json_mode: bool,
+
+    fn onEvent(
+        context: *anyopaque,
+        phase: agent.CompactionPhase,
+        reason: session_events.CompactionReason,
+        result: ?*const agent.CompactResult,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        if (self.json_mode) {
+            emitCompactionEvent(self.allocator, self.out, phase, reason, result) catch {};
+            return;
+        }
+        if (phase != .end) return;
+        const present = result orelse return;
+        const details = switch (present.*) {
+            .compacted => |value| value,
+            else => return,
+        };
+        var buffer: [192]u8 = undefined;
+        const notice = std.fmt.bufPrint(
+            &buffer,
+            "[context compacted ({s}): {d} -> {d} estimated input tokens]\n",
+            .{ @tagName(reason), details.tokens_before, details.estimated_tokens_after },
+        ) catch return;
+        _ = std.c.write(std.c.STDERR_FILENO, notice.ptr, notice.len);
+    }
+};
+
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
@@ -124,6 +156,17 @@ fn runWithSession(
         };
     }
     defer session.transcript.observer = null;
+    var compaction_ctx: PrintCompactionCtx = .{
+        .allocator = allocator,
+        .out = out_writer,
+        .json_mode = flags.json_mode,
+    };
+    const prior_compaction_observer = session.compaction_observer;
+    session.compaction_observer = .{
+        .context = &compaction_ctx,
+        .on_event = PrintCompactionCtx.onEvent,
+    };
+    defer session.compaction_observer = prior_compaction_observer;
 
     const turn_start_len = session.transcript.len();
     const turn_result = if (client_override) |client|
@@ -286,6 +329,56 @@ fn emitEndEvent(allocator: std.mem.Allocator, out: ?*std.Io.Writer) !void {
     try writeOut(out, buf.written());
 }
 
+fn emitCompactionEvent(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    phase: agent.CompactionPhase,
+    reason: session_events.CompactionReason,
+    result: ?*const agent.CompactResult,
+) !void {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    var s: std.json.Stringify = .{ .writer = buf.writer() };
+    try s.beginObject();
+    try s.objectField("v");
+    try s.write(session_events.schema_version);
+    try s.objectField("k");
+    try s.write("compaction");
+    try s.objectField("d");
+    try s.beginObject();
+    try s.objectField("phase");
+    try s.write(@tagName(phase));
+    try s.objectField("reason");
+    try s.write(@tagName(reason));
+    if (result) |present| {
+        try s.objectField("status");
+        try s.write(@tagName(std.meta.activeTag(present.*)));
+        switch (present.*) {
+            .compacted => |details| {
+                try s.objectField("first_kept_entry_id");
+                try s.write(details.first_kept_entry_id);
+                try s.objectField("tokens_before");
+                try s.write(details.tokens_before);
+                try s.objectField("estimated_tokens_after");
+                try s.write(details.estimated_tokens_after);
+            },
+            .not_compactable => |why| {
+                try s.objectField("not_compactable_reason");
+                try s.write(@tagName(why));
+            },
+            .failed => |failure| {
+                try s.objectField("error");
+                try s.write(@errorName(failure));
+            },
+            .no_change, .unavailable => {},
+        }
+    }
+    try s.endObject();
+    try s.endObject();
+    try buf.writer().writeByte('\n');
+    try writeOut(out, buf.written());
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -427,6 +520,33 @@ test "emitErrorEvent: non-provider error emits null remediation" {
     const d = parsed.value.object.get("d").?.object;
     try testing.expectEqualStrings("MissingPrintPrompt", d.get("error").?.string);
     try testing.expect(d.get("remediation").? == .null);
+}
+
+test "json compaction lifecycle is ordered and structured" {
+    const allocator = testing.allocator;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+
+    try emitCompactionEvent(allocator, buf.writer(), .start, .threshold, null);
+    const result: agent.CompactResult = .{ .compacted = .{
+        .reason = .threshold,
+        .first_kept_entry_id = 7,
+        .tokens_before = 50_000,
+        .estimated_tokens_after = 18_000,
+        .summary_usage = .{ .input_tokens = 100, .output_tokens = 50 },
+    } };
+    try emitCompactionEvent(allocator, buf.writer(), .end, .threshold, &result);
+    try emitEndEvent(allocator, buf.writer());
+
+    const start = std.mem.indexOf(u8, buf.written(), "\"phase\":\"start\"") orelse
+        return error.TestFailed;
+    const finish = std.mem.indexOf(u8, buf.written(), "\"phase\":\"end\"") orelse
+        return error.TestFailed;
+    const stream_end = std.mem.indexOf(u8, buf.written(), "\"k\":\"end\"") orelse
+        return error.TestFailed;
+    try testing.expect(start < finish);
+    try testing.expect(finish < stream_end);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"first_kept_entry_id\":7") != null);
 }
 
 test "exitCodeForOutcome maps every terminal reason to a distinct code" {

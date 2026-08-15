@@ -423,6 +423,7 @@ test "stand-in gate: every test in the stand-in roots is reachable through the p
 }
 
 const loop = @import("loop.zig");
+const model_request = @import("providers/model_request.zig");
 const standin_request = @import("standin/request.zig");
 
 // The stand-in reconstructs turn state from the request body, and every mid-turn
@@ -477,6 +478,10 @@ test "stand-in gate: continuation prefixes match the messages the loop authors" 
     }
 
     try testing.expectEqualStrings(loop.veto_reject_preamble, standin_request.veto_reject_preamble);
+    try testing.expectEqualStrings(
+        model_request.compaction_summary_marker,
+        standin_request.compaction_summary_marker,
+    );
     std.debug.print(
         "[standin-gate] continuation prefixes {d}/{d} agree with their authors\n",
         .{ authored.len, authored.len },

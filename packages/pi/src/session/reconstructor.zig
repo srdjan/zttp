@@ -35,7 +35,6 @@ pub fn reconstructTranscript(
     var tr: transcript.Transcript = .{};
     errdefer tr.deinit(allocator);
 
-    try events.recoverIncompleteTail(allocator, events_path);
     var reader = try events.Reader.open(allocator, events_path);
     defer reader.deinit();
 
@@ -106,7 +105,7 @@ fn appendFromLine(
     if (!transcript_kind and (entry_id != null or part_index != null)) return error.CorruptEventsLog;
 
     if (transcript_kind) {
-        const id = entry_id.?;
+        const id = entry_id orelse return error.CorruptEventsLog;
         if (std.mem.eql(u8, kind, "tool_use") and id == tr.nextEntryId() - 1) {
             try appendToolUsePart(allocator, tr, payload, part_index orelse return error.CorruptEventsLog);
             return;
@@ -129,6 +128,8 @@ fn appendFromLine(
         try appendDisplayMessage(allocator, tr, payload, .verified_patch);
     } else if (std.mem.eql(u8, kind, "tool_use")) {
         try appendToolUse(allocator, tr, payload);
+    } else if (std.mem.eql(u8, kind, "tool_use_batch")) {
+        try appendToolUseBatch(allocator, tr, payload);
     } else if (std.mem.eql(u8, kind, "tool_result")) {
         try appendToolResult(allocator, tr, payload);
     } else if (std.mem.eql(u8, kind, "system_note")) {
@@ -156,6 +157,7 @@ fn isTranscriptKind(kind: []const u8) bool {
         std.mem.eql(u8, kind, "diagnostic_box") or
         std.mem.eql(u8, kind, "verified_patch") or
         std.mem.eql(u8, kind, "tool_use") or
+        std.mem.eql(u8, kind, "tool_use_batch") or
         std.mem.eql(u8, kind, "tool_result") or
         std.mem.eql(u8, kind, "system_note");
 }
@@ -278,6 +280,38 @@ fn appendToolUse(
     errdefer allocator.free(args_copy);
 
     calls[0] = .{ .id = id_copy, .name = name_copy, .args_json = args_copy };
+    try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
+}
+
+fn appendToolUseBatch(
+    allocator: std.mem.Allocator,
+    tr: *transcript.Transcript,
+    payload: std.json.Value,
+) !void {
+    if (payload != .array or payload.array.items.len == 0) return error.CorruptEventsLog;
+    const calls = try allocator.alloc(transcript.OwnedToolCall, payload.array.items.len);
+    errdefer allocator.free(calls);
+    var initialized: usize = 0;
+    errdefer {
+        for (calls[0..initialized]) |*call| call.deinit(allocator);
+    }
+    for (payload.array.items, 0..) |item, index| {
+        if (item != .object) return error.CorruptEventsLog;
+        const id_val = item.object.get("id") orelse return error.CorruptEventsLog;
+        const name_val = item.object.get("name") orelse return error.CorruptEventsLog;
+        const args_val = item.object.get("args_json") orelse return error.CorruptEventsLog;
+        if (id_val != .string or name_val != .string or args_val != .string) {
+            return error.CorruptEventsLog;
+        }
+        const id_copy = try allocator.dupe(u8, id_val.string);
+        errdefer allocator.free(id_copy);
+        const name_copy = try allocator.dupe(u8, name_val.string);
+        errdefer allocator.free(name_copy);
+        const args_copy = try allocator.dupe(u8, args_val.string);
+        errdefer allocator.free(args_copy);
+        calls[index] = .{ .id = id_copy, .name = name_copy, .args_json = args_copy };
+        initialized += 1;
+    }
     try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
 }
 
@@ -418,16 +452,11 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
 
     try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "hi" });
     try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "hello back" });
-    try events.appendEntryEvent(allocator, path, 3, 0, .{ .tool_use = .{
-        .id = "toolu_1",
-        .name = "zts_expert_meta",
-        .args_json = "{\"verbose\":true}",
-    } });
-    try events.appendEntryEvent(allocator, path, 3, 1, .{ .tool_use = .{
-        .id = "toolu_2",
-        .name = "workspace_read_file",
-        .args_json = "{\"path\":\"handler.ts\"}",
-    } });
+    const tool_batch = [_]events.ToolUse{
+        .{ .id = "toolu_1", .name = "zts_expert_meta", .args_json = "{\"verbose\":true}" },
+        .{ .id = "toolu_2", .name = "workspace_read_file", .args_json = "{\"path\":\"handler.ts\"}" },
+    };
+    try events.appendEntryEvent(allocator, path, 3, null, .{ .tool_use_batch = &tool_batch });
     try events.appendEntryEvent(allocator, path, 4, null, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
         .tool_name = "zts_expert_meta",
@@ -606,12 +635,12 @@ test "reconstructTranscript restores the latest projection checkpoint" {
 
     try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "old" });
     try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "old answer" });
+    try events.appendEntryEvent(allocator, path, 3, null, .{ .user_text = "new" });
     try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
         .summary = "summary",
         .first_kept_entry_id = 3,
         .reason = .manual,
     } });
-    try events.appendEntryEvent(allocator, path, 3, null, .{ .user_text = "new" });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -620,7 +649,7 @@ test "reconstructTranscript restores the latest projection checkpoint" {
     try testing.expectEqual(@as(events.EntryId, 3), tr.projection.?.first_kept_entry_id);
 }
 
-test "reconstructTranscript rejects a checkpoint with a missing cut identity" {
+test "journal writer rejects a checkpoint with a missing cut identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -628,12 +657,14 @@ test "reconstructTranscript rejects a checkpoint with a missing cut identity" {
     defer allocator.free(path);
 
     try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "only" });
-    try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
-        .summary = "invalid",
-        .first_kept_entry_id = 99,
-        .reason = .manual,
-    } });
-    try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
+    try testing.expectError(
+        error.CorruptEventsLog,
+        events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+            .summary = "invalid",
+            .first_kept_entry_id = 99,
+            .reason = .manual,
+        } }),
+    );
 }
 
 test "reconstructTranscript streams a journal larger than the former 64 MiB ceiling" {
@@ -656,7 +687,7 @@ test "reconstructTranscript streams a journal larger than the former 64 MiB ceil
     try testing.expectEqual(body.len, tr.at(1).system_note.len);
 }
 
-test "reconstructTranscript recovers a provably incomplete final frame" {
+test "reconstructTranscript is read-only and recovery requires the journal lock" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -669,6 +700,8 @@ test "reconstructTranscript recovers a provably incomplete final frame" {
     defer std.Io.Threaded.closeFd(fd);
     _ = std.c.write(fd, "ZTE3partial".ptr, "ZTE3partial".len);
 
+    try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
+    try events.recoverIncompleteTail(allocator, path);
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
     try testing.expectEqual(@as(usize, 1), tr.len());

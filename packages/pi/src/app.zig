@@ -311,6 +311,7 @@ fn runAutoloop(
         .goals = goal_slices,
         .budget = budget,
         .events_path = session.events_path,
+        .journal_writer = if (session.journal_writer) |*writer| writer else null,
     }) catch |err| {
         var stderr: [256]u8 = undefined;
         const line = std.fmt.bufPrint(&stderr, "autoloop error: {s}\n", .{@errorName(err)}) catch "autoloop error\n";

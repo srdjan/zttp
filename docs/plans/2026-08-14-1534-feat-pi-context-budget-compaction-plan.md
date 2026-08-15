@@ -284,6 +284,17 @@ The pure core owns IDs, turn classification, token estimation, cut selection, se
 
 ---
 
+## Execution Status - 2026-08-15
+
+- U1-U8 are implemented on local `main`. The fixed full-preset estimate fell from 31,477 to 8,524 tokens, a 72.9 percent reduction.
+- U9 deterministic coverage is implemented. The provider cassette suite passes 339/339, the full-flow simulator passes 815/815, and the stand-in suite passes 53/53.
+- The Pi suite passes 910 tests and skips 1. Its sole failure is the explicit stale-corpus guard for all 19 DeepSeek empirical codegen recordings after the intentional request-contract change.
+- The aggregate repository suite reaches 6,132 passing tests and 5 skips. Its sole failure is the same stale DeepSeek corpus guard. Module-boundary, proof-swallow, docs-drift, docs-links, and runtime-purity gates pass.
+- The optional local MLX E2E remains unverified because no pinned local server is available. It fails explicitly with `LocalServerUnavailable`; synthetic evidence is not substituted.
+- Remaining external verification: re-record and review the 19 DeepSeek cases with credentials, then rerun `zig build test-expert-app --summary all` and `bash scripts/verify.sh`; start the pinned MLX server before running `zig build test-expert-mlx-e2e --summary all`.
+
+---
+
 ## Verification Contract
 
 | Layer | Command | Done signal |
