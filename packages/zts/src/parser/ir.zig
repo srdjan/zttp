@@ -399,10 +399,9 @@ pub const Node = struct {
     };
 
     pub const PropertyExpr = struct {
-        key: NodeIndex, // Can be identifier, string, or computed
+        key: NodeIndex,
         value: NodeIndex,
-        is_computed: bool,
-        is_shorthand: bool, // { x } === { x: x }
+        is_shorthand: bool, // match { x } === match { x: x }
     };
 
     pub const FunctionExpr = struct {
@@ -1110,9 +1109,8 @@ pub const IRStore = struct {
             },
             .object_property => blk: {
                 const p = node.data.property;
-                // Pack: a = key, b = value(24) | is_computed(1) << 24 | is_shorthand(1) << 25
-                const flags: u32 = (@as(u32, if (p.is_computed) 1 else 0) << 24) |
-                    (@as(u32, if (p.is_shorthand) 1 else 0) << 25);
+                // Pack: a = key, b = value(24) | is_shorthand(1) << 24.
+                const flags: u32 = @as(u32, if (p.is_shorthand) 1 else 0) << 24;
                 const b_val = @as(u32, @as(u24, @truncate(p.value))) | flags;
                 break :blk self.addNode(.object_property, loc, .{ .a = p.key, .b = b_val });
             },
@@ -1340,8 +1338,7 @@ pub const IRStore = struct {
             // --- Object method/accessor ---
             .object_method, .object_getter, .object_setter => blk: {
                 const p = node.data.property;
-                const flags: u32 = (@as(u32, if (p.is_computed) 1 else 0) << 24);
-                const b_val = @as(u32, @as(u24, @truncate(p.value))) | flags;
+                const b_val = @as(u32, @as(u24, @truncate(p.value)));
                 break :blk self.addNode(node.tag, loc, .{ .a = p.key, .b = b_val });
             },
 
@@ -1908,15 +1905,14 @@ pub const IrView = struct {
             .ir_store => |ir| blk: {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
-                // Property: a = key, b[0:24] = value, b[24] = is_computed, b[25] = is_shorthand.
+                // Property: a = key, b[0:24] = value, b[24] = is_shorthand.
                 // Mask the value field: @truncate to NodeIndex (u32) would leave the flag
-                // bits in place, so a shorthand property (bit 25) would read back with
-                // 0x02000000 OR'd into the node index and resolve to garbage.
+                // bits in place, so a shorthand property (bit 24) would read back with
+                // 0x01000000 OR'd into the node index and resolve to garbage.
                 break :blk .{
                     .key = d.a,
                     .value = @as(NodeIndex, @as(u24, @truncate(d.b))),
-                    .is_computed = (d.b >> 24) & 1 != 0,
-                    .is_shorthand = (d.b >> 25) & 1 != 0,
+                    .is_shorthand = (d.b >> 24) & 1 != 0,
                 };
             },
         };

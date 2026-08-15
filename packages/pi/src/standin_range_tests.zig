@@ -266,7 +266,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
                 null,
                 null,
                 "{\"path\":\"handler.ts\",\"holes\":[{\"function\":\"handler\",\"line\":3,\"column\":10}]}",
-                "{\"ok\":true,\"applied\":false,\"path\":\"handler.ts\",\"line\":3,\"column\":10,\"expression\":\"Response.json({ total })\",\"proposed_content\":\"function handler(req: Request): Proof<Response, \\\"deterministic\\\"> {\\n  const total = 1;\\n  return Response.json({ total });\\n}\\n\"}",
+                "{\"ok\":true,\"applied\":false,\"path\":\"handler.ts\",\"line\":3,\"column\":10,\"expression\":\"Response.json({ total: total })\",\"proposed_content\":\"function handler(req: Request): Proof<Response, \\\"deterministic\\\"> {\\n  const total = 1;\\n  return Response.json({ total: total });\\n}\\n\"}",
             },
         },
     };
@@ -352,7 +352,7 @@ fn sequenceSource(entry_id: []const u8) []const u8 {
         \\function handler(req: Request): Response {
         \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
-        \\    return Response.json({ data });
+        \\    return Response.json({ data: data });
         \\}
         \\
         ;

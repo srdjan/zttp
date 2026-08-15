@@ -122,7 +122,7 @@ test "verify-paths registry performs one file-bound version-2 check" {
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{
         .sub_path = "handler.ts",
-        .data = "function handler(req: Request): Response { var x = 1; return Response.json({ x }); }",
+        .data = "function handler(req: Request): Response { var x = 1; return Response.json({ x: x }); }",
     });
     const file = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, "handler.ts", testing.allocator);
     defer testing.allocator.free(file);

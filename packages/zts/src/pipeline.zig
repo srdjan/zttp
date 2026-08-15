@@ -913,7 +913,7 @@ test "pipeline.resolve rejects optional module value in boolean context" {
 
 test "pipeline.resolve runs strict checker without type context" {
     const allocator = testing.allocator;
-    const source: []const u8 = "function handler(req) { let x = 1; return Response.json({x}); }";
+    const source: []const u8 = "function handler(req) { let x = 1; return Response.json({ x: x }); }";
 
     var parsed_state = try parseSourceForTest(allocator, source);
     defer parsed_state.js_parser.deinit();

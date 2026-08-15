@@ -535,7 +535,7 @@ test "candidateFromSource verifies a guard repair in memory" {
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
-        \\  return Response.json({ data });
+        \\  return Response.json({ data: data });
         \\}
     ;
     var cand = try candidateFromSource(testing.allocator, source, "handler.ts", &.{}, 4);
@@ -590,7 +590,7 @@ test "execute returns verified candidate without writing the file" {
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
-        \\  return Response.json({ data });
+        \\  return Response.json({ data: data });
         \\}
     ;
     try tmp.writeFile(allocator, "handler.ts", source);
@@ -634,7 +634,7 @@ test "execute does not persist witnesses to the on-disk corpus" {
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
-        \\  return Response.json({ data });
+        \\  return Response.json({ data: data });
         \\}
     ;
     try tmp.writeFile(allocator, "handler.ts", source);

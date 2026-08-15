@@ -258,7 +258,7 @@ test "stand-in seeded arm: a foreign source gets a miss, not a scripted defect" 
     const allocator = arena.allocator();
 
     const seed = defect_seeds.findById("let-binding") orelse return error.MissingSeed;
-    const foreign = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const other = 7;\n  return Response.json({ other });\n}\n";
+    const foreign = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const other = 7;\n  return Response.json({ other: other });\n}\n";
 
     var tmp = try IsolatedTmp.init(allocator, "standin-seed-foreign");
     defer tmp.cleanup(allocator);
@@ -593,7 +593,7 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
-        \\    return Response.json({ data });
+        \\    return Response.json({ data: data });
         \\}
         \\
     ;
@@ -672,7 +672,7 @@ test "stand-in review reports source observations without a compiler verdict" {
         \\function handler(req: Request): Response {
         \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
-        \\    return Response.json({ data });
+        \\    return Response.json({ data: data });
         \\}
         \\
     ;
@@ -789,7 +789,7 @@ test "stand-in violation fix preserves source around the inserted guard" {
         \\function handler(req: Request): Response {
         \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
-        \\    return Response.json({ data });
+        \\    return Response.json({ data: data });
         \\}
         \\
     ;
@@ -803,7 +803,7 @@ test "stand-in violation fix preserves source around the inserted guard" {
         \\        return Response.json({ error: result.error }, { status: 400 });
         \\    }
         \\    const data = result.value;
-        \\    return Response.json({ data });
+        \\    return Response.json({ data: data });
         \\}
         \\
     ;
@@ -844,7 +844,7 @@ test "stand-in violation fix returns a miss for an already guarded source" {
         \\        return Response.json({ error: result.error }, { status: 400 });
         \\    }
         \\    const data = result.value;
-        \\    return Response.json({ data });
+        \\    return Response.json({ data: data });
         \\}
         \\
     ;
@@ -879,7 +879,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
-        \\    return Response.json({ data });
+        \\    return Response.json({ data: data });
         \\}
         \\
         ,

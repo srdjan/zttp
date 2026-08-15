@@ -537,7 +537,7 @@ test "insertTemplateBeforeLine preserves target indentation" {
     const source =
         \\function handler(req: Request): Response {
         \\  const data = auth.value;
-        \\  return Response.json({ data });
+        \\  return Response.json({ data: data });
         \\}
     ;
     const out = try repair_apply.applyIntent(
@@ -568,7 +568,7 @@ test "insertTemplateBeforeLastClosingBrace inserts inside the outer scope" {
             .plan_id = "rp_002",
             .intent_kind = "add_trailing_return",
             .line = 3,
-            .template = "return Response.json({ data });",
+            .template = "return Response.json({ data: data });",
         },
     );
     defer testing.allocator.free(out);
@@ -647,7 +647,7 @@ test "execute returns typed failure for unsupported intent" {
 
 test "execute dry-runs a source-backed guard insertion" {
     const input =
-        \\{"path":"handler.ts","source":"function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const data = auth.value;\n  return Response.json({ data });\n}","plan":{"id":"rp_001","edit_intent":{"kind":"insert_guard_before_line","line":2,"column":14,"template":"if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });"}}}
+        \\{"path":"handler.ts","source":"function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const data = auth.value;\n  return Response.json({ data: data });\n}","plan":{"id":"rp_001","edit_intent":{"kind":"insert_guard_before_line","line":2,"column":14,"template":"if (!auth.ok) return Response.json({ error: auth.error }, { status: 400 });"}}}
     ;
     var result = try executeSemanticPlan(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);

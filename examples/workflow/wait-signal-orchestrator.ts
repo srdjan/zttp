@@ -30,7 +30,7 @@ function handler(req: Request): Response {
     key,
     () => {
       const approval = waitSignal("approved");
-      return Response.json({ resumed: true, approval });
+      return Response.json({ resumed: true, approval: approval });
     },
   );
 }

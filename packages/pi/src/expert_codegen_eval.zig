@@ -560,7 +560,7 @@ test "runCase records the failing ZTS code for a bad first draft" {
     // code - exactly the hard-failure case the gap histogram is meant to rank.
     var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({ x }); }",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({ x: x }); }",
     } } } };
     const case: CodegenCase = .{
         .name = "forbidden-var",

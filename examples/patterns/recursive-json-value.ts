@@ -52,5 +52,5 @@ function kindOf(value: JsonValue): string {
 function handler(req: Request): Guardrails<Response> {
   const document: JsonValue = [1, "two", true, null, [3]];
   const kinds = document.map(kindOf);
-  return Response.json({ outer: kindOf(document), kinds });
+  return Response.json({ outer: kindOf(document), kinds: kinds });
 }

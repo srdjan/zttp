@@ -1660,7 +1660,7 @@ test "HandlerVerifier accepts exhaustive literal union match without default" {
         \\    when "a": 1,
         \\    when "b": 2,
         \\  };
-        \\  return Response.json({ out });
+        \\  return Response.json({ out: out });
         \\}
     , 0, 0);
 }
@@ -1672,7 +1672,7 @@ test "HandlerVerifier still warns on non-exhaustive union match" {
         \\  const out = match (value) {
         \\    when "a": 1,
         \\  };
-        \\  return Response.json({ out });
+        \\  return Response.json({ out: out });
         \\}
     , 0, 1);
 }

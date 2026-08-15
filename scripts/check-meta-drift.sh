@@ -38,19 +38,19 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-15 after phase 7 removed declaration destructuring. The core
-# grammar now has one named binding form, the policy no longer advertises the
-# two obsolete canonicalization diagnostics, and the restriction matrix names
-# both declaration patterns and renames.
+# Pinned 2026-08-15 after phase 7 made record construction explicit. The core
+# grammar requires a key and value for every field, the match-only shorthand
+# idiom is named as such, and the restriction matrix refuses object shorthand
+# and computed record keys.
 EXPECTED_PROFILE="zts-advanced-1"
 EXPECTED_POLICY_HASH="dd420c0ffb35e1b43ea17e4a79765169da292dd2a9417d9819429f0eceb59e3c"
 # Moved when JSX was removed from the core grammar. TSX is now a separately
 # hashed frontend that lowers into this exact core identity.
-EXPECTED_GRAMMAR_HASH="38ef6da750271d8375cbc3ee41bf58ea3cb438283d26e5ada921e12294aeeafd"
+EXPECTED_GRAMMAR_HASH="c5caa05447cc6288b9c2ba84055e297ea72681597bd64cada577e3c4a2a3eb0a"
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
-EXPECTED_FRONTEND_GRAMMAR_HASH="345013589d975ededd034acf6ec7773c3fea12f72029536e1c4c06e9269092a3"
-EXPECTED_IDIOM_HASH="c145df3cbeeb35ab53fcb30a86ce331ce78de25ef0da8292f03526f1ce4cdd43"
-EXPECTED_RESTRICTION_HASH="9d1d96ebb24af995dcc56ededa779d21a51015f2147f1029c12fdeb4ba981cff"
+EXPECTED_FRONTEND_GRAMMAR_HASH="a5777bbacf655c8b34abee2e622cf147eac70048ba24bd066db7a907512c0641"
+EXPECTED_IDIOM_HASH="acc50fe37ba8bfe6306c5d6db821ef081b6e67f284676765097784d696436ba1"
+EXPECTED_RESTRICTION_HASH="9e0ad04b2a8e5c0016e164598e400d7be4ee87fbf92cdabb8b9f6f0a40fc02c8"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

@@ -349,7 +349,7 @@ registry-generated and drift-gated; this document is its readable view.
 | pure search loop | `find`, `findIndex`, `some`, or `every`, by what the loop yields and whether its flag starts `false` or `true` | `let` plus `for...of` whose only early exit is `break` | the body is pure, carries one accumulator, uses no `continue`, and the loop head is already idiomatic under the element-iteration row |
 | field read | `const id = user.id;`, or `const first = pair[0];` for a tuple | any declaration destructuring pattern | none |
 | matched field read | a binding pattern field | a `match` arm that reads the field off the scrutinee | none |
-| binding field name | shorthand `{ value }` | `{ value: value }` | none |
+| match binding field name | match shorthand `{ value }` | match pattern `{ value: value }` | none |
 | element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items` | none |
 
 Three entries are declared preferences rather than derivations, recorded here
@@ -773,10 +773,13 @@ It excludes:
 - function expressions
 - reusable or exported arrow helpers
 - object methods, getters, and setters
+- object literal shorthand and computed record keys
 - declaration merging
 
-Object literals contain data fields only. Reusable behavior is a named
-function with explicit inputs and outputs.
+Object literals contain explicit data fields only. Write `{ value: value }`,
+not `{ value }`. A fixed-shape record uses literal field names; dynamic keyed
+data uses `Dict`. Reusable behavior is a named function with explicit inputs
+and outputs.
 
 A default is explicit in the parameter type, call, and function body:
 
@@ -1988,7 +1991,7 @@ RecordExpr   ::= "{" "}"
                | "{" RecordField ("," RecordField)* [","] "}"
                | "{" "..." Expr "," RecordField
                   ("," RecordField)* [","] "}"
-RecordField  ::= Ident [":" Expr] | String ":" Expr
+RecordField  ::= Ident ":" Expr | String ":" Expr
 PropertyName ::= Ident | String
 Args         ::= Expr ("," Expr)* [","]
 TypeArgs     ::= "<" Type ("," Type)* ">"
@@ -2236,6 +2239,8 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | fallback `assert` | one explicit early-return spelling | use `if` plus `return` |
 | interface, enum, namespace, decorator | one closed data and module model | language-simplicity choice |
 | object methods, getters, setters | explicit functions and effects | language-simplicity choice |
+| object literal shorthand | record fields name both their key and value | canonical simplicity; write `{ value: value }` |
+| computed record key | fixed compiler-visible record shape | replaced by a literal field name or `Dict` |
 | `.js` and `.jsx` source files | one typed core and one explicit TSX frontend | language-simplicity choice; use `.ts` or `.tsx` |
 
 Non-idiomatic spellings are absent from this matrix by design. They are not

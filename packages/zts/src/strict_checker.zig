@@ -109,7 +109,7 @@ pub const DiagnosticKind = enum {
     /// distinction JSON fidelity depends on.
     nullish_operator_on_null,
     /// A `match` record pattern renames a field to the name it already has
-    /// (`{ value: value }`). Spec 4.2.1 row `binding field name`: the
+    /// (`{ value: value }`). Spec 4.2.1 row `match binding field name`: the
     /// shorthand is the idiomatic spelling.
     canonical_redundant_pattern_rename,
     /// A `match` arm reads a field off the scrutinee instead of binding it in
@@ -733,15 +733,6 @@ pub const StrictChecker = struct {
                         continue;
                     }
                     const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-                    if (prop.is_computed and !self.isStaticComputedKey(prop.key)) {
-                        self.addDiagnostic(.{
-                            .severity = .err,
-                            .kind = .computed_property_access,
-                            .node = prop_idx,
-                            .message = "dynamic computed object keys are not part of strict ZigTS",
-                            .help = "use a literal field name so object shape stays compiler-visible",
-                        });
-                    }
                     self.walkExpr(prop.value);
                 }
             },
@@ -894,7 +885,7 @@ pub const StrictChecker = struct {
 
     /// The two spec 4.2.1 rows a `match` binding realizes.
     ///
-    /// `binding field name` (ZTS625): `{ value: value }` says the field name
+    /// `match binding field name` (ZTS625): `{ value: value }` says the field name
     /// twice; the shorthand `{ value }` is the same pattern.
     ///
     /// `matched field read` (ZTS626): an arm that reads a field off the
@@ -1883,7 +1874,7 @@ test "canonical_export_function_const survives the export annotation split" {
 }
 
 test "strict checker flags avoidable let" {
-    const source = "function handler(req) { let x = 1; return Response.json({x}); }";
+    const source = "function handler(req) { let x = 1; return Response.json({ x: x }); }";
     var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
@@ -1895,7 +1886,7 @@ test "strict checker flags avoidable let" {
 }
 
 test "strict checker accepts reassigned let" {
-    const source = "function handler(req) { let x = 1; x = 2; return Response.json({x}); }";
+    const source = "function handler(req) { let x = 1; x = 2; return Response.json({ x: x }); }";
     var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
@@ -1915,7 +1906,7 @@ test "strict checker accepts reassigned let inside an exported function" {
     // function was ever recorded and every `let` there read as never
     // reassigned, at error severity. `let` is an advertised admitted form with
     // no legal spelling until this descends.
-    const source = "export function handler(req) { let x = 1; x = 2; return Response.json({x}); }";
+    const source = "export function handler(req) { let x = 1; x = 2; return Response.json({ x: x }); }";
     var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
@@ -1931,7 +1922,7 @@ test "strict checker accepts reassigned let inside an exported function" {
 test "an exported function's let that is never reassigned is still flagged" {
     // The floor under the fix above: descending through `export_decl` must not
     // turn the rule off, only stop it firing on a binding that is assigned.
-    const source = "export function handler(req) { let x = 1; return Response.json({x}); }";
+    const source = "export function handler(req) { let x = 1; return Response.json({ x: x }); }";
     var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
@@ -1947,7 +1938,7 @@ test "an exported function's let that is never reassigned is still flagged" {
 }
 
 test "canonical profile warns on reused arrow helper" {
-    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); const b = parse(2); return Response.json({a,b}); }";
+    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); const b = parse(2); return Response.json({ a: a, b: b }); }";
     var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
@@ -1973,7 +1964,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
         \\function handler(req: Request): Response {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     var stripped = try @import("zts-engine").stripper.strip(testing.allocator, source, .{});
@@ -2002,7 +1993,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
 }
 
 test "strict checker accepts one-off arrow helper value" {
-    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({a}); }";
+    const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({ a: a }); }";
     var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
     defer parser.deinit();
     const root = try parser.parse();
@@ -2246,7 +2237,7 @@ test "canonical_redundant_bool_compare does not fire without type info" {
 }
 
 test "pure ternary is admitted" {
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 200 : 500; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 200 : 500; return Response.json({ x: x }); }");
     defer checker.deinit();
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .canonical_ternary_impure);
@@ -2255,13 +2246,13 @@ test "pure ternary is admitted" {
 }
 
 test "ternary with a call arm fires impure diagnostic" {
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? load(req) : 500; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? load(req) : 500; return Response.json({ x: x }); }");
     defer checker.deinit();
     try expectKind(&checker, .canonical_ternary_impure);
 }
 
 test "ternary with an assignment arm fires impure diagnostic" {
-    var checker = try checkSource("function handler(req) { let n = 0; const x = req.method === 'GET' ? (n = 1) : 500; return Response.json({x, n}); }");
+    var checker = try checkSource("function handler(req) { let n = 0; const x = req.method === 'GET' ? (n = 1) : 500; return Response.json({ x: x, n: n }); }");
     defer checker.deinit();
     try expectKind(&checker, .canonical_ternary_impure);
 }
@@ -2269,7 +2260,7 @@ test "ternary with an assignment arm fires impure diagnostic" {
 test "ternary over pure composite arms is admitted" {
     // Array, object, and template arms are pure when every part is pure, so
     // the recursion must reach into them rather than defaulting to pure.
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? [req.url, 1] : [req.url, 2]; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? [req.url, 1] : [req.url, 2]; return Response.json({ x: x }); }");
     defer checker.deinit();
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .canonical_ternary_impure);
@@ -2277,7 +2268,7 @@ test "ternary over pure composite arms is admitted" {
 }
 
 test "ternary with a call nested inside a composite arm fires impure diagnostic" {
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? [load(req)] : [500]; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? [load(req)] : [500]; return Response.json({ x: x }); }");
     defer checker.deinit();
     try expectKind(&checker, .canonical_ternary_impure);
 }
@@ -2302,7 +2293,7 @@ test "a ternary over a capability-reaching call still fires" {
     // `env` declares while reading the host.
     var h = try checkStripped(
         "import { sha256 } from \"zttp:crypto\";\n" ++
-            "function handler(req: Request): Response {\n  const n = 1;\n  const x = n > 0 ? sha256(\"a\") : \"\";\n  return Response.json({ x });\n}\n",
+            "function handler(req: Request): Response {\n  const n = 1;\n  const x = n > 0 ? sha256(\"a\") : \"\";\n  return Response.json({ x: x });\n}\n",
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_ternary_impure);
@@ -2388,25 +2379,25 @@ test "a named helper in a callback slot is refused rather than assumed pure" {
 }
 
 test "chained ternary fires chain diagnostic" {
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 1 : req.method === 'POST' ? 2 : 3; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? 1 : req.method === 'POST' ? 2 : 3; return Response.json({ x: x }); }");
     defer checker.deinit();
     try expectKind(&checker, .canonical_ternary_chain);
 }
 
 test "chained ternary in the then branch fires chain diagnostic" {
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? (req.url === '/a' ? 1 : 2) : 3; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? (req.url === '/a' ? 1 : 2) : 3; return Response.json({ x: x }); }");
     defer checker.deinit();
     try expectKind(&checker, .canonical_ternary_chain);
 }
 
 test "canonical_compound_assignment fires on +=" {
-    var checker = try checkSource("function handler(req) { let n = 0; n += 1; return Response.json({n}); }");
+    var checker = try checkSource("function handler(req) { let n = 0; n += 1; return Response.json({ n: n }); }");
     defer checker.deinit();
     try expectKind(&checker, .canonical_compound_assignment);
 }
 
 test "canonical_compound_assignment does not fire on plain =" {
-    var checker = try checkSource("function handler(req) { let n = 0; n = n + 1; return Response.json({n}); }");
+    var checker = try checkSource("function handler(req) { let n = 0; n = n + 1; return Response.json({ n: n }); }");
     defer checker.deinit();
     for (checker.getDiagnostics()) |diag| {
         try testing.expect(diag.kind != .canonical_compound_assignment);
@@ -2453,7 +2444,7 @@ test "canonical_ternary_impure diagnostic carries repair_intent = replace_ternar
     // Every veto-able strict diagnostic must populate the typed repair
     // primitive so the agent picks an apply step
     // directly. ZTS612 is the representative canonical-profile case.
-    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? load(req) : 500; return Response.json({x}); }");
+    var checker = try checkSource("function handler(req) { const x = req.method === 'GET' ? load(req) : 500; return Response.json({ x: x }); }");
     defer checker.deinit();
     var saw_ternary = false;
     for (checker.getDiagnostics()) |diag| {
@@ -2542,7 +2533,7 @@ test "this checker records imports from unresolved modules" {
 
 test "`??` over a type that admits null is refused" {
     var h = try checkStripped(
-        "function handler(req: Request): Response {\n  const name: string | null = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown });\n}\n",
+        "function handler(req: Request): Response {\n  const name: string | null = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
     try expectKind(&h.checker, .nullish_operator_on_null);
@@ -2553,7 +2544,7 @@ test "`??` over an optional type stays idiomatic" {
     // operator keeps exactly one meaning and is the idiomatic spelling of it,
     // so a rule that fired here would refuse the corpus rather than a defect.
     var h = try checkStripped(
-        "function handler(req: Request): Response {\n  const name: string | undefined = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown });\n}\n",
+        "function handler(req: Request): Response {\n  const name: string | undefined = req.url;\n  const shown = name ?? \"anonymous\";\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
     try expectNoKind(&h.checker, .nullish_operator_on_null);
@@ -2561,7 +2552,7 @@ test "`??` over an optional type stays idiomatic" {
 
 test "`?.` over a type that admits null is refused" {
     var h = try checkStripped(
-        "function handler(req: Request): Response {\n  const row: { name: string } | null = undefined;\n  const shown = row?.name;\n  return Response.json({ shown });\n}\n",
+        "function handler(req: Request): Response {\n  const row: { name: string } | null = undefined;\n  const shown = row?.name;\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
     try expectKind(&h.checker, .nullish_operator_on_null);
@@ -2569,7 +2560,7 @@ test "`?.` over a type that admits null is refused" {
 
 test "`?.` over a concrete record stays idiomatic" {
     var h = try checkStripped(
-        "function handler(req: Request): Response {\n  const row: { name: string } | undefined = undefined;\n  const shown = row?.name;\n  return Response.json({ shown });\n}\n",
+        "function handler(req: Request): Response {\n  const row: { name: string } | undefined = undefined;\n  const shown = row?.name;\n  return Response.json({ shown: shown });\n}\n",
     );
     defer h.deinit();
     try expectNoKind(&h.checker, .nullish_operator_on_null);
@@ -2638,7 +2629,7 @@ test "a round trip that changes the key set is advised nothing" {
 
 test "a reduce over dictEntries is advised to dictFold" {
     var h = try checkStripped(dict_imports ++
-        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total });\n}\n");
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total: total });\n}\n");
     defer h.deinit();
     try expectKind(&h.checker, .canonical_dict_entries_reduce);
 }
@@ -2647,7 +2638,7 @@ test "the bulk operations themselves are advised nothing" {
     // The control for all three rows at once. A rule that fired here would
     // advise the idiomatic spelling to rewrite itself.
     var h = try checkStripped(dict_imports ++
-        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const doubled = dictMapValues(d, (v, k) => v * 2);\n  const kept = dictFilter(d, (v, k) => v > 0);\n  const total = dictFold(d, (acc, v, k) => acc + v, 0);\n  return Response.json({ total, a: dictEntries(doubled).length, b: dictEntries(kept).length });\n}\n");
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const doubled = dictMapValues(d, (v, k) => v * 2);\n  const kept = dictFilter(d, (v, k) => v > 0);\n  const total = dictFold(d, (acc, v, k) => acc + v, 0);\n  return Response.json({ total: total, a: dictEntries(doubled).length, b: dictEntries(kept).length });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_dict_entry_round_trip);
     try expectNoKind(&h.checker, .canonical_dict_entries_reduce);
@@ -2658,7 +2649,7 @@ test "a reduce over a filtered entry list is not the fold row" {
     // different program, so the row does not cover it and advising the rewrite
     // would be advising a behavior change.
     var h = try checkStripped(dict_imports ++
-        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).filter((p) => p[1] > 0).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total });\n}\n");
+        "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const total = dictEntries(d).filter((p) => p[1] > 0).reduce((acc, p) => acc + p[1], 0);\n  return Response.json({ total: total });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .canonical_dict_entries_reduce);
 }

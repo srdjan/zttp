@@ -109,11 +109,6 @@ fn extractFromInit(deps: Deps, init_idx: NodeIndex) !IntentInfo {
             info.dynamic = true;
             return info;
         };
-        if (prop.is_computed) {
-            info.dynamic = true;
-            return info;
-        }
-
         const key = propKeyName(deps, prop.key) orelse {
             info.dynamic = true;
             return info;
@@ -213,7 +208,6 @@ fn parseAssertion(deps: Deps, obj_idx: NodeIndex) ParseError!IntentAssertion {
         const prop_tag = deps.ir_view.getTag(prop_idx) orelse return error.NotLiteral;
         if (prop_tag != .object_property) return error.NotLiteral;
         const prop = deps.ir_view.getProperty(prop_idx) orelse return error.NotLiteral;
-        if (prop.is_computed) return error.NotLiteral;
 
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
 
@@ -265,7 +259,6 @@ fn parseRequest(
         const prop_idx = deps.ir_view.getListIndex(obj.properties_start, @intCast(p));
         if (deps.ir_view.getTag(prop_idx) != .object_property) return error.NotLiteral;
         const prop = deps.ir_view.getProperty(prop_idx) orelse return error.NotLiteral;
-        if (prop.is_computed) return error.NotLiteral;
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
 
         // Duplicate keys would overwrite (and leak) the prior allocation; the
@@ -306,7 +299,6 @@ fn parseExpect(
         const prop_idx = deps.ir_view.getListIndex(obj.properties_start, @intCast(p));
         if (deps.ir_view.getTag(prop_idx) != .object_property) return error.NotLiteral;
         const prop = deps.ir_view.getProperty(prop_idx) orelse return error.NotLiteral;
-        if (prop.is_computed) return error.NotLiteral;
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
 
         // Duplicate keys are rejected: `json` would overwrite (and leak) the
@@ -343,7 +335,6 @@ fn parseHeaders(
         const prop_idx = deps.ir_view.getListIndex(obj.properties_start, @intCast(p));
         if (deps.ir_view.getTag(prop_idx) != .object_property) return error.NotLiteral;
         const prop = deps.ir_view.getProperty(prop_idx) orelse return error.NotLiteral;
-        if (prop.is_computed) return error.NotLiteral;
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
         const val = literalString(deps, prop.value) orelse return error.NotLiteral;
 
@@ -429,7 +420,6 @@ fn writeLiteralAsJson(deps: Deps, idx: NodeIndex, out: *std.ArrayList(u8)) Parse
                 const prop_idx = deps.ir_view.getListIndex(obj.properties_start, @intCast(p));
                 if (deps.ir_view.getTag(prop_idx) != .object_property) return error.NotLiteral;
                 const prop = deps.ir_view.getProperty(prop_idx) orelse return error.NotLiteral;
-                if (prop.is_computed) return error.NotLiteral;
                 const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
                 if (p > 0) try out.append(deps.allocator, ',');
                 try out.append(deps.allocator, '"');

@@ -945,7 +945,7 @@ test "proof-gated durable retry allows proven workflow replay" {
         \\function handler(req) {
         \\  return run("retry:proven", () => {
         \\    const seed = step("seed", () => Math.random());
-        \\    return Response.json({ seed });
+        \\    return Response.json({ seed: seed });
         \\  });
         \\}
     ;
@@ -1199,7 +1199,7 @@ test "proof-gated durable retry blocks unproven workflow replay" {
         \\function handler(req) {
         \\  return run("retry:unproven", () => {
         \\    const seed = step("seed", () => Math.random());
-        \\    return Response.json({ seed });
+        \\    return Response.json({ seed: seed });
         \\  });
         \\}
     ;
@@ -1245,7 +1245,7 @@ test "idempotency ledger allows unproven durable retry" {
         \\  const key = req.headers.get("idempotency-key") ?? "missing";
         \\  return run(key, () => {
         \\    const seed = step("seed", () => Math.random());
-        \\    return Response.json({ seed });
+        \\    return Response.json({ seed: seed });
         \\  });
         \\}
     ;

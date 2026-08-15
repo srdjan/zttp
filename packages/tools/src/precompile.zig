@@ -3783,7 +3783,7 @@ test "runCheckOnlyFromSource: canonical reused arrow helper fails strict check" 
         \\function handler(req: Request): Response {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-arrow.ts", .{
@@ -4026,7 +4026,7 @@ test "formatProofCard: strict canonical diagnostics are visible in text mode" {
         \\function handler(req: Request): Response {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-arrow-text.ts", .{});
@@ -4776,7 +4776,7 @@ test "runCheckOnlyFromSource refuses mutable exports with ZTS057" {
     const source =
         \\export let version: number = 1;
         \\export function handler(req: Request): Response {
-        \\  return Response.json({ version });
+        \\  return Response.json({ version: version });
         \\}
     ;
     var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
@@ -4909,7 +4909,7 @@ test "runCheckOnlyFromSource refuses when wildcard arms" {
         \\  const status = match (req.method) {
         \\    when _: 200,
         \\  };
-        \\  return Response.json({ status });
+        \\  return Response.json({ status: status });
         \\}
     ;
     var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
@@ -4977,6 +4977,44 @@ test "runCheckOnlyFromSource refuses array declaration destructuring" {
     const diagnostic = result.json_diagnostics.items[0];
     try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
     try std.testing.expectEqualStrings("bind the source to a name, then read each element with explicit indexed `const` bindings", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses object literal shorthand" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const value = req.method;
+        \\  return Response.json({ value });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("write the field and value explicitly, for example `{ value: value }`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses computed record keys" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const key = req.method;
+        \\  return Response.json({ [key]: "value" });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("use a literal field name, or `Dict` for dynamic keys", diagnostic.suggestion.?);
     try std.testing.expect(result.contract == null);
 }
 

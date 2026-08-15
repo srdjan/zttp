@@ -99,7 +99,7 @@ test "canonicalize registry returns bound version-2 candidates and optional simu
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
 

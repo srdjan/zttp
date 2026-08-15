@@ -4170,7 +4170,7 @@ test "ternary join: identical branch types collapse to that type" {
 test "ternary join: distinct literal branches form a literal union" {
     var buf: [128]u8 = undefined;
     const rendered = try formatFirstTernaryType(
-        "function handler(req: Request): Response { const x = req.method === \"GET\" ? 1 : 2; return Response.json({ x }); }",
+        "function handler(req: Request): Response { const x = req.method === \"GET\" ? 1 : 2; return Response.json({ x: x }); }",
         &buf,
     );
     // Step 5, not step 2: `1` and `2` are distinct literal types and neither is
@@ -4193,7 +4193,7 @@ test "ternary join: a literal widens into the receiving branch type" {
 test "ternary join: disjoint branch types form a union" {
     var buf: [128]u8 = undefined;
     const rendered = try formatFirstTernaryType(
-        "function handler(req: Request): Response { const u = req.method === \"GET\" ? 1 : \"a\"; return Response.json({ u }); }",
+        "function handler(req: Request): Response { const u = req.method === \"GET\" ? 1 : \"a\"; return Response.json({ u: u }); }",
         &buf,
     );
     // Step 5: nothing relates number and string, so the join is their union.
@@ -5344,7 +5344,7 @@ test "a literal argument binds the type parameter to its base type" {
         generic_first_decl ++
             \\function handler(req: Request): Response {
             \\    const head = first(["a"]);
-            \\    return Response.json({ head });
+            \\    return Response.json({ head: head });
             \\}
         ,
         "first",
@@ -5361,7 +5361,7 @@ test "an inferred type argument is checked against the annotation it flows into"
         generic_first_decl ++
             \\function handler(req: Request): Response {
             \\    const head: number | undefined = first(["a"]);
-            \\    return Response.json({ head });
+            \\    return Response.json({ head: head });
             \\}
         ,
         1,
@@ -5374,7 +5374,7 @@ test "an inferred type argument that matches its annotation raises nothing" {
         generic_first_decl ++
             \\function handler(req: Request): Response {
             \\    const head: string | undefined = first(["a"]);
-            \\    return Response.json({ head });
+            \\    return Response.json({ head: head });
             \\}
         ,
         0,
@@ -5388,7 +5388,7 @@ test "an explicit type argument overrides inference" {
         generic_first_decl ++
             \\function handler(req: Request): Response {
             \\    const head = first<number>([]);
-            \\    return Response.json({ head });
+            \\    return Response.json({ head: head });
             \\}
         ,
         "first",
@@ -5404,7 +5404,7 @@ test "a type parameter no argument determines is refused, not widened" {
         \\}
         \\function handler(req: Request): Response {
         \\    const v = make(1);
-        \\    return Response.json({ v });
+        \\    return Response.json({ v: v });
         \\}
     ,
         1,
@@ -5419,7 +5419,7 @@ test "naming the type argument answers the ambiguity" {
         \\}
         \\function handler(req: Request): Response {
         \\    const v = make<string>(1);
-        \\    return Response.json({ v });
+        \\    return Response.json({ v: v });
         \\}
     ,
         0,
@@ -5434,7 +5434,7 @@ test "a type argument outside its constraint is refused" {
         \\}
         \\function handler(req: Request): Response {
         \\    const s = idOf({ name: "no id" });
-        \\    return Response.json({ s });
+        \\    return Response.json({ s: s });
         \\}
     ,
         1,
@@ -5449,7 +5449,7 @@ test "a type argument inside its constraint is accepted" {
         \\}
         \\function handler(req: Request): Response {
         \\    const s = idOf({ id: "u1" });
-        \\    return Response.json({ s });
+        \\    return Response.json({ s: s });
         \\}
     ,
         0,
@@ -5462,7 +5462,7 @@ test "explicit type arguments of the wrong count are refused" {
         generic_first_decl ++
             \\function handler(req: Request): Response {
             \\    const head = first<string, number>(["a"]);
-            \\    return Response.json({ head });
+            \\    return Response.json({ head: head });
             \\}
         ,
         1,
@@ -5477,7 +5477,7 @@ test "every instantiation re-checks its value arguments" {
         generic_first_decl ++
             \\function handler(req: Request): Response {
             \\    const head = first<string>([1]);
-            \\    return Response.json({ head });
+            \\    return Response.json({ head: head });
             \\}
         ,
         1,
@@ -5494,7 +5494,7 @@ test "a constraint that accepts literals keeps the literal it was given" {
         \\}
         \\function handler(req: Request): Response {
         \\    const m = pick("get");
-        \\    return Response.json({ m });
+        \\    return Response.json({ m: m });
         \\}
     ,
         0,
@@ -6158,7 +6158,7 @@ test "Response.json refuses a payload JSON cannot carry" {
         \\}
         \\function handler(req: Request): Response {
         \\    const f: (n: number) => number = helper;
-        \\    return Response.json({ f });
+        \\    return Response.json({ f: f });
         \\}
     ,
         1,
@@ -6228,7 +6228,7 @@ test "Response.json still admits every payload JSON can carry" {
         \\import { encodeBase64, encodeUtf8 } from "zttp:bytes";
         \\function handler(req: Request): Response {
         \\    const nested = { id: "a", counts: [1, 2, 3], flag: true, missing: null };
-        \\    return Response.json({ nested, encoded: encodeBase64(encodeUtf8("hi")), n: 1 });
+        \\    return Response.json({ nested: nested, encoded: encodeBase64(encodeUtf8("hi")), n: 1 });
         \\}
     ,
         0,
@@ -6397,7 +6397,7 @@ test "a recursive alias guarded by an array is accepted" {
         \\  | readonly JsonValue[];
         \\function handler(req: Request): Response {
         \\    const value: JsonValue = [1, "a", [true, null]];
-        \\    return Response.json({ value });
+        \\    return Response.json({ value: value });
         \\}
     ,
         0,
@@ -6525,7 +6525,7 @@ test "an admitted type predicate narrows at its call site" {
         \\    const raw: string | number = 1;
         \\    if (isString(raw)) {
         \\        const s: string = raw;
-        \\        return Response.json({ s });
+        \\        return Response.json({ s: s });
         \\    }
         \\    return Response.json({ ok: true });
         \\}
@@ -6551,7 +6551,7 @@ test "a predicate whose body calls a function installs no guard" {
         \\    const raw: string | number = 1;
         \\    if (isString(raw)) {
         \\        const s: string = raw;
-        \\        return Response.json({ s });
+        \\        return Response.json({ s: s });
         \\    }
         \\    return Response.json({ ok: true });
         \\}
@@ -6570,7 +6570,7 @@ test "a predicate that returns a bare literal proves nothing" {
         \\    const raw: string | number = 1;
         \\    if (isString(raw)) {
         \\        const s: string = raw;
-        \\        return Response.json({ s });
+        \\        return Response.json({ s: s });
         \\    }
         \\    return Response.json({ ok: true });
         \\}
@@ -6607,7 +6607,7 @@ test "admitted tests combine with && and !" {
         \\    const raw: string | number | undefined = 1;
         \\    if (isText(raw)) {
         \\        const s: string = raw;
-        \\        return Response.json({ s });
+        \\        return Response.json({ s: s });
         \\    }
         \\    return Response.json({ ok: true });
         \\}

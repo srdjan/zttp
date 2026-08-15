@@ -440,7 +440,7 @@ test "ast rewrite: replace_let_with_const clears veto on a local let" {
     const source =
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  let count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     var tmp = testing.tmpDir(.{});
@@ -468,7 +468,7 @@ test "ast rewrite: replace_compound_assign_with_explicit clears veto on a compou
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  let count = 1;
         \\  count += 2;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     var tmp = testing.tmpDir(.{});
@@ -496,7 +496,7 @@ test "ast rewrite: canonicalize_for_of_const clears veto on a for-of let" {
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const items = [1, 2];
         \\  for (let item of items) {
-        \\    Response.json({ item });
+        \\    Response.json({ item: item });
         \\  }
         \\  return Response.json({ ok: true });
         \\}
@@ -526,7 +526,7 @@ test "ast rewrite: replace_arrow_with_function clears veto on reused arrow helpe
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     var tmp = testing.tmpDir(.{});
@@ -595,7 +595,7 @@ test "ast rewrite: canonicalize_capability_key_alias rewrites the alias line" {
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  let key = "API_KEY";
         \\  const value = env(key);
-        \\  return Response.json({ value });
+        \\  return Response.json({ value: value });
         \\}
     ;
     var tmp = testing.tmpDir(.{});
@@ -635,7 +635,7 @@ test "ast rewrite: replace_ternary_with_if lifts a chained ternary" {
     const source =
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
-        \\  return Response.json({ n });
+        \\  return Response.json({ n: n });
         \\}
     ;
     var tmp = testing.tmpDir(.{});
@@ -665,7 +665,7 @@ test "ast rewrite: a span-keyed intent refuses a source override" {
     const source =
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
-        \\  return Response.json({ n });
+        \\  return Response.json({ n: n });
         \\}
     ;
     var tmp = testing.tmpDir(.{});
@@ -720,7 +720,7 @@ test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → vet
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     var tmp = testing.tmpDir(.{});

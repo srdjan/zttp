@@ -41,7 +41,7 @@ pub const seeds = [_]HoleSeed{
         \\
         ,
         .holes = 1,
-        .expressions = &.{"Response.json({ total })"},
+        .expressions = &.{"Response.json({ total: total })"},
         .ask = "Fill the remaining hole in handler.ts",
     },
     .{
@@ -57,7 +57,7 @@ pub const seeds = [_]HoleSeed{
         \\
         ,
         .holes = 2,
-        .expressions = &.{ "\"count\"", "Response.json({ label, total })" },
+        .expressions = &.{ "\"count\"", "Response.json({ label: label, total: total })" },
         .ask = "Fill both remaining holes in handler.ts",
     },
 };

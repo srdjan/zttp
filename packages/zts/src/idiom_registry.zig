@@ -217,9 +217,9 @@ pub const entries = [_]IdiomEntry{
     },
     .{
         .id = "idiom.binding-field-name",
-        .operation = "binding field name",
-        .idiomatic = "shorthand { value }",
-        .superseded = "{ value: value }",
+        .operation = "match binding field name",
+        .idiomatic = "match shorthand { value }",
+        .superseded = "match pattern { value: value }",
         .precondition = "none",
         .rewrite_rule = null,
     },

@@ -2239,7 +2239,7 @@ test "recursive handler gets no constant cost bound" {
         \\}
         \\export function handler(req) {
         \\  const d = depth(req.n);
-        \\  return Response.json({ d });
+        \\  return Response.json({ d: d });
         \\}
     ;
 
@@ -2272,7 +2272,7 @@ test "handler calling a recursive helper gets no constant cost bound" {
         \\}
         \\export function handler(req) {
         \\  const d = outer(req.n);
-        \\  return Response.json({ d });
+        \\  return Response.json({ d: d });
         \\}
     ;
 
@@ -2296,7 +2296,7 @@ test "non-recursive helper keeps its constant cost bound" {
         \\export function handler(req) {
         \\  sqlOne("row");
         \\  const a = load("x");
-        \\  return Response.json({ a });
+        \\  return Response.json({ a: a });
         \\}
     ;
 

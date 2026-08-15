@@ -21,7 +21,7 @@ function handler(req: Request): unknown {
                 id: draft.id,
                 status: "confirmed",
                 totalCents: draft.totalCents,
-                approval,
+                approval: approval,
             };
         });
 

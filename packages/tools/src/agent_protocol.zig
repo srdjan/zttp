@@ -3384,7 +3384,7 @@ test "check publishes a null contract_body when no contract exists" {
 const ternary_chain_handler =
     \\export function handler(req: Request): Response {
     \\  const n = req.method === "GET" ? 1 : req.method === "POST" ? 2 : 3;
-    \\  return Response.json({ n });
+    \\  return Response.json({ n: n });
     \\}
     \\
 ;
@@ -3793,7 +3793,7 @@ test "simulate and apply refuse a mixed-binding batch atomically" {
         \\export function handler(req: Request): Guardrails<Response> {
         \\    let first = "a";
         \\    let second = "b";
-        \\    return Response.json({ first, second });
+        \\    return Response.json({ first: first, second: second });
         \\}
         \\
     ;
@@ -4674,7 +4674,7 @@ test "check never answers success false with an empty diagnostics array" {
         // A file that fails in the stripper for a different reason.
         "export function handler(req: Request): any {\n  return Response.text(\"x\");\n}\n",
         // A file that fails in the parser rather than the stripper.
-        "export function handler(req) {\n  const n = 0x;\n  return Response.json({ n });\n}\n",
+        "export function handler(req) {\n  const n = 0x;\n  return Response.json({ n: n });\n}\n",
         // A file that fails after parsing, in the checker.
         "export function handler(req) { return Response.json({ ok: true }); }\n",
         // And one that does not fail at all, so the assertion below is about

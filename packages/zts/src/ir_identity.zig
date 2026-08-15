@@ -316,12 +316,8 @@ const Comparer = struct {
             .object_property => {
                 const av = self.left.getProperty(a) orelse return payloadMissing();
                 const bv = self.right.getProperty(b) orelse return payloadMissing();
-                if (av.is_computed != bv.is_computed) {
-                    return .{ .differs = "one property key is computed and the other is not" };
-                }
-                // `is_shorthand` is deliberately not compared: `{ x }` and
-                // `{ x: x }` are the same program, and the flag records only
-                // which spelling the author used.
+                // `is_shorthand` is deliberately not compared: the match
+                // patterns `{ x }` and `{ x: x }` have the same meaning.
                 return self.all(&.{
                     .{ av.key, bv.key },
                     .{ av.value, bv.value },

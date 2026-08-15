@@ -179,7 +179,6 @@ fn parseStep(deps: Deps, obj_idx: NodeIndex) ParseError!SagaStep {
         const prop_tag = deps.ir_view.getTag(prop_idx) orelse return error.NotLiteral;
         if (prop_tag != .object_property) return error.NotLiteral;
         const prop = deps.ir_view.getProperty(prop_idx) orelse return error.NotLiteral;
-        if (prop.is_computed) return error.NotLiteral;
 
         const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
 

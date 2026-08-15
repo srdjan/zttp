@@ -226,7 +226,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "RecordField",
-        .rhs = "Ident [\":\" Expr] | String \":\" Expr",
+        .rhs = "Ident \":\" Expr | String \":\" Expr",
     },
     .{
         .name = "PropertyName",

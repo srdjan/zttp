@@ -509,4 +509,16 @@ if [[ -n "${removed_declaration_destructuring_hits//[[:space:]]/}" ]]; then
   fail "tracked TypeScript still uses declaration destructuring; bind one name and read members or indexed elements explicitly"
 fi
 
+# Record construction names every field and keeps fixed record shapes visible.
+# Match binding shorthand remains intentional and is not selected by this
+# object-expression census. Historical recordings remain immutable evidence.
+removed_record_field_hits="$({
+  git ls-files -z -- '*.ts' |
+    xargs -0 rg -n -U --pcre2 -- '(?s)(?:(?:=|return|\(|,)\s*\{\s*(?:\.\.\.[^,}]+,\s*)?(?:[A-Za-z_$][A-Za-z0-9_$]*\s*,\s*)*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|(?:return|Response\.json\(|=>|=)\s*\{(?:(?![{}()]).)*,\s*[A-Za-z_$][A-Za-z0-9_$]*\s*(?:,|\})|\{\s*\[[^]]+\]\s*:)' 2>/dev/null || true
+} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/)' || true)"
+if [[ -n "${removed_record_field_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$removed_record_field_hits" >&2
+  fail "tracked TypeScript still uses object shorthand or a computed record key; spell fields explicitly or use Dict"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

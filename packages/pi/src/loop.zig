@@ -1553,13 +1553,13 @@ fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir
 }
 
 const bad_handler =
-    "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({x}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({ x: x }); }";
 const clean_handler =
     "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }";
 const protocol_before_handler =
-    "function handler(req: Request): Proof<Response, \"deterministic\"> { let ok = true; return Response.json({ok}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { let ok = true; return Response.json({ ok: ok }); }";
 const protocol_after_handler =
-    "function handler(req: Request): Proof<Response, \"deterministic\"> { const ok = true; return Response.json({ok}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { const ok = true; return Response.json({ ok: ok }); }";
 
 fn protocolPreviewExecute(
     allocator: std.mem.Allocator,
@@ -1680,7 +1680,7 @@ const unchecked_result_handler =
     "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
     "  const result = validateJson(\"item\", req.body ?? \"\");\n" ++
     "  const data = result.value;\n" ++
-    "  return Response.json({ data });\n" ++
+    "  return Response.json({ data: data });\n" ++
     "}\n";
 
 // A scripted client that flags whether any retry prompt carried the

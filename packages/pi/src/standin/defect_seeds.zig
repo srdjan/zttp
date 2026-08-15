@@ -59,7 +59,7 @@ pub const DefectSeed = struct {
 const clean_total =
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const total = 1;
-    \\  return Response.json({ total });
+    \\  return Response.json({ total: total });
     \\}
     \\
 ;
@@ -68,7 +68,7 @@ const clean_reassigned =
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  let total = 1;
     \\  total = total + 2;
-    \\  return Response.json({ total });
+    \\  return Response.json({ total: total });
     \\}
     \\
 ;
@@ -80,7 +80,7 @@ const clean_checked_result =
     \\  const result = validateJson("item", req.body ?? "");
     \\  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
     \\  const data = result.value;
-    \\  return Response.json({ data });
+    \\  return Response.json({ data: data });
     \\}
     \\
 ;
@@ -91,7 +91,7 @@ const clean_checked_optional =
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const appName = env("APP_NAME");
     \\  if (appName === undefined) return Response.json({ error: "missing value" }, { status: 400 });
-    \\  return Response.json({ appName });
+    \\  return Response.json({ appName: appName });
     \\}
     \\
 ;
@@ -110,14 +110,14 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  let total = 5;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
         .good_draft =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 2;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
@@ -134,7 +134,7 @@ pub const seeds = [_]DefectSeed{
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  let total = 1;
         \\  total += 7;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
@@ -142,7 +142,7 @@ pub const seeds = [_]DefectSeed{
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  let total = 1;
         \\  total = total + 3;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
@@ -156,14 +156,14 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  var total = 1;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
         .good_draft =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 3;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
@@ -177,7 +177,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 1;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\  const unreachable_total = 2;
         \\}
         \\
@@ -185,7 +185,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 4;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
@@ -202,7 +202,7 @@ pub const seeds = [_]DefectSeed{
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body ?? "");
         \\  const data = result.value;
-        \\  return Response.json({ data });
+        \\  return Response.json({ data: data });
         \\}
         \\
         ,
@@ -219,7 +219,7 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const appName = env("APP_NAME");
-        \\  return Response.json({ appName });
+        \\  return Response.json({ appName: appName });
         \\}
         \\
         ,

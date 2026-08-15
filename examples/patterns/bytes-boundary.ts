@@ -87,7 +87,7 @@ function handler(
   const text = decodeUtf8(body);
   if (!text.ok) {
     return Response.json(
-      { error: text.error.kind, size, octetKind },
+      { error: text.error.kind, size: size, octetKind: octetKind },
       { status: 400 },
     );
   }
@@ -95,7 +95,7 @@ function handler(
   const parsed = parseJsonBytes(body);
   if (!parsed.ok) {
     return Response.json(
-      { error: parsed.error.kind, size, octetKind },
+      { error: parsed.error.kind, size: size, octetKind: octetKind },
       { status: 400 },
     );
   }
@@ -104,18 +104,18 @@ function handler(
   const documentKind = kindOf(parsed.value);
   if (scope === undefined) {
     return Response.json({
-      size,
-      octetKind,
-      documentKind,
+      size: size,
+      octetKind: octetKind,
+      documentKind: documentKind,
       named: label(documentKind, undefined),
       overridden: label(documentKind, "body"),
       reEncoded: kindOf(encodeUtf8(documentKind)),
     });
   }
   return Response.json({
-    size,
-    octetKind,
-    documentKind,
+    size: size,
+    octetKind: octetKind,
+    documentKind: documentKind,
     named: label(documentKind, scope),
     overridden: label(documentKind, "body"),
     reEncoded: kindOf(encodeUtf8(documentKind)),

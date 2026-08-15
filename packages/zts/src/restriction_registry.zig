@@ -592,6 +592,22 @@ pub const entries = [_]RestrictionEntry{
         .note = "write an explicit member read into the desired local name",
         .enforced_by = &.{"ZTS001"},
     },
+    .{
+        .id = "restriction.object-literal-shorthand",
+        .feature = "object literal shorthand",
+        .boundary = "record fields name both their key and value",
+        .nature = .canonical_simplicity,
+        .note = "write the field and value explicitly, for example `{ value: value }`",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.computed-record-key",
+        .feature = "computed record key",
+        .boundary = "fixed compiler-visible record shape",
+        .nature = .replaced,
+        .note = "use a literal field name, or `Dict` for dynamic keys",
+        .enforced_by = &.{"ZTS001"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

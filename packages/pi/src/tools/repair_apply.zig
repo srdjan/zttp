@@ -316,7 +316,7 @@ test "insert guard intent preserves target indentation" {
     const source =
         \\function handler(req: Request): Response {
         \\  const data = auth.value;
-        \\  return Response.json({ data });
+        \\  return Response.json({ data: data });
         \\}
     ;
     const out = try applyIntent(testing.allocator, source, .{
@@ -340,7 +340,7 @@ test "add trailing return intent inserts inside the outer scope" {
         .plan_id = "rp_002",
         .intent_kind = "add_trailing_return",
         .line = 3,
-        .template = "return Response.json({ data });",
+        .template = "return Response.json({ data: data });",
     });
     defer testing.allocator.free(out);
     try testing.expect(std.mem.indexOf(u8, out, "  return Response.json") != null);
@@ -353,7 +353,7 @@ test "replace_let_with_const intent rewrites a local let line" {
     const source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     const out = try applyIntent(testing.allocator, source, .{
@@ -372,7 +372,7 @@ test "replace_compound_assign_with_explicit rewrites a compound assignment" {
         \\function handler(req: Request): Response {
         \\  let n = 0;
         \\  n += 1;
-        \\  return Response.json({ n });
+        \\  return Response.json({ n: n });
         \\}
     ;
     const out = try applyIntent(testing.allocator, source, .{
@@ -440,7 +440,7 @@ test "canonicalize_for_of_const intent rewrites a for-of let binding" {
         \\function handler(req: Request): Response {
         \\  const items = [1, 2];
         \\  for (let item of items) {
-        \\    Response.json({ item });
+        \\    Response.json({ item: item });
         \\  }
         \\  return Response.json({ ok: true });
         \\}
@@ -498,7 +498,7 @@ test "canonicalize_capability_key_alias is not dispatched source-only" {
         \\function handler(req: Request): Response {
         \\  let key = "API_KEY";
         \\  const value = env(key);
-        \\  return Response.json({ value });
+        \\  return Response.json({ value: value });
         \\}
     ;
     try testing.expectError(error.UnsupportedRepairIntent, applyIntent(testing.allocator, source, .{

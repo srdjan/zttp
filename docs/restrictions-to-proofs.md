@@ -69,6 +69,8 @@ reach clients through the version-2 `restrictions` operation.
 | `when _:` match arm | one explicit catch-all spelling | `canonical_simplicity` | `ZTS001` |
 | object or array declaration destructuring | one named binding form with explicit reads | `language_simplicity` | `ZTS001` |
 | destructuring rename | binding names are visible at their read sites | `canonical_simplicity` | `ZTS001` |
+| object literal shorthand | record fields name both their key and value | `canonical_simplicity` | `ZTS001` |
+| computed record key | fixed compiler-visible record shape | `replaced` | `ZTS001` |
 
 ## Rows No Diagnostic Rejects
 
@@ -129,3 +131,5 @@ Per-restriction rationale, one sentence each.
 - **`when _:` match arm** - write `default:`
 - **object or array declaration destructuring** - bind the source to a name, then introduce values with explicit member or index reads
 - **destructuring rename** - write an explicit member read into the desired local name
+- **object literal shorthand** - write the field and value explicitly, for example `{ value: value }`
+- **computed record key** - use a literal field name, or `Dict` for dynamic keys

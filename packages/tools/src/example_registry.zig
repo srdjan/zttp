@@ -71,7 +71,7 @@ pub const examples = [_]Example{
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const limit: number = 10;
-        \\  return Response.json({ limit });
+        \\  return Response.json({ limit: limit });
         \\}
         \\
         ,
@@ -88,7 +88,7 @@ pub const examples = [_]Example{
         \\  for (const n of [1, 2, 3]) {
         \\    total = total + n;
         \\  }
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
@@ -119,7 +119,7 @@ pub const examples = [_]Example{
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const doubled: number[] = [1, 2, 3].map((n: number): number => n * 2);
-        \\  return Response.json({ doubled });
+        \\  return Response.json({ doubled: doubled });
         \\}
         \\
         ,
@@ -188,7 +188,7 @@ pub const examples = [_]Example{
         \\  for (const n of [1, 2, 3]) {
         \\    total = total + n;
         \\  }
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         \\
         ,
@@ -224,7 +224,7 @@ pub const examples = [_]Example{
         \\export function handler(req: Request): Guard<Response> {
         \\  const p: Profile = profile();
         \\  const city = p?.city;
-        \\  return Response.json({ city });
+        \\  return Response.json({ city: city });
         \\}
         \\
         ,
@@ -441,7 +441,7 @@ pub const examples = [_]Example{
         \\
         \\export function handler(req: Request): Guard<Response> {
         \\  const seconds: number = comptime(60 * 60 * 24);
-        \\  return Response.json({ seconds });
+        \\  return Response.json({ seconds: seconds });
         \\}
         \\
         ,

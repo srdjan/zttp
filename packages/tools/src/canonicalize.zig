@@ -2654,14 +2654,14 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         .{ .intent = .replace_let_with_const, .source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
         },
         .{ .intent = .canonicalize_for_of_const, .source =
         \\function handler(req: Request): Response {
         \\  const items = [1, 2];
         \\  for (let item of items) {
-        \\    Response.json({ item });
+        \\    Response.json({ item: item });
         \\  }
         \\  return Response.json({ ok: true });
         \\}
@@ -2670,7 +2670,7 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         \\function handler(req: Request): Response {
         \\  let total = 10;
         \\  total -= 2 + 3;
-        \\  return Response.json({ total });
+        \\  return Response.json({ total: total });
         \\}
         },
         .{ .intent = .replace_arrow_with_function, .source =
@@ -2678,7 +2678,7 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         \\function handler(req: Request): Response {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
         },
         .{ .intent = .replace_export_arrow_with_function, .source =
@@ -2773,7 +2773,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
             \\function handler(req: Request): Response {
             \\  const a = parse(1);
             \\  const b = parse(2);
-            \\  return Response.json({ a, b });
+            \\  return Response.json({ a: a, b: b });
             \\}
             ,
             .kind = "canonicalize_arrow_helper",
@@ -2795,7 +2795,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
             .source =
             \\function handler(req: Request): Response {
             \\  let count = 1;
-            \\  return Response.json({ count });
+            \\  return Response.json({ count: count });
             \\}
             ,
             .kind = "canonicalize_let_const",
@@ -2807,7 +2807,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
             \\function handler(req: Request): Response {
             \\  const items = [1, 2];
             \\  for (let item of items) {
-            \\    Response.json({ item });
+            \\    Response.json({ item: item });
             \\  }
             \\  return Response.json({ ok: true });
             \\}
@@ -2822,7 +2822,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
             \\function handler(req: Request): Response {
             \\  let key = "API_KEY";
             \\  const value = env(key);
-            \\  return Response.json({ value });
+            \\  return Response.json({ value: value });
             \\}
             ,
             .kind = "canonicalize_capability_key_alias",
@@ -2866,7 +2866,7 @@ test "generic arrow helper preview is skipped, not malformed" {
         \\function handler(req: Request): Response {
         \\  const a = id(1);
         \\  const b = id(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     const out = try collectAndWriteJson(source);
@@ -2883,7 +2883,7 @@ test "dynamic literal-prefix capability alias is not treated as static" {
         \\function handler(req: Request): Response {
         \\  let key = "API_" + req.headers["x"];
         \\  const value = env(key);
-        \\  return Response.json({ value });
+        \\  return Response.json({ value: value });
         \\}
     ;
     const out = try collectAndWriteJson(source);
@@ -2906,7 +2906,7 @@ test "capability alias preview stays in enclosing scope" {
         \\function handler(req: Request): Response {
         \\  let key = req.headers["x"];
         \\  const value = env(key);
-        \\  return Response.json({ value });
+        \\  return Response.json({ value: value });
         \\}
     ;
     const out = try collectAndWriteJson(source);
@@ -2929,7 +2929,7 @@ test "applyRepairs applies a replacement that spans lines" {
     const source =
         \\function handler(req: Request): Response {
         \\  const n = 1;
-        \\  return Response.json({ n });
+        \\  return Response.json({ n: n });
         \\}
     ;
     const span = lineSpan(source, 2).?;
@@ -2949,7 +2949,7 @@ test "applyRepairs applies a replacement that spans lines" {
     // The lines around it are untouched, so the splice took the span and not
     // the line's neighbourhood.
     try std.testing.expect(std.mem.indexOf(u8, out, "function handler(req: Request): Response {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, out, "return Response.json({ n });") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "return Response.json({ n: n });") != null);
 }
 
 test "applyRepairs applies two repairs on one line when their spans are disjoint" {
@@ -3006,7 +3006,7 @@ test "applyRepairs rejects a stale snapshot on a line-derived span" {
     const source =
         \\function handler(req: Request): Response {
         \\  const count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     const span = lineSpan(source, 2).?;
@@ -3027,7 +3027,7 @@ test "applyRepairs rejects two repairs covering the same bytes" {
     const source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     const span = lineSpan(source, 2).?;
@@ -3060,9 +3060,9 @@ test "applyRepairs applies repairs on several lines and edit simulation stays cl
         \\  let count = 1;
         \\  const items = [1, 2];
         \\  for (let item of items) {
-        \\    Response.json({ item });
+        \\    Response.json({ item: item });
         \\  }
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     const first_span = lineSpan(source, 2).?;
@@ -3104,7 +3104,7 @@ test "invalid applied replacement is caught by edit simulation" {
     const source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     const bad_span = lineSpan(source, 2).?;
@@ -3136,7 +3136,7 @@ test "collect output can clear canonical diagnostic through edit simulation" {
         \\function handler(req: Request): Response {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     var preview = try collectFromSource(std.testing.allocator, source, "handler.ts");
@@ -3173,7 +3173,7 @@ test "collect output can clear capability alias diagnostic through edit simulati
         \\function handler(req: Request): Response {
         \\  let key = "API_KEY";
         \\  const value = env(key);
-        \\  return Response.json({ value });
+        \\  return Response.json({ value: value });
         \\}
     ;
     var preview = try collectFromSource(std.testing.allocator, source, "handler.ts");
@@ -3187,7 +3187,7 @@ test "collect output can clear capability alias diagnostic through edit simulati
     try proposed.appendSlice(std.testing.allocator, preview.repairs.items[0].replacement);
     try proposed.appendSlice(std.testing.allocator, "\n");
     try proposed.appendSlice(std.testing.allocator, "  const value = env(key);\n");
-    try proposed.appendSlice(std.testing.allocator, "  return Response.json({ value });\n");
+    try proposed.appendSlice(std.testing.allocator, "  return Response.json({ value: value });\n");
     try proposed.appendSlice(std.testing.allocator, "}\n");
 
     // Re-collecting on the rewritten source yields no further refactor: the
@@ -3201,7 +3201,7 @@ test "normalizeSource fixes avoidable let to const and is fully canonical" {
     const source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3218,7 +3218,7 @@ test "normalizeSource records the rewrite trace" {
     const source =
         \\function handler(req: Request): Response {
         \\  let count = 1;
-        \\  return Response.json({ count });
+        \\  return Response.json({ count: count });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3318,7 +3318,7 @@ test "normalizeSource: ternary is rewritten to an expression-position match and 
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
         \\  const status = ok ? 200 : fallbackStatus();
-        \\  return Response.json({ status });
+        \\  return Response.json({ status: status });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3352,7 +3352,7 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
         \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
         \\  const status = req.method === "GET" ? 200 : fallbackStatus();
-        \\  return Response.json({ status });
+        \\  return Response.json({ status: status });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3391,7 +3391,7 @@ test "layout off returns the rewrite fixed point in the author's whitespace" {
         \\function handler(req: Request): Response {
         \\        let total = 1;
         \\        total += 2;
-        \\        return Response.json({ total });
+        \\        return Response.json({ total: total });
         \\}
     ;
     var nr = try normalizeSourceWithOptions(allocator, source, "handler.ts", .{ .layout = false });
@@ -3411,7 +3411,7 @@ test "layout on lays the same source out" {
         \\function handler(req: Request): Response {
         \\        let total = 1;
         \\        total += 2;
-        \\        return Response.json({ total });
+        \\        return Response.json({ total: total });
         \\}
     ;
     var nr = try normalizeSource(allocator, source, "handler.ts");
@@ -3427,7 +3427,7 @@ test "normalizeSource is idempotent on a reused arrow helper" {
         \\function handler(req: Request): Response {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
     ;
     var first = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3451,7 +3451,7 @@ test "normalizeSource: a ternary in an arrow body bounds the condition at `=>`" 
         \\const clamp = (x: number): number => x > 0 ? 1 : minusOne();
         \\function handler(req: Request): Response {
         \\  const v = clamp(2);
-        \\  return Response.json({ v });
+        \\  return Response.json({ v: v });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3627,7 +3627,7 @@ test "normalizeSource unchains a right-associative nested ternary and stops" {
         \\  const a = req.method === "GET";
         \\  const b = req.method === "POST";
         \\  const status = a ? 200 : b ? 201 : 500;
-        \\  return Response.json({ status });
+        \\  return Response.json({ status: status });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3670,7 +3670,7 @@ test "normalizeSource ternary inside an object-literal value is rewritten in pla
         \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  return Response.json({ code: ok ? 200 : fallbackStatus(), ok });
+        \\  return Response.json({ code: ok ? 200 : fallbackStatus(), ok: ok });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3910,7 +3910,7 @@ const normalize_cases = [_]NormalizeCase{
         .source =
         \\function handler(req: Request): Response {
         \\  let n = 1;
-        \\  return Response.json({ n });
+        \\  return Response.json({ n: n });
         \\}
         ,
     },
@@ -3933,7 +3933,7 @@ const normalize_cases = [_]NormalizeCase{
         \\function handler(req: Request): Response {
         \\  const a = parse(1);
         \\  const b = parse(2);
-        \\  return Response.json({ a, b });
+        \\  return Response.json({ a: a, b: b });
         \\}
         ,
     },
@@ -3943,7 +3943,7 @@ const normalize_cases = [_]NormalizeCase{
         \\function handler(req: Request): Response {
         \\  let n = 0;
         \\  n += 1;
-        \\  return Response.json({ n });
+        \\  return Response.json({ n: n });
         \\}
         ,
     },
@@ -3966,7 +3966,7 @@ const normalize_cases = [_]NormalizeCase{
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
         \\  const status = ok ? 200 : fallbackStatus();
-        \\  return Response.json({ status });
+        \\  return Response.json({ status: status });
         \\}
         ,
     },
@@ -3977,7 +3977,7 @@ const normalize_cases = [_]NormalizeCase{
         \\  const a = req.method === "GET";
         \\  const b = req.method === "POST";
         \\  const status = a ? 200 : b ? 201 : 500;
-        \\  return Response.json({ status });
+        \\  return Response.json({ status: status });
         \\}
         ,
     },
@@ -4216,7 +4216,7 @@ test "rewrite rows join in either order" {
             \\  let total = 0;
             \\  const a = parse(1);
             \\  const b = parse(2);
-            \\  return Response.json({ total, a, b });
+            \\  return Response.json({ total: total, a: a, b: b });
             \\}
             \\
             ,

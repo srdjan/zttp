@@ -1980,7 +1980,6 @@ pub const ContractBuilder = struct {
             },
             .object_property => {
                 const prop = self.ir_view.getProperty(node_idx) orelse return;
-                if (prop.is_computed) try self.walkScopeDepth(prop.key, depth);
                 try self.walkScopeDepth(prop.value, depth);
             },
             .call, .method_call, .optional_call => {
@@ -3488,7 +3487,6 @@ pub const ContractBuilder = struct {
             },
             .object_property => {
                 const prop = self.ir_view.getProperty(node_idx) orelse return;
-                if (prop.is_computed) try self.scanFunctionNodeForApiFacts(prop.key, request_binding_slot, route);
                 try self.scanFunctionNodeForApiFacts(prop.value, request_binding_slot, route);
             },
             .member_access, .computed_access, .optional_chain => {
@@ -4974,7 +4972,7 @@ test "durable workflow properties prove stable step workflow" {
         \\function handler(req) {
         \\  return run("job:stable", () => {
         \\    const value = step("charge", () => 1);
-        \\    return Response.json({ value });
+        \\    return Response.json({ value: value });
         \\  });
         \\}
     ;
@@ -5001,7 +4999,7 @@ test "durable workflow properties reject a side effect inside a match arm" {
         \\      when { method: "POST" }: cacheSet(req.url, "x")
         \\      default: 0
         \\    };
-        \\    return Response.json({ ok: true, v });
+        \\    return Response.json({ ok: true, v: v });
         \\  });
         \\}
     ;
@@ -5040,7 +5038,7 @@ test "durable workflow properties reject unmodeled side effect hidden behind ass
         \\    let id = "";
         \\    id = uuid();
         \\    const value = step("charge", () => 1);
-        \\    return Response.json({ value, id });
+        \\    return Response.json({ value: value, id: id });
         \\  });
         \\}
     ;
@@ -5060,7 +5058,7 @@ test "durable workflow properties reject unmodeled side effect hidden in return 
         \\function handler(req) {
         \\  return run("job:return-cache", () => {
         \\    const value = step("charge", () => 1);
-        \\    return Response.json({ value, cached: cacheSet("k", "v") });
+        \\    return Response.json({ value: value, cached: cacheSet("k", "v") });
         \\  });
         \\}
     ;

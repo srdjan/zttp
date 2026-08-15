@@ -525,7 +525,6 @@ pub const ComptimeEvaluator = struct {
             const property_idx = ir.getListIndex(object_literal.properties_start, @intCast(initialized));
             if (ir.getTag(property_idx) != .object_property) return ComptimeError.UnsupportedOp;
             const property = ir.getProperty(property_idx) orelse return ComptimeError.SyntaxError;
-            if (property.is_computed or property.is_shorthand) return ComptimeError.SyntaxError;
             if (ir.getTag(property.key) != .lit_string) return ComptimeError.SyntaxError;
             const key_idx = ir.getStringIdx(property.key) orelse return ComptimeError.SyntaxError;
             const key = ir.getString(key_idx) orelse return ComptimeError.SyntaxError;
@@ -2007,7 +2006,7 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         // reachable in tests and fail closed under their current identities.
         .{ .source = "[...[]]", .expected = ComptimeError.UnsupportedOp },
         .{ .source = "{...{a: 1}}", .expected = ComptimeError.UnsupportedOp },
-        .{ .source = "{[\"a\"]: 1}", .expected = ComptimeError.SyntaxError },
+        .{ .source = "{[\"a\"]: 1}", .expected = ComptimeError.UnsupportedOp },
         .{ .source = "\"x\"[0]", .expected = ComptimeError.UnsupportedOp },
         .{ .source = "Env?.VALUE", .expected = ComptimeError.UnsupportedOp },
         .{ .source = "hash?.(\"x\")", .expected = ComptimeError.UnsupportedOp },
@@ -2020,7 +2019,7 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         // reached without allocator fault injection.
         .{ .source = "`value: ${1}`", .expected = ComptimeError.UnsupportedOp },
         .{ .source = "\"x\" - {}", .expected = ComptimeError.TypeMismatch },
-        .{ .source = "{a 1}", .expected = ComptimeError.SyntaxError },
+        .{ .source = "{a 1}", .expected = ComptimeError.UnsupportedOp },
         .{ .source = "\"unterminated", .expected = ComptimeError.UnclosedString },
         .{ .source = "{\"unterminated", .expected = ComptimeError.UnclosedString },
         .{ .source = "(1 + 2", .expected = ComptimeError.UnclosedParen },
@@ -2033,7 +2032,7 @@ test "comptime behavior matrix rejects nondeterminism and malformed expressions"
         .{ .source = "{\"\\xGG\": 1}", .expected = ComptimeError.InvalidEscape },
         .{ .source = "JSON.parse(\"'single-root'\")", .expected = ComptimeError.SyntaxError },
         .{ .source = "JSON.parse(\".5\")", .expected = ComptimeError.SyntaxError },
-        .{ .source = "JSON.parse(\"{loose 1}\")", .expected = ComptimeError.SyntaxError },
+        .{ .source = "JSON.parse(\"{loose 1}\")", .expected = ComptimeError.UnsupportedOp },
     };
     for (cases) |case| {
         var evaluator = ComptimeEvaluator.init(allocator, case.source);

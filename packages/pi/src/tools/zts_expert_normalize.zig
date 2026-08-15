@@ -94,7 +94,7 @@ test "normalize registry returns a non-writing version-2 fixed point" {
     const source =
         \\function handler(req: Request): Response {
         \\  let msg = "hi";
-        \\  return Response.json({ msg });
+        \\  return Response.json({ msg: msg });
         \\}
     ;
     var tmp = testing.tmpDir(.{});

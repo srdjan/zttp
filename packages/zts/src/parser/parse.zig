@@ -1219,7 +1219,6 @@ pub const Parser = struct {
                 .data = .{ .property = .{
                     .key = key,
                     .value = value,
-                    .is_computed = false,
                     .is_shorthand = shorthand,
                 } },
             });
@@ -2446,13 +2445,10 @@ pub const Parser = struct {
 
                     // Property key
                     var key_node: NodeIndex = undefined;
-                    var is_computed = false;
-                    var is_shorthand = false;
 
-                    if (self.match(.lbracket)) {
-                        is_computed = true;
-                        key_node = try self.parseExpression(.none);
-                        try self.expect(.rbracket, "']'");
+                    if (self.check(.lbracket)) {
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "computed record keys are not supported; use a literal field name, or `Dict` for dynamic keys");
+                        return error.ParseError;
                     } else if (self.check(.identifier)) {
                         const key = self.current;
                         self.advance();
@@ -2461,30 +2457,8 @@ pub const Parser = struct {
                         if (prop_kind == .object_property and
                             !self.check(.colon) and !self.check(.lparen))
                         {
-                            is_shorthand = true;
-                            const key_idx = try self.addString(key.text(self.source));
-                            key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
-
-                            // Shorthand - value is identifier reference
-                            const name_atom = try self.addAtom(key.text(self.source));
-                            const binding = try self.scopes.resolveBinding(key.text(self.source), name_atom);
-                            const value_node = try self.nodes.add(Node.identifier(key.location(), binding));
-
-                            const prop_node = try self.nodes.add(.{
-                                .tag = .object_property,
-                                .loc = prop_loc,
-                                .data = .{ .property = .{
-                                    .key = key_node,
-                                    .value = value_node,
-                                    .is_computed = false,
-                                    .is_shorthand = true,
-                                } },
-                            });
-                            try properties.append(properties_alloc, prop_node);
-
-                            if (!self.match(.comma)) break;
-                            if (self.check(.rbrace)) break;
-                            continue;
+                            self.errors.addErrorAt(.unsupported_feature, key, "object literal shorthand is not supported; write the field and value explicitly, for example `{ value: value }`");
+                            return error.ParseError;
                         }
 
                         const key_idx = try self.addString(key.text(self.source));
@@ -2541,8 +2515,7 @@ pub const Parser = struct {
                         .data = .{ .property = .{
                             .key = key_node,
                             .value = value,
-                            .is_computed = is_computed,
-                            .is_shorthand = is_shorthand,
+                            .is_shorthand = false,
                         } },
                     });
                     try properties.append(properties_alloc, prop_node);
@@ -3621,7 +3594,7 @@ test "unsupported: async function rejected at parse time" {
 
 test "unsupported: await rejected at parse time" {
     const allocator = std.testing.allocator;
-    const source = "function handler(req) { const x = await foo(); return Response.json({x}); }";
+    const source = "function handler(req) { const x = await foo(); return Response.json({ x: x }); }";
     var parser = try Parser.init(allocator, source);
     defer parser.deinit();
     _ = parser.parse() catch {

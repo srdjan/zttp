@@ -15,7 +15,7 @@ function handler(req: Request): Proof<Response, "state_isolated"> {
   const b = parse(2);
   const items = [1, 2];
   for (let item of items) {
-    Response.json({ item });
+    Response.json({ item: item });
   }
-  return Response.json({ value, count, a, b });
+  return Response.json({ value: value, count: count, a: a, b: b });
 }
