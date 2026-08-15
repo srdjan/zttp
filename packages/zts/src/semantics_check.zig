@@ -568,6 +568,14 @@ pub fn runCheck(allocator: std.mem.Allocator) !CheckResult {
     defer scratch_arena.deinit();
     const scratch = scratch_arena.allocator();
 
+    const coverage = semantics.coverage();
+    if (coverage.nodes_classified != coverage.nodes_reachable) {
+        try result.fail(.uncovered_node, "NodeTag", "one or more reachable named IR nodes have no semantic assurance disposition");
+    }
+    if (coverage.opcodes_classified != coverage.opcodes_reachable) {
+        try result.fail(.uncovered_opcode, "Opcode", "one or more reachable named bytecode opcodes have no semantic assurance disposition");
+    }
+
     for (semantics.node_rules) |rule| {
         const where = @tagName(rule.tag);
         switch (rule.proof) {
@@ -627,6 +635,10 @@ test "registry passes all slice mechanisms" {
     try std.testing.expectEqual(@as(usize, 13), result.nodes_proven);
     try std.testing.expectEqual(@as(usize, 1), result.refinements_proven);
     try std.testing.expectEqual(@as(usize, 4), result.nodes_structural); // match_type_test, if_stmt, return_stmt, block
+
+    const coverage = semantics.coverage();
+    try std.testing.expectEqual(coverage.nodes_reachable, coverage.nodes_classified);
+    try std.testing.expectEqual(coverage.opcodes_reachable, coverage.opcodes_classified);
 }
 
 test "a wrong lowering is caught as divergence" {

@@ -4,15 +4,11 @@
 //! zts already pins three declarative registries (features, modules, rules),
 //! each reducible to a stable hash. The meaning of the language has no such home
 //! today; it lives only implicitly in `parser/codegen.zig` (lowering) and
-//! `interpreter.zig` (execution). This file is the L2 on-ramp to a full semantics
-//! registry: every node rule carries its denotation and lowering AS DATA here, so
-//! the registry is the single source of truth and `semanticsHash` covers all of
-//! it; `semantics_check.zig` is a pure interpreter of this data.
-//!
-//! Scope (this slice): denotation proofs for the pure, value-producing core,
-//! statements marked structural-only, `call` modeled as an opaque oracle. Only
-//! part of the language is specified; the drift gate pins the size of the IR and
-//! bytecode alphabets (see the caveat there about non-exhaustive `Opcode`).
+//! `interpreter.zig` (execution). This file is the L2 semantics registry. The
+//! pure value core carries executable denotations and lowering rules. Every
+//! other named IR node and opcode carries a per-member assurance disposition,
+//! so the conformance denominator is the whole named alphabet rather than only
+//! the symbolic slice. `semantics_check.zig` fails any unclassified member.
 //!
 //! The northstar (docs/zts-formal-spec-northstar.html) replaces the hand-rolled
 //! symbolic executor with an SMT refinement check; this data model migrates there
@@ -226,6 +222,108 @@ pub const node_rules = [_]NodeRule{
     .{ .tag = .block, .proof = .structural },
 };
 
+/// Assurance attached to every named IR node and opcode.
+///
+/// `specified` means the executable symbolic registry covers the member.
+/// `translation_validated` means an explicit refinement proves an optimized
+/// member equivalent to its base sequence. `trusted` keeps a narrow compiler or
+/// VM transition in the TCB and names why. `not_reachable` is reserved for a
+/// member that the profile front end proves cannot enter the core. An unknown
+/// future named member is `unclassified` and makes spec-check fail.
+pub const DispositionKind = enum {
+    specified,
+    translation_validated,
+    trusted,
+    not_reachable,
+    unclassified,
+};
+
+pub const Disposition = struct {
+    kind: DispositionKind,
+    reason: []const u8,
+};
+
+const symbolic_reason = "executable denotation and lowering rule";
+const literal_tcb_reason = "literal representation and constant-pool lowering remain in the compiler and VM TCB";
+const expression_tcb_reason = "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract";
+const control_tcb_reason = "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins";
+const binding_tcb_reason = "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary";
+const pattern_tcb_reason = "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings";
+const parser_structure_reason = "parser-only structural container with no independent runtime denotation";
+const vm_stack_reason = "VM stack transition remains in the execution TCB and has verifier-owned arity metadata";
+const vm_numeric_reason = "typed numeric transition remains in the VM TCB and has verifier-owned arity metadata";
+const vm_control_reason = "VM control transition remains in the execution TCB and has verifier-checked targets and stack effects";
+const vm_call_reason = "call and closure transition remains in the VM TCB behind typed call-site and capability checks";
+const vm_object_reason = "object and property transition remains in the VM TCB behind shape and stack verification";
+const vm_module_reason = "static module transition remains in the VM TCB behind the resolved module graph";
+const vm_optimized_reason = "optimized transition remains in the VM TCB and is guarded by bytecode verification and optimizer tests";
+const already_specified = Disposition{ .kind = .specified, .reason = symbolic_reason };
+const optimized_refinement_reason = "translation validation proves the fused opcode equivalent to its declared base sequence";
+const unclassified_reason = "named member has no semantic assurance disposition";
+
+fn hasNodeRule(tag: NodeTag) bool {
+    for (node_rules) |rule| if (rule.tag == tag) return true;
+    return false;
+}
+
+pub fn nodeDisposition(tag: NodeTag) Disposition {
+    if (hasNodeRule(tag)) return already_specified;
+    return switch (tag) {
+        .lit_float, .lit_string, .lit_undefined => .{ .kind = .trusted, .reason = literal_tcb_reason },
+        .method_call,
+        .member_access,
+        .computed_access,
+        .optional_chain,
+        .assignment,
+        .array_literal,
+        .object_literal,
+        .object_property,
+        .object_method,
+        .object_getter,
+        .object_setter,
+        .object_spread,
+        .function_expr,
+        .arrow_function,
+        .spread,
+        .await_expr,
+        .yield_expr,
+        .sequence_expr,
+        .comma_expr,
+        => .{ .kind = .trusted, .reason = expression_tcb_reason },
+        .match_expr, .match_arm, .match_pattern, .array_pattern, .pattern_element, .pattern_rest, .pattern_default => .{ .kind = .trusted, .reason = pattern_tcb_reason },
+        .expr_stmt,
+        .var_decl,
+        .for_stmt,
+        .for_of_stmt,
+        .for_in_stmt,
+        .while_stmt,
+        .do_while_stmt,
+        .switch_stmt,
+        .case_clause,
+        .assert_stmt,
+        .throw_stmt,
+        .break_stmt,
+        .continue_stmt,
+        .try_stmt,
+        .labeled_stmt,
+        => .{ .kind = .trusted, .reason = control_tcb_reason },
+        .function_decl,
+        .import_decl,
+        .import_specifier,
+        .import_default,
+        .import_namespace,
+        .export_decl,
+        .export_specifier,
+        .export_default,
+        .export_all,
+        => .{ .kind = .trusted, .reason = binding_tcb_reason },
+        .program, .param_list, .arg_list, .stmt_list => .{ .kind = .trusted, .reason = parser_structure_reason },
+        // Handled before this switch by `hasNodeRule`; spelling the members here
+        // keeps the switch exhaustive, so adding a new NodeTag is a compile error.
+        .lit_int, .lit_bool, .lit_null, .identifier, .binary_op, .unary_op, .ternary, .call, .match_type_test, .if_stmt, .return_stmt, .block => already_specified,
+    };
+}
+
 /// A fused/superinstruction opcode and the base opcode sequence it must be
 /// equivalent to. `fused_effect` and `base` are authored as two independent
 /// fields; the checker proves they leave the same symbolic stack. For a faithful
@@ -244,6 +342,159 @@ pub const refinements = [_]Refinement{
         .base = &.{ .{ .push_local = 0 }, .{ .op = .add } },
     },
 };
+
+fn hasOpRule(op: Opcode) bool {
+    for (op_rules) |rule| if (rule.op == op) return true;
+    return false;
+}
+
+fn hasRefinement(op: Opcode) bool {
+    for (refinements) |refinement| if (refinement.fused == op) return true;
+    return false;
+}
+
+/// Classify every named opcode. Opcode is non-exhaustive because bytecode
+/// reserves numeric space, so the final else deliberately remains
+/// `unclassified`. Coverage iterates the named enum fields, which means adding
+/// a named opcode without adding it here makes spec-check fail.
+pub fn opcodeDisposition(op: Opcode) Disposition {
+    if (hasOpRule(op)) return already_specified;
+    if (hasRefinement(op)) return .{ .kind = .translation_validated, .reason = optimized_refinement_reason };
+    return switch (op) {
+        .nop,
+        .push_const,
+        .push_0,
+        .push_1,
+        .push_2,
+        .push_3,
+        .push_i8,
+        .push_i16,
+        .push_null,
+        .push_undefined,
+        .push_true,
+        .push_false,
+        .dup,
+        .drop,
+        .swap,
+        .rot3,
+        .get_length,
+        .dup2,
+        => .{ .kind = .trusted, .reason = vm_stack_reason },
+        .div,
+        .mod,
+        .pow,
+        .inc,
+        .dec,
+        .math_floor,
+        .math_ceil,
+        .math_round,
+        .math_abs,
+        .math_min2,
+        .math_max2,
+        .bit_and,
+        .bit_or,
+        .bit_xor,
+        .bit_not,
+        .shl,
+        .shr,
+        .ushr,
+        .lte,
+        .gt,
+        .gte,
+        .neq,
+        .strict_eq,
+        .strict_neq,
+        .typeof,
+        .add_num,
+        .sub_num,
+        .mul_num,
+        .div_num,
+        .lt_num,
+        .gt_num,
+        .lte_num,
+        .gte_num,
+        => .{ .kind = .trusted, .reason = vm_numeric_reason },
+        .halt,
+        .loop,
+        .goto,
+        .if_true,
+        .if_false,
+        .ret,
+        .ret_undefined,
+        => .{ .kind = .trusted, .reason = vm_control_reason },
+        .get_loc,
+        .put_loc,
+        .get_loc_0,
+        .get_loc_1,
+        .get_loc_2,
+        .get_loc_3,
+        .put_loc_0,
+        .put_loc_1,
+        .put_loc_2,
+        .put_loc_3,
+        .get_global,
+        .put_global,
+        .define_global,
+        => .{ .kind = .trusted, .reason = binding_tcb_reason },
+        .call,
+        .call_method,
+        .tail_call,
+        .make_function,
+        .call_spread,
+        .get_upvalue,
+        .put_upvalue,
+        .close_upvalue,
+        .make_closure,
+        => .{ .kind = .trusted, .reason = vm_call_reason },
+        .get_field,
+        .put_field,
+        .get_elem,
+        .put_elem,
+        .put_elem_keep,
+        .put_field_keep,
+        .new_object,
+        .new_array,
+        .new_object_literal,
+        .array_spread,
+        .object_spread,
+        .set_slot,
+        => .{ .kind = .trusted, .reason = vm_object_reason },
+        .import_module,
+        .import_name,
+        .import_default,
+        .export_name,
+        .export_default,
+        => .{ .kind = .trusted, .reason = vm_module_reason },
+        .get_loc_get_loc_add,
+        .push_const_call,
+        .get_field_call,
+        .if_false_goto,
+        .add_mod,
+        .sub_mod,
+        .mul_mod,
+        .for_of_next,
+        .for_of_next_put_loc,
+        .shr_1,
+        .mul_2,
+        .mod_const,
+        .mod_const_i8,
+        .add_const_i8,
+        .sub_const_i8,
+        .get_field_ic,
+        .put_field_ic,
+        .call_ic,
+        .mul_const_i8,
+        .lt_const_i8,
+        .le_const_i8,
+        .drop_goto,
+        => .{ .kind = .trusted, .reason = vm_optimized_reason },
+        // Symbolic and refined opcodes return before the switch. Listing them
+        // still documents the complete named alphabet for human review.
+        .add, .sub, .mul, .lt, .eq, .not, .neg => already_specified,
+        .get_loc_add => .{ .kind = .translation_validated, .reason = optimized_refinement_reason },
+        else => .{ .kind = .unclassified, .reason = unclassified_reason },
+    };
+}
 
 /// Algebraic laws the language's value semantics must satisfy: equivalences
 /// between *structurally different* denotations. Mechanism 3 (structural RPN
@@ -501,6 +752,29 @@ fn computeSemanticsHash() [64]u8 {
         hashSteps(&hasher, rf.base);
         hasher.update("\x01");
     }
+    // The assurance boundary is semantic content too. Hash every named member,
+    // its disposition, and the exact reason that keeps it in a trusted or
+    // translation-validated boundary.
+    hasher.update("node-dispositions\x00");
+    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
+        const disposition = nodeDisposition(@enumFromInt(field.value));
+        hasher.update(field.name);
+        hasher.update("\x00");
+        hasher.update(@tagName(disposition.kind));
+        hasher.update("\x00");
+        hasher.update(disposition.reason);
+        hasher.update("\x01");
+    }
+    hasher.update("opcode-dispositions\x00");
+    inline for (@typeInfo(Opcode).@"enum".fields) |field| {
+        const disposition = opcodeDisposition(@enumFromInt(field.value));
+        hasher.update(field.name);
+        hasher.update("\x00");
+        hasher.update(@tagName(disposition.kind));
+        hasher.update("\x00");
+        hasher.update(disposition.reason);
+        hasher.update("\x01");
+    }
     // algebraic laws (the SMT-certified non-structural equivalences) are spec
     // content too, so a change to any law moves the hash.
     for (algebraic_laws) |law| {
@@ -555,21 +829,93 @@ fn transitionHashForTest(t: Transition) [64]u8 {
     return std.fmt.bytesToHex(digest, .lower);
 }
 
-/// Coverage counts for reporting.
+/// Total classification coverage and its assurance breakdown. `reachable`
+/// includes every named member except an explicitly unreachable one.
 pub const Coverage = struct {
     nodes_total: usize,
+    nodes_reachable: usize,
+    nodes_classified: usize,
     nodes_specified: usize,
+    nodes_translation_validated: usize,
+    nodes_trusted: usize,
+    nodes_unreachable: usize,
     opcodes_total: usize,
+    opcodes_reachable: usize,
+    opcodes_classified: usize,
     opcodes_specified: usize,
+    opcodes_translation_validated: usize,
+    opcodes_trusted: usize,
+    opcodes_unreachable: usize,
 };
 
 pub fn coverage() Coverage {
-    return .{
+    var result = Coverage{
         .nodes_total = @typeInfo(NodeTag).@"enum".fields.len,
-        .nodes_specified = node_rules.len,
         .opcodes_total = @typeInfo(Opcode).@"enum".fields.len,
-        .opcodes_specified = op_rules.len,
+        .nodes_reachable = 0,
+        .nodes_classified = 0,
+        .nodes_specified = 0,
+        .nodes_translation_validated = 0,
+        .nodes_trusted = 0,
+        .nodes_unreachable = 0,
+        .opcodes_reachable = 0,
+        .opcodes_classified = 0,
+        .opcodes_specified = 0,
+        .opcodes_translation_validated = 0,
+        .opcodes_trusted = 0,
+        .opcodes_unreachable = 0,
     };
+    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
+        addNodeDisposition(&result, nodeDisposition(@enumFromInt(field.value)).kind);
+    }
+    inline for (@typeInfo(Opcode).@"enum".fields) |field| {
+        addOpcodeDisposition(&result, opcodeDisposition(@enumFromInt(field.value)).kind);
+    }
+    return result;
+}
+
+fn addNodeDisposition(result: *Coverage, kind: DispositionKind) void {
+    switch (kind) {
+        .specified => {
+            result.nodes_reachable += 1;
+            result.nodes_classified += 1;
+            result.nodes_specified += 1;
+        },
+        .translation_validated => {
+            result.nodes_reachable += 1;
+            result.nodes_classified += 1;
+            result.nodes_translation_validated += 1;
+        },
+        .trusted => {
+            result.nodes_reachable += 1;
+            result.nodes_classified += 1;
+            result.nodes_trusted += 1;
+        },
+        .not_reachable => result.nodes_unreachable += 1,
+        .unclassified => result.nodes_reachable += 1,
+    }
+}
+
+fn addOpcodeDisposition(result: *Coverage, kind: DispositionKind) void {
+    switch (kind) {
+        .specified => {
+            result.opcodes_reachable += 1;
+            result.opcodes_classified += 1;
+            result.opcodes_specified += 1;
+        },
+        .translation_validated => {
+            result.opcodes_reachable += 1;
+            result.opcodes_classified += 1;
+            result.opcodes_translation_validated += 1;
+        },
+        .trusted => {
+            result.opcodes_reachable += 1;
+            result.opcodes_classified += 1;
+            result.opcodes_trusted += 1;
+        },
+        .not_reachable => result.opcodes_unreachable += 1,
+        .unclassified => result.opcodes_reachable += 1,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -581,10 +927,22 @@ test "drift gate is pinned to the real enums" {
     try std.testing.expectEqual(expected_opcodes, @typeInfo(Opcode).@"enum".fields.len);
 
     const c = coverage();
+    try std.testing.expectEqual(c.nodes_reachable, c.nodes_classified);
+    try std.testing.expectEqual(c.opcodes_reachable, c.opcodes_classified);
+    try std.testing.expectEqual(c.nodes_total, c.nodes_reachable + c.nodes_unreachable);
+    try std.testing.expectEqual(c.opcodes_total, c.opcodes_reachable + c.opcodes_unreachable);
     try std.testing.expect(c.nodes_specified > 0);
-    try std.testing.expect(c.nodes_specified <= c.nodes_total);
     try std.testing.expect(c.opcodes_specified > 0);
-    try std.testing.expect(c.opcodes_specified <= c.opcodes_total);
+    try std.testing.expect(c.nodes_trusted > 0);
+    try std.testing.expect(c.opcodes_trusted > 0);
+    try std.testing.expect(c.opcodes_translation_validated > 0);
+    try std.testing.expectEqual(c.nodes_classified, c.nodes_specified + c.nodes_translation_validated + c.nodes_trusted);
+    try std.testing.expectEqual(c.opcodes_classified, c.opcodes_specified + c.opcodes_translation_validated + c.opcodes_trusted);
+}
+
+test "reserved opcode values remain unclassified" {
+    const reserved: Opcode = @enumFromInt(0xff);
+    try std.testing.expectEqual(DispositionKind.unclassified, opcodeDisposition(reserved).kind);
 }
 
 test "hashes are deterministic and well-formed" {

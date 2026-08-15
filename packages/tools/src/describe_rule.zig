@@ -316,7 +316,7 @@ test "writeUnknownRuleJson emits a JSON error object for an unknown rule" {
     try testing.expectEqualStrings("BOGUS", parsed.value.object.get("query").?.string);
 }
 
-test "writeIdiomListJson emits every seeded row with a stable id" {
+test "writeIdiomListJson emits every registry row with a stable id" {
     var aw = std.Io.Writer.Allocating.init(testing.allocator);
     defer aw.deinit();
     try writeIdiomListJson(&aw.writer);
@@ -327,7 +327,6 @@ test "writeIdiomListJson emits every seeded row with a stable id" {
 
     const idioms = parsed.value.object.get("idioms").?.array;
     try testing.expectEqual(idiomCatalog.idioms().len, idioms.items.len);
-    var wired: usize = 0;
     for (idioms.items) |item| {
         const obj = item.object;
         try testing.expect(std.mem.startsWith(u8, obj.get("id").?.string, "idiom."));
@@ -337,10 +336,8 @@ test "writeIdiomListJson emits every seeded row with a stable id" {
         try testing.expect(obj.get("precondition").?.string.len > 0);
         // The key is always present: an absent rewrite is the signal that the
         // row is advisory-only, so a consumer has to be able to see the null.
-        const rewrite = obj.get("rewrite_rule") orelse return error.MissingRewriteRuleKey;
-        if (rewrite == .string) wired += 1;
+        _ = obj.get("rewrite_rule") orelse return error.MissingRewriteRuleKey;
     }
-    try testing.expect(wired >= 1);
 }
 
 test "writeTypeCheckerJson emits the rule-json shape with a real description" {

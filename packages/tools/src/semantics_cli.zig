@@ -201,8 +201,10 @@ fn writeSpecCheckText(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
     const smt = report.smt;
     try appendFmt(allocator, buf, "zts semantics spec-check\n", .{});
     try appendFmt(allocator, buf, "  semantics hash:    {s}\n", .{sh});
-    try appendFmt(allocator, buf, "  nodes specified:   {d}/{d}\n", .{ cov.nodes_specified, cov.nodes_total });
-    try appendFmt(allocator, buf, "  opcodes specified: {d}/{d}\n", .{ cov.opcodes_specified, cov.opcodes_total });
+    try appendFmt(allocator, buf, "  nodes classified:  {d}/{d} reachable\n", .{ cov.nodes_classified, cov.nodes_reachable });
+    try appendFmt(allocator, buf, "    assurance:       {d} specified, {d} translation-validated, {d} trusted, {d} unreachable\n", .{ cov.nodes_specified, cov.nodes_translation_validated, cov.nodes_trusted, cov.nodes_unreachable });
+    try appendFmt(allocator, buf, "  opcodes classified:{d}/{d} reachable\n", .{ cov.opcodes_classified, cov.opcodes_reachable });
+    try appendFmt(allocator, buf, "    assurance:       {d} specified, {d} translation-validated, {d} trusted, {d} unreachable\n", .{ cov.opcodes_specified, cov.opcodes_translation_validated, cov.opcodes_trusted, cov.opcodes_unreachable });
     try appendFmt(allocator, buf, "  value proofs:      {d} (binop x{d}, unop x{d})\n", .{ r.nodes_proven, r.binop_instances, r.unop_instances });
     try appendFmt(allocator, buf, "  refinements:       {d}\n", .{r.refinements_proven});
     try appendFmt(allocator, buf, "  structural-only:   {d}\n", .{r.nodes_structural});
@@ -261,7 +263,8 @@ fn writeSpecCheckJson(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), rep
     const corpus = report.corpus;
     const smt = report.smt;
     try appendFmt(allocator, buf, "{{\"semanticsHash\":\"{s}\",\"irTableHash\":\"{s}\",\"opcodeTableHash\":\"{s}\",", .{ sh, ir_h, op_h });
-    try appendFmt(allocator, buf, "\"nodes\":{{\"specified\":{d},\"total\":{d}}},\"opcodes\":{{\"specified\":{d},\"total\":{d}}},", .{ cov.nodes_specified, cov.nodes_total, cov.opcodes_specified, cov.opcodes_total });
+    try appendFmt(allocator, buf, "\"nodes\":{{\"classified\":{d},\"reachable\":{d},\"specified\":{d},\"translationValidated\":{d},\"trusted\":{d},\"unreachable\":{d},\"total\":{d}}},", .{ cov.nodes_classified, cov.nodes_reachable, cov.nodes_specified, cov.nodes_translation_validated, cov.nodes_trusted, cov.nodes_unreachable, cov.nodes_total });
+    try appendFmt(allocator, buf, "\"opcodes\":{{\"classified\":{d},\"reachable\":{d},\"specified\":{d},\"translationValidated\":{d},\"trusted\":{d},\"unreachable\":{d},\"total\":{d}}},", .{ cov.opcodes_classified, cov.opcodes_reachable, cov.opcodes_specified, cov.opcodes_translation_validated, cov.opcodes_trusted, cov.opcodes_unreachable, cov.opcodes_total });
     try appendFmt(allocator, buf, "\"valueProofs\":{d},\"binopInstances\":{d},\"unopInstances\":{d},\"refinements\":{d},\"structural\":{d},\"stackEffectChecks\":{d},", .{ r.nodes_proven, r.binop_instances, r.unop_instances, r.refinements_proven, r.nodes_structural, r.stack_effect_checked });
     try appendFmt(allocator, buf, "\"differential\":{{\"passed\":{d},\"total\":{d}}},", .{ corpus.cases_passed, corpus.cases_total });
     try appendFmt(allocator, buf, "\"smt\":{{\"available\":{s},\"proved\":{d},\"unproven\":{d},\"total\":{d}}},", .{ if (smt.available) "true" else "false", smt.proved, smt.unproven, smt.total });
@@ -354,6 +357,8 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
     defer json.deinit(allocator);
     try writeSpecCheckJson(allocator, &json, report);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"ok\":false") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"classified\":69,\"reachable\":69") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"classified\":127,\"reachable\":127") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"binary_op\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"unary_op\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"smt_law\"") != null);
@@ -362,6 +367,8 @@ test "spec-check renderers aggregate structural corpus and smt failures" {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
     try writeSpecCheckText(allocator, &text, report);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "nodes classified:  69/69 reachable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "opcodes classified:127/127 reachable") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "FAIL (4 divergence)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "binary_op: lowering mismatch") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "unary_op: real codegen mismatch") != null);

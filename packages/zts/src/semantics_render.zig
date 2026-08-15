@@ -115,7 +115,9 @@ pub fn renderSpecTs(caller: std.mem.Allocator) ![]u8 {
     try fmt(allocator, w, "// irTableHash:     {s}\n", .{ir});
     try fmt(allocator, w, "// opcodeTableHash: {s}\n", .{op});
     try fmt(allocator, w, "//\n", .{});
-    try fmt(allocator, w, "// Coverage: {d}/{d} IR nodes, {d}/{d} bytecode opcodes specified.\n", .{ cov.nodes_specified, cov.nodes_total, cov.opcodes_specified, cov.opcodes_total });
+    try fmt(allocator, w, "// Coverage: {d}/{d} reachable IR nodes and {d}/{d} reachable bytecode opcodes classified.\n", .{ cov.nodes_classified, cov.nodes_reachable, cov.opcodes_classified, cov.opcodes_reachable });
+    try fmt(allocator, w, "// IR assurance: {d} specified, {d} translation-validated, {d} trusted, {d} unreachable.\n", .{ cov.nodes_specified, cov.nodes_translation_validated, cov.nodes_trusted, cov.nodes_unreachable });
+    try fmt(allocator, w, "// Opcode assurance: {d} specified, {d} translation-validated, {d} trusted, {d} unreachable.\n", .{ cov.opcodes_specified, cov.opcodes_translation_validated, cov.opcodes_trusted, cov.opcodes_unreachable });
     try fmt(allocator, w, "// `denote` is what the node computes; `lower` is the bytecode it compiles to.\n", .{});
     try fmt(allocator, w, "// A value node's lower, symbolically executed, equals its denote (spec-check\n", .{});
     try fmt(allocator, w, "// mechanism 3), and the real compiler agrees on a corpus (mechanism 4).\n\n", .{});
@@ -134,6 +136,23 @@ pub fn renderSpecTs(caller: std.mem.Allocator) ![]u8 {
         try fmt(allocator, w, " {s}: \"{s}\"", .{ @tagName(k), @tagName(semantics.unOpcode(k)) });
     }
     try fmt(allocator, w, " }};\n\n", .{});
+
+    // Complete per-member assurance dispositions. These make the trusted
+    // boundary visible in the generated view instead of rendering only the
+    // small executable symbolic subset.
+    try fmt(allocator, w, "export const nodeAssurance = {{\n", .{});
+    inline for (@typeInfo(semantics.NodeTag).@"enum".fields) |field| {
+        const disposition = semantics.nodeDisposition(@enumFromInt(field.value));
+        try fmt(allocator, w, "  {s}: {{ disposition: \"{s}\", reason: \"{s}\" }},\n", .{ field.name, @tagName(disposition.kind), disposition.reason });
+    }
+    try fmt(allocator, w, "}} as const;\n\n", .{});
+
+    try fmt(allocator, w, "export const opcodeAssurance = {{\n", .{});
+    inline for (@typeInfo(semantics.Opcode).@"enum".fields) |field| {
+        const disposition = semantics.opcodeDisposition(@enumFromInt(field.value));
+        try fmt(allocator, w, "  {s}: {{ disposition: \"{s}\", reason: \"{s}\" }},\n", .{ field.name, @tagName(disposition.kind), disposition.reason });
+    }
+    try fmt(allocator, w, "}} as const;\n\n", .{});
 
     // Node rules.
     for (semantics.node_rules) |r| {
@@ -229,7 +248,7 @@ fn fmt(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), comptime f: []cons
 // Tests
 // ---------------------------------------------------------------------------
 
-test "rendered spec is tied to the registry: carries the hash and every node" {
+test "rendered spec carries every named semantic disposition" {
     const allocator = std.testing.allocator;
     const ts = try renderSpecTs(allocator);
     defer allocator.free(ts);
@@ -237,11 +256,15 @@ test "rendered spec is tied to the registry: carries the hash and every node" {
     const sh = semantics.semanticsHash();
     try std.testing.expect(std.mem.indexOf(u8, ts, &sh) != null);
 
-    // Every specified node tag appears as an exported const.
-    for (semantics.node_rules) |r| {
-        const decl = try std.fmt.allocPrint(allocator, "export const {s} =", .{@tagName(r.tag)});
-        defer allocator.free(decl);
-        try std.testing.expect(std.mem.indexOf(u8, ts, decl) != null);
+    inline for (@typeInfo(semantics.NodeTag).@"enum".fields) |field| {
+        const row = try std.fmt.allocPrint(allocator, "  {s}: {{ disposition:", .{field.name});
+        defer allocator.free(row);
+        try std.testing.expect(std.mem.indexOf(u8, ts, row) != null);
+    }
+    inline for (@typeInfo(semantics.Opcode).@"enum".fields) |field| {
+        const row = try std.fmt.allocPrint(allocator, "  {s}: {{ disposition:", .{field.name});
+        defer allocator.free(row);
+        try std.testing.expect(std.mem.indexOf(u8, ts, row) != null);
     }
 }
 
