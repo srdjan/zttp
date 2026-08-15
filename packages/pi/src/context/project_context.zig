@@ -33,10 +33,7 @@ pub const Options = struct {
 /// Loads project context from the current working directory. Thin wrapper
 /// around `loadFromDir` that resolves cwd realpath. Returns null when no
 /// matching files were found.
-pub fn loadFromCwd(allocator: std.mem.Allocator) !?[]u8 {
-    return loadFromCwdWithOptions(allocator, .{});
-}
-
+///
 /// The caps belong to whoever consumes the result: a loader that accepts more
 /// than its consumer can carry turns an oversized file into a launch refusal
 /// with no file named.
