@@ -473,10 +473,18 @@ proposed file - though that content is what the model just wrote. The compiler's
 veto verdict comes back as a tool result and can quote diagnostics with source
 spans.
 
-Each result is appended to the session transcript, and every subsequent request
-in that turn resends the whole transcript. So a file read once is sent again on
-each later round trip of the same turn. A single tool result is capped at 32 KiB
-before it enters the transcript; a larger file is truncated there.
+Each result is appended to the raw session journal. The provider sees a bounded
+active projection: file reads are UTF-8-safe pages with an explicit range and
+completeness flag, searches and file lists carry deterministic continuation
+metadata, and process output is a bounded head/tail digest with omitted-byte
+counts. Raw tool output remains available to the host and journal. It is never
+cut into an ambiguous partial value before entering model context.
+
+Every request is measured before transport, including the system prompt, tool
+schemas, active history, transient retry text, provider framing, response
+reserve, and exact wire bytes. The default soft input target is 40,000 tokens.
+The hard limit is the active model's context window minus the configured
+reserve. Output tokens are clamped to the capacity left after input.
 
 Files the model never asks for are never sent. There is no repository scan and
 no upfront upload, and the examples baked into the persona are this repository's
@@ -512,6 +520,54 @@ model-shipped generation defaults.
 5. On a pass you see a proof card and approve or reject. `--yes` approves every
    verified edit; `--no-edit` blocks writes entirely.
 6. The host writes the file. The agent never writes to disk itself.
+
+### Context compaction
+
+When a normal request crosses the soft target, expert mode summarizes safe
+older turns before making that request. It prefers whole user turns, never cuts
+between a tool call and its result, and preserves an oversized or unresolved
+current turn exactly. If protected input cannot fit the model's hard limit, the
+request fails before network I/O.
+
+The summary call uses the active provider and model in isolation: one user
+message, a fixed summary prompt, no tools, no normal transcript, bounded output,
+and no prompt-cache write. The returned Markdown must contain Goal,
+Constraints & Preferences, Progress with Done/In Progress/Blocked, Key
+Decisions, Next Steps, and Critical Context. The host derives read and modified
+file blocks from typed tool calls rather than trusting model-authored file facts.
+
+Raw session entries remain append-only for proof reconstruction and ledger
+export. A successful summary is stored as a checksummed v3 compaction
+checkpoint, then installed as the provider-visible projection. Resume and fork
+preserve both the raw ancestry and the active projection. A provider
+`PromptTooLong` response can compact and retry that exact pending model call
+once; the turn is not restarted and effects are not repeated.
+
+Run `/compact` manually, or add an optional focus that cannot replace the fixed
+summary contract:
+
+```text
+/compact
+/compact retain the deployment decision and pending verification commands
+```
+
+Compaction settings use built-in defaults, then
+`$HOME/.zttp/settings.json`, then `<cwd>/.zttp/settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "maxInputTokens": 40000,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
+Disabling automatic compaction leaves manual `/compact` available and keeps
+hard request admission enabled. Unknown keys, invalid values, and malformed
+JSON reject the named file. Settings files cannot contain provider credentials.
 
 ```bash
 zttp expert                                      # current DeepSeek default

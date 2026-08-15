@@ -438,6 +438,26 @@ zttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 | `--max-iters <n>` | Autoloop iteration budget for a `--goal` run. Defaults to 8. |
 
+Interactive context commands:
+
+```text
+/compact [instructions]
+/settings
+```
+
+`/compact` summarizes safe older context with the active model. Optional
+instructions add focus but do not replace the fixed summary contract.
+`/settings` shows the resolved compaction policy. Persistent overrides load in
+order from `$HOME/.zttp/settings.json` and `<cwd>/.zttp/settings.json`; the
+project file wins. Only `compaction.enabled`, `maxInputTokens`, `reserveTokens`,
+and `keepRecentTokens` are accepted.
+
+RPC `compact` accepts optional `{"instructions":"..."}` and returns a typed
+result object with status `compacted`, `no_change`, `not_compactable`,
+`unavailable`, or `failed`. Successful results include the kept entry ID,
+before/after token estimates, and summary usage. Automatic compaction emits
+ordered `compaction` start/end notifications.
+
 The explicit local provider uses `LiquidAI/LFM2.5-2.6B-MLX-8bit` through
 non-streaming Chat Completions at the loopback-only `ZTTP_MLX_BASE_URL`, which defaults to
 `http://127.0.0.1:8080`. Zttp checks `/health` and `/v1/models` before creating

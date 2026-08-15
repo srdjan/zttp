@@ -87,6 +87,21 @@ pub fn processSubmit(
         return .{ .tool_result = try renderSessionSettings(allocator, session) };
     }
 
+    if (isCompactSubmission(trimmed)) {
+        const suffix = std.mem.trim(u8, trimmed["/compact".len..], " \t\r\n");
+        const result = try agent.compactManual(
+            allocator,
+            session,
+            if (suffix.len == 0) null else suffix,
+        );
+        const message = try agent.renderCompactResult(allocator, result);
+        const ok = switch (result) {
+            .compacted, .no_change => true,
+            .not_compactable, .unavailable, .failed => false,
+        };
+        return .{ .tool_result = .{ .ok = ok, .llm_text = message } };
+    }
+
     if (std.mem.startsWith(u8, trimmed, "/model ")) {
         const model_id = std.mem.trim(u8, trimmed["/model ".len..], " \t");
         session.setModel(allocator, model_id) catch |err| {
@@ -175,6 +190,11 @@ pub fn processSubmit(
         .session_compact => .session_compact,
         .session_fork => .session_fork,
     };
+}
+
+fn isCompactSubmission(line: []const u8) bool {
+    if (!std.mem.startsWith(u8, line, "/compact")) return false;
+    return line.len == "/compact".len or std.ascii.isWhitespace(line["/compact".len]);
 }
 
 pub fn dispatchLine(
@@ -392,6 +412,7 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
     // Source every figure from the actual defaults so this display cannot drift.
     const defaults = loop.RunOptions{};
     const default_model = models_registry.defaultForProvider(models_registry.default_provider);
+    const compaction_defaults = @import("compaction.zig").Settings{};
     const msg = try std.fmt.allocPrint(
         allocator,
         "Settings (compile-time defaults):\n" ++
@@ -400,7 +421,11 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
             "  max_attempts:    {d}\n" ++
             "  roundtrips/turn: {d}\n" ++
             "  tool_calls/turn: {d}\n" ++
-            "  batch_size:      {d}\n",
+            "  batch_size:      {d}\n" ++
+            "  compaction:      enabled\n" ++
+            "  max_input:       {d}\n" ++
+            "  reserve:         {d}\n" ++
+            "  keep_recent:     {d}\n",
         .{
             default_model.id,
             default_model.request_policy.max_output_tokens,
@@ -408,6 +433,9 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
             defaults.max_model_roundtrips_per_turn,
             defaults.max_tool_calls_per_turn,
             defaults.max_tool_batch_size,
+            compaction_defaults.max_input_tokens,
+            compaction_defaults.reserve_tokens,
+            compaction_defaults.keep_recent_tokens,
         },
     );
     defer allocator.free(msg);
@@ -427,7 +455,11 @@ fn renderSessionSettings(allocator: std.mem.Allocator, session: *const agent.Age
             "  max_attempts:     {d}\n" ++
             "  roundtrips/turn:  {d}\n" ++
             "  tool_calls/turn:  {d}\n" ++
-            "  batch_size:       {d}\n",
+            "  batch_size:       {d}\n" ++
+            "  compaction:       {s}\n" ++
+            "  max_input:        {d}\n" ++
+            "  reserve:          {d}\n" ++
+            "  keep_recent:      {d}\n",
         .{
             session.backendDescriptor().provider_label,
             model_id,
@@ -436,6 +468,10 @@ fn renderSessionSettings(allocator: std.mem.Allocator, session: *const agent.Age
             defaults.max_model_roundtrips_per_turn,
             defaults.max_tool_calls_per_turn,
             defaults.max_tool_batch_size,
+            if (session.compaction_enabled) "enabled" else "disabled",
+            session.compaction_settings.max_input_tokens,
+            session.compaction_settings.reserve_tokens,
+            session.compaction_settings.keep_recent_tokens,
         },
     );
     defer allocator.free(msg);
@@ -784,6 +820,7 @@ pub fn run(
     // sessions only (piped output keeps the original post-turn render so its
     // ordering is unchanged).
     var stream_ctx = InteractiveStreamCtx{ .allocator = allocator };
+    var compaction_ctx: InteractiveCompactionCtx = .{};
 
     var line_buf: [64 * 1024]u8 = undefined;
     while (true) {
@@ -800,13 +837,19 @@ pub fn run(
         stream_ctx.streamed = false;
         if (is_tty) {
             session.transcript.observer = .{ .context = &stream_ctx, .on_append = InteractiveStreamCtx.onAppend };
+            session.compaction_observer = .{
+                .context = &compaction_ctx,
+                .on_event = InteractiveCompactionCtx.onEvent,
+            };
         }
         var outcome = processSubmit(allocator, &session, registry, line, approval_fn) catch |err| {
             session.transcript.observer = null;
+            session.compaction_observer = null;
             loop.writeTurnErrorToStderr(err);
             continue;
         };
         session.transcript.observer = null;
+        session.compaction_observer = null;
 
         switch (outcome) {
             .noop => {},
@@ -970,6 +1013,30 @@ const InteractiveStreamCtx = struct {
             _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
         }
         self.streamed = true;
+    }
+};
+
+const InteractiveCompactionCtx = struct {
+    fn onEvent(
+        _: *anyopaque,
+        phase: agent.CompactionPhase,
+        reason: session_events.CompactionReason,
+        result: ?*const agent.CompactResult,
+    ) void {
+        if (phase != .end or reason == .manual) return;
+        const present = result orelse return;
+        const details = switch (present.*) {
+            .compacted => |value| value,
+            else => return,
+        };
+        stopWorkingTicker();
+        var buffer: [192]u8 = undefined;
+        const notice = std.fmt.bufPrint(
+            &buffer,
+            "[context compacted ({s}): {d} -> {d} estimated input tokens]\n",
+            .{ @tagName(reason), details.tokens_before, details.estimated_tokens_after },
+        ) catch return;
+        _ = std.c.write(std.c.STDOUT_FILENO, notice.ptr, notice.len);
     }
 };
 
@@ -1627,6 +1694,31 @@ test "processSubmit: /settings reports compile-time defaults without themes" {
         },
         else => return error.TestFailed,
     }
+}
+
+test "processSubmit: /compact accepts a trimmed focus and keeps lookalikes as model text" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(testing.allocator);
+
+    var outcome = try processSubmit(
+        testing.allocator,
+        &session,
+        &reg,
+        "/compact   focus on the pending tool pair   ",
+        null,
+    );
+    switch (outcome) {
+        .tool_result => |*result| {
+            defer result.deinit(testing.allocator);
+            try testing.expect(result.ok);
+            try testing.expectEqualStrings("Nothing to compact.\n", result.llm_text);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try testing.expect(isCompactSubmission("/compact\tfocus"));
+    try testing.expect(!isCompactSubmission("/compaction"));
 }
 
 test "processSubmit: /model lists only the active provider and marks current" {

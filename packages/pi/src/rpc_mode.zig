@@ -13,7 +13,7 @@
 //!
 //! Methods (v1):
 //!   - turn(params: {text: string})
-//!   - compact()
+//!   - compact(params?: {instructions?: string})
 //!   - session.info()
 //!   - tools.list()          tools.invoke(params: {name, args_json})
 //!   - skills.list()         skills.invoke(params: {name})
@@ -83,6 +83,14 @@ pub fn runWithSession(
 ) !void {
     const approval_fn = loop.resolveApprovalFn(policy, null);
 
+    var compaction_context = RpcCompactionContext{ .allocator = allocator, .out = out_writer };
+    const previous_compaction_observer = session.compaction_observer;
+    session.compaction_observer = .{
+        .context = &compaction_context,
+        .on_event = RpcCompactionContext.onEvent,
+    };
+    defer session.compaction_observer = previous_compaction_observer;
+
     var line_buf: std.ArrayList(u8) = .empty;
     defer line_buf.deinit(allocator);
 
@@ -103,6 +111,21 @@ pub fn runWithSession(
         if (done) break;
     }
 }
+
+const RpcCompactionContext = struct {
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+
+    fn onEvent(
+        context: *anyopaque,
+        phase: agent.CompactionPhase,
+        reason: session_events.CompactionReason,
+        result: ?*const agent.CompactResult,
+    ) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        emitCompactionNotification(self.allocator, self.out, phase, reason, result) catch {};
+    }
+};
 
 /// Reads one `\n`-terminated line into `out`. Returns false on EOF.
 /// `out` never contains the trailing newline.
@@ -220,7 +243,7 @@ fn dispatchMethod(
         return false;
     }
     if (std.mem.eql(u8, method, "compact")) {
-        try handleCompact(allocator, session, id, out);
+        try handleCompact(allocator, session, params, id, out);
         return false;
     }
     if (std.mem.eql(u8, method, "turn")) {
@@ -306,6 +329,14 @@ fn handleSessionInfo(
     try w.print("{d}", .{session.token_totals.cache_read_input_tokens});
     try w.writeAll(",\"cache_creation\":");
     try w.print("{d}", .{session.token_totals.cache_creation_input_tokens});
+    try w.writeAll("},\"summary_tokens\":{\"input\":");
+    try w.print("{d}", .{session.summary_token_totals.input_tokens});
+    try w.writeAll(",\"output\":");
+    try w.print("{d}", .{session.summary_token_totals.output_tokens});
+    try w.writeAll("},\"request_attempts\":{\"normal\":");
+    try w.print("{d}", .{session.normal_request_attempt_count});
+    try w.writeAll(",\"summary\":");
+    try w.print("{d}", .{session.summary_attempt_count});
     try w.writeAll("}}");
 
     try emitResultRaw(allocator, out, id, buf.written());
@@ -544,12 +575,113 @@ fn handleToolsInvoke(
 fn handleCompact(
     allocator: std.mem.Allocator,
     session: *agent.AgentSession,
+    params: ?std.json.Value,
     id: std.json.Value,
     out: ?*std.Io.Writer,
 ) !void {
-    const msg = try agent.compact(allocator, session);
-    defer allocator.free(msg);
-    try emitResultString(allocator, out, id, msg);
+    var instructions: ?[]const u8 = null;
+    if (params) |present| {
+        if (present != .object) {
+            try emitError(allocator, out, id, INVALID_PARAMS, "params must be an object");
+            return;
+        }
+        var iterator = present.object.iterator();
+        while (iterator.next()) |entry| {
+            if (!std.mem.eql(u8, entry.key_ptr.*, "instructions")) {
+                try emitErrorFmt(
+                    allocator,
+                    out,
+                    id,
+                    INVALID_PARAMS,
+                    "unknown compact param: {s}",
+                    .{entry.key_ptr.*},
+                );
+                return;
+            }
+        }
+        if (present.object.get("instructions")) |value| {
+            if (value != .string) {
+                try emitError(allocator, out, id, INVALID_PARAMS, "instructions must be a string");
+                return;
+            }
+            const trimmed = std.mem.trim(u8, value.string, " \t\r\n");
+            instructions = if (trimmed.len == 0) null else trimmed;
+        }
+    }
+    const result = try agent.compactManual(allocator, session, instructions);
+    try emitCompactResult(allocator, out, id, result);
+}
+
+fn emitCompactResult(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    id: std.json.Value,
+    result: agent.CompactResult,
+) !void {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
+    try writeCompactPayload(w, result, .manual);
+    try emitResultRaw(allocator, out, id, buf.written());
+}
+
+fn writeCompactPayload(
+    w: *std.Io.Writer,
+    result: agent.CompactResult,
+    reason: session_events.CompactionReason,
+) !void {
+    try w.writeAll("{\"status\":");
+    try json_writer.writeString(w, @tagName(result));
+    try w.writeAll(",\"reason\":");
+    try json_writer.writeString(w, @tagName(reason));
+    switch (result) {
+        .compacted => |details| {
+            try w.print(",\"first_kept_entry_id\":{d}", .{details.first_kept_entry_id});
+            try w.print(",\"tokens_before\":{d}", .{details.tokens_before});
+            try w.print(",\"estimated_tokens_after\":{d}", .{details.estimated_tokens_after});
+            try w.writeAll(",\"summary_usage\":{\"input\":");
+            try w.print("{d}", .{details.summary_usage.input_tokens});
+            try w.writeAll(",\"output\":");
+            try w.print("{d}", .{details.summary_usage.output_tokens});
+            try w.writeAll(",\"cache_read\":");
+            try w.print("{d}", .{details.summary_usage.cache_read_input_tokens});
+            try w.writeAll(",\"cache_creation\":");
+            try w.print("{d}", .{details.summary_usage.cache_creation_input_tokens});
+            try w.writeByte('}');
+        },
+        .not_compactable => |why| {
+            try w.writeAll(",\"not_compactable_reason\":");
+            try json_writer.writeString(w, @tagName(why));
+        },
+        .failed => |failure| {
+            try w.writeAll(",\"error\":");
+            try json_writer.writeString(w, @errorName(failure));
+        },
+        .no_change, .unavailable => {},
+    }
+    try w.writeByte('}');
+}
+
+fn emitCompactionNotification(
+    allocator: std.mem.Allocator,
+    out: ?*std.Io.Writer,
+    phase: agent.CompactionPhase,
+    reason: session_events.CompactionReason,
+    result: ?*const agent.CompactResult,
+) !void {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const w = buf.writer();
+    try w.writeAll("{\"jsonrpc\":\"2.0\",\"method\":\"compaction\",\"params\":{\"phase\":");
+    try json_writer.writeString(w, @tagName(phase));
+    try w.writeAll(",\"reason\":");
+    try json_writer.writeString(w, @tagName(reason));
+    if (result) |present| {
+        try w.writeAll(",\"result\":");
+        try writeCompactPayload(w, present.*, reason);
+    }
+    try w.writeAll("}}\n");
+    try writeOut(out, buf.written());
 }
 
 fn handleTurn(
@@ -1106,6 +1238,84 @@ test "rpc: session.info reports stub session fields" {
     try testing.expect(std.mem.indexOf(u8, buf.written(), "\"session_id\":null") != null);
     try testing.expect(std.mem.indexOf(u8, buf.written(), "\"transcript_len\":0") != null);
     try testing.expect(std.mem.indexOf(u8, buf.written(), "\"input\":0") != null);
+}
+
+test "rpc: compact returns a structured status and validates optional instructions" {
+    const allocator = testing.allocator;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+
+    try driveWith(
+        allocator,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"compact\",\"params\":{\"instructions\":\"  focus on tools  \"}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"compact\",\"params\":{\"secret\":true}}\n" ++
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\"}\n",
+        &buf,
+    );
+
+    const out = buf.written();
+    try testing.expect(std.mem.indexOf(u8, out, "\"id\":1,\"result\":{\"status\":\"no_change\",\"reason\":\"manual\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"id\":2,\"error\":{\"code\":-32602") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "unknown compact param: secret") != null);
+}
+
+test "rpc: all compaction outcomes remain result data rather than protocol errors" {
+    const allocator = testing.allocator;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const results = [_]agent.CompactResult{
+        .{ .compacted = .{
+            .reason = .manual,
+            .first_kept_entry_id = 7,
+            .tokens_before = 45_000,
+            .estimated_tokens_after = 18_000,
+            .summary_usage = .{ .input_tokens = 900, .output_tokens = 300 },
+        } },
+        .no_change,
+        .{ .not_compactable = .unresolved_tool_pair },
+        .unavailable,
+        .{ .failed = error.MalformedSummary },
+    };
+    for (results, 0..) |result, index| {
+        try emitCompactResult(
+            allocator,
+            buf.writer(),
+            .{ .integer = @intCast(index + 1) },
+            result,
+        );
+    }
+    const out = buf.written();
+    inline for (.{ "compacted", "no_change", "not_compactable", "unavailable", "failed" }) |status| {
+        const needle = "\"status\":\"" ++ status ++ "\"";
+        try testing.expect(std.mem.indexOf(u8, out, needle) != null);
+    }
+    try testing.expect(std.mem.indexOf(u8, out, "\"first_kept_entry_id\":7") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"not_compactable_reason\":\"unresolved_tool_pair\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"error\":\"MalformedSummary\"") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "\"error\":{\"code\":") == null);
+}
+
+test "rpc: compaction lifecycle notifications precede retried model entries" {
+    const allocator = testing.allocator;
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const result: agent.CompactResult = .{ .compacted = .{
+        .reason = .overflow,
+        .first_kept_entry_id = 4,
+        .tokens_before = 50_000,
+        .estimated_tokens_after = 16_000,
+        .summary_usage = .{},
+    } };
+    try emitCompactionNotification(allocator, buf.writer(), .start, .overflow, null);
+    try emitCompactionNotification(allocator, buf.writer(), .end, .overflow, &result);
+    const entry: transcript_mod.OwnedEntry = .{ .model_text = "retried response" };
+    try emitEntryNotification(allocator, buf.writer(), 9, &entry);
+    const out = buf.written();
+    const start = std.mem.indexOf(u8, out, "\"phase\":\"start\"") orelse return error.TestExpectedStart;
+    const end = std.mem.indexOf(u8, out, "\"phase\":\"end\"") orelse return error.TestExpectedEnd;
+    const retried = std.mem.indexOf(u8, out, "retried response") orelse return error.TestExpectedEntry;
+    try testing.expect(start < end);
+    try testing.expect(end < retried);
 }
 
 test "rpc: turn missing params returns INVALID_PARAMS" {

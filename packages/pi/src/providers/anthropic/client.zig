@@ -12,6 +12,7 @@ const response_assembler = @import("response_assembler.zig");
 const apply_edit = @import("apply_edit.zig");
 const http_errors = @import("../http_errors.zig");
 const model_request = @import("../model_request.zig");
+const context_budget = @import("../../context_budget.zig");
 const capture_sink = @import("../capture_sink.zig");
 
 const default_base_url = "https://api.anthropic.com/v1/messages";
@@ -24,6 +25,7 @@ pub const Config = struct {
     model: []const u8 = request_mod.default_model,
     max_tokens: u32 = request_mod.default_max_tokens,
     tools_json: ?[]const u8 = null,
+    reserve_tokens: u64 = context_budget.default_reserve_tokens,
     base_url: []const u8 = default_base_url,
     anthropic_version: []const u8 = default_anthropic_version,
     purpose: model_request.Purpose = .normal,
@@ -121,6 +123,7 @@ fn createRequestSnapshot(
             .max_output_tokens = config.max_tokens,
             .system_prompt = config.system_prompt,
             .tools_json = config.tools_json,
+            .reserve_tokens = config.reserve_tokens,
             .purpose = config.purpose,
             .cache_policy = config.cache_policy,
         },

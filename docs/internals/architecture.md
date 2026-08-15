@@ -42,6 +42,29 @@ engine includes a garbage collector, but the default serving configuration
 uses the hybrid arena allocator, which disables collection on the serving path
 (`Context.setHybridAllocator` in `packages/zts/src/context.zig`).
 
+## Expert Model Context
+
+The expert agent keeps two views of a session. The v3 event journal and raw
+`Transcript` entries are append-only proof and audit authority. A separate
+projection supplies the model with the latest validated summary plus a retained
+suffix of raw entries. Ledger export, proof reconstruction, patch-chain hashes,
+and workspace state never derive authority from a summary.
+
+All provider adapters serialize a shared `ModelRequestSnapshot`. The snapshot
+measures system, tools, active history, transient text, framing, wire bytes, and
+model limits before transport. Typed tool context policies produce exact,
+replayable preview, or structured digest results. No generic byte slice is used
+as provider-visible context.
+
+Compaction selection, serialization, file-fact extraction, prompt construction,
+and summary validation are pure functions in `packages/pi/src/compaction.zig`.
+`AgentSession` owns provider calls and the transactional checkpoint boundary. A
+standalone summarizer has no tools or normal history. After validation, the
+session flushes pending raw frames, synchronizes a compaction checkpoint, and
+installs an already-built projection without allocation. Normal request
+admission and one-shot overflow recovery wrap the provider client at the shared
+model-call seam, so TTY, print, JSON, RPC, and resumed sessions use one policy.
+
 ## Execution State Ownership
 
 Each `Context` owns the authorization scope for its current native-module call

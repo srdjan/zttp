@@ -24,6 +24,7 @@ const local_client = @import("providers/local/client.zig");
 const deepseek_client = @import("providers/deepseek/client.zig");
 const model_request = @import("providers/model_request.zig");
 const compaction = @import("compaction.zig");
+const settings_mod = @import("settings.zig");
 const context_budget = @import("context_budget.zig");
 const chat_completions = @import("providers/chat_completions.zig");
 const models_registry = @import("providers/models.zig");
@@ -47,6 +48,18 @@ pub const Provider = models_registry.Provider;
 pub const BackendDescriptor = struct {
     auth_label: []const u8,
     provider_label: []const u8,
+};
+
+pub const CompactionPhase = enum { start, end };
+
+pub const CompactionObserver = struct {
+    context: *anyopaque,
+    on_event: *const fn (
+        context: *anyopaque,
+        phase: CompactionPhase,
+        reason: session_events.CompactionReason,
+        result: ?*const CompactResult,
+    ) void,
 };
 
 pub const SessionConfig = struct {
@@ -323,6 +336,9 @@ pub const AgentSession = struct {
     overflow_recovery_used: bool = false,
     compaction_enabled: bool = true,
     compaction_settings: compaction.Settings = .{},
+    compaction_observer: ?CompactionObserver = null,
+    compaction_sequence: u64 = 0,
+    last_compaction: ?CompactedDetails = null,
     /// Per-session expert metrics, folded each turn and emitted as a
     /// `session_summary` event by `writeSessionSummary` at session close.
     metrics: SessionMetrics = .{},
@@ -641,6 +657,12 @@ pub const AgentSession = struct {
     ) !void {
         const provider = self.activeProvider() orelse return error.NoActiveProvider;
         const model = try models_registry.resolveForProvider(provider, model_id);
+        try settings_mod.validateCompaction(.{
+            .enabled = self.compaction_enabled,
+            .max_input_tokens = self.compaction_settings.max_input_tokens,
+            .reserve_tokens = self.compaction_settings.reserve_tokens,
+            .keep_recent_tokens = self.compaction_settings.keep_recent_tokens,
+        }, model);
         const backend_matches = switch (self.backend) {
             .local => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
             .anthropic => |client| modelConfigMatches(client.config.model, client.config.max_tokens, model),
@@ -770,6 +792,30 @@ fn initFromEnvWithPreparedResume(
             } else null,
         });
 
+    const settings_model = if (resolution) |resolved|
+        resolved.model
+    else
+        models_registry.defaultForProvider(models_registry.default_provider);
+    const loaded_settings = switch (try settings_mod.load(allocator, settings_model)) {
+        .loaded => |value| value,
+        .invalid => |diagnostic_value| {
+            var diagnostic = diagnostic_value;
+            defer diagnostic.deinit(allocator);
+            if (diagnostic.key) |key| {
+                std.debug.print(
+                    "invalid compaction settings at {s}: {s} ({s})\n",
+                    .{ diagnostic.path, key, @tagName(diagnostic.issue) },
+                );
+            } else {
+                std.debug.print(
+                    "invalid compaction settings at {s}: {s}\n",
+                    .{ diagnostic.path, @tagName(diagnostic.issue) },
+                );
+            }
+            return error.InvalidCompactionSettingsFile;
+        },
+    };
+
     // Load project context (AGENTS.md / CLAUDE.md) from cwd upward unless
     // the caller disabled it. Instruction failures propagate: launching with
     // an incomplete project contract would be less safe than refusing.
@@ -836,6 +882,15 @@ fn initFromEnvWithPreparedResume(
         }
     };
     errdefer session.deinit(allocator);
+    session.compaction_enabled = loaded_settings.compaction.enabled;
+    session.compaction_settings = loaded_settings.compaction.core();
+    switch (session.backend) {
+        .stub => {},
+        .local => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
+        .anthropic => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
+        .openai => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
+        .deepseek => |*client| client.config.reserve_tokens = loaded_settings.compaction.reserve_tokens,
+    }
 
     if (resolution) |resolved| {
         session.resolved_provider = resolved.provider;
@@ -1218,15 +1273,37 @@ pub fn compact(
     allocator: std.mem.Allocator,
     session: *AgentSession,
 ) ![]u8 {
-    const result = try compactDetailed(
+    const result = try compactManual(allocator, session, null);
+    return renderCompactResult(allocator, result);
+}
+
+pub fn compactManual(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    focus: ?[]const u8,
+) !CompactResult {
+    notifyCompaction(session, .start, .manual, null);
+    const result = compactDetailed(
         allocator,
         session,
         session.summarizer(),
-        .{},
+        session.compaction_settings,
         .manual,
-        null,
+        focus,
         false,
-    );
+    ) catch |err| {
+        const failed: CompactResult = .{ .failed = err };
+        notifyCompaction(session, .end, .manual, &failed);
+        return err;
+    };
+    notifyCompaction(session, .end, .manual, &result);
+    return result;
+}
+
+pub fn renderCompactResult(
+    allocator: std.mem.Allocator,
+    result: CompactResult,
+) ![]u8 {
     return switch (result) {
         .compacted => |details| std.fmt.allocPrint(
             allocator,
@@ -1240,7 +1317,11 @@ pub fn compact(
             .{@tagName(reason)},
         ),
         .unavailable => allocator.dupe(u8, "Compaction requires an active model backend.\n"),
-        .failed => |failure| return failure,
+        .failed => |failure| std.fmt.allocPrint(
+            allocator,
+            "Compaction failed: {s}.\n",
+            .{@errorName(failure)},
+        ),
     };
 }
 
@@ -1447,13 +1528,16 @@ fn compactTranscriptDetailed(
     session.checkpoint_generation +|= 1;
     session.last_normal_input = null;
     session.last_normal_budget = null;
-    return .{ .compacted = .{
+    const details: CompactedDetails = .{
         .reason = reason,
         .first_kept_entry_id = ready.first_kept_entry_id,
         .tokens_before = current_budget.tokens.total,
         .estimated_tokens_after = after_budget.tokens.total,
         .summary_usage = summary_usage,
-    } };
+    };
+    session.compaction_sequence +|= 1;
+    session.last_compaction = details;
+    return .{ .compacted = details };
 }
 
 fn callSummarizer(
@@ -1554,7 +1638,8 @@ fn reducePendingRequest(
     selected_tokens: u64,
     hard_limit: u64,
 ) !ReductionOutcome {
-    const result = try compactTranscriptDetailed(
+    notifyCompaction(session, .start, reason, null);
+    const result = compactTranscriptDetailed(
         allocator,
         session,
         transcript,
@@ -1564,7 +1649,12 @@ fn reducePendingRequest(
         null,
         will_retry,
         extra_user_text,
-    );
+    ) catch |err| {
+        const failed: CompactResult = .{ .failed = err };
+        notifyCompaction(session, .end, reason, &failed);
+        return err;
+    };
+    notifyCompaction(session, .end, reason, &result);
     return switch (result) {
         .compacted => .compacted,
         .not_compactable => |why| switch (why) {
@@ -1579,6 +1669,16 @@ fn reducePendingRequest(
         .unavailable => error.CompactionUnavailable,
         .failed => |failure| failure,
     };
+}
+
+fn notifyCompaction(
+    session: *AgentSession,
+    phase: CompactionPhase,
+    reason: session_events.CompactionReason,
+    result: ?*const CompactResult,
+) void {
+    const observer = session.compaction_observer orelse return;
+    observer.on_event(observer.context, phase, reason, result);
 }
 
 fn selectedNormalInputTokens(
@@ -1657,6 +1757,7 @@ fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
             .stream = false,
             .system_prompt = client.config.system_prompt,
             .tools_json = client.config.tools_json,
+            .reserve_tokens = client.config.reserve_tokens,
         },
         .anthropic => |client| .{
             .provider = .anthropic,
@@ -1664,6 +1765,7 @@ fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
             .max_output_tokens = client.config.max_tokens,
             .system_prompt = client.config.system_prompt,
             .tools_json = client.config.tools_json,
+            .reserve_tokens = client.config.reserve_tokens,
         },
         .openai => |client| .{
             .provider = .openai,
@@ -1671,6 +1773,7 @@ fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
             .max_output_tokens = client.config.max_tokens,
             .system_prompt = client.config.system_prompt,
             .tools_json = client.config.tools_json,
+            .reserve_tokens = client.config.reserve_tokens,
         },
         .deepseek => |client| .{
             .provider = .deepseek,
@@ -1679,6 +1782,7 @@ fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
             .stream = false,
             .system_prompt = client.config.system_prompt,
             .tools_json = client.config.tools_json,
+            .reserve_tokens = client.config.reserve_tokens,
         },
     };
 }

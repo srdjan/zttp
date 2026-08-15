@@ -98,8 +98,9 @@ library loading.
 The one external input that reaches the system prompt is
 `AGENTS.md` / `CLAUDE.md`, walked up from cwd to `.git/`. The loader
 appends it as a labelled read-only project-context section; persona
-text stays intact above. A hard 128 KiB cap on the assembled prompt
-truncates the project-context section first on overflow.
+text stays intact above. A hard cap refuses launch if the protected prompt and
+complete applicable project instructions cannot fit; it never truncates the
+instruction tail.
 
 `test_support/lockdown.zig` enforces the policy mechanically: a
 build-time seal test walks the source tree and fails if any `.zig`
@@ -161,6 +162,45 @@ reconstructs the transcript; `--fork` branches with `parent_id`;
 `--continue` is an alias for `--resume`. `$ZTTP_SESSIONS_DIR`
 overrides the root (used by tests).
 
+The v3 journal is a checksummed append-only frame stream. Raw entries remain
+the authority for ledgers, proof state, and patch-chain verification. Context
+compaction writes a typed checkpoint and changes only the provider-visible
+projection. Resume and fork reconstruct that projection without discarding its
+raw ancestry. Older v2 journals are rejected instead of guessed or migrated.
+
+### Request budgets and compaction
+
+Every provider request is assembled as a provider-neutral snapshot before
+transport. The budget records system, tools, active history, transient text,
+framing, wire bytes, response reserve, and the model-specific hard limit.
+Normal requests target at most 40,000 estimated input tokens by default. A
+request over that target compacts safe older turns before transport; protected
+current input can cross the soft target only when it still fits the hard limit.
+Provider `PromptTooLong` recovery compacts and retries the same pending model
+call once, without restarting the turn or repeating tool effects.
+
+`/compact [instructions]` runs the same model-backed controller manually. The
+active model receives one standalone summary request with no tools and no
+normal transcript. The summary is validated, file facts are appended by the
+host, and the checkpoint commits before the active projection changes.
+
+Compaction policy loads from built-in defaults, then
+`$HOME/.zttp/settings.json`, then `<cwd>/.zttp/settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "maxInputTokens": 40000,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
+Unknown keys, malformed JSON, wrong types, and values outside the active
+model's range reject the named settings file. This file accepts no credentials.
+
 ### `--mode rpc` (line-delimited JSON-RPC 2.0)
 
 `zttp expert --mode rpc` exposes the agent over stdio for programmatic
@@ -168,6 +208,10 @@ clients. Methods: `turn`, `compact`, `session.info`, `tools.list`,
 `tools.invoke`, `skills.list`, `templates.{list,expand}`,
 `model.{list,set}`, `shutdown`. Turn events emit as `"event"`
 notifications using the same `{v,k,d}` envelope as `events.jsonl`.
+`compact` accepts optional `{instructions}` and returns a structured status:
+`compacted`, `no_change`, `not_compactable`, `unavailable`, or `failed`.
+Automatic compaction emits ordered `compaction` start/end notifications before
+the retried model events.
 
 ### CLI REPL
 
@@ -270,7 +314,7 @@ Slash commands in the interactive REPL:
 ```
 /help /quit
 /new /resume /continue /fork /tree
-/compact
+/compact [instructions]
 /model [<id>]
 /skills /skill:<name>
 /templates /template:<name> [args...]
@@ -323,9 +367,9 @@ uses. Reopen if a future UI needs a typed payload for rendering.
 
 ## See also
 
-- [../../README.md](../../README.md) — repository overview; pi is
+- [../../README.md](../../README.md) - repository overview; pi is
   linked from the zts CLI section.
-- [../../docs/internals/architecture.md](../../docs/internals/architecture.md) — how
+- [../../docs/internals/architecture.md](../../docs/internals/architecture.md) - how
   `pi_app` fits alongside `zts`, `zttp`, and `zttp-runtime`.
 - [../../docs/internals/zts-expert-contract.md](../../docs/internals/zts-expert-contract.md)
-  — the v1 JSON contract for the `zts` tool commands pi invokes.
+  - the v1 JSON contract for the `zts` tool commands pi invokes.

@@ -20,6 +20,7 @@ pub const Config = struct {
     stream: bool = true,
     system_prompt: []const u8,
     tools_json: ?[]const u8 = null,
+    reserve_tokens: u64 = context_budget.default_reserve_tokens,
     purpose: Purpose = .normal,
     cache_policy: CachePolicy = .enabled,
 };
@@ -107,7 +108,7 @@ pub const ModelRequestSnapshot = struct {
         self.budget = try context_budget.estimate(
             self.component_bytes,
             wire_bytes,
-            context_budget.limitsForModel(self.config.provider, self.config.model),
+            modelLimits(self.config),
         );
     }
 
@@ -122,7 +123,7 @@ pub const ModelRequestSnapshot = struct {
     /// true when the provider body must be rebuilt with the smaller value.
     pub fn clampOutputToRemainingContext(self: *ModelRequestSnapshot) !bool {
         const budget = self.budget orelse return error.RequestNotPrepared;
-        const limits = context_budget.limitsForModel(self.config.provider, self.config.model);
+        const limits = modelLimits(self.config);
         if (budget.tokens.total >= limits.context_window_tokens) return error.RequestTooLarge;
         const remaining = limits.context_window_tokens - budget.tokens.total;
         const clamped_u64 = @min(@as(u64, self.config.max_output_tokens), remaining);
@@ -139,6 +140,12 @@ pub const ModelRequestSnapshot = struct {
         return true;
     }
 };
+
+fn modelLimits(config: Config) context_budget.ModelLimits {
+    var limits = context_budget.limitsForModel(config.provider, config.model);
+    limits.reserve_tokens = config.reserve_tokens;
+    return limits;
+}
 
 pub const Input = struct {
     config: Config,
@@ -281,6 +288,7 @@ fn hashRequestContext(config: Config, system_digest: Sha256Hex, tools_digest: ?S
     hashFrame(&hasher, @tagName(config.provider));
     hashFrame(&hasher, config.model);
     hashU64(&hasher, config.max_output_tokens);
+    hashU64(&hasher, config.reserve_tokens);
     hashFrame(&hasher, if (config.stream) "stream" else "non-stream");
     hashFrame(&hasher, @tagName(config.purpose));
     hashFrame(&hasher, @tagName(config.cache_policy));
