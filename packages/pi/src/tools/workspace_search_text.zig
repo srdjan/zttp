@@ -184,7 +184,10 @@ fn renderSearchOutput(
 
     var seen: usize = 0;
     var returned: usize = 0;
-    var has_more = !output.complete;
+    // Paging state only. A cut inventory is reported by `inventory_complete`;
+    // folding it in here would publish a `next_offset` one past the last record
+    // and turn the final page into a hard projection error.
+    var has_more = false;
     for (records.items) |line| {
         if (seen < offset) {
             seen += 1;
