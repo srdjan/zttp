@@ -146,7 +146,7 @@ pub fn execute(
         if (repairs_applied >= input.max_repairs) break;
         const apply_args_json = try buildApplyArgsJson(allocator, input.path, current_source, plan.raw_json);
         defer allocator.free(apply_args_json);
-        var apply_result = try pi_apply_repair_plan.execute(allocator, &.{apply_args_json});
+        var apply_result = try pi_apply_repair_plan.executeSemanticPlan(allocator, &.{apply_args_json});
         defer apply_result.deinit(allocator);
 
         var apply_json = parseApplyJson(allocator, apply_result.llm_text) catch {
@@ -481,7 +481,7 @@ pub fn candidateFromSource(
         if (repairs_applied >= max_repairs) break;
         const apply_args_json = try buildApplyArgsJson(allocator, rel_path, current_source, plan.raw_json);
         defer allocator.free(apply_args_json);
-        var apply_result = try pi_apply_repair_plan.execute(allocator, &.{apply_args_json});
+        var apply_result = try pi_apply_repair_plan.executeSemanticPlan(allocator, &.{apply_args_json});
         defer apply_result.deinit(allocator);
         var apply_json = try parseApplyJson(allocator, apply_result.llm_text);
         defer apply_json.deinit(allocator);

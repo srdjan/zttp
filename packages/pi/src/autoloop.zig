@@ -29,6 +29,7 @@ const session_state = @import("session_state.zig");
 const session_events = @import("session/events.zig");
 const persister = @import("session/persister.zig");
 const tools_common = @import("tools/common.zig");
+const pi_apply_repair_plan = @import("tools/pi_apply_repair_plan.zig");
 const json_writer = @import("providers/json_writer.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
@@ -613,13 +614,12 @@ const ApplyResult = struct {
 
 fn invokeApply(
     allocator: std.mem.Allocator,
-    registry: *const registry_mod.Registry,
     file: []const u8,
     plan_raw_json: []const u8,
 ) !ApplyResult {
     const args_json = try buildApplyArgsJson(allocator, file, plan_raw_json);
     defer allocator.free(args_json);
-    var result = try registry.invokeJson(allocator, "pi_apply_repair_plan", args_json);
+    var result = try pi_apply_repair_plan.executeSemanticPlan(allocator, &.{args_json});
     defer result.deinit(allocator);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, result.llm_text, .{}) catch {
@@ -688,7 +688,7 @@ fn applyPlans(
 
     for (plans) |plan| {
         if (cancelRequested(options)) return .{ .applied = applied };
-        var candidate = invokeApply(allocator, registry, options.file, plan.raw_json) catch |err| switch (err) {
+        var candidate = invokeApply(allocator, options.file, plan.raw_json) catch |err| switch (err) {
             error.InvalidToolOutput, error.ToolFailed => continue,
             else => return err,
         };

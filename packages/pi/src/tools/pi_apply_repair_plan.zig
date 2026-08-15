@@ -39,6 +39,19 @@ pub fn execute(
     allocator: std.mem.Allocator,
     args: []const []const u8,
 ) anyerror!registry_mod.ToolResult {
+    return executeSemanticPlan(allocator, args);
+}
+
+/// Internal compatibility seam for the autonomous semantic-repair lane.
+///
+/// The model-facing tool is being cut to the bound v2 repair protocol. The
+/// autoloop and goal-candidate reducer still consume proof-diagnostic plans,
+/// which are a different ADT. Keeping that lane behind a named helper prevents
+/// it from depending on the public tool schema while it is migrated separately.
+pub fn executeSemanticPlan(
+    allocator: std.mem.Allocator,
+    args: []const []const u8,
+) anyerror!registry_mod.ToolResult {
     if (args.len == 0) return registry_mod.ToolResult.err(allocator, name ++ ": requires a JSON input argument\n");
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
