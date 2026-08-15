@@ -391,6 +391,32 @@ pub const TextPage = struct {
 
 /// Select one exact, valid UTF-8 page. Callers own the surrounding envelope;
 /// this helper centralizes cursor validation and codepoint-safe boundaries.
+/// Render the largest page at `offset` whose complete envelope fits, halving
+/// the byte budget on each refusal. Shared so the tools that page text cannot
+/// diverge on the halving policy. `renderWithin(context, budget)` must return
+/// `error.ToolContextProjectionTooLarge` when its envelope does not fit.
+pub fn renderShrinkingPage(
+    source: []const u8,
+    offset: usize,
+    max_bytes: usize,
+    context: anytype,
+    comptime renderWithin: anytype,
+) !registry_mod.ToolResult {
+    var budget = max_bytes;
+    while (true) {
+        const result = renderWithin(context, budget) catch |err| switch (err) {
+            error.ToolContextProjectionTooLarge => {
+                const page = try textPage(source, offset, budget);
+                if (page.content.len <= 1) return err;
+                budget = page.content.len / 2;
+                continue;
+            },
+            else => return err,
+        };
+        return result;
+    }
+}
+
 pub fn textPage(bytes: []const u8, offset: usize, maximum: usize) !TextPage {
     if (!std.unicode.utf8ValidateSlice(bytes)) return error.InvalidUtf8Text;
     if (offset > bytes.len or (offset < bytes.len and (bytes[offset] & 0xc0) == 0x80)) {

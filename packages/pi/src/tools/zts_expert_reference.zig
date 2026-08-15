@@ -102,19 +102,22 @@ fn renderPage(
     offset: usize,
     max_bytes: usize,
 ) !registry_mod.ToolResult {
-    var budget = max_bytes;
-    while (true) {
-        const result = renderPageWithin(allocator, topic, source, offset, budget) catch |err| switch (err) {
-            error.ToolContextProjectionTooLarge => {
-                const page = try common.textPage(source, offset, budget);
-                if (page.content.len <= 1) return err;
-                budget = page.content.len / 2;
-                continue;
-            },
-            else => return err,
-        };
-        return result;
-    }
+    const Context = struct {
+        allocator: std.mem.Allocator,
+        topic: []const u8,
+        source: []const u8,
+        offset: usize,
+
+        fn render(self: @This(), budget: usize) !registry_mod.ToolResult {
+            return renderPageWithin(self.allocator, self.topic, self.source, self.offset, budget);
+        }
+    };
+    return common.renderShrinkingPage(source, offset, max_bytes, Context{
+        .allocator = allocator,
+        .topic = topic,
+        .source = source,
+        .offset = offset,
+    }, Context.render);
 }
 
 fn renderPageWithin(
