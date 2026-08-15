@@ -21,10 +21,21 @@ pub const PROMPT_CAP_BYTES: usize = 48 * 1024;
 /// budget.
 pub const PROTECTED_CORE_CAP_BYTES: usize = 16 * 1024;
 
+const banner_rule = "\n============================================================\n";
+const project_context_title = "PROJECT INSTRUCTIONS (complete, from AGENTS.md / CLAUDE.md)";
+
+/// The banner around the project instructions, its trailing blank line, and the
+/// newline appended when the content does not end in one. Assembly counts these
+/// against the prompt cap, so the loader budget must leave room for them or a
+/// file the loader admits still fails at assembly, where no path is named.
+const project_context_framing_bytes: usize =
+    banner_rule.len * 2 + project_context_title.len + 2;
+
 /// What is left of the prompt cap for project instructions. The loader reads
 /// against this, so an oversized file fails where its path is known rather than
 /// at prompt assembly, where only the total is.
-pub const PROJECT_CONTEXT_CAP_BYTES: usize = PROMPT_CAP_BYTES - PROTECTED_CORE_CAP_BYTES;
+pub const PROJECT_CONTEXT_CAP_BYTES: usize =
+    PROMPT_CAP_BYTES - PROTECTED_CORE_CAP_BYTES - project_context_framing_bytes;
 
 // The registered tool schemas remain the canonical source of argument and
 // result details. This index gives the model stable routing names without
@@ -166,7 +177,7 @@ pub fn buildSystemPromptWithContext(
 
     if (project_context) |ctx| {
         if (ctx.len > 0) {
-            try writeBanner(w, "PROJECT INSTRUCTIONS (complete, from AGENTS.md / CLAUDE.md)");
+            try writeBanner(w, project_context_title);
             try w.writeAll(ctx);
             if (ctx[ctx.len - 1] != '\n') try w.writeByte('\n');
         }
@@ -201,9 +212,9 @@ fn writeCatalogIndex(writer: anytype) !void {
 }
 
 fn writeBanner(writer: anytype, title: []const u8) !void {
-    try writer.writeAll("\n============================================================\n");
+    try writer.writeAll(banner_rule);
     try writer.writeAll(title);
-    try writer.writeAll("\n============================================================\n\n");
+    try writer.writeAll(banner_rule ++ "\n");
 }
 
 const testing = std.testing;
