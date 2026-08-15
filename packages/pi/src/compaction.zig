@@ -205,7 +205,10 @@ fn entryTokens(entry: *const transcript_mod.OwnedEntry) u64 {
         .user_text, .model_text, .system_note => |body| @intCast(body.len +| 24),
         .assistant_tool_use => |calls| blk: {
             var total: usize = 32;
-            for (calls) |call| total +|= call.id.len +| call.name.len +| call.args_json.len +| 32;
+            for (calls) |call| {
+                total +|= call.id.len +| call.name.len +| call.args_json.len +| 32;
+                if (call.reasoning_content) |reasoning| total +|= reasoning.len;
+            }
             break :blk @intCast(total);
         },
         .tool_result => |result| @intCast(
@@ -778,6 +781,53 @@ test "prepare protects unresolved pairs and an oversized single user ask" {
     try addText(&oversized, .user, "x" ** 1000);
     const user_result = try prepare(testing.allocator, &oversized, 1);
     try testing.expectEqual(NotCompactableReason.oversized_current_user, user_result.not_compactable);
+}
+
+test "prepare counts opaque tool reasoning when selecting the retained suffix" {
+    const reasoning = try testing.allocator.alloc(u8, 44_720);
+    defer testing.allocator.free(reasoning);
+    @memset(reasoning, 'r');
+    const first_result = try testing.allocator.alloc(u8, 5_000);
+    defer testing.allocator.free(first_result);
+    @memset(first_result, 'x');
+
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .user_text = "finish the workflow" });
+    const large_call = [_]turn.ToolCall{.{
+        .id = "large",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+        .reasoning_content = reasoning,
+    }};
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &large_call });
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "large",
+        .tool_name = "workspace_read_file",
+        .ok = true,
+        .llm_text = first_result,
+    } });
+    const recent_call = [_]turn.ToolCall{.{
+        .id = "recent",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"zttp.json\"}",
+    }};
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &recent_call });
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "recent",
+        .tool_name = "workspace_read_file",
+        .ok = true,
+        .llm_text = "{}",
+    } });
+
+    const result = try prepare(testing.allocator, &tr, 12_000);
+    switch (result) {
+        .ready => |ready| {
+            try testing.expectEqual(@as(usize, 3), ready.first_kept_index);
+            try testing.expectEqual(@as(transcript_mod.EntryId, 4), ready.first_kept_entry_id);
+        },
+        else => return error.TestExpectedCompactionCut,
+    }
 }
 
 test "tool pair validation permits an id reused after its result" {
