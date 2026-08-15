@@ -13,6 +13,8 @@ const transcript_mod = @import("transcript.zig");
 const turn = @import("turn.zig");
 
 const CapturedDeepSeekInput = struct {
+    system_bytes: u64 = 7_142,
+    tools_bytes: u64 = 20_252,
     wire_bytes: u64,
     history_bytes: u64,
     transient_bytes: u64 = 0,
@@ -24,18 +26,22 @@ fn expectCapturedDeepSeekFlowCalibrates(captured: []const CapturedDeepSeekInput)
     try testing.expect(captured.len > 0);
     const limits = context_budget.limitsForModel(.deepseek, "deepseek-v4-flash");
     var anchor: ?context_budget.InputAnchor = null;
+    var compaction_bridge: ?context_budget.InputAnchor = null;
     var previous_generation: ?u64 = null;
 
     for (captured, 0..) |fixture, fixture_index| {
-        if (previous_generation != fixture.checkpoint_generation) anchor = null;
+        if (previous_generation != fixture.checkpoint_generation) {
+            compaction_bridge = anchor;
+            anchor = null;
+        }
         const epoch: context_budget.UsageEpoch = .{
             .provider = .deepseek,
             .model = "deepseek-v4-flash",
             .checkpoint_generation = fixture.checkpoint_generation,
         };
         const budget = try context_budget.estimate(.{
-            .system = 7_142,
-            .tools = 20_252,
+            .system = fixture.system_bytes,
+            .tools = fixture.tools_bytes,
             .history = fixture.history_bytes,
             .transient = fixture.transient_bytes,
         }, fixture.wire_bytes, limits);
@@ -43,11 +49,13 @@ fn expectCapturedDeepSeekFlowCalibrates(captured: []const CapturedDeepSeekInput)
             .epoch = epoch,
             .current_budget = budget,
             .anchor = anchor,
+            .compaction_bridge = compaction_bridge,
         });
         const observed = try context_budget.observeLogicalInput(.{
             .epoch = epoch,
             .current_budget = budget,
             .anchor = anchor,
+            .compaction_bridge = compaction_bridge,
             .reported_tokens = fixture.actual_tokens,
         });
         context_budget.validateCalibration(selected.tokens, observed.logical_input_tokens) catch |err| {
@@ -70,8 +78,27 @@ fn expectCapturedDeepSeekFlowCalibrates(captured: []const CapturedDeepSeekInput)
             .usage = .{ .epoch = epoch, .logical_input_tokens = observed.logical_input_tokens },
             .budget = budget,
         };
+        compaction_bridge = null;
         previous_generation = fixture.checkpoint_generation;
     }
+}
+
+test "fresh estimate stays calibrated after current validate body compaction" {
+    // Captured from the 2026-08-16 direct-cutover corpus. The first request
+    // after checkpoint 13 has no same-epoch usage anchor. A single density for
+    // fixed schemas and conversation history overestimated it by 4,446 tokens.
+    const captured = [_]CapturedDeepSeekInput{
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 24_733, .history_bytes = 232, .actual_tokens = 6_154 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 28_085, .history_bytes = 2_969, .actual_tokens = 7_260 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 60_634, .history_bytes = 32_223, .actual_tokens = 14_531 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 114_978, .history_bytes = 80_016, .actual_tokens = 28_181 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 129_350, .history_bytes = 93_480, .actual_tokens = 32_163 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 55_249, .history_bytes = 28_844, .actual_tokens = 15_509, .checkpoint_generation = 13 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 61_864, .history_bytes = 34_731, .actual_tokens = 17_378, .checkpoint_generation = 13 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 64_297, .history_bytes = 36_786, .actual_tokens = 20_382, .checkpoint_generation = 13 },
+        .{ .system_bytes = 3_871, .tools_bytes = 20_390, .wire_bytes = 66_274, .history_bytes = 38_390, .actual_tokens = 23_342, .checkpoint_generation = 13 },
+    };
+    try expectCapturedDeepSeekFlowCalibrates(&captured);
 }
 
 test "current repository full preset fixed prefix meets U2 budget and stays stable" {
@@ -284,6 +311,29 @@ test "provider usage normalization and exact usage selection are provider neutra
     });
     try testing.expectEqual(context_budget.EstimateSource.full_estimate, after_checkpoint.source);
     try testing.expectEqual(anchor_budget.tokens.total, after_checkpoint.tokens);
+
+    const compacted_budget = try context_budget.estimate(.{
+        .system = 100,
+        .tools = 200,
+        .history = 100,
+        .transient = 0,
+    }, 450, .{ .context_window_tokens = 100_000 });
+    const bridged = try context_budget.selectInputEstimate(.{
+        .epoch = checkpointed,
+        .current_budget = compacted_budget,
+        .anchor = null,
+        .compaction_bridge = .{ .usage = stable, .budget = anchor_budget },
+    });
+    try testing.expectEqual(context_budget.EstimateSource.compaction_bridge_density, bridged.source);
+    try testing.expectEqual(@as(u64, 25_340), bridged.tokens);
+
+    const switched_bridge = try context_budget.selectInputEstimate(.{
+        .epoch = switched,
+        .current_budget = compacted_budget,
+        .anchor = null,
+        .compaction_bridge = .{ .usage = stable, .budget = anchor_budget },
+    });
+    try testing.expectEqual(context_budget.EstimateSource.full_estimate, switched_bridge.source);
 }
 
 test "logical input observation preserves raw cache discontinuity evidence" {

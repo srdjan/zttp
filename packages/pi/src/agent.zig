@@ -333,6 +333,7 @@ pub const AgentSession = struct {
     normal_request_attempt_count: u64 = 0,
     checkpoint_generation: u64 = 0,
     last_normal_anchor: ?context_budget.InputAnchor = null,
+    compaction_bridge_anchor: ?context_budget.InputAnchor = null,
     overflow_turn_entry_id: transcript_mod.EntryId = 0,
     overflow_recovery_used: bool = false,
     compaction_enabled: bool = true,
@@ -755,6 +756,7 @@ pub const AgentSession = struct {
         }
         self.resolved_model = model;
         self.last_normal_anchor = null;
+        self.compaction_bridge_anchor = null;
     }
 
     /// Append the per-session metrics row at session close. Best-effort and a
@@ -1704,6 +1706,7 @@ fn compactTranscriptDetailed(
     summary_owned = false;
     file_ops_owned = false;
     session.checkpoint_generation +|= 1;
+    session.compaction_bridge_anchor = session.last_normal_anchor;
     session.last_normal_anchor = null;
     const details: CompactedDetails = .{
         .reason = reason,
@@ -1951,6 +1954,7 @@ fn selectedNormalInputTokens(
         .epoch = epoch,
         .current_budget = current,
         .anchor = session.last_normal_anchor,
+        .compaction_bridge = session.compaction_bridge_anchor,
     })).tokens;
 }
 
@@ -1964,6 +1968,7 @@ fn rememberNormalInput(
     const reported_input = try context_budget.normalizeLogicalInput(provider, usage);
     if (reported_input == 0) {
         session.last_normal_anchor = null;
+        session.compaction_bridge_anchor = null;
         return;
     }
     const epoch: context_budget.UsageEpoch = .{
@@ -1975,6 +1980,7 @@ fn rememberNormalInput(
         .epoch = epoch,
         .current_budget = budget,
         .anchor = session.last_normal_anchor,
+        .compaction_bridge = session.compaction_bridge_anchor,
         .reported_tokens = reported_input,
     });
     session.last_normal_anchor = .{
@@ -1984,6 +1990,7 @@ fn rememberNormalInput(
         },
         .budget = budget,
     };
+    session.compaction_bridge_anchor = null;
 }
 
 fn resetOverflowRecoveryForCurrentTurn(

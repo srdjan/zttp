@@ -200,6 +200,7 @@ pub const StableInputUsage = struct {
 
 pub const EstimateSource = enum {
     anchored_density,
+    compaction_bridge_density,
     full_estimate,
 };
 
@@ -228,6 +229,7 @@ pub const ObserveInput = struct {
     epoch: UsageEpoch,
     current_budget: RequestBudget,
     anchor: ?InputAnchor,
+    compaction_bridge: ?InputAnchor = null,
     reported_tokens: u64,
 };
 
@@ -244,24 +246,39 @@ pub fn observeLogicalInput(input: ObserveInput) BudgetError!InputObservation {
         .source = .provider_reported,
     };
     if (input.reported_tokens == 0) return reported;
-    const anchor = input.anchor orelse return reported;
-    if (!input.epoch.eql(anchor.usage.epoch)) return reported;
-    const selected = try selectInputEstimate(.{
-        .epoch = input.epoch,
-        .current_budget = input.current_budget,
-        .anchor = input.anchor,
-    });
-    validateCalibration(selected.tokens, input.reported_tokens) catch {
-        const projected = try projectInputFromAnchor(
-            anchor.budget,
-            input.current_budget,
-            anchor.usage.logical_input_tokens,
-        ) orelse return reported;
-        return .{
-            .reported_tokens = input.reported_tokens,
-            .logical_input_tokens = projected,
-            .source = .prior_density_projection,
-        };
+    if (input.anchor) |anchor| {
+        if (input.epoch.eql(anchor.usage.epoch)) {
+            const selected = try selectInputEstimate(.{
+                .epoch = input.epoch,
+                .current_budget = input.current_budget,
+                .anchor = input.anchor,
+            });
+            validateCalibration(selected.tokens, input.reported_tokens) catch {
+                const projected = try projectInputFromAnchor(
+                    anchor.budget,
+                    input.current_budget,
+                    anchor.usage.logical_input_tokens,
+                ) orelse return reported;
+                return .{
+                    .reported_tokens = input.reported_tokens,
+                    .logical_input_tokens = projected,
+                    .source = .prior_density_projection,
+                };
+            };
+            return reported;
+        }
+    }
+    const bridge = input.compaction_bridge orelse return reported;
+    const projected = try projectAcrossCompaction(
+        bridge,
+        input.epoch,
+        input.current_budget,
+    ) orelse return reported;
+    const selected = try withAnchorMargin(projected);
+    validateCalibration(selected, input.reported_tokens) catch return .{
+        .reported_tokens = input.reported_tokens,
+        .logical_input_tokens = projected,
+        .source = .prior_density_projection,
     };
     return reported;
 }
@@ -270,6 +287,7 @@ pub const SelectEstimateInput = struct {
     epoch: UsageEpoch,
     current_budget: RequestBudget,
     anchor: ?InputAnchor,
+    compaction_bridge: ?InputAnchor = null,
 };
 
 /// Reuse stable provider usage only inside the same model and checkpoint epoch.
@@ -280,7 +298,18 @@ pub fn selectInputEstimate(input: SelectEstimateInput) BudgetError!SelectedEstim
         .tokens = input.current_budget.tokens.total,
         .source = .full_estimate,
     };
-    const anchor = input.anchor orelse return fallback;
+    const anchor = input.anchor orelse {
+        const bridge = input.compaction_bridge orelse return fallback;
+        const projected = try projectAcrossCompaction(
+            bridge,
+            input.epoch,
+            input.current_budget,
+        ) orelse return fallback;
+        return .{
+            .tokens = try withAnchorMargin(projected),
+            .source = .compaction_bridge_density,
+        };
+    };
     if (!input.epoch.eql(anchor.usage.epoch)) return fallback;
     const projected = try projectInputFromAnchor(
         anchor.budget,
@@ -299,6 +328,37 @@ pub fn selectInputEstimate(input: SelectEstimateInput) BudgetError!SelectedEstim
         .tokens = try withAnchorMargin(@min(projected, fallback.tokens)),
         .source = .anchored_density,
     };
+}
+
+/// A compaction bridge is deliberately separate from the active usage anchor.
+/// It may inform exactly the first request after a projection shrinks, but a
+/// model/provider change or a non-shrinking request invalidates it. The next
+/// successful normal request replaces it with an ordinary same-epoch anchor.
+fn projectAcrossCompaction(
+    bridge: InputAnchor,
+    current_epoch: UsageEpoch,
+    current: RequestBudget,
+) BudgetError!?u64 {
+    if (bridge.usage.epoch.provider != current_epoch.provider or
+        !std.mem.eql(u8, bridge.usage.epoch.model, current_epoch.model) or
+        bridge.usage.epoch.checkpoint_generation == current_epoch.checkpoint_generation)
+    {
+        return null;
+    }
+    const previous = bridge.budget;
+    if (current.bytes.system != previous.bytes.system or
+        current.bytes.tools != previous.bytes.tools or
+        current.bytes.history >= previous.bytes.history or
+        current.bytes.wire >= previous.bytes.wire or
+        previous.bytes.wire == 0)
+    {
+        return null;
+    }
+    return @as(?u64, try ratioCeil(
+        bridge.usage.logical_input_tokens,
+        current.bytes.wire,
+        previous.bytes.wire,
+    ));
 }
 
 /// Project the last stable whole-request density onto the current wire size.

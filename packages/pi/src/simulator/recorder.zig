@@ -107,6 +107,7 @@ pub const Recorder = struct {
     fixtures: std.ArrayList(recording_storage.FixtureBytes) = .empty,
     fixture_bytes: usize = 0,
     input_anchor: ?context_budget.InputAnchor = null,
+    compaction_bridge_anchor: ?context_budget.InputAnchor = null,
     pending_turn: ?PendingTurn = null,
     captured_initial: bool = false,
     captured_expected: bool = false,
@@ -390,16 +391,27 @@ pub const Recorder = struct {
         // makes both calls return the fresh-estimate and raw-report defaults,
         // so summarization needs no separate branch here.
         const is_normal = snapshot.config.purpose == .normal;
+        if (is_normal) {
+            if (self.input_anchor) |anchor| {
+                if (!epoch.eql(anchor.usage.epoch)) {
+                    self.compaction_bridge_anchor = anchor;
+                    self.input_anchor = null;
+                }
+            }
+        }
         const anchor = if (is_normal) self.input_anchor else null;
+        const bridge = if (is_normal) self.compaction_bridge_anchor else null;
         const selected = try context_budget.selectInputEstimate(.{
             .epoch = epoch,
             .current_budget = request_budget,
             .anchor = anchor,
+            .compaction_bridge = bridge,
         });
         const observed = try context_budget.observeLogicalInput(.{
             .epoch = epoch,
             .current_budget = request_budget,
             .anchor = anchor,
+            .compaction_bridge = bridge,
             .reported_tokens = reported_input_tokens,
         });
         if (is_normal and reported_input_tokens > 0) {
@@ -410,6 +422,7 @@ pub const Recorder = struct {
                 },
                 .budget = request_budget,
             };
+            self.compaction_bridge_anchor = null;
         }
         try self.reserveFixtureBytes(response_bytes.len, artifact.Limits.trace_or_response_bytes);
         const response_path = try std.fmt.allocPrint(

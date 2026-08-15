@@ -42,6 +42,7 @@ pub const Client = struct {
     cursor: usize = 0,
     last_mismatch: ?artifact.ReplayMismatch = null,
     input_anchor: ?context_budget.InputAnchor = null,
+    compaction_bridge_anchor: ?context_budget.InputAnchor = null,
 
     pub fn init(script: Script, request_config: model_request.Config) Client {
         return .{ .script = script, .request_config = request_config };
@@ -151,15 +152,23 @@ pub const Client = struct {
                 .model = self.script.model,
                 .checkpoint_generation = snapshot.projection_first_kept_entry_id orelse 0,
             };
+            if (self.input_anchor) |anchor| {
+                if (!epoch.eql(anchor.usage.epoch)) {
+                    self.compaction_bridge_anchor = anchor;
+                    self.input_anchor = null;
+                }
+            }
             const selected = try context_budget.selectInputEstimate(.{
                 .epoch = epoch,
                 .current_budget = budget,
                 .anchor = self.input_anchor,
+                .compaction_bridge = self.compaction_bridge_anchor,
             });
             const observed = try context_budget.observeLogicalInput(.{
                 .epoch = epoch,
                 .current_budget = budget,
                 .anchor = self.input_anchor,
+                .compaction_bridge = self.compaction_bridge_anchor,
                 .reported_tokens = reported_input,
             });
             context_budget.validateCalibration(selected.tokens, observed.logical_input_tokens) catch |err| {
@@ -190,6 +199,7 @@ pub const Client = struct {
                 .usage = .{ .epoch = epoch, .logical_input_tokens = observed.logical_input_tokens },
                 .budget = budget,
             };
+            self.compaction_bridge_anchor = null;
         }
         self.cursor += 1;
         return result;
