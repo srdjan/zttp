@@ -65,16 +65,14 @@ pub const ModuleCompiler = struct {
 
         for (graph.execution_order) |mod_idx| {
             const module = &graph.module_list.items[mod_idx];
-            const source = module.stripped_source orelse module.source;
+            const source = module.parserInput();
 
             // Parse with shared atom table
             var js_parser = try zts_parser.JsParser.init(self.allocator, source);
             js_parser.setAtomTable(self.atoms);
 
             // Enable JSX if needed
-            if (std.mem.endsWith(u8, module.path, ".jsx") or
-                std.mem.endsWith(u8, module.path, ".tsx"))
-            {
+            if (module.enablesJsx()) {
                 js_parser.tokenizer.enableJsx();
             }
 
@@ -164,7 +162,7 @@ test "compileAll returns a clean error instead of panicking when parser-init all
     try graph.module_list.append(allocator, .{
         .path = try allocator.dupe(u8, "entry.ts"),
         .source = try allocator.dupe(u8, "const x = 1;"),
-        .stripped_source = null,
+        .prepared_source = null,
         .dependencies = &.{},
         .state = .visited,
     });
