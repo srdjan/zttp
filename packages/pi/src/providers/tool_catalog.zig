@@ -3,12 +3,18 @@
 //! Providers own their wire serialization. This module owns the ordered
 //! `{name, description, input_schema}` inventory that every provider sees.
 
+const std = @import("std");
+const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const registry_mod = @import("../registry/registry.zig");
 
 pub const Definition = struct {
     name: []const u8,
     description: []const u8,
     input_schema: []const u8,
+    /// Proof inputs the host writes into the raw transcript for this tool. They
+    /// are never valid model-authored input and must not appear in the
+    /// provider-visible projection.
+    host_authoritative_keys: []const []const u8 = &.{},
 };
 
 pub const apply_edit: Definition = .{
@@ -23,7 +29,43 @@ pub const apply_edit: Definition = .{
         "\"content\":{\"type\":\"string\",\"description\":\"Full file content after the edit.\"}" ++
         "}," ++
         "\"required\":[\"file\",\"content\"]}",
+    .host_authoritative_keys = &.{ "before", "baseline_state", "baseline_sha256" },
 };
+
+/// Return owned model-visible arguments when a raw tool call needs projection.
+/// Null means the raw arguments are already safe to borrow unchanged.
+pub fn projectArgsForModel(
+    allocator: std.mem.Allocator,
+    tool_name: []const u8,
+    raw_args_json: []const u8,
+) !?[]u8 {
+    if (!std.mem.eql(u8, tool_name, apply_edit.name)) return null;
+
+    var parse_arena = std.heap.ArenaAllocator.init(allocator);
+    defer parse_arena.deinit();
+    var parsed = std.json.parseFromSliceLeaky(
+        std.json.Value,
+        parse_arena.allocator(),
+        raw_args_json,
+        .{ .duplicate_field_behavior = .@"error" },
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidApplyEditHistory,
+    };
+    if (parsed != .object) return error.InvalidApplyEditHistory;
+    const file = parsed.object.get("file") orelse return error.InvalidApplyEditHistory;
+    const content = parsed.object.get("content") orelse return error.InvalidApplyEditHistory;
+    if (file != .string or content != .string) return error.InvalidApplyEditHistory;
+
+    for (apply_edit.host_authoritative_keys) |key| {
+        _ = parsed.object.orderedRemove(key);
+    }
+
+    var out = TextBuffer.init(allocator);
+    defer out.deinit();
+    try std.json.Stringify.value(parsed, .{}, out.writer());
+    return try out.toOwnedSlice();
+}
 
 pub const Iterator = struct {
     registry: *const registry_mod.Registry,

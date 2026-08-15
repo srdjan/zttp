@@ -331,8 +331,7 @@ pub const AgentSession = struct {
     summary_attempt_count: u64 = 0,
     normal_request_attempt_count: u64 = 0,
     checkpoint_generation: u64 = 0,
-    last_normal_input: ?context_budget.ExactInputUsage = null,
-    last_normal_budget: ?context_budget.RequestBudget = null,
+    last_normal_anchor: ?context_budget.InputAnchor = null,
     overflow_turn_entry_id: transcript_mod.EntryId = 0,
     overflow_recovery_used: bool = false,
     compaction_enabled: bool = true,
@@ -754,8 +753,7 @@ pub const AgentSession = struct {
             .stub => {},
         }
         self.resolved_model = model;
-        self.last_normal_input = null;
-        self.last_normal_budget = null;
+        self.last_normal_anchor = null;
     }
 
     /// Append the per-session metrics row at session close. Best-effort and a
@@ -1659,8 +1657,7 @@ fn compactTranscriptDetailed(
     summary_owned = false;
     file_ops_owned = false;
     session.checkpoint_generation +|= 1;
-    session.last_normal_input = null;
-    session.last_normal_budget = null;
+    session.last_normal_anchor = null;
     const details: CompactedDetails = .{
         .reason = reason,
         .first_kept_entry_id = ready.first_kept_entry_id,
@@ -1734,6 +1731,24 @@ pub const RequestController = struct {
     }
 };
 
+/// A request is admitted on both sizes it can be measured at: the anchored
+/// stable-usage estimate and the fresh conservative estimate. Either can be the
+/// one the provider agrees with, so the larger governs the hard limit.
+fn exceedsHardLimit(selected_tokens: u64, budget: context_budget.RequestBudget) bool {
+    return @max(selected_tokens, budget.tokens.total) > budget.limits.hard_input_tokens;
+}
+
+/// The compaction threshold sits at or below the hard limit, so a selected
+/// estimate over the hard limit is already over the admitted limit.
+fn needsReduction(
+    selected_tokens: u64,
+    budget: context_budget.RequestBudget,
+    admitted_limit: u64,
+) bool {
+    return selected_tokens > admitted_limit or
+        budget.tokens.total > budget.limits.hard_input_tokens;
+}
+
 fn requestNormalWith(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -1750,7 +1765,7 @@ fn requestNormalWith(
     const hard_limit = budget.limits.hard_input_tokens;
     const admitted_limit = @min(session.compaction_settings.max_input_tokens, hard_limit);
 
-    if (session.compaction_enabled and selected_tokens > admitted_limit) {
+    if (session.compaction_enabled and needsReduction(selected_tokens, budget, admitted_limit)) {
         const reduction = try reducePendingRequest(
             allocator,
             session,
@@ -1765,17 +1780,21 @@ fn requestNormalWith(
         if (reduction == .compacted) {
             budget = try normalRequestBudget(allocator, session, transcript, extra_user_text);
             selected_tokens = try selectedNormalInputTokens(session, budget);
-            if (selected_tokens > admitted_limit) return error.CompactedRequestStillTooLarge;
+            if (needsReduction(selected_tokens, budget, admitted_limit)) {
+                return error.CompactedRequestStillTooLarge;
+            }
         }
     }
 
-    if (selected_tokens > hard_limit) return error.RequestTooLarge;
+    if (exceedsHardLimit(selected_tokens, budget)) {
+        return error.RequestTooLarge;
+    }
 
     try session.prepareProviderCall();
     session.normal_request_attempt_count +|= 1;
     const first = raw_client.request(arena, transcript, extra_user_text) catch |err| {
         // A client admits on its own conservative byte-derived budget, which the
-        // calibration gate permits to sit above the exact-usage estimate this
+        // calibration gate permits to sit above the stable-usage estimate this
         // controller admitted on. Both of its refusals are the same overflow and
         // both are recoverable by compacting; treating only PromptTooLong as one
         // left the stale anchor in place and failed every later turn identically.
@@ -1799,7 +1818,9 @@ fn requestNormalWith(
 
         budget = try normalRequestBudget(allocator, session, transcript, extra_user_text);
         selected_tokens = try selectedNormalInputTokens(session, budget);
-        if (selected_tokens > budget.limits.hard_input_tokens) return error.RequestTooLarge;
+        if (exceedsHardLimit(selected_tokens, budget)) {
+            return error.RequestTooLarge;
+        }
 
         try session.prepareProviderCall();
         session.normal_request_attempt_count +|= 1;
@@ -1879,15 +1900,10 @@ fn selectedNormalInputTokens(
         .model = model.id,
         .checkpoint_generation = session.checkpoint_generation,
     };
-    const trailing = if (session.last_normal_budget) |previous|
-        context_budget.estimateTrailing(previous, current) orelse return current.tokens.total
-    else
-        0;
     return (try context_budget.selectInputEstimate(.{
         .epoch = epoch,
-        .fallback_estimated_tokens = current.tokens.total,
-        .trailing_estimated_tokens = trailing,
-        .exact_usage = session.last_normal_input,
+        .current_budget = current,
+        .anchor = session.last_normal_anchor,
     })).tokens;
 }
 
@@ -1898,21 +1914,29 @@ fn rememberNormalInput(
 ) !void {
     const provider = session.resolved_provider orelse return;
     const model = session.resolved_model orelse return;
-    const logical_input = try context_budget.normalizeLogicalInput(provider, usage);
-    if (logical_input == 0) {
-        session.last_normal_input = null;
-        session.last_normal_budget = null;
+    const reported_input = try context_budget.normalizeLogicalInput(provider, usage);
+    if (reported_input == 0) {
+        session.last_normal_anchor = null;
         return;
     }
-    session.last_normal_input = .{
-        .epoch = .{
-            .provider = provider,
-            .model = model.id,
-            .checkpoint_generation = session.checkpoint_generation,
-        },
-        .logical_input_tokens = logical_input,
+    const epoch: context_budget.UsageEpoch = .{
+        .provider = provider,
+        .model = model.id,
+        .checkpoint_generation = session.checkpoint_generation,
     };
-    session.last_normal_budget = budget;
+    const observed = try context_budget.observeLogicalInput(.{
+        .epoch = epoch,
+        .current_budget = budget,
+        .anchor = session.last_normal_anchor,
+        .reported_tokens = reported_input,
+    });
+    session.last_normal_anchor = .{
+        .usage = .{
+            .epoch = epoch,
+            .logical_input_tokens = observed.logical_input_tokens,
+        },
+        .budget = budget,
+    };
 }
 
 fn resetOverflowRecoveryForCurrentTurn(
@@ -2510,7 +2534,7 @@ test "initDeepSeek dupes its owned bytes and routes through the deepseek backend
     try testing.expectEqualStrings("deepseek-fixture-key", session.backend.deepseek.config.api_key);
     try testing.expectEqualStrings("you are a zts expert", session.backend.deepseek.config.system_prompt);
     try testing.expectEqualStrings("deepseek-v4-flash", session.backend.deepseek.config.model);
-    try testing.expectEqual(@as(u32, 8_192), session.backend.deepseek.config.max_tokens);
+    try testing.expectEqual(@as(u32, 32_768), session.backend.deepseek.config.max_tokens);
     try testing.expectEqualStrings("deepseek", session.backendDescriptor().provider_label);
     try testing.expectEqualStrings("api-key", session.backendDescriptor().auth_label);
     try testing.expect(session.base_url_owned != null);

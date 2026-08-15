@@ -8,6 +8,7 @@
 const std = @import("std");
 const context_budget = @import("context_budget.zig");
 const models = @import("providers/models.zig");
+const tool_catalog = @import("providers/tool_catalog.zig");
 const transcript_mod = @import("transcript.zig");
 const turn_mod = @import("turn.zig");
 const ui_payload_mod = @import("ui_payload.zig");
@@ -315,7 +316,13 @@ fn serializeEntry(
                 try writer.writeAll(" name=");
                 try writer.writeAll(call.name);
                 try writer.writeAll(" args=");
-                try writer.writeAll(call.args_json);
+                const projected_args = try tool_catalog.projectArgsForModel(
+                    allocator,
+                    call.name,
+                    call.args_json,
+                );
+                defer if (projected_args) |args| allocator.free(args);
+                try writer.writeAll(projected_args orelse call.args_json);
                 try writer.writeByte('\n');
             }
             try writer.writeByte('\n');
@@ -815,6 +822,31 @@ test "serializeSpan uses explicit labels exact args and a UTF-8-safe 2000-byte t
     try testing.expect(std.mem.indexOf(u8, serialized, "[Tool result]: id=call_1") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "...[truncated ") != null);
     try testing.expect(std.unicode.utf8ValidateSlice(serialized));
+}
+
+test "serializeSpan hides host apply_edit baseline from the summarizer" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    const raw_args =
+        "{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\",\"baseline_state\":\"present\",\"baseline_sha256\":\"0123456789abcdef\"}";
+    const calls = [_]turn.ToolCall{.{
+        .id = "apply_1",
+        .name = "apply_edit",
+        .args_json = raw_args,
+    }};
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
+
+    const serialized = try serializeSpan(testing.allocator, &tr, 0, tr.len());
+    defer testing.allocator.free(serialized);
+
+    switch (tr.at(0).*) {
+        .assistant_tool_use => |raw_calls| try testing.expectEqualStrings(raw_args, raw_calls[0].args_json),
+        else => return error.TestExpectedRawToolUse,
+    }
+    try testing.expect(std.mem.indexOf(u8, serialized, "args={\"file\":\"handler.ts\",\"content\":\"new\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, serialized, "baseline_state") == null);
+    try testing.expect(std.mem.indexOf(u8, serialized, "baseline_sha256") == null);
+    try testing.expect(std.mem.indexOf(u8, serialized, "\"before\"") == null);
 }
 
 test "extractFileOps is cumulative unique and deterministic" {

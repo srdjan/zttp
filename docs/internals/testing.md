@@ -74,9 +74,14 @@ standalone summary validation, settings precedence and rejection, v3 checkpoint
 resume/fork, and one-shot overflow recovery. `test-cassette` verifies the four
 provider summary request shapes and cache controls. `test-simulator` verifies
 provider-neutral request checkpoints and hard admission. New checkpoints
-record the complete `estimated_logical_input_v1` component budget, normalized
-provider-reported logical input, and the active compaction cut ID. Replay
-compares all three. Historical artifacts without those additive fields remain
+record the complete `estimated_logical_input_v2` component budget, normalized
+provider-reported input, and the active compaction cut ID. Version 2 uses a
+conservative whole-request estimate for fresh epochs. Within one compaction
+epoch it projects the last stable normal-request density. A provider total that
+falls outside the pre-response calibration envelope remains recorded as raw
+usage, while the labeled budgeting observation uses the stable projection.
+Replay compares the budget, raw usage, and cut, then derives the same stable
+observation. Historical artifacts without those additive fields remain
 readable, but changed prompt or wire bytes still make them stale. Refresh
 empirical artifacts with their real provider. Do not rewrite request digests
 around an old response, because that would attribute it to a request the model

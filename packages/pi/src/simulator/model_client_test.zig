@@ -4,6 +4,7 @@ const testing = std.testing;
 const artifact = @import("artifact.zig");
 const model_client = @import("model_client.zig");
 const compaction = @import("../compaction.zig");
+const context_budget = @import("../context_budget.zig");
 const local_client = @import("../providers/local/client.zig");
 const deepseek_client = @import("../providers/deepseek/client.zig");
 const chat_completions = @import("../providers/chat_completions.zig");
@@ -99,6 +100,77 @@ test "canonical request snapshot covers every model-visible input" {
         .extra_user_text = "retry after veto",
     });
     try testing.expect(!snapshot.transcript_sha256.eql(changed_transcript.transcript_sha256));
+}
+
+test "canonical request snapshot hides host apply_edit baseline while raw history keeps it" {
+    const raw_apply_edit_args =
+        "{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\",\"baseline_state\":\"present\",\"baseline_sha256\":\"0123456789abcdef\",\"reason\":\"repair\"}";
+    const calls = [_]turn.ToolCall{
+        .{ .id = "toolu_edit", .name = "apply_edit", .args_json = raw_apply_edit_args },
+        .{ .id = "toolu_other", .name = "inspect", .args_json = "{\"path\":\"handler.ts\"}" },
+    };
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .assistant_tool_use = &calls });
+
+    var snapshot = try model_request.createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .deepseek,
+            .model = "deepseek-chat",
+            .max_output_tokens = 1024,
+            .system_prompt = "system",
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+
+    switch (transcript.at(0).*) {
+        .assistant_tool_use => |raw_calls| {
+            try testing.expectEqualStrings(raw_apply_edit_args, raw_calls[0].args_json);
+        },
+        else => return error.TestExpectedRawToolUse,
+    }
+    switch (snapshot.items[0]) {
+        .tool_use => |call| try testing.expectEqualStrings(
+            "{\"file\":\"handler.ts\",\"content\":\"new\",\"reason\":\"repair\"}",
+            call.args_json,
+        ),
+        else => return error.TestExpectedProjectedToolUse,
+    }
+    switch (snapshot.items[1]) {
+        .tool_use => |call| try testing.expectEqualStrings("{\"path\":\"handler.ts\"}", call.args_json),
+        else => return error.TestExpectedUnchangedToolUse,
+    }
+
+    const wire_body = try chat_completions.buildRequestBodyFromSnapshot(testing.allocator, &snapshot);
+    defer testing.allocator.free(wire_body);
+    try testing.expect(std.mem.indexOf(u8, wire_body, "baseline_state") == null);
+    try testing.expect(std.mem.indexOf(u8, wire_body, "baseline_sha256") == null);
+    try testing.expect(std.mem.indexOf(u8, wire_body, "\\\"before\\\"") == null);
+}
+
+test "canonical request snapshot refuses malformed apply_edit history" {
+    const calls = [_]turn.ToolCall{.{
+        .id = "toolu_edit",
+        .name = "apply_edit",
+        .args_json = "{\"file\":\"handler.ts\",\"content\":",
+    }};
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .assistant_tool_use = &calls });
+
+    try testing.expectError(
+        error.InvalidApplyEditHistory,
+        model_request.createSnapshot(testing.allocator, .{
+            .config = .{
+                .provider = .deepseek,
+                .model = "deepseek-chat",
+                .max_output_tokens = 1024,
+                .system_prompt = "system",
+            },
+            .transcript = &transcript,
+        }),
+    );
 }
 
 test "canonical request snapshot records the active projection cut" {
@@ -282,10 +354,23 @@ test "simulator summarizer consumes a purpose-specific request checkpoint" {
     var client = model_client.Client.init(.{
         .provider = .openai,
         .model = request_config.model,
+        .evidence_class = .empirical_model,
         .checkpoints = &checkpoints,
         .responses = &responses,
         .fixtures = &fixtures,
     }, request_config);
+    const normal_anchor: context_budget.InputAnchor = .{
+        .usage = .{
+            .epoch = .{
+                .provider = .openai,
+                .model = request_config.model,
+                .checkpoint_generation = 0,
+            },
+            .logical_input_tokens = 42,
+        },
+        .budget = snapshot.budget.?,
+    };
+    client.input_anchor = normal_anchor;
 
     const result = try client.asSummarizer().summarize(allocator, summary_request);
     switch (result.response) {
@@ -293,6 +378,12 @@ test "simulator summarizer consumes a purpose-specific request checkpoint" {
         else => return error.TestFailed,
     }
     try testing.expectEqual(@as(usize, 1), client.consumedCount());
+    try testing.expectEqual(
+        normal_anchor.usage.logical_input_tokens,
+        client.input_anchor.?.usage.logical_input_tokens,
+    );
+    try testing.expect(normal_anchor.usage.epoch.eql(client.input_anchor.?.usage.epoch));
+    try testing.expectEqual(normal_anchor.budget.bytes.wire, client.input_anchor.?.budget.bytes.wire);
 }
 
 test "local replay rejects a wire framing mismatch before releasing a response" {
@@ -505,12 +596,29 @@ test "simulator checkpoints bind request budgets normalized usage and projection
         var client = model_client.Client.init(.{
             .provider = .deepseek,
             .model = request_config.model,
+            .evidence_class = .empirical_model,
             .checkpoints = &checkpoints,
             .responses = &responses,
             .fixtures = &fixtures,
         }, request_config);
+        client.input_anchor = .{
+            .usage = .{
+                .epoch = .{
+                    .provider = .deepseek,
+                    .model = request_config.model,
+                    .checkpoint_generation = transcript.projection.?.first_kept_entry_id,
+                },
+                .logical_input_tokens = 10_000,
+            },
+            .budget = checkpoint.request_budget.?,
+        };
         const result = try client.asModelClient().request(arena.allocator(), &transcript, null);
         try testing.expectEqualStrings("ok", result.reply.response.final_text);
+        try testing.expectEqual(
+            transcript.projection.?.first_kept_entry_id,
+            client.input_anchor.?.usage.epoch.checkpoint_generation,
+        );
+        try testing.expectEqual(@as(u64, 10_000), client.input_anchor.?.usage.logical_input_tokens);
     }
 
     {

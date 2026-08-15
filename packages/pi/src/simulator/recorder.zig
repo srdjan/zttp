@@ -19,6 +19,37 @@ const model_request = @import("../providers/model_request.zig");
 const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
 
+/// Safe, metadata-only progress emitted after a model exchange is fully
+/// captured. Prompt, response, tool arguments, and workspace bytes are never
+/// present in this event surface.
+pub const ModelCallCompleted = struct {
+    global_call_index: usize,
+    turn_index: u32,
+    turn_call_index: u32,
+    purpose: model_request.Purpose,
+    estimated_input_tokens: u64,
+    estimate_source: context_budget.EstimateSource,
+    reported_input_tokens: u64,
+    logical_input_tokens: u64,
+    input_observation_source: context_budget.InputObservationSource,
+    output_tokens: u64,
+    output_limit_tokens: u32,
+    wire_bytes: u64,
+};
+
+pub const ProgressEvent = union(enum) {
+    model_call_completed: ModelCallCompleted,
+};
+
+pub const ProgressObserver = struct {
+    context: *anyopaque,
+    on_event: *const fn (context: *anyopaque, event: ProgressEvent) void,
+
+    pub fn emit(self: ProgressObserver, event: ProgressEvent) void {
+        self.on_event(self.context, event);
+    }
+};
+
 pub const Options = struct {
     case_name: []const u8,
     evidence_class: artifact.EvidenceClass,
@@ -34,6 +65,9 @@ pub const Options = struct {
     /// Absolute ignored-worktree path for metadata-only live response
     /// diagnostics. The diagnostic observer is disabled when this is null.
     diagnostics_path: ?[]const u8 = null,
+    /// Borrowed observer for operator-facing, metadata-only live progress.
+    /// Recording correctness never depends on this best-effort side channel.
+    progress: ?ProgressObserver = null,
     workspace_allowlist: []const []const u8,
 };
 
@@ -63,6 +97,7 @@ pub const Recorder = struct {
     changes: std.ArrayList(artifact.WorkspaceChange) = .empty,
     fixtures: std.ArrayList(recording_storage.FixtureBytes) = .empty,
     fixture_bytes: usize = 0,
+    input_anchor: ?context_budget.InputAnchor = null,
     pending_turn: ?PendingTurn = null,
     captured_initial: bool = false,
     captured_expected: bool = false,
@@ -107,6 +142,7 @@ pub const Recorder = struct {
                 .runtime_name = runtime_name,
                 .runtime_version = runtime_version,
                 .diagnostics_path = diagnostics_path,
+                .progress = options.progress,
                 .workspace_allowlist = workspace_allowlist,
             },
         };
@@ -332,10 +368,40 @@ pub const Recorder = struct {
             },
             .body = raw_response,
         });
-        const normalized_input_tokens = try context_budget.normalizeLogicalInput(
+        const reported_input_tokens = try context_budget.normalizeLogicalInput(
             self.options.provider,
             decoded.usage,
         );
+        const epoch: context_budget.UsageEpoch = .{
+            .provider = self.options.provider,
+            .model = self.options.model,
+            .checkpoint_generation = snapshot.projection_first_kept_entry_id orelse 0,
+        };
+        // Production tracks stable normal-request usage only. A null anchor
+        // makes both calls return the fresh-estimate and raw-report defaults,
+        // so summarization needs no separate branch here.
+        const is_normal = snapshot.config.purpose == .normal;
+        const anchor = if (is_normal) self.input_anchor else null;
+        const selected = try context_budget.selectInputEstimate(.{
+            .epoch = epoch,
+            .current_budget = request_budget,
+            .anchor = anchor,
+        });
+        const observed = try context_budget.observeLogicalInput(.{
+            .epoch = epoch,
+            .current_budget = request_budget,
+            .anchor = anchor,
+            .reported_tokens = reported_input_tokens,
+        });
+        if (is_normal and reported_input_tokens > 0) {
+            self.input_anchor = .{
+                .usage = .{
+                    .epoch = epoch,
+                    .logical_input_tokens = observed.logical_input_tokens,
+                },
+                .budget = request_budget,
+            };
+        }
         try self.reserveFixtureBytes(response_bytes.len, artifact.Limits.trace_or_response_bytes);
         const response_path = try std.fmt.allocPrint(
             self.allocator(),
@@ -366,7 +432,7 @@ pub const Recorder = struct {
             else
                 null,
             .request_budget = request_budget,
-            .normalized_input_tokens = normalized_input_tokens,
+            .normalized_input_tokens = reported_input_tokens,
             .projection_first_kept_entry_id = snapshot.projection_first_kept_entry_id,
         });
         try self.fixtures.append(self.allocator(), .{
@@ -374,7 +440,24 @@ pub const Recorder = struct {
             .path = response_path,
             .bytes = response_bytes,
         });
+        const turn_call_index = pending.model_calls;
         pending.model_calls += 1;
+        if (self.options.progress) |progress| progress.emit(.{
+            .model_call_completed = .{
+                .global_call_index = global_call_index,
+                .turn_index = pending.index,
+                .turn_call_index = turn_call_index,
+                .purpose = snapshot.config.purpose,
+                .estimated_input_tokens = selected.tokens,
+                .estimate_source = selected.source,
+                .reported_input_tokens = observed.reported_tokens,
+                .logical_input_tokens = observed.logical_input_tokens,
+                .input_observation_source = observed.source,
+                .output_tokens = decoded.usage.output_tokens,
+                .output_limit_tokens = snapshot.config.max_output_tokens,
+                .wire_bytes = request_budget.bytes.wire,
+            },
+        });
     }
 
     fn recordResponseDiagnostics(

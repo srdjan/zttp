@@ -1537,6 +1537,109 @@ const record_corpus = [_]RecordCase{
     },
 };
 
+const LiveRecordingProgress = struct {
+    case_index: usize,
+    case_count: usize,
+    case_name: []const u8,
+
+    fn observer(self: *LiveRecordingProgress) flow_recorder.ProgressObserver {
+        return .{ .context = self, .on_event = onEvent };
+    }
+
+    fn onEvent(context: *anyopaque, event: flow_recorder.ProgressEvent) void {
+        const self: *LiveRecordingProgress = @ptrCast(@alignCast(context));
+        var bytes: [512]u8 = undefined;
+        var writer = std.Io.Writer.fixed(&bytes);
+        writeEvent(&writer, self.*, event) catch {
+            std.debug.print(
+                "[codegen-record] [{d}/{d}] {s}: model call captured\n",
+                .{ self.case_index, self.case_count, self.case_name },
+            );
+            return;
+        };
+        std.debug.print("{s}", .{writer.buffered()});
+    }
+
+    fn writeEvent(
+        writer: *std.Io.Writer,
+        progress: LiveRecordingProgress,
+        event: flow_recorder.ProgressEvent,
+    ) !void {
+        switch (event) {
+            .model_call_completed => |completed| try writer.print(
+                "[codegen-record] [{d}/{d}] {s}: call {d} captured " ++
+                    "(turn={d} turn-call={d} purpose={s} " ++
+                    "input-reported={d} input-logical={d} ({s}) " ++
+                    "input-estimated={d} ({s}) output={d} " ++
+                    "output-limit={d} wire={d}B)\n",
+                .{
+                    progress.case_index,
+                    progress.case_count,
+                    progress.case_name,
+                    completed.global_call_index + 1,
+                    completed.turn_index + 1,
+                    completed.turn_call_index + 1,
+                    @tagName(completed.purpose),
+                    completed.reported_input_tokens,
+                    completed.logical_input_tokens,
+                    @tagName(completed.input_observation_source),
+                    completed.estimated_input_tokens,
+                    @tagName(completed.estimate_source),
+                    completed.output_tokens,
+                    completed.output_limit_tokens,
+                    completed.wire_bytes,
+                },
+            ),
+        }
+    }
+};
+
+test "live codegen recorder progress renders metadata only" {
+    var text = TextBuffer.init(testing.allocator);
+    defer text.deinit();
+    try LiveRecordingProgress.writeEvent(text.writer(), .{
+        .case_index = 3,
+        .case_count = 19,
+        .case_name = "validate-body",
+    }, .{ .model_call_completed = .{
+        .global_call_index = 3,
+        .turn_index = 0,
+        .turn_call_index = 3,
+        .purpose = .normal,
+        .estimated_input_tokens = 27_308,
+        .estimate_source = .anchored_density,
+        .reported_input_tokens = 19_861,
+        .logical_input_tokens = 20_394,
+        .input_observation_source = .prior_density_projection,
+        .output_tokens = 417,
+        .output_limit_tokens = 32_768,
+        .wire_bytes = 77_789,
+    } });
+    try testing.expectEqualStrings(
+        "[codegen-record] [3/19] validate-body: call 4 captured " ++
+            "(turn=1 turn-call=4 purpose=normal input-reported=19861 " ++
+            "input-logical=20394 (prior_density_projection) input-estimated=27308 " ++
+            "(anchored_density) output=417 output-limit=32768 wire=77789B)\n",
+        text.written(),
+    );
+}
+
+/// The single selection rule. The progress denominator and the recording loop
+/// both read it, so the printed `[n/total]` cannot drift from what runs.
+fn recordCaseSelected(index: usize, limit: usize, only_case: ?[]const u8, name: []const u8) bool {
+    if (index >= limit) return false;
+    if (only_case) |only| return std.mem.eql(u8, only, name);
+    return true;
+}
+
+fn selectedRecordCaseCount(limit: usize, only_case: ?[]const u8) usize {
+    var count: usize = 0;
+    for (record_corpus, 0..) |rc, index| {
+        if (recordCaseSelected(index, limit, only_case, rc.name)) count += 1;
+    }
+    return count;
+}
+
 // Record the real expert agent against the corpus and report the live baseline.
 // Gated: ZTTP_CODEGEN_RECORD=1. Cloud providers additionally require their
 // named key. Each case runs in its own tmp
@@ -1621,16 +1724,22 @@ test "record codegen baseline corpus (live, gated)" {
     if (envValue("ZTTP_CODEGEN_LIMIT")) |lim| {
         limit = std.fmt.parseInt(usize, lim, 10) catch limit;
     }
+    const selected_case_count = selectedRecordCaseCount(limit, only_case);
+    std.debug.print(
+        "[codegen-record] corpus start: provider={s} model={s} cases={d}\n",
+        .{ corpus_provider.publicName(), corpus_model, selected_case_count },
+    );
 
     var first_draft_passes: usize = 0;
     var greens: usize = 0;
     var total: usize = 0;
     for (record_corpus, 0..) |rc, i| {
-        if (i >= limit) break;
-        if (only_case) |only| {
-            if (!std.mem.eql(u8, only, rc.name)) continue;
-        }
+        if (!recordCaseSelected(i, limit, only_case, rc.name)) continue;
         total += 1;
+        std.debug.print(
+            "[codegen-record] [{d}/{d}] {s}: case start\n",
+            .{ total, selected_case_count, rc.name },
+        );
         var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer case_arena.deinit();
         const ca = case_arena.allocator();
@@ -1652,6 +1761,11 @@ test "record codegen baseline corpus (live, gated)" {
             null;
 
         const workspace_allowlist = try workspaceCaptureAllowlist(ca, rc.seed_files);
+        var live_progress: LiveRecordingProgress = .{
+            .case_index = total,
+            .case_count = selected_case_count,
+            .case_name = rc.name,
+        };
         var recorder = try flow_recorder.Recorder.init(ca, .{
             .case_name = rc.name,
             .evidence_class = .empirical_model,
@@ -1666,6 +1780,7 @@ test "record codegen baseline corpus (live, gated)" {
             .runtime_name = if (runtime_identity) |identity| identity.name else null,
             .runtime_version = if (runtime_identity) |identity| identity.version else null,
             .diagnostics_path = response_diagnostics_path,
+            .progress = live_progress.observer(),
             .workspace_allowlist = workspace_allowlist,
         });
         defer recorder.deinit();
@@ -1722,6 +1837,19 @@ test "record codegen baseline corpus (live, gated)" {
         }
         try recorder.finishTurn(result, &tr);
         try recorder.captureExpectedWorkspace(tmp.abs_path);
+        std.debug.print(
+            "[codegen-record] [{d}/{d}] {s}: live turn captured " ++
+                "(calls={d} roundtrips={d} retries={d} tools={d}); checking result\n",
+            .{
+                total,
+                selected_case_count,
+                rc.name,
+                sink.next_call_index,
+                result.roundtrips,
+                result.veto_retry_count,
+                result.tool_call_count,
+            },
+        );
         if (corpus_provider == headline_provider) {
             if (firstDraftExpectation(corpus_provider, null, rc.expect_first_draft_pass)) |expected| {
                 if (result.first_draft_veto_pass != expected) {
@@ -1767,6 +1895,10 @@ test "record codegen baseline corpus (live, gated)" {
             if (err == error.IntentCheckUnavailable) return err;
         };
 
+        std.debug.print(
+            "[codegen-record] [{d}/{d}] {s}: validating replay and promoting\n",
+            .{ total, selected_case_count, rc.name },
+        );
         const active_version = try flow_promotion.validateAndPromote(
             ca,
             &recorder,
@@ -1778,8 +1910,10 @@ test "record codegen baseline corpus (live, gated)" {
         if (result.applied_edit) greens += 1;
         const fail_code = codegen.firstZtsCode(&tr) orelse "-";
         std.debug.print(
-            "[codegen-record] {s}: provider={s} model={s} flow={s} first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
+            "[codegen-record] [{d}/{d}] {s}: promoted provider={s} model={s} flow={s} first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
             .{
+                total,
+                selected_case_count,
                 rc.name,
                 corpus_provider.publicName(),
                 corpus_model,

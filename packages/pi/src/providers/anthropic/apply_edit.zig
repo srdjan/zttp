@@ -21,10 +21,7 @@ pub const RemapError = error{
     OutputTruncated,
 };
 
-/// Argument names the host owns. The model reads them in its own history,
-/// where the host writes them, so their presence in a call is a forged
-/// baseline rather than a harmless extra field.
-const host_authoritative_keys = [_][]const u8{ "before", "baseline_state", "baseline_sha256" };
+const host_authoritative_keys = tool_catalog.apply_edit.host_authoritative_keys;
 
 /// A parse/shape failure on an `apply_edit` payload is truncation (recoverable)
 /// when the response stopped on the output-token limit, and a malformed-args bug

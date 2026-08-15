@@ -10,6 +10,7 @@ const runner_mod = @import("runner.zig");
 const capture_sink = @import("../providers/capture_sink.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
+const context_budget = @import("../context_budget.zig");
 const model_client = @import("model_client.zig");
 const local_client = @import("../providers/local/client.zig");
 const model_request = @import("../providers/model_request.zig");
@@ -31,6 +32,23 @@ const openai_text_response =
     "event: response.completed\n" ++
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n" ++
     "data: [DONE]\n\n";
+
+const ProgressProbe = struct {
+    events: std.ArrayList(recorder_mod.ProgressEvent) = .empty,
+
+    fn observer(self: *ProgressProbe) recorder_mod.ProgressObserver {
+        return .{ .context = self, .on_event = onEvent };
+    }
+
+    fn onEvent(context: *anyopaque, event: recorder_mod.ProgressEvent) void {
+        const self: *ProgressProbe = @ptrCast(@alignCast(context));
+        self.events.append(testing.allocator, event) catch @panic("progress probe allocation failed");
+    }
+
+    fn deinit(self: *ProgressProbe) void {
+        self.events.deinit(testing.allocator);
+    }
+};
 
 test "simulator recorder appends metadata-only response diagnostics" {
     var tmp = testing.tmpDir(.{});
@@ -410,11 +428,14 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
         .max_output_tokens = 8192,
         .system_prompt = "persona",
     };
+    var progress_probe: ProgressProbe = .{};
+    defer progress_probe.deinit();
     var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "recorded-two-turn",
         .evidence_class = .deterministic_harness,
         .provider = .openai,
         .model = request_config.model,
+        .progress = progress_probe.observer(),
         .workspace_allowlist = &.{"handler.ts"},
     });
     defer recorder.deinit();
@@ -440,6 +461,23 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
         if (turn_index == 0) try recorder.captureTurnWorkspace(workspace_abs);
     }
     try recorder.captureExpectedWorkspace(workspace_abs);
+
+    try testing.expectEqual(@as(usize, 2), progress_probe.events.items.len);
+    for (progress_probe.events.items, 0..) |event, index| switch (event) {
+        .model_call_completed => |completed| {
+            try testing.expectEqual(index, completed.global_call_index);
+            try testing.expectEqual(@as(u32, @intCast(index)), completed.turn_index);
+            try testing.expectEqual(@as(u32, 0), completed.turn_call_index);
+            try testing.expectEqual(model_request.Purpose.normal, completed.purpose);
+            try testing.expectEqual(request_config.max_output_tokens, completed.output_limit_tokens);
+            try testing.expect(completed.estimated_input_tokens >= completed.logical_input_tokens);
+            try testing.expectEqual(@as(u64, 1), completed.reported_input_tokens);
+            try testing.expectEqual(@as(u64, 1), completed.logical_input_tokens);
+            try testing.expectEqual(context_budget.InputObservationSource.provider_reported, completed.input_observation_source);
+            try testing.expectEqual(@as(u64, 2), completed.output_tokens);
+            try testing.expect(completed.wire_bytes > 0);
+        },
+    };
 
     var mismatched_config = request_config;
     mismatched_config.system_prompt = "changed persona";

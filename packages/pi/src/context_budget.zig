@@ -8,16 +8,24 @@ const std = @import("std");
 const models = @import("providers/models.zig");
 const turn = @import("turn.zig");
 
-pub const estimator_version = "estimated_logical_input_v1";
+pub const estimator_version = "estimated_logical_input_v2";
 pub const soft_input_target_tokens: u64 = 40_000;
 pub const default_reserve_tokens: u64 = 16_384;
 
-/// The fresh-request fallback treats each four wire bytes as one token.
-/// Component estimates round independently so their sum cannot be less than
-/// the estimate of the complete wire body.
-const primary_bytes_per_token: u64 = 4;
-const trailing_bytes_per_token: u64 = 3;
-const trailing_uncertainty_tokens: u64 = 4_096;
+/// Fresh requests use the measured conservative density of thirteen tokens per
+/// thirty-six bytes. Component estimates round independently, so their sum
+/// cannot be less than the estimate of the complete wire body.
+const request_bytes_per_token: u64 = 3;
+const request_headroom_bytes_per_token: u64 = 36;
+const generic_bytes_per_token: u64 = 4;
+/// DeepSeek's cache boundaries can change whole-prompt token density between
+/// adjacent requests. Project the last stable density with this measured margin
+/// instead of treating the appended byte suffix as independently tokenizable.
+/// The same margin bounds the projection against the fresh estimate, because a
+/// large appended payload can change the request composition enough that stale
+/// whole-request density overshoots.
+const anchor_margin_numerator: u64 = 119;
+const anchor_margin_denominator: u64 = 100;
 
 pub const BudgetError = error{
     RequestSizeOverflow,
@@ -97,11 +105,11 @@ pub fn estimate(
     const framing_bytes = wire_bytes -| logical_bytes;
     const total_bytes = try checkedAdd(logical_bytes, framing_bytes, error.RequestSizeOverflow);
 
-    const system_tokens = estimateBytes(components.system);
-    const tool_tokens = estimateBytes(components.tools);
-    const history_tokens = estimateBytes(components.history);
-    const transient_tokens = estimateBytes(components.transient);
-    const framing_tokens = estimateBytes(framing_bytes);
+    const system_tokens = estimateRequestBytes(components.system);
+    const tool_tokens = estimateRequestBytes(components.tools);
+    const history_tokens = estimateRequestBytes(components.history);
+    const transient_tokens = estimateRequestBytes(components.transient);
+    const framing_tokens = estimateRequestBytes(framing_bytes);
     const total_tokens = try sum5(
         system_tokens,
         tool_tokens,
@@ -186,13 +194,13 @@ pub const UsageEpoch = struct {
     }
 };
 
-pub const ExactInputUsage = struct {
+pub const StableInputUsage = struct {
     epoch: UsageEpoch,
     logical_input_tokens: u64,
 };
 
 pub const EstimateSource = enum {
-    actual_plus_trailing,
+    anchored_density,
     full_estimate,
 };
 
@@ -201,64 +209,147 @@ pub const SelectedEstimate = struct {
     source: EstimateSource,
 };
 
-pub const SelectEstimateInput = struct {
-    epoch: UsageEpoch,
-    fallback_estimated_tokens: u64,
-    trailing_estimated_tokens: u64,
-    exact_usage: ?ExactInputUsage,
+pub const InputAnchor = struct {
+    usage: StableInputUsage,
+    budget: RequestBudget,
 };
 
-/// Reuse exact provider usage only inside the same model and checkpoint epoch.
+pub const InputObservationSource = enum {
+    provider_reported,
+    prior_density_projection,
+};
+
+pub const InputObservation = struct {
+    reported_tokens: u64,
+    logical_input_tokens: u64,
+    source: InputObservationSource,
+};
+
+pub const ObserveInput = struct {
+    epoch: UsageEpoch,
+    current_budget: RequestBudget,
+    anchor: ?InputAnchor,
+    reported_tokens: u64,
+};
+
+/// Stabilize provider input accounting inside one append-oriented request
+/// epoch. DeepSeek can report sharp rises or drops when its cache accounting
+/// rolls over even though the persistent request grows smoothly. Accept a raw
+/// total only when it is calibrated against the estimate selected before the
+/// response. Otherwise project the prior stable density. The raw total remains
+/// present in the observation for cost reporting and empirical diagnostics.
+pub fn observeLogicalInput(input: ObserveInput) BudgetError!InputObservation {
+    const reported: InputObservation = .{
+        .reported_tokens = input.reported_tokens,
+        .logical_input_tokens = input.reported_tokens,
+        .source = .provider_reported,
+    };
+    if (input.reported_tokens == 0) return reported;
+    const anchor = input.anchor orelse return reported;
+    if (!input.epoch.eql(anchor.usage.epoch)) return reported;
+    const selected = try selectInputEstimate(.{
+        .epoch = input.epoch,
+        .current_budget = input.current_budget,
+        .anchor = input.anchor,
+    });
+    validateCalibration(selected.tokens, input.reported_tokens) catch {
+        const projected = try projectInputFromAnchor(
+            anchor.budget,
+            input.current_budget,
+            anchor.usage.logical_input_tokens,
+        ) orelse return reported;
+        return .{
+            .reported_tokens = input.reported_tokens,
+            .logical_input_tokens = projected,
+            .source = .prior_density_projection,
+        };
+    };
+    return reported;
+}
+
+pub const SelectEstimateInput = struct {
+    epoch: UsageEpoch,
+    current_budget: RequestBudget,
+    anchor: ?InputAnchor,
+};
+
+/// Reuse stable provider usage only inside the same model and checkpoint epoch.
 /// A model switch or a new projection checkpoint falls back to a full fresh
 /// estimate rather than presenting stale usage as exact.
 pub fn selectInputEstimate(input: SelectEstimateInput) BudgetError!SelectedEstimate {
-    if (input.exact_usage) |exact| {
-        if (input.epoch.eql(exact.epoch)) {
-            return .{
-                .tokens = try checkedAdd(
-                    exact.logical_input_tokens,
-                    input.trailing_estimated_tokens,
-                    error.TokenCountOverflow,
-                ),
-                .source = .actual_plus_trailing,
-            };
-        }
+    const fallback: SelectedEstimate = .{
+        .tokens = input.current_budget.tokens.total,
+        .source = .full_estimate,
+    };
+    const anchor = input.anchor orelse return fallback;
+    if (!input.epoch.eql(anchor.usage.epoch)) return fallback;
+    const projected = try projectInputFromAnchor(
+        anchor.budget,
+        input.current_budget,
+        anchor.usage.logical_input_tokens,
+    ) orelse return fallback;
+    if (input.current_budget.bytes.wire == anchor.budget.bytes.wire) {
+        return .{ .tokens = projected, .source = .anchored_density };
     }
-    return .{ .tokens = input.fallback_estimated_tokens, .source = .full_estimate };
+
+    // A whole-request density is valuable for small append-only changes, but
+    // a large new tool payload can change the request's composition abruptly.
+    // Bound stale-density overshoot near the fresh content estimate. The margin
+    // is monotone, so bounding before it is the same as bounding after it.
+    return .{
+        .tokens = try withAnchorMargin(@min(projected, fallback.tokens)),
+        .source = .anchored_density,
+    };
 }
 
-/// Estimate growth after an exact provider count. A component decrease means
-/// the request is no longer an append-only extension and invalidates the
-/// anchor. Appended tool and code JSON is denser than the fresh-request
-/// fallback, so trailing bytes use a conservative three-byte ratio. Any
-/// non-empty suffix also gets a 4,096-token uncertainty floor for tokenizer
-/// boundary and provider-accounting shifts. A new exact count replaces the
-/// anchor after every response.
-pub fn estimateTrailing(previous: RequestBudget, current: RequestBudget) ?u64 {
-    if (current.bytes.system < previous.bytes.system or
-        current.bytes.tools < previous.bytes.tools or
-        current.bytes.history < previous.bytes.history or
-        current.bytes.transient < previous.bytes.transient or
-        current.bytes.wire < previous.bytes.wire)
-    {
-        return null;
-    }
+/// Project the last stable whole-request density onto the current wire size.
+/// Replacing the stable prefix or shrinking the persistent request invalidates
+/// the anchor. Transient retry text may come and go while history and the full
+/// wire body continue to grow, so it is not part of continuation identity.
+fn projectInputFromAnchor(
+    previous: RequestBudget,
+    current: RequestBudget,
+    previous_input_tokens: u64,
+) BudgetError!?u64 {
+    if (!isPersistentContinuation(previous, current)) return null;
+    if (current.bytes.wire == previous.bytes.wire) return previous_input_tokens;
+    if (previous.bytes.wire == 0) return null;
+    return try ratioCeil(
+        previous_input_tokens,
+        current.bytes.wire,
+        previous.bytes.wire,
+    );
+}
 
-    // The wire body already contains every component's bytes plus the framing
-    // around them (`framing = wire -| logical`), so its growth is the complete
-    // growth. Adding the component deltas on top counted each grown byte twice
-    // and compacted requests that fit.
-    const delta = current.bytes.wire - previous.bytes.wire;
-    if (delta == 0) return 0;
-    return @max(ceilingDivision(delta, trailing_bytes_per_token), trailing_uncertainty_tokens);
+fn isPersistentContinuation(previous: RequestBudget, current: RequestBudget) bool {
+    return current.bytes.system == previous.bytes.system and
+        current.bytes.tools == previous.bytes.tools and
+        current.bytes.history >= previous.bytes.history and
+        current.bytes.wire >= previous.bytes.wire;
 }
 
 pub fn estimateBytes(bytes: u64) u64 {
-    return ceilingDivision(bytes, primary_bytes_per_token);
+    return ceilingDivision(bytes, generic_bytes_per_token);
+}
+
+fn estimateRequestBytes(bytes: u64) u64 {
+    return ceilingDivision(bytes, request_bytes_per_token) +|
+        ceilingDivision(bytes, request_headroom_bytes_per_token);
 }
 
 fn ceilingDivision(value: u64, divisor: u64) u64 {
     return value / divisor + @intFromBool(value % divisor != 0);
+}
+
+fn withAnchorMargin(value: u64) BudgetError!u64 {
+    return ratioCeil(value, anchor_margin_numerator, anchor_margin_denominator);
+}
+
+fn ratioCeil(value: u64, numerator: u64, denominator: u64) BudgetError!u64 {
+    const product = @as(u128, value) * @as(u128, numerator);
+    const wide_denominator: u128 = denominator;
+    const result = product / wide_denominator + @intFromBool(product % wide_denominator != 0);
+    return std.math.cast(u64, result) orelse error.TokenCountOverflow;
 }
 
 fn checkedAdd(a: u64, b: u64, comptime overflow_error: BudgetError) BudgetError!u64 {

@@ -41,8 +41,7 @@ pub const Client = struct {
     request_config: model_request.Config,
     cursor: usize = 0,
     last_mismatch: ?artifact.ReplayMismatch = null,
-    exact_input_usage: ?context_budget.ExactInputUsage = null,
-    previous_budget: ?context_budget.RequestBudget = null,
+    input_anchor: ?context_budget.InputAnchor = null,
 
     pub fn init(script: Script, request_config: model_request.Config) Client {
         return .{ .script = script, .request_config = request_config };
@@ -133,39 +132,49 @@ pub const Client = struct {
             error.OutOfMemory => return err,
             else => return self.failResponseFixture(.malformed),
         };
-        const logical_input = try context_budget.normalizeLogicalInput(self.script.provider, result.usage);
+        const reported_input = try context_budget.normalizeLogicalInput(self.script.provider, result.usage);
         if (checkpoint.normalized_input_tokens) |expected_input| {
-            if (logical_input != expected_input) {
+            if (reported_input != expected_input) {
                 return self.fail(.{ .normalized_input_mismatch = self.detailFor(.trace, checkpoint) });
             }
         }
-        if (self.script.evidence_class == .empirical_model and logical_input > 0) {
+        // Production tracks stable normal-request usage only. Summarization is
+        // separately accounted and a compaction projection starts a new usage
+        // epoch, so replay must not let either contaminate the normal anchor.
+        if (self.script.evidence_class == .empirical_model and
+            reported_input > 0 and
+            request_config.purpose == .normal)
+        {
             const budget = snapshot.budget orelse return error.IncompleteRequestPreparation;
             const epoch: context_budget.UsageEpoch = .{
                 .provider = self.script.provider,
                 .model = self.script.model,
-                .checkpoint_generation = 0,
+                .checkpoint_generation = snapshot.projection_first_kept_entry_id orelse 0,
             };
-            const trailing = if (self.previous_budget) |previous|
-                context_budget.estimateTrailing(previous, budget)
-            else
-                0;
             const selected = try context_budget.selectInputEstimate(.{
                 .epoch = epoch,
-                .fallback_estimated_tokens = budget.tokens.total,
-                .trailing_estimated_tokens = trailing orelse 0,
-                .exact_usage = if (trailing != null) self.exact_input_usage else null,
+                .current_budget = budget,
+                .anchor = self.input_anchor,
             });
-            context_budget.validateCalibration(selected.tokens, logical_input) catch |err| {
+            const observed = try context_budget.observeLogicalInput(.{
+                .epoch = epoch,
+                .current_budget = budget,
+                .anchor = self.input_anchor,
+                .reported_tokens = reported_input,
+            });
+            context_budget.validateCalibration(selected.tokens, observed.logical_input_tokens) catch |err| {
                 std.debug.print(
-                    "[request-budget] {s} call {d}: estimated={d} ({s}) actual={d}" ++
+                    "[request-budget] {s} call {d}: estimated={d} ({s})" ++
+                        " reported={d} logical={d} ({s})" ++
                         " bytes(system={d}, tools={d}, history={d}, transient={d}, framing={d}, wire={d}): {s}\n",
                     .{
                         self.script.model,
                         self.cursor,
                         selected.tokens,
                         @tagName(selected.source),
-                        logical_input,
+                        observed.reported_tokens,
+                        observed.logical_input_tokens,
+                        @tagName(observed.source),
                         budget.bytes.system,
                         budget.bytes.tools,
                         budget.bytes.history,
@@ -177,8 +186,10 @@ pub const Client = struct {
                 );
                 return err;
             };
-            self.exact_input_usage = .{ .epoch = epoch, .logical_input_tokens = logical_input };
-            self.previous_budget = budget;
+            self.input_anchor = .{
+                .usage = .{ .epoch = epoch, .logical_input_tokens = observed.logical_input_tokens },
+                .budget = budget,
+            };
         }
         self.cursor += 1;
         return result;

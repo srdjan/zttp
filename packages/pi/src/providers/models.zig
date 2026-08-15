@@ -115,14 +115,14 @@ pub const registry = [_]Model{
     },
     .{
         // Capabilities are the published DeepSeek figures (1M context, 384K
-        // maximum output). The request policy is far below the ceiling on
-        // purpose: an expert turn emits a patch, not a book, and the ceiling
-        // is what the model permits rather than what zttp intends to spend.
+        // maximum output). The 32K request policy leaves room for V4's default
+        // thinking tokens and the eventual tool call without approaching the
+        // model ceiling. An 8K policy truncated a real jwt-auth agent turn.
         .provider = .deepseek,
         .id = "deepseek-v4-flash",
         .display_name = "DeepSeek V4 Flash",
         .capabilities = .{ .context_window_tokens = 1_000_000, .max_output_tokens = 384_000 },
-        .request_policy = .{ .max_output_tokens = 8_192 },
+        .request_policy = .{ .max_output_tokens = 32_768 },
         .is_default = true,
     },
     .{
@@ -130,7 +130,7 @@ pub const registry = [_]Model{
         .id = "deepseek-v4-pro",
         .display_name = "DeepSeek V4 Pro",
         .capabilities = .{ .context_window_tokens = 1_000_000, .max_output_tokens = 384_000 },
-        .request_policy = .{ .max_output_tokens = 8_192 },
+        .request_policy = .{ .max_output_tokens = 32_768 },
     },
 };
 
@@ -238,10 +238,11 @@ test "DeepSeek rows carry the published limits and a deliberate request policy" 
     const flash = try resolveForProvider(.deepseek, "deepseek-v4-flash");
     try std.testing.expectEqual(@as(u32, 1_000_000), flash.capabilities.context_window_tokens);
     try std.testing.expectEqual(@as(u32, 384_000), flash.capabilities.max_output_tokens);
-    try std.testing.expectEqual(@as(u32, 8_192), flash.request_policy.max_output_tokens);
+    try std.testing.expectEqual(@as(u32, 32_768), flash.request_policy.max_output_tokens);
     try std.testing.expectEqual(flash, defaultForProvider(.deepseek));
 
     const pro = try resolveForProvider(.deepseek, "deepseek-v4-pro");
+    try std.testing.expectEqual(@as(u32, 32_768), pro.request_policy.max_output_tokens);
     try std.testing.expect(!pro.is_default);
     try std.testing.expectError(error.ProviderMismatch, resolveForProvider(.openai, "deepseek-v4-flash"));
 }

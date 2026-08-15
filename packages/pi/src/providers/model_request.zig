@@ -1,13 +1,16 @@
 //! Provider-neutral authority for one model request.
 //!
-//! A snapshot owns only its item slice. All strings borrow from the supplied
-//! config and transcript, so those inputs must outlive serialization or replay
-//! validation. Callers normally allocate the slice in their per-request arena.
+//! A snapshot owns its item slices and any model-safe tool arguments projected
+//! from host-enriched transcript entries. All other strings borrow from the
+//! supplied config and transcript, so those inputs must outlive serialization
+//! or replay validation. Callers normally allocate the owned data in their
+//! per-request arena.
 
 const std = @import("std");
 const context_budget = @import("../context_budget.zig");
 const transcript_mod = @import("../transcript.zig");
 const models = @import("models.zig");
+const tool_catalog = @import("tool_catalog.zig");
 
 pub const Provider = models.Provider;
 pub const Purpose = enum { normal, summarization };
@@ -87,6 +90,7 @@ pub const ModelRequestSnapshot = struct {
     config: Config,
     items: []const Item,
     item_groups: []const ItemGroup,
+    owned_tool_args: []const []u8,
     extra_user_text: ?[]const u8,
     component_bytes: context_budget.ComponentBytes,
     /// Present once the provider serializer has supplied the exact wire body.
@@ -104,6 +108,8 @@ pub const ModelRequestSnapshot = struct {
     wire_request_sha256: ?Sha256Hex = null,
 
     pub fn deinit(self: *ModelRequestSnapshot, allocator: std.mem.Allocator) void {
+        for (self.owned_tool_args) |args| allocator.free(args);
+        allocator.free(self.owned_tool_args);
         allocator.free(self.items);
         allocator.free(self.item_groups);
         self.* = undefined;
@@ -171,6 +177,11 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
     errdefer items.deinit(allocator);
     var item_groups: std.ArrayListUnmanaged(ItemGroup) = .empty;
     errdefer item_groups.deinit(allocator);
+    var projected_tool_args: std.ArrayListUnmanaged([]u8) = .empty;
+    errdefer {
+        for (projected_tool_args.items) |args| allocator.free(args);
+        projected_tool_args.deinit(allocator);
+    }
 
     const projection = if (input.use_projection_override)
         input.projection_override
@@ -196,10 +207,15 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
             .user_text => |body| try items.append(allocator, .{ .user_text = body }),
             .model_text => |body| try items.append(allocator, .{ .model_text = body }),
             .assistant_tool_use => |calls| for (calls) |call| {
+                // Reserve before projecting so the owned bytes cannot be
+                // stranded between allocation and the ownership list.
+                try projected_tool_args.ensureUnusedCapacity(allocator, 1);
+                const projected = try tool_catalog.projectArgsForModel(allocator, call.name, call.args_json);
+                if (projected) |args| projected_tool_args.appendAssumeCapacity(args);
                 try items.append(allocator, .{ .tool_use = .{
                     .id = call.id,
                     .name = call.name,
-                    .args_json = call.args_json,
+                    .args_json = projected orelse call.args_json,
                 } });
             },
             .tool_result => |result| try items.append(allocator, .{ .tool_result = .{
@@ -223,6 +239,11 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
     errdefer allocator.free(owned_items);
     const owned_groups = try item_groups.toOwnedSlice(allocator);
     errdefer allocator.free(owned_groups);
+    const owned_tool_args = try projected_tool_args.toOwnedSlice(allocator);
+    errdefer {
+        for (owned_tool_args) |args| allocator.free(args);
+        allocator.free(owned_tool_args);
+    }
     const system_prompt_sha256 = Sha256Hex.fromBytes("zttp-model-request-system-v1", input.config.system_prompt);
     const tools_sha256 = if (input.config.tools_json) |tools|
         Sha256Hex.fromBytes("zttp-model-request-tools-v1", tools)
@@ -233,6 +254,7 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
         .config = input.config,
         .items = owned_items,
         .item_groups = owned_groups,
+        .owned_tool_args = owned_tool_args,
         .extra_user_text = input.extra_user_text,
         .component_bytes = .{
             .system = try byteLen(input.config.system_prompt),
@@ -391,7 +413,7 @@ test "snapshot uses checkpoint summary and retained suffix without mutating raw 
 
 test "prepared snapshot clamps output to the model capacity left after input" {
     const testing = std.testing;
-    const system_prompt = try testing.allocator.alloc(u8, 560_000);
+    const system_prompt = try testing.allocator.alloc(u8, 500_000);
     defer testing.allocator.free(system_prompt);
     @memset(system_prompt, 'x');
     const wire_body = try testing.allocator.alloc(u8, system_prompt.len + 100);
