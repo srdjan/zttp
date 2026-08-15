@@ -30,6 +30,13 @@ fn throwTypeError(ctx: *context.Context, message: []const u8) value.JSValue {
     return value.JSValue.exception_val;
 }
 
+fn predicateBool(ctx: *context.Context, result: value.JSValue) ?bool {
+    return result.toConditionBool() orelse {
+        _ = throwTypeError(ctx, "predicate callback must return boolean");
+        return null;
+    };
+}
+
 // ============================================================================
 // Array methods
 // ============================================================================
@@ -681,8 +688,9 @@ pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const val
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const keep = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
-        if (keep.toBoolean()) {
+        const keep = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const keep_bool = predicateBool(ctx, keep) orelse return value.JSValue.exception_val;
+        if (keep_bool) {
             result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
         }
     }
@@ -747,8 +755,9 @@ pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const valu
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
-        if (!result.toBoolean()) return value.JSValue.false_val;
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
+        if (!result_bool) return value.JSValue.false_val;
     }
     return value.JSValue.true_val;
 }
@@ -764,8 +773,9 @@ pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
-        if (result.toBoolean()) return value.JSValue.true_val;
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
+        if (result_bool) return value.JSValue.true_val;
     }
     return value.JSValue.false_val;
 }
@@ -781,8 +791,9 @@ pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
-        if (result.toBoolean()) return elem;
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
+        if (result_bool) return elem;
     }
     return value.JSValue.undefined_val;
 }
@@ -798,8 +809,9 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.false_val;
-        if (result.toBoolean()) return value.JSValue.fromInt(@intCast(i));
+        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
+        if (result_bool) return value.JSValue.fromInt(@intCast(i));
     }
     return value.JSValue.fromInt(-1);
 }
@@ -956,6 +968,37 @@ test "arrayReduce throws on empty array without initial value" {
 
     const without_initial = arrayReduce(ctx, arr.toValue(), &.{callback.toValue()});
     try std.testing.expect(without_initial.isException());
+    try std.testing.expect(ctx.hasException());
+}
+
+test "arrayFilter rejects a non-boolean predicate result" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const stub = struct {
+        fn call(_: *context.Context, _: *object.JSObject, _: []const value.JSValue) anyerror!value.JSValue {
+            return value.JSValue.fromInt(1);
+        }
+    };
+    http.setCallFunctionCallback(ctx, stub.call);
+    defer http.clearCallFunctionCallback(ctx);
+
+    const callback = try ctx.createObject(null);
+    callback.flags.is_callable = true;
+    const arr = try ctx.createArray();
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
+    arr.setArrayLength(1);
+
+    const result = arrayFilter(ctx, arr.toValue(), &.{callback.toValue()});
+    try std.testing.expect(result.isException());
     try std.testing.expect(ctx.hasException());
 }
 

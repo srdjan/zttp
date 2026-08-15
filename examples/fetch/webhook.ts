@@ -27,7 +27,7 @@ function handler(req: Request): Response & WebhookProof {
     return Response.text("not found", { status: 404 });
   }
   const key = req.headers.get("idempotency-key");
-  if (!key) {
+  if (key === undefined) {
     return Response.text("idempotency-key header required", { status: 400 });
   }
   const body = req.text();

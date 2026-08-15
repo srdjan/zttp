@@ -2732,6 +2732,7 @@ pub const FlowChecker = struct {
                 const binding = self.ir_view.getBinding(cond) orelse return null;
                 const key = packBindingKey(binding.scope_id, binding.slot);
                 const meta = self.binding_origin.get(key) orelse return null;
+                if (meta.returns != .boolean) return null;
                 return .{ .stub_truthy = .{
                     .module = meta.module,
                     .func = meta.func,
@@ -2751,6 +2752,8 @@ pub const FlowChecker = struct {
 
                 const raw = self.extractLiteralReqComparison(bin.left, bin.right) orelse
                     self.extractLiteralReqComparison(bin.right, bin.left) orelse
+                    self.extractOptionalAbsentComparison(bin.left, bin.right) orelse
+                    self.extractOptionalAbsentComparison(bin.right, bin.left) orelse
                     return null;
                 return if (bin.op == .strict_eq) raw else counterexample.negate(raw);
             },
@@ -2786,6 +2789,43 @@ pub const FlowChecker = struct {
             return .{ .req_url = value };
         }
         return null;
+    }
+
+    /// Recognise `value === undefined` where value was produced by an
+    /// optional-returning module call. The equality branch needs an absent
+    /// stub; the caller negates it for `!==`.
+    fn extractOptionalAbsentComparison(
+        self: *FlowChecker,
+        value_node: NodeIndex,
+        undefined_node: NodeIndex,
+    ) ?counterexample.WitnessConstraint {
+        if (self.ir_view.getTag(value_node) != .identifier or
+            self.ir_view.getTag(undefined_node) != .lit_undefined)
+        {
+            return null;
+        }
+        const binding = self.ir_view.getBinding(value_node) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const meta = self.binding_origin.get(key) orelse return null;
+        switch (meta.returns) {
+            .optional_string, .optional_object, .optional_number => {},
+            .boolean,
+            .number,
+            .string,
+            .object,
+            .undefined,
+            .unknown,
+            .result,
+            .dict,
+            .bytes,
+            => return null,
+        }
+        return .{ .stub_falsy = .{
+            .module = meta.module,
+            .func = meta.func,
+            .returns = meta.returns,
+            .call_index = meta.call_index,
+        } };
     }
 
     /// Recognise `result.ok` where `result` is an identifier bound to a
@@ -2878,7 +2918,7 @@ test "FlowChecker captures witness constraints on secret-in-response" {
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
-        \\  if (secret) {
+        \\  if (secret !== undefined) {
         \\    return Response.json({ leaked: secret });
         \\  }
         \\  return Response.json({ ok: true });
@@ -2902,7 +2942,7 @@ test "FlowChecker captures witness constraints on secret-in-response" {
     _ = try checker.check(handler_fn);
 
     // Expect exactly one secret-in-response diagnostic, carrying a
-    // stub_truthy constraint on the env call and a tracked env I/O call.
+    // stub_truthy constraint on the present env value and a tracked env I/O call.
     var found = false;
     for (checker.getDiagnostics()) |d| {
         if (d.kind != .secret_in_response) continue;
@@ -2933,7 +2973,7 @@ test "FlowChecker does not leak sibling-branch I/O calls into the witness" {
         \\import { cacheGet } from "zttp:cache";
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
-        \\  if (!secret) {
+        \\  if (secret === undefined) {
         \\    const cached = cacheGet("sibling");
         \\    return Response.json({ ok: cached });
         \\  }
@@ -2971,16 +3011,15 @@ test "FlowChecker does not leak sibling-branch I/O calls into the witness" {
     try std.testing.expect(found);
 }
 
-test "FlowChecker captures stub_truthy on if-else with negated condition" {
-    // `if (!secret) { ok } else { leak }` - the else branch's effective
-    // constraint is the double-negation of !secret, i.e. secret truthy.
-    // Exercises the `.unary_op` arm of `extractCondConstraint`.
+test "FlowChecker captures stub_truthy on if-else with absent condition" {
+    // `if (secret === undefined) { ok } else { leak }` - the else branch's
+    // effective constraint requires a present secret value.
     const allocator = std.testing.allocator;
     const source =
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
-        \\  if (!secret) {
+        \\  if (secret === undefined) {
         \\    return Response.json({ ok: true });
         \\  } else {
         \\    return Response.json({ leaked: secret });
@@ -3059,15 +3098,15 @@ test "FlowChecker captures req_method constraint from literal comparison" {
 }
 
 test "FlowChecker captures AND chain as multiple constraints" {
-    // `if (req.method === "POST" && secret) { leak }` produces TWO
-    // constraints: the method literal and the env truthiness. The solver
-    // turns this into a POST request whose env stub returns truthy.
+    // `if (req.method === "POST" && secret !== undefined) { leak }` produces
+    // TWO constraints: the method literal and env presence. The solver turns
+    // this into a POST request whose env stub returns a value.
     const allocator = std.testing.allocator;
     const source =
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
-        \\  if (req.method === "POST" && secret) {
+        \\  if (req.method === "POST" && secret !== undefined) {
         \\    return Response.json({ leaked: secret });
         \\  }
         \\  return Response.json({ ok: true });
@@ -3117,7 +3156,7 @@ test "FlowChecker captures AND chain as multiple constraints" {
 }
 
 test "FlowChecker captures one concrete negated request constraint for else AND path" {
-    // `!(req.method === "GET" && secret)` should use one concrete false
+    // `!(req.method === "GET" && secret !== undefined)` should use one concrete false
     // clause. Pick a non-GET method and leave the env call on its default
     // truthy stub so replay still leaks the sentinel secret.
     const allocator = std.testing.allocator;
@@ -3125,7 +3164,7 @@ test "FlowChecker captures one concrete negated request constraint for else AND 
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const secret = env("SECRET_KEY");
-        \\  if (req.method === "GET" && secret) {
+        \\  if (req.method === "GET" && secret !== undefined) {
         \\    return Response.json({ ok: true });
         \\  } else {
         \\    return Response.json({ leaked: secret });
@@ -3181,8 +3220,8 @@ test "FlowChecker keeps repeated module call constraints tied to call index" {
         \\function handler(req) {
         \\  const a = env("SECRET_A");
         \\  const b = env("SECRET_B");
-        \\  if (a) {
-        \\    if (!b) {
+        \\  if (a !== undefined) {
+        \\    if (b === undefined) {
         \\      return Response.json({ leaked: a });
         \\    }
         \\  }

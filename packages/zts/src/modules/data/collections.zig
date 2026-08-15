@@ -52,6 +52,37 @@ pub const binding = mb.ModuleBinding{
 
 pub const exports = binding.toModuleExports();
 
+test "dictFilter rejects a non-boolean predicate result" {
+    const testing = std.testing;
+    const gc_mod = @import("../../gc.zig");
+    const http_mod = @import("../../http.zig");
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const stub = struct {
+        fn call(_: *context.Context, _: *JSObject, _: []const JSValue) anyerror!JSValue {
+            return JSValue.fromInt(1);
+        }
+    };
+    http_mod.setCallFunctionCallback(ctx, stub.call);
+    defer http_mod.clearCallFunctionCallback(ctx);
+
+    const callback = try ctx.createObject(null);
+    callback.flags.is_callable = true;
+    var values = try dict.empty(ctx);
+    values = try dict.set(ctx, values, try ctx.createString("a"), JSValue.fromInt(1));
+
+    const result = try dictFilterNative(@ptrCast(ctx), JSValue.undefined_val, &.{ JSValue.fromPtr(values), callback.toValue() });
+    try testing.expect(result.isException());
+    try testing.expect(ctx.hasException());
+}
+
 test "a malformed entry names itself rather than a duplicate key" {
     // `dictFromEntries([["a", 1], "oops"])` answered
     // `{ kind: "duplicate-key", key: undefined }`. A caller matching on `kind`
@@ -239,7 +270,9 @@ fn dictFilterNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anye
         const val = dict.valueAt(d, i);
         const keep = helpers.invokeCallback(ctx, call_fn, callback, &.{ val, key }) orelse
             return JSValue.undefined_val;
-        if (keep.toConditionBool() orelse false) {
+        const keep_bool = keep.toConditionBool() orelse
+            return util.throwError(ctx, "TypeError", "dictFilter predicate must return boolean");
+        if (keep_bool) {
             out = try dict.set(ctx, out, key, val);
         }
     }

@@ -14,7 +14,7 @@ schemaCompile("FormatInput", JSON.stringify({
 }));
 
 export default (req: Request): Response => {
-  const result = validateJson("FormatInput", req.body);
+  const result = validateJson("FormatInput", req.body ?? "");
   if (!result.ok) {
     return Response.json({ errors: result.errors }, { status: 400 });
   }

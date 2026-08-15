@@ -266,13 +266,12 @@ if (!result.ok) return Response.json({ error: result.error }, { status: 403 });
 const claims = result.value;
 ```
 
-**Optional narrowing:** Functions like `env()`, `cacheGet()`, `parseBearer()` return `T | undefined`. Four recognized patterns:
+**Optional narrowing:** Functions like `env()`, `cacheGet()`, `parseBearer()` return `T | undefined`. Three recognized patterns:
 
 | Pattern | Example |
 |---------|---------|
-| Truthiness guard | `if (val) { /* val is T */ }` |
-| Early return | `if (!val) return ...; // val is T below` |
-| Undefined check | `if (val !== undefined) { /* val is T */ }` |
+| Presence check | `if (val !== undefined) { /* val is T */ }` |
+| Absence return | `if (val === undefined) return ...; // val is T below` |
 | Nullish coalesce | `const v = val ?? "default"; // v is string` |
 
 ### Type Guards and Assert
@@ -424,7 +423,7 @@ function rateLimiter(req: Request): Response | undefined {
 
 function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers["authorization"]);
-    if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (token === undefined) return Response.json({ error: "unauthorized" }, { status: 401 });
     const secret = env("JWT_SECRET");
     if (secret === undefined) return Response.json({ error: "server misconfigured" }, { status: 500 });
     const result = jwtVerify(token, secret);

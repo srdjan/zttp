@@ -874,6 +874,12 @@ pub const PathGenerator = struct {
                     if (self.extractLiteralComparison(bin.right, bin.left)) |c| {
                         return if (bin.op == .strict_eq) c else self.negateConstraint(c);
                     }
+                    if (self.extractOptionalAbsentComparison(bin.left, bin.right)) |c| {
+                        return if (bin.op == .strict_eq) c else self.negateConstraint(c);
+                    }
+                    if (self.extractOptionalAbsentComparison(bin.right, bin.left)) |c| {
+                        return if (bin.op == .strict_eq) c else self.negateConstraint(c);
+                    }
                 }
 
                 // && chains handled by extractAllConstraints
@@ -891,8 +897,9 @@ pub const PathGenerator = struct {
             },
 
             .identifier => {
-                // Truthiness check: if (val) where val is a module return
-                return self.extractTruthinessConstraint(cond);
+                // Only a boolean-returning module value is a legal direct
+                // condition in the boolean-only profile.
+                return self.extractBooleanConstraint(cond);
             },
 
             .member_access => {
@@ -901,8 +908,7 @@ pub const PathGenerator = struct {
             },
 
             .call => {
-                // if (moduleFunc(...)) - truthiness of direct call
-                return self.extractCallTruthinessConstraint(cond);
+                return self.extractBooleanCallConstraint(cond);
             },
 
             else => {},
@@ -946,7 +952,7 @@ pub const PathGenerator = struct {
         return null;
     }
 
-    fn extractTruthinessConstraint(self: *PathGenerator, id_node: NodeIndex) ?Constraint {
+    fn extractBooleanConstraint(self: *PathGenerator, id_node: NodeIndex) ?Constraint {
         const binding = self.ir_view.getBinding(id_node) orelse return null;
         const key = packBindingKey(binding.scope_id, binding.slot);
 
@@ -957,33 +963,53 @@ pub const PathGenerator = struct {
         if (init_tag == .call) {
             const call = self.ir_view.getCall(init_node) orelse return null;
             if (self.getCalleeMeta(call.callee)) |meta| {
+                if (meta.returns != .boolean) return null;
                 return .{ .stub_truthy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
-            }
-        }
-
-        // Check through nullish coalescing: const x = env("Y") ?? "default"
-        if (init_tag == .binary_op) {
-            const bin = self.ir_view.getBinary(init_node) orelse return null;
-            if (bin.op == .nullish) {
-                const lhs_tag = self.ir_view.getTag(bin.left) orelse return null;
-                if (lhs_tag == .call) {
-                    const call = self.ir_view.getCall(bin.left) orelse return null;
-                    if (self.getCalleeMeta(call.callee)) |meta| {
-                        return .{ .stub_truthy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
-                    }
-                }
             }
         }
 
         return null;
     }
 
-    fn extractCallTruthinessConstraint(self: *PathGenerator, call_node: NodeIndex) ?Constraint {
+    fn extractBooleanCallConstraint(self: *PathGenerator, call_node: NodeIndex) ?Constraint {
         const call = self.ir_view.getCall(call_node) orelse return null;
         if (self.getCalleeMeta(call.callee)) |meta| {
+            if (meta.returns != .boolean) return null;
             return .{ .stub_truthy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
         }
         return null;
+    }
+
+    fn extractOptionalAbsentComparison(
+        self: *PathGenerator,
+        value_node: NodeIndex,
+        undefined_node: NodeIndex,
+    ) ?Constraint {
+        if (self.ir_view.getTag(value_node) != .identifier or
+            self.ir_view.getTag(undefined_node) != .lit_undefined)
+        {
+            return null;
+        }
+        const binding = self.ir_view.getBinding(value_node) orelse return null;
+        const key = packBindingKey(binding.scope_id, binding.slot);
+        const init_node = self.var_inits.get(key) orelse return null;
+        if (self.ir_view.getTag(init_node) != .call) return null;
+        const call = self.ir_view.getCall(init_node) orelse return null;
+        const meta = self.getCalleeMeta(call.callee) orelse return null;
+        switch (meta.returns) {
+            .optional_string, .optional_object, .optional_number => {},
+            .boolean,
+            .number,
+            .string,
+            .object,
+            .undefined,
+            .unknown,
+            .result,
+            .dict,
+            .bytes,
+            => return null,
+        }
+        return .{ .stub_falsy = .{ .module = meta.module, .func = meta.func, .returns = meta.returns } };
     }
 
     fn extractResultOkConstraint(self: *PathGenerator, member_node: NodeIndex) ?Constraint {
@@ -2013,7 +2039,7 @@ fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
 test "walkPaths fails closed when local binding allocation fails" {
     try expectWalkFailsOnNextAllocation(
         \\export function handler(req) {
-        \\  if (req) {
+        \\  if (req.method === "GET") {
         \\    const local = req.url;
         \\    return Response.json(local);
         \\  }
@@ -2157,7 +2183,7 @@ test "behavior path conversion cleans every allocation failure" {
         \\import { env } from "zttp:env";
         \\export function handler(req) {
         \\  const value = env("NAME");
-        \\  if (value) return Response.json(true);
+        \\  if (value !== undefined) return Response.json(true);
         \\  return Response.json(false);
         \\}
     ;

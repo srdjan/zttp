@@ -1,32 +1,32 @@
 # Sound Mode: Type-Directed Analysis
 
-zttp's sound mode uses compile-time type inference to catch bugs across all operators, not just boolean contexts. The compiler infers types for every expression and enforces type-safety rules at three levels: truthiness in boolean contexts, arithmetic type safety, and tautological comparison detection.
+zttp's sound mode uses compile-time type inference to catch bugs across all
+operators. The compiler enforces boolean-only control flow, arithmetic type
+safety, and tautological comparison detection.
 
-## Type-Directed Truthiness
+## Boolean-Only Control Flow
 
-zttp uses type-directed truthiness (TDT) in boolean contexts. Instead of rejecting all non-boolean values, the compiler uses its type knowledge to apply unambiguous truthiness rules per type. The original concise syntax (`if (x)`, `if (count)`, `if (name)`) works when the type has exactly one falsy state.
+Conditions in `if`, `assert`, and `?:` must have type `boolean`. The operands
+of `!`, `&&`, and `||` must also be boolean, as must predicate callback results
+for array and dictionary operations. There is no general truthiness conversion.
 
-Objects and functions remain rejected because they are always truthy - a condition on them is pointless and likely a bug.
-
-## Truthiness Rules
-
-| Type | Boolean meaning | Rationale |
+| Value type | In a boolean context | Write instead |
 |---|---|---|
-| `boolean` | the value itself | already boolean |
-| `number` | `!= 0` | exactly one falsy state (zero) |
-| `string` | `!= ""` | exactly one falsy state (empty) |
-| `undefined` | always false | no ambiguity; WARNING as dead branch |
-| `optional_string` | `!= undefined` | narrows to `string` in then-branch |
-| `optional_object` | `!= undefined` | narrows to `object` in then-branch |
-| `object` | REJECTED | always truthy - condition is pointless |
-| `function` | REJECTED | always truthy - condition is pointless |
-| `unknown` | runtime coercion | same rules at runtime; objects/functions still error |
+| `boolean` | accepted | the value itself |
+| optional value | rejected | compare with `undefined` |
+| `number` | rejected | compare with `0` |
+| `string` | rejected | compare with `""` |
+| `undefined` | rejected | remove the dead condition |
+| `object` | rejected | test a boolean field or explicit property condition |
+| `function` | rejected | call it and use a boolean result |
+| `unknown` | rejected | narrow or validate it first |
 
 ## What Works
 
-### Optional existence checks (most common)
+### Optional existence checks
 
-Every `env()`, `cacheGet()`, `parseBearer()`, `routerMatch()` call returns an optional type. Use them directly in conditions:
+Every `env()`, `cacheGet()`, `parseBearer()`, and `routerMatch()` call returns
+an optional type. Compare the result with `undefined`:
 
 ```javascript
 import { env } from "zttp:env";
@@ -34,81 +34,71 @@ import { parseBearer } from "zttp:auth";
 import { routerMatch } from "zttp:router";
 
 const token = parseBearer(auth);
-if (token) { use(token); }        // token narrowed to string inside
+if (token !== undefined) { use(token); }
 
 const match = routerMatch(routes, req);
-if (match) {                       // match narrowed to object inside
+if (match !== undefined) {
     req.params = match.params;
     return match.handler(req);
 }
 
 const secret = env("SECRET");
-if (!secret) { return Response.json({ error: "missing secret" }, { status: 500 }); }
-// secret is string here (narrowed by early return)
+if (secret === undefined) {
+    return Response.json({ error: "missing secret" }, { status: 500 });
+}
+// secret is string here after the early return
 ```
 
-### Number and string truthiness
+### Number and string conditions
 
 ```javascript
-if (count) { ... }                 // means count !== 0
-if (name) { ... }                  // means name !== ""
-if (!count) { ... }                // means count === 0
+if (count !== 0) { ... }
+if (name !== "") { ... }
+if (count === 0) { ... }
 ```
 
 ### Logical operators
 
-`&&` and `||` operands are auto-coerced by the conditional opcodes. The return value is still the operand value (JS semantics), not boolean.
+`&&` and `||` combine boolean operands and produce a boolean.
 
 ```javascript
-if (count && name) { ... }         // both coerced: count != 0 && name != ""
+if (count !== 0 && name !== "") { ... }
 const val = x ?? fallback;         // use ?? for value defaults (unchanged)
 ```
 
-### Negation with narrowing
+### Result discriminants
 
 ```javascript
-const token = parseBearer(auth);
-if (!token) { return error; }      // token narrowed to undefined inside
-// token is string here (after early return)
+const parsed = validateJson("input", body);
+if (!parsed.ok) { return error; }
+// parsed.ok is boolean, and parsed.value is available after the guard
 ```
 
 ## What Is Rejected
 
-### Objects (always truthy)
+### Non-boolean values
 
 ```javascript
-if ({}) { ... }                    // ERROR: always-truthy value (object)
-if (result) { ... }                // ERROR if result is known object type
-
-// Use result.ok instead:
-if (result.ok) { ... }             // OK: result.ok is boolean
-```
-
-### Functions (always truthy)
-
-```javascript
-if (() => 1) { ... }               // ERROR: always-truthy value (function)
-```
-
-### Undefined (warning)
-
-```javascript
-if (undefined) { ... }             // WARNING: condition is always false (dead branch)
+if ({}) { ... }                    // ERROR: object is not boolean
+if (result) { ... }                // ERROR: record is not boolean
+if (() => true) { ... }            // ERROR: function is not boolean
+if (undefined) { ... }             // ERROR: undefined is not boolean
+if (count) { ... }                 // ERROR: number is not boolean
 ```
 
 ## Narrowing
 
-When `if (x)` and x has an optional type (`optional_string` or `optional_object`), x is narrowed to its non-optional variant in the then-branch. This works automatically - no explicit `x !== undefined` needed.
-
-When `if (!x)` and x is optional, x is narrowed to `undefined` in the then-branch. The negated narrowing also applies to else-branches and early returns.
-
-The existing `typeof` guard narrowing and `x !== undefined` narrowing continue to work unchanged. TDT narrowing is applied when no explicit guard pattern is detected.
+Optional narrowing requires an explicit `=== undefined` or `!== undefined`
+comparison. Narrowing applies in `if` and `?:` branches, after an early-return
+guard, and to the right side of an admitted boolean `&&` or `||` test. `typeof`,
+literal discriminants, and validated type predicates keep their specified
+narrowing behavior.
 
 ```javascript
 import { env } from "zttp:env";
 
 const val = env("KEY");            // optional_string
-if (val) {
+if (val !== undefined) {
     // val is string here
     const upper = val;
 }
@@ -128,9 +118,11 @@ env("KEY") ?? "default"            // No warning: env() is optional
 
 The parser rejects `==` and `!=` with a helpful error message suggesting `===` and `!==`.
 
-## The `unknown` Escape Hatch
+## Unknown Values Fail Closed
 
-When the BoolChecker cannot determine the type statically, it infers `unknown`. This happens for function parameters, untracked function calls, and general property accesses. `unknown` values pass the static checker silently. The VM applies the same TDT rules at runtime: number/string/boolean/undefined are coerced, objects/functions produce an error.
+An `unknown` value cannot enter a boolean context. Narrow it with an admitted
+type test or validate it before branching. Unchecked bytecode and native
+predicate callbacks face the same rule at runtime.
 
 ## Type Inference Rules
 
@@ -143,7 +135,7 @@ When the BoolChecker cannot determine the type statically, it infers `unknown`. 
 | `{}`, `[]` | object |
 | `() => ...`, `function() {}` | function |
 | `===`, `!==`, `<`, `>`, `<=`, `>=`, `in` | boolean |
-| `A && B`, `A \|\| B` | `A \| B` |
+| `A && B`, `A \|\| B` | boolean |
 | non-nullable `A ?? B` | `A` |
 | `(T \| undefined) ?? B` | `T \| B` |
 | `undefined ?? B` | `B` |
@@ -164,7 +156,7 @@ When the BoolChecker cannot determine the type statically, it infers `unknown`. 
 | optional virtual-module return | optional string/object |
 | Result property access (`result.ok`) | known property type when modeled |
 | Generic alias application (`Result<string>`) | instantiated record type |
-| `if (x)` where x is optional | narrows to non-optional in then-branch |
+| `x !== undefined` where x is optional | narrows to non-optional on the true branch |
 | `typeof x === "T"` guard (then-branch) | T (narrowed) |
 | `typeof x !== "T"` guard (else-branch) | T (narrowed) |
 
@@ -240,14 +232,12 @@ env("KEY") === undefined           // No warning: env() returns optional
 ## Diagnostic Reference
 
 **Errors (block compilation):**
-- `always-truthy value (object) in 'if' operator` - objects are always truthy; this condition is pointless
-- `always-truthy value (function) in 'if' operator` - functions are always truthy; this condition is pointless
+- `boolean context requires a value of type boolean` - compare or narrow the value explicitly
 - `'<type>' operand in '<op>' operator; arithmetic requires numbers` - non-numeric value in arithmetic
 - `implicit type coercion in '+'; number and string operands` - mixed types in addition
 - `'<type>' operand in '+' operator` - non-addable type in addition
 
 **Warnings (do not block compilation):**
-- `condition is always false (undefined)` - this branch is dead code
 - `left side of '??' is never undefined` - remove the '??' fallback; it is unreachable
 - `tautological typeof comparison: result is always true/false` - typeof check on known type
 - `comparison with undefined is always true/false` - undefined check on non-optional value
@@ -272,11 +262,9 @@ Type-directed codegen is active only in precompiled handlers (`-Dhandler=...`). 
 
 ## Runtime Enforcement
 
-The VM applies TDT at four opcode sites:
-
-- `if_true` / `if_false` / `if_false_goto`: conditional jumps use `toConditionBool()` - accepts boolean/number/string/undefined, rejects objects/functions
-- `not`: logical NOT uses `toConditionBool()` with the same rules
-
-If an object or function reaches these opcodes at runtime, an exception is set: `condition rejected: <type> has no falsy state`.
-
-`toConditionBool()` checks boolean first and integer second, the two most common condition types, before it reaches floats, nullish values, and strings.
+The VM applies the boolean-only contract at the conditional jump and logical
+NOT opcodes. Array predicates and `dictFilter` apply it at their callback
+boundary. Any non-boolean value raises a type error such as
+`boolean context requires boolean, got number`. This prevents unchecked
+bytecode or native callbacks from recovering JavaScript truthiness behind the
+compiler.

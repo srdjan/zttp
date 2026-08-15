@@ -66,7 +66,7 @@ function handler(req: Request): Response {
 
     if (url === "/api/json" && method === "POST") {
         const body = req.body;
-        if (!body) {
+        if (body === undefined) {
             return Response.json({ error: "No body provided" }, { status: 400 });
         }
 

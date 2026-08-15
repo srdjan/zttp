@@ -29,12 +29,11 @@ pub fn createArray(self: *Interpreter) !*object.JSObject {
     return obj;
 }
 
-/// Build a "condition rejected: <type> has no falsy state" exception
-/// payload for sound-mode boolean checks. Buffer-bounded to 80 bytes.
+/// Build a typed boolean-context exception payload. Buffer-bounded to 80 bytes.
 pub fn createBoolError(self: *Interpreter, val: value.JSValue) !value.JSValue {
     const type_name = val.typeOf();
-    const prefix = "condition rejected: ";
-    const suffix = " has no falsy state";
+    const prefix = "boolean context requires boolean, got ";
+    const suffix = "";
     var buf: [80]u8 = undefined;
     const total = @min(prefix.len + type_name.len + suffix.len, buf.len);
     @memcpy(buf[0..prefix.len], prefix);

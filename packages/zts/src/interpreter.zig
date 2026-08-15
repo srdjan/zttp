@@ -2552,6 +2552,76 @@ test "Interpreter conditional jump" {
     try std.testing.expectEqual(@as(i32, 42), result.getInt());
 }
 
+test "Interpreter rejects non-boolean conditional bytecode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_0),
+        @intFromEnum(bytecode.Opcode.if_false),
+        1,
+        0,
+        @intFromEnum(bytecode.Opcode.ret_undefined),
+    };
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+
+    try std.testing.expectError(error.TypeError, interp.run(&func));
+}
+
+test "Interpreter rejects non-boolean logical not bytecode" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc = @import("gc.zig");
+
+    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var interp = Interpreter.init(ctx);
+    const code = [_]u8{
+        @intFromEnum(bytecode.Opcode.push_0),
+        @intFromEnum(bytecode.Opcode.not),
+        @intFromEnum(bytecode.Opcode.ret),
+    };
+    var func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = 0,
+        .stack_size = 16,
+        .flags = .{},
+        .code = &code,
+        .constants = &.{},
+        .source_map = null,
+        .line_table = null,
+    };
+
+    try std.testing.expectError(error.TypeError, interp.run(&func));
+}
+
 test "Interpreter superinstruction get_loc_get_loc_add" {
     const allocator = std.testing.allocator;
     const gc = @import("gc.zig");

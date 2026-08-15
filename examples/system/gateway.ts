@@ -6,7 +6,7 @@ import { serviceCall } from "zttp:service";
 function handler(req: Request): Response {
   // Authenticate
   const token = parseBearer(req.headers["authorization"]);
-  if (!token) {
+  if (token === undefined) {
     return Response.json({ error: "missing token" }, { status: 401 });
   }
 

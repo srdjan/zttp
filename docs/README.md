@@ -43,7 +43,7 @@ they are designs rather than a backlog. Finished plans live under
   features.
 - [Restrictions to Proofs](restrictions-to-proofs.md) - why each language cut
   exists.
-- [Sound Mode](sound-mode.md) - type-directed truthiness, arithmetic, and
+- [Sound Mode](sound-mode.md) - boolean-only control flow, arithmetic, and
   comparison diagnostics.
 - [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) - canonical
   ZigTS rules and `zttp normalize`.

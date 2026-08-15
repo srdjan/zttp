@@ -49,7 +49,7 @@ import { sha256 } from "zttp:crypto";
 function handler(req: Request): Response {
     const routes = { "GET /users/:id": true };
     const match = routerMatch(routes, req);
-    if (match) {
+    if (match !== undefined) {
         return Response.json({
             id: match.params.id,
             tokenHash: sha256(env("API_TOKEN") ?? ""),

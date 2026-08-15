@@ -7,7 +7,7 @@ function getUserById(req: Request): Response {
   const id = req.params.id;
   // Check cache first
   const cached = cacheGet("users", id);
-  if (cached) {
+  if (cached !== undefined) {
     return Response.json({ user: cached });
   }
 

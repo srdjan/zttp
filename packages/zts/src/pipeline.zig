@@ -187,11 +187,6 @@ pub fn resolve(
     parsed: ParsedModule,
     opts: ResolveOptions,
 ) !ResolvedModule {
-    var bool_checker = BoolChecker.init(allocator, parsed.ir_view, parsed.atoms);
-    bool_checker.facts = opts.module_facts;
-    errdefer bool_checker.deinit();
-    const bool_errors = try bool_checker.check(parsed.root);
-
     var type_checker_opt: ?TypeChecker = null;
     var type_errors: u32 = 0;
     if (opts.type_env) |env| {
@@ -206,6 +201,13 @@ pub fn resolve(
         type_errors = try tc.check(parsed.root);
         type_checker_opt = tc;
     }
+    errdefer if (type_checker_opt) |*tc| tc.deinit();
+
+    var bool_checker = BoolChecker.init(allocator, parsed.ir_view, parsed.atoms);
+    bool_checker.facts = opts.module_facts;
+    bool_checker.authoritative_type_checker = if (type_checker_opt) |*tc| tc else null;
+    errdefer bool_checker.deinit();
+    const bool_errors = try bool_checker.check(parsed.root);
 
     var strict_checker_opt: ?StrictChecker = null;
     var strict_errors: u32 = 0;
@@ -886,6 +888,34 @@ test "pipeline.resolve flags pointless object truthy condition" {
 
     try testing.expect(resolved.bool_error_count > 0);
     try testing.expect(resolved.boolDiagnostics().len > 0);
+}
+
+test "pipeline.resolve rejects optional module value in boolean context" {
+    const allocator = testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\const secret = env("TOKEN");
+        \\if (!secret) { const missing = true; }
+    ;
+    var parsed_state = try parseSourceForTest(allocator, source);
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+    var type_map = TypeMap.init(source);
+    defer type_map.deinit(allocator);
+    var storage: TypeEnvStorage = .{};
+    defer storage.deinit(allocator);
+    try storage.init(allocator, &type_map);
+
+    var resolved = try resolve(allocator, parsed, .{
+        .type_env = storage.envPtr(),
+        .strict = false,
+    });
+    defer resolved.deinit();
+
+    try testing.expectEqual(@as(u32, 1), resolved.bool_error_count);
+    try testing.expectEqual(bool_checker_mod.DiagnosticKind.not_operand_not_boolean, resolved.boolDiagnostics()[0].kind);
 }
 
 test "pipeline.resolve runs strict checker without type context" {

@@ -81,7 +81,7 @@ verify error: result.value accessed without checking result.ok first
 
 **Recognized patterns for .ok checks:**
 
-- `if (result.ok) { ... }` - direct truthiness
+- `if (result.ok) { ... }` - direct boolean discriminant
 - `if (result.isOk()) { ... }` - method call
 - `if (result.ok === true) { ... }` - strict equality
 - `if (!result.ok) { return ...; }` - negated early return (code after is safe)
@@ -168,8 +168,6 @@ verify error: property access on optional value without checking for undefined
 
 **Recognized narrowing patterns:**
 
-- `if (val) { ... }` - truthiness narrows in then-branch
-- `if (!val) { return ...; }` - negated early return narrows subsequent code
 - `if (val !== undefined) { ... }` - explicit check narrows in then-branch
 - `if (val === undefined) { return ...; }` - explicit check with early return
 - `const x = env("KEY") ?? "default"` - nullish coalesce resolves at declaration

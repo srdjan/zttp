@@ -1075,6 +1075,15 @@ both the same lesson: a `.ts` file is not necessarily zts source.
 keyword. The other is a digest-pinned recorded model turn, where an edit is an
 edit to the measurement.
 
+Boolean-only control flow is now enforced by the checker and runtime. `if`,
+conditional expressions, `!`, `&&`, `||`, assertions, and collection
+predicates require a boolean. Optional and unknown values fail closed instead
+of participating in truthiness, so absence must be written explicitly as
+`value === undefined` or `value !== undefined`. The internal witness tags keep
+their existing names, but they are now derived from explicit comparisons or a
+module result whose declared return type is boolean. The published profile
+remains `zts-advanced-1` until the other phase 7 removals are complete.
+
 **Owed, and this is the debt the cutover has been accumulating toward.** The
 recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases
 write `type X =`, so `zig build test` now fails two of them: `weather-egress`

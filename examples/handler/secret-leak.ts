@@ -7,7 +7,7 @@ import { env } from "zttp:env";
 
 function handler(req: Request): Response {
   const secret = env("SECRET_KEY");
-  if (secret) {
+  if (secret !== undefined) {
     return Response.json({ leaked: secret });
   }
   return Response.json({ ok: true });

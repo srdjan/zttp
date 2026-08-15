@@ -112,7 +112,7 @@ import { routerMatch } from "zttp:router";
 function handler(req: Request): Response {
     const routes = { "GET /users/:id": true };
     const match = routerMatch(routes, req);
-    if (match) {
+    if (match !== undefined) {
         return Response.json({ id: match.params.id });
     }
     return Response.text("Not Found", { status: 404 });
@@ -358,7 +358,7 @@ function handler(req) {
 
   const inbox = receive("worker");
   if (!inbox.ok) return Response.json({ error: inbox.error }, { status: 503 });
-  if (!inbox.value) return Response.json({ queued: sent.value });
+  if (inbox.value === undefined) return Response.json({ queued: sent.value });
 
   const msg = inbox.value;
   const done = ack(msg.id);
@@ -369,7 +369,8 @@ function handler(req) {
 `send(target, payload)` stores a JSON snapshot of `payload` and returns
 `Result<string>` with the message id. `request(target, payload)` also sets the
 current actor as the reply target. `receive(actor?)` leases one message and
-returns a `Result` whose `.value` is falsy when no message is available; the default actor is `main`. A leased message
+returns a `Result` whose `.value` is `undefined` when no message is available;
+the default actor is `main`. A leased message
 stays retained until `ack(id)` deletes it or `nack(id, reason?)` requeues it.
 After the configured attempt limit, `nack()` moves the message to the in-memory
 dead-letter set and releases the actor mailbox slot; dead letters are retained
@@ -642,7 +643,7 @@ Check `.ok` before `.value`, or narrow the optional before use:
 
 ```ts
 const token = parseBearer(req.headers.authorization ?? "");
-if (!token) return Response.text("Unauthorized", { status: 401 });
+if (token === undefined) return Response.text("Unauthorized", { status: 401 });
 ```
 
 **A language feature is rejected.**

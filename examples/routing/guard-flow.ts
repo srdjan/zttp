@@ -22,7 +22,7 @@ function preflight(req: Request): Response | undefined {
 function requireAuth(req: Request): Response | undefined {
   const header = req.headers["authorization"] ?? "";
   const token = parseBearer(header);
-  if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+  if (token === undefined) return Response.json({ error: "unauthorized" }, { status: 401 });
   const secret = env("JWT_SECRET");
   if (
     secret === undefined

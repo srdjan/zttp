@@ -7,7 +7,7 @@ const ok = schemaCompile("test", JSON.stringify({ type: "object" }));
 structural Guardrails = Spec<"result_safe">;
 
 function handler(req: Request): Response & Guardrails {
-    const result = validateJson("test", req.body);
+    const result = validateJson("test", req.body ?? "");
     if (result.ok) {
         return Response.json({ data: result.value });
     }

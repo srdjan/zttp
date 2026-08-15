@@ -5177,7 +5177,7 @@ test "compileHandler emits result_unsafe counterexample when jwtVerify result is
         \\
         \\function handler(req: Request): Response {
         \\  const token = parseBearer(req.headers.get("authorization") ?? "");
-        \\  if (!token) return Response.json({ error: "no token" }, { status: 401 });
+        \\  if (token === undefined) return Response.json({ error: "no token" }, { status: 401 });
         \\  const result = jwtVerify(token, "secret");
         \\  return Response.json({ user: result.value });
         \\}
@@ -5209,7 +5209,7 @@ test "compileHandler sets result_safe and optional_safe when verification passes
         \\
         \\function handler(req: Request): Response {
         \\  const token = parseBearer(req.headers.get("authorization") ?? "");
-        \\  if (!token) return Response.text("no token", { status: 401 });
+        \\  if (token === undefined) return Response.text("no token", { status: 401 });
         \\  const result = jwtVerify(token, "secret");
         \\  if (!result.ok) return Response.text(result.error, { status: 401 });
         \\  const name = env("NAME") ?? "world";
@@ -5396,7 +5396,7 @@ const bytecode_golden_cases = [_]struct {
         \\function handler(req: Request): Response {
         \\    const token = env("API_TOKEN") ?? "";
         \\    const cached = cacheGet("sessions", token);
-        \\    if (cached) {
+        \\    if (cached !== undefined) {
         \\        return Response.json({ hit: true, value: cached });
         \\    }
         \\    const digest = sha256(token);
@@ -5404,7 +5404,7 @@ const bytecode_golden_cases = [_]struct {
         \\    return Response.json({ hit: false, digest: digest });
         \\}
         ,
-        .sha256 = "3b784399545f2a1880f66ce4175521ff30bc7f21854f49e28a9f21cfe3234544",
+        .sha256 = "b47edaefb4ef8f663a35872a28c823bc7e5982845cacb9381314db971f4030e2",
     },
     .{
         .name = "jsx",

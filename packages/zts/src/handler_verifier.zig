@@ -1308,32 +1308,9 @@ pub const HandlerVerifier = struct {
         return self.isOptionalProducingCall(binary.left) != null;
     }
 
-    /// Extract optional narrowing info from an if-condition.
-    /// Recognizes: if (val), if (!val), if (val !== undefined), if (val === undefined).
+    /// Extract optional narrowing info from an explicit undefined comparison.
     fn extractOptionalNarrowingCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?NarrowingInfo {
         const cond_tag = self.ir_view.getTag(cond_node) orelse return null;
-
-        // if (val) - truthiness check
-        if (cond_tag == .identifier) {
-            const binding = self.ir_view.getBinding(cond_node) orelse return null;
-            if (self.findOptionalBinding(binding.slot, binding.scope_id)) |_| {
-                return .{ .slot = binding.slot, .scope_id = binding.scope_id, .branch = .then };
-            }
-        }
-
-        // if (!val) - negated truthiness
-        if (cond_tag == .unary_op) {
-            const unary = self.ir_view.getUnary(cond_node) orelse return null;
-            if (unary.op == .not) {
-                const inner_tag = self.ir_view.getTag(unary.operand) orelse return null;
-                if (inner_tag == .identifier) {
-                    const binding = self.ir_view.getBinding(unary.operand) orelse return null;
-                    if (self.findOptionalBinding(binding.slot, binding.scope_id)) |_| {
-                        return .{ .slot = binding.slot, .scope_id = binding.scope_id, .branch = .then_returns_early };
-                    }
-                }
-            }
-        }
 
         // if (val !== undefined) or if (val === undefined)
         if (cond_tag == .binary_op) {

@@ -25,7 +25,6 @@ const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
 const abi_types = @import("abi_types.zig");
 const service_types_mod = @import("zts-contracts").service_types;
-const bool_checker_mod = @import("bool_checker.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 
 const Node = ir.Node;
@@ -772,6 +771,7 @@ pub const TypeChecker = struct {
             .method_call => {
                 const mc = self.ir_view.getCall(node) orelse return;
                 self.walkExpr(mc.callee);
+                self.checkCallArgs(node, mc);
                 for (0..mc.args_count) |i| {
                     const arg = self.ir_view.getListIndex(mc.args_start, @intCast(i));
                     self.walkExpr(arg);
@@ -1569,13 +1569,6 @@ pub const TypeChecker = struct {
     fn extractNarrowingGuard(self: *const TypeChecker, condition: NodeIndex) NarrowingGuard {
         const tag = self.ir_view.getTag(condition) orelse return .{};
 
-        // if (x) - truthiness guard on nullable binding. Truthiness excludes
-        // both absent values, which is why this one asks for `.either`.
-        if (tag == .identifier) {
-            const r = self.resolveAbsentBinding(condition, .either) orelse return .{};
-            return .{ .key = r.key, .narrowed_type = r.inner, .negated = false };
-        }
-
         // if (r.ok) - a bare boolean discriminant read. The `Result` idiom is
         // written this way as often as it is written `r.ok === true`, and only
         // the second form narrowed.
@@ -1975,8 +1968,9 @@ pub const TypeChecker = struct {
     fn predicateLeafTestsParam(self: *const TypeChecker, node: NodeIndex, param: ir.BindingRef) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
         switch (tag) {
-            // `if (x)` - truthiness, and `if (x.ok)` - a bare discriminant read.
-            .identifier, .member_access => return self.operandNamesParam(node, param),
+            // A bare boolean discriminant read may prove a predicate. A bare
+            // identifier is not a test in the boolean-only profile.
+            .member_access => return self.operandNamesParam(node, param),
             // `Array.isArray(x)`
             .call => {
                 const call = self.ir_view.getCall(node) orelse return false;
@@ -2421,12 +2415,7 @@ pub const TypeChecker = struct {
             // Fail closed if such an IR node reaches normal type analysis.
             .loose_eq, .loose_neq => null_type_idx,
             .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op => pool.idx_boolean,
-            .and_op, .or_op => {
-                const lt = self.inferType(bin.left);
-                const rt = self.inferType(bin.right);
-                if (lt == null_type_idx or rt == null_type_idx) return null_type_idx;
-                return pool.addUnion(self.allocator, &.{ lt, rt });
-            },
+            .and_op, .or_op => pool.idx_boolean,
             .sub, .mul, .div, .mod, .pow => pool.idx_number,
             .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => pool.idx_number,
             .add => {
@@ -2665,13 +2654,31 @@ pub const TypeChecker = struct {
         return self.env.pool.addArray(self.allocator, element_type);
     }
 
-    /// Model the subset of Array.prototype methods that preserve the element type.
-    /// `toSorted(compareFn?)` and `toReversed()` both return a fresh `T[]`. Without
-    /// this, member access on an array receiver infers `null_type_idx`, leaving the
-    /// call's return type unknown and (for `toSorted`) risking a spurious argument
-    /// diagnostic against an unmodelled signature. The comparator parameter is typed
-    /// `unknown` and optional so any callback is accepted.
+    /// Model the array methods whose contracts affect static checking. Predicate
+    /// callbacks have an explicit boolean return type, matching the runtime
+    /// boundary in builtins/array.zig.
     fn inferArrayMethodType(self: *const TypeChecker, array_type: TypeIndex, prop_name: []const u8) TypeIndex {
+        const pool = self.env.pool;
+        const element_type = pool.getArrayElement(array_type);
+        const predicate_type = pool.addFunctionWithReturn(self.allocator, &.{}, pool.idx_boolean);
+        const predicate_param = [_]type_pool_mod.FuncParam{.{
+            .name_start = 0,
+            .name_len = 0,
+            .type_idx = predicate_type,
+            .optional = false,
+        }};
+        if (std.mem.eql(u8, prop_name, "filter")) {
+            return pool.addFunction(self.allocator, &predicate_param, array_type);
+        }
+        if (std.mem.eql(u8, prop_name, "every") or std.mem.eql(u8, prop_name, "some")) {
+            return pool.addFunction(self.allocator, &predicate_param, pool.idx_boolean);
+        }
+        if (std.mem.eql(u8, prop_name, "find")) {
+            return pool.addFunction(self.allocator, &predicate_param, pool.addNullable(self.allocator, element_type));
+        }
+        if (std.mem.eql(u8, prop_name, "findIndex")) {
+            return pool.addFunction(self.allocator, &predicate_param, pool.idx_number);
+        }
         if (std.mem.eql(u8, prop_name, "toSorted")) {
             const params = [_]type_pool_mod.FuncParam{.{
                 .name_start = 0,
@@ -3201,6 +3208,18 @@ pub const TypeChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return null_type_idx;
         if (tag != .arrow_function and tag != .function_expr) return null_type_idx;
         return self.functionExprType(node);
+    }
+
+    /// The argument type used for assignability checks. Generic inference may
+    /// leave an untyped callback unresolved so it can report ambiguity. A
+    /// concrete callback contract must instead fail closed, so an unresolved
+    /// function return becomes `unknown` and is rejected by a boolean target.
+    fn argumentTypeForChecking(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const inferred = self.argumentTypeForInference(node);
+        if (inferred != null_type_idx) return inferred;
+        const tag = self.ir_view.getTag(node) orelse return null_type_idx;
+        if (tag != .arrow_function and tag != .function_expr) return null_type_idx;
+        return self.env.pool.addFunctionWithReturn(self.allocator, &.{}, self.env.pool.idx_unknown);
     }
 
     /// A function type for a function expression written at a call site: its
@@ -3741,9 +3760,31 @@ pub const TypeChecker = struct {
         }
     }
 
+    fn checkModuleBooleanPredicate(self: *TypeChecker, call: Node.CallExpr) void {
+        if (self.ir_view.getTag(call.callee) != .identifier) return;
+        const binding = self.ir_view.getBinding(call.callee) orelse return;
+        const entry = self.resolveImportedExport(binding) orelse return;
+        if (!std.mem.eql(u8, entry.binding.specifier, "zttp:collections") or
+            !std.mem.eql(u8, entry.func.name, "dictFilter") or
+            call.args_count < 2)
+        {
+            return;
+        }
+
+        const callback = self.ir_view.getListIndex(call.args_start, 1);
+        const actual = self.argumentTypeForChecking(callback);
+        const expected = self.env.pool.addFunctionWithReturn(self.allocator, &.{}, self.env.pool.idx_boolean);
+        if (actual == null_type_idx or !self.env.isAssignableTo(actual, expected)) {
+            self.addArgTypeMismatch(callback, expected, actual);
+        }
+    }
+
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
-        if (callee_tag == .identifier) self.checkModuleEncodableArgs(call);
+        if (callee_tag == .identifier) {
+            self.checkModuleEncodableArgs(call);
+            self.checkModuleBooleanPredicate(call);
+        }
         if (callee_tag == .member_access) {
             self.checkResponseJsonPayload(call);
             const callee_type = self.inferType(call.callee);
@@ -3763,7 +3804,7 @@ pub const TypeChecker = struct {
                 for (info.params, 0..) |param, i| {
                     if (i >= call.args_count) break;
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
-                    const arg_type = self.inferType(arg_idx);
+                    const arg_type = self.argumentTypeForChecking(arg_idx);
                     if (arg_type != null_type_idx and param.type_idx != null_type_idx and !self.env.isAssignableTo(arg_type, param.type_idx)) {
                         self.addArgTypeMismatch(arg_idx, param.type_idx, arg_type);
                     }
@@ -3802,7 +3843,7 @@ pub const TypeChecker = struct {
 
                 for (0..param_count) |i| {
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
-                    const arg_type = self.inferType(arg_idx);
+                    const arg_type = self.argumentTypeForChecking(arg_idx);
                     if (arg_type != null_type_idx and param_types[i] != null_type_idx and !self.env.isAssignableTo(arg_type, param_types[i])) {
                         self.addArgTypeMismatch(arg_idx, param_types[i], arg_type);
                     }
@@ -3874,7 +3915,7 @@ pub const TypeChecker = struct {
         var i: u8 = 0;
         while (i < sig.param_count and i < call.args_count) : (i += 1) {
             const arg_idx = self.ir_view.getListIndex(call.args_start, i);
-            const arg_type = self.inferType(arg_idx);
+            const arg_type = self.argumentTypeForChecking(arg_idx);
             const param_type = self.substitute(inst, sig.param_types[i]);
             if (arg_type != null_type_idx and param_type != null_type_idx) {
                 if (!self.env.isAssignableTo(arg_type, param_type)) {
@@ -5030,36 +5071,74 @@ test "TypeChecker: genuine module calls retain module argument checking" {
     , 1, 0);
 }
 
-test "TypeChecker: logical and preserves matching operand type" {
+test "TypeChecker: logical and produces boolean" {
     try checkTypedSource(
         \\const x: string = "x";
         \\const y: string = "y";
         \\const s: string = x && y;
-    , 0, 0);
+    , 1, 0);
 }
 
-test "TypeChecker: logical and rejects boolean annotation for string operands" {
+test "TypeChecker: logical result satisfies boolean annotation" {
     try checkTypedSource(
         \\const x: string = "x";
         \\const y: string = "y";
         \\const b: boolean = x && y;
-    , 1, 0);
+    , 0, 0);
 }
 
-test "TypeChecker: logical operators infer operand union" {
+test "TypeChecker: logical operators do not infer operand union" {
     try checkTypedSource(
         \\function combine(x: string, y: number) {
         \\  const and_result: string | number = x && y;
         \\  const or_result: string | number = x || y;
         \\}
-    , 0, 0);
+    , 2, 0);
 }
 
-test "TypeChecker: logical and flattens operand union for exact annotation" {
+test "TypeChecker: logical boolean result is admitted by containing union" {
     try checkTypedSource(
         \\const value: string | number = "x";
         \\const flag: boolean = true;
         \\const result: string | number | boolean = value && flag;
+    , 0, 0);
+}
+
+test "TypeChecker: array predicates require boolean callback results" {
+    try checkTypedSource(
+        \\const values = [1, 2, 3];
+        \\const a = values.filter((value) => value);
+        \\const b = values.every((value) => "yes");
+        \\const c = values.some((value) => 1);
+        \\const d = values.find((value) => value);
+        \\const e = values.findIndex((value) => value);
+    , 5, 0);
+}
+
+test "TypeChecker: array predicates admit boolean callback results" {
+    try checkTypedSource(
+        \\const values = [1, 2, 3];
+        \\const a = values.filter((value) => value > 1);
+        \\const b: boolean = values.every((value) => value > 0);
+        \\const c: boolean = values.some((value) => value === 2);
+        \\const d = values.find((value) => value > 1);
+        \\const e: number = values.findIndex((value) => value > 1);
+    , 0, 0);
+}
+
+test "TypeChecker: dictFilter predicate requires a boolean result" {
+    try checkTypedSource(
+        \\import { dictEmpty, dictSet, dictFilter } from "zttp:collections";
+        \\const values = dictSet(dictEmpty(), "a", 1);
+        \\const kept = dictFilter(values, (value) => value);
+    , 1, 0);
+}
+
+test "TypeChecker: dictFilter admits a boolean predicate result" {
+    try checkTypedSource(
+        \\import { dictEmpty, dictSet, dictFilter } from "zttp:collections";
+        \\const values = dictSet(dictEmpty(), "a", 1);
+        \\const kept = dictFilter(values, (value) => value === 1);
     , 0, 0);
 }
 

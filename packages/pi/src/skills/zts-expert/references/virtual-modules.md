@@ -77,7 +77,7 @@ schemaCompile("createUser", JSON.stringify({
 }));
 
 function handler(req: Request): Response {
-    const result = decodeJson("createUser", req.body);
+    const result = decodeJson("createUser", req.body ?? "");
     if (!result.ok) return Response.json({ errors: result.errors }, { status: 400 });
     return Response.json({ created: result.value }, { status: 201 });
 }
@@ -99,7 +99,7 @@ All values are strings (`JSON.stringify` objects). TTL in seconds. Cache persist
 
 ```typescript
 const cached = cacheGet("sessions", token);
-if (cached) return Response.json(JSON.parse(cached));
+if (cached !== undefined) return Response.json(JSON.parse(cached));
 // Compute and cache
 const data = JSON.stringify(computeResult());
 cacheSet("sessions", token, data, 300);
@@ -126,7 +126,7 @@ const routes = {
 
 function handler(req: Request): Response {
     const found = routerMatch(routes, req);
-    if (found) {
+    if (found !== undefined) {
         req.params = found.params;
         return found.handler(req);
     }
@@ -174,7 +174,7 @@ function cors(req: Request): Response | undefined {
 
 function requireAuth(req: Request): Response | undefined {
     const token = parseBearer(req.headers["authorization"]);
-    if (!token) return Response.json({ error: "unauthorized" }, { status: 401 });
+    if (token === undefined) return Response.json({ error: "unauthorized" }, { status: 401 });
     const secret = env("JWT_SECRET");
     if (secret === undefined) return Response.json({ error: "server misconfigured" }, { status: 500 });
     const result = jwtVerify(token, secret);
@@ -303,7 +303,7 @@ sql("create_user", "INSERT INTO users (name, email) VALUES (:name, :email)");
 
 function handler(req: Request): Response {
     const user = sqlOne("get_user", { id: req.params.id });
-    if (!user) return Response.json({ error: "not found" }, { status: 404 });
+    if (user === undefined) return Response.json({ error: "not found" }, { status: 404 });
     return Response.json(user);
 }
 ```

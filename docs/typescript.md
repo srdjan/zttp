@@ -230,22 +230,20 @@ A record alias is transparent, whatever the keyword. Nominal identity comes only
 
 ### Optional Narrowing
 
-The type checker narrows nullable types through if-guards. Functions like `env()`, `cacheGet()`, and `parseBearer()` return optional values (`T | undefined`). Three guard patterns trigger narrowing:
+The type checker narrows nullable types through explicit absence checks.
+Functions like `env()`, `cacheGet()`, and `parseBearer()` return optional values
+(`T | undefined`). These guard patterns trigger narrowing:
 
 ```typescript
 const val = env("KEY");
 
-if (val) {
+if (val !== undefined) {
     // val is string here (narrowed from string | undefined)
     sha256(val);
 }
 
-if (!val) return Response.text("missing");
+if (val === undefined) return Response.text("missing");
 // val is string here (early return pattern)
-
-if (val !== undefined) {
-    // val is string here (explicit check)
-}
 ```
 
 ### Discriminated Union Narrowing
@@ -773,7 +771,7 @@ This is a philosophy tip, so there is no snippet. zts has no `tsconfig.json`
 and no opt-in strictness dial. Strict ZigTS is the default profile: `any` is
 rejected, named functions must carry parameter and return annotations,
 capability access must use literal keys, and an avoidable `let` is an error.
-Layered on top are sound mode (type-directed truthiness, arithmetic, and
+Layered on top are sound mode (boolean-only control flow, arithmetic, and
 comparison diagnostics) and the canonical profile, both strict by construction
 rather than by flag. See [Sound Mode](sound-mode.md) and
 [Canonicalize And Normalize](cli.md#canonicalize-and-normalize). The canon's "turn on every strict

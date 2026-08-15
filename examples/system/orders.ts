@@ -4,7 +4,7 @@ import { routerMatch } from "zttp:router";
 
 function getOrderById(req: Request): Response {
   const cached = cacheGet("orders", req.params.id);
-  if (cached) {
+  if (cached !== undefined) {
     return Response.json({ order: cached });
   }
   return Response.json({ error: "order not found" }, { status: 404 });
