@@ -38,20 +38,19 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-15 after phase 7 made parameter arity, module exports, arrays,
-# and absence explicit. The core grammar was already canonical; the restriction
-# matrix now names every removed spelling and its refusal.
+# Pinned 2026-08-15 after phase 7 removed declaration destructuring. The core
+# grammar now has one named binding form, the policy no longer advertises the
+# two obsolete canonicalization diagnostics, and the restriction matrix names
+# both declaration patterns and renames.
 EXPECTED_PROFILE="zts-advanced-1"
-EXPECTED_POLICY_HASH="807d3613e3c934f785eb0c310380296deaeca0c1d277028186ca4d3a2f5e1ac4"
+EXPECTED_POLICY_HASH="dd420c0ffb35e1b43ea17e4a79765169da292dd2a9417d9819429f0eceb59e3c"
 # Moved when JSX was removed from the core grammar. TSX is now a separately
 # hashed frontend that lowers into this exact core identity.
-EXPECTED_GRAMMAR_HASH="8e832800e21e352785bcbcb230a3f787c1314219fa02f753ab10ced37eee5d5b"
+EXPECTED_GRAMMAR_HASH="38ef6da750271d8375cbc3ee41bf58ea3cb438283d26e5ada921e12294aeeafd"
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
-EXPECTED_FRONTEND_GRAMMAR_HASH="67b7ec97cc658df59440c087d46e3b386f0863c3f461d12512ee4f458a757763"
-EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
-# Moved when phase 7 added the debugger, empty-statement, and when-wildcard
-# rows, each enforced by an exact ZTS001 parser refusal.
-EXPECTED_RESTRICTION_HASH="8e9d071f54297fad4419e84e14d5b05f5ff084eca559e59439156232969c9f93"
+EXPECTED_FRONTEND_GRAMMAR_HASH="345013589d975ededd034acf6ec7773c3fea12f72029536e1c4c06e9269092a3"
+EXPECTED_IDIOM_HASH="c145df3cbeeb35ab53fcb30a86ce331ce78de25ef0da8292f03526f1ce4cdd43"
+EXPECTED_RESTRICTION_HASH="9d1d96ebb24af995dcc56ededa779d21a51015f2147f1029c12fdeb4ba981cff"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

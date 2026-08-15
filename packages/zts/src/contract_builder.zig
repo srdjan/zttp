@@ -1023,9 +1023,6 @@ pub const ContractBuilder = struct {
         while (idx < hole_node) : (idx += 1) {
             if (self.ir_view.getTag(idx) != .var_decl) continue;
             const vd = self.ir_view.getVarDecl(idx) orelse continue;
-            // Destructuring binds names this walk cannot name: the binding on
-            // the declaration is a placeholder for the whole pattern.
-            if (vd.pattern != null_node) continue;
             if (!self.subtreeContains(owner.body_node, idx)) continue;
             const name = self.resolveAtomName(vd.binding.name_atom) orelse continue;
             try self.appendScopeBinding(summary, name, vd.binding.scope_id, vd.binding.name_atom);
@@ -1612,7 +1609,7 @@ pub const ContractBuilder = struct {
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(root) orelse return false;
-                return self.subtreeContains(decl.pattern, target) or self.subtreeContains(decl.init, target);
+                return self.subtreeContains(decl.init, target);
             },
             .if_stmt => {
                 const stmt = self.ir_view.getIfStmt(root) orelse return false;
@@ -1622,8 +1619,7 @@ pub const ContractBuilder = struct {
             },
             .for_of_stmt => {
                 const stmt = self.ir_view.getForIter(root) orelse return false;
-                return self.subtreeContains(stmt.pattern, target) or
-                    self.subtreeContains(stmt.iterable, target) or
+                return self.subtreeContains(stmt.iterable, target) or
                     self.subtreeContains(stmt.body, target);
             },
             .binary_op => {

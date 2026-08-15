@@ -576,6 +576,22 @@ pub const entries = [_]RestrictionEntry{
         .note = "write `default:`",
         .enforced_by = &.{"ZTS001"},
     },
+    .{
+        .id = "restriction.declaration-destructuring",
+        .feature = "object or array declaration destructuring",
+        .boundary = "one named binding form with explicit reads",
+        .nature = .language_simplicity,
+        .note = "bind the source to a name, then introduce values with explicit member or index reads",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.destructuring-rename",
+        .feature = "destructuring rename",
+        .boundary = "binding names are visible at their read sites",
+        .nature = .canonical_simplicity,
+        .note = "write an explicit member read into the desired local name",
+        .enforced_by = &.{"ZTS001"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

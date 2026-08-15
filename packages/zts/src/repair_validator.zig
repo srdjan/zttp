@@ -20,10 +20,9 @@
 //! them? M4, declared law, for every one of them, and the catalog says why the
 //! other four do not. M1 and M2 were built and measured: layout identity prints
 //! both sides and compares bytes, parse identity compares trees, and neither
-//! discharged a single row. Every rewrite here changes the tree -
-//! `flatten_destructure` turns one statement into two, `drop_unused_index_alias`
-//! turns two into one - so parse identity refuses them all, and layout identity
-//! is strictly weaker than parse identity. Their case is the rewrite that moves
+//! discharged a single row. Every rewrite here changes the tree, so parse
+//! identity refuses them all, and layout identity is strictly weaker than parse
+//! identity. Their case is the rewrite that moves
 //! a token without moving structure, which is the semicolon spec 5.5 forbids
 //! ASI from inserting; the code went out with the measurement rather than being
 //! carried against a rewrite that does not exist yet. M3 needs the semantic
@@ -32,15 +31,8 @@
 //! and whose published shape - a law plus "the law's own preconditions carried
 //! into the row's precondition column" - is the shape these rewrites need.
 //!
-//! Where a precondition comes from is part of the row. For most it is the
-//! checker: the rewrite is sound exactly where the diagnostic that requested it
-//! fired. For the two multi-line laws it is not, because the fact that makes
-//! them equivalences - no live binding is captured, no dropped name is read -
-//! is one the producer established for itself, and a validator that trusted the
-//! producer's own check would be checking nothing. Those two re-derive their
-//! preconditions here, from the original source, conservatively: a refusal
-//! costs a repair, and an acceptance that should have been a refusal grades a
-//! program-changing edit as an equivalence.
+//! Where a precondition comes from is part of the row. It is the checker: the
+//! rewrite is sound exactly where the diagnostic that requested it fired.
 //!
 //! `status` is what keeps the advertisement honest. A row may name M4 and still
 //! be `.planned`, meaning the method is right but nothing runs it yet. Only an
@@ -208,18 +200,6 @@ pub const rows = [_]Row{
         .precondition = null,
     },
     .{
-        .intent = .flatten_destructure,
-        .method = .declared_law,
-        .status = .implemented,
-        .precondition = "the destructure binds exactly one field through one level, and nothing else in the file binds the name the rewrite introduces",
-    },
-    .{
-        .intent = .drop_unused_index_alias,
-        .method = .declared_law,
-        .status = .implemented,
-        .precondition = "neither the pair binding nor the index alias is read after the loop header",
-    },
-    .{
         .intent = .widen_signature_drop_spread,
         .method = .contract_equivalence,
         .status = .planned,
@@ -376,11 +356,6 @@ fn dischargeParseIdentity(
 
 /// M4, declared law: re-derive the rewrite from the original and require the
 /// edit to be exactly it.
-///
-/// Two skeletons, because the rewrites come in two shapes. A line-local law
-/// replaces one line with one line. A region law replaces a run of lines with
-/// a different-length run, which is what flattening a destructure (one line
-/// becomes two) and collapsing an index alias (two become one) do.
 fn dischargeDeclaredLaw(
     intent: RepairIntent,
     original: []const u8,
@@ -388,7 +363,6 @@ fn dischargeDeclaredLaw(
     line: u32,
 ) Discharge {
     if (lawFor(intent)) |law| return dischargeLineLocal(law, original, repaired, line);
-    if (regionLawFor(intent)) |law| return dischargeRegionLocal(law, original, repaired, line);
     return .no_validator;
 }
 
@@ -399,27 +373,6 @@ fn dischargeDeclaredLaw(
 /// says another, and splicing on a partial match is the failure a validator is
 /// here to prevent.
 const LawFn = *const fn (before: []const u8, buf: []u8) ?[]const u8;
-
-/// A law over a run of lines rather than one line.
-///
-/// `source` is the whole original file, which these laws need: their
-/// preconditions are facts about the rest of the program - whether a name the
-/// rewrite introduces is already bound, whether a name it drops is read later -
-/// and neither is visible in the region alone.
-const RegionLawFn = *const fn (
-    source: []const u8,
-    region: Region,
-    before: []const u8,
-    buf: []u8,
-) ?[]const u8;
-
-fn regionLawFor(intent: RepairIntent) ?RegionLawFn {
-    return switch (intent) {
-        .flatten_destructure => lawFlattenDestructure,
-        .drop_unused_index_alias => lawDropUnusedIndexAlias,
-        else => null,
-    };
-}
 
 fn lawFor(intent: RepairIntent) ?LawFn {
     return switch (intent) {
@@ -468,118 +421,6 @@ fn dischargeLineLocal(
         return .{ .not_law_shape = "the new line is not the law's rewrite of the old one" };
     }
     return .equivalent;
-}
-
-/// The run of lines an edit changed, as 1-based line numbers and counts.
-const Region = struct {
-    /// First changed line, 1-based.
-    first_line: u32,
-    /// How many lines the region covers in the original.
-    original_lines: u32,
-    /// How many it covers in the repaired source.
-    repaired_lines: u32,
-};
-
-/// The region skeleton: the same two obligations as `dischargeLineLocal`, for
-/// a rewrite whose output is a different number of lines than its input.
-fn dischargeRegionLocal(
-    law: RegionLawFn,
-    original: []const u8,
-    repaired: []const u8,
-    line: u32,
-) Discharge {
-    const region = changedRegion(original, repaired) orelse
-        return .{ .not_law_shape = "the edit changes nothing" };
-    if (region.first_line != line) {
-        return .{ .not_law_shape = "the changed region does not start at the line the diagnostic reported" };
-    }
-
-    const before = lineSpan(original, region.first_line, region.original_lines) orelse
-        return .{ .not_law_shape = "the reported region runs past the end of the original" };
-    const after = lineSpan(repaired, region.first_line, region.repaired_lines) orelse
-        return .{ .not_law_shape = "the reported region runs past the end of the repaired source" };
-
-    var buf: [8192]u8 = undefined;
-    const expected = law(original, region, before, &buf) orelse
-        return .{ .not_law_shape = "the original region is not the shape this law rewrites, or its precondition does not hold" };
-
-    if (!std.mem.eql(u8, expected, after)) {
-        return .{ .not_law_shape = "the new region is not the law's rewrite of the old one" };
-    }
-    return .equivalent;
-}
-
-/// The one contiguous run of lines that differs, or null when nothing does.
-///
-/// Computed as the lines between the common prefix and the common suffix, so
-/// an edit that adds or removes lines is located as precisely as one that
-/// replaces them. An edit that touches two separate places collapses into one
-/// region spanning both, and the law then refuses it for not being its shape.
-/// Both scans walk the sources rather than materializing a line table: this
-/// runs on the request path, and one array per side big enough for any handler
-/// is a quarter megabyte of stack for a comparison that needs none.
-fn changedRegion(original: []const u8, repaired: []const u8) ?Region {
-    const a_count = countLines(original);
-    const b_count = countLines(repaired);
-
-    var prefix: u32 = 0;
-    var a_it = std.mem.splitScalar(u8, original, '\n');
-    var b_it = std.mem.splitScalar(u8, repaired, '\n');
-    while (prefix < a_count and prefix < b_count) : (prefix += 1) {
-        if (!std.mem.eql(u8, a_it.next().?, b_it.next().?)) break;
-    }
-    if (prefix == a_count and prefix == b_count) return null;
-
-    var suffix: u32 = 0;
-    var a_end: usize = original.len;
-    var b_end: usize = repaired.len;
-    while (suffix < a_count - prefix and suffix < b_count - prefix) : (suffix += 1) {
-        const a_start = if (std.mem.lastIndexOfScalar(u8, original[0..a_end], '\n')) |i| i + 1 else 0;
-        const b_start = if (std.mem.lastIndexOfScalar(u8, repaired[0..b_end], '\n')) |i| i + 1 else 0;
-        if (!std.mem.eql(u8, original[a_start..a_end], repaired[b_start..b_end])) break;
-        a_end = if (a_start == 0) 0 else a_start - 1;
-        b_end = if (b_start == 0) 0 else b_start - 1;
-    }
-
-    return .{
-        .first_line = prefix + 1,
-        .original_lines = a_count - prefix - suffix,
-        .repaired_lines = b_count - prefix - suffix,
-    };
-}
-
-/// Lines are newline-separated, so a source with no newline is one line and a
-/// source ending in one has a final empty line. `lineSpan` counts the same way.
-fn countLines(source: []const u8) u32 {
-    var n: u32 = 1;
-    for (source) |c| {
-        if (c == '\n') n += 1;
-    }
-    return n;
-}
-
-/// The bytes of `count` lines starting at 1-based `first`, without the newline
-/// that ends the last of them. A zero count is the empty slice at that point,
-/// which is what a pure insertion or deletion needs.
-fn lineSpan(source: []const u8, first: u32, count: u32) ?[]const u8 {
-    if (first == 0) return null;
-    var start: usize = 0;
-    var n: u32 = 1;
-    while (n < first) : (n += 1) {
-        start = (std.mem.indexOfScalarPos(u8, source, start, '\n') orelse return null) + 1;
-    }
-    if (count == 0) return source[start..start];
-    var end = start;
-    var seen: u32 = 0;
-    while (seen < count) : (seen += 1) {
-        const nl = std.mem.indexOfScalarPos(u8, source, end, '\n');
-        if (seen + 1 == count) {
-            end = nl orelse source.len;
-            break;
-        }
-        end = (nl orelse return null) + 1;
-    }
-    return source[start..end];
 }
 
 // ---------------------------------------------------------------------------
@@ -721,365 +562,6 @@ fn lawArrowToFunction(before: []const u8, buf: []u8) ?[]const u8 {
         std.fmt.bufPrint(buf, "{s}function {s}({s}) {{ return {s}; }}", .{ export_prefix, name, signature, body }) catch null
     else
         std.fmt.bufPrint(buf, "{s}function {s}{s} {{ return {s}; }}", .{ export_prefix, name, signature, body }) catch null;
-}
-
-/// ZTS618. `const {outer: {inner}} = rhs;` becomes
-/// `const {outer} = rhs;` followed by `const {inner} = outer;`.
-///
-/// The rewrite introduces a binding the program did not have, which is the
-/// only way it can stop being an equivalence: if `outer` already names
-/// something the rest of the file uses, the new declaration shadows it. That
-/// precondition is re-derived here rather than taken from the producer, and it
-/// is deliberately conservative - any binding of the name anywhere outside the
-/// rewritten line refuses, whether or not it is in scope, and the scan works in
-/// logical lines so a declaration head or parameter list broken across physical
-/// lines cannot hide one.
-fn lawFlattenDestructure(
-    source: []const u8,
-    region: Region,
-    before: []const u8,
-    buf: []u8,
-) ?[]const u8 {
-    if (region.original_lines != 1 or region.repaired_lines != 2) return null;
-
-    const indent_len = leadingBlankLen(before);
-    const rest = before[indent_len..];
-    if (!std.mem.startsWith(u8, rest, "const ")) return null;
-
-    const open = std.mem.indexOfScalar(u8, before, '{') orelse return null;
-    const close = matchingBrace(before, open) orelse return null;
-    const eq = topLevelEquals(before, close + 1) orelse return null;
-
-    const rhs = trimBlank(before[eq + 1 ..]);
-    if (rhs.len == 0) return null;
-    // An expression that does not finish on this line would be truncated by a
-    // two-line replacement, so the law does not describe it.
-    if (!delimitersBalanced(rhs)) return null;
-
-    const pattern = trimBlank(before[open + 1 .. close]);
-    const colon = topLevelColon(pattern) orelse return null;
-    const outer = trimBlank(pattern[0..colon]);
-    if (!isSimpleIdentifier(outer)) return null;
-
-    const nested = trimBlank(pattern[colon + 1 ..]);
-    if (nested.len < 2 or nested[0] != '{' or nested[nested.len - 1] != '}') return null;
-    const inner = trimBlank(nested[1 .. nested.len - 1]);
-    if (!isFlatIdentifierList(inner)) return null;
-
-    // The precondition. `outer` becomes a binding here, so nothing else may
-    // bind it.
-    if (bindsOutsideRegion(source, region, outer)) return null;
-
-    const indent = before[0..indent_len];
-    return std.fmt.bufPrint(buf, "{s}const {{{s}}} = {s}\n{s}const {{{s}}} = {s};", .{
-        indent, outer, rhs, indent, inner, outer,
-    }) catch null;
-}
-
-/// ZTS619. A for-of over `xs.entries()` whose body opens by destructuring the
-/// pair into `[index, value]` becomes a for-of over `xs` binding `value`.
-///
-/// Two names disappear: the pair and the index. The rewrite is an equivalence
-/// only where neither is read afterwards, and both halves are re-derived here.
-/// The checker establishes the index is unread inside the loop, and nothing
-/// establishes the pair is - the producer checks that for itself, which is
-/// exactly the check a validator must not borrow.
-fn lawDropUnusedIndexAlias(
-    source: []const u8,
-    region: Region,
-    before: []const u8,
-    buf: []u8,
-) ?[]const u8 {
-    if (region.original_lines != 2 or region.repaired_lines != 1) return null;
-
-    const split = std.mem.indexOfScalar(u8, before, '\n') orelse return null;
-    const for_line = before[0..split];
-    const destructure_line = before[split + 1 ..];
-
-    const indent_len = leadingBlankLen(for_line);
-    const indent = for_line[0..indent_len];
-    var rest = for_line[indent_len..];
-
-    const prefix = "for (const ";
-    if (!std.mem.startsWith(u8, rest, prefix)) return null;
-    rest = rest[prefix.len..];
-    const binding_end = identEnd(rest) orelse return null;
-    const binding = rest[0..binding_end];
-    rest = trimLeadingBlank(rest[binding_end..]);
-    if (!std.mem.startsWith(u8, rest, "of ")) return null;
-    rest = trimLeadingBlank(rest["of ".len..]);
-
-    const entries = std.mem.lastIndexOf(u8, rest, ".entries()") orelse return null;
-    const iterable = trimBlank(rest[0..entries]);
-    if (iterable.len == 0) return null;
-    var tail = trimLeadingBlank(rest[entries + ".entries()".len ..]);
-    if (tail.len == 0 or tail[0] != ')') return null;
-    tail = trimLeadingBlank(tail[1..]);
-    if (tail.len == 0 or tail[0] != '{') return null;
-    if (trimBlank(tail[1..]).len != 0) return null;
-
-    // `const [index, value] = binding;`
-    var d = trimLeadingBlank(destructure_line);
-    if (!std.mem.startsWith(u8, d, "const [")) return null;
-    d = d["const [".len..];
-    const bracket = std.mem.indexOfScalar(u8, d, ']') orelse return null;
-    const elements = d[0..bracket];
-    const comma = std.mem.indexOfScalar(u8, elements, ',') orelse return null;
-    if (std.mem.indexOfScalarPos(u8, elements, comma + 1, ',') != null) return null;
-    const index_name = trimBlank(elements[0..comma]);
-    const value_name = trimBlank(elements[comma + 1 ..]);
-    if (!isSimpleIdentifier(index_name) or !isSimpleIdentifier(value_name)) return null;
-
-    var after_bracket = trimLeadingBlank(d[bracket + 1 ..]);
-    if (after_bracket.len == 0 or after_bracket[0] != '=') return null;
-    after_bracket = std.mem.trim(u8, after_bracket[1..], " \t\r;");
-    if (!std.mem.eql(u8, after_bracket, binding)) return null;
-
-    // The preconditions. Both dropped names must be dead from here on.
-    if (readAfterRegion(source, region, binding)) return null;
-    if (readAfterRegion(source, region, index_name)) return null;
-
-    return std.fmt.bufPrint(buf, "{s}for (const {s} of {s}) {{", .{
-        indent, value_name, iterable,
-    }) catch null;
-}
-
-/// True when any binding outside the changed region binds `ident`.
-///
-/// The unit is the logical line, not the physical one: a declaration head or a
-/// parameter list broken across lines is examined as the one declaration it is.
-/// A physical-line scan sees `const {`, then `  user,`, then `} = cfg;` and
-/// finds no line that declares `user`, and the same for a parameter on its own
-/// line - so it answers "nothing binds this" for two forms that do, and the
-/// caller then grades a capture as an equivalence.
-///
-/// Over-approximates otherwise. It covers the binding forms the language has -
-/// `const`/`let` declarations including destructuring heads, arrow and function
-/// parameters, a for-of binding, and an import specifier - and it does not ask
-/// whether the binding is in scope at the rewrite site. A refusal costs a
-/// repair; a miss is unsound.
-pub fn bindsOutsideLines(
-    source: []const u8,
-    first_line: u32,
-    line_count: u32,
-    ident: []const u8,
-) bool {
-    var i: usize = 0;
-    var line_no: u32 = 1;
-    while (i < source.len) {
-        const start_line = line_no;
-        const end = logicalLineEnd(source, i, &line_no);
-        const inside = start_line >= first_line and start_line < first_line + line_count;
-        if (!inside and lineBinds(source[i..end], ident)) return true;
-        if (end >= source.len) break;
-        line_no += 1;
-        i = end + 1;
-    }
-    return false;
-}
-
-fn bindsOutsideRegion(source: []const u8, region: Region, ident: []const u8) bool {
-    return bindsOutsideLines(source, region.first_line, region.original_lines, ident);
-}
-
-/// Index of the newline that ends the logical line starting at `start`, or the
-/// length of the source. `line_no` is advanced past every newline swallowed.
-///
-/// A line continues into the next while a `(` or `[` it opened is still open,
-/// and - only for a declaration head - while a `{` is. The brace case is
-/// restricted that way because an unrestricted one would swallow a function
-/// body whole: `function f() {` opens a brace that closes pages later, and the
-/// whole body would then read as one declaration naming everything in it.
-fn logicalLineEnd(source: []const u8, start: usize, line_no: *u32) usize {
-    const first_line_end = std.mem.indexOfScalarPos(u8, source, start, '\n') orelse source.len;
-    const head = trimLeadingBlank(source[start..first_line_end]);
-    const decl_head = std.mem.startsWith(u8, head, "const ") or
-        std.mem.startsWith(u8, head, "let ") or
-        std.mem.startsWith(u8, head, "var ") or
-        std.mem.startsWith(u8, head, "import ") or
-        std.mem.startsWith(u8, head, "export const ") or
-        std.mem.startsWith(u8, head, "export let ");
-
-    var round: i32 = 0;
-    var curly: i32 = 0;
-    var i = start;
-    while (i < source.len) : (i += 1) {
-        switch (source[i]) {
-            // Bounded to the line: a literal that does not close on its own
-            // line is malformed, and following it further would swallow lines
-            // whose bindings this scan exists to find.
-            '"', '\'', '`' => {
-                const line_end = std.mem.indexOfScalarPos(u8, source, i, '\n') orelse source.len;
-                if (skipStringLiteral(source[0..line_end], i)) |close| i = close;
-            },
-            '(', '[' => round += 1,
-            ')', ']' => {
-                if (round > 0) round -= 1;
-            },
-            '{' => curly += 1,
-            '}' => {
-                if (curly > 0) curly -= 1;
-            },
-            '\n' => {
-                if (round == 0 and (curly == 0 or !decl_head)) return i;
-                line_no.* += 1;
-            },
-            else => {},
-        }
-    }
-    return source.len;
-}
-
-/// True when `ident` appears as a token on any line after the changed region.
-fn readAfterRegion(source: []const u8, region: Region, ident: []const u8) bool {
-    var it = std.mem.splitScalar(u8, source, '\n');
-    var n: u32 = 0;
-    while (it.next()) |line| {
-        n += 1;
-        if (n < region.first_line + region.original_lines) continue;
-        if (tokenAppears(line, ident)) return true;
-    }
-    return false;
-}
-
-/// True when the logical line declares `ident`. Written against a span that may
-/// carry newlines: every scan below is by index, not by line.
-fn lineBinds(line: []const u8, ident: []const u8) bool {
-    var t = trimLeadingBlank(line);
-    if (std.mem.startsWith(u8, t, "export ")) t = trimLeadingBlank(t["export ".len..]);
-
-    // `const x = ...`, `let {a, b} = ...`: everything left of the binding `=`.
-    inline for (.{ "const ", "let " }) |kw| {
-        if (std.mem.startsWith(u8, t, kw)) {
-            const eq = topLevelEquals(t, kw.len) orelse t.len;
-            if (tokenAppears(t[kw.len..eq], ident)) return true;
-        }
-    }
-    // An arrow's parameters sit left of the `=>`, whichever declaration the
-    // line opens with.
-    if (std.mem.indexOf(u8, t, "=>")) |arrow| {
-        if (tokenAppears(t[0..arrow], ident)) return true;
-    }
-    // A function's name and parameter list.
-    if (std.mem.indexOf(u8, t, "function ")) |at| {
-        if (tokenAppears(t[at..], ident)) return true;
-    }
-    // A for-of binding.
-    if (std.mem.indexOf(u8, t, "for (")) |at| {
-        const head = t[at..];
-        const of = std.mem.indexOf(u8, head, " of ") orelse head.len;
-        if (tokenAppears(head[0..of], ident)) return true;
-    }
-    // An import clause binds every name it lists.
-    if (std.mem.startsWith(u8, t, "import ")) {
-        if (tokenAppears(t, ident)) return true;
-    }
-    return false;
-}
-
-fn tokenAppears(text: []const u8, ident: []const u8) bool {
-    if (ident.len == 0) return false;
-    var i: usize = 0;
-    while (i < text.len) {
-        if (!isIdentStart(text[i])) {
-            i += 1;
-            continue;
-        }
-        const start = i;
-        i += 1;
-        while (i < text.len and isIdentContinue(text[i])) i += 1;
-        if (std.mem.eql(u8, text[start..i], ident)) return true;
-    }
-    return false;
-}
-
-fn identEnd(s: []const u8) ?usize {
-    if (s.len == 0 or !isIdentStart(s[0])) return null;
-    var i: usize = 1;
-    while (i < s.len and isIdentContinue(s[i])) i += 1;
-    return i;
-}
-
-fn isSimpleIdentifier(s: []const u8) bool {
-    if (s.len == 0 or !isIdentStart(s[0])) return false;
-    for (s[1..]) |c| {
-        if (!isIdentContinue(c)) return false;
-    }
-    return true;
-}
-
-/// `a, b, c` - the only inner pattern the flatten law rewrites, because a
-/// nested or renamed field would need a second level of rewriting.
-fn isFlatIdentifierList(s: []const u8) bool {
-    if (s.len == 0) return false;
-    var it = std.mem.splitScalar(u8, s, ',');
-    while (it.next()) |part| {
-        if (!isSimpleIdentifier(trimBlank(part))) return false;
-    }
-    return true;
-}
-
-fn trimLeadingBlank(s: []const u8) []const u8 {
-    return s[leadingBlankLen(s)..];
-}
-
-/// Index of the `}` closing the `{` at `open`, within one line, ignoring
-/// brackets inside string literals.
-fn matchingBrace(line: []const u8, open: usize) ?usize {
-    if (open >= line.len or line[open] != '{') return null;
-    var depth: i32 = 0;
-    var i = open;
-    while (i < line.len) : (i += 1) {
-        switch (line[i]) {
-            '"', '\'', '`' => i = skipStringLiteral(line, i) orelse return null,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if (depth == 0) return i;
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-/// Index of the first `=` at nesting depth zero at or after `from`, skipping
-/// `==`, `=>`, and the comparison operators.
-fn topLevelEquals(line: []const u8, from: usize) ?usize {
-    var depth: i32 = 0;
-    var i = from;
-    while (i < line.len) : (i += 1) {
-        switch (line[i]) {
-            '"', '\'', '`' => i = skipStringLiteral(line, i) orelse return null,
-            '{', '[', '(' => depth += 1,
-            '}', ']', ')' => depth -= 1,
-            '=' => {
-                if (depth != 0) continue;
-                if (i + 1 < line.len and (line[i + 1] == '=' or line[i + 1] == '>')) continue;
-                if (i > from and (line[i - 1] == '=' or line[i - 1] == '!' or line[i - 1] == '<' or line[i - 1] == '>')) continue;
-                return i;
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-/// Index of the first `:` at nesting depth zero, which is the field separator
-/// of a one-level destructuring pattern.
-fn topLevelColon(pattern: []const u8) ?usize {
-    var depth: i32 = 0;
-    var i: usize = 0;
-    while (i < pattern.len) : (i += 1) {
-        switch (pattern[i]) {
-            '"', '\'', '`' => i = skipStringLiteral(pattern, i) orelse return null,
-            '{', '[', '(' => depth += 1,
-            '}', ']', ')' => depth -= 1,
-            ':' => if (depth == 0) return i,
-            else => {},
-        }
-    }
-    return null;
 }
 
 /// Index of the closing quote of the literal opening at `start`, or null when
@@ -1401,12 +883,11 @@ test "every gradable row has a law, and every law has a gradable row" {
     // `implemented` without a law behind it, and a law cannot exist for a row
     // that still says `planned`. Either drift is a lie in a published field.
     //
-    // "A law" means either skeleton: a line-local one, or the region-local one
-    // the two multi-line rewrites use. A row served by neither and still
-    // claiming M4 is the drift being caught.
+    // A row without a line-local law that still claims M4 is the drift being
+    // caught.
     var gradable_count: usize = 0;
     for (rows) |row| {
-        const has_law = lawFor(row.intent) != null or regionLawFor(row.intent) != null;
+        const has_law = lawFor(row.intent) != null;
         if (row.gradable()) {
             gradable_count += 1;
             // What `implemented` has to mean: `dischargeByMethod` reaches
@@ -1436,9 +917,9 @@ test "every gradable row has a law, and every law has a gradable row" {
             return error.TestFailed;
         }
     }
-    // Eight, all under M4. The one M2 row is `.planned` while its pipeline is
+    // Six, all under M4. The one M2 row is `.planned` while its pipeline is
     // withdrawn, so it is not gradable and advertises nothing.
-    try std.testing.expectEqual(@as(usize, 8), gradable_count);
+    try std.testing.expectEqual(@as(usize, 6), gradable_count);
 }
 
 test "the withdrawn semicolon row advertises nothing" {
@@ -1687,223 +1168,4 @@ test "no planned row can advertise a repair" {
         const answer = try validateApplication(std.testing.allocator, row.intent, "const a = 1;\n", "const a = 1;\n", 1);
         try std.testing.expect(answer == .no_validator);
     }
-}
-
-test "a nested destructure flattens, and a capture is refused" {
-    const original =
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(name);
-        \\}
-    ;
-    const repaired =
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user} = payload;
-        \\  const {name} = user;
-        \\  return Response.text(name);
-        \\}
-    ;
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 3),
-    );
-
-    // The precondition, re-derived here rather than trusted: the rewrite
-    // introduces a binding named `user`, and this file already has one. The
-    // two-statement form would shadow it, which is a different program.
-    const captures =
-        \\const user = "global";
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(name);
-        \\}
-    ;
-    const captured =
-        \\const user = "global";
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user} = payload;
-        \\  const {name} = user;
-        \\  return Response.text(name);
-        \\}
-    ;
-    const refused = try validateApplication(std.testing.allocator, .flatten_destructure, captures, captured, 4);
-    try std.testing.expect(refused == .not_law_shape);
-}
-
-test "an unused index alias collapses, and a live name is refused" {
-    const original =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    return Response.text(item);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    const repaired =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const item of items) {
-        \\    return Response.text(item);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    try std.testing.expectEqual(
-        Discharge.equivalent,
-        try validateApplication(std.testing.allocator, .drop_unused_index_alias, original, repaired, 3),
-    );
-
-    // The index alias is what the loop drops. A body that reads it is left
-    // naming something the rewrite deleted, so the law refuses even though the
-    // text of the header rewrite is exactly right.
-    const reads_index =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    return Response.text(item + _i);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    const dropped_index =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const item of items) {
-        \\    return Response.text(item + _i);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    const refused_index = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_index, dropped_index, 3);
-    try std.testing.expect(refused_index == .not_law_shape);
-
-    // Same for the pair binding, which nothing but the producer ever checked.
-    const reads_pair =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    return Response.text(item + pair[0]);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    const dropped_pair =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const item of items) {
-        \\    return Response.text(item + pair[0]);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    const refused_pair = try validateApplication(std.testing.allocator, .drop_unused_index_alias, reads_pair, dropped_pair, 3);
-    try std.testing.expect(refused_pair == .not_law_shape);
-}
-
-test "a region edit outside the reported line is refused" {
-    const original =
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(name);
-        \\}
-    ;
-    const repaired =
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user} = payload;
-        \\  const {name} = user;
-        \\  return Response.text(name);
-        \\}
-    ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
-    try std.testing.expect(answer == .not_law_shape);
-}
-
-test "a binding wrapped across lines still refuses the flatten" {
-    // The capture the line-oriented scan used to miss. `user` is bound by a
-    // destructuring head split over three lines, so no single line reads as a
-    // declaration of it, and the rewrite's `const {user} = payload;` shadows
-    // the outer binding: `name + user` would read the new object rather than
-    // the one line 2 bound.
-    const original =
-        \\const {
-        \\  user,
-        \\} = config;
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(name + user);
-        \\}
-    ;
-    const repaired =
-        \\const {
-        \\  user,
-        \\} = config;
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user} = payload;
-        \\  const {name} = user;
-        \\  return Response.text(name + user);
-        \\}
-    ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 6);
-    try std.testing.expect(answer == .not_law_shape);
-}
-
-test "a parameter list wrapped across lines still refuses the flatten" {
-    // The same capture through the other multi-line form: the parameter sits
-    // on its own line, so the line carrying `function` does not name it.
-    const original =
-        \\function outer(
-        \\  user: string,
-        \\): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(name + user);
-        \\}
-    ;
-    const repaired =
-        \\function outer(
-        \\  user: string,
-        \\): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user} = payload;
-        \\  const {name} = user;
-        \\  return Response.text(name + user);
-        \\}
-    ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 5);
-    try std.testing.expect(answer == .not_law_shape);
-}
-
-test "an object-literal right-hand side that runs past the line refuses" {
-    // `delimitersBalanced` used to count only `()` and `[]`, so an object
-    // literal continuing onto the next line read as finished and the law
-    // spliced `const {name} = user;` into the middle of it.
-    const original =
-        \\function handler(req: Request): Response {
-        \\  const {user: {name}} = { user: { name: "ada" },
-        \\    other: 1 };
-        \\  return Response.text(name);
-        \\}
-    ;
-    const repaired =
-        \\function handler(req: Request): Response {
-        \\  const {user} = { user: { name: "ada" },
-        \\  const {name} = user;
-        \\    other: 1 };
-        \\  return Response.text(name);
-        \\}
-    ;
-    const answer = try validateApplication(std.testing.allocator, .flatten_destructure, original, repaired, 2);
-    try std.testing.expect(answer == .not_law_shape);
 }

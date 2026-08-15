@@ -67,6 +67,8 @@ reach clients through the version-2 `restrictions` operation.
 | `debugger` statement | runtime-observer-free execution | `language_simplicity` | `ZTS001` |
 | empty statement | every statement names an operation | `language_simplicity` | `ZTS001` |
 | `when _:` match arm | one explicit catch-all spelling | `canonical_simplicity` | `ZTS001` |
+| object or array declaration destructuring | one named binding form with explicit reads | `language_simplicity` | `ZTS001` |
+| destructuring rename | binding names are visible at their read sites | `canonical_simplicity` | `ZTS001` |
 
 ## Rows No Diagnostic Rejects
 
@@ -125,3 +127,5 @@ Per-restriction rationale, one sentence each.
 - **`debugger` statement** - remove the statement
 - **empty statement** - remove the standalone semicolon
 - **`when _:` match arm** - write `default:`
+- **object or array declaration destructuring** - bind the source to a name, then introduce values with explicit member or index reads
+- **destructuring rename** - write an explicit member read into the desired local name

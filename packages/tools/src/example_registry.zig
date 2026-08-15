@@ -125,26 +125,6 @@ pub const examples = [_]Example{
         ,
     },
     .{
-        .feature = "destructuring",
-        .evidence = .{ .node = .object_pattern },
-        .source =
-        \\
-        \\structural Guard<T> = Proof<T, "state_isolated">;
-        \\
-        \\structural Point = { x: number, y: number };
-        \\
-        \\function origin(): Point {
-        \\  return { x: 1, y: 2 };
-        \\}
-        \\
-        \\export function handler(req: Request): Guard<Response> {
-        \\  const { x, y } = origin();
-        \\  return Response.json({ sum: x + y });
-        \\}
-        \\
-        ,
-    },
-    .{
         .feature = "spread/rest",
         .evidence = .{ .node = .object_spread },
         .source =

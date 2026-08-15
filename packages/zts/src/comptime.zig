@@ -328,7 +328,6 @@ pub const ComptimeEvaluator = struct {
             .labeled_stmt,
             .function_decl,
             .array_pattern,
-            .object_pattern,
             .pattern_element,
             .pattern_rest,
             .pattern_default,

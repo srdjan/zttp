@@ -138,31 +138,18 @@ function greet(name: string | undefined): string {
 }
 greet(undefined);
 ```
-```
 
-### Nested destructuring (ZTS618)
+### Declaration binding reads
 ```ts
-// before
-const {user: {name}} = payload;
-
-// after
-const {user} = payload;
-const {name} = user;
-```
-
-### Unused index alias in `for...of` (ZTS619)
-```ts
-// before
-for (const pair of items.entries()) {
-  const [_i, item] = pair;
-  use(item);
-}
-
-// after
+const user = payload.user;
+const name = user.name;
 for (const item of items) {
   use(item);
 }
 ```
+
+Do not use object or array declaration destructuring, including renamed
+bindings. Bind one source value and read fields or indexed elements explicitly.
 
 ### Boolean compared to a boolean literal (ZTS620)
 ```ts

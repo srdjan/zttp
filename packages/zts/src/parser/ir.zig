@@ -209,9 +209,8 @@ pub const NodeTag = enum(u8) {
     // Declarations
     function_decl,
 
-    // Patterns (for destructuring)
+    // Patterns
     array_pattern,
-    object_pattern,
     pattern_element,
     pattern_rest,
     pattern_default,
@@ -423,7 +422,6 @@ pub const Node = struct {
 
     pub const VarDecl = struct {
         binding: BindingRef,
-        pattern: NodeIndex, // For destructuring, null_node for simple
         init: NodeIndex, // Initializer, null_node if none
         kind: VarKind,
 
@@ -449,7 +447,6 @@ pub const Node = struct {
     pub const ForIterStmt = struct {
         is_for_in: bool, // false = for-of
         binding: BindingRef,
-        pattern: NodeIndex, // For destructuring, null_node for simple
         iterable: NodeIndex,
         body: NodeIndex,
         is_const: bool, // const vs let/var
@@ -1144,12 +1141,7 @@ pub const IRStore = struct {
                 const binding_packed = (@as(u32, v.binding.scope_id) << 16) | v.binding.slot;
                 const kind_and_binding_kind = @as(u32, @intFromEnum(v.kind)) |
                     (@as(u32, @intFromEnum(v.binding.kind)) << 2);
-                const extra_start = try self.addExtra(&.{
-                    binding_packed,
-                    v.pattern,
-                    v.init,
-                    kind_and_binding_kind,
-                });
+                const extra_start = try self.addExtra(&.{ binding_packed, v.init, kind_and_binding_kind });
                 break :blk self.addNode(.function_decl, loc, .{ .a = extra_start, .b = 0 });
             },
 
@@ -1167,16 +1159,11 @@ pub const IRStore = struct {
             // --- Statements ---
             .var_decl => blk: {
                 const v = node.data.var_decl;
-                // Store in extra: [binding_packed, pattern, init, kind]
+                // Store in extra: [binding_packed, init, kind]
                 const binding_packed = (@as(u32, v.binding.scope_id) << 16) | v.binding.slot;
                 const kind_and_binding_kind = @as(u32, @intFromEnum(v.kind)) |
                     (@as(u32, @intFromEnum(v.binding.kind)) << 2);
-                const extra_start = try self.addExtra(&.{
-                    binding_packed,
-                    v.pattern,
-                    v.init,
-                    kind_and_binding_kind,
-                });
+                const extra_start = try self.addExtra(&.{ binding_packed, v.init, kind_and_binding_kind });
                 break :blk self.addNode(.var_decl, loc, .{ .a = extra_start, .b = 0 });
             },
             .if_stmt => blk: {
@@ -1202,15 +1189,8 @@ pub const IRStore = struct {
                 const flags = (@as(u32, if (f.is_for_in) 1 else 0)) |
                     (@as(u32, if (f.is_const) 1 else 0) << 1) |
                     (@as(u32, @intFromEnum(f.binding.kind)) << 2);
-                // Store: [flags, binding_packed, pattern, iterable, flags, body]
-                const extra_start = try self.addExtra(&.{
-                    flags,
-                    binding_packed,
-                    f.pattern,
-                    f.iterable,
-                    flags,
-                    f.body,
-                });
+                // Store: [binding_packed, iterable, flags, body]
+                const extra_start = try self.addExtra(&.{ binding_packed, f.iterable, flags, f.body });
                 break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
             },
             .switch_stmt => blk: {
@@ -1282,8 +1262,8 @@ pub const IRStore = struct {
             .expr_stmt => self.addNode(.expr_stmt, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
 
             // --- Patterns ---
-            .pattern_element, .pattern_rest, .object_pattern, .array_pattern => blk: {
-                if (node.tag == .object_pattern or node.tag == .array_pattern) {
+            .pattern_element, .pattern_rest, .array_pattern => blk: {
+                if (node.tag == .array_pattern) {
                     const arr = node.data.array;
                     const b_val = @as(u32, arr.elements_count) | (@as(u32, if (arr.has_spread) 1 else 0) << 16);
                     break :blk self.addNode(node.tag, loc, .{ .a = arr.elements_start, .b = b_val });
@@ -1992,18 +1972,17 @@ pub const IrView = struct {
                 const d = ir.data.items[idx];
                 const extra_start = d.a;
                 const extra = ir.extra.items;
-                // VarDecl in extra: [binding_packed, pattern, init, kind]
+                // VarDecl in extra: [binding_packed, init, kind]
                 const binding_packed = extra[extra_start];
                 break :blk .{
                     .binding = .{
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
                         .name_atom = ir.bindingName(idx),
-                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start + 3] >> 2))),
+                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start + 2] >> 2))),
                     },
-                    .pattern = extra[extra_start + 1],
-                    .init = extra[extra_start + 2],
-                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start + 3]))),
+                    .init = extra[extra_start + 1],
+                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start + 2]))),
                 };
             },
         };
@@ -2056,8 +2035,8 @@ pub const IrView = struct {
                 const d = ir.data.items[idx];
                 const extra_start = d.a;
                 const extra = ir.extra.items;
-                const binding_packed = extra[extra_start + 1];
-                const flags = extra[extra_start + 4];
+                const binding_packed = extra[extra_start];
+                const flags = extra[extra_start + 2];
                 break :blk .{
                     .is_for_in = (flags & 1) != 0,
                     .binding = .{
@@ -2066,9 +2045,8 @@ pub const IrView = struct {
                         .name_atom = ir.bindingName(idx),
                         .kind = @enumFromInt(@as(u3, @truncate(flags >> 2))),
                     },
-                    .pattern = extra[extra_start + 2],
-                    .iterable = extra[extra_start + 3],
-                    .body = extra[extra_start + 5],
+                    .iterable = extra[extra_start + 1],
+                    .body = extra[extra_start + 3],
                     .is_const = (flags >> 1) & 1 != 0,
                 };
             },
@@ -2285,9 +2263,8 @@ pub const IrView = struct {
 
     /// Single-binding parameter extraction. The parser emits each function
     /// parameter either as a bare `.identifier` node or as a
-    /// `.pattern_element` wrapper; destructuring patterns (object/array)
-    /// carry no single binding slot and return null. Shared by the type
-    /// checker and flow checker so the parameter-node shape is encoded once.
+    /// `.pattern_element` wrapper. Shared by the type checker and flow checker
+    /// so the parameter-node shape is encoded once.
     pub fn paramBinding(self: IrView, param_idx: NodeIndex) ?BindingRef {
         const tag = self.getTag(param_idx) orelse return null;
         if (tag == .identifier) {

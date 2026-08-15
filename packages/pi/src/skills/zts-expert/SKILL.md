@@ -220,7 +220,7 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 
 | Category | Features |
 |----------|----------|
-| Declarations | `let`, `const`, `function`, arrow functions, destructuring (array/object/rest) |
+| Declarations | named `let`, `const`, `function`, and arrow functions |
 | Control flow | `if`/`else`, `for...of` with `break`/`continue`, `return`, `assert` |
 | Expressions | Template literals, ternary, spread, optional chaining (`?.`), nullish coalescing (`??`) |
 | Operators | `+` `-` `*` `/` `%` `**`, `===` `!==` `<` `>` `<=` `>=`, `&&` `||` `!` |

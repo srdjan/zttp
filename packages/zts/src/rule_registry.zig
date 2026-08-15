@@ -325,22 +325,6 @@ const strict_meta = [_]struct {
         .repair = .widen_signature_drop_spread,
     },
     .{
-        .kind = .canonical_destructure_depth,
-        .code = "ZTS618",
-        .description = "Destructuring patterns must be at most one level deep.",
-        .example = "const {user: {name}} = payload;",
-        .help = "Destructure one level, then drill into the value with a follow-up `const`: `const {user} = payload; const {name} = user;`",
-        .repair = .flatten_destructure,
-    },
-    .{
-        .kind = .canonical_unused_index_alias,
-        .code = "ZTS619",
-        .description = "for-of binds an index alias via `.entries()` that is never read.",
-        .example = "for (const pair of arr.entries()) { const [_i, x] = pair; use(x); }",
-        .help = "Drop `.entries()` and the destructure; iterate the array directly: `for (const x of arr) { use(x); }`",
-        .repair = .drop_unused_index_alias,
-    },
-    .{
         .kind = .canonical_redundant_bool_compare,
         .code = "ZTS620",
         .description = "A boolean value compared against a boolean literal (`x === true`).",

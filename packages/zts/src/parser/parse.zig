@@ -440,11 +440,17 @@ pub const Parser = struct {
             return error.ParseError;
         }
 
-        // Check for destructuring pattern
+        // Model-1 declarations bind one name. Explicit member/index reads keep
+        // every introduced binding visible and give declaration parsing one
+        // shape instead of a second pattern language.
         if (self.check(.lbrace)) {
-            return self.parseDestructuringDecl(loc, kind, .object);
+            self.errors.addErrorAt(.unsupported_feature, self.current, "declaration destructuring is not supported; bind the source to a name, then read each member with explicit `const` bindings");
+            self.advance();
+            return error.ParseError;
         } else if (self.check(.lbracket)) {
-            return self.parseDestructuringDecl(loc, kind, .array);
+            self.errors.addErrorAt(.unsupported_feature, self.current, "declaration destructuring is not supported; bind the source to a name, then read each element with explicit indexed `const` bindings");
+            self.advance();
+            return error.ParseError;
         }
 
         // Simple identifier binding
@@ -477,330 +483,8 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .var_decl = .{
                 .binding = binding,
-                .pattern = null_node,
                 .init = init_node,
                 .kind = kind,
-            } },
-        });
-    }
-
-    const PatternKind = enum { object, array };
-
-    fn parseDestructuringDecl(self: *Parser, loc: SourceLocation, kind: Node.VarDecl.VarKind, pattern_kind: PatternKind) anyerror!NodeIndex {
-        // Parse the pattern
-        const pattern = switch (pattern_kind) {
-            .object => try self.parseObjectPattern(),
-            .array => try self.parseArrayPattern(),
-        };
-
-        // Require initializer for destructuring
-        try self.expect(.assign, "'=' after destructuring pattern");
-        const init_node = try self.parseExpression(.assignment);
-
-        try self.expectSemicolon();
-
-        // Create a special binding for destructuring (slot 255 = pattern)
-        const dummy_binding = BindingRef{
-            .scope_id = 0,
-            .slot = 255,
-            .name_atom = 0,
-            .kind = .local,
-        };
-
-        return try self.nodes.add(.{
-            .tag = .var_decl,
-            .loc = loc,
-            .data = .{ .var_decl = .{
-                .binding = dummy_binding,
-                .pattern = pattern,
-                .init = init_node,
-                .kind = kind,
-            } },
-        });
-    }
-
-    fn parseObjectPattern(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume '{'
-
-        var elements = std.ArrayList(NodeIndex).empty;
-        defer elements.deinit(self.allocator);
-
-        while (!self.check(.rbrace) and !self.check(.eof)) {
-            const elem = try self.parseObjectPatternElement();
-            try elements.append(self.allocator, elem);
-
-            if (!self.match(.comma)) break;
-        }
-
-        try self.expect(.rbrace, "'}' to close object pattern");
-
-        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many object pattern elements; limit is 65535");
-        const elements_start = try self.addNodeList(elements.items);
-
-        return try self.nodes.add(.{
-            .tag = .object_pattern,
-            .loc = loc,
-            .data = .{ .array = .{
-                .elements_start = elements_start,
-                .elements_count = elements_count,
-                .has_spread = false,
-            } },
-        });
-    }
-
-    fn parseObjectPatternElement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-
-        // Check for rest element: ...rest
-        if (self.match(.spread)) {
-            self.errors.addErrorAt(.unsupported_feature, self.current, "rest element in object destructuring is not supported; bind the remaining properties explicitly instead");
-            const name = try self.expectIdentifier("identifier after '...'");
-            const name_atom = try self.addAtom(name.text(self.source));
-
-            const binding = self.scopes.declareBinding(
-                name.text(self.source),
-                name_atom,
-                .variable,
-                false,
-            ) catch {
-                self.errorAtCurrent("too many local variables");
-                return error.TooManyLocals;
-            };
-
-            return try self.nodes.add(.{
-                .tag = .pattern_rest,
-                .loc = loc,
-                .data = .{ .pattern_elem = .{
-                    .kind = .rest,
-                    .binding = binding,
-                    .key = null_node,
-                    .key_atom = 0,
-                    .default_value = null_node,
-                } },
-            });
-        }
-
-        // Property name (could be renamed: { name: localName })
-        const key_name = try self.expectPropertyIdentifier("property name in object pattern");
-        const key_atom_for_binding = try self.addAtom(key_name.text(self.source));
-
-        var local_name = key_name;
-        var local_atom = key_atom_for_binding;
-
-        // Check for rename: { name: localName }
-        if (self.match(.colon)) {
-            // Check for nested pattern
-            if (self.check(.lbrace)) {
-                const nested = try self.parseObjectPattern();
-
-                // A nested pattern may carry a default: `{ data: { x } = {} }`.
-                var nested_default: NodeIndex = null_node;
-                if (self.match(.assign)) {
-                    nested_default = try self.parseExpression(.assignment);
-                }
-
-                return try self.nodes.add(.{
-                    .tag = .pattern_element,
-                    .loc = loc,
-                    .data = .{
-                        .pattern_elem = .{
-                            .kind = .object,
-                            .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
-                            .key = nested, // Nested pattern
-                            .key_atom = key_atom_for_binding, // property-name atom for get_field
-                            .default_value = nested_default,
-                        },
-                    },
-                });
-            } else if (self.check(.lbracket)) {
-                const nested = try self.parseArrayPattern();
-
-                var nested_default: NodeIndex = null_node;
-                if (self.match(.assign)) {
-                    nested_default = try self.parseExpression(.assignment);
-                }
-
-                return try self.nodes.add(.{
-                    .tag = .pattern_element,
-                    .loc = loc,
-                    .data = .{
-                        .pattern_elem = .{
-                            .kind = .array,
-                            .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
-                            .key = nested, // Nested pattern
-                            .key_atom = key_atom_for_binding, // property-name atom for get_field
-                            .default_value = nested_default,
-                        },
-                    },
-                });
-            }
-
-            // Simple rename
-            local_name = try self.expectIdentifier("local name after ':'");
-            local_atom = try self.addAtom(local_name.text(self.source));
-        }
-
-        // Declare the local binding
-        const binding = self.scopes.declareBinding(
-            local_name.text(self.source),
-            local_atom,
-            .variable,
-            false,
-        ) catch {
-            self.errorAtCurrent("too many local variables");
-            return error.TooManyLocals;
-        };
-
-        // Check for default value: { x = 10 }
-        var default_value: NodeIndex = null_node;
-        if (self.match(.assign)) {
-            default_value = try self.parseExpression(.assignment);
-        }
-
-        return try self.nodes.add(.{
-            .tag = .pattern_element,
-            .loc = loc,
-            .data = .{
-                .pattern_elem = .{
-                    .kind = .simple,
-                    .binding = binding,
-                    .key = null_node,
-                    .key_atom = key_atom_for_binding, // property-name atom for get_field
-                    .default_value = default_value,
-                },
-            },
-        });
-    }
-
-    fn parseArrayPattern(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume '['
-
-        var elements = std.ArrayList(NodeIndex).empty;
-        defer elements.deinit(self.allocator);
-
-        while (!self.check(.rbracket) and !self.check(.eof)) {
-            // Handle holes: [a, , b]
-            if (self.check(.comma)) {
-                // Hole - push null_node
-                try elements.append(self.allocator, null_node);
-                self.advance();
-                continue;
-            }
-
-            const elem = try self.parseArrayPatternElement();
-            try elements.append(self.allocator, elem);
-
-            if (!self.match(.comma)) break;
-        }
-
-        try self.expect(.rbracket, "']' to close array pattern");
-
-        const elements_count = try self.checkedU16Count(loc, elements.items.len, "too many array pattern elements; limit is 65535");
-        const elements_start = try self.addNodeList(elements.items);
-
-        return try self.nodes.add(.{
-            .tag = .array_pattern,
-            .loc = loc,
-            .data = .{ .array = .{
-                .elements_start = elements_start,
-                .elements_count = elements_count,
-                .has_spread = false,
-            } },
-        });
-    }
-
-    fn parseArrayPatternElement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-
-        // Check for rest element: ...rest
-        if (self.match(.spread)) {
-            self.errors.addErrorAt(.unsupported_feature, self.current, "rest element in array destructuring is not supported; index the remaining elements explicitly instead");
-            const name = try self.expectIdentifier("identifier after '...'");
-            const name_atom = try self.addAtom(name.text(self.source));
-
-            const binding = self.scopes.declareBinding(
-                name.text(self.source),
-                name_atom,
-                .variable,
-                false,
-            ) catch {
-                self.errorAtCurrent("too many local variables");
-                return error.TooManyLocals;
-            };
-
-            return try self.nodes.add(.{
-                .tag = .pattern_rest,
-                .loc = loc,
-                .data = .{ .pattern_elem = .{
-                    .kind = .rest,
-                    .binding = binding,
-                    .key = null_node,
-                    .key_atom = 0,
-                    .default_value = null_node,
-                } },
-            });
-        }
-
-        // Check for nested patterns
-        if (self.check(.lbrace)) {
-            const nested = try self.parseObjectPattern();
-            return try self.nodes.add(.{
-                .tag = .pattern_element,
-                .loc = loc,
-                .data = .{ .pattern_elem = .{
-                    .kind = .object,
-                    .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
-                    .key = nested,
-                    .key_atom = 0,
-                    .default_value = null_node,
-                } },
-            });
-        } else if (self.check(.lbracket)) {
-            const nested = try self.parseArrayPattern();
-            return try self.nodes.add(.{
-                .tag = .pattern_element,
-                .loc = loc,
-                .data = .{ .pattern_elem = .{
-                    .kind = .array,
-                    .binding = .{ .scope_id = 0, .slot = 255, .name_atom = 0, .kind = .local },
-                    .key = nested,
-                    .key_atom = 0,
-                    .default_value = null_node,
-                } },
-            });
-        }
-
-        // Simple identifier
-        const name = try self.expectIdentifier("identifier in array pattern");
-        const name_atom = try self.addAtom(name.text(self.source));
-
-        const binding = self.scopes.declareBinding(
-            name.text(self.source),
-            name_atom,
-            .variable,
-            false,
-        ) catch {
-            self.errorAtCurrent("too many local variables");
-            return error.TooManyLocals;
-        };
-
-        // Check for default value: [x = 10]
-        var default_value: NodeIndex = null_node;
-        if (self.match(.assign)) {
-            default_value = try self.parseExpression(.assignment);
-        }
-
-        return try self.nodes.add(.{
-            .tag = .pattern_element,
-            .loc = loc,
-            .data = .{ .pattern_elem = .{
-                .kind = .simple,
-                .binding = binding,
-                .key = null_node,
-                .key_atom = 0,
-                .default_value = default_value,
             } },
         });
     }
@@ -857,7 +541,6 @@ pub const Parser = struct {
             .loc = loc,
             .data = .{ .var_decl = .{
                 .binding = binding,
-                .pattern = null_node,
                 .init = func_node,
                 .kind = .let,
             } },
@@ -919,7 +602,7 @@ pub const Parser = struct {
                 }
 
                 if (self.check(.lbrace) or self.check(.lbracket)) {
-                    self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; destructure inside the body instead");
+                    self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; bind one parameter, then read its members explicitly in the body");
                     return error.ParseError;
                 }
 
@@ -1096,7 +779,6 @@ pub const Parser = struct {
                         .data = .{ .for_iter = .{
                             .is_for_in = false,
                             .binding = binding,
-                            .pattern = null_node,
                             .iterable = iterable,
                             .body = body,
                             .is_const = is_const,
@@ -1115,7 +797,6 @@ pub const Parser = struct {
                     .loc = name.location(),
                     .data = .{ .var_decl = .{
                         .binding = binding,
-                        .pattern = null_node,
                         .init = var_init,
                         .kind = kind,
                     } },
@@ -2987,7 +2668,7 @@ pub const Parser = struct {
                     }
 
                     if (self.check(.lbrace) or self.check(.lbracket)) {
-                        self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; destructure inside the body instead");
+                        self.errors.addErrorAt(.unsupported_feature, self.current, "destructured parameters are not supported; bind one parameter, then read its members explicitly in the body");
                         return error.ParseError;
                     }
 
@@ -3803,7 +3484,7 @@ test "parse closure creates upvalue" {
     try std.testing.expect(found_upvalue);
 }
 
-test "parse object destructuring" {
+test "refuse object declaration destructuring" {
     const allocator = std.testing.allocator;
     const source =
         \\const { name, age } = obj;
@@ -3813,16 +3494,12 @@ test "parse object destructuring" {
     var parser = try Parser.init(allocator, source);
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-
-    try std.testing.expect(result != null_node);
-    try std.testing.expect(!parser.hasErrors());
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expect(parser.hasErrors());
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "read each member") != null);
 }
 
-test "parse array destructuring" {
+test "refuse array declaration destructuring" {
     const allocator = std.testing.allocator;
     const source =
         \\const [a, b, c] = arr;
@@ -3832,13 +3509,9 @@ test "parse array destructuring" {
     var parser = try Parser.init(allocator, source);
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-
-    try std.testing.expect(result != null_node);
-    try std.testing.expect(!parser.hasErrors());
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expect(parser.hasErrors());
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "indexed `const` bindings") != null);
 }
 
 // ============================================================================
@@ -5208,19 +4881,6 @@ test "keyword as property name: obj.enum" {
 
     const result = parser.parse();
     // Should parse successfully - enum is valid as property name
-    try std.testing.expect(!parser.hasErrors());
-    _ = result catch unreachable;
-}
-
-test "keyword in destructuring: {public: x}" {
-    const allocator = std.testing.allocator;
-    const source = "const {public: x} = obj;";
-
-    var parser = try Parser.init(allocator, source);
-    defer parser.deinit();
-
-    const result = parser.parse();
-    // Should parse successfully - public is valid as property key in destructuring
     try std.testing.expect(!parser.hasErrors());
     _ = result catch unreachable;
 }

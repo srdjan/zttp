@@ -7,7 +7,7 @@
 //! `advisory` severity, rewritten where the rewrite is provable, and otherwise
 //! left alone.
 //!
-//! The table is complete against spec 4.2.1: 24 rows, in the document's own
+//! The table is complete against spec 4.2.1: 23 rows, in the document's own
 //! order, held there by `scripts/check-idiom-table.sh`. Phase 0 seeded the rows
 //! that needed no language the engine lacked; the Dict rows arrived with
 //! `Dict`; the `Result`, selection, record-update, fold, and search-loop rows
@@ -16,8 +16,7 @@
 //! `rewrite_rule` names the canonicalize rewrite that implements the row; it
 //! stays null until that rewrite is wired, and a row with no rewrite is
 //! advisory-only. Completeness of the table is not completeness of the rewrite
-//! lane: one row names a rewrite today, and the other 23 are preferences the
-//! profile reports or stays quiet about.
+//! lane: all rows are currently advisory-only preferences.
 //!
 //! Three of the four Dict rows are also reported: `dictionary map` and
 //! `dictionary filter` share ZTS627 - one round trip, two destinations,
@@ -204,16 +203,8 @@ pub const entries = [_]IdiomEntry{
         .id = "idiom.field-read",
         .operation = "field read",
         .idiomatic = "const id = user.id;, or const first = pair[0]; for a tuple",
-        .superseded = "a one-field or one-element destructuring pattern",
+        .superseded = "any declaration destructuring pattern",
         .precondition = "none",
-        .rewrite_rule = null,
-    },
-    .{
-        .id = "idiom.multi-field-read",
-        .operation = "multi-field read",
-        .idiomatic = "const { id, name } = user;, or const [first, second] = pair; for a tuple",
-        .superseded = "two or more member or fixed-tuple index reads of the same binding in one block",
-        .precondition = "the binding's type is a single record type or a fixed tuple, and no narrowing guard separates the reads",
         .rewrite_rule = null,
     },
     .{
@@ -236,15 +227,9 @@ pub const entries = [_]IdiomEntry{
         .id = "idiom.element-iteration",
         .operation = "element iteration",
         .idiomatic = "for (const item of items)",
-        // The second spelling was beyond spec 4.2.1's table, which listed only
-        // the range-index form. The repo has rewritten the entries-alias form
-        // since before this program (ZTS619), and it supersedes the same
-        // idiomatic spelling for the same operation, so it belongs on this row.
-        // The owed spec edit was paid in phase 6 task 2, and the drift gate
-        // now holds the two texts together.
-        .superseded = "for...of over range(items.length) whose body only indexes items, for...of over items.entries() whose index alias is never read",
+        .superseded = "for...of over range(items.length) whose body only indexes items",
         .precondition = "none",
-        .rewrite_rule = "drop_unused_index_alias",
+        .rewrite_rule = null,
     },
 };
 
@@ -325,7 +310,7 @@ test "idiom registry has unique stable ids" {
     // here fails `scripts/check-idiom-table.sh`; a row added here and not there
     // fails it too. This asserts the number itself so a same-size swap of one
     // row for another still has to face the text comparison.
-    try std.testing.expectEqual(@as(usize, 24), entries.len);
+    try std.testing.expectEqual(@as(usize, 23), entries.len);
 }
 
 test "idiom registry rows are fully populated" {
@@ -349,11 +334,8 @@ test "every wired rewrite_rule names a real RepairIntent" {
     }
 }
 
-test "findByRewriteRule maps an applied intent back to its idiom" {
-    const entry = findByRewriteRule("drop_unused_index_alias") orelse return error.TestExpectedEntry;
-    try std.testing.expectEqualStrings("idiom.element-iteration", entry.id);
-    // An intent that repairs a restriction rather than realizing an idiom has
-    // no row, and must not be forced into one.
+test "findByRewriteRule rejects intents not owned by an idiom" {
+    try std.testing.expect(findByRewriteRule("drop_unused_index_alias") == null);
     try std.testing.expect(findByRewriteRule("replace_let_with_const") == null);
 }
 

@@ -628,7 +628,7 @@ pub const FlowChecker = struct {
             const tag = self.ir_view.getTag(idx) orelse continue;
             if (tag != .function_decl and tag != .var_decl) continue;
             const vd = self.ir_view.getVarDecl(idx) orelse continue;
-            if (vd.init == null_node or vd.pattern != null_node) continue;
+            if (vd.init == null_node) continue;
             if (tag == .var_decl) {
                 const init_tag = self.ir_view.getTag(vd.init) orelse continue;
                 if (init_tag != .function_expr and init_tag != .arrow_function) continue;
@@ -981,7 +981,7 @@ pub const FlowChecker = struct {
             // function_decl shares the var_decl layout: binding + init
             // function expression.
             const vd = self.ir_view.getVarDecl(idx) orelse continue;
-            if (vd.init == null_node or vd.pattern != null_node) continue;
+            if (vd.init == null_node) continue;
             if (tag == .var_decl) {
                 const init_tag = self.ir_view.getTag(vd.init) orelse continue;
                 if (init_tag != .function_expr and init_tag != .arrow_function) continue;
@@ -1007,51 +1007,10 @@ pub const FlowChecker = struct {
     }
 
     /// Unwrap a function parameter node to its binding slot. Handles both
-    /// the bare `.identifier` shape and the `.pattern_element` wrapper
-    /// the parser emits for every parameter. Destructuring patterns
-    /// (object_pattern / array_pattern) return null; those don't carry a
-    /// single binding slot and callers treat the request as unnamed.
+    /// the bare `.identifier` shape and the `.pattern_element` wrapper the
+    /// parser emits for every parameter.
     fn paramBinding(self: *const FlowChecker, param_idx: NodeIndex) ?ir.BindingRef {
         return self.ir_view.paramBinding(param_idx);
-    }
-
-    /// Conservatively attach `labels` to every binding bound by a destructuring
-    /// pattern (object/array, nested patterns, and rest elements). Without this,
-    /// taint pulled out via `const { apiKey } = secretProducingCall()` is keyed
-    /// only on the dummy whole-declaration binding and the destructured local is
-    /// untracked, so the secret leaks unflagged.
-    fn applyPatternLabels(self: *FlowChecker, pattern: NodeIndex, labels: LabelSet) void {
-        if (pattern == null_node) return;
-        const tag = self.ir_view.getTag(pattern) orelse return;
-        switch (tag) {
-            .object_pattern, .array_pattern => {
-                const arr = self.ir_view.getArray(pattern) orelse return;
-                var i: u16 = 0;
-                while (i < arr.elements_count) : (i += 1) {
-                    self.applyPatternLabels(self.ir_view.getListIndex(arr.elements_start, i), labels);
-                }
-            },
-            .pattern_element, .pattern_rest => {
-                const pe = self.ir_view.getPatternElem(pattern) orelse return;
-                switch (pe.kind) {
-                    .simple, .rest => {
-                        const key = packBindingKey(pe.binding.scope_id, pe.binding.slot);
-                        self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
-                    },
-                    // Nested pattern: recurse into pe.key.
-                    .object, .array => self.applyPatternLabels(pe.key, labels),
-                }
-            },
-            .identifier => {
-                const binding = self.ir_view.getBinding(pattern) orelse return;
-                const key = packBindingKey(binding.scope_id, binding.slot);
-                self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
-            },
-            // exhaustive: the arms above are every node a destructuring pattern
-            // can be - the two pattern containers, the two element kinds, and a
-            // bare identifier. Anything else is not a pattern and binds nothing.
-            else => {},
-        }
     }
 
     /// Walk a (possibly nested) member-access assignment target down to its root
@@ -1194,18 +1153,10 @@ pub const FlowChecker = struct {
                 if (vd.init != null_node) {
                     const labels = self.inferLabels(vd.init);
                     if (!labels.isEmpty()) {
-                        if (vd.pattern != null_node) {
-                            // Destructuring declaration: propagate RHS labels to
-                            // every bound local conservatively.
-                            self.applyPatternLabels(vd.pattern, labels);
-                        } else {
-                            const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
-                            self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
-                        }
+                        const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+                        self.binding_labels.put(self.allocator, key, labels) catch self.markAllocationFailure();
                     }
-                    if (vd.pattern == null_node) {
-                        self.recordBindingValue(vd.binding, vd.init);
-                    }
+                    self.recordBindingValue(vd.binding, vd.init);
                     self.trackModuleCallInit(vd);
                     // Track result bindings from validation calls for .value label narrowing
                     self.trackResultBinding(vd);

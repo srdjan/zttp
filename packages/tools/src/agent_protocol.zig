@@ -2062,13 +2062,10 @@ fn writeCheckPayload(
 /// equivalence validator exists, so the flag is true exactly when this
 /// diagnostic's repair intent has a row whose method is implemented.
 ///
-/// Eight rows answer true, every one of them under M4: the validator
+/// Six rows answer true, every one of them under M4: the validator
 /// re-derives the declared law's rewrite from the original and requires the
-/// candidate to match it byte for byte. Six are line-local, and two -
-/// `flatten_destructure` (ZTS618) and `drop_unused_index_alias` (ZTS619) -
-/// replace a run of lines and also re-derive the precondition that makes the
-/// rewrite an equivalence. Every other row is still `planned` and answers
-/// false.
+/// candidate to match it byte for byte. Every other row is still `planned` and
+/// answers false.
 fn writeDiagnostic(
     json: *std.json.Stringify,
     allocator: std.mem.Allocator,
@@ -3598,55 +3595,6 @@ test "apply_repair accepts a repair keyed on a byte span" {
     try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
 }
 
-test "apply_repair accepts the one wired idiom row" {
-    // ZTS619 is spec 4.2.1's `element iteration` row and the only idiom row
-    // with a rewrite behind it. Its validator row said M2, which cannot
-    // discharge a rewrite that deletes a statement, so the repair was
-    // advertised as a proposal and this operation refused it. Under the M4 law
-    // it is applied, and the law re-derives both the header rewrite and the
-    // two facts that make it an equivalence.
-    const a = testing.allocator;
-    const source =
-        \\export function handler(req: Request): Response {
-        \\    const arr = [10, 20];
-        \\    const out = [];
-        \\    for (const pair of arr.entries()) {
-        \\        const [_i, x] = pair;
-        \\        out.push(x);
-        \\    }
-        \\    return Response.json({ out });
-        \\}
-        \\
-    ;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const target = "    for (const pair of arr.entries()) {\n        const [_i, x] = pair;\n";
-    const start = std.mem.indexOf(u8, source, target).?;
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"drop_unused_index_alias","span":{{"start":{d},"end":{d}}},"original":"    for (const pair of arr.entries()) {{\n        const [_i, x] = pair;\n","replacement":"    for (const x of arr) {{\n"}}]}}}}
-    , .{ root, start, start + target.len });
-    defer a.free(req);
-    const out = try respondWithCurrentRepairBindings(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    try testing.expect(parsed.value.object.get("success").?.bool);
-    const payload = parsed.value.object.get("payload").?.object;
-    try testing.expectEqual(@as(i64, 1), payload.get("applied").?.integer);
-
-    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
-    defer a.free(on_disk);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "for (const x of arr) {") != null);
-    try testing.expect(std.mem.indexOf(u8, on_disk, ".entries()") == null);
-    try testing.expect(std.mem.indexOf(u8, on_disk, "const [_i, x]") == null);
-}
-
 test "apply_repair refuses a span outside the file" {
     // The floor under the test above: a span the client made up is refused
     // rather than clamped, so "the span form works" is not satisfied by an
@@ -4597,52 +4545,6 @@ test "normalize with write true is refused, not silently ignored" {
     try testing.expectEqualStrings(let_handler, on_disk);
 }
 
-test "normalize maps an applied intent back to the idiom row it realizes" {
-    const a = testing.allocator;
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    // The ZTS619 vehicle: `.entries()` with an index the body never reads.
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
-        \\
-        \\structural Guardrails<T> = Proof<T, "state_isolated">;
-        \\
-        \\export function handler(req: Request): Guardrails<Response> {
-        \\    const arr = [10, 20];
-        \\    const out = [];
-        \\    for (const pair of arr.entries()) {
-        \\        const [_i, x] = pair;
-        \\        out.push(x);
-        \\    }
-        \\    return Response.json({ out });
-        \\}
-        \\
-    });
-    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
-    defer a.free(root);
-
-    const req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
-    , .{root});
-    defer a.free(req);
-    const out = try respond(a, req);
-    defer a.free(out);
-
-    var parsed = try parse(a, out);
-    defer parsed.deinit();
-    const trace = parsed.value.object.get("payload").?.object.get("rewrite_trace").?.array;
-    try testing.expectEqual(@as(usize, 1), trace.items.len);
-    const entry = trace.items[0].object;
-    try testing.expectEqualStrings("drop_unused_index_alias", entry.get("intent").?.string);
-    try testing.expectEqualStrings("idiom.element-iteration", entry.get("idiom_id").?.string);
-    // The other side of the same rule. This row named M2 and could not be
-    // discharged by it - the rewrite deletes a statement, so the trees differ
-    // by construction - and it now names M4 with a law that re-derives both the
-    // header rewrite and the two preconditions the producer used to check for
-    // itself. The one idiom row with a wired rewrite is therefore gradable, and
-    // `apply_repair` will take it.
-    try testing.expectEqualStrings("mechanical_repair", entry.get("grade").?.string);
-}
-
 fn metaPayload(a: std.mem.Allocator, out: *[]u8) !std.json.Parsed(std.json.Value) {
     out.* = try respond(a,
         \\{"schema_version":2,"operation":"meta","project_root":".","input":{}}
@@ -4688,7 +4590,7 @@ test "meta publishes the closed severity set and the rule that decides success" 
     try testing.expect(std.mem.indexOf(u8, severities.get("success_rule").?.string, "no error diagnostic") != null);
 }
 
-test "meta publishes the idiom table with its rewrite back-reference" {
+test "meta publishes an advisory-only idiom table" {
     const a = testing.allocator;
     var raw: []u8 = undefined;
     var parsed = try metaPayload(a, &raw);
@@ -4711,8 +4613,9 @@ test "meta publishes the idiom table with its rewrite back-reference" {
             try testing.expectEqualStrings(row.get("id").?.string, entry.id);
         }
     }
-    // Advisory-only rows are legal (spec 4.2.1), so most rows carry no rewrite.
-    try testing.expect(wired >= 1);
+    // The current table is wholly advisory. Mechanical repairs belong to
+    // diagnostics, not stylistic alternatives.
+    try testing.expectEqual(@as(usize, 0), wired);
 }
 
 test "meta limits are the constants the code enforces" {

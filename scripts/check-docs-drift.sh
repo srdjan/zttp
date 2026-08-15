@@ -497,4 +497,16 @@ if [[ -n "${removed_statement_form_hits//[[:space:]]/}" ]]; then
   fail "tracked TypeScript still uses debugger, an empty statement, or when _; remove inert statements and use default:"
 fi
 
+# Bindings have one named form. Historical provider recordings remain evidence
+# of what models emitted and are deliberately excluded from this live-source
+# census rather than rewritten.
+removed_declaration_destructuring_hits="$({
+  git ls-files -z -- '*.ts' '*.tsx' |
+    xargs -0 rg -n -U --pcre2 -- '(?s)\b(?:const|let|var)\s+(?:\{|\[)' 2>/dev/null || true
+} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/)' || true)"
+if [[ -n "${removed_declaration_destructuring_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$removed_declaration_destructuring_hits" >&2
+  fail "tracked TypeScript still uses declaration destructuring; bind one name and read members or indexed elements explicitly"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

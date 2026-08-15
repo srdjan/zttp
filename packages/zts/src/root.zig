@@ -393,11 +393,7 @@ test "stable policy metadata catalogs expose borrowed queries and hashes" {
     const idioms = IdiomCatalog.idioms();
     try std.testing.expectEqual(idiom_registry.entries.len, idioms.len);
     try std.testing.expect(idioms.len > 0);
-    const wired = IdiomCatalog.findByRewriteRule("drop_unused_index_alias") orelse
-        return error.TestExpectedIdiom;
-    const internalWired = idiom_registry.findByRewriteRule("drop_unused_index_alias") orelse
-        return error.TestExpectedInternalIdiom;
-    try std.testing.expectEqual(internalWired, wired);
+    try std.testing.expect(IdiomCatalog.findByRewriteRule("drop_unused_index_alias") == null);
     try std.testing.expect(IdiomCatalog.findByRewriteRule("not-a-rewrite") == null);
     try std.testing.expectEqualStrings(&idiom_registry.tableHash(), &idiomTableHash());
 
@@ -723,22 +719,6 @@ pub const RepairPolicy = struct {
         line: u32,
     ) error{OutOfMemory}!Discharge {
         return repair_validator.validateApplication(allocator, intent, original, repaired, line);
-    }
-
-    /// True when anything outside the named span of lines binds `ident`.
-    ///
-    /// Exposed because the producer of a rewrite that introduces a binding has
-    /// to refuse on the same condition the validator re-derives. Two spellings
-    /// of "is this name free" drift apart, and the drift is not symmetric: the
-    /// weaker one advertises `repair_available` for an edit the stricter one
-    /// then refuses, and the whole apply batch is dropped.
-    pub fn bindsOutsideLines(
-        source: []const u8,
-        first_line: u32,
-        line_count: u32,
-        ident: []const u8,
-    ) bool {
-        return repair_validator.bindsOutsideLines(source, first_line, line_count, ident);
     }
 };
 

@@ -587,25 +587,15 @@ pub const HandlerVerifier = struct {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
 
                 // Track this binding for dead variable detection (scope-aware).
-                //
-                // A destructuring declaration's own binding is synthetic and is
-                // never referenced, while the names a reader would call the
-                // variables live on the pattern's elements. Registering the
-                // synthetic one reported every `const { x, y } = ...` as an
-                // unused variable, however thoroughly `x` and `y` were read.
-                if (decl.pattern != null_node) {
-                    self.registerPatternBindings(decl.pattern, node);
-                } else {
-                    self.all_bindings.append(self.allocator, .{
-                        .scope_id = decl.binding.scope_id,
-                        .slot = decl.binding.slot,
-                        .is_result = false,
-                        .ok_checked = false,
-                        .ref_count = 0,
-                        .decl_node = node,
-                        .name_idx = 0,
-                    }) catch self.markAllocationFailure();
-                }
+                self.all_bindings.append(self.allocator, .{
+                    .scope_id = decl.binding.scope_id,
+                    .slot = decl.binding.slot,
+                    .is_result = false,
+                    .ok_checked = false,
+                    .ref_count = 0,
+                    .decl_node = node,
+                    .name_idx = 0,
+                }) catch self.markAllocationFailure();
 
                 // Check if the init expression is a call to a result-producing function
                 if (decl.init != null_node) {
@@ -1136,52 +1126,6 @@ pub const HandlerVerifier = struct {
         return env.getVarTypeByName(name) orelse null_type_idx;
     }
 
-    /// Register one dead-variable candidate per name a destructuring pattern
-    /// introduces, so the rule answers per element rather than about the
-    /// declaration as a whole. `decl_node` is the declaration, which is where
-    /// the diagnostic points either way.
-    fn registerPatternBindings(self: *HandlerVerifier, pattern: NodeIndex, decl_node: NodeIndex) void {
-        if (pattern == null_node) return;
-        const tag = self.ir_view.getTag(pattern) orelse return;
-        switch (tag) {
-            .object_pattern, .array_pattern => {
-                const arr = self.ir_view.getArray(pattern) orelse return;
-                for (0..arr.elements_count) |i| {
-                    const child = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
-                    self.registerPatternBindings(child, decl_node);
-                }
-            },
-            .pattern_element, .pattern_rest => {
-                const elem = self.ir_view.getPatternElem(pattern) orelse return;
-                // A nested pattern binds nothing itself; its own elements do.
-                if (elem.key != null_node and self.isPatternNode(elem.key)) {
-                    self.registerPatternBindings(elem.key, decl_node);
-                    return;
-                }
-                self.all_bindings.append(self.allocator, .{
-                    .scope_id = elem.binding.scope_id,
-                    .slot = elem.binding.slot,
-                    .is_result = false,
-                    .ok_checked = false,
-                    .ref_count = 0,
-                    .decl_node = decl_node,
-                    .name_idx = 0,
-                }) catch self.markAllocationFailure();
-            },
-            // exhaustive: a pattern's children are the four tags above and
-            // nothing else. Any other tag reaching here is not a pattern, so it
-            // introduces no name and there is no dead-variable candidate to
-            // register - and a missed candidate reports no warning rather than
-            // a wrong one.
-            else => {},
-        }
-    }
-
-    fn isPatternNode(self: *const HandlerVerifier, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        return tag == .object_pattern or tag == .array_pattern;
-    }
-
     /// Increment reference count for a binding (scope-aware).
     fn incrementRefCount(self: *HandlerVerifier, binding_ref: ir.BindingRef) void {
         const target_key = bindingKey(binding_ref.scope_id, binding_ref.slot);
@@ -1694,33 +1638,6 @@ fn countUnusedVariableWarnings(source: []const u8) !u32 {
         if (diag.kind == .unused_variable) count += 1;
     }
     return count;
-}
-
-test "a destructured binding that is read is not reported unused" {
-    // A destructuring declaration registered ONE binding for dead-variable
-    // detection - the declaration's own synthetic binding, which nothing ever
-    // references - so every `const { x, y } = ...` warned that a variable was
-    // never used while `x` and `y` were both read on the next line.
-    try std.testing.expectEqual(@as(u32, 0), try countUnusedVariableWarnings(
-        \\function origin() { return { x: 1, y: 2 }; }
-        \\function handler(req) {
-        \\  const { x, y } = origin();
-        \\  return Response.json({ sum: x + y });
-        \\}
-    ));
-}
-
-test "a destructured binding that is never read is still reported" {
-    // The floor, and the thing the old code could not do at all: the rule must
-    // now answer per element, so an unread `y` is one warning and the read `x`
-    // is none.
-    try std.testing.expectEqual(@as(u32, 1), try countUnusedVariableWarnings(
-        \\function origin() { return { x: 1, y: 2 }; }
-        \\function handler(req) {
-        \\  const { x, y } = origin();
-        \\  return Response.json({ x });
-        \\}
-    ));
 }
 
 test "a binding read only through an object spread is not reported unused" {

@@ -121,23 +121,21 @@ pub fn compileWithOptions(
 // These two assert language behavior, not driver mechanics, so they are kept
 // and rewritten against `compile`.
 
-test "compile rejects rest element in object destructuring" {
+test "compile rejects object declaration destructuring" {
     const allocator = std.testing.allocator;
 
-    // Rest in destructuring is not implemented; it must be a clear compile
-    // error rather than silently binding `rest` to undefined.
     try std.testing.expectError(
         error.ParseError,
-        compile(allocator, "let obj = { a: 1, b: 2, c: 3 }; let { a, ...rest } = obj;"),
+        compile(allocator, "let obj = { a: 1, b: 2 }; const { a } = obj;"),
     );
 }
 
-test "compile rejects rest element in array destructuring" {
+test "compile rejects array declaration destructuring" {
     const allocator = std.testing.allocator;
 
     try std.testing.expectError(
         error.ParseError,
-        compile(allocator, "let arr = [10, 20, 30]; let [x, ...rest] = arr;"),
+        compile(allocator, "let arr = [10, 20]; const [x] = arr;"),
     );
 }
 

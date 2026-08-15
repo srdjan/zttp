@@ -355,13 +355,15 @@ as `default:` rather than `when _:`.
 | ZTS058 | Generic array alias | Write `T[]`. |
 | ZTS059 | Generic readonly-array alias | Write `readonly T[]`. |
 | ZTS060 | Void type | Write `undefined`; evaluate any required effect as a separate statement. |
-| ZTS618 | Nested destructuring | Destructure one level at a time. |
-| ZTS619 | Unused index alias in `for...of` | Iterate the array directly. |
 | ZTS620 | Boolean compared to boolean literal | Use the boolean expression or negation directly. |
 | ZTS621 | Chained conditional arms | Use `match` over one scrutinee, or an if/else chain. |
 
 A pure `?:` is canonical. Only an effectful arm (ZTS612) or a conditional
 nested inside another conditional (ZTS621) is diagnosed.
+
+Declaration destructuring is refused at the parser boundary. Bind the source
+to one name, then read members or indexed elements with explicit `const`
+bindings.
 
 ```bash
 zttp check --json examples/handler/handler.ts

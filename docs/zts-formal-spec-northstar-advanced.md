@@ -153,7 +153,7 @@ The live compiler already has most of the right shape:
 
 - block-scoped `const` and necessary `let`
 - named functions, direct arrow callbacks, lexical closures, and recursion
-- records, arrays, tuples, fixed-shape mutation, destructuring, spread,
+- records, arrays, tuples, fixed-shape mutation, explicit member reads, spread,
   templates, optional chaining, and nullish coalescing
 - `if`/`else`, `for...of`, `match`, `assert`, `return`, `break`, and
   `continue`
@@ -166,7 +166,7 @@ The live compiler already has most of the right shape:
 
 The canonical checker is narrower than the parser and the feature catalog. It
 currently rejects forms including ternaries, compound assignment, call spread,
-default parameters, nested destructuring, non-leading object spread, and
+non-leading object spread and
 reusable function-valued constants. The advanced profile reassesses each form
 under the agent-first decision rule rather than treating every current
 restriction as permanent.
@@ -347,11 +347,10 @@ registry-generated and drift-gated; this document is its readable view.
 | dictionary fold | `dictFold(d, f, init)` | `dictEntries(d).reduce(...)` | the fold has one accumulator |
 | pure single-accumulator fold | `map`, then `filter`, then `some`, then `every`, then `find`, then `findIndex`, then `reduce`: the first that fits | `let` plus `for...of` with no `break`, `continue`, or effect | the body is pure and the loop head is already idiomatic under the element-iteration row |
 | pure search loop | `find`, `findIndex`, `some`, or `every`, by what the loop yields and whether its flag starts `false` or `true` | `let` plus `for...of` whose only early exit is `break` | the body is pure, carries one accumulator, uses no `continue`, and the loop head is already idiomatic under the element-iteration row |
-| field read | `const id = user.id;`, or `const first = pair[0];` for a tuple | a one-field or one-element destructuring pattern | none |
-| multi-field read | `const { id, name } = user;`, or `const [first, second] = pair;` for a tuple | two or more member or fixed-tuple index reads of the same binding in one block | the binding's type is a single record type or a fixed tuple, and no narrowing guard separates the reads |
+| field read | `const id = user.id;`, or `const first = pair[0];` for a tuple | any declaration destructuring pattern | none |
 | matched field read | a binding pattern field | a `match` arm that reads the field off the scrutinee | none |
 | binding field name | shorthand `{ value }` | `{ value: value }` | none |
-| element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items`, `for...of` over `items.entries()` whose index alias is never read | none |
+| element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items` | none |
 
 Three entries are declared preferences rather than derivations, recorded here
 so no reader has to infer them:
@@ -762,18 +761,14 @@ The profile permits:
 - named function declarations for reusable behavior
 - parameters written as `name: Type`, with absence named as `T | undefined`
 - direct arrow expressions only as arguments to typed, finite callback APIs
-- one-level object or array destructuring, idiomatic when two or more fields
-  of a single record type are read in one block with no narrowing guard
-  between them, and idiomatic for two or more elements of a fixed tuple; a
-  single field, a union-typed binding, and any read after a guard use member
-  access
+- named bindings followed by explicit member or fixed-tuple index reads
 - one leading object spread followed by explicit fields, idiomatic when at
   least one field is inherited unchanged from the base
 
 It excludes:
 
 - `var`
-- nested or rest destructuring
+- declaration destructuring and destructuring renames
 - rest parameters, default parameters, and optional-parameter shorthand
 - function expressions
 - reusable or exported arrow helpers
@@ -1939,11 +1934,7 @@ TypePredicate ::= Ident "is" Type
 
 TopBindingDecl ::= "const" Bind [":" Type] "=" Expr ";"
 BindingDecl  ::= ("const" | "let") Bind [":" Type] "=" Expr ";"
-Bind         ::= Ident | ObjectBind | ArrayBind
-ObjectBind   ::= "{" BindField ("," BindField)* [","] "}"
-BindField    ::= Ident [":" Ident]
-               | String ":" Ident
-ArrayBind    ::= "[" Ident? ("," Ident?)* "]"
+Bind         ::= Ident
 
 Block        ::= "{" Stmt* "}"
 Stmt         ::= BindingDecl
@@ -2073,7 +2064,6 @@ The advanced surface is intentionally richer than the executable kernel.
 | pure conditional expression | evaluate the boolean condition and exactly one branch |
 | record spread | allocate fixed target shape, copy one base, write explicit fields |
 | array spread | finite snapshot concatenation |
-| destructuring | temporary binding plus fixed reads |
 | `match` | ordered tested branches over the named scrutinee |
 | `match` binding field | arm-scoped `const` bound from the narrowed scrutinee field |
 | `match` type-test pattern | the corresponding value-kind narrowing test from the Section 5.4 closed list |
@@ -2555,7 +2545,7 @@ The corpus MUST include:
 - `const` plus necessary `let`
 - named functions and direct typed callbacks
 - lexical closures
-- fixed records, arrays, tuples, and limited spread/destructuring
+- fixed records, arrays, tuples, and limited spread with explicit member reads
 - strict operators, optional chaining, and nullish coalescing
 - `if`, `match`, `assert`, snapshot-finite `for...of`
 - pure boolean conditional expressions, with impure arms rejected as ZTS612 and
@@ -2607,9 +2597,8 @@ The corpus MUST include:
 - the completed array operation set and `push`
 - a total `responseText` constructor in the HTTP ABI
 - the ambient-name criterion and registry table
-- the remaining idiom rows and their rewrites: the registry mechanism ships and
-  is published with a hash, but 12 of 24 rows exist and only one carries a
-  wired rewrite, so the rest are advisory
+- the remaining idiom rows and their rewrites: the registry mechanism ships,
+  publishes all 23 current rows with a hash, and reports them as advisory-only
 - an ordered `Result` consumption procedure with disjoint clauses
 - one `responseJson` result type at every call site
 - opaque typed `HtmlNode` and finite `HtmlChild`

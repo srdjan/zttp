@@ -7,10 +7,9 @@
 //! `replace_arrow_with_function`, `replace_export_arrow_with_function`) plus
 //! the two insertion intents and the two span-local rewrites.
 //!
-//! `applyStatementIntent` covers the four whose construct spans more than the
+//! `applyStatementIntent` covers the two whose construct spans more than the
 //! line it is reported on (`replace_ternary_with_if`,
-//! `name_const_above_template`, `flatten_destructure`,
-//! `drop_unused_index_alias`). Those need a fresh analysis pass to derive the
+//! `name_const_above_template`). Those need a fresh analysis pass to derive the
 //! construct's byte span, so they take a path as well as source and run through
 //! `canonicalize.applyStatementIntent`. They are a separate entry point rather
 //! than a branch inside `applyIntent` because `applyIntent`'s contract - pure,
@@ -58,8 +57,6 @@ pub const RepairKind = enum {
 pub const StatementKind = enum {
     replace_ternary_with_if,
     name_const_above_template,
-    flatten_destructure,
-    drop_unused_index_alias,
 
     pub fn fromString(s: []const u8) ?StatementKind {
         return std.meta.stringToEnum(StatementKind, s);
@@ -69,8 +66,6 @@ pub const StatementKind = enum {
         return switch (self) {
             .replace_ternary_with_if => .replace_ternary_with_if,
             .name_const_above_template => .name_const_above_template,
-            .flatten_destructure => .flatten_destructure,
-            .drop_unused_index_alias => .drop_unused_index_alias,
         };
     }
 };

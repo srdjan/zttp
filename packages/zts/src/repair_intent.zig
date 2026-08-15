@@ -23,8 +23,6 @@ pub const RepairIntent = enum {
     replace_compound_assign_with_explicit,
     lead_with_spread,
     widen_signature_drop_spread,
-    flatten_destructure,
-    drop_unused_index_alias,
     add_capability_declaration,
     add_spec_assertion,
 

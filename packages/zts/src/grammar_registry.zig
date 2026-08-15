@@ -140,23 +140,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "Bind",
-        .rhs = "Ident | ObjectBind | ArrayBind",
-    },
-    .{
-        .name = "ObjectBind",
-        .rhs = "\"{\" BindField (\",\" BindField)* [\",\"] \"}\"",
-        .enforcement = .check_time,
-        .rule_code = "ZTS618",
-    },
-    .{
-        .name = "BindField",
-        .rhs = "Ident [\":\" Ident] | String \":\" Ident",
-    },
-    .{
-        .name = "ArrayBind",
-        .rhs = "\"[\" Ident? (\",\" Ident?)* \"]\"",
-        .enforcement = .check_time,
-        .rule_code = "ZTS618",
+        .rhs = "Ident",
     },
     .{
         .name = "Block",

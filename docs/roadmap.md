@@ -397,16 +397,12 @@ three driveable properties to five; the counterexample solver already models bot
 
 Why: every intent that lowers and validates pulls a rejected program into the provable
 set with zero model tokens. That is convergence driven from the compiler side, and the
-`compiler_authored_apply` counter already measures it. 17 variants are declared in
-`packages/zts/src/repair_intent.zig`; 12 now reach a source edit, and the autoloop
-drives 5 properties rather than 3.
+`compiler_authored_apply` counter already measures it. The catalog now contains only
+repairs for syntax still recognized by the core profile.
 
-The count moved from 8 to 13 by wiring up rewrites that already existed. Five intents -
-`replace_ternary_with_if`, `name_const_above_template`, `lift_default_to_body`,
-`flatten_destructure`, `drop_unused_index_alias` - had builders in the canonicalizer
-reachable only through the normalize loop, which rewrites a whole file. It is 12 rather
-than 13 now: the ZTS617 rule change retired `lift_default_to_body` along with its
-rewriter, so both the variant and the edit it reached are gone.
+The original count moved from 8 to 13 by wiring up rewrites that already existed.
+Later direct cuts retired `lift_default_to_body`, `flatten_destructure`, and
+`drop_unused_index_alias` with the syntax they repaired.
 `canonicalize.applyStatementIntent` asks the narrow question a repair client actually
 has: build this pass's rewrites, keep the one carrying this intent at this line, splice
 it. It refuses on two matches rather than guessing, because `Intent` carries no column,

@@ -293,9 +293,8 @@ const Comparer = struct {
                     .{ av.value, bv.value },
                 }, depth);
             },
-            .array_literal, .array_pattern, .object_pattern => {
-                // All three carry an `ArrayExpr`: the two pattern tags reuse it
-                // for their element list, which is what codegen reads.
+            .array_literal, .array_pattern => {
+                // Both carry an `ArrayExpr` element list.
                 const av = self.left.getArray(a) orelse return payloadMissing();
                 const bv = self.right.getArray(b) orelse return payloadMissing();
                 if (av.has_spread != bv.has_spread) {
@@ -417,10 +416,7 @@ const Comparer = struct {
                 }
                 const binding = self.bindingRefs(av.binding, bv.binding);
                 if (binding != .identical) return binding;
-                return self.all(&.{
-                    .{ av.pattern, bv.pattern },
-                    .{ av.init, bv.init },
-                }, depth);
+                return self.nodes(av.init, bv.init, depth + 1);
             },
             .if_stmt => {
                 const av = self.left.getIfStmt(a) orelse return payloadMissing();
@@ -443,7 +439,6 @@ const Comparer = struct {
                 const binding = self.bindingRefs(av.binding, bv.binding);
                 if (binding != .identical) return binding;
                 return self.all(&.{
-                    .{ av.pattern, bv.pattern },
                     .{ av.iterable, bv.iterable },
                     .{ av.body, bv.body },
                 }, depth);
@@ -751,7 +746,7 @@ test "the constructs the unmodeled arm names cannot reach this file" {
     }
 
     // The alphabet pin, read off the enum rather than off a list beside it.
-    try testing.expectEqual(@as(usize, 74), std.enums.values(NodeTag).len);
+    try testing.expectEqual(@as(usize, 73), std.enums.values(NodeTag).len);
 }
 
 /// One source exercising every form a handler is written in, used twice below:
@@ -764,7 +759,8 @@ const admitted_surface =
     \\
     \\export function handler(req: Request): Response {
     \\  const orders: Order[] = [{ id: "a", total: 1 }, { id: "b", total: 2 }];
-    \\  const { id } = orders[0];
+    \\  const firstOrder = orders[0];
+    \\  const id = firstOrder.id;
     \\  const labels = orders.map((o: Order): string => `${o.id}:${o.total}`);
     \\  let sum = 0;
     \\  for (const o of orders) {

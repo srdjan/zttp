@@ -707,7 +707,6 @@ const allowed_features = [_]Feature{
     .{ .name = "let", .status = .allowed, .alternative = null },
     .{ .name = "function", .status = .allowed, .alternative = null },
     .{ .name = "arrow functions", .status = .allowed, .alternative = null },
-    .{ .name = "destructuring", .status = .allowed, .alternative = null },
     .{ .name = "spread/rest", .status = .allowed, .alternative = null },
     .{ .name = "template literals", .status = .allowed, .alternative = null },
     .{ .name = "if/else", .status = .allowed, .alternative = null },

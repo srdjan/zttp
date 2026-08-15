@@ -1099,18 +1099,6 @@ fn buildSpanRepairs(
                 else => return err,
             };
             try appendSpanRepairUnique(allocator, source, result, rw);
-        } else if (std.mem.eql(u8, diag.code, "ZTS618")) {
-            const rw = nestedDestructureRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
-                error.UnsupportedRefactor => continue,
-                else => return err,
-            };
-            try appendSpanRepairUnique(allocator, source, result, rw);
-        } else if (std.mem.eql(u8, diag.code, "ZTS619")) {
-            const rw = unusedIndexAliasRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
-                error.UnsupportedRefactor => continue,
-                else => return err,
-            };
-            try appendSpanRepairUnique(allocator, source, result, rw);
         }
     }
 }
@@ -1675,125 +1663,6 @@ fn delimitersBalanced(text: []const u8) bool {
     return depth == 0;
 }
 
-/// ZTS618 canonical_destructure_depth: flatten a simple nested object pattern.
-///
-/// Supported shape:
-///   `const {outer: {inner}} = expr;`
-///
-/// The output names the intermediate object, then destructures the nested
-/// fields from that name:
-///   `const {outer} = expr;`
-///   `const {inner} = outer;`
-fn nestedDestructureRewrite(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    line: u32,
-    column: u32,
-) !Repair {
-    const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
-    const line_start = lineStartOffset(source, pos);
-    const line_end = lineEndOffset(source, pos);
-    const line_text = source[line_start..line_end];
-    const trimmed_left = trimLeft(line_text, " \t");
-    const indent = line_text[0 .. line_text.len - trimmed_left.len];
-    if (!std.mem.startsWith(u8, trimmed_left, "const ")) return error.UnsupportedRefactor;
-
-    const open = std.mem.indexOfScalar(u8, line_text, '{') orelse return error.UnsupportedRefactor;
-    const close_abs = matchingDelimiter(source, line_start + open, '{', '}', line_end) orelse return error.UnsupportedRefactor;
-    const close = close_abs - line_start;
-    const eq = findTopLevelChar(source, close_abs + 1, line_end, '=') orelse return error.UnsupportedRefactor;
-    const rhs = std.mem.trim(u8, source[eq + 1 .. line_end], " \t");
-    if (rhs.len == 0) return error.UnsupportedRefactor;
-    // The replacement captures the RHS only up to this line's newline. If the
-    // expression does not finish on this line (an unbalanced `(`/`[`/`{` or an
-    // unterminated string, e.g. `= makeUser(\n ...\n)`), refuse rather than emit
-    // a truncated, broken two-line replacement.
-    if (!delimitersBalanced(rhs)) return error.UnsupportedRefactor;
-
-    const pattern = std.mem.trim(u8, line_text[open + 1 .. close], " \t");
-    const colon = topLevelColon(pattern) orelse return error.UnsupportedRefactor;
-    const outer = std.mem.trim(u8, pattern[0..colon], " \t");
-    if (!isSimpleIdentifier(outer)) return error.UnsupportedRefactor;
-    // The rewrite introduces `outer` as a binding, so nothing else in the file
-    // may bind it. Asked through the validator's own predicate rather than
-    // re-derived here: a producer that refused on a weaker condition would
-    // advertise `repair_available` for an edit `validateApplication` then
-    // refuses, and `apply_repair` drops the whole batch on one refusal.
-    if (repairPolicy.bindsOutsideLines(source, line, 1, outer)) return error.UnsupportedRefactor;
-
-    const nested = std.mem.trim(u8, pattern[colon + 1 ..], " \t");
-    if (nested.len < 2 or nested[0] != '{' or nested[nested.len - 1] != '}') return error.UnsupportedRefactor;
-    const inner = std.mem.trim(u8, nested[1 .. nested.len - 1], " \t");
-    if (!isFlatIdentifierList(inner)) return error.UnsupportedRefactor;
-
-    const replacement = try std.fmt.allocPrint(
-        allocator,
-        "{s}const {{{s}}} = {s}\n{s}const {{{s}}} = {s};",
-        .{ indent, outer, rhs, indent, inner, outer },
-    );
-    errdefer allocator.free(replacement);
-    const original = try allocator.dupe(u8, source[line_start..line_end]);
-    errdefer allocator.free(original);
-
-    return .{
-        .intent = .flatten_destructure,
-        .start_offset = line_start,
-        .end_offset = line_end,
-        .replacement = replacement,
-        .original = original,
-    };
-}
-
-/// ZTS619 canonical_unused_index_alias: collapse
-/// `for (const pair of items.entries()) { const [_i, item] = pair; ... }`
-/// to `for (const item of items) { ... }`.
-fn unusedIndexAliasRewrite(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    line: u32,
-    column: u32,
-) !Repair {
-    const pos = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
-    const for_start = lineStartOffset(source, pos);
-    const for_end = lineEndOffset(source, pos);
-    const for_line = source[for_start..for_end];
-    const for_shape = parseForEntriesLine(for_line) orelse return error.UnsupportedRefactor;
-
-    if (for_end >= source.len or source[for_end] != '\n') return error.UnsupportedRefactor;
-    const destructure_start = for_end + 1;
-    const destructure_end = lineEndOffset(source, destructure_start);
-    const destructure_line = source[destructure_start..destructure_end];
-    const destructure = parseIndexAliasDestructure(destructure_line, for_shape.binding) orelse return error.UnsupportedRefactor;
-
-    const span_end = if (destructure_end < source.len and source[destructure_end] == '\n')
-        destructure_end + 1
-    else
-        destructure_end;
-    // Both dropped names must be dead from here on. The loop body is not the
-    // whole obligation: `repair_validator.lawDropUnusedIndexAlias` re-derives
-    // this over everything after the region, so checking only as far as the
-    // closing brace would advertise a repair the validator then refuses.
-    if (identifierTokenAppears(source[span_end..], for_shape.binding)) return error.UnsupportedRefactor;
-    if (identifierTokenAppears(source[span_end..], destructure.index)) return error.UnsupportedRefactor;
-
-    const replacement = try std.fmt.allocPrint(
-        allocator,
-        "{s}for (const {s} of {s}) {{\n",
-        .{ for_shape.indent, destructure.value, for_shape.iterable },
-    );
-    errdefer allocator.free(replacement);
-    const original = try allocator.dupe(u8, source[for_start..span_end]);
-    errdefer allocator.free(original);
-
-    return .{
-        .intent = .drop_unused_index_alias,
-        .start_offset = for_start,
-        .end_offset = span_end,
-        .replacement = replacement,
-        .original = original,
-    };
-}
-
 fn lineEndOffset(source: []const u8, pos: usize) usize {
     return std.mem.indexOfScalarPos(u8, source, pos, '\n') orelse source.len;
 }
@@ -1811,22 +1680,6 @@ fn isSimpleIdentifier(s: []const u8) bool {
         if (!isIdentContinue(c)) return false;
     }
     return true;
-}
-
-fn identifierTokenAppears(source: []const u8, ident: []const u8) bool {
-    if (ident.len == 0) return false;
-    var i: usize = 0;
-    while (i < source.len) {
-        if (!isIdentStart(source[i])) {
-            i += 1;
-            continue;
-        }
-        const start = i;
-        i += 1;
-        while (i < source.len and isIdentContinue(source[i])) i += 1;
-        if (std.mem.eql(u8, source[start..i], ident)) return true;
-    }
-    return false;
 }
 
 fn findTopLevelChar(source: []const u8, start: usize, end: usize, target: u8) ?usize {
@@ -1856,129 +1709,6 @@ fn findTopLevelChar(source: []const u8, start: usize, end: usize, target: u8) ?u
         }
     }
     return null;
-}
-
-fn matchingDelimiter(source: []const u8, open: usize, open_ch: u8, close_ch: u8, limit: usize) ?usize {
-    if (open >= limit or source[open] != open_ch) return null;
-    var i = open + 1;
-    var depth: u32 = 0;
-    while (i < limit) {
-        const c = source[i];
-        if (c == open_ch) {
-            depth += 1;
-            i += 1;
-            continue;
-        }
-        if (c == close_ch) {
-            if (depth == 0) return i;
-            depth -= 1;
-            i += 1;
-            continue;
-        }
-        if (c == '"' or c == '\'' or c == '`') {
-            const after = scanStringForward(source, i, c) orelse return null;
-            if (after > limit) return null;
-            i = after;
-            continue;
-        }
-        i += 1;
-    }
-    return null;
-}
-
-fn topLevelColon(source: []const u8) ?usize {
-    var i: usize = 0;
-    var depth: i32 = 0;
-    while (i < source.len) {
-        const c = source[i];
-        switch (c) {
-            '{', '[', '(' => {
-                depth += 1;
-                i += 1;
-            },
-            '}', ']', ')' => {
-                if (depth == 0) return null;
-                depth -= 1;
-                i += 1;
-            },
-            ':' => {
-                if (depth == 0) return i;
-                i += 1;
-            },
-            else => i += 1,
-        }
-    }
-    return null;
-}
-
-fn isFlatIdentifierList(source: []const u8) bool {
-    var rest = std.mem.trim(u8, source, " \t");
-    if (rest.len == 0) return false;
-    while (true) {
-        const comma = std.mem.indexOfScalar(u8, rest, ',');
-        const item = std.mem.trim(u8, if (comma) |c| rest[0..c] else rest, " \t");
-        if (!isSimpleIdentifier(item)) return false;
-        if (comma == null) return true;
-        rest = std.mem.trim(u8, rest[comma.? + 1 ..], " \t");
-        if (rest.len == 0) return false;
-    }
-}
-
-const ForEntriesLine = struct {
-    indent: []const u8,
-    binding: []const u8,
-    iterable: []const u8,
-};
-
-fn parseForEntriesLine(line: []const u8) ?ForEntriesLine {
-    const trimmed = trimLeft(line, " \t");
-    const indent = line[0 .. line.len - trimmed.len];
-    const prefix = "for (const ";
-    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
-    var rest = trimmed[prefix.len..];
-    const binding_end = scanIdentEnd(rest, 0, rest.len) orelse return null;
-    const binding = rest[0..binding_end];
-    if (!isSimpleIdentifier(binding)) return null;
-    rest = rest[binding_end..];
-    rest = trimLeft(rest, " \t");
-    if (!std.mem.startsWith(u8, rest, "of ")) return null;
-    rest = trimLeft(rest["of ".len..], " \t");
-
-    const entries = std.mem.lastIndexOf(u8, rest, ".entries()") orelse return null;
-    const iterable = std.mem.trim(u8, rest[0..entries], " \t");
-    if (iterable.len == 0) return null;
-    var tail = trimLeft(rest[entries + ".entries()".len ..], " \t");
-    if (tail.len == 0 or tail[0] != ')') return null;
-    tail = trimLeft(tail[1..], " \t");
-    if (tail.len == 0 or tail[0] != '{') return null;
-    if (std.mem.trim(u8, tail[1..], " \t").len != 0) return null;
-    return .{ .indent = indent, .binding = binding, .iterable = iterable };
-}
-
-const IndexAliasDestructure = struct {
-    value: []const u8,
-    /// The alias the rewrite drops. The caller re-derives that it is dead
-    /// rather than trusting the diagnostic that reported it unused.
-    index: []const u8,
-};
-
-fn parseIndexAliasDestructure(line: []const u8, pair_binding: []const u8) ?IndexAliasDestructure {
-    const trimmed = trimLeft(line, " \t");
-    const prefix = "const [";
-    if (!std.mem.startsWith(u8, trimmed, prefix)) return null;
-    const close = std.mem.indexOfScalar(u8, trimmed, ']') orelse return null;
-    const pattern = trimmed[prefix.len..close];
-    const comma = std.mem.indexOfScalar(u8, pattern, ',') orelse return null;
-    if (std.mem.indexOfScalarPos(u8, pattern, comma + 1, ',') != null) return null;
-    const index_name = std.mem.trim(u8, pattern[0..comma], " \t");
-    const value_name = std.mem.trim(u8, pattern[comma + 1 ..], " \t");
-    if (!isSimpleIdentifier(index_name) or !isSimpleIdentifier(value_name)) return null;
-
-    var tail = trimLeft(trimmed[close + 1 ..], " \t");
-    if (tail.len == 0 or tail[0] != '=') return null;
-    tail = std.mem.trim(u8, tail[1..], " \t;");
-    if (!std.mem.eql(u8, tail, pair_binding)) return null;
-    return .{ .value = value_name, .index = index_name };
 }
 
 fn appendSpanRepairUnique(
@@ -2962,27 +2692,6 @@ test "every graded rewrite this rewriter emits discharges against its law" {
         \\  const ready = true;
         \\  if (ready === true) { return Response.json({ ok: true }); }
         \\  return Response.json({ ok: false });
-        \\}
-        },
-        // The two region rewrites. Their laws re-derive a replacement spanning
-        // more than one line and re-derive their own preconditions, so this
-        // pairing is the only place either is checked against the rewriter that
-        // produces it.
-        .{ .intent = .flatten_destructure, .source =
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(name);
-        \\}
-        },
-        .{ .intent = .drop_unused_index_alias, .source =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    Response.text(item);
-        \\  }
-        \\  return Response.text("done");
         \\}
         },
     };
@@ -4182,46 +3891,6 @@ test "normalizeSource reports dynamic computed access as residual diagnostic" {
     try std.testing.expectEqualStrings("ZTS605", residual.items[0].object.get("code").?.string);
 }
 
-test "normalizeSource flattens a simple nested object destructure" {
-    const source =
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(name);
-        \\}
-    ;
-    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
-    defer nr.deinit(std.testing.allocator);
-    try std.testing.expect(nr.converged);
-    try std.testing.expect(nr.fully_canonical);
-    try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const { user } = payload;") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const { name } = user;") != null);
-
-    var found = false;
-    for (nr.rewrite_trace.items) |intent| {
-        if (intent == .flatten_destructure) found = true;
-    }
-    try std.testing.expect(found);
-}
-
-test "normalizeSource refuses nested destructure flattening that would shadow a live binding" {
-    const source =
-        \\const user = "global";
-        \\function handler(req: Request): Response {
-        \\  const payload = { user: { name: "ada" } };
-        \\  const {user: {name}} = payload;
-        \\  return Response.text(user + name);
-        \\}
-    ;
-    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
-    defer nr.deinit(std.testing.allocator);
-    try std.testing.expect(nr.converged);
-    try std.testing.expect(!nr.fully_canonical);
-    try std.testing.expect(nr.residual >= 1);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const { user: { name } } = payload;") != null);
-}
-
 // One non-canonical source per rewrite the normalizer can apply. Spec 4.2.1
 // requires a second `normalize` of canonical source to produce identical bytes,
 // and rows compose, so the failure mode that matters is a rewrite that
@@ -4322,19 +3991,6 @@ const normalize_cases = [_]NormalizeCase{
         \\}
         ,
     },
-    .{
-        .name = "unused entries index alias",
-        .source =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    Response.text(item);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-        ,
-    },
 };
 
 test "normalize is byte-idempotent over every rewrite" {
@@ -4365,68 +4021,6 @@ test "normalize is byte-idempotent over every rewrite" {
             return error.NormalizeNotAtFixedPoint;
         }
     }
-}
-
-test "normalizeSource drops an unused entries index alias" {
-    const source =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    Response.text(item);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
-    defer nr.deinit(std.testing.allocator);
-    try std.testing.expect(nr.converged);
-    try std.testing.expect(nr.fully_canonical);
-    try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "for (const item of items) {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "const [_i, item]") == null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, ".entries()") == null);
-
-    var found = false;
-    for (nr.rewrite_trace.items) |intent| {
-        if (intent == .drop_unused_index_alias) found = true;
-    }
-    try std.testing.expect(found);
-}
-
-test "normalizeSource refuses entries alias rewrite when pair binding is still read" {
-    const source =
-        \\function handler(req: Request): Response {
-        \\  const items = ["a", "b"];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    Response.text(pair[1]);
-        \\  }
-        \\  return Response.text("done");
-        \\}
-    ;
-    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
-    defer nr.deinit(std.testing.allocator);
-    try std.testing.expect(nr.converged);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "for (const pair of items.entries())") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "Response.text(pair[1]);") != null);
-
-    // The row still reports and still declines to rewrite, and the file is
-    // still canonical: ZTS619 is spec 4.2.1's `element iteration` row, so it
-    // reports at advisory severity and does not deny Canonical Normal Form.
-    // This assertion used to read `!fully_canonical` and `residual >= 1`, which
-    // were standing in for "a diagnostic remains" - so it is made to say that
-    // instead of a verdict the advisory no longer moves.
-    try std.testing.expect(nr.fully_canonical);
-    try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    var saw_advisory = false;
-    for (nr.residual_diagnostics.items) |diag| {
-        if (std.mem.eql(u8, diag.code, "ZTS619")) {
-            try std.testing.expectEqualStrings("advisory", diag.severity);
-            saw_advisory = true;
-        }
-    }
-    try std.testing.expect(saw_advisory);
 }
 
 test "compoundAssignReplacement parenthesizes a compound rhs to preserve precedence" {
@@ -4479,34 +4073,6 @@ test "delimitersBalanced detects expressions that do not finish on the line" {
     try std.testing.expect(!delimitersBalanced("f(\"unterminated"));
 }
 
-test "nestedDestructureRewrite refuses a multiline right-hand side" {
-    const source =
-        \\function handler(req: Request): Response {
-        \\  const {user: {name}} = makeUser(
-        \\    1,
-        \\  );
-        \\  return Response.json({ name });
-        \\}
-    ;
-    try std.testing.expectError(
-        error.UnsupportedRefactor,
-        nestedDestructureRewrite(std.testing.allocator, source, 2, 3),
-    );
-}
-
-test "nestedDestructureRewrite flattens a single-line nested pattern" {
-    const source =
-        \\function handler(req: Request): Response {
-        \\  const {user: {name}} = makeUser(1);
-        \\  return Response.json({ name });
-        \\}
-    ;
-    var rw = try nestedDestructureRewrite(std.testing.allocator, source, 2, 3);
-    defer rw.deinit(std.testing.allocator);
-    try std.testing.expect(std.mem.indexOf(u8, rw.replacement, "const {user} = makeUser(1);") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rw.replacement, "const {name} = user;") != null);
-}
-
 // ---------------------------------------------------------------------------
 // Confluence: critical pairs over the rewrite rows
 // ---------------------------------------------------------------------------
@@ -4522,8 +4088,6 @@ pub const rewrite_row_intents = [_]RepairIntent{
     .canonicalize_for_of_const,
     .replace_let_with_const,
     .drop_redundant_bool_compare,
-    .flatten_destructure,
-    .drop_unused_index_alias,
 };
 
 /// Apply only the refactors of one row kind, to a fixed point.
@@ -4542,12 +4106,7 @@ fn normalizeOnlyIntent(
 
     var pass: u32 = 0;
     while (pass < max_normalize_iterations) : (pass += 1) {
-        // Both builders, not just the line-keyed one. `collectFromSource` runs
-        // `buildLineRepairs` alone, so driving the pairs off it would leave
-        // every span-keyed row - `flatten_destructure` and
-        // `drop_unused_index_alias`, the two multi-line ones - selecting
-        // nothing, joining unchanged text against unchanged text, and reporting
-        // a pass over a pair it never formed.
+        // Run both builders so every enabled row participates in the pair.
         var check = precompile.runCheckOnlyFromSource(allocator, current, virtual_path, null, true, null, false) catch break;
         defer check.deinit(allocator);
         var result = Result{ .file = virtual_path };
@@ -4644,32 +4203,6 @@ test "rewrite rows join in either order" {
             \\function handler(req: Request): Response {
             \\  let out = "";
             \\  for (let item of ["a", "b"]) { out = out + item; }
-            \\  return Response.text(out);
-            \\}
-            \\
-            ,
-        },
-        .{
-            .name = "nested destructure beside a let-const",
-            .source =
-            \\function handler(req: Request): Response {
-            \\  let payload = { data: { name: "ada" } };
-            \\  const {data: {name}} = payload;
-            \\  return Response.text(name);
-            \\}
-            \\
-            ,
-        },
-        .{
-            .name = "unused index alias beside a let-const",
-            .source =
-            \\function handler(req: Request): Response {
-            \\  let items = ["a", "b"];
-            \\  let out = "";
-            \\  for (const pair of items.entries()) {
-            \\    const [_i, item] = pair;
-            \\    out = out + item;
-            \\  }
             \\  return Response.text(out);
             \\}
             \\

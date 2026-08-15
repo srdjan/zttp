@@ -4645,71 +4645,6 @@ test "runCheckOnlyFromSource reports malformed TSX at the authored tag" {
     try std.testing.expectEqual(@as(u32, 31), diagnostic.column);
 }
 
-test "an idiom advisory is neither an error nor a warning" {
-    // Spec 4.2.1: a non-idiomatic spelling "is never an error and never fails a
-    // build". A warning is a build failure on this CLI - it sets exit code 2 -
-    // so folding advisories into the warning count made the idiom channel
-    // change a program's verdict. The counts are asserted by value here, not as
-    // a difference from the error count, because subtraction is exactly what
-    // produced the defect.
-    const source =
-        \\function handler(req: Request): Proof<Response, "canonical"> {
-        \\  const items = ["a", "b"];
-        \\  const out = [];
-        \\  for (const pair of items.entries()) {
-        \\    const [_i, item] = pair;
-        \\    out.push(item);
-        \\  }
-        \\  return Response.json({ out: out });
-        \\}
-    ;
-
-    // The same program in its idiomatic spelling. Every count the build reads
-    // must agree between the two; only the advisory count may differ.
-    const idiomatic =
-        \\function handler(req: Request): Proof<Response, "canonical"> {
-        \\  const items = ["a", "b"];
-        \\  const out = [];
-        \\  for (const item of items) {
-        \\    out.push(item);
-        \\  }
-        \\  return Response.json({ out: out });
-        \\}
-    ;
-
-    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
-    defer result.deinit(std.testing.allocator);
-    var clean = try runCheckOnlyFromSource(std.testing.allocator, idiomatic, "handler.ts", null, true, null, false);
-    defer clean.deinit(std.testing.allocator);
-
-    try std.testing.expectEqual(@as(u32, 1), result.strict_advisories);
-    try std.testing.expectEqual(@as(u32, 0), clean.strict_advisories);
-    try std.testing.expectEqual(@as(u32, 0), result.strict_warnings);
-    try std.testing.expectEqual(@as(u32, 0), result.strict_errors);
-    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
-    try std.testing.expectEqual(clean.totalErrors(), result.totalErrors());
-
-    // The alias program does carry one warning the idiomatic one does not, and
-    // it is not this channel: the destructure binds an index nobody reads, so
-    // the unused-binding rule fires on `_i`. That is a real observation about
-    // the program and it survives; what must not happen is the advisory adding
-    // a second one. The strict channel's own warning count above is the
-    // assertion that says so.
-    try std.testing.expectEqual(@as(u32, 0), clean.totalWarnings());
-    try std.testing.expectEqual(@as(u32, 1), result.totalWarnings());
-
-    // And it is still reported: silencing it would satisfy the counts above for
-    // the wrong reason.
-    var saw_advisory = false;
-    for (result.json_diagnostics.items) |diag| {
-        if (std.mem.eql(u8, diag.code, "ZTS619")) {
-            try std.testing.expectEqualStrings("advisory", diag.severity);
-            saw_advisory = true;
-        }
-    }
-    try std.testing.expect(saw_advisory);
-}
-
 test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
     const allocator = std.testing.allocator;
     const source =
@@ -4985,6 +4920,63 @@ test "runCheckOnlyFromSource refuses when wildcard arms" {
     const diagnostic = result.json_diagnostics.items[0];
     try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
     try std.testing.expectEqualStrings("write `default:`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses object declaration destructuring" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const { method, url } = req;
+        \\  return Response.json({ method: method, url: url });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("bind the source to a name, then read each member with explicit `const` bindings", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses destructuring renames" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const { method: requestMethod } = req;
+        \\  return Response.json({ method: requestMethod });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("bind the source to a name, then read each member with explicit `const` bindings", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses array declaration destructuring" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function first(pair: [string, number]): string {
+        \\  const [name, count] = pair;
+        \\  return name + String(count);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("bind the source to a name, then read each element with explicit indexed `const` bindings", diagnostic.suggestion.?);
     try std.testing.expect(result.contract == null);
 }
 

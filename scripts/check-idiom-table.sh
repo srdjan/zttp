@@ -36,8 +36,9 @@ cd "$(dirname "$0")/.."
 spec_doc="docs/zts-formal-spec-northstar-advanced.md"
 registry_file="packages/zts/src/idiom_registry.zig"
 
-# The row count measured on 2026-08-10, when the table was completed.
-MIN_ROWS=24
+# The row count measured on 2026-08-15 after declaration destructuring left
+# the language and the competing multi-field-read preference left with it.
+MIN_ROWS=23
 
 fail() {
   printf 'idiom table drift: %s\n' "$1" >&2

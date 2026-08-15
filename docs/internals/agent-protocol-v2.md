@@ -226,11 +226,11 @@ names - a node tag or a type-map kind wherever either records the form, and a
 source match only for the pipe, `comptime()`, `readonly`, and template literal
 types, which leave no trace after parsing or stripping.
 
-Writing those examples found five defects, all now fixed: ZTS604 fired on every
+Writing those examples found four defects, all now fixed: ZTS604 fired on every
 `let` in an exported function, an annotated `let` took its initializer's literal
 type, an object spread contributed its operand's name instead of its fields to
-both the inferred type and the dead-variable rule, a used destructured binding
-read as unused, and a template literal type was not assignable to `string`.
+both the inferred type and the dead-variable rule, and a template literal type
+was not assignable to `string`.
 
 `ambient_names` and `type_serialization` were stale deferrals whose mechanisms
 had landed in earlier phases, and both now ship. `ambient_names` publishes the

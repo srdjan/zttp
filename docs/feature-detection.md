@@ -283,12 +283,14 @@ The strict checker enforces the **canonical ZigTS profile** on every `zttp check
 | `ZTS058` | `Array<T>` type spelling | write `T[]` |
 | `ZTS059` | `ReadonlyArray<T>` type spelling | write `readonly T[]` |
 | `ZTS060` | `void` type spelling | write `undefined` |
-| `ZTS618` | nested destructuring `{a: {b}}` | drill in with follow-up `const` bindings |
-| `ZTS619` | unused index alias in `for...of` | iterate the array directly; drop `.entries()` and the destructure |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |
 | `ZTS622` | the iterated collection is mutated in the loop body (`for (const x of xs) { xs.push(x); }`) | iterate a snapshot: read one collection, build the mutated one separately |
 
 The full reference lives at [Canonicalize And Normalize](cli.md#canonicalize-and-normalize).
+
+Declaration destructuring, including renamed bindings, is outside the core
+profile. Bind the source to one name and read fields or indexed elements with
+explicit `const` declarations.
 
 ## Workflow Proof Guardrails
 
