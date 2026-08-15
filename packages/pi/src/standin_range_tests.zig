@@ -255,7 +255,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
     const cases = [_]SequenceCase{
         .{ .entry_id = "explain", .tools = &.{"zts_expert_modules"} },
         .{ .entry_id = "review", .tools = &.{"workspace_read_file"} },
-        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_modules", "zts_expert_edit_simulate", "apply_edit" } },
+        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_modules", "apply_edit" } },
         .{ .entry_id = "add-env", .tools = &.{ "zts_expert_modules", "workspace_read_file", "apply_edit" } },
         .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file", "apply_edit" } },
         .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "apply_edit" } },

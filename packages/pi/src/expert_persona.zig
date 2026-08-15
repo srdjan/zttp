@@ -89,8 +89,8 @@ const prologue =
     \\    ZTS401). Return only specifically proven non-sensitive fields.
     \\  - A handler that writes durable, sql, or cache state, or returns unknown,
     \\    cannot hold the implicit default proof profile. Preserve an existing
-    \\    Spec<...>, or run zts_expert_edit_simulate and declare exactly the
-    \\    narrow properties it discharges. Do not claim read_only for a writer.
+    \\    Spec<...>, and declare only narrow properties the host veto can
+    \\    discharge. Do not claim read_only for a writer.
     \\  - When a file contains hole(), use zts_expert_holes and fill exactly one
     \\    expression with zts_expert_fill_hole. Re-read holes after each fill;
     \\    never regenerate the complete file around a compiler-owned frame.
@@ -110,7 +110,6 @@ const prologue =
     \\                                           workspace_list_files,
     \\                                           workspace_search_text
     \\  Violation baseline                    -> zts_expert_verify_paths
-    \\  Draft veto before apply               -> zts_expert_edit_simulate
     \\  Canonical source/refactor             -> zts_expert_normalize,
     \\                                           zts_expert_canonicalize,
     \\                                           zts_expert_ast_rewrite

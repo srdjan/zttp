@@ -88,15 +88,10 @@ fn renderRouteAdd(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             break :blk try renderToolCall(allocator, 1, "zts_expert_verify_paths", args);
         },
         2 => try renderToolCall(allocator, 2, "zts_expert_modules", "{}"),
-        // Steps 3 and 4 are the pre-apply proof this migration's own persona
-        // rewrite made mandatory: "Author the COMPLETE file content yourself.
-        // Dry-run the draft with `zts_expert_edit_simulate` and resolve every
-        // new violation. Submit exactly one `apply_edit` call." The playbook
-        // went straight from facts to apply, so the offline path demonstrated
-        // the behavior the hosted path is measured for not doing. Both steps
-        // send identical bytes, so the simulate verdict is about the draft that
-        // actually lands.
-        3, 4 => blk: {
+        // The host veto is the one pre-apply authority, so the playbook submits
+        // the complete draft once instead of duplicating it through a second
+        // model-visible simulation tool.
+        3 => blk: {
             const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "add-route");
             const handler_name = try routeHandlerName(allocator, spec.method, spec.path);
             defer allocator.free(handler_name);
@@ -104,8 +99,7 @@ fn renderRouteAdd(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             defer allocator.free(proposed);
             const args = try renderApplyArgs(allocator, spec.file, proposed);
             defer allocator.free(args);
-            const tool = if (parsed.step_index == 3) "zts_expert_edit_simulate" else "apply_edit";
-            break :blk try renderToolCall(allocator, parsed.step_index, tool, args);
+            break :blk try renderToolCall(allocator, parsed.step_index, "apply_edit", args);
         },
         else => try renderText(
             allocator,
@@ -1311,8 +1305,7 @@ test "stand-in natural add-route ask becomes the historical structured route spe
 test "stand-in add-route steps use tool cassette event names and apply_edit last" {
     const parsed: request.ParsedRequest = .{
         .ask = "Add a GET /health route to handler.ts",
-        // The apply step; 3 is the mandated edit_simulate dry-run before it.
-        .step_index = 4,
+        .step_index = 3,
         .source = "function handler(req: Request): Response { return Response.json({ old: true }); }\n",
     };
     const body = try renderResponse(testing.allocator, parsed);

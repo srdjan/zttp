@@ -23,7 +23,6 @@ const canonicalize_tool = @import("tools/zts_expert_canonicalize.zig");
 const normalize_tool = @import("tools/zts_expert_normalize.zig");
 const describe_rule_tool = @import("tools/zts_expert_describe_rule.zig");
 const search_tool = @import("tools/zts_expert_search.zig");
-const edit_simulate_tool = @import("tools/zts_expert_edit_simulate.zig");
 const review_patch_tool = @import("tools/zts_expert_review_patch.zig");
 const prove_patch_tool = @import("tools/zts_expert_prove_patch.zig");
 const system_proof_tool = @import("tools/zts_expert_system_proof.zig");
@@ -135,7 +134,6 @@ const analysis_bundle = [_]ToolDef{
     normalize_tool.tool,
     describe_rule_tool.tool,
     search_tool.tool,
-    edit_simulate_tool.tool,
     review_patch_tool.tool,
     prove_patch_tool.tool,
     system_proof_tool.tool,
@@ -661,7 +659,6 @@ test "buildRegistry registers every first-party compiler primitive" {
         "zts_expert_normalize",
         "zts_expert_describe_rule",
         "zts_expert_search",
-        "zts_expert_edit_simulate",
         "zts_expert_review_patch",
         "zts_expert_prove_patch",
         "zts_expert_system_proof",

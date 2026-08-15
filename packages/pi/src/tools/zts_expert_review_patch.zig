@@ -1,7 +1,7 @@
 //! Edit-simulate with an optional `diff_only` filter matching the CLI's
 //! `zts review-patch --diff-only` semantics. `ToolResult.ok` is true iff no
 //! *new* violations were introduced, the same veto signal as
-//! `zts_expert_edit_simulate`, regardless of the filter.
+//! the host apply-time veto, regardless of the filter.
 //!
 //! Wire format for args[0]: {"file", "content", "before"?, "diff_only"?}.
 

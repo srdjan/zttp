@@ -468,8 +468,8 @@ persona, and the tool schemas.
 
 Source crosses the wire when the model calls a tool that returns it. Three do:
 `workspace_read_file` returns a file's contents, `workspace_search_text` returns
-matching lines, and `zts_expert_edit_simulate` and `apply_edit` carry a full
-proposed file - though that content is what the model just wrote. The compiler's
+matching lines, and `apply_edit` carries a full proposed file - though that
+content is what the model just wrote. The compiler's
 veto verdict comes back as a tool result and can quote diagnostics with source
 spans.
 
@@ -513,8 +513,8 @@ model-shipped generation defaults.
 
 1. You state a goal in plain English.
 2. The agent gathers facts with read-only tools before proposing anything.
-3. It authors a complete file and dry-runs it through `zts_expert_edit_simulate`.
-4. The compiler veto counts violations the draft introduces relative to the
+3. It authors a complete file and submits one `apply_edit` proposal.
+4. Before any write, the host compiler veto counts violations the draft introduces relative to the
    file's current contents. A draft that adds none passes; one that adds any is
    rejected and the agent retries.
 5. On a pass you see a proof card and approve or reject. `--yes` approves every

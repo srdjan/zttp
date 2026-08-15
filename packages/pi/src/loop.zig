@@ -1961,7 +1961,7 @@ test "text reply path injects workflow note before model text" {
         else => return error.TestFailed,
     }
     switch (tr.at(1).*) {
-        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "Author the COMPLETE file content yourself. Dry-run the draft with `zts_expert_edit_simulate`") != null),
+        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "submit exactly one `apply_edit` call so the host veto checks the draft") != null),
         else => return error.TestFailed,
     }
     switch (tr.at(2).*) {

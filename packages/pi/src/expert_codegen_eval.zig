@@ -455,8 +455,7 @@ pub fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
 }
 
 fn isViolationTool(tool_name: []const u8) bool {
-    return std.mem.eql(u8, tool_name, "zts_expert_edit_simulate") or
-        std.mem.eql(u8, tool_name, "zts_expert_review_patch") or
+    return std.mem.eql(u8, tool_name, "zts_expert_review_patch") or
         std.mem.eql(u8, tool_name, "zts_check");
 }
 

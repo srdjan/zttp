@@ -600,8 +600,7 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
     const cases = [_]DraftCase{
         .{
             .ask = "Create a handler in handler.ts that responds to GET /health with Response.json({ ok: true }).",
-            // add-route dry-runs at 3 and applies at 4; both send the same bytes.
-            .step_index = 4,
+            .step_index = 3,
             .source = normal_handler,
             .file = "handler.ts",
             .must_contain = "\"GET /health\": handleGetHealth",
