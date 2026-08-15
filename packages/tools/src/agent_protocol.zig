@@ -165,6 +165,69 @@ const Identity = struct {
     module_graph_hash: [64]u8,
 };
 
+const RepairBinding = struct {
+    source_digest: [64]u8,
+    profile_id: []const u8,
+    policy_hash: [64]u8,
+    module_graph_hash: [64]u8,
+
+    fn current(source_digest: [64]u8, identity: Identity) RepairBinding {
+        return .{
+            .source_digest = source_digest,
+            .profile_id = agent_identity.profile_id,
+            .policy_hash = identity.policy_hash,
+            .module_graph_hash = identity.module_graph_hash,
+        };
+    }
+
+    fn writeJson(self: RepairBinding, json: *std.json.Stringify) !void {
+        try json.beginObject();
+        try json.objectField("source_digest");
+        try json.write(&self.source_digest);
+        try json.objectField("profile_id");
+        try json.write(self.profile_id);
+        try json.objectField("policy_hash");
+        try json.write(&self.policy_hash);
+        try json.objectField("module_graph_hash");
+        try json.write(&self.module_graph_hash);
+        try json.endObject();
+    }
+};
+
+const RepairBindingCheck = union(enum) {
+    valid,
+    malformed: []const u8,
+    stale: []const u8,
+};
+
+fn checkRepairBinding(value: ?std.json.Value, expected: RepairBinding) RepairBindingCheck {
+    const object = switch (value orelse return .{ .malformed = "a repair must carry its `bound` identity object" }) {
+        .object => |o| o,
+        else => return .{ .malformed = "repair `bound` must be an object" },
+    };
+    if (object.count() != 4) {
+        return .{ .malformed = "repair `bound` must contain exactly source_digest, profile_id, policy_hash, and module_graph_hash" };
+    }
+
+    const fields = [_]struct { name: []const u8, expected: []const u8 }{
+        .{ .name = "source_digest", .expected = &expected.source_digest },
+        .{ .name = "profile_id", .expected = expected.profile_id },
+        .{ .name = "policy_hash", .expected = &expected.policy_hash },
+        .{ .name = "module_graph_hash", .expected = &expected.module_graph_hash },
+    };
+    for (fields) |field| {
+        const supplied = object.get(field.name) orelse
+            return .{ .malformed = "repair `bound` is missing a required identity field" };
+        if (supplied != .string) {
+            return .{ .malformed = "every repair `bound` identity field must be a string" };
+        }
+        if (!std.mem.eql(u8, supplied.string, field.expected)) {
+            return .{ .stale = field.name };
+        }
+    }
+    return .valid;
+}
+
 fn contextFreeIdentity() Identity {
     return .{
         .policy_hash = zts.policyHash(),
@@ -369,7 +432,7 @@ pub fn handleRequest(
         .restrictions => try writeRestrictionsPayload(&payload_json),
         .describe_rule => try writeDescribeRulePayload(&payload_json, input),
         .modules => try writeModulesPayload(&payload_json, &graph.?),
-        .canonicalize => try runCanonicalize(allocator, &payload_json, canonical_root, file_rel.?, input),
+        .canonicalize => try runCanonicalize(allocator, &payload_json, canonical_root, file_rel.?, identity, input),
         .normalize => try runNormalize(allocator, &payload_json, canonical_root, file_rel.?),
         .check => try runCheck(
             allocator,
@@ -380,7 +443,7 @@ pub fn handleRequest(
             file_rel.?,
         ),
         .verify => try runVerify(allocator, &payload_json, canonical_root, file_rel.?, input),
-        .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, identity.module_graph_hash, input),
+        .simulate_edit => try runSimulateEdit(allocator, &payload_json, canonical_root, file_rel.?, identity, input),
         .apply_repair => try runApplyRepair(allocator, io, &payload_json, canonical_root, file_rel.?, &identity, input),
     };
     // No `else` prong: spec 4.8's operation set is closed and every member is
@@ -1109,7 +1172,7 @@ fn runApplyRepair(
 
     var repairs: std.ArrayListUnmanaged(canonicalize.Repair) = .empty;
     defer repairs.deinit(allocator);
-    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, identity.module_graph_hash, input, source)) |refused| return refused;
+    if (try parseRepairs(allocator, json, &repairs, file_rel, before_digest, identity.*, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
         return try writeApplyRefusalWithGraph(json, file_rel, before_digest, identity.module_graph_hash, .no_repairs, "`repairs` must carry at least one repair");
@@ -1312,12 +1375,13 @@ fn parseRepairs(
     out: *std.ArrayListUnmanaged(canonicalize.Repair),
     file_rel: []const u8,
     digest: [64]u8,
-    module_graph_hash: [64]u8,
+    identity: Identity,
     input: ?std.json.Value,
     /// The bytes the digest covers. A `line`-form repair is resolved to its
     /// span against these, so both forms reach the applier as spans.
     source: []const u8,
 ) !?bool {
+    const expected_binding = RepairBinding.current(digest, identity);
     const items: []const std.json.Value = blk: {
         const obj = (input orelse break :blk &.{}).object;
         const value = obj.get("repairs") orelse break :blk &.{};
@@ -1326,15 +1390,21 @@ fn parseRepairs(
     };
 
     for (items) |item| {
-        if (item != .object) return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "each entry in `repairs` must be an object");
+        if (item != .object) return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "each entry in `repairs` must be an object");
         const o = item.object;
 
+        switch (checkRepairBinding(o.get("bound"), expected_binding)) {
+            .valid => {},
+            .malformed => |message| return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, message),
+            .stale => return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .stale_repair, "a repair's `bound` identity is stale; re-run canonicalize"),
+        }
+
         const intent_value = o.get("intent") orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must name its `intent`");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must name its `intent`");
         if (intent_value != .string)
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`intent` must be a string");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`intent` must be a string");
         const intent = zts.RepairIntent.fromString(intent_value.string) orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
 
         // A repair is keyed on a byte span. `line` is the older spelling of the
         // same thing for a whole-line rewrite, and it keeps working: within
@@ -1347,42 +1417,42 @@ fn parseRepairs(
         var line: u32 = 0;
         if (o.get("span")) |span_value| {
             if (span_value != .object)
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span` must be an object with `start` and `end`");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span` must be an object with `start` and `end`");
             const start_value = span_value.object.get("start") orelse
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span` must carry `start`");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span` must carry `start`");
             const end_value = span_value.object.get("end") orelse
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span` must carry `end`");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span` must carry `end`");
             if (start_value != .integer or start_value.integer < 0 or
                 end_value != .integer or end_value.integer < start_value.integer)
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`span.start` and `span.end` must be byte offsets with start <= end");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`span.start` and `span.end` must be byte offsets with start <= end");
             start_offset = @intCast(start_value.integer);
             end_offset = @intCast(end_value.integer);
             if (end_offset > source.len)
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             line = canonicalize.offsetLine(source, start_offset);
         } else if (o.get("line")) |line_value| {
             if (line_value != .integer or line_value.integer < 1 or line_value.integer > std.math.maxInt(u32))
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`line` must be a positive integer");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`line` must be a positive integer");
             line = @intCast(line_value.integer);
             const span = canonicalize.lineSpan(source, line) orelse
-                return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
+                return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .repair_out_of_range, "a repair names a line past the end of the file, or a byte span outside it");
             start_offset = span.start;
             end_offset = span.end;
         } else {
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must carry the `span` it applies to, or the `line` for a whole-line repair");
         }
 
         const replacement_value = o.get("replacement") orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must carry its `replacement`");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must carry its `replacement`");
         if (replacement_value != .string)
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`replacement` must be a string");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`replacement` must be a string");
 
         // Required, not optional. An absent snapshot would make the staleness
         // check silently skip, which is the one thing this field exists for.
         const original_value = o.get("original") orelse
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "a repair must carry `original`, the snapshot of the bytes it replaces");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must carry `original`, the snapshot of the bytes it replaces");
         if (original_value != .string)
-            return try writeApplyRefusalWithGraph(json, file_rel, digest, module_graph_hash, .malformed_repair, "`original` must be a string");
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`original` must be a string");
 
         try out.append(allocator, .{
             .intent = intent,
@@ -1416,7 +1486,7 @@ fn runSimulateEdit(
     json: *std.json.Stringify,
     canonical_root: []const u8,
     file_rel: []const u8,
-    module_graph_hash: [64]u8,
+    identity: Identity,
     input: ?std.json.Value,
 ) !bool {
     const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
@@ -1432,7 +1502,7 @@ fn runSimulateEdit(
     // applied it must not find the second call parsing it differently. The
     // refusal shape differs by operation, so the parser writes `apply_repair`'s
     // and simulate maps it - both carry the same `reason` strings.
-    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, module_graph_hash, input, source)) |refused| return refused;
+    if (try parseRepairs(allocator, json, &repairs, file_rel, digest, identity, input, source)) |refused| return refused;
 
     if (repairs.items.len == 0) {
         return try writeSimulateRefusal(json, file_rel, digest, .no_repairs, "`repairs` must carry at least one repair; simulating nothing has no answer to give");
@@ -1996,6 +2066,7 @@ fn runCanonicalize(
     json: *std.json.Stringify,
     canonical_root: []const u8,
     file_rel: []const u8,
+    identity: Identity,
     input: std.json.Value,
 ) !bool {
     const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
@@ -2070,6 +2141,8 @@ fn runCanonicalize(
         try json.write(repair.original);
         try json.objectField("replacement");
         try json.write(repair.replacement);
+        try json.objectField("bound");
+        try RepairBinding.current(digest, identity).writeJson(json);
         try json.endObject();
     }
     try json.endArray();
@@ -2259,6 +2332,93 @@ fn respond(allocator: std.mem.Allocator, request: []const u8) ![]u8 {
 
 fn parse(allocator: std.mem.Allocator, bytes: []const u8) !std.json.Parsed(std.json.Value) {
     return std.json.parseFromSlice(std.json.Value, allocator, bytes, .{});
+}
+
+/// Keep hand-authored test requests readable while the production wire
+/// requires every repair to carry the identity a real canonicalize response
+/// publishes. Tests for missing or stale bindings call `respond` directly.
+fn respondWithCurrentRepairBindings(allocator: std.mem.Allocator, request: []const u8) ![]u8 {
+    var parsed = try parse(allocator, request);
+    defer parsed.deinit();
+    const root = parsed.value.object;
+    const project_root = root.get("project_root").?.string;
+    const input = root.get("input").?.object;
+    const file = input.get("file").?.string;
+
+    const canonical_root = try agent_identity.canonicalRoot(allocator, testing.io, project_root);
+    defer allocator.free(canonical_root);
+    const file_rel = try agent_identity.canonicalRelPath(allocator, testing.io, canonical_root, file);
+    defer allocator.free(file_rel);
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file_rel });
+    defer allocator.free(abs);
+    const source = try zts.file_io.readFile(allocator, abs, module_graph_record.max_source_bytes);
+    defer allocator.free(source);
+    var graph = try module_graph_record.build(allocator, testing.io, canonical_root, file_rel);
+    defer graph.deinit(allocator);
+
+    const binding = RepairBinding.current(agent_identity.sourceDigest(source), .{
+        .policy_hash = zts.policyHash(),
+        .module_graph_hash = graph.hash,
+    });
+    const repairs = input.get("repairs").?.array;
+    for (repairs.items) |*repair| {
+        const arena = parsed.arena.allocator();
+        var bound: std.json.ObjectMap = .{};
+        try bound.put(arena, "source_digest", .{ .string = &binding.source_digest });
+        try bound.put(arena, "profile_id", .{ .string = binding.profile_id });
+        try bound.put(arena, "policy_hash", .{ .string = &binding.policy_hash });
+        try bound.put(arena, "module_graph_hash", .{ .string = &binding.module_graph_hash });
+        try repair.object.put(arena, "bound", .{ .object = bound });
+    }
+
+    var encoded: std.Io.Writer.Allocating = .init(allocator);
+    defer encoded.deinit();
+    var json: std.json.Stringify = .{ .writer = &encoded.writer };
+    try json.write(parsed.value);
+    return respond(allocator, encoded.writer.buffered());
+}
+
+fn currentTestRepairBinding(
+    allocator: std.mem.Allocator,
+    canonical_root: []const u8,
+    file: []const u8,
+) !RepairBinding {
+    const abs = try std.fs.path.resolve(allocator, &.{ canonical_root, file });
+    defer allocator.free(abs);
+    const source = try zts.file_io.readFile(allocator, abs, module_graph_record.max_source_bytes);
+    defer allocator.free(source);
+    var graph = try module_graph_record.build(allocator, testing.io, canonical_root, file);
+    defer graph.deinit(allocator);
+    return RepairBinding.current(agent_identity.sourceDigest(source), .{
+        .policy_hash = zts.policyHash(),
+        .module_graph_hash = graph.hash,
+    });
+}
+
+const TestStaleBindingField = enum { none, source_digest, profile_id, policy_hash, module_graph_hash };
+
+fn testRepairJson(
+    allocator: std.mem.Allocator,
+    intent: []const u8,
+    line: u32,
+    original: []const u8,
+    replacement: []const u8,
+    binding: RepairBinding,
+    stale_field: TestStaleBindingField,
+) ![]u8 {
+    const stale = "stale";
+    return std.fmt.allocPrint(allocator,
+        \\{{"intent":"{s}","line":{d},"original":{f},"replacement":{f},"bound":{{"source_digest":"{s}","profile_id":"{s}","policy_hash":"{s}","module_graph_hash":"{s}"}}}}
+    , .{
+        intent,
+        line,
+        std.json.fmt(original, .{}),
+        std.json.fmt(replacement, .{}),
+        if (stale_field == .source_digest) stale else &binding.source_digest,
+        if (stale_field == .profile_id) stale else binding.profile_id,
+        if (stale_field == .policy_hash) stale else &binding.policy_hash,
+        if (stale_field == .module_graph_hash) stale else &binding.module_graph_hash,
+    });
 }
 
 test "the operation table covers the closed operation set exactly once" {
@@ -3165,7 +3325,7 @@ test "apply_repair writes a graded repair and rebinds the digest" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":7,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3226,7 +3386,7 @@ test "apply_repair accepts a repair keyed on a byte span" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","span":{{"start":{d},"end":{d}}},"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
     , .{ root, start, start + target.len });
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3274,7 +3434,7 @@ test "apply_repair accepts the one wired idiom row" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"drop_unused_index_alias","span":{{"start":{d},"end":{d}}},"original":"    for (const pair of arr.entries()) {{\n        const [_i, x] = pair;\n","replacement":"    for (const x of arr) {{\n"}}]}}}}
     , .{ root, start, start + target.len });
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3305,7 +3465,7 @@ test "apply_repair refuses a span outside the file" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","span":{{"start":10,"end":99999}},"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3352,6 +3512,177 @@ test "canonicalize publishes the span a repair is keyed on" {
     }
 }
 
+test "a bound canonicalize candidate round-trips unchanged through simulate and apply" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const propose_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
+    , .{root});
+    defer a.free(propose_req);
+    const propose_out = try respond(a, propose_req);
+    defer a.free(propose_out);
+    var proposed = try parse(a, propose_out);
+    defer proposed.deinit();
+
+    const proposal = proposed.value.object;
+    const candidate = proposal.get("payload").?.object.get("candidates").?.array.items[0];
+    const bound = candidate.object.get("bound").?.object;
+    try testing.expectEqualStrings(
+        proposal.get("payload").?.object.get("source_digest").?.string,
+        bound.get("source_digest").?.string,
+    );
+    try testing.expectEqualStrings(proposal.get("profile_id").?.string, bound.get("profile_id").?.string);
+    try testing.expectEqualStrings(proposal.get("policy_hash").?.string, bound.get("policy_hash").?.string);
+    try testing.expectEqualStrings(
+        proposal.get("module_graph_hash").?.string,
+        bound.get("module_graph_hash").?.string,
+    );
+
+    const simulate_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{f}]}}}}
+    , .{ root, std.json.fmt(candidate, .{}) });
+    defer a.free(simulate_req);
+    const simulate_out = try respond(a, simulate_req);
+    defer a.free(simulate_out);
+    var simulated = try parse(a, simulate_out);
+    defer simulated.deinit();
+    try testing.expect(simulated.value.object.get("payload").?.object.get("ok").?.bool);
+
+    const apply_req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{f}]}}}}
+    , .{ root, std.json.fmt(candidate, .{}) });
+    defer a.free(apply_req);
+    const apply_out = try respond(a, apply_req);
+    defer a.free(apply_out);
+    var applied = try parse(a, apply_out);
+    defer applied.deinit();
+    try testing.expect(applied.value.object.get("success").?.bool);
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "const name") != null);
+    try testing.expect(std.mem.indexOf(u8, on_disk, "let name") == null);
+}
+
+test "simulate and apply refuse an unbound repair" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    for ([_][]const u8{ "simulate_edit", "apply_repair" }) |operation| {
+        const req = try std.fmt.allocPrint(a,
+            \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
+        , .{ operation, root });
+        defer a.free(req);
+        const out = try respond(a, req);
+        defer a.free(out);
+        var refused = try parse(a, out);
+        defer refused.deinit();
+        try testing.expectEqualStrings(
+            "malformed_repair",
+            refused.value.object.get("payload").?.object.get("refusal").?.object.get("reason").?.string,
+        );
+    }
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "simulate and apply refuse every stale repair binding" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+    const binding = try currentTestRepairBinding(a, root, "h.ts");
+
+    for ([_]TestStaleBindingField{ .source_digest, .profile_id, .policy_hash, .module_graph_hash }) |stale_field| {
+        const repair = try testRepairJson(
+            a,
+            "replace_let_with_const",
+            6,
+            "    let name = \"world\";",
+            "    const name = \"world\";",
+            binding,
+            stale_field,
+        );
+        defer a.free(repair);
+        for ([_][]const u8{ "simulate_edit", "apply_repair" }) |operation| {
+            const req = try std.fmt.allocPrint(a,
+                \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s}]}}}}
+            , .{ operation, root, repair });
+            defer a.free(req);
+            const out = try respond(a, req);
+            defer a.free(out);
+            var refused = try parse(a, out);
+            defer refused.deinit();
+            try testing.expectEqualStrings(
+                "stale_repair",
+                refused.value.object.get("payload").?.object.get("refusal").?.object.get("reason").?.string,
+            );
+        }
+    }
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(let_handler, on_disk);
+}
+
+test "simulate and apply refuse a mixed-binding batch atomically" {
+    const a = testing.allocator;
+    const source =
+        \\import type { Spec } from "zttp:types";
+        \\
+        \\structural Guardrails = Spec<"state_isolated">;
+        \\
+        \\export function handler(req: Request): Response & Guardrails {
+        \\    let first = "a";
+        \\    let second = "b";
+        \\    return Response.json({ first, second });
+        \\}
+        \\
+    ;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+    const binding = try currentTestRepairBinding(a, root, "h.ts");
+    const first = try testRepairJson(a, "replace_let_with_const", 6, "    let first = \"a\";", "    const first = \"a\";", binding, .none);
+    defer a.free(first);
+    const second = try testRepairJson(a, "replace_let_with_const", 7, "    let second = \"b\";", "    const second = \"b\";", binding, .profile_id);
+    defer a.free(second);
+
+    for ([_][]const u8{ "simulate_edit", "apply_repair" }) |operation| {
+        const req = try std.fmt.allocPrint(a,
+            \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s},{s}]}}}}
+        , .{ operation, root, first, second });
+        defer a.free(req);
+        const out = try respond(a, req);
+        defer a.free(out);
+        var refused = try parse(a, out);
+        defer refused.deinit();
+        try testing.expectEqualStrings(
+            "stale_repair",
+            refused.value.object.get("payload").?.object.get("refusal").?.object.get("reason").?.string,
+        );
+    }
+
+    const on_disk = try tmp.dir.readFileAlloc(testing.io, "h.ts", a, .limited(4096));
+    defer a.free(on_disk);
+    try testing.expectEqualStrings(source, on_disk);
+}
+
 test "apply_repair refuses an ungraded intent without touching the file" {
     // The gate that separates this operation from `simulate_edit`. Applying a
     // rewrite unasked is a stronger claim than advertising it, so only an
@@ -3369,7 +3700,7 @@ test "apply_repair refuses an ungraded intent without touching the file" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"add_trailing_return","line":6,"original":"    let name = \"world\";","replacement":"    return Response.json({{}});"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3400,7 +3731,7 @@ test "apply_repair is atomic: a rejected set leaves the file untouched" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}},{{"intent":"replace_let_with_const","line":7,"original":"    let other = 1;","replacement":"    const other = 1;"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3437,7 +3768,7 @@ test "apply_repair refuses an overlapping set and writes nothing" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}},{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"earth\";"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3473,7 +3804,7 @@ test "apply_repair refuses an edit its own law does not discharge" {
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"attacker\";"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3503,7 +3834,7 @@ test "simulate_edit round-trips a canonicalize candidate" {
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3535,7 +3866,7 @@ test "simulate_edit refuses a repair whose snapshot has moved" {
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"mars\";","replacement":"    const name = \"mars\";"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3563,7 +3894,7 @@ test "simulate_edit refuses a repair outside the vocabulary" {
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"canonicalize_let_const","line":6,"original":"x","replacement":"y"}}]}}}}
     , .{root});
     defer a.free(req);
-    const out = try respond(a, req);
+    const out = try respondWithCurrentRepairBindings(a, req);
     defer a.free(out);
 
     var parsed = try parse(a, out);
@@ -3592,18 +3923,12 @@ test "an external client completes propose, simulate, verify over the wire" {
     defer a.free(propose_out);
     var proposed = try parse(a, propose_out);
     defer proposed.deinit();
-    const candidate = proposed.value.object.get("payload").?.object.get("candidates").?.array.items[0].object;
+    const candidate = proposed.value.object.get("payload").?.object.get("candidates").?.array.items[0];
 
     // 2. Simulate, using the candidate's own fields verbatim.
     const simulate_req = try std.fmt.allocPrint(a,
-        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"{s}","line":{d},"original":{f},"replacement":{f}}}]}}}}
-    , .{
-        root,
-        candidate.get("intent").?.string,
-        candidate.get("line").?.integer,
-        std.json.fmt(candidate.get("original").?.string, .{}),
-        std.json.fmt(candidate.get("replacement").?.string, .{}),
-    });
+        \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{f}]}}}}
+    , .{ root, std.json.fmt(candidate, .{}) });
     defer a.free(simulate_req);
     const simulate_out = try respond(a, simulate_req);
     defer a.free(simulate_out);
