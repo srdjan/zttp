@@ -154,6 +154,11 @@ pub fn buildRequestBodyFromSnapshot(
             try writer.writeAll(",\"tool_choice\":\"auto\"");
         }
     }
+    if (snapshot.config.provider == .deepseek and
+        snapshot.config.purpose == .summarization)
+    {
+        try writer.writeAll(",\"thinking\":{\"type\":\"disabled\"}");
+    }
     try writer.writeByte('}');
     return buf.toOwnedSlice();
 }
@@ -299,6 +304,11 @@ test "local and DeepSeek summarization bodies are standalone and tool-free" {
         const body = try buildRequestBodyFromSnapshot(ta, &snapshot);
         try testing.expect(std.mem.indexOf(u8, body, "\"tools\"") == null);
         try testing.expect(std.mem.indexOf(u8, body, "summary payload") != null);
+        if (provider == .deepseek) {
+            try testing.expect(std.mem.indexOf(u8, body, "\"thinking\":{\"type\":\"disabled\"}") != null);
+        } else {
+            try testing.expect(std.mem.indexOf(u8, body, "\"thinking\"") == null);
+        }
         try testing.expectEqual(model_request.Purpose.summarization, snapshot.config.purpose);
     }
 }
