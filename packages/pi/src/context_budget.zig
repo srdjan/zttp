@@ -245,11 +245,11 @@ pub fn estimateTrailing(previous: RequestBudget, current: RequestBudget) ?u64 {
         return null;
     }
 
-    const delta = (current.bytes.system - previous.bytes.system) +|
-        (current.bytes.tools - previous.bytes.tools) +|
-        (current.bytes.history - previous.bytes.history) +|
-        (current.bytes.transient - previous.bytes.transient) +|
-        (current.bytes.wire - previous.bytes.wire);
+    // The wire body already contains every component's bytes plus the framing
+    // around them (`framing = wire -| logical`), so its growth is the complete
+    // growth. Adding the component deltas on top counted each grown byte twice
+    // and compacted requests that fit.
+    const delta = current.bytes.wire - previous.bytes.wire;
     if (delta == 0) return 0;
     const uncertainty = if (current.bytes.history >= tool_heavy_history_bytes)
         tool_heavy_trailing_uncertainty_tokens
