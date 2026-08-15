@@ -55,6 +55,8 @@ pub const BuildVerifiedPatchOptions = struct {
     before: ?[]const u8,
     after: []const u8,
     policy_hash: []const u8,
+    source_digest: ?[]const u8 = null,
+    module_graph_hash: ?[]const u8 = null,
     applied_at_unix_ms: i64,
     post_apply_ok: bool,
     post_apply_summary: ?[]const u8 = null,
@@ -100,6 +102,10 @@ pub fn buildVerifiedPatchPayload(
     errdefer allocator.free(file_copy);
     const policy_copy = try allocator.dupe(u8, options.policy_hash);
     errdefer allocator.free(policy_copy);
+    const source_digest_copy: ?[]u8 = if (options.source_digest) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (source_digest_copy) |value| allocator.free(value);
+    const module_graph_hash_copy: ?[]u8 = if (options.module_graph_hash) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (module_graph_hash_copy) |value| allocator.free(value);
     const before_copy: ?[]u8 = if (options.before) |before|
         try allocator.dupe(u8, before)
     else
@@ -128,6 +134,8 @@ pub fn buildVerifiedPatchPayload(
     var payload = ui_payload.VerifiedPatchPayload{
         .file = file_copy,
         .policy_hash = policy_copy,
+        .source_digest = source_digest_copy,
+        .module_graph_hash = module_graph_hash_copy,
         .applied_at_unix_ms = options.applied_at_unix_ms,
         .stats = analysis.stats,
         .before = before_copy,

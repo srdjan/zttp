@@ -18,6 +18,7 @@ const session_events = @import("session/events.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const auto_repair = @import("auto_repair.zig");
 const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
+const zts_repair_writer = @import("tools/zts_repair_writer.zig");
 const compaction = @import("compaction.zig");
 
 const PostApplyReport = struct {
@@ -248,6 +249,9 @@ pub const RunOptions = struct {
     max_tool_calls_per_turn: usize = 16,
     max_tool_batch_size: usize = 8,
     replay_mode: bool = false,
+    /// Host-only write edge for exact bound protocol repairs. It is injected
+    /// here, never registered as a model or RPC tool.
+    repair_writer: zts_repair_writer.RepairWriter = zts_repair_writer.protocol_writer,
     /// Per-turn wall-time limit in milliseconds. When elapsed at the start of
     /// a model roundtrip, the turn is cut short the same way a roundtrip-budget
     /// exhaustion is: the model sees a "budget exhausted" prompt and the turn
@@ -1031,6 +1035,19 @@ fn applyVerifiedEdit(
     // The bytes that will actually be written (post-normalization). Bound here
     // so the approval preview shows exactly what lands.
     const applied_content = report.normalized_content orelse prepared.edit.content;
+    const protocol_repair: ?ui_payload_mod.ProtocolRepairPayload = if (repair_plan_ids_override == null)
+        try findRecentProtocolRepair(
+            ta,
+            transcript,
+            options.workspace_root,
+            prepared.edit.file,
+            prepared.edit.content,
+        )
+    else
+        null;
+    if (protocol_repair != null and !std.mem.eql(u8, applied_content, prepared.edit.content)) {
+        return error.ProtocolRepairNormalizationMismatch;
+    }
 
     // Log canonical normalization to stderr in auto-approve mode so the user
     // knows what changed even when there is no prompt.
@@ -1093,7 +1110,37 @@ fn applyVerifiedEdit(
         },
         else => return err,
     };
-    try applyPreparedEdit(ta, prepared, applied_content);
+    var protocol_identity: ?zts_repair_writer.Applied = null;
+    if (protocol_repair) |repair| {
+        var io_backend = std.Io.Threaded.init(ta, .{ .environ = .empty });
+        defer io_backend.deinit();
+        var outcome = try options.repair_writer.apply(ta, io_backend.io(), .{
+            .workspace_root = options.workspace_root,
+            .file = prepared.edit.file,
+            .repairs_json = repair.repairs_json,
+            .expected = .{
+                .profile_id = repair.profile_id,
+                .policy_hash = repair.policy_hash,
+                .module_graph_hash = repair.module_graph_hash,
+            },
+            .proposed_content = applied_content,
+        });
+        defer outcome.deinit(ta);
+        switch (outcome) {
+            .applied => |identity| protocol_identity = identity,
+            .refused => |refusal| {
+                const note = try std.fmt.allocPrint(
+                    ta,
+                    "bound compiler repair refused before write: {s}: {s}",
+                    .{ refusal.code, refusal.message },
+                );
+                try transcript.append(allocator, .{ .system_note = note });
+                return error.ProtocolRepairRefused;
+            },
+        }
+    } else {
+        try applyPreparedEdit(ta, prepared, applied_content);
+    }
     const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared, applied_content);
     defer if (post_apply.summary) |s| allocator.free(s);
     try appendVerifiedPatchEntry(
@@ -1105,6 +1152,7 @@ fn applyVerifiedEdit(
         report,
         post_apply,
         repair_plan_ids_override,
+        protocol_identity,
     );
     var st: ApplyState = .{ .applied = true };
     if (report.after_properties) |snap| {
@@ -1246,6 +1294,7 @@ fn appendVerifiedPatchEntry(
     report: veto.VetoReport,
     post_apply: PostApplyReport,
     repair_plan_ids_override: ?[]const []const u8,
+    protocol_identity: ?zts_repair_writer.Applied,
 ) !void {
     const workspace_root_abs = try std.fs.path.resolve(allocator, &.{workspace_root});
     defer allocator.free(workspace_root_abs);
@@ -1279,6 +1328,8 @@ fn appendVerifiedPatchEntry(
             .before = prepared.before,
             .after = applied_content,
             .policy_hash = report.policy_hash,
+            .source_digest = if (protocol_identity) |identity| &identity.source_digest else null,
+            .module_graph_hash = if (protocol_identity) |identity| &identity.module_graph_hash else null,
             .applied_at_unix_ms = tools_common.nowUnixMs(),
             .post_apply_ok = post_apply.ok,
             .post_apply_summary = post_apply.summary,
@@ -1336,6 +1387,50 @@ fn collectRecentRepairLinks(
         }
     }
     return .{};
+}
+
+/// Match only the exact v2 preview tool result for this path and the model's
+/// proposed bytes. A near match is not a protocol repair: semantic apply_edit
+/// remains available, but a selected bound repair can never be reconstructed
+/// from text or a broad diagnostic.
+fn findRecentProtocolRepair(
+    allocator: std.mem.Allocator,
+    transcript: *const transcript_mod.Transcript,
+    workspace_root: []const u8,
+    file: []const u8,
+    content: []const u8,
+) !?ui_payload_mod.ProtocolRepairPayload {
+    const workspace_root_abs = try std.fs.path.resolve(allocator, &.{workspace_root});
+    defer allocator.free(workspace_root_abs);
+    const file_abs = try std.fs.path.resolve(allocator, &.{ workspace_root_abs, file });
+    defer allocator.free(file_abs);
+
+    var i = transcript.len();
+    while (i > 0) {
+        i -= 1;
+        switch (transcript.at(i).*) {
+            .user_text => break,
+            .tool_result => |result| {
+                if (!std.mem.eql(u8, result.tool_name, "pi_apply_repair_plan")) continue;
+                const payload = result.ui_payload orelse continue;
+                switch (payload) {
+                    .protocol_repair => |repair| {
+                        const candidate_abs = try std.fs.path.resolve(
+                            allocator,
+                            &.{ workspace_root_abs, repair.path },
+                        );
+                        defer allocator.free(candidate_abs);
+                        if (!std.mem.eql(u8, candidate_abs, file_abs)) continue;
+                        if (!std.mem.eql(u8, repair.proposed_content, content)) continue;
+                        return repair;
+                    },
+                    else => {},
+                }
+            },
+            else => {},
+        }
+    }
+    return null;
 }
 
 fn repairLinksFromCandidate(
@@ -1461,6 +1556,45 @@ const bad_handler =
     "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }";
 const clean_handler =
     "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
+const protocol_before_handler =
+    "function handler(req: Request): Response & Spec<\"deterministic\"> { let ok = true; return Response.json({ok}); }";
+const protocol_after_handler =
+    "function handler(req: Request): Response & Spec<\"deterministic\"> { const ok = true; return Response.json({ok}); }";
+
+fn protocolPreviewExecute(
+    allocator: std.mem.Allocator,
+    _: []const []const u8,
+) anyerror!registry_mod.ToolResult {
+    var payload: ui_payload_mod.UiPayload = .{ .protocol_repair = try ui_payload_mod.ProtocolRepairPayload.init(
+        allocator,
+        "handler.ts",
+        protocol_after_handler,
+        "[{\"intent\":\"replace_let_with_const\",\"bound\":{\"source_digest\":\"source\",\"profile_id\":\"zts-advanced-1\",\"policy_hash\":\"policy\",\"module_graph_hash\":\"graph\"}}]",
+        "source",
+        "zts-advanced-1",
+        "policy",
+        "graph",
+        "0 new, 0 preexisting",
+        .{ .total = 0, .new = 0, .preexisting = 0 },
+    ) };
+    errdefer payload.deinit(allocator);
+    return .{
+        .ok = true,
+        .llm_text = try allocator.dupe(u8, "{\"schema_version\":2,\"operation\":\"simulate_edit\",\"success\":true}"),
+        .ui_payload = payload,
+    };
+}
+
+const protocol_preview_tool: registry_mod.ToolDef = .{
+    .name = "pi_apply_repair_plan",
+    .label = "test protocol repair preview",
+    .effect = .read_workspace,
+    .context_policy = .exact,
+    .description = "Test-only protocol repair preview",
+    .input_schema = "{\"type\":\"object\"}",
+    .decode_json = registry_mod.helpers.decodeJsonPassthrough,
+    .execute = protocolPreviewExecute,
+};
 
 const ApprovalRace = struct {
     allocator: std.mem.Allocator,
@@ -1479,6 +1613,63 @@ const ApprovalRace = struct {
 
     fn callback(self: *ApprovalRace) ApprovalFn {
         return .{ .contextual = .{ .context = self, .func = approve } };
+    }
+};
+
+const ApprovalCapture = struct {
+    approve_result: bool,
+    calls: u32 = 0,
+    saw_after: bool = false,
+    expected_after: []const u8,
+
+    fn approve(context: *anyopaque, preview: ApprovalPreview) anyerror!bool {
+        const self: *ApprovalCapture = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.saw_after = std.mem.eql(u8, preview.after, self.expected_after);
+        return self.approve_result;
+    }
+
+    fn callback(self: *ApprovalCapture) ApprovalFn {
+        return .{ .contextual = .{ .context = self, .func = approve } };
+    }
+};
+
+const RecordingRepairWriter = struct {
+    calls: u32 = 0,
+    refuse: bool = false,
+
+    fn apply(
+        context: ?*anyopaque,
+        allocator: std.mem.Allocator,
+        _: std.Io,
+        request: zts_repair_writer.ApplyRequest,
+    ) anyerror!zts_repair_writer.Outcome {
+        const self: *RecordingRepairWriter = @ptrCast(@alignCast(context.?));
+        self.calls += 1;
+        if (self.refuse) {
+            const code = try allocator.dupe(u8, "test_refusal");
+            errdefer allocator.free(code);
+            return .{ .refused = .{
+                .code = code,
+                .message = try allocator.dupe(u8, "writer refused"),
+            } };
+        }
+
+        const absolute = try tools_common.resolveInsideWorkspace(allocator, request.workspace_root, request.file);
+        defer allocator.free(absolute);
+        try file_io.writeFile(allocator, absolute, request.proposed_content);
+        var source_digest: [64]u8 = undefined;
+        @memset(&source_digest, 'a');
+        var module_graph_hash: [64]u8 = undefined;
+        @memset(&module_graph_hash, 'b');
+        return .{ .applied = .{
+            .source_digest = source_digest,
+            .module_graph_hash = module_graph_hash,
+        } };
+    }
+
+    fn capability(self: *RecordingRepairWriter) zts_repair_writer.RepairWriter {
+        return .{ .context = self, .apply_fn = apply };
     }
 };
 
@@ -1970,6 +2161,188 @@ test "approval callback can block an otherwise verified edit from being written"
         .no_change, .ready => {},
     }
     try testing.expect(!file_io.fileExists(testing.allocator, written_path));
+}
+
+test "approved bound repair uses host writer once and receipts returned identity" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+    try file_io.writeFile(testing.allocator, written_path, protocol_before_handler);
+
+    const replies = [_]turn.AssistantReply{
+        .{ .response = .{ .tool_calls = &[_]turn.ToolCall{.{
+            .id = "toolu_protocol_repair",
+            .name = "pi_apply_repair_plan",
+            .args_json = "{\"path\":\"handler.ts\",\"repairs\":[]}",
+        }} } },
+        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = protocol_after_handler } } },
+    };
+    var sequence: SequenceClient = .{ .replies = &replies };
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, protocol_preview_tool);
+    var approval: ApprovalCapture = .{ .approve_result = true, .expected_after = protocol_after_handler };
+    var writer: RecordingRepairWriter = .{};
+
+    const result = try runTurnWith(
+        testing.allocator,
+        sequence.asClient(),
+        &registry,
+        &transcript,
+        "apply the bound repair",
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = approval.callback(),
+            .repair_writer = writer.capability(),
+        },
+    );
+    try testing.expect(result.applied_edit);
+    try testing.expectEqual(@as(u32, 1), approval.calls);
+    try testing.expect(approval.saw_after);
+    try testing.expectEqual(@as(u32, 1), writer.calls);
+    const on_disk = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(on_disk);
+    try testing.expectEqualStrings(protocol_after_handler, on_disk);
+
+    var found_receipt = false;
+    for (transcript.entries.items) |entry| switch (entry) {
+        .verified_patch => |message| switch (message.ui_payload.?) {
+            .verified_patch => |patch| {
+                found_receipt = true;
+                try testing.expectEqualStrings("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", patch.source_digest.?);
+                try testing.expectEqualStrings("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", patch.module_graph_hash.?);
+                try testing.expectEqual(@as(usize, 0), patch.repair_plan_ids.len);
+            },
+            else => return error.TestExpectedVerifiedPatch,
+        },
+        else => {},
+    };
+    try testing.expect(found_receipt);
+}
+
+test "bound repair selection does not cross an external user boundary" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    var preview = try protocolPreviewExecute(testing.allocator, &.{});
+    defer preview.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "old_preview",
+        .tool_name = "pi_apply_repair_plan",
+        .ok = preview.ok,
+        .llm_text = preview.llm_text,
+        .ui_payload = preview.ui_payload,
+    } });
+    try transcript.append(testing.allocator, .{ .user_text = "a different request" });
+    try testing.expect(try findRecentProtocolRepair(
+        testing.allocator,
+        &transcript,
+        ".",
+        "handler.ts",
+        protocol_after_handler,
+    ) == null);
+}
+
+test "bound repair rejection never calls writer and writer refusal never falls back" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+    try file_io.writeFile(testing.allocator, written_path, protocol_before_handler);
+
+    const replies = [_]turn.AssistantReply{
+        .{ .response = .{ .tool_calls = &[_]turn.ToolCall{.{
+            .id = "toolu_protocol_repair",
+            .name = "pi_apply_repair_plan",
+            .args_json = "{\"path\":\"handler.ts\",\"repairs\":[]}",
+        }} } },
+        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = protocol_after_handler } } },
+    };
+    var denied_sequence: SequenceClient = .{ .replies = &replies };
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, protocol_preview_tool);
+    var rejected_writer: RecordingRepairWriter = .{};
+
+    const denied = try runTurnWith(
+        testing.allocator,
+        denied_sequence.asClient(),
+        &registry,
+        &transcript,
+        "reject the bound repair",
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = ApprovalFn.fromFn(autoReject),
+            .repair_writer = rejected_writer.capability(),
+        },
+    );
+    try testing.expectEqual(session_events.TurnEndReason.approval_denied, denied.end_reason);
+    try testing.expectEqual(@as(u32, 0), rejected_writer.calls);
+    const after_denial = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(after_denial);
+    try testing.expectEqualStrings(protocol_before_handler, after_denial);
+
+    var refusal_transcript: transcript_mod.Transcript = .{};
+    defer refusal_transcript.deinit(testing.allocator);
+    var refusal_sequence: SequenceClient = .{ .replies = &replies };
+    var refusing_writer: RecordingRepairWriter = .{ .refuse = true };
+    try testing.expectError(
+        error.ProtocolRepairRefused,
+        runTurnWith(
+            testing.allocator,
+            refusal_sequence.asClient(),
+            &registry,
+            &refusal_transcript,
+            "apply a refused bound repair",
+            .{
+                .workspace_root = workspace_root,
+                .approval_fn = ApprovalFn.fromFn(autoApprove),
+                .repair_writer = refusing_writer.capability(),
+            },
+        ),
+    );
+    try testing.expectEqual(@as(u32, 1), refusing_writer.calls);
+    const after_refusal = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(after_refusal);
+    try testing.expectEqualStrings(protocol_before_handler, after_refusal);
+
+    const concurrent = "const concurrent = true;\n";
+    var race: ApprovalRace = .{
+        .allocator = testing.allocator,
+        .path = written_path,
+        .expected_before = protocol_before_handler,
+        .concurrent_content = concurrent,
+    };
+    var race_transcript: transcript_mod.Transcript = .{};
+    defer race_transcript.deinit(testing.allocator);
+    var race_sequence: SequenceClient = .{ .replies = &replies };
+    var race_writer: RecordingRepairWriter = .{};
+    const raced = try runTurnWith(
+        testing.allocator,
+        race_sequence.asClient(),
+        &registry,
+        &race_transcript,
+        "race the bound repair",
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = race.callback(),
+            .repair_writer = race_writer.capability(),
+        },
+    );
+    try testing.expectEqual(session_events.TurnEndReason.approval_denied, raced.end_reason);
+    try testing.expect(race.saw_authoritative_before);
+    try testing.expectEqual(@as(u32, 0), race_writer.calls);
+    const after_race = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(after_race);
+    try testing.expectEqualStrings(concurrent, after_race);
 }
 
 test "workspace change during approval fails closed without overwriting concurrent bytes" {

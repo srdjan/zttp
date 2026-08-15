@@ -75,9 +75,11 @@ pub const RepairWriter = struct {
     }
 
     pub fn protocol() RepairWriter {
-        return .{ .context = null, .apply_fn = applyProtocol };
+        return protocol_writer;
     }
 };
+
+pub const protocol_writer: RepairWriter = .{ .context = null, .apply_fn = applyProtocol };
 
 fn applyProtocol(
     _: ?*anyopaque,

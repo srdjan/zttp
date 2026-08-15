@@ -438,6 +438,10 @@ pub fn freeWitnessBodySlice(
 pub const VerifiedPatchPayload = struct {
     file: []u8,
     policy_hash: []u8,
+    /// Post-write identities returned by v2 `apply_repair`. Manual semantic
+    /// edits leave both null because Pi must not fabricate protocol evidence.
+    source_digest: ?[]u8 = null,
+    module_graph_hash: ?[]u8 = null,
     applied_at_unix_ms: i64,
     stats: ProofStats,
     before: ?[]u8,
@@ -724,6 +728,10 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
             try json_writer.writeString(writer, patch.file);
             try writer.writeAll(",\"policy_hash\":");
             try json_writer.writeString(writer, patch.policy_hash);
+            try writer.writeAll(",\"source_digest\":");
+            if (patch.source_digest) |digest| try json_writer.writeString(writer, digest) else try writer.writeAll("null");
+            try writer.writeAll(",\"module_graph_hash\":");
+            if (patch.module_graph_hash) |hash| try json_writer.writeString(writer, hash) else try writer.writeAll("null");
             try writer.writeAll(",\"applied_at_unix_ms\":");
             try writer.print("{d}", .{patch.applied_at_unix_ms});
             try writer.writeAll(",\"stats\":{\"total\":");
@@ -1158,6 +1166,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
     if (std.mem.eql(u8, kind_val.string, "verified_patch")) {
         const file = getString(obj, "file") orelse return error.InvalidUiPayload;
         const policy_hash = getString(obj, "policy_hash") orelse return error.InvalidUiPayload;
+        const source_digest = try getOptionalString(obj, "source_digest");
+        const module_graph_hash = try getOptionalString(obj, "module_graph_hash");
         const stats_val = obj.get("stats") orelse return error.InvalidUiPayload;
         if (stats_val != .object) return error.InvalidUiPayload;
         const stats_obj = stats_val.object;
@@ -1198,6 +1208,10 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         errdefer allocator.free(file_copy);
         const policy_copy = try allocator.dupe(u8, policy_hash);
         errdefer allocator.free(policy_copy);
+        const source_digest_copy: ?[]u8 = if (source_digest) |digest| try allocator.dupe(u8, digest) else null;
+        errdefer if (source_digest_copy) |digest| allocator.free(digest);
+        const module_graph_hash_copy: ?[]u8 = if (module_graph_hash) |hash| try allocator.dupe(u8, hash) else null;
+        errdefer if (module_graph_hash_copy) |hash| allocator.free(hash);
         const before_copy: ?[]u8 = if (before_opt) |b| try allocator.dupe(u8, b) else null;
         errdefer if (before_copy) |b| allocator.free(b);
         const after_copy = try allocator.dupe(u8, after);
@@ -1218,6 +1232,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         return .{ .verified_patch = .{
             .file = file_copy,
             .policy_hash = policy_copy,
+            .source_digest = source_digest_copy,
+            .module_graph_hash = module_graph_hash_copy,
             .applied_at_unix_ms = applied_at_unix_ms,
             .stats = .{
                 .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
@@ -1940,6 +1956,8 @@ test "verified_patch payload round-trips with rich proof metadata" {
     var payload: UiPayload = .{ .verified_patch = .{
         .file = try testing.allocator.dupe(u8, "handler.ts"),
         .policy_hash = try testing.allocator.dupe(u8, "a" ** 64),
+        .source_digest = try testing.allocator.dupe(u8, "b" ** 64),
+        .module_graph_hash = try testing.allocator.dupe(u8, "c" ** 64),
         .applied_at_unix_ms = 1700000000123,
         .stats = .{ .total = 1, .new = 0, .preexisting = 1 },
         .before = try testing.allocator.dupe(u8, "old content"),
@@ -2087,6 +2105,8 @@ test "verified_patch payload round-trips with rich proof metadata" {
         .verified_patch => |patch| {
             try testing.expectEqualStrings("handler.ts", patch.file);
             try testing.expectEqualStrings("a" ** 64, patch.policy_hash);
+            try testing.expectEqualStrings("b" ** 64, patch.source_digest.?);
+            try testing.expectEqualStrings("c" ** 64, patch.module_graph_hash.?);
             try testing.expectEqual(@as(i64, 1700000000123), patch.applied_at_unix_ms);
             try testing.expectEqual(@as(u32, 1), patch.stats.total);
             try testing.expectEqual(@as(u32, 0), patch.stats.new);
