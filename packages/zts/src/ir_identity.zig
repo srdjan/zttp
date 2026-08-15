@@ -255,12 +255,9 @@ const Comparer = struct {
                     .{ av.else_branch, bv.else_branch },
                 }, depth);
             },
-            .call, .method_call, .optional_call => {
+            .call, .method_call => {
                 const av = self.left.getCall(a) orelse return payloadMissing();
                 const bv = self.right.getCall(b) orelse return payloadMissing();
-                if (av.is_optional != bv.is_optional) {
-                    return .{ .differs = "one call is optional and the other is not" };
-                }
                 if (av.args_count != bv.args_count) {
                     return .{ .differs = "two calls take different argument counts" };
                 }
@@ -742,7 +739,7 @@ test "the constructs the unmodeled arm names cannot reach this file" {
     }
 
     // The alphabet pin, read off the enum rather than off a list beside it.
-    try testing.expectEqual(@as(usize, 73), std.enums.values(NodeTag).len);
+    try testing.expectEqual(@as(usize, 72), std.enums.values(NodeTag).len);
 }
 
 /// One source exercising every form a handler is written in, used twice below:

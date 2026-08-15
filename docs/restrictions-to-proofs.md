@@ -71,6 +71,10 @@ reach clients through the version-2 `restrictions` operation.
 | destructuring rename | binding names are visible at their read sites | `canonical_simplicity` | `ZTS001` |
 | object literal shorthand | record fields name both their key and value | `canonical_simplicity` | `ZTS001` |
 | computed record key | fixed compiler-visible record shape | `replaced` | `ZTS001` |
+| `in` operator | one explicit membership predicate per value kind | `replaced` | `ZTS001` |
+| unary `+` | visible numeric conversion at an admitted boundary parser | `replaced` | `ZTS001` |
+| optional call | explicit absence branch before invocation | `replaced` | `ZTS001` |
+| optional computed access | explicit absence branch before dynamic indexed access | `replaced` | `ZTS001` |
 
 ## Rows No Diagnostic Rejects
 
@@ -133,3 +137,7 @@ Per-restriction rationale, one sentence each.
 - **destructuring rename** - write an explicit member read into the desired local name
 - **object literal shorthand** - write the field and value explicitly, for example `{ value: value }`
 - **computed record key** - use a literal field name, or `Dict` for dynamic keys
+- **`in` operator** - use the explicit predicate for the value kind, such as `dictHas`
+- **unary `+`** - remove it from a number expression, or use an admitted boundary parser for text
+- **optional call** - check for `undefined`, then call the function directly
+- **optional computed access** - check for `undefined`, then use indexed access

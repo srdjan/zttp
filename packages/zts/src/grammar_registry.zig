@@ -202,7 +202,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "UnaryOp",
-        .rhs = "\"!\" | \"+\" | \"-\" | \"~\" | \"typeof\"",
+        .rhs = "\"!\" | \"-\" | \"~\" | \"typeof\"",
     },
     .{
         .name = "BinaryOp",

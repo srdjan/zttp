@@ -521,4 +521,16 @@ if [[ -n "${removed_record_field_hits//[[:space:]]/}" ]]; then
   fail "tracked TypeScript still uses object shorthand or a computed record key; spell fields explicitly or use Dict"
 fi
 
+# Expression forms keep absence and conversion branches explicit. This scans
+# authored TypeScript only; the parser E2E probes live in Zig and remain the
+# authoritative diagnostic check. Historical recordings remain evidence.
+removed_expression_form_hits="$({
+  git ls-files -z -- '*.ts' '*.tsx' |
+    xargs -0 rg -n -U --pcre2 -- '(?m)(?:\?\.\s*[\[(]|(?:^|[=(:,;!?{}\[])\s*\+\s*(?:[A-Za-z_$]|\()|(?:\b[A-Za-z_$][A-Za-z0-9_$]*|\)|\])\s+in\s+(?:[A-Za-z_$]|\(|\{|\[))' 2>/dev/null || true
+} | grep -v -E '^(docs/|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/)' | grep -v -E ':[[:space:]]*(//|\*)' || true)"
+if [[ -n "${removed_expression_form_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$removed_expression_form_hits" >&2
+  fail "tracked TypeScript still uses in, unary plus, optional call, or optional computed access; use explicit predicates, conversions, and absence branches"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

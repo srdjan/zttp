@@ -1404,18 +1404,6 @@ pub const Interpreter = struct {
                 try self.ctx.push(value.JSValue.fromPtr(js_str));
                 continue :sw @enumFromInt(self.pc[0]);
             },
-            .to_number => {
-                self.advanceOp();
-                const a = self.ctx.pop();
-                if (a.isInt()) {
-                    try self.ctx.push(a);
-                } else if (a.toNumber()) |n| {
-                    try self.ctx.push(value.JSValue.fromFloat(n));
-                } else {
-                    try self.ctx.push(value.JSValue.nan_val);
-                }
-                continue :sw @enumFromInt(self.pc[0]);
-            },
             .array_spread => {
                 // Stack: [target_array, current_index, source_array]
                 self.advanceOp();

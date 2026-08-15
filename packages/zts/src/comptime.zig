@@ -290,7 +290,6 @@ pub const ComptimeEvaluator = struct {
             .method_call,
             .computed_access,
             .optional_chain,
-            .optional_call,
             .object_property,
             .object_method,
             .object_getter,
@@ -441,7 +440,6 @@ pub const ComptimeEvaluator = struct {
             .shl => self.bitwiseShift(left, right, .left),
             .shr => self.bitwiseShift(left, right, .right),
             .ushr => self.bitwiseShift(left, right, .unsigned_right),
-            .in_op => ComptimeError.UnsupportedOp,
             .and_op, .or_op, .nullish => unreachable,
         };
     }
@@ -471,7 +469,6 @@ pub const ComptimeEvaluator = struct {
                 break :blk .{ .number = @floatFromInt(~floatToInt32(number)) };
             },
             .neg => .{ .number = -(operand.toNumber() orelse return ComptimeError.TypeMismatch) },
-            .pos => .{ .number = operand.toNumber() orelse return ComptimeError.TypeMismatch },
             .typeof_op => ComptimeError.UnsupportedOp,
         };
     }
@@ -568,7 +565,6 @@ pub const ComptimeEvaluator = struct {
 
     fn evalCall(self: *Self, ir: parser.IrView, atoms: *AtomTable, node_idx: parser.NodeIndex) ComptimeError!ComptimeValue {
         const call = ir.getCall(node_idx) orelse return ComptimeError.SyntaxError;
-        if (call.is_optional) return ComptimeError.UnsupportedOp;
         const callee_tag = ir.getTag(call.callee) orelse return ComptimeError.SyntaxError;
 
         if (callee_tag == .identifier) {
@@ -1789,7 +1785,6 @@ test "comptime behavior matrix preserves exact values operators builtins and cap
         .{ .source = "\"\" || \"fallback\"", .expected = "\"fallback\"" },
         .{ .source = "null ?? 7", .expected = "7" },
         .{ .source = "false ? 1 : 2", .expected = "2" },
-        .{ .source = "+5", .expected = "5" },
         .{ .source = "-5", .expected = "-5" },
         .{ .source = "!0", .expected = "true" },
         .{ .source = "~0", .expected = "-1" },

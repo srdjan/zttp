@@ -878,12 +878,8 @@ pub const HandlerVerifier = struct {
                 // access: `r["value"]` is an unchecked-Result read, and `m["x"]`
                 // on an un-narrowed optional is an unchecked-optional access.
                 // Without this, bracket notation launders both past the verdict.
-                // An optional computed access (`val?.[k]`) safely handles
-                // undefined, so the optional check is skipped for it.
                 self.checkResultValueAccessComputed(member, node);
-                if (!member.is_optional) {
-                    self.checkOptionalObjectAccess(member, node);
-                }
+                self.checkOptionalObjectAccess(member, node);
             },
             // exhaustive: this walk looks for unguarded Result and optional reads,
             // and every expression that can perform one is handled above. A leaf
@@ -1087,7 +1083,7 @@ pub const HandlerVerifier = struct {
             .object = member.object,
             .property = prop,
             .computed = null_node,
-            .is_optional = member.is_optional,
+            .is_optional = false,
         }, node);
     }
 

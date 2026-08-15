@@ -154,7 +154,6 @@ pub const Opcode = enum(u8) {
 
     // Type checks
     typeof = 0x90,
-    to_number = 0x91, // Unary +: coerce top of stack to number
 
     // Async operations (kept for future implementation)
 
@@ -350,7 +349,6 @@ pub fn getOpcodeInfo(op: Opcode) OpcodeInfo {
 
         // Type checks
         .typeof => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "typeof" },
-        .to_number => .{ .size = 1, .n_pop = 1, .n_push = 1, .name = "to_number" },
 
         // Async operations
 

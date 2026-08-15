@@ -774,6 +774,8 @@ It excludes:
 - reusable or exported arrow helpers
 - object methods, getters, and setters
 - object literal shorthand and computed record keys
+- the `in` operator and unary `+`
+- optional calls and optional computed access
 - declaration merging
 
 Object literals contain explicit data fields only. Write `{ value: value }`,
@@ -896,11 +898,15 @@ The profile excludes:
 
 - loose equality
 - implicit numeric or string coercion
+- unary `+`
+- the `in` operator; use the value kind's explicit membership predicate
 - assignment in expression position
 - compound and logical assignment
 - increment and decrement
 - comma and sequence expressions
 - call spread
+- optional calls
+- optional computed access
 - dynamic record property access
 - regex literals and the ambient `RegExp` constructor
 - `delete`
@@ -1976,7 +1982,7 @@ PrimaryExpr  ::= Literal
                | Template
                | MatchExpr
                | "(" Expr ")"
-UnaryOp      ::= "!" | "+" | "-" | "~" | "typeof"
+UnaryOp      ::= "!" | "-" | "~" | "typeof"
 BinaryOp     ::= "**" | "*" | "/" | "%"
                | "+" | "-"
                | "<<" | ">>" | ">>>"
@@ -2241,6 +2247,10 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | object methods, getters, setters | explicit functions and effects | language-simplicity choice |
 | object literal shorthand | record fields name both their key and value | canonical simplicity; write `{ value: value }` |
 | computed record key | fixed compiler-visible record shape | replaced by a literal field name or `Dict` |
+| `in` operator | one explicit membership predicate per value kind | replaced by `dictHas` or the corresponding value-kind predicate |
+| unary `+` | visible numeric conversion | replaced by an admitted boundary parser when the input is text |
+| optional call | explicit absence branch before invocation | check for `undefined`, then call directly |
+| optional computed access | explicit absence branch before dynamic indexed access | check for `undefined`, then use indexed access |
 | `.js` and `.jsx` source files | one typed core and one explicit TSX frontend | language-simplicity choice; use `.ts` or `.tsx` |
 
 Non-idiomatic spellings are absent from this matrix by design. They are not

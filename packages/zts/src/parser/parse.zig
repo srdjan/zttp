@@ -1112,7 +1112,6 @@ pub const Parser = struct {
                 .callee = callee,
                 .args_start = args_start,
                 .args_count = 1,
-                .is_optional = false,
             } },
         });
     }
@@ -1140,7 +1139,6 @@ pub const Parser = struct {
                 .callee = callee,
                 .args_start = args_start,
                 .args_count = 1,
-                .is_optional = false,
             } },
         });
     }
@@ -1659,7 +1657,10 @@ pub const Parser = struct {
             // Unary operators
             .bang => self.parseUnaryOp(.not),
             .tilde => self.parseUnaryOp(.bit_not),
-            .plus => self.parseUnaryOp(.pos), // Unary +: coerce to number
+            .plus => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "unary `+` is not supported; remove it from a number expression, or use an admitted boundary parser for text");
+                return error.ParseError;
+            },
             .minus => self.parseUnaryOp(.neg),
             // Prefix increment/decrement - not supported
             .plus_plus => {
@@ -1710,6 +1711,11 @@ pub const Parser = struct {
                 return error.ParseError;
             },
 
+            .kw_in => {
+                self.errors.addErrorAt(.unsupported_feature, op_tok, "`in` is not supported; use the explicit predicate for the value kind, such as `dictHas`");
+                return error.ParseError;
+            },
+
             // Binary operators
             .plus,
             .minus,
@@ -1732,7 +1738,6 @@ pub const Parser = struct {
             .ampersand_ampersand,
             .pipe_pipe,
             .question_question,
-            .kw_in,
             => {
                 // In JavaScript, a unary operator on the left of ** is a syntax
                 // error (e.g. -3**2 is ambiguous). Require parentheses.
@@ -1904,48 +1909,32 @@ pub const Parser = struct {
             // Optional chaining
             .question_dot => {
                 self.advance();
-                if (self.match(.lbracket)) {
-                    const index = try self.parseExpression(.none);
-                    try self.expect(.rbracket, "']'");
-                    // `obj?.[key]` is an optional COMPUTED access. Tag it as
-                    // `computed_access` (which preserves the computed key and the
-                    // is_optional bit) rather than `optional_chain` (whose IR
-                    // packing keeps only `property`, dropping the key, so codegen
-                    // read a nonexistent atom 0 and the result was always
-                    // undefined).
-                    return try self.nodes.add(.{
-                        .tag = .computed_access,
-                        .loc = loc,
-                        .data = .{ .member = .{
-                            .object = left,
-                            .property = 0,
-                            .computed = index,
-                            .is_optional = true,
-                        } },
-                    });
-                } else if (self.match(.lparen)) {
-                    // Optional call
-                    return self.parseCallArgs(left, loc, true);
-                } else {
-                    const prop = try self.expectPropertyIdentifier("property name");
-                    const prop_atom = try self.addAtom(prop.text(self.source));
-                    return try self.nodes.add(.{
-                        .tag = .optional_chain,
-                        .loc = loc,
-                        .data = .{ .member = .{
-                            .object = left,
-                            .property = prop_atom,
-                            .computed = null_node,
-                            .is_optional = true,
-                        } },
-                    });
+                if (self.check(.lparen)) {
+                    self.errors.addErrorAt(.unsupported_feature, op_tok, "optional calls are not supported; check for `undefined`, then call the function directly");
+                    return error.ParseError;
                 }
+                if (self.check(.lbracket)) {
+                    self.errors.addErrorAt(.unsupported_feature, op_tok, "optional computed access is not supported; check for `undefined`, then use indexed access");
+                    return error.ParseError;
+                }
+                const prop = try self.expectPropertyIdentifier("property name");
+                const prop_atom = try self.addAtom(prop.text(self.source));
+                return try self.nodes.add(.{
+                    .tag = .optional_chain,
+                    .loc = loc,
+                    .data = .{ .member = .{
+                        .object = left,
+                        .property = prop_atom,
+                        .computed = null_node,
+                        .is_optional = true,
+                    } },
+                });
             },
 
             // Function call
             .lparen => {
                 self.advance();
-                return self.parseCallArgs(left, loc, false);
+                return self.parseCallArgs(left, loc);
             },
 
             // Postfix operators - not supported
@@ -1962,7 +1951,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseCallArgs(self: *Parser, callee: NodeIndex, loc: SourceLocation, is_optional: bool) anyerror!NodeIndex {
+    fn parseCallArgs(self: *Parser, callee: NodeIndex, loc: SourceLocation) anyerror!NodeIndex {
         // Argument lists are almost always tiny, so a small stack buffer keeps
         // them off the heap entirely; longer lists fall back to the parser
         // allocator, and deinit handles either case. See
@@ -1999,13 +1988,12 @@ pub const Parser = struct {
             null_node;
 
         return try self.nodes.add(.{
-            .tag = if (is_optional) .optional_call else .call,
+            .tag = .call,
             .loc = loc,
             .data = .{ .call = .{
                 .callee = callee,
                 .args_start = args_start,
                 .args_count = args_count,
-                .is_optional = is_optional,
             } },
         });
     }
@@ -2966,7 +2954,6 @@ pub const Parser = struct {
             .ampersand_ampersand => .and_op,
             .pipe_pipe => .or_op,
             .question_question => .nullish,
-            .kw_in => .in_op,
             else => .add,
         };
     }

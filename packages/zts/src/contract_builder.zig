@@ -1982,7 +1982,7 @@ pub const ContractBuilder = struct {
                 const prop = self.ir_view.getProperty(node_idx) orelse return;
                 try self.walkScopeDepth(prop.value, depth);
             },
-            .call, .method_call, .optional_call => {
+            .call, .method_call => {
                 const call = self.ir_view.getCall(node_idx) orelse return;
 
                 if (self.isModuleBindingName(call.callee, "scope")) {
@@ -3495,7 +3495,7 @@ pub const ContractBuilder = struct {
                 try self.scanFunctionNodeForApiFacts(member.object, request_binding_slot, route);
                 try self.scanFunctionNodeForApiFacts(member.computed, request_binding_slot, route);
             },
-            .call, .method_call, .optional_call => {
+            .call, .method_call => {
                 const call = self.ir_view.getCall(node_idx) orelse return;
                 try self.captureApiHeaderGetter(call, request_binding_slot, route);
                 const callee_tag = self.ir_view.getTag(call.callee) orelse return;

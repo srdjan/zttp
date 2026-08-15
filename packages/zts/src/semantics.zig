@@ -365,8 +365,8 @@ pub const SpecCode = enum {
 // alphabet", not "every byte value". Rename/reorder at equal size is caught by
 // the receipt's irTableHash/opcodeTableHash at check time. A per-member
 // rule-or-pending list plus SMT-checked coverage is the northstar's version.
-pub const expected_nodes = 73;
-pub const expected_opcodes = 130;
+pub const expected_nodes = 72;
+pub const expected_opcodes = 129;
 
 comptime {
     const n = @typeInfo(NodeTag).@"enum".fields.len;

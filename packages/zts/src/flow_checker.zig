@@ -1230,7 +1230,7 @@ pub const FlowChecker = struct {
                 }
             },
 
-            .call, .method_call, .optional_call => {
+            .call, .method_call => {
                 self.checkExprSinks(node);
             },
 
@@ -1260,7 +1260,7 @@ pub const FlowChecker = struct {
     /// the next pass does not re-derive it:
     ///
     ///   carried:      binary and template concatenation, ternary, match arms,
-    ///                 member and computed reads, optional chains and calls,
+    ///                 member and computed reads, optional chains,
     ///                 assignment, array and object literals, object spread,
     ///                 array and object destructuring, for-of bindings, array
     ///                 HOFs, JSX trees and expression containers, user calls,
@@ -1288,7 +1288,7 @@ pub const FlowChecker = struct {
                 return self.binding_labels.get(key) orelse LabelSet.empty;
             },
 
-            .call, .optional_call => {
+            .call => {
                 const call_data = self.ir_view.getCall(node) orelse return LabelSet.empty;
                 return self.inferCallLabels(call_data);
             },
@@ -1587,7 +1587,7 @@ pub const FlowChecker = struct {
         }
 
         // Any other callee shape (member `obj.method(x)`, computed `obj[k](x)`,
-        // a call result `f()(x)`, an optional call, an IIFE) is not a known
+        // a call result `f()(x)`, or an IIFE) is not a known
         // pure builtin. Returning empty here would LAUNDER taint: a labelled
         // value routed through `JSON.stringify(secret)`, `[secret].join()`,
         // `secret.slice()`, etc. would reach a sink carrying no label, falsely
@@ -1818,7 +1818,7 @@ pub const FlowChecker = struct {
         // diagnostics belong to the handler walk.
         if (self.summary_returns != null) return;
         const tag = self.ir_view.getTag(node) orelse return;
-        if (tag != .call and tag != .method_call and tag != .optional_call) return;
+        if (tag != .call and tag != .method_call) return;
 
         const call_data = self.ir_view.getCall(node) orelse return;
 
@@ -1835,7 +1835,7 @@ pub const FlowChecker = struct {
         // the message string and every value of the context object to stderr, so
         // they are log sinks just like console.*. Recognize them so a secret or
         // credential logged via logError(...) is caught.
-        if ((tag == .call or tag == .optional_call) and self.isLogModuleCall(call_data.callee)) {
+        if (tag == .call and self.isLogModuleCall(call_data.callee)) {
             for (0..call_data.args_count) |i| {
                 const arg = self.ir_view.getListIndex(call_data.args_start, @intCast(i));
                 const labels = self.inferLabels(arg);
@@ -1844,7 +1844,7 @@ pub const FlowChecker = struct {
             return;
         }
 
-        if (tag == .call or tag == .optional_call) {
+        if (tag == .call) {
             // Egress sinks: the bare `fetchSync(url, opts)` global plus the
             // documented module APIs `fetch` (zttp:fetch) and `serviceCall`
             // (zttp:service). Recognizing only the bare global let a secret
@@ -4274,23 +4274,8 @@ test "FlowChecker flags a secret laundered through a string method in a response
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
 }
 
-test "FlowChecker flags a secret laundered through an optional call in a response" {
-    // `f?.(x)` is an .optional_call node; it must be treated like .call so its
-    // argument labels are not laundered. (getCallData must also mask the
-    // is_optional bit out of args_start, or the argument is dropped entirely.)
-    const source =
-        \\import { env } from "zttp:env";
-        \\function wrap(v) { return v; }
-        \\function handler(req) {
-        \\  const secret = env("SECRET_KEY");
-        \\  return Response.text(wrap?.(secret));
-        \\}
-    ;
-    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
-}
-
 test "FlowChecker flags a secret laundered through an optional method call in a response" {
-    // `[secret]?.join(",")` - optional call on a tainted receiver.
+    // `[secret]?.join(",")` - direct call through an optional receiver.
     const source =
         \\import { env } from "zttp:env";
         \\function handler(req) {

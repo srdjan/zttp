@@ -100,9 +100,6 @@ pub const BinaryOp = enum(u8) {
     or_op,
     nullish,
 
-    // Other
-    in_op,
-
     // The normal ZigTS parser profile rejects loose equality. The comptime
     // expression profile preserves it explicitly so downstream consumers can
     // reject it unless they deliberately implement JavaScript coercion. Keep
@@ -118,8 +115,6 @@ pub const UnaryOp = enum(u4) {
     not,
     bit_not,
     typeof_op,
-    pos, // Unary +: coerce to number
-    // delete_op removed - delete operator not supported
 };
 
 /// Function flags
@@ -156,7 +151,6 @@ pub const NodeTag = enum(u8) {
     member_access,
     computed_access,
     optional_chain,
-    optional_call,
     assignment,
     array_literal,
     object_literal,
@@ -366,7 +360,6 @@ pub const Node = struct {
         callee: NodeIndex,
         args_start: NodeIndex, // First argument node
         args_count: u8,
-        is_optional: bool, // foo?.()
     };
 
     pub const MemberExpr = struct {
@@ -1012,17 +1005,10 @@ pub const IRStore = struct {
     pub fn getCallData(self: *const IRStore, idx: NodeIndex) ?Node.CallExpr {
         if (idx >= self.data.items.len) return null;
         const d = self.data.items[idx];
-        // args_start is packed as 16 bits at bit 8 (see the .call/.method_call/
-        // .optional_call encoders), with is_optional at bit 24. Mask to 16 bits
-        // so the is_optional bit (which shifts into bit 16 after `>> 8`) does not
-        // corrupt args_start. Without the mask, every optional call
-        // (is_optional == 1) reads args_start + 0x10000, pointing out of bounds
-        // so its arguments are silently dropped from every IRStore consumer.
         return .{
             .callee = d.a,
             .args_start = @as(u16, @truncate(d.b >> 8)),
             .args_count = @truncate(d.b),
-            .is_optional = (d.b >> 24) != 0,
         };
     }
 
@@ -1067,10 +1053,9 @@ pub const IRStore = struct {
             },
             .call => blk: {
                 const c = node.data.call;
-                // Pack: a = callee, b = args_count(8) | args_start(16) | is_optional(8)
+                // Pack: a = callee, b = args_count(8) | args_start(16)
                 const b_val = @as(u32, c.args_count) |
-                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8) |
-                    (@as(u32, if (c.is_optional) 1 else 0) << 24);
+                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
                 break :blk self.addNode(.call, loc, .{ .a = c.callee, .b = b_val });
             },
             .member_access => blk: {
@@ -1081,9 +1066,7 @@ pub const IRStore = struct {
             },
             .computed_access => blk: {
                 const m = node.data.member;
-                // Pack: a = object, b = computed | is_optional << 24
-                const b_val = m.computed | (@as(u32, if (m.is_optional) 1 else 0) << 24);
-                break :blk self.addNode(.computed_access, loc, .{ .a = m.object, .b = b_val });
+                break :blk self.addNode(.computed_access, loc, .{ .a = m.object, .b = m.computed });
             },
             .optional_chain => blk: {
                 const m = node.data.member;
@@ -1320,19 +1303,8 @@ pub const IRStore = struct {
             .method_call => blk: {
                 const c = node.data.call;
                 const b_val = @as(u32, c.args_count) |
-                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8) |
-                    (@as(u32, if (c.is_optional) 1 else 0) << 24);
+                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8);
                 break :blk self.addNode(.method_call, loc, .{ .a = c.callee, .b = b_val });
-            },
-            .optional_call => blk: {
-                const c = node.data.call;
-                // Pack the is_optional bit (<<24) like .call/.method_call so
-                // getCallData reports the optional flag and emitCall emits the
-                // nil-check short-circuit instead of a plain throwing call.
-                const b_val = @as(u32, c.args_count) |
-                    (@as(u32, @as(u16, @truncate(c.args_start))) << 8) |
-                    (@as(u32, if (c.is_optional) 1 else 0) << 24);
-                break :blk self.addNode(.optional_call, loc, .{ .a = c.callee, .b = b_val });
             },
 
             // --- Object method/accessor ---
@@ -1823,16 +1795,11 @@ pub const IrView = struct {
                 // Member packed formats differ by tag.
                 switch (tag) {
                     .computed_access => {
-                        // Pack: a = object, b = computed(24) | is_optional << 24.
-                        // Mask the computed key to its low 24 bits: NodeIndex is
-                        // u32, so a bare @truncate would fold the is_optional bit
-                        // (bit 24) into the node index and corrupt it for the
-                        // optional case (`obj?.[key]`).
                         break :blk .{
                             .object = d.a,
                             .property = 0,
-                            .computed = @as(NodeIndex, @as(u24, @truncate(d.b))),
-                            .is_optional = (d.b >> 24) != 0,
+                            .computed = d.b,
+                            .is_optional = false,
                         };
                     },
                     else => {

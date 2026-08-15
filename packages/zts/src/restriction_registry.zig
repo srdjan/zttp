@@ -608,6 +608,38 @@ pub const entries = [_]RestrictionEntry{
         .note = "use a literal field name, or `Dict` for dynamic keys",
         .enforced_by = &.{"ZTS001"},
     },
+    .{
+        .id = "restriction.in-operator",
+        .feature = "`in` operator",
+        .boundary = "one explicit membership predicate per value kind",
+        .nature = .replaced,
+        .note = "use the explicit predicate for the value kind, such as `dictHas`",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.unary-plus",
+        .feature = "unary `+`",
+        .boundary = "visible numeric conversion at an admitted boundary parser",
+        .nature = .replaced,
+        .note = "remove it from a number expression, or use an admitted boundary parser for text",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.optional-call",
+        .feature = "optional call",
+        .boundary = "explicit absence branch before invocation",
+        .nature = .replaced,
+        .note = "check for `undefined`, then call the function directly",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.optional-computed-access",
+        .feature = "optional computed access",
+        .boundary = "explicit absence branch before dynamic indexed access",
+        .nature = .replaced,
+        .note = "check for `undefined`, then use indexed access",
+        .enforced_by = &.{"ZTS001"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

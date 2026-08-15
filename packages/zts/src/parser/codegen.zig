@@ -375,7 +375,7 @@ pub const CodeGen = struct {
             .binary_op => try self.emitBinaryOp(self.ir.getBinary(index).?, index),
             .unary_op => try self.emitUnaryOp(self.ir.getUnary(index).?),
             .ternary => try self.emitTernary(self.ir.getTernary(index).?),
-            .call, .optional_call => try self.emitCall(self.ir.getCall(index).?),
+            .call => try self.emitCall(self.ir.getCall(index).?),
             .member_access, .optional_chain => try self.emitMemberAccess(self.ir.getMember(index).?),
             .computed_access => try self.emitComputedAccess(self.ir.getMember(index).?),
             .assignment => try self.emitAssignment(self.ir.getAssignment(index).?),
@@ -1013,7 +1013,6 @@ pub const CodeGen = struct {
                     if (val == std.math.minInt(i32)) break :blk null;
                     break :blk -val;
                 },
-                .pos => val, // Unary + on integer is identity
                 .bit_not => ~val,
                 else => null,
             };
@@ -1027,7 +1026,6 @@ pub const CodeGen = struct {
 
         const opcode: Opcode = switch (unary.op) {
             .neg => .neg,
-            .pos => .to_number,
             .not => .not,
             .bit_not => .bit_not,
             .typeof_op => .typeof,
@@ -1058,14 +1056,10 @@ pub const CodeGen = struct {
         // Check if this is a method call (callee is member access)
         const callee_tag = self.ir.getTag(call.callee) orelse {
             try self.emitNode(call.callee);
-            if (call.is_optional) {
-                try self.emitOptionalCall(call, 0);
-            } else {
-                try self.emitCallArgs(call);
-                try self.emit(.call);
-                try self.emitByte(call.args_count);
-                self.popStack(call.args_count);
-            }
+            try self.emitCallArgs(call);
+            try self.emit(.call);
+            try self.emitByte(call.args_count);
+            self.popStack(call.args_count);
             return;
         };
 
@@ -1098,13 +1092,6 @@ pub const CodeGen = struct {
             self.pushStack(1);
             try self.emitGetField(member.property);
 
-            if (call.is_optional) {
-                // obj.method?.(): if the method value is null/undefined, drop
-                // both it and the receiver, then push undefined (short-circuit).
-                try self.emitOptionalCall(call, 1);
-                return;
-            }
-
             // Emit arguments
             try self.emitCallArgs(call);
 
@@ -1116,11 +1103,6 @@ pub const CodeGen = struct {
         } else {
             // Regular function call
             try self.emitNode(call.callee);
-
-            if (call.is_optional) {
-                try self.emitOptionalCall(call, 0);
-                return;
-            }
 
             // Emit arguments
             try self.emitCallArgs(call);
@@ -1141,16 +1123,9 @@ pub const CodeGen = struct {
         }
     }
 
-    /// Emit the short-circuiting tail of an optional call (`callee?.(...)`).
-    /// The callee value must already be on top of the stack; for method calls
-    /// the receiver sits directly beneath it (`extra_below` = 1), otherwise
-    /// `extra_below` = 0. If the callee is null or undefined the call is
-    /// skipped and `undefined` is pushed; otherwise the call proceeds normally.
-    /// Mirrors the nil-check pattern in `emitNullishCoalescing`.
     /// Emit a guard that jumps to `skip_label` when the top-of-stack value is
     /// null or undefined, leaving the value on the stack otherwise. Stack-neutral.
-    /// Shared by the optional-call emitters (the value being tested is the callee
-    /// for `emitOptionalCall`, the receiver for `emitOptionalMethodCall`).
+    /// Used by `emitOptionalMethodCall` to test its receiver.
     fn emitNullishSkip(self: *CodeGen, skip_label: u32) !void {
         try self.emit(.dup);
         self.pushStack(1);
@@ -1171,43 +1146,6 @@ pub const CodeGen = struct {
         self.popStack(1);
     }
 
-    fn emitOptionalCall(self: *CodeGen, call: Node.CallExpr, extra_below: u16) !void {
-        // Stack: [..., (receiver?), callee]
-        const skip_label = try self.createLabel();
-        const end_label = try self.createLabel();
-
-        // Short-circuit if the callee is null or undefined.
-        try self.emitNullishSkip(skip_label);
-
-        // Not nullish: perform the call. Stack here is [..., (receiver?), callee].
-        try self.emitCallArgs(call);
-        if (extra_below == 1) {
-            try self.emit(.call_method);
-            try self.emitByte(call.args_count);
-            // Pops receiver + callee + args, pushes result.
-            self.popStack(call.args_count + 1);
-        } else {
-            try self.emit(.call);
-            try self.emitByte(call.args_count);
-            // Pops callee + args, pushes result.
-            self.popStack(call.args_count);
-        }
-        try self.emitJump(.goto, end_label);
-
-        // Nullish: drop the callee (and receiver if present), push undefined.
-        try self.placeLabel(skip_label);
-        try self.emit(.drop); // drop callee
-        self.popStack(1);
-        if (extra_below == 1) {
-            try self.emit(.drop); // drop receiver
-            self.popStack(1);
-        }
-        try self.emit(.push_undefined);
-        self.pushStack(1);
-
-        try self.placeLabel(end_label);
-    }
-
     /// Emit `receiver?.method(args)`: if the receiver is null/undefined the whole
     /// call short-circuits to `undefined`; otherwise it proceeds as a normal
     /// method call. The receiver value must already be on top of the stack.
@@ -1223,15 +1161,10 @@ pub const CodeGen = struct {
         try self.emit(.dup);
         self.pushStack(1);
         try self.emitGetField(member.property);
-        if (call.is_optional) {
-            // `obj?.method?.()`: also guard the method value being nullish.
-            try self.emitOptionalCall(call, 1);
-        } else {
-            try self.emitCallArgs(call);
-            try self.emit(.call_method);
-            try self.emitByte(call.args_count);
-            self.popStack(call.args_count + 1);
-        }
+        try self.emitCallArgs(call);
+        try self.emit(.call_method);
+        try self.emitByte(call.args_count);
+        self.popStack(call.args_count + 1);
         try self.emitJump(.goto, end_label);
 
         // Nullish receiver: drop it, push undefined.

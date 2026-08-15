@@ -676,7 +676,6 @@ pub const BoolChecker = struct {
             .method_call,
             .computed_access,
             .optional_chain,
-            .optional_call,
             .spread,
             => .unknown,
 
@@ -694,7 +693,7 @@ pub const BoolChecker = struct {
             .loose_eq, .loose_neq => .unknown,
 
             // Comparisons always produce boolean
-            .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op => .boolean,
+            .strict_eq, .strict_neq, .lt, .lte, .gt, .gte => .boolean,
 
             // Logical ops: both sides boolean -> boolean
             .and_op, .or_op => .boolean,
@@ -739,7 +738,7 @@ pub const BoolChecker = struct {
 
         return switch (un.op) {
             .not => .boolean,
-            .neg, .pos, .bit_not => .number,
+            .neg, .bit_not => .number,
             .typeof_op => .string,
         };
     }

@@ -5018,6 +5018,82 @@ test "runCheckOnlyFromSource refuses computed record keys" {
     try std.testing.expect(result.contract == null);
 }
 
+test "runCheckOnlyFromSource refuses the in operator" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const present = "authorization" in req.headers;
+        \\  return Response.json({ present: present });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("use the explicit predicate for the value kind, such as `dictHas`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses unary plus" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const value = +req.path;
+        \\  return Response.json({ value: value });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("remove it from a number expression, or use an admitted boundary parser for text", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses optional calls" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const value = req.callback?.();
+        \\  return Response.json({ value: value });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("check for `undefined`, then call the function directly", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses optional computed access" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const value = req.headers?.["authorization"];
+        \\  return Response.json({ value: value });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("check for `undefined`, then use indexed access", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =

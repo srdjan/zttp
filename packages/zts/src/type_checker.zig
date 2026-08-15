@@ -2337,7 +2337,7 @@ pub const TypeChecker = struct {
             // Loose equality belongs only to the comptime expression profile.
             // Fail closed if such an IR node reaches normal type analysis.
             .loose_eq, .loose_neq => null_type_idx,
-            .strict_eq, .strict_neq, .lt, .lte, .gt, .gte, .in_op => pool.idx_boolean,
+            .strict_eq, .strict_neq, .lt, .lte, .gt, .gte => pool.idx_boolean,
             .and_op, .or_op => pool.idx_boolean,
             .sub, .mul, .div, .mod, .pow => pool.idx_number,
             .bit_and, .bit_or, .bit_xor, .shl, .shr, .ushr => pool.idx_number,
@@ -2370,7 +2370,7 @@ pub const TypeChecker = struct {
 
         return switch (un.op) {
             .not => pool.idx_boolean,
-            .neg, .pos, .bit_not => pool.idx_number,
+            .neg, .bit_not => pool.idx_number,
             .typeof_op => pool.idx_string,
         };
     }
@@ -6636,27 +6636,6 @@ test "a test over an unknown parameter is admitted on its form, not its effect" 
         \\}
     ,
         0,
-        null,
-    );
-}
-
-test "a test outside the closed list is refused" {
-    // `"status" in val` is not in the closed narrowing list, so the compiler
-    // cannot verify the claim the annotation makes. This is the shape the
-    // corpus trips ZTS211 on.
-    try checkTypedSource(
-        \\function isResponse(val: unknown): val is Response {
-        \\    return typeof val === "object" && "status" in val;
-        \\}
-        \\function handler(req: Request): Response {
-        \\    const raw: unknown = 1;
-        \\    if (isResponse(raw)) {
-        \\        return Response.json({ ok: true });
-        \\    }
-        \\    return Response.json({ ok: false });
-        \\}
-    ,
-        1,
         null,
     );
 }
