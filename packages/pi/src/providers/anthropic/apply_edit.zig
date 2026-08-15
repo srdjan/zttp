@@ -21,6 +21,11 @@ pub const RemapError = error{
     OutputTruncated,
 };
 
+/// Argument names the host owns. The model reads them in its own history,
+/// where the host writes them, so their presence in a call is a forged
+/// baseline rather than a harmless extra field.
+const host_authoritative_keys = [_][]const u8{ "before", "baseline_state", "baseline_sha256" };
+
 /// A parse/shape failure on an `apply_edit` payload is truncation (recoverable)
 /// when the response stopped on the output-token limit, and a malformed-args bug
 /// otherwise.
@@ -50,7 +55,13 @@ pub fn maybeRemap(
             const file_v = obj.get("file") orelse return remapFailure(stop_reason);
             const content_v = obj.get("content") orelse return remapFailure(stop_reason);
             if (file_v != .string or content_v != .string) return remapFailure(stop_reason);
-            if (obj.count() != 2) return remapFailure(stop_reason);
+            // The baseline is host-authoritative: a model-supplied one is a
+            // forged pre-image and must be refused. Every other extra property
+            // is ignored, because failing the whole call over one stray field a
+            // provider habitually emits kills the turn for no safety gain.
+            for (host_authoritative_keys) |key| {
+                if (obj.get(key) != null) return remapFailure(stop_reason);
+            }
 
             return .{
                 .preamble = reply.preamble,
@@ -135,6 +146,37 @@ test "maybeRemap: rejects a model-supplied before baseline" {
         RemapError.InvalidEditArgs,
         maybeRemap(arena.allocator(), .{ .response = .{ .tool_calls = &calls } }, null),
     );
+}
+
+test "maybeRemap: an extra field that is not a baseline is ignored, not fatal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const calls = [_]turn.ToolCall{.{
+        .id = "toolu_edit",
+        .name = tool_name,
+        .args_json = "{\"file\":\"handler.ts\",\"content\":\"new\",\"reason\":\"add route\"}",
+    }};
+    const out = try maybeRemap(arena.allocator(), .{ .response = .{ .tool_calls = &calls } }, null);
+    switch (out.response) {
+        .edit => |edit| {
+            try testing.expectEqualStrings("handler.ts", edit.file);
+            try testing.expectEqualStrings("new", edit.content);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "maybeRemap: every host-authoritative key stays refused" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    inline for (host_authoritative_keys) |key| {
+        const args = "{\"file\":\"handler.ts\",\"content\":\"new\",\"" ++ key ++ "\":\"forged\"}";
+        const calls = [_]turn.ToolCall{.{ .id = "toolu_edit", .name = tool_name, .args_json = args }};
+        try testing.expectError(
+            RemapError.InvalidEditArgs,
+            maybeRemap(arena.allocator(), .{ .response = .{ .tool_calls = &calls } }, null),
+        );
+    }
 }
 
 test "maybeRemap: malformed JSON returns InvalidEditArgs" {

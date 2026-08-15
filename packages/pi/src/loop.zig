@@ -156,6 +156,7 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.InvalidCompactionToolPair,
         => "The request crossed the context target but could not be compacted safely. Close pending tool work, run `/compact`, or narrow the request.",
         error.OutputTruncated => "The edit was too large for one response and was cut off at the model's output limit. Split the change into smaller edits (edit one function or section at a time), or switch to a model with a larger output budget via `/model <id>`.",
+        error.InvalidEditArgs => "The model sent an `apply_edit` call this host cannot accept: it must carry `file` and `content` only, and never a baseline the host owns. Retry the ask.",
         error.RequestTimedOut => "The request timed out with no response. Check your network and try again.",
         error.LocalServerUnavailable,
         error.LocalHealthNotOk,
@@ -1004,8 +1005,9 @@ const ApplyState = struct {
     applied: bool = false,
     proven: u32 = 0,
     tracked: u32 = 0,
-    /// True when the approval policy rejected the verified edit. The caller
-    /// ends the turn with .approval_denied; nothing was written.
+    /// True when a verified edit was not written: the approval policy rejected
+    /// it, or the file changed on disk after the baseline was taken. The caller
+    /// ends the turn with .approval_denied; nothing was written either way.
     denied: bool = false,
 };
 
@@ -1076,7 +1078,21 @@ fn applyVerifiedEdit(
     // reduction, fed to BOTH the disk write and the verified-patch entry so the
     // file on disk, the equivalence receipt (after=applied), and the transcript
     // attest the same bytes.
-    try verifyBaselineUnchanged(ta, prepared);
+    //
+    // A workspace changed under the approval prompt ends the turn the same way a
+    // denial does. Raising out of here instead would leave the transcript's
+    // "verified: all compiler checks passed" tool result as the last word on an
+    // edit that was never written, and a resumed session would reason from a
+    // file it believes it changed.
+    verifyBaselineUnchanged(ta, prepared) catch |err| switch (err) {
+        error.WorkspaceChangedBeforeApply => {
+            try transcript.append(allocator, .{
+                .system_note = "edit verified but not applied: the file changed on disk after the baseline was taken",
+            });
+            return .{ .denied = true };
+        },
+        else => return err,
+    };
     try applyPreparedEdit(ta, prepared, applied_content);
     const post_apply = try postApplyCheck(allocator, ta, registry, transcript, prepared, applied_content);
     defer if (post_apply.summary) |s| allocator.free(s);
@@ -1983,15 +1999,24 @@ test "workspace change during approval fails closed without overwriting concurre
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
 
-    try testing.expectError(error.WorkspaceChangedBeforeApply, runTurnWith(
+    // Ending the turn rather than raising: the transcript already closed the
+    // synthetic apply_edit call with the compiler verdict, so an error here
+    // would leave "verified" as the last word on an edit that never landed.
+    const result = try runTurnWith(
         testing.allocator,
         canned.asClient(),
         &registry,
         &tr,
         "replace the handler",
         .{ .workspace_root = workspace_root, .approval_fn = race.callback() },
-    ));
+    );
+    try testing.expectEqual(session_events.TurnEndReason.approval_denied, result.end_reason);
+    try testing.expect(!result.applied_edit);
     try testing.expect(race.saw_authoritative_before);
+    switch (tr.at(tr.len() - 1).*) {
+        .system_note => |note| try testing.expect(std.mem.indexOf(u8, note, "changed on disk") != null),
+        else => return error.TestFailed,
+    }
     const after = try file_io.readFile(testing.allocator, written_path, 1024);
     defer testing.allocator.free(after);
     try testing.expectEqualStrings(concurrent, after);
