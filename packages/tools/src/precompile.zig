@@ -317,33 +317,24 @@ fn buildContractForServiceContext(
     const source = try readFilePosix(allocator, handler_path, 10 * 1024 * 1024);
     defer allocator.free(source);
 
-    var source_to_parse: []const u8 = source;
-    var strip_result: ?zts.StripResult = null;
-    defer if (strip_result) |*sr| sr.deinit();
-
-    const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
-    const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
-    if (is_ts or is_tsx) {
-        var strip_diag: ?zts.StripDiagnostic = null;
-        strip_result = zts.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = .{},
-            .diagnostic_out = &strip_diag,
-        }) catch |err| {
-            debugPrintStripError(handler_path, err, strip_diag);
-            return err;
-        };
-        source_to_parse = strip_result.?.code;
-    }
+    var strip_diag: ?zts.StripDiagnostic = null;
+    var prepared = zts.PreparedSource.init(allocator, source, handler_path, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+        .diagnostic_out = &strip_diag,
+    }) catch |err| {
+        debugPrintStripError(handler_path, err, strip_diag);
+        return err;
+    };
+    defer prepared.deinit();
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
+    if (prepared.enablesJsx()) {
         js_parser.tokenizer.enableJsx();
     }
 
@@ -363,7 +354,7 @@ fn buildContractForServiceContext(
         root,
         null,
         null,
-        if (strip_result) |*sr| &sr.type_map else null,
+        prepared.typeMap(),
         null,
         sql_schema_path,
         null,
@@ -504,26 +495,18 @@ fn importedFunctionLabels(
     const source = readFilePosix(allocator, path, 10 * 1024 * 1024) catch return null;
     defer allocator.free(source);
 
-    const is_ts = std.mem.endsWith(u8, path, ".ts");
-    const is_tsx = std.mem.endsWith(u8, path, ".tsx");
-    var strip_result: ?zts.StripResult = null;
-    defer if (strip_result) |*sr| sr.deinit();
-    var to_parse: []const u8 = source;
-    if (is_ts or is_tsx) {
-        strip_result = zts.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = .{},
-        }) catch return null;
-        to_parse = strip_result.?.code;
-    }
+    var prepared = zts.PreparedSource.init(allocator, source, path, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+    }) catch return null;
+    defer prepared.deinit();
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = zts.parser.JsParser.init(allocator, to_parse) catch return null;
+    var parser = zts.parser.JsParser.init(allocator, prepared.parserInput()) catch return null;
     defer parser.deinit();
     parser.setAtomTable(&atoms);
-    if (is_tsx or std.mem.endsWith(u8, path, ".jsx")) parser.enableJsx();
+    if (prepared.enablesJsx()) parser.enableJsx();
     _ = parser.parse() catch return null;
 
     const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1121,24 +1104,24 @@ fn runCheckOnlyFromSourceWithPathAllocator(
     handler_path: []const u8,
     opts: CheckOptions,
 ) !CheckResult {
-    var strip_result: ?zts.StripResult = null;
-    defer if (strip_result) |*sr| sr.deinit();
+    var prepared_source: ?zts.PreparedSource = null;
+    defer if (prepared_source) |*prepared| prepared.deinit();
     // Diagnostics the strip stage raises carry source coordinates already;
     // only what the parse of the stripped code produced needs mapping. The
     // inner call reports where that boundary falls.
     var already_mapped: usize = 0;
 
-    var result = try runCheckOnStrippedSource(
+    var result = try runCheckOnPreparedSource(
         allocator,
         path_allocator,
         source,
         handler_path,
         opts,
-        &strip_result,
+        &prepared_source,
         &already_mapped,
     );
     errdefer result.deinit(allocator);
-    if (strip_result) |sr| remapDiagnosticsToSource(&result, sr, source, already_mapped);
+    if (prepared_source) |*prepared| remapDiagnosticsToSource(&result, prepared.sourceView(), already_mapped);
     return result;
 }
 
@@ -1148,26 +1131,24 @@ fn runCheckOnlyFromSourceWithPathAllocator(
 /// a repair at the wrong byte of the file it is rewriting.
 fn remapDiagnosticsToSource(
     result: *CheckResult,
-    strip_result: zts.StripResult,
-    source: []const u8,
+    source_view: zts.SourceView,
     already_mapped: usize,
 ) void {
-    if (strip_result.span_edits.len == 0) return;
     const items = result.json_diagnostics.items;
     for (items[@min(already_mapped, items.len)..]) |*diagnostic| {
-        const mapped = strip_result.sourcePosition(source, diagnostic.line, diagnostic.column);
+        const mapped = source_view.position(diagnostic.line, diagnostic.column);
         diagnostic.line = mapped.line;
         diagnostic.column = mapped.column;
     }
 }
 
-fn runCheckOnStrippedSource(
+fn runCheckOnPreparedSource(
     allocator: std.mem.Allocator,
     path_allocator: std.mem.Allocator,
     source: []const u8,
     handler_path: []const u8,
     opts: CheckOptions,
-    strip_out: *?zts.StripResult,
+    prepared_out: *?zts.PreparedSource,
     already_mapped: *usize,
 ) !CheckResult {
     const sql_schema_path = opts.sql_schema_path;
@@ -1178,47 +1159,41 @@ fn runCheckOnStrippedSource(
     errdefer result.deinit(allocator);
     result.line_count = @intCast(std.mem.count(u8, source, "\n") + 1);
 
-    var source_to_parse: []const u8 = source;
-
-    const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
-    const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
-    result.is_typescript = is_ts or is_tsx;
+    const source_kind = zts.classifySourcePath(handler_path);
+    result.is_typescript = source_kind.isTyped();
 
     var service_type_context = try loadServiceTypeContext(allocator, system_path, sql_schema_path);
     defer if (service_type_context) |*ctx| ctx.deinit(allocator);
     const stc_ptr: ?*const ServiceTypeContext = if (service_type_context) |*ctx| ctx else null;
 
-    // Stage 1: TypeScript strip
-    if (is_ts or is_tsx) {
-        var strip_diag: ?zts.StripDiagnostic = null;
-        strip_out.* = zts.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = .{},
-            .diagnostic_out = &strip_diag,
-            // Report EVERY `as`/`satisfies`/`any` site in one pass instead of
-            // aborting at the first, so an agent (or `check`) fixes them all in
-            // a single round-trip rather than one per round-trip.
-            .collect_all_diagnostics = true,
-        }) catch |err| {
-            if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
-            if (strip_diag) |d| {
-                result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
-            }
-            result.parse_errors = 1;
-            return result;
-        };
-        // Recovered type-assertion diagnostics: surface them all and stop before
-        // parse. The recovered code has the assertions dropped, so parsing it
-        // would analyze a different program than the author wrote.
-        if (strip_out.*.?.diagnostics.len > 0) {
-            for (strip_out.*.?.diagnostics) |d| {
-                result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
-            }
-            result.parse_errors = @intCast(strip_out.*.?.diagnostics.len);
-            return result;
+    // Stage 1: source preparation and TypeScript stripping.
+    var strip_diag: ?zts.StripDiagnostic = null;
+    prepared_out.* = zts.PreparedSource.init(allocator, source, handler_path, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+        .diagnostic_out = &strip_diag,
+        // Report EVERY `as`/`satisfies`/`any` site in one pass instead of
+        // aborting at the first, so an agent (or `check`) fixes them all in
+        // a single round-trip rather than one per round-trip.
+        .collect_all_diagnostics = true,
+    }) catch |err| {
+        if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
+        if (strip_diag) |d| {
+            result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
         }
-        source_to_parse = strip_out.*.?.code;
+        result.parse_errors = 1;
+        return result;
+    };
+    const prepared = &prepared_out.*.?;
+    // Recovered type-assertion diagnostics: surface them all and stop before
+    // parse. The recovered code has the assertions dropped, so parsing it
+    // would analyze a different program than the author wrote.
+    if (prepared.stripDiagnostics().len > 0) {
+        for (prepared.stripDiagnostics()) |d| {
+            result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
+        }
+        result.parse_errors = @intCast(prepared.stripDiagnostics().len);
+        return result;
     }
     // Everything appended so far came from the stripper and is already in the
     // author's coordinates; everything appended below is not.
@@ -1227,19 +1202,16 @@ fn runCheckOnStrippedSource(
     // Diagnostics are rendered against the file the author wrote, not the
     // stripped text that was parsed, and the view carries what it takes to move
     // a reported position between the two.
-    const diag_view = if (strip_out.*) |*sr|
-        zts.SourceView.stripped(source, sr)
-    else
-        zts.SourceView.of(source);
+    const diag_view = prepared.sourceView();
 
     // Stage 2: Parse
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
+    if (prepared.enablesJsx()) {
         js_parser.tokenizer.enableJsx();
     }
 
@@ -1292,8 +1264,8 @@ fn runCheckOnStrippedSource(
 
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
-    if (strip_out.*) |sr| {
-        try type_env_storage.init(allocator, &sr.type_map);
+    if (prepared.typeMap()) |type_map| {
+        try type_env_storage.init(allocator, type_map);
     }
 
     var resolved = try zts.pipeline.resolve(
@@ -1503,7 +1475,7 @@ fn runCheckOnStrippedSource(
         root,
         null,
         verify_info,
-        if (strip_out.*) |*sr| &sr.type_map else null,
+        prepared.typeMap(),
         null,
         sql_schema_path,
         null,
@@ -1612,33 +1584,24 @@ pub fn runGenTests(
     };
     defer allocator.free(source);
 
-    var source_to_parse: []const u8 = source;
-    var strip_result: ?zts.StripResult = null;
-    defer if (strip_result) |*sr| sr.deinit();
-
-    const is_ts = std.mem.endsWith(u8, handler_path, ".ts");
-    const is_tsx = std.mem.endsWith(u8, handler_path, ".tsx");
-    if (is_ts or is_tsx) {
-        var strip_diag: ?zts.StripDiagnostic = null;
-        strip_result = zts.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = .{},
-            .diagnostic_out = &strip_diag,
-        }) catch |err| {
-            debugPrintStripError(handler_path, err, strip_diag);
-            return err;
-        };
-        source_to_parse = strip_result.?.code;
-    }
+    var strip_diag: ?zts.StripDiagnostic = null;
+    var prepared = zts.PreparedSource.init(allocator, source, handler_path, .{
+        .enable_comptime = true,
+        .comptime_env = .{},
+        .diagnostic_out = &strip_diag,
+    }) catch |err| {
+        debugPrintStripError(handler_path, err, strip_diag);
+        return err;
+    };
+    defer prepared.deinit();
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    if (std.mem.endsWith(u8, handler_path, ".jsx") or is_tsx) {
+    if (prepared.enablesJsx()) {
         js_parser.tokenizer.enableJsx();
     }
 
@@ -1705,55 +1668,42 @@ pub fn compileHandler(
     const system_path = opts.system_path;
     const manifest_registry = opts.manifest_registry;
 
-    var source_to_parse: []const u8 = source;
-    var strip_result: ?zts.StripResult = null;
-    defer if (strip_result) |*sr| sr.deinit();
-
-    // Type strip for .ts/.tsx files
-    const is_ts = std.mem.endsWith(u8, filename, ".ts");
-    const is_tsx = std.mem.endsWith(u8, filename, ".tsx");
-
-    if (is_ts or is_tsx) {
+    const source_kind = zts.classifySourcePath(filename);
+    var iso_buf: [24]u8 = undefined;
+    const comptime_env: zts.ComptimeEnv = if (source_kind.isTyped()) blk: {
         // Build comptime environment with build metadata. Callers may pin
         // build_time / git_commit for reproducible builds; otherwise we fill in
         // the current wall clock and the sentinel "unknown" so the magic
         // identifiers documented in docs/typescript.md never evaluate to
         // `undefined`.
-        var iso_buf: [24]u8 = undefined;
-        const fallback_seconds: i64 = blk: {
-            const ms = zts.realtimeNowMs() catch break :blk 0;
-            break :blk @divTrunc(ms, 1000);
+        const fallback_seconds: i64 = timestamp: {
+            const ms = zts.realtimeNowMs() catch break :timestamp 0;
+            break :timestamp @divTrunc(ms, 1000);
         };
         const build_time_value = opts.build_time orelse zts.pipeline.formatIsoTimestamp(&iso_buf, fallback_seconds);
         const git_commit_value = opts.git_commit orelse "unknown";
-
-        const comptime_env = zts.ComptimeEnv{
+        break :blk .{
             .build_time = build_time_value,
             .git_commit = git_commit_value,
             .version = zts.version.string,
             .env_vars = null,
         };
-
-        var strip_diag: ?zts.StripDiagnostic = null;
-        strip_result = zts.strip(allocator, source, .{
-            .tsx_mode = is_tsx,
-            .enable_comptime = true,
-            .comptime_env = comptime_env,
-            .diagnostic_out = &strip_diag,
-        }) catch |err| {
-            debugPrintStripError(filename, err, strip_diag);
-            return err;
-        };
-        source_to_parse = strip_result.?.code;
-        if (!builtin.is_test) debugPrint("TypeScript stripped successfully\n", .{});
-    }
+    } else .{};
+    var strip_diag: ?zts.StripDiagnostic = null;
+    var prepared = zts.PreparedSource.init(allocator, source, filename, .{
+        .enable_comptime = true,
+        .comptime_env = comptime_env,
+        .diagnostic_out = &strip_diag,
+    }) catch |err| {
+        debugPrintStripError(filename, err, strip_diag);
+        return err;
+    };
+    defer prepared.deinit();
+    if (source_kind.isTyped() and !builtin.is_test) debugPrint("TypeScript stripped successfully\n", .{});
 
     // Rendered against the author's file, not the stripped text that was
-    // parsed; see runCheckOnStrippedSource.
-    const diag_view = if (strip_result) |*sr|
-        zts.SourceView.stripped(source, sr)
-    else
-        zts.SourceView.of(source);
+    // parsed; see runCheckOnPreparedSource.
+    const diag_view = prepared.sourceView();
 
     // Initialize string table and atom table for parsing
     var strings = zts.StringTable.init(allocator);
@@ -1763,12 +1713,12 @@ pub fn compileHandler(
     defer atoms.deinit();
 
     // Parse the source code (single pass for IR + bytecode)
-    var js_parser = try zts.parser.JsParser.init(allocator, source_to_parse);
+    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
     // Enable JSX mode for .jsx and .tsx files
-    if (std.mem.endsWith(u8, filename, ".jsx") or is_tsx) {
+    if (prepared.enablesJsx()) {
         js_parser.tokenizer.enableJsx();
     }
 
@@ -1807,7 +1757,7 @@ pub fn compileHandler(
         if (!builtin.is_test) debugPrint("File imports detected, building module graph...\n", .{});
         return compileMultiModule(
             allocator,
-            source_to_parse,
+            source,
             filename,
             &strings,
             &atoms,
@@ -1833,8 +1783,8 @@ pub fn compileHandler(
 
     var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
     defer type_env_storage.deinit(allocator);
-    if (strip_result) |sr| {
-        try type_env_storage.init(allocator, &sr.type_map);
+    if (prepared.typeMap()) |type_map| {
+        try type_env_storage.init(allocator, type_map);
     }
 
     var resolved = try zts.pipeline.resolve(
@@ -2097,7 +2047,7 @@ pub fn compileHandler(
                     root,
                     aot,
                     verify_info,
-                    if (strip_result) |*sr| &sr.type_map else null,
+                    prepared.typeMap(),
                     policy,
                     sql_schema_path,
                     null,
@@ -2148,7 +2098,7 @@ pub fn compileHandler(
             root,
             effective_aot,
             verify_info,
-            if (strip_result) |*sr| &sr.type_map else null,
+            prepared.typeMap(),
             policy,
             sql_schema_path,
             &all_violations,

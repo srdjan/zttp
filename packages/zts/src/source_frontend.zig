@@ -83,6 +83,10 @@ pub const PreparedSource = struct {
         return if (self.strip_result) |*result| &result.type_map else null;
     }
 
+    pub fn stripDiagnostics(self: *const PreparedSource) []const stripper.StripDiagnostic {
+        return if (self.strip_result) |result| result.diagnostics else &.{};
+    }
+
     pub fn sourceView(self: *const PreparedSource) stripper.SourceView {
         return if (self.strip_result) |*result|
             stripper.SourceView.stripped(self.original_source, result)
