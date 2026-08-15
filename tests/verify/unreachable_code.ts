@@ -1,9 +1,8 @@
 // Should warn: unreachable code after return
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<"result_safe">;
+structural Guardrails<T> = Proof<T, "result_safe">;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     return Response.json({ ok: true });
     const x = 42;
 }

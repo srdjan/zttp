@@ -17,7 +17,7 @@ const transcript_mod = @import("../transcript.zig");
 const testing = std.testing;
 
 const clean_handler =
-    "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }";
 
 // ---------------------------------------------------------------------------
 // Scaffolding

@@ -5,15 +5,14 @@ pub const starter_source =
     \\// Run `zttp dev`, press `b`, then confirm the preview to watch
     \\// deterministic flip red. Press `r` to repair it back to green.
     \\
-    \\import type { Spec } from "zttp:types";
     \\
-    \\structural Guardrails = Spec<
+    \\structural Guardrails<T> = Proof<T,
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"
     \\>;
     \\
-    \\function handler(req: Request): Response & Guardrails {
+    \\function handler(req: Request): Guardrails<Response> {
     \\    if (req.method === "GET" && req.path === "/") {
     \\        return Response.html(
     \\            "<main><h1>Hello, world!</h1><p>Proven at compile time.</p></main>"
@@ -28,15 +27,14 @@ pub const broken_source =
     \\// Run `zttp dev`, press `b`, then confirm the preview to watch
     \\// deterministic flip red. Press `r` to repair it back to green.
     \\
-    \\import type { Spec } from "zttp:types";
     \\
-    \\structural Guardrails = Spec<
+    \\structural Guardrails<T> = Proof<T,
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"
     \\>;
     \\
-    \\function handler(req: Request): Response & Guardrails {
+    \\function handler(req: Request): Guardrails<Response> {
     \\    if (req.method === "GET" && req.path === "/") {
     \\        const renderedAt = Date.now();
     \\        return Response.html(
@@ -53,7 +51,7 @@ pub const break_diff =
     \\--- src/handler.ts
     \\+++ src/handler.ts
     \\@@
-    \\ function handler(req: Request): Response & Guardrails {
+    \\ function handler(req: Request): Guardrails<Response> {
     \\     if (req.method === "GET" && req.path === "/") {
     \\+        const renderedAt = Date.now();
     \\         return Response.html(
@@ -67,7 +65,7 @@ pub const repair_diff =
     \\--- src/handler.ts
     \\+++ src/handler.ts
     \\@@
-    \\ function handler(req: Request): Response & Guardrails {
+    \\ function handler(req: Request): Guardrails<Response> {
     \\     if (req.method === "GET" && req.path === "/") {
     \\-        const renderedAt = Date.now();
     \\         return Response.html(

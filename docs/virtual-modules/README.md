@@ -94,14 +94,10 @@ bounded, `maxRetries` must be at most 10, `baseDelayMs` at most 5000, and
 For capability governance internals, see
 [Module Capabilities](../internals/capabilities.md).
 
-## Type-Only Imports
+## Ambient Proof Types
 
-`zttp:types` is stripped before runtime and is not in the native module
-registry. It provides proof annotation aliases:
-
-```ts
-import type { Spec, Proof, Effects } from "zttp:types";
-```
+`Proof<T, P>` and `Effects<T, R>` are ambient type names. They require no
+virtual module or type-only import and are erased before runtime.
 
 See [TypeScript](../typescript.md) and
 [Contracts and Auto-Sandboxing](../contracts-and-sandboxing.md) for active

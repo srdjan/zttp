@@ -33,7 +33,7 @@ pub const tool: registry_mod.ToolDef = .{
     .context_policy = .exact,
     .description =
     \\Read the handler's active spec set and return each active spec's
-    \\current discharge state. A source `Response & Spec<...>` narrows
+    \\current discharge state. A source `Proof<T, P>` narrows
     \\the set; without one, all supported specs are active. Use this
     \\before drafting a repair plan: the discharge state plus the
     \\per-spec suggestion is the agent's authoritative target list, not
@@ -193,6 +193,6 @@ const testing = std.testing;
 test "tool registers expected name and label" {
     try testing.expectEqualStrings("pi_specs_status", tool.name);
     try testing.expectEqualStrings("specs-status", tool.label);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "Spec<...>") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "Proof<T, P>") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "ZTS500") != null);
 }

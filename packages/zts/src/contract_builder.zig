@@ -613,7 +613,7 @@ pub const ContractBuilder = struct {
         contract.capabilities = computeCapabilityMatrix(contract.modules.items);
         contract.policy_hash = currentPolicyHashRaw();
 
-        // Phase 4: Resolve active specs. An explicit handler Spec<...>
+        // Phase 4: Resolve active specs. An explicit handler Proof<...>
         // narrows the set; otherwise every supported v1 spec is active.
         // Downstream surfaces read declared_specs as the mandatory active
         // set when discharging ZTS500/ZTS501/ZTS502.
@@ -634,7 +634,7 @@ pub const ContractBuilder = struct {
 
         // Phase 4d: unconditional structural check (ZTS509) - workflow.call/
         // saga/fanout/follow nested inside a durable.step() callback. Unlike
-        // 4b/4c, this does not depend on any declared Spec<...>/Effects<...>:
+        // 4b/4c, this does not depend on any declared Proof<...>/Effects<...>:
         // the durability loss is silent and real regardless of what the
         // function claims about itself.
         try self.emitNestedWorkflowCallDiagnostics(&contract, &effects);
@@ -655,9 +655,9 @@ pub const ContractBuilder = struct {
     // -----------------------------------------------------------------
 
     /// Populate `contract.declared_specs` with the active handler spec set.
-    /// An explicit `Response & Spec<...>` (or alias-hop equivalent) narrows
+    /// An explicit `Proof<Response, ...>` (or alias-hop equivalent) narrows
     /// the active set to the declared names. When the handler declares no
-    /// `Spec<...>`, every supported v1 spec is active by default.
+    /// `Proof<...>`, every supported v1 spec is active by default.
     fn populateDeclaredSpecs(
         self: *ContractBuilder,
         contract: *HandlerContract,
@@ -675,7 +675,7 @@ pub const ContractBuilder = struct {
                             // empty, which selects the full v1 set below -
                             // the widest, strictest reading, so there is no
                             // fail-open to report here.
-                            _ = try env.extractSpecMembers(sig.return_type, &raw_names);
+                            _ = try env.extractProofMembers(sig.return_type, &raw_names);
                         }
                     }
                 }

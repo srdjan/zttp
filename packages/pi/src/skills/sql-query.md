@@ -7,18 +7,17 @@ Add a SQL query using `zttp:sql`:
 2. Register statements with `sql(name, statement)` at module scope.
 3. Use named SQL parameters such as `:id` and pass an object like `{ id }`. Positional `?` parameters are rejected.
 4. Use `sqlOne(name, params?)` for one optional row, `sqlMany(name, params?)` for arrays, and `sqlExec(name, params?)` for writes.
-5. Stateful SQL handlers need a narrow `Spec<...>`; do not claim `read_only`, `idempotent`, or `retry_safe` for mutation paths.
+5. Stateful SQL handlers need a narrow `Proof<T, P>`; do not claim `read_only`, `idempotent`, or `retry_safe` for mutation paths.
 
 ```ts
-import type { Spec } from "zttp:types";
 import { sql, sqlOne, sqlExec } from "zttp:sql";
 
-structural SqlWriteSpec = Spec<"deterministic" | "state_isolated" | "fault_covered" | "canonical">;
+structural SqlWriteProof<T> = Proof<T, "deterministic" | "state_isolated" | "fault_covered" | "canonical">;
 
 sql("getUser", "SELECT id, name FROM users WHERE id = :id");
 sql("touchUser", "UPDATE users SET seen = 1 WHERE id = :id");
 
-function handler(req: Request): Response & SqlWriteSpec {
+function handler(req: Request): SqlWriteProof<Response> {
   const user = sqlOne("getUser", { id: "u_123" });
   if (user === undefined) {
     return Response.json({ error: "not_found" }, { status: 404 });

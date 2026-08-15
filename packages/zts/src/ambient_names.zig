@@ -80,7 +80,6 @@ pub const types = [_]AmbientType{
 
     .{ .name = "Effects", .origin = .builtin_alias, .arity = 2 },
     .{ .name = "Proof", .origin = .builtin_alias, .arity = 2 },
-    .{ .name = "Spec", .origin = .builtin_alias, .arity = 1 },
 
     .{ .name = "Request", .origin = .abi_alias },
     .{ .name = "Response", .origin = .abi_alias },

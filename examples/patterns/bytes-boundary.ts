@@ -26,12 +26,11 @@
 // on: the module's public surface owes its callers a ceiling whether or not
 // this handler is one of them.
 
-import type { Effects, Proof, Spec } from "zttp:types";
 import { env } from "zttp:env";
 import { bytesLength, decodeUtf8, encodeUtf8 } from "zttp:bytes";
 import { parseJsonBytes } from "zttp:json";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "read_only"
     | "retry_safe"
     | "state_isolated"
@@ -69,7 +68,7 @@ function label(kind: string, prefix: string = "payload"): string {
 // Exported, never called from this handler, and still owing a ceiling.
 export function describeOctets(
   raw: Bytes,
-): Effects<string, "env" | "policy_check"> & Proof<string, "total" | "read_only" | "deterministic"> {
+): Proof<Effects<string, "env" | "policy_check">, "total" | "read_only" | "deterministic"> {
   const scope = env("BYTES_SCOPE");
   const kind = kindOf(raw);
   if (scope === undefined) {
@@ -80,7 +79,7 @@ export function describeOctets(
 
 function handler(
   req: Request,
-): Effects<Response, "env" | "policy_check"> & Guardrails {
+): Guardrails<Effects<Response, "env" | "policy_check">> {
   const body = requestBody(req);
   const size = bytesLength(body);
   const octetKind = kindOf(body);

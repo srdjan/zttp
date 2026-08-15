@@ -15,11 +15,10 @@
 // something the collection operations accept - the same guard `when Dict:`
 // lowers to inside a `match`.
 
-import type { Spec } from "zttp:types";
 import { parseJson, stringifyJson } from "zttp:json";
 import { dictGet, dictEntries } from "zttp:collections";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -35,7 +34,7 @@ structural Guardrails = Spec<
     | "cost_bounded"
 >;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const parsed = parseJson(
     "{\"name\":\"ada\",\"tags\":[1,null,true],\"ok\":true}",
   );

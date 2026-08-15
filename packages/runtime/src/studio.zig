@@ -896,8 +896,8 @@ fn writeNextActionsJson(
             .kind = "add_specs",
             .severity = "info",
             .title = "Narrow source-level proof guardrails",
-            .command = "import type { Spec } from \"zttp:types\"; type Guardrails = Spec<\"idempotent\" | \"deterministic\" | \"injection_safe\">;",
-            .detail = "Add a Spec<...> alias and intersect it with the handler return type to narrow the default active set.",
+            .command = "structural Guardrails<T> = Proof<T, \"idempotent\" | \"deterministic\" | \"injection_safe\">;",
+            .detail = "Return a Proof capsule to narrow the default active property set.",
         });
     }
 
@@ -909,7 +909,7 @@ fn writeNextActionsJson(
             .severity = "error",
             .title = "Repair failed declared specs",
             .command = command,
-            .detail = "Surface failing Spec<...> obligations as compiler diagnostics, then drive the repair loop from zttp expert via /specs <handler>.",
+            .detail = "Surface failing Proof<T, P> obligations as compiler diagnostics, then drive the repair loop from zttp expert via /specs <handler>.",
         });
     }
 

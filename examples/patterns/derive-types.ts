@@ -4,9 +4,8 @@
 // exactly one place instead of being copied into hand-written aliases that can
 // drift.
 
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -43,7 +42,7 @@ const safe: Safe = { id: 2, name: "Grace", age: 36 };
 const patch: UserPatch = { name: "Hedy" };
 const config: Config = { host: "0.0.0.0", port: 8080 };
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   return Response.json({
     summary: summary,
     safe: safe,

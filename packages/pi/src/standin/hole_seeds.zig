@@ -34,7 +34,7 @@ pub const seeds = [_]HoleSeed{
     .{
         .id = "single-hole",
         .source =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 1;
         \\  return hole();
         \\}
@@ -49,7 +49,7 @@ pub const seeds = [_]HoleSeed{
         // compose after each accepted proposal is written.
         .id = "two-holes",
         .source =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 1;
         \\  const label = hole();
         \\  return hole();

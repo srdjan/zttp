@@ -71,8 +71,8 @@ form - nominal identity now comes only from a `nominal` declaration.
 ## Supported Module Syntax
 
 The parser supports ES6 `import`/`export` syntax for built-in virtual modules
-(`zttp:*`) and registered extension modules (`zttp-ext:*`). The
-`zttp:types` specifier is type-only and stripped before runtime.
+(`zttp:*`) and registered extension modules (`zttp-ext:*`). `Proof<T, P>` and
+`Effects<T, R>` are ambient type names and require no module import.
 
 ### Supported Import Forms
 
@@ -87,7 +87,6 @@ The parser supports ES6 `import`/`export` syntax for built-in virtual modules
 | `import { cacheGet, cacheSet } from "zttp:cache"` | Cache module imports |
 | `import { run, step } from "zttp:durable"` | Durable execution imports |
 | `import { charge } from "zttp-ext:stripe"` | Registered extension imports |
-| `import type { Spec, Proof, Effects } from "zttp:types"` | Type-only imports for the built-in `Spec<...>` obligation alias and the `Proof<...>` / `Effects<...>` capsule aliases (stripped at load time) |
 
 ### Supported Export Forms
 

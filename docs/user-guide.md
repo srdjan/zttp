@@ -162,7 +162,7 @@ Use:
 - `for...of` loops.
 - `if`/`else` and `match` for branching.
 - Explicit Result and optional checks.
-- Type-only imports from `zttp:types` for proof annotations.
+- Ambient `Proof<T, P>` and `Effects<T, R>` annotations with no import.
 
 ### Match Patterns
 
@@ -212,14 +212,12 @@ record, tuple, or array constructor. `type JsonValue = null | boolean | number
 `type U = number | U` are refused (ZTS212), because a union edge does not guard
 recursion.
 
-### Author-Declared Specs
+### Author-Declared Proofs
 
 ```ts
-import type { Spec } from "zttp:types";
+structural Safe<T> = Proof<T, "deterministic" | "state_isolated">;
 
-structural Safe = Spec<"deterministic" | "state_isolated">;
-
-function handler(req: Request): Response & Safe {
+function handler(req: Request): Safe<Response> {
     return Response.json({ ok: true });
 }
 ```
@@ -414,7 +412,7 @@ the analyzer. It checks:
 - Result and optional values are checked before access;
 - unreachable code and unused values are reported;
 - module-scope mutations that can leak request state are rejected;
-- declared `Spec<...>` obligations are discharged;
+- declared `Proof<T, P>` obligations are discharged;
 - virtual-module imports derive a least-privilege runtime policy;
 - flow checks catch secret, credential, validation, injection, and PII issues
   where enough structure is visible.

@@ -1,10 +1,9 @@
 // Should fail: optional value used without checking for undefined
 import { env } from "zttp:env";
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<"optional_safe">;
+structural Guardrails<T> = Proof<T, "optional_safe">;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     const secret = env("SECRET");
     return Response.json({ key: secret });
 }

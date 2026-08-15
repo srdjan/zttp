@@ -627,7 +627,7 @@ pub const HandlerProperties = struct {
     /// (ZTS6xx) diagnostics at `error` severity. Those are hard `check` errors,
     /// so a contract is only ever built for a handler carrying none of them,
     /// and the contract builder sets this true unconditionally. The chip makes
-    /// the always-on gate explicit and attestable; `Spec<"canonical">`
+    /// the always-on gate explicit and attestable; `Proof<T, "canonical">`
     /// discharges against it.
     ///
     /// An advisory in the same band does not deny it, and that is the rule
@@ -865,7 +865,7 @@ pub const SpecDiagnostic = struct {
     /// the handler is implied.
     function: ?[]const u8 = null,
     /// True when this diagnostic comes from the IMPLICIT default spec set:
-    /// the handler declared no `Spec<...>`, so the full v1 profile is active
+    /// the handler declared no `Proof<T, P>`, so the full v1 profile is active
     /// and every unsatisfiable property trips ZTS500/ZTS501. Lets downstream
     /// surfaces explain that no Spec was authored and recommend declaring a
     /// narrow one, instead of claiming the author "declared" a spec they
@@ -910,13 +910,13 @@ pub const SpecDiagnostic = struct {
         /// two predicates - exported, undeclared, nonempty inferred row - were
         /// the same one, and the warning was a quieter duplicate of an error.
         /// This one survives because ZTS611 requires the handler to declare a
-        /// proof-supported `Spec<...>` and this does not.
+        /// proof-supported `Proof<T, P>` and this does not.
         missing_proof_capsule_export,
         /// ZTS509: `workflow.call`/`saga`/`fanout`/`follow` is used inside a
         /// `durable.step()` callback. These exports only durably record at
         /// step depth 0 (runtime_workflow.zig); nested inside a user
         /// `step()` they silently lose durability at runtime. Unconditional:
-        /// fires regardless of any declared `Spec<...>`/`Effects<...>`.
+        /// fires regardless of any declared `Proof<T, P>`/`Effects<...>`.
         workflow_call_in_step,
         /// ZTS510: a statically-analyzable `saga([...])` has a non-last step
         /// with no `compensate`, leaving a partial-rollback hole - if a
@@ -1765,14 +1765,14 @@ pub const HandlerContract = struct {
     /// during build for the live-reload HUD's "Why" line. Snippets are
     /// borrowed static strings, so deinit is a no-op.
     property_provenance: PropertyProvenance = .{},
-    /// Active handler specs. An explicit `Response & Spec<"name" | ...>` on
+    /// Active handler specs. An explicit `Proof<Response, "name" | ...>` on
     /// the handler return type narrows this set; without one, every supported
     /// v1 spec is active by default. Each entry is an owned spec name string.
     /// The verifier emits ZTS500 for any member whose corresponding
     /// `HandlerProperties` field is false.
     declared_specs: std.ArrayList([]const u8) = .empty,
     /// True when `declared_specs` is the IMPLICIT default profile (the
-    /// handler return type carried no `Spec<...>`), rather than an
+    /// handler return type carried no `Proof<T, P>`), rather than an
     /// author-declared set. Drives the actionable "declare a narrow Spec"
     /// diagnostic. Transient: not serialized; recomputed each build.
     declared_specs_implicit: bool = false,

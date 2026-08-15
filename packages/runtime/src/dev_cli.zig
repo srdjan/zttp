@@ -721,7 +721,7 @@ test "doctorCommand passes configured sqlite path into analyzer" {
         \\
         \\sql("listUsers", "SELECT id, name FROM users ORDER BY id ASC");
         \\
-        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\    return Response.json({ users: sqlMany("listUsers", {}) });
         \\}
         ,

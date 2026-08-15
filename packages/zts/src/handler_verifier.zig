@@ -82,13 +82,13 @@ pub const DiagnosticKind = enum {
 
     // WebSocket event exports (Check 8)
     // Author-declared spec discharge (Check 9)
-    /// The author declared `Spec<"name">` but the corresponding
+    /// The author declared `Proof<T, "name">` but the corresponding
     /// `HandlerProperties` field is false. The compiler refuses to
     /// build because the handler does not satisfy its own stated
     /// obligation.
     spec_not_discharged,
     /// The author declared a spec that contradicts an import already
-    /// present in the contract (e.g. `Spec<"read_only">` while
+    /// present in the contract (e.g. `Proof<T, "read_only">` while
     /// importing a writing function from `zttp:cache`). Failing
     /// fast keeps the autoloop from burning turns trying to remove
     /// the user's actual feature.

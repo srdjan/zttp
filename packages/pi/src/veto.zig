@@ -524,7 +524,7 @@ const testing = std.testing;
 test "clean handler passes the veto with an empty violations body" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);
@@ -547,7 +547,7 @@ test "a veto-passing edit is normalized: is_canonical set and the proof card car
     // (the caller writes the model's original bytes).
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "const handler = (req: Request): Response & Spec<\"deterministic\"> => Response.json({ok: true});",
+        .content = "const handler = (req: Request): Proof<Response, \"deterministic\"> => Response.json({ok: true});",
         .before = null,
     });
     defer result.deinit(testing.allocator);
@@ -578,7 +578,7 @@ test "a canonical-band failing edit is salvaged by normalize-on-reject" {
     // rewrite trace is surfaced. This is the model's canonical slip auto-fixed.
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> {\n  let x = 1;\n  return Response.json({ x });\n}\n",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let x = 1;\n  return Response.json({ x });\n}\n",
         .before = null,
     });
     defer result.deinit(testing.allocator);
@@ -611,7 +611,7 @@ test "a non-canonical failing edit is not salvaged (var stays rejected)" {
 test "broken handler (var) fails the veto and body surfaces ZTS001" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({x}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);
@@ -691,7 +691,7 @@ test "a zttp:sql edit passes the veto when a schema is configured" {
             "\n" ++
             "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
             "\n" ++
-            "function handler(req: Request): Response & Spec<\"state_isolated\"> {\n" ++
+            "function handler(req: Request): Proof<Response, \"state_isolated\"> {\n" ++
             "    return Response.json({ users: sqlMany(\"listUsers\", {}) });\n" ++
             "}\n",
         .before = null,
@@ -713,7 +713,7 @@ test "a zttp:sql edit with an unloadable configured schema fails the veto with g
             "\n" ++
             "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
             "\n" ++
-            "function handler(req: Request): Response & Spec<\"state_isolated\"> {\n" ++
+            "function handler(req: Request): Proof<Response, \"state_isolated\"> {\n" ++
             "    return Response.json({ users: sqlMany(\"listUsers\", {}) });\n" ++
             "}\n",
         .before = null,
@@ -751,7 +751,7 @@ test "a zttp:sql edit against a mismatched schema fails the veto with diagnostic
             "\n" ++
             "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
             "\n" ++
-            "function handler(req: Request): Response & Spec<\"state_isolated\"> {\n" ++
+            "function handler(req: Request): Proof<Response, \"state_isolated\"> {\n" ++
             "    return Response.json({ users: sqlMany(\"listUsers\", {}) });\n" ++
             "}\n",
         .before = null,
@@ -766,7 +766,7 @@ test "a non-sql handler mentioning zttp sql as text still runs normal veto" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
         .content = "// import { sqlOne } from \"zttp:sql\";\n" ++
-            "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
+            "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
             "  const marker = \"zttp:sql\";\n" ++
             "  return Response.json({ marker });\n" ++
             "}\n",
@@ -781,8 +781,8 @@ test "a non-sql handler mentioning zttp sql as text still runs normal veto" {
 test "pre-existing violation with matching before passes the veto" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x, y: 2}); }",
-        .before = "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({x, y: 2}); }",
+        .before = "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({x}); }",
     });
     defer result.deinit(testing.allocator);
 
@@ -796,7 +796,7 @@ test "pre-existing violation with matching before passes the veto" {
 test "runVeto output fits turn.TurnMachine edit_verified event path" {
     var result = try runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);

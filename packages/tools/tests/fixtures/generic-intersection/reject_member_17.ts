@@ -21,7 +21,7 @@ function requireAll(value: Box<string>
   return value.value;
 }
 
-export function handler(req: Request): Response & Spec<"pure"> {
+export function handler(req: Request): Proof<Response, "pure"> {
   const result = requireAll({
     value: "ok",
     p02: "ok",

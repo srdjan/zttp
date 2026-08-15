@@ -661,7 +661,7 @@ pub const DeployReview = struct {
         contract_sha: []const u8,
         /// Author-declared specs for the handler, paired with their current
         /// discharge state. Defaults to empty for first-deploy callers and
-        /// for handlers without a `Spec<...>` annotation. ReviewFacts dupes
+        /// for handlers without a `Proof<T, P>` annotation. ReviewFacts dupes
         /// the names into its own ownership.
         declared_specs: []const SpecState = &.{},
         baseline: ?*const ReviewFacts = null,

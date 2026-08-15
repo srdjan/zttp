@@ -33,7 +33,7 @@ they are designs rather than a backlog. Finished plans live under
 
 - [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md) - handler
   contracts, least-privilege runtime policy, OpenAPI/SDK emit, replay,
-  upgrade checks, and `Spec<...>`.
+  upgrade checks, and `Proof<T, P>`.
 - [Verification](verification.md) - compile-time handler checks.
 - [TypeScript](typescript.md) - type stripping, type checking, TSX, and
   `comptime()`.

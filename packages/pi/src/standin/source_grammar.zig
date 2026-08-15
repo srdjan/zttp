@@ -90,13 +90,13 @@ pub fn renderRouteSource(allocator: std.mem.Allocator, v: RouteVariant) ![]u8 {
     defer buf.deinit();
     const w = buf.writer();
 
-    if (v.has_spec_import) try w.writeAll("import type { Spec } from \"zttp:types\";\n");
+    if (v.has_spec_import) try w.writeAll("");
     if (v.has_router) try w.writeAll("import { routerMatch } from \"zttp:router\";\n");
     if (v.has_spec_import or v.has_router) try w.writeAll("\n");
 
     if (v.has_guardrails_alias) {
         try w.writeAll(
-            \\structural Guardrails = Spec<
+            \\structural Guardrails<T> = Proof<T,
             \\    | "deterministic"
             \\    | "idempotent"
             \\    | "no_secret_leakage"

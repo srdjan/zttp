@@ -211,7 +211,7 @@ const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
 test "in-process publisher returns the compiler hole frame" {
     const source =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 1;
         \\  return hole();
         \\}
@@ -275,7 +275,7 @@ test "in-process publisher preserves discovered system service-call analysis" {
         \\}
     );
     const gateway_source =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const user = serviceCall("users", "GET /users/:id", {});
         \\  return hole();
         \\}

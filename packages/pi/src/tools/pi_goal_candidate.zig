@@ -532,7 +532,7 @@ test "candidateFromSource verifies a guard repair in memory" {
     const source =
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
         \\  return Response.json({ data });
@@ -548,7 +548,7 @@ test "candidateFromSource verifies a guard repair in memory" {
 
 test "candidateFromSource reports already_satisfied for a clean handler" {
     const clean =
-        "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ ok: true }); }";
+        "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ ok: true }); }";
     var cand = try candidateFromSource(testing.allocator, clean, "handler.ts", &.{}, 4);
     defer cand.deinit(testing.allocator);
     try testing.expect(!cand.verified());
@@ -587,7 +587,7 @@ test "execute returns verified candidate without writing the file" {
     const source =
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
         \\  return Response.json({ data });
@@ -631,7 +631,7 @@ test "execute does not persist witnesses to the on-disk corpus" {
     const source =
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
         \\  return Response.json({ data });

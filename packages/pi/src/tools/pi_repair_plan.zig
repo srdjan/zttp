@@ -501,7 +501,7 @@ test "planFromSource plans repairs from an in-memory draft" {
     const source =
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
         \\  return Response.json({ data });
@@ -520,7 +520,7 @@ test "planFromSource preserves a local optional binding name in its repair" {
     const source =
         \\import { env } from "zttp:env";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const appName = env("APP_NAME");
         \\  return Response.json({ appName });
         \\}
@@ -578,7 +578,7 @@ test "a persisting plan reads the same from two different workspaces" {
     const source =
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body);
         \\  const data = result.value;
         \\  return Response.json({ data });

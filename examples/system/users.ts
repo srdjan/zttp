@@ -1,10 +1,9 @@
 // Users service handler with author-declared proof obligations.
-import type { Spec } from "zttp:types";
 import { cacheGet, cacheSet } from "zttp:cache";
 import { routerMatch } from "zttp:router";
 import { serviceCall } from "zttp:service";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "injection_safe"
     | "state_isolated"
     | "no_secret_leakage"
@@ -41,7 +40,7 @@ const routes = {
   "GET /api/users": listUsers,
 };
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const found = routerMatch(routes, req);
   if (found !== undefined) {
     req.params = found.params;

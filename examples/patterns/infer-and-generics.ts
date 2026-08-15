@@ -7,9 +7,8 @@
 // the type argument at the call site. The single absent-value sentinel is
 // `undefined`, never `null`.
 
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -28,7 +27,7 @@ function first<T>(xs: T[]): T | undefined {
   return undefined;
 }
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const names: string[] = ["alice", "bob", "carol"];
   // Locals infer from their initializers; the helper is reused via `first<string>`.
   const head: string | undefined = first<string>(names);

@@ -52,48 +52,38 @@ const pair: Pair<string, number> = { first: "a", second: 1 };
 
 Up to 8 type parameters per alias are supported.
 
-**Built-in `Spec<...>` for proof obligations:**
+**Ambient `Proof<T, P>` for proof obligations:**
 
-`zttp:types` exposes a built-in generic alias `Spec<S>` that lets the
-author narrow which compiler-proven properties their handler must satisfy.
-When no `Spec<...>` is present, every supported v1 spec is active by
-default; when a `Spec<...>` is present, only the named specs are active.
-It is structurally a phantom marker - stripped at runtime, read at
-type-check time - and rides the same alias-resolution machinery as
-`Result<T>`. Declare a named alias and intersect it on the handler's return
-type:
+`Proof<T, P>` is an ambient generic type. It preserves `T` as the value type
+and carries `P` as the compiler-proven property set. When no proof capsule is
+present, every supported v1 property is active by default. An explicit capsule
+narrows the active set to the named properties. No import is required.
 
 ```typescript
-import type { Spec } from "zttp:types";
-
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "idempotent"
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"
 >;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     return Response.json({ ok: true });
 }
 ```
 
-The verifier walks the return-type intersection, follows the alias to
-the `Spec<...>` body, and emits ZTS500 / ZTS501 / ZTS502 diagnostics if
+The verifier follows the return capsule to its proof-property payload and
+emits ZTS500 / ZTS501 / ZTS502 diagnostics if
 any active spec is not discharged, contradicts an import, or names a
 property outside the v1 set. The proof HUD, proof ledger, and
 `pi_specs_status` agent tool all read from this annotation.
 
-**Helper capsules with `Proof<T, S>`:**
+**Helper capsules with `Proof<T, P>`:**
 
-`Proof<T, S>` is the helper-level companion to `Spec<S>`. It annotates a
-helper's return type, resolving to `T` for type checking while carrying
-`S` as a proof obligation the compiler discharges against the helper's
-own body:
+The same capsule annotates helpers. It resolves to `T` for type checking while
+carrying `P` as a proof obligation discharged against the helper's own body:
 
 ```typescript
-import type { Proof } from "zttp:types";
-
 function fullName(u: User): Proof<string, "pure" | "total"> {
     return `${u.first} ${u.last}`;
 }
@@ -104,7 +94,7 @@ The v1 capsule properties are `total` (every path returns a value),
 capsule it cannot satisfy fails with ZTS500; an unknown name fails with
 ZTS502. Proven and trivially-clean helpers compose into the caller's
 proof; an effectful helper with no capsule that breaks a property the
-handler's `Spec<...>` demands fails with ZTS606.
+handler's `Proof<T, P>` demands fails with ZTS606.
 
 **Capability capsules with `Effects<T, S>`:**
 
@@ -115,8 +105,6 @@ be no wider than `S`. It resolves to `T` for type checking and carries
 `S` - a union of capability names - as the ceiling:
 
 ```typescript
-import type { Effects } from "zttp:types";
-
 export function loadRegion(): Effects<string, "env"> {
     return env("REGION");
 }

@@ -7,11 +7,10 @@
 // accessing `.value` on an unchecked result is a compile error.
 
 import { schemaCompile, validateJson } from "zttp:validate";
-import type { Spec } from "zttp:types";
 
 schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -22,7 +21,7 @@ structural Guardrails = Spec<
     | "input_validated"
 >;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const parsed = validateJson("todo", req.body ?? "");
   if (!parsed.ok) {
     return Response.json({ error: "invalid body" }, { status: 400 });

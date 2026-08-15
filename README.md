@@ -52,9 +52,7 @@ zig build -Doptimize=ReleaseFast
 ## First Handler
 
 ```tsx
-import type { Spec } from "zttp:types";
-
-type Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"
@@ -69,7 +67,7 @@ function HomePage(): JSX.Element {
     );
 }
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     if (req.path === "/") {
         return Response.html(renderToString(<HomePage />));
     }
@@ -93,7 +91,7 @@ workflows, and proof examples.
 - Language profile: a restricted JS/TS/TSX subset with no `var`, `while`,
   `class`, or `try/catch`; unsupported constructs fail at compile time.
 - Proofs: response-path verification, Result/optional checks, state-isolation
-  checks, active `Spec<...>` obligations, flow checks, proof traces, witnesses,
+  checks, active `Proof<T, P>` obligations, flow checks, proof traces, witnesses,
   and proof receipts. A runtime fault that slips through names the proof chip
   that guards it and the faulting source line, instead of a bare 500.
 - Virtual modules: native modules under `zttp:*` for env, crypto, auth,
@@ -142,7 +140,7 @@ Start at the [Documentation Index](docs/README.md).
 - [Virtual Modules](docs/virtual-modules/README.md) - complete current module
   list and runtime requirements.
 - [Contracts and Sandboxing](docs/contracts-and-sandboxing.md) - contract
-  extraction, runtime policy, replay, OpenAPI, SDK emit, and `Spec<...>`.
+  extraction, runtime policy, replay, OpenAPI, SDK emit, and `Proof<T, P>`.
 - [Verification](docs/verification.md), [TypeScript](docs/typescript.md),
   [Sound Mode](docs/sound-mode.md), and
   [Restrictions to Proofs](docs/restrictions-to-proofs.md).

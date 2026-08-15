@@ -194,22 +194,20 @@ Fix: use `const` for module-level declarations, or move mutable state to `zttp:c
 
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing.
 
-### 8. Author-Declared Spec Discharge
+### 8. Author-Declared Proof Discharge
 
 The verifier resolves the handler's active spec set and discharges each
 name against the classified `HandlerProperties`. When the handler declares
-no `Spec<...>`, every supported v1 spec is active by default. A
-`Spec<...>` on the handler return type narrows the active set to exactly
+no `Proof<T, P>`, every supported v1 spec is active by default. A
+`Proof<T, P>` on the handler return type narrows the active set to exactly
 the names in the annotation. The machinery lives in `spec_discharge.zig`
 and runs after the analyzer pipeline so it has access to the full property
 set plus the imported module list.
 
 ```typescript
-import type { Spec } from "zttp:types";
+structural Guardrails<T> = Proof<T, "idempotent" | "deterministic">;
 
-structural Guardrails = Spec<"idempotent" | "deterministic">;
-
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     return Response.json({ now: Date.now() });
 }
 ```
@@ -227,7 +225,7 @@ Three diagnostic codes:
   finite envelope; its suggestion points at literal arrays, `range(n)`,
   `.slice(0, k)`, SQL `LIMIT n`, or schema `maxItems`.
 - **ZTS501 - spec_incompatible_with_import**: the spec contradicts an
-  imported module. v1 fires for `Spec<"read_only">` against
+  imported module. v1 fires for `Proof<Response, "read_only">` against
   `zttp:cache` or `zttp:sql`. ZTS500 is suppressed for the same
   name so the agent does not enter repair against a contradiction.
 - **ZTS502 - spec_unknown_name**: the declared name is not in the v1
@@ -251,7 +249,7 @@ helper's return type is discharged against the facts effect inference
 and path-return analysis prove about that function (`function_specs.zig`),
 for the v1 capsule set `total`, `pure`, `read_only`, `deterministic`.
 Helper failures reuse ZTS500 / ZTS502, each carrying a `function`
-attribution. A helper that breaks a property the handler's `Spec<...>`
+attribution. A helper that breaks a property the handler's `Proof<T, P>`
 demands while carrying no capsule for it gets **ZTS606 -
 missing_capsule**: the proof cannot compose across that call boundary.
 `computeProperties` intersects the handler's classified properties with
@@ -361,13 +359,13 @@ loop source: iterate a literal array, a `range(n)` literal, `Object.keys` of an
 object literal, a `.slice(0, k)`, a SQL statement ending in `LIMIT n`, or a
 field of a `zttp:validate` schema that declares `maxItems`. When the total
 bound is constant or linear with exhaustive path enumeration, the
-`cost_bounded` property holds and `Spec<"cost_bounded">` discharges against it;
+`cost_bounded` property holds and `Proof<Response, "cost_bounded">` discharges against it;
 otherwise the proof card's counterexample names the loop and the discharge
 lever.
 
 Results appear in:
 - `contract.json` under `costEnvelope`, plus the honest `properties.maxIoDepth`
-- The `cost_bounded` proof chip and `Spec<"cost_bounded">` discharge
+- The `cost_bounded` proof chip and `Proof<Response, "cost_bounded">` discharge
 - The `contract_diff` cost lane: widening a bound to `unbounded` is breaking, a
   bounded widening (`constant` to `linear`) is additive; this reaches
   `prove`, `prove-behavior`, the expert equivalence receipt, and `proofs gate`

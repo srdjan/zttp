@@ -66,11 +66,10 @@ pub const examples = [_]Example{
         .feature = "const",
         .evidence = .{ .var_kind = .@"const" },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const limit: number = 10;
         \\  return Response.json({ limit });
         \\}
@@ -81,11 +80,10 @@ pub const examples = [_]Example{
         .feature = "let",
         .evidence = .{ .var_kind = .let },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  let total: number = 0;
         \\  for (const n of [1, 2, 3]) {
         \\    total = total + n;
@@ -99,15 +97,14 @@ pub const examples = [_]Example{
         .feature = "function",
         .evidence = .{ .node = .function_decl },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\function double(n: number): number {
         \\  return n * 2;
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  return Response.json({ four: double(2) });
         \\}
         \\
@@ -117,11 +114,10 @@ pub const examples = [_]Example{
         .feature = "arrow functions",
         .evidence = .{ .node = .arrow_function },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const doubled: number[] = [1, 2, 3].map((n: number): number => n * 2);
         \\  return Response.json({ doubled });
         \\}
@@ -132,9 +128,8 @@ pub const examples = [_]Example{
         .feature = "destructuring",
         .evidence = .{ .node = .object_pattern },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Point = { x: number, y: number };
         \\
@@ -142,7 +137,7 @@ pub const examples = [_]Example{
         \\  return { x: 1, y: 2 };
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const { x, y } = origin();
         \\  return Response.json({ sum: x + y });
         \\}
@@ -153,9 +148,8 @@ pub const examples = [_]Example{
         .feature = "spread/rest",
         .evidence = .{ .node = .object_spread },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Config = { host: string, port: number };
         \\
@@ -163,7 +157,7 @@ pub const examples = [_]Example{
         \\  return { host: "localhost", port: 80 };
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const config: Config = { ...defaults(), port: 8080 };
         \\  return Response.json(config);
         \\}
@@ -174,11 +168,10 @@ pub const examples = [_]Example{
         .feature = "template literals",
         .evidence = .{ .node = .template_literal },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const name: string = "world";
         \\  return Response.text(`hello, ${name}`);
         \\}
@@ -189,11 +182,10 @@ pub const examples = [_]Example{
         .feature = "if/else",
         .evidence = .{ .node = .if_stmt },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const n: number = 3;
         \\  if (n > 2) {
         \\    return Response.text("big");
@@ -208,11 +200,10 @@ pub const examples = [_]Example{
         .feature = "for...of",
         .evidence = .{ .node = .for_of_stmt },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  let total: number = 0;
         \\  for (const n of [1, 2, 3]) {
         \\    total = total + n;
@@ -226,11 +217,10 @@ pub const examples = [_]Example{
         .feature = "ternary",
         .evidence = .{ .node = .ternary },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const n: number = 3;
         \\  const label: string = n > 2 ? "big" : "small";
         \\  return Response.text(label);
@@ -242,9 +232,8 @@ pub const examples = [_]Example{
         .feature = "optional chaining",
         .evidence = .{ .node = .optional_chain },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Profile = { name: string, city?: string };
         \\
@@ -252,7 +241,7 @@ pub const examples = [_]Example{
         \\  return { name: "ada" };
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const p: Profile = profile();
         \\  const city = p?.city;
         \\  return Response.json({ city });
@@ -264,9 +253,8 @@ pub const examples = [_]Example{
         .feature = "nullish coalescing",
         .evidence = .{ .binary_operator = .nullish },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Profile = { name: string, city?: string };
         \\
@@ -274,7 +262,7 @@ pub const examples = [_]Example{
         \\  return { name: "ada" };
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const p: Profile = profile();
         \\  const city: string = p.city ?? "unknown";
         \\  return Response.text(city);
@@ -286,13 +274,12 @@ pub const examples = [_]Example{
         .feature = "match expression",
         .evidence = .{ .node = .match_expr },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Command = { kind: "echo", text: string } | { kind: "ping" };
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const command: Command = { kind: "ping" };
         \\  const reply: string = match (command) {
         \\    when { kind: "echo", text }: text,
@@ -307,11 +294,10 @@ pub const examples = [_]Example{
         .feature = "assert statement",
         .evidence = .{ .node = .assert_stmt },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const items: number[] = [1, 2, 3];
         \\  assert items.length > 0;
         \\  return Response.json({ first: items[0] });
@@ -324,11 +310,10 @@ pub const examples = [_]Example{
         .evidence = .{ .node = .import_decl },
         .source =
         \\import { ok } from "zttp:result";
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const parsed = ok(42);
         \\  if (!parsed.ok) {
         \\    return Response.text("unreachable");
@@ -342,15 +327,14 @@ pub const examples = [_]Example{
         .feature = "type annotations",
         .evidence = .{ .type_annotation = .param_annotation },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\function area(width: number, height: number): number {
         \\  return width * height;
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  return Response.json({ area: area(3, 4) });
         \\}
         \\
@@ -363,9 +347,8 @@ pub const examples = [_]Example{
             .reason = "`structural` and `type` share the `type_alias` map kind by construction - the keyword is the whole difference and the map records neither, so a kind-based row here would be satisfied by an example that writes `type` throughout and teaches nothing",
         } },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Point = { x: number; y: number };
         \\
@@ -373,7 +356,7 @@ pub const examples = [_]Example{
         \\  return point.x + point.y;
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const origin: Point = { x: 1, y: 2 };
         \\  return Response.json({ total: sum(origin) });
         \\}
@@ -387,9 +370,8 @@ pub const examples = [_]Example{
             .reason = "the same reason the `structural` row gives: the map kind is `distinct_type` whatever the source spelled, so a kind-based row would be satisfied by an example that never wrote the keyword",
         } },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\nominal OrderId = string;
         \\
@@ -397,7 +379,7 @@ pub const examples = [_]Example{
         \\  return id;
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const id: OrderId = OrderId("o-1");
         \\  return Response.text(label(id));
         \\}
@@ -411,13 +393,12 @@ pub const examples = [_]Example{
             .reason = "`readonly` is a modifier inside a type alias, and the type map records the alias as one annotation without a kind of its own for the modifier",
         } },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Config = { readonly port: number, host: string };
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const config: Config = { port: 3000, host: "localhost" };
         \\  return Response.json({ port: config.port, host: config.host });
         \\}
@@ -428,15 +409,14 @@ pub const examples = [_]Example{
         .feature = "type guards (x is T)",
         .evidence = .{ .type_annotation = .type_guard_annotation },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\function isString(value: string | number): value is string {
         \\  return typeof value === "string";
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const value: string | number = "ada";
         \\  if (isString(value)) {
         \\    return Response.text(value);
@@ -453,9 +433,8 @@ pub const examples = [_]Example{
             .reason = "the pattern is the body of a type alias, and the type map records the alias without distinguishing a pattern body from any other",
         } },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Route = `/api/${string}`;
         \\
@@ -463,7 +442,7 @@ pub const examples = [_]Example{
         \\  return route;
         \\}
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const route: Route = "/api/orders";
         \\  return Response.text(path(route));
         \\}
@@ -477,11 +456,10 @@ pub const examples = [_]Example{
             .reason = "the stripper folds the call to its value before the parser runs, so the tree holds the literal and no trace of the call",
         } },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const seconds: number = comptime(60 * 60 * 24);
         \\  return Response.json({ seconds });
         \\}
@@ -492,13 +470,12 @@ pub const examples = [_]Example{
         .feature = "null",
         .evidence = .{ .node = .lit_null },
         .source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guard = Spec<"state_isolated">;
+        \\structural Guard<T> = Proof<T, "state_isolated">;
         \\
         \\structural Row = { id: number, note: string | null };
         \\
-        \\export function handler(req: Request): Response & Guard {
+        \\export function handler(req: Request): Guard<Response> {
         \\  const row: Row = { id: 1, note: null };
         \\  return Response.json(row);
         \\}

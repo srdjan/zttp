@@ -11,9 +11,9 @@ they exercise real durable state, signals, and the persisted workflow queue.
 
 These three handlers, in order, are the shortest path to seeing what makes zttp different from a Node runtime.
 
-1. **[handler/spec-guardrails.ts](handler/spec-guardrails.ts)** - the magnet, in 24 lines. The handler declares `Spec<"deterministic" | "idempotent" | "no_secret_leakage" | "injection_safe">` on its return type and the compiler discharges all four. Try editing it: drop a `Date.now()` into the body and watch `-deterministic` light up in the proof card with a `Why:` row. Wrap it in `step("ts", () => Date.now())` from `zttp:durable` and the chip flips back green.
+1. **[handler/spec-guardrails.ts](handler/spec-guardrails.ts)** - the magnet, in 24 lines. The handler declares `Proof<T, "deterministic" | "idempotent" | "no_secret_leakage" | "injection_safe">` on its return type and the compiler discharges all four. Try editing it: drop a `Date.now()` into the body and watch `-deterministic` light up in the proof card with a `Why:` row. Wrap it in `step("ts", () => Date.now())` from `zttp:durable` and the chip flips back green.
 
-2. **[handler/handler-full.tsx](handler/handler-full.tsx)** - the same shape, with branches. JSX rendering, multiple routes, and Result handling across a fuller handler. It returns a plain `Response` (no `Spec<...>`), so it does not declare proof obligations; read it after the guardrails example to see the routing surface scale up, then compare with [handler/handler.ts](handler/handler.ts), which carries the `Spec<...>` declaration.
+2. **[handler/handler-full.tsx](handler/handler-full.tsx)** - the same shape, with branches. JSX rendering, multiple routes, and Result handling across a fuller handler. It returns a plain `Response` (no `Proof<T, P>`), so it does not declare proof obligations; read it after the guardrails example to see the routing surface scale up, then compare with [handler/handler.ts](handler/handler.ts), which carries the `Proof<T, P>` declaration.
 
 3. **[handler/secret-leak.ts](handler/secret-leak.ts)** - see a proof reject your code. Reads `env("SECRET_KEY")` and tries to ship it back in the response body. The flow analyzer catches it before runtime and emits ZTS400. This is the most concrete demo of "the compiler proves what your code is."
 
@@ -29,12 +29,12 @@ surface.
 
 The core shape of a zttp handler. Start with the three above, then:
 
-- [handler.ts](handler/handler.ts) - the canonical TS handler with `Spec<...>`.
+- [handler.ts](handler/handler.ts) - the canonical TS handler with `Proof<T, P>`.
 - [handler.tsx](handler/handler.tsx) - the same shape in TSX.
 - [handler-with-imports.ts](handler/handler-with-imports.ts) - importing multiple virtual modules.
 - [sugar.ts](handler/sugar.ts) - the small syntactic conveniences (compound assignment, array HOFs, `Object.keys`) the parser permits.
 - [feature-probes.ts](handler/feature-probes.ts) - exact-output probes for runtime language features tracked in the feature matrix.
-- [spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) - a deliberately failing `Spec<...>` for the discharge diagnostics path.
+- [spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) - a deliberately failing `Proof<T, P>` for the discharge diagnostics path.
 
 ### jsx/
 
@@ -91,11 +91,11 @@ zts check examples/handler/spec-guardrails.ts                          # verify 
 
 `zttp check` (equivalently `zts check`) runs the strict analyzer. Its
 default is to demand a *fully discharged* handler: when a handler declares no
-`Spec<...>` on its return type, the verifier must prove the entire default
+`Proof<T, P>` on its return type, the verifier must prove the entire default
 profile (`read_only`, `retry_safe`, `idempotent`, `pure`) and emits **ZTS500**
 if any member does not hold. Most examples here are intentionally minimal -
 they exist to show one feature (a route, a module import, a JSX component) and
-deliberately do *not* carry a `Spec<...>`, so they exit non-zero under `check`.
+deliberately do *not* carry a `Proof<T, P>`, so they exit non-zero under `check`.
 That is expected, not a bug: the example test harness
 (`scripts/test-examples.sh`) replays each `.test.jsonl` for observable
 behavior, which is a separate gate from the strict `check` discharge.
@@ -103,12 +103,12 @@ Workflow fixtures in `examples/workflow/` run as live server checks because the
 JSONL replay runner intentionally stubs virtual-module I/O and creates a fresh
 runtime per test case.
 
-The canonical example that declares and fully discharges a `Spec<...>` - and so
+The canonical example that declares and fully discharges a `Proof<T, P>` - and so
 passes strict `check` cleanly - is [handler/handler.ts](handler/handler.ts).
 [handler/spec-guardrails.ts](handler/spec-guardrails.ts) also declares a
-`Spec<...>` and is the magnet to edit interactively under `zttp dev`.
+`Proof<T, P>` and is the magnet to edit interactively under `zttp dev`.
 [handler/spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) declares a
-`Spec<...>` it cannot hold *on purpose*, to exercise the ZTS500 discharge
+`Proof<T, P>` it cannot hold *on purpose*, to exercise the ZTS500 discharge
 diagnostic.
 
 ## Diagnosing failures

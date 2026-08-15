@@ -1036,11 +1036,9 @@ pub fn synthesizeRoute(
 
     const has_router = std.mem.indexOf(u8, source, "zttp:router") != null;
     const has_routes = std.mem.indexOf(u8, source, "const routes = {") != null;
-    const has_spec_import = std.mem.indexOf(u8, source, "from \"zttp:types\"") != null;
-    const has_guardrails_alias = std.mem.indexOf(u8, source, "structural Guardrails =") != null;
+    const has_guardrails_alias = std.mem.indexOf(u8, source, "structural Guardrails<") != null;
 
     if (!has_router) {
-        if (!has_spec_import) try out.appendSlice(allocator, "import type { Spec } from \"zttp:types\";\n");
         try out.appendSlice(allocator, "import { routerMatch } from \"zttp:router\";\n");
     }
     if (spec.body_schema != null and std.mem.indexOf(u8, source, "zttp:validate") == null) {
@@ -1050,7 +1048,7 @@ pub fn synthesizeRoute(
 
     if (!has_router and !has_guardrails_alias) {
         try out.appendSlice(allocator,
-            \\structural Guardrails = Spec<
+            \\structural Guardrails<T> = Proof<T,
             \\    | "deterministic"
             \\    | "idempotent"
             \\    | "no_secret_leakage"
@@ -1078,7 +1076,7 @@ pub fn synthesizeRoute(
 
     if (!has_router) {
         try out.appendSlice(allocator,
-            \\function handler(req: Request): Response & Guardrails {
+            \\function handler(req: Request): Guardrails<Response> {
             \\    const found = routerMatch(routes, req);
             \\    if (found !== undefined) {
             \\        req.params = found.params;

@@ -6,12 +6,11 @@
 // assertion is needed. Template literal types constrain a string to a
 // pattern, here any path under `/api/`.
 
-import type { Spec } from "zttp:types";
 
 structural Method = "GET" | "POST" | "DELETE";
 structural ApiRoute = `/api/${string}`;
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -26,7 +25,7 @@ structural Guardrails = Spec<
 const defaultMethod: Method = "GET";
 const defaultRoute: ApiRoute = "/api/health";
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const method: Method = defaultMethod;
   const route: ApiRoute = defaultRoute;
   return Response.json({ method: method, route: route });

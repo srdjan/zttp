@@ -19,7 +19,7 @@ const registry_mod = @import("../registry/registry.zig");
 const transcript_mod = @import("../transcript.zig");
 const app = @import("../app.zig");
 const expert_persona = @import("../expert_persona.zig");
-const anthropic_tools = @import("../providers/anthropic/tools_schema.zig");
+const openai_client = @import("../providers/openai/client.zig");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("../test_support/cwd.zig").cwdPathAlloc;
@@ -32,6 +32,52 @@ const openai_text_response =
     "event: response.completed\n" ++
     "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"r1\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":2,\"total_tokens\":3}}}\n\n" ++
     "data: [DONE]\n\n";
+
+const deterministic_handler =
+    "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
+    "    return Response.json({ ok: true });\n" ++
+    "}\n";
+
+fn renderOpenAiApplyEditResponse(allocator: std.mem.Allocator) ![]u8 {
+    var arguments = TextBuffer.init(allocator);
+    defer arguments.deinit();
+    try std.json.Stringify.value(.{
+        .file = "handler.ts",
+        .content = deterministic_handler,
+    }, .{}, arguments.writer());
+
+    var response = TextBuffer.init(allocator);
+    errdefer response.deinit();
+    const writer = response.writer();
+    try writer.writeAll("event: response.created\n" ++
+        "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_edit\",\"status\":\"in_progress\"}}\n\n" ++
+        "event: response.output_item.added\n" ++
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"apply_edit\",\"arguments\":\"\"}}\n\n" ++
+        "event: response.function_call_arguments.delta\n" ++
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":");
+    try std.json.Stringify.value(arguments.written(), .{}, writer);
+    try writer.writeAll("}\n\n" ++
+        "event: response.output_item.done\n" ++
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"apply_edit\",\"arguments\":");
+    try std.json.Stringify.value(arguments.written(), .{}, writer);
+    try writer.writeAll("}}\n\n" ++
+        "event: response.completed\n" ++
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_edit\",\"status\":\"completed\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3,\"total_tokens\":10}}}\n\n" ++
+        "data: [DONE]\n\n");
+    return response.toOwnedSlice();
+}
+
+fn deterministicEditSteps(allocator: std.mem.Allocator) ![]const []const u8 {
+    const apply_edit_response = try renderOpenAiApplyEditResponse(allocator);
+    const steps = try allocator.alloc([]const u8, 1);
+    steps[0] = try cassette_record.serializeCassette(allocator, apply_edit_response, .{
+        .provider = .openai,
+        .scenario = "recorder-edit-flow",
+        .stream = true,
+        .model = openai_client.default_model,
+    });
+    return steps;
+}
 
 const ProgressProbe = struct {
     events: std.ArrayList(recorder_mod.ProgressEvent) = .empty,
@@ -535,23 +581,18 @@ test "simulator recorder captures approved and denied real edit flows" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const repo_root = try cwdPathAlloc(allocator);
-    const legacy_root = try std.fs.path.join(allocator, &.{
-        repo_root,
-        "packages/pi/src/providers/testdata/codegen/health",
-    });
-    const steps = try readNumberedSteps(allocator, legacy_root);
-    try testing.expectEqual(@as(usize, 3), steps.len);
+    const steps = try deterministicEditSteps(allocator);
+    try testing.expectEqual(@as(usize, 1), steps.len);
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
     var tools_buffer = TextBuffer.init(allocator);
     defer tools_buffer.deinit();
-    try anthropic_tools.writeToolsArray(tools_buffer.writer(), &registry);
+    try openai_client.writeToolsArray(tools_buffer.writer(), &registry);
     const request_config: model_request.Config = .{
-        .provider = .anthropic,
-        .model = "claude-sonnet-4-6",
+        .provider = .openai,
+        .model = openai_client.default_model,
         .max_output_tokens = 64_000,
         .system_prompt = system_prompt,
         .tools_json = tools_buffer.written(),
@@ -575,7 +616,7 @@ test "simulator recorder captures approved and denied real edit flows" {
         var recorder = try recorder_mod.Recorder.init(allocator, .{
             .case_name = case_name,
             .evidence_class = .deterministic_harness,
-            .provider = .anthropic,
+            .provider = .openai,
             .model = request_config.model,
             .workspace_allowlist = &.{"handler.ts"},
         });
@@ -671,13 +712,8 @@ test "simulator runner preserves an approved edit into the next real Turn" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-    const repo_root = try cwdPathAlloc(allocator);
-    const legacy_root = try std.fs.path.join(allocator, &.{
-        repo_root,
-        "packages/pi/src/providers/testdata/codegen/health",
-    });
-    const one_turn_steps = try readNumberedSteps(allocator, legacy_root);
-    try testing.expectEqual(@as(usize, 3), one_turn_steps.len);
+    const one_turn_steps = try deterministicEditSteps(allocator);
+    try testing.expectEqual(@as(usize, 1), one_turn_steps.len);
     const steps = try allocator.alloc([]const u8, one_turn_steps.len * 2);
     @memcpy(steps[0..one_turn_steps.len], one_turn_steps);
     @memcpy(steps[one_turn_steps.len..], one_turn_steps);
@@ -687,10 +723,10 @@ test "simulator runner preserves an approved edit into the next real Turn" {
     const system_prompt = try expert_persona.buildSystemPrompt(allocator);
     var tools_buffer = TextBuffer.init(allocator);
     defer tools_buffer.deinit();
-    try anthropic_tools.writeToolsArray(tools_buffer.writer(), &registry);
+    try openai_client.writeToolsArray(tools_buffer.writer(), &registry);
     const request_config: model_request.Config = .{
-        .provider = .anthropic,
-        .model = "claude-sonnet-4-6",
+        .provider = .openai,
+        .model = openai_client.default_model,
         .max_output_tokens = 64_000,
         .system_prompt = system_prompt,
         .tools_json = tools_buffer.written(),
@@ -712,7 +748,7 @@ test "simulator runner preserves an approved edit into the next real Turn" {
     var recorder = try recorder_mod.Recorder.init(allocator, .{
         .case_name = "health-two-turn",
         .evidence_class = .deterministic_harness,
-        .provider = .anthropic,
+        .provider = .openai,
         .model = request_config.model,
         .workspace_allowlist = &.{"handler.ts"},
     });
@@ -757,26 +793,12 @@ test "simulator runner preserves an approved edit into the next real Turn" {
         .failure => return error.ExpectedRecordedFlow,
         .available => |*flow_case| {
             try testing.expectEqual(@as(usize, 2), flow_case.manifest.turns.len);
-            try testing.expectEqual(@as(usize, 6), flow_case.trace.model_calls.len);
+            try testing.expectEqual(@as(usize, 2), flow_case.trace.model_calls.len);
             try testing.expectEqual(@as(usize, 2), flow_case.manifest.approvals.len);
             var runner = runner_mod.Runner.init(allocator, flow_case, &registry, request_config);
             const replay = try runner.run();
             try testing.expectEqual(@as(usize, 2), replay.turns);
-            try testing.expectEqual(@as(usize, 6), replay.model_calls);
+            try testing.expectEqual(@as(usize, 2), replay.model_calls);
         },
     }
-}
-
-fn readNumberedSteps(allocator: std.mem.Allocator, root_abs: []const u8) ![][]u8 {
-    var steps: std.ArrayList([]u8) = .empty;
-    var index: usize = 0;
-    while (true) : (index += 1) {
-        const path = try std.fmt.allocPrint(allocator, "{s}/step_{d}.jsonl", .{ root_abs, index });
-        const bytes = zts.file_io.readFile(allocator, path, artifact.Limits.trace_or_response_bytes) catch |err| switch (err) {
-            error.FileNotFound => break,
-            else => return err,
-        };
-        try steps.append(allocator, bytes);
-    }
-    return steps.toOwnedSlice(allocator);
 }

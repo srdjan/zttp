@@ -238,14 +238,14 @@ declared-but-not-monotonic. It reports and never fails:
 zttp ratchet show src/handler.ts
 ```
 
-A handler with no `Spec<...>` annotation activates every supported spec. The
+A handler with no `Proof<T, P>` annotation activates every supported spec. The
 proven set is also written to `contract.json` under `provenSpecs` and rides
 inside the signed `Zttp-Attest` JWS, with the active set alongside it under
 `declaredSpecs`, so cross-build diffs are mechanical and attestable.
 
 `zttp ratchet check` is deprecated and kept working for one release. `zttp
 check` is the gate: it compiles the same contract and exits 1 on an
-undischarged Spec (`ZTS500`) and on a non-monotonic declared name.
+undischarged proof (`ZTS500`) and on a non-monotonic declared name.
 
 `zttp witnesses` inspects the on-disk corpus of compiler-discovered falsifying
 inputs under `.zttp/witnesses/<short-hash>/`:
@@ -380,7 +380,7 @@ JSX and TSX are the current refusal.
 
 Canonical code reduces the number of equivalent shapes the analyzer and the
 expert agent must handle. A handler with no ZTS6xx errors carries the
-`canonical` proof property, and `Response & Spec<"canonical">` can discharge
+`canonical` proof property, and `Proof<Response, "canonical">` can discharge
 against it. An advisory in the same band does not deny it: an idiom row reports
 a preference about a program that is already correct, and a row whose
 precondition fails emits no rewrite, so there would be nothing to act on.

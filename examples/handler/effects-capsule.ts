@@ -17,7 +17,6 @@
 // budget fails with ZTS607, attributed to that helper; the handler reaching
 // one directly fails with ZTS506.
 
-import type { Effects, Spec } from "zttp:types";
 import { sha256 } from "zttp:crypto";
 
 function digest(s: string): string {
@@ -26,11 +25,11 @@ function digest(s: string): string {
 }
 
 // The two capsules compose on one return type. `Effects<...>` bounds the
-// capabilities; `Spec<...>` declares the properties. The Spec set is narrow on
+// capabilities; `Proof<T, P>` declares the properties. The proof-property set is narrow on
 // purpose: a handler that declares nothing must prove the entire default
 // profile, and this one holds neither `pure` (it calls a virtual module) nor
 // `fault_covered` (it has no failable I/O site to cover).
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -48,6 +47,6 @@ structural Guardrails = Spec<
     | "cost_bounded"
 >;
 
-function handler(req: Request): Effects<Response, "crypto"> & Guardrails {
+function handler(req: Request): Guardrails<Effects<Response, "crypto">> {
   return Response.text(digest("zttp"));
 }

@@ -516,19 +516,18 @@ const htmxManifest =
 const basicHandler = zts_cli.proof_quest_fixture.starter_source;
 
 const apiHandler =
-    \\import type { Spec } from "zttp:types";
     \\
     \\// Author-declared guardrails. Declaring an explicit Spec scopes the proof
     \\// to these properties; without it every supported spec is active, and the
     \\// /echo route below (which reflects the request body) cannot discharge
     \\// pii_contained. Run `zttp check` to see them proven at compile time.
-    \\structural Guardrails = Spec<
+    \\structural Guardrails<T> = Proof<T,
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"
     \\>;
     \\
-    \\function handler(req: Request): Response & Guardrails {
+    \\function handler(req: Request): Guardrails<Response> {
     \\    if (req.method === "GET" && req.path === "/health") {
     \\        return Response.json({ ok: true });
     \\    }
@@ -545,13 +544,12 @@ const apiHandler =
 ;
 
 const htmxHandler =
-    \\import type { Spec } from "zttp:types";
     \\
     \\// Author-declared guardrails. Declaring an explicit Spec scopes the proof
     \\// to these properties; without it every supported spec is active and the
     \\// proof cannot be discharged. Run `zttp check` to see them proven at
     \\// compile time.
-    \\structural Guardrails = Spec<
+    \\structural Guardrails<T> = Proof<T,
     \\    | "deterministic"
     \\    | "no_secret_leakage"
     \\    | "injection_safe"
@@ -571,7 +569,7 @@ const htmxHandler =
     \\    );
     \\}
     \\
-    \\function handler(req: Request): Response & Guardrails {
+    \\function handler(req: Request): Guardrails<Response> {
     \\    if (req.method === "GET" && req.path === "/") {
     \\        return Response.html(renderToString(<Page />));
     \\    }

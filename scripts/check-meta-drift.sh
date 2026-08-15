@@ -38,9 +38,10 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-12, read from the binary built at that commit.
+# Pinned 2026-08-15 after ambient Proof replaced Spec and the removed
+# legacy synthetic types module gained a typed restriction.
 EXPECTED_PROFILE="zts-advanced-1"
-EXPECTED_POLICY_HASH="78c9fec96be277836842b2365a249ed26da46f1f0545f36753e33434cc3fd685"
+EXPECTED_POLICY_HASH="cc4150b0823718d56519fcc7782235eeed8fcdf3fbb5aaef091b45144dbe4da4"
 # Moved when JSX was removed from the core grammar. TSX is now a separately
 # hashed frontend that lowers into this exact core identity.
 EXPECTED_GRAMMAR_HASH="0838cc5e3a0e7f6c3e32edd5b8aba236b27c539de0bf0e44e53542332edd589b"
@@ -51,7 +52,7 @@ EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab1
 # gained `restriction.javascript-source-extension`, enforced by the new ZTS052
 # source-boundary diagnostic. Earlier moves recorded the removal of `type`,
 # `distinct type`, `|>`, `pipe()`, `guard()`, and `interface`.
-EXPECTED_RESTRICTION_HASH="b89d024f9ab2cbcb91204d3b6e54c85be3243085495abc63b947148a3c55515c"
+EXPECTED_RESTRICTION_HASH="b638cf1ead4754cb408a3848c1e7b289d59b011dfc1f09aff6c32fd17a845319"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

@@ -31,7 +31,7 @@ pub const tour_text =
     \\    deterministic     no Date.now() / Math.random() / performance.now()
     \\    injection_safe    user input never reaches sensitive sinks
     \\
-    \\  the starter declares `Spec<"deterministic" | "no_secret_leakage">` on
+    \\  the starter declares `Proof<T, "deterministic" | "no_secret_leakage">` on
     \\  its return type. that is the author-declared proof obligation the
     \\  compiler discharges on every save.
     \\

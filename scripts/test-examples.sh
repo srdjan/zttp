@@ -294,17 +294,16 @@ run_live_workflow "workflow/follow-orchestrator.ts" "examples/workflow/follow-or
 run_live_workflow "workflow/durable-orchestrator.ts" "examples/workflow/durable-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-call"
 run_live_workflow "workflow/queued-orchestrator.ts" "examples/workflow/queued-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-queued" --workflow-queue
 run_live_workflow "workflow/dsl-orchestrator.ts" "examples/workflow/dsl-orchestrator.ts" --system examples/workflow/system.json --durable "$TMP_ROOT/durable-dsl" --workflow-queue
-# dsl-orchestrator is embedded as a canonical few-shot, so its declared Spec<...>
-# must prove clean. `check` does not fail its exit code on a refuted Spec and the
-# live run above cannot observe one, so gate on an empty spec_diagnostics in the
+# dsl-orchestrator is embedded as a canonical few-shot, so its declared Proof<T, P>
+# must prove clean. Gate directly on an empty spec_diagnostics array in the
 # --json output (catches a ZTS500/ZTS501 over-claim - the exact regression this
 # example already hit once with retry_safe/idempotent).
 DSL_JSON="$("$ZTTP" check examples/workflow/dsl-orchestrator.ts --system examples/workflow/system.json --json 2>/dev/null)"
 if printf '%s' "$DSL_JSON" | grep -q '"spec_diagnostics":\[\]'; then
-    echo "  PASS  workflow/dsl-orchestrator.ts (Spec discharge, --json)"
+    echo "  PASS  workflow/dsl-orchestrator.ts (Proof discharge, --json)"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL  workflow/dsl-orchestrator.ts (Spec discharge: declared Spec not fully proven)"
+    echo "  FAIL  workflow/dsl-orchestrator.ts (Proof discharge: declared capsule not fully proven)"
     printf '%s' "$DSL_JSON" | grep -oE '"spec_diagnostics":\[[^]]*\]' | head -1 | sed 's/^/        /'
     FAIL=$((FAIL + 1))
 fi

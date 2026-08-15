@@ -141,7 +141,7 @@ moment owns which assertion is the difference between "the binary
 won't boot" and "individual requests get rejected".
 
 **Build time** (before the binary is produced):
-- Type and effect checks against `Spec<...>` and `Effects<...>` on the
+- Type and effect checks against `Proof<T, P>` and `Effects<T, R>` on the
   handler's return type. Failures stop compilation; no binary is
   produced.
 - Explicit policy override validation against the contract when
@@ -393,17 +393,15 @@ Without `--prove`, `--watch` hot-reloads without contract proof.
 Compilation errors keep the old handler running. Durable handlers
 refuse live swap because replay state depends on handler identity.
 
-## Author-declared specs (`Spec<...>`)
+## Author-declared proofs (`Proof<T, P>`)
 
 Declare which compiler-proven properties your handler must satisfy
 directly in the return type:
 
 ```typescript
-import type { Spec } from "zttp:types";
+structural Guardrails<T> = Proof<T, "idempotent" | "deterministic" | "no_secret_leakage">;
 
-structural Guardrails = Spec<"idempotent" | "deterministic" | "no_secret_leakage">;
-
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     // ...
 }
 ```
@@ -413,7 +411,7 @@ The verifier discharges each spec against the inferred
 suggestion, `ZTS501` for spec-vs-import contradictions, and `ZTS502`
 for unknown names.
 
-Helpers carry the companion `Proof<T, "...">` capsule: the compiler
+Helpers use the same `Proof<T, P>` capsule: the compiler
 discharges `total`, `pure`, `read_only`, and `deterministic` against
 each helper's own body, so a handler's proof composes across call
 boundaries instead of dying at the first helper (`ZTS606` if an
@@ -430,18 +428,18 @@ Every `contract.json` carries a top-level `provenSpecs` array (the
 canonical, ordered list of properties the compiler proves true)
 alongside the existing `properties` object, plus a `declaredSpecs`
 array containing the effective active spec set. If the handler has no
-`Spec<...>`, this array contains every supported v1 spec; an explicit
-`Spec<...>` narrows it to the named specs. Both ride inside the signed
+`Proof<...>` capsule, this array contains every supported v1 spec; an explicit
+`Proof<T, P>` narrows it to the named specs. Both ride inside the signed
 JWS payload, so a third party can diff two builds and see exactly which
 property moved.
 
 ```bash
 zttp ratchet show <handler.ts>      # current proven set
 zttp ratchet show <handler.ts>      # print declared vs proven specs, and the differences
-zttp check <handler.ts>              # the gate: exit 1 on an undischarged Spec (ZTS500)
+zttp check <handler.ts>              # the gate: exit 1 on an undischarged proof (ZTS500)
 ```
 
-Handlers that declare no `Spec<...>` ratchet against the default full
+Handlers that declare no `Proof<T, P>` ratchet against the default full
 supported set.
 
 ## Behavioral contract

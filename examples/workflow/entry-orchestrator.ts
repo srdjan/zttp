@@ -16,9 +16,8 @@
 //   POST /orders  -> reserve then ship, as two in-process calls
 import { routerMatch } from "zttp:router";
 import { call } from "zttp:workflow";
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<"deterministic" | "no_secret_leakage" | "no_credential_leakage" | "injection_safe" | "input_validated" | "pii_contained">;
+structural Guardrails<T> = Proof<T, "deterministic" | "no_secret_leakage" | "no_credential_leakage" | "injection_safe" | "input_validated" | "pii_contained">;
 
 function createOrder(req: Request): Response {
   const reserved = call("inventory", { method: "GET", path: "/reserve" });
@@ -31,7 +30,7 @@ function createOrder(req: Request): Response {
 
 const routes = { "POST /orders": createOrder };
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const found = routerMatch(routes, req);
   if (found !== undefined) return found.handler(req);
   return Response.json({ error: "not found" }, { status: 405 });

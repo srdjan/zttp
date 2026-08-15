@@ -4,8 +4,8 @@
 //! `Proof<T, S>` capsule annotation, and discharges the declared properties
 //! against the facts effect inference and path-return analysis proved.
 //!
-//! The reserved `handler` entry point is skipped: its return type carries
-//! `Spec<...>`, discharged separately by the contract builder. Discharging it
+//! The reserved `handler` entry point is skipped: its `Proof<...>` return
+//! capsule is discharged separately by the contract builder. Discharging it
 //! here too would double-report and mis-flag handler-only flow specs.
 
 const std = @import("std");
@@ -24,7 +24,7 @@ const TypeEnv = type_env_mod.TypeEnv;
 const SpecDiagnostic = contract_types.SpecDiagnostic;
 const CapsuleFacts = spec_discharge.CapsuleFacts;
 
-/// The reserved handler entry point - discharged via `Spec<...>` elsewhere.
+/// The reserved handler entry point - discharged via `Proof<...>` elsewhere.
 const handler_fn_name = "handler";
 
 /// One helper's capsules: the declared `Proof<...>` properties and
@@ -202,7 +202,7 @@ fn collectDeclared(
     const status = if (effects)
         try e.extractEffectMembers(sig.return_type, &raw)
     else
-        try e.extractSpecMembers(sig.return_type, &raw);
+        try e.extractProofMembers(sig.return_type, &raw);
 
     for (raw.items) |name| {
         if (json_utils.containsString(out.items, name)) continue;
@@ -241,7 +241,7 @@ test "discharge records proven facts and skips the handler" {
     var table = try discharge(allocator, &analyzer, null, view);
     defer table.deinit(allocator);
 
-    // The handler is discharged via Spec<...> elsewhere; capsule discharge
+    // The handler is discharged via Proof<...> elsewhere; capsule discharge
     // skips it. Helpers each get a capsule entry.
     try std.testing.expect(table.byName("handler") == null);
 

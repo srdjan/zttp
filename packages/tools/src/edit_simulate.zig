@@ -606,7 +606,7 @@ test "runWithArgs accepts redundant --json flag" {
     const allocator = std.testing.allocator;
 
     const handler =
-        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -631,7 +631,7 @@ test "runWithArgs accepts redundant --json flag" {
 test "simulate flags newly introduced canonical diagnostics" {
     const before =
         \\function parse(x: number): number { return x; }
-        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });
@@ -639,7 +639,7 @@ test "simulate flags newly introduced canonical diagnostics" {
     ;
     const after =
         \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });

@@ -266,7 +266,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
                 null,
                 null,
                 "{\"path\":\"handler.ts\",\"holes\":[{\"function\":\"handler\",\"line\":3,\"column\":10}]}",
-                "{\"ok\":true,\"applied\":false,\"path\":\"handler.ts\",\"line\":3,\"column\":10,\"expression\":\"Response.json({ total })\",\"proposed_content\":\"function handler(req: Request): Response & Spec<\\\"deterministic\\\"> {\\n  const total = 1;\\n  return Response.json({ total });\\n}\\n\"}",
+                "{\"ok\":true,\"applied\":false,\"path\":\"handler.ts\",\"line\":3,\"column\":10,\"expression\":\"Response.json({ total })\",\"proposed_content\":\"function handler(req: Request): Proof<Response, \\\"deterministic\\\"> {\\n  const total = 1;\\n  return Response.json({ total });\\n}\\n\"}",
             },
         },
     };

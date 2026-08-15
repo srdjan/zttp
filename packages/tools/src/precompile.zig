@@ -3838,7 +3838,7 @@ test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
         \\  return s;
         \\}
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  return Response.text(stable("x"));
         \\}
     ;
@@ -3872,7 +3872,7 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
         \\  return s;
         \\}
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  return Response.text(stable("x"));
         \\}
     ;
@@ -3896,7 +3896,7 @@ test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs
         \\  return s;
         \\}
         \\
-        \\function handler(req: Request): Response & Spec<"result_safe"> {
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
         \\  return Response.text(stable("x"));
         \\}
     ;
@@ -3976,7 +3976,7 @@ test "runCheckOnlyWithOptions: non-json mode still propagates a missing-handler 
 
 test "formatProofCard: spec-less handler renders ZTS500 lines matching the footer count" {
     const allocator = std.testing.allocator;
-    // A handler with no Spec<...> activates the default proof profile, whose
+    // A handler with no Proof<T, P> activates the default proof profile, whose
     // unsatisfiable properties trip error-severity ZTS500 spec diagnostics.
     // Those used to be counted in the footer but never printed; assert they
     // now render and that the printed error lines equal the footer count.
@@ -4050,7 +4050,7 @@ test "runCheckOnlyFromSource: composed Spec and Effects preserves handler budget
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\function handler(req: Request): Effects<Response, "env"> & Spec<"state_isolated"> {
+        \\function handler(req: Request): Proof<Effects<Response, "env">, "state_isolated"> {
         \\  return Response.text(sha256("x"));
         \\}
     ;
@@ -4080,7 +4080,7 @@ test "runCheckOnlyFromSource: missing capsule ignores unreachable helpers" {
         \\  return String(Date.now());
         \\}
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  return Response.text("ok");
         \\}
     ;
@@ -4146,7 +4146,6 @@ test "holes: each site reports its expected type and the unspent budget" {
     // three capabilities and spends two, so `crypto` is what is left to spend
     // filling either hole.
     const source =
-        \\import type { Effects } from "zttp:types";
         \\import { env } from "zttp:env";
         \\
         \\function slug(s: string): string {
@@ -4310,7 +4309,6 @@ test "ZTS623: a module-internal helper may not declare an Effects ceiling" {
     // the compiler does not infer, and ZTS607 already bounds the helper through
     // the handler's budget.
     const source =
-        \\import type { Effects } from "zttp:types";
         \\import { sha256 } from "zttp:crypto";
         \\
         \\function digest(s: string): Effects<string, "crypto"> {
@@ -4337,7 +4335,6 @@ test "ZTS623: dropping the internal ceiling satisfies the placement rule" {
     // Same program with the internal ceiling removed. The handler's budget
     // still bounds `digest`, so nothing about the proof weakens.
     const source =
-        \\import type { Effects } from "zttp:types";
         \\import { sha256 } from "zttp:crypto";
         \\
         \\function digest(s: string): string {
@@ -4456,7 +4453,7 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
     const source =
         \\import { jwtVerify } from "zttp:auth";
         \\
-        \\function handler(req: Request): Response & Spec<"fault_covered"> {
+        \\function handler(req: Request): Proof<Response, "fault_covered"> {
         \\  _ = req;
         \\  const auth = jwtVerify("token", "secret");
         \\  if (!auth.ok) {
@@ -4697,7 +4694,7 @@ test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
         \\    return <main><h1>zttp</h1></main>;
         \\}
         \\
-        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\    if (req.path === "/") {
         \\        return Response.html(renderToString(<Page />));
         \\    }
@@ -4738,7 +4735,7 @@ test "an idiom advisory is neither an error nor a warning" {
     // a difference from the error count, because subtraction is exactly what
     // produced the defect.
     const source =
-        \\function handler(req: Request): Response & Spec<"canonical"> {
+        \\function handler(req: Request): Proof<Response, "canonical"> {
         \\  const items = ["a", "b"];
         \\  const out = [];
         \\  for (const pair of items.entries()) {
@@ -4752,7 +4749,7 @@ test "an idiom advisory is neither an error nor a warning" {
     // The same program in its idiomatic spelling. Every count the build reads
     // must agree between the two; only the advisory count may differ.
     const idiomatic =
-        \\function handler(req: Request): Response & Spec<"canonical"> {
+        \\function handler(req: Request): Proof<Response, "canonical"> {
         \\  const items = ["a", "b"];
         \\  const out = [];
         \\  for (const item of items) {
@@ -4831,10 +4828,34 @@ test "runCheckOnlyFromSource refuses JavaScript extensions with ZTS052" {
     try std.testing.expect(result.contract == null);
 }
 
+test "runCheckOnlyFromSource refuses legacy zttp types import with ZTS053" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import type { Spec } from "zttp:types";
+        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\  _ = req;
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS053", diagnostic.code);
+    try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
+    try std.testing.expectEqualStrings(
+        "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
+        diagnostic.suggestion.?,
+    );
+    try std.testing.expect(result.contract == null);
+}
+
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  _ = req;
         \\  return Response.json({ ok: true });
         \\}
@@ -4851,7 +4872,7 @@ test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
 test "runCheckOnlyFromSource: explicit unknown Spec suppresses defaults and emits ZTS502" {
     const allocator = std.testing.allocator;
     const source =
-        \\function handler(req: Request): Response & Spec<"made_up"> {
+        \\function handler(req: Request): Proof<Response, "made_up"> {
         \\  _ = req;
         \\  return Response.json({ ok: true });
         \\}

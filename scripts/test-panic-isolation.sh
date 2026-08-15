@@ -91,15 +91,14 @@ step "init test app"
 [ -f "$APP_DIR/src/handler.ts" ] || fail "handler.ts not created by init"
 
 cat > "$APP_DIR/src/handler.ts" <<'HANDLER'
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"
 >;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     if (req.method === "GET" && req.path === "/crash") {
         return Response.text("panic injection route");
     }

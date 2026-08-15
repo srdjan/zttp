@@ -691,13 +691,12 @@ fn writeHtmlEscaped(writer: anytype, value: []const u8) !void {
 }
 
 pub const baseline_source =
-    \\import type { Spec } from "zttp:types";
     \\import { routerMatch } from "zttp:router";
     \\import { schemaCompile, validateJson } from "zttp:validate";
     \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
     \\import { env } from "zttp:env";
     \\
-    \\structural Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
+    \\structural Guardrails<T> = Proof<T, "injection_safe" | "no_secret_leakage">;
     \\
     \\const routes = {
     \\    "GET /": "home",
@@ -722,7 +721,7 @@ pub const baseline_source =
     \\    );
     \\}
     \\
-    \\function handler(req: Request): Response & Guardrails {
+    \\function handler(req: Request): Guardrails<Response> {
     \\    const route = routerMatch(routes, { method: req.method, path: req.path });
     \\    if (route === undefined) return Response.text("Not Found", { status: 404 });
     \\
@@ -745,13 +744,12 @@ pub const baseline_source =
 ;
 
 pub const bug_source =
-    \\import type { Spec } from "zttp:types";
     \\import { routerMatch } from "zttp:router";
     \\import { schemaCompile, validateJson } from "zttp:validate";
     \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
     \\import { env } from "zttp:env";
     \\
-    \\structural Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
+    \\structural Guardrails<T> = Proof<T, "injection_safe" | "no_secret_leakage">;
     \\
     \\const routes = {
     \\    "GET /": "home",
@@ -776,7 +774,7 @@ pub const bug_source =
     \\    );
     \\}
     \\
-    \\function handler(req: Request): Response & Guardrails {
+    \\function handler(req: Request): Guardrails<Response> {
     \\    const route = routerMatch(routes, { method: req.method, path: req.path });
     \\    if (route === undefined) return Response.text("Not Found", { status: 404 });
     \\
@@ -801,13 +799,12 @@ pub const bug_source =
 
 pub const repaired_source =
     \\// repair marker: the status route now proves no_secret_leakage again.
-    \\import type { Spec } from "zttp:types";
     \\import { routerMatch } from "zttp:router";
     \\import { schemaCompile, validateJson } from "zttp:validate";
     \\import { cacheGet, cacheSet, cacheStats } from "zttp:cache";
     \\import { env } from "zttp:env";
     \\
-    \\structural Guardrails = Spec<"injection_safe" | "no_secret_leakage">;
+    \\structural Guardrails<T> = Proof<T, "injection_safe" | "no_secret_leakage">;
     \\
     \\const routes = {
     \\    "GET /": "home",
@@ -832,7 +829,7 @@ pub const repaired_source =
     \\    );
     \\}
     \\
-    \\function handler(req: Request): Response & Guardrails {
+    \\function handler(req: Request): Guardrails<Response> {
     \\    const route = routerMatch(routes, { method: req.method, path: req.path });
     \\    if (route === undefined) return Response.text("Not Found", { status: 404 });
     \\

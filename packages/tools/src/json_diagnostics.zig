@@ -186,6 +186,7 @@ fn stripErrorCode(kind: zts.StripDiagnosticKind) []const u8 {
         // on the code to pick a repair, and the three repairs differ.
         .type_alias_declaration => "ZTS050",
         .distinct_type_declaration => "ZTS051",
+        .legacy_types_import => "ZTS053",
         // The parser band's existing code for the same fault. The stripper
         // reaches it first, so the code is shared rather than minted: a client
         // that handles ZTS008 handles it wherever it was raised.
@@ -482,7 +483,7 @@ pub fn writeErrorJson(
     try writer.writeAll("}\n");
 }
 
-/// Emit the `spec_diagnostics` array: handler `Spec<...>` discharge results
+/// Emit the `spec_diagnostics` array: handler `Proof<T, P>` discharge results
 /// (ZTS500/501/502) plus helper capsule discharge and ZTS606. The `function`
 /// key is present only on capsule diagnostics, attributing them to a helper.
 fn writeSpecDiagnosticsJson(writer: anytype, items: anytype) !void {

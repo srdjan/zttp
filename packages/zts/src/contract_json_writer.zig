@@ -754,7 +754,7 @@ fn writeContractJsonVersion(
         try writer.print("  \"" ++ comptime contractKey(json_version, "behaviorsExhaustive") ++ "\": {s},\n", .{if (contract.behaviors_exhaustive) "true" else "false"});
     }
 
-    // declaredSpecs: effective active spec names. Source `Spec<...>`
+    // declaredSpecs: effective active spec names. Source `Proof<T, P>`
     // narrows this set; without one it contains every supported v1 spec.
     try writer.writeAll("  \"" ++ comptime contractKey(json_version, "declaredSpecs") ++ "\": [");
     for (contract.declared_specs.items, 0..) |s, i| {

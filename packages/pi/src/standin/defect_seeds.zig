@@ -57,7 +57,7 @@ pub const DefectSeed = struct {
 };
 
 const clean_total =
-    \\function handler(req: Request): Response & Spec<"deterministic"> {
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const total = 1;
     \\  return Response.json({ total });
     \\}
@@ -65,7 +65,7 @@ const clean_total =
 ;
 
 const clean_reassigned =
-    \\function handler(req: Request): Response & Spec<"deterministic"> {
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  let total = 1;
     \\  total = total + 2;
     \\  return Response.json({ total });
@@ -76,7 +76,7 @@ const clean_reassigned =
 const clean_checked_result =
     \\import { validateJson } from "zttp:validate";
     \\
-    \\function handler(req: Request): Response & Spec<"deterministic"> {
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const result = validateJson("item", req.body ?? "");
     \\  if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
     \\  const data = result.value;
@@ -88,7 +88,7 @@ const clean_checked_result =
 const clean_checked_optional =
     \\import { env } from "zttp:env";
     \\
-    \\function handler(req: Request): Response & Spec<"deterministic"> {
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const appName = env("APP_NAME");
     \\  if (appName === undefined) return Response.json({ error: "missing value" }, { status: 400 });
     \\  return Response.json({ appName });
@@ -108,14 +108,14 @@ pub const seeds = [_]DefectSeed{
         // discarded and the baseline rewritten" produce identical bytes on disk
         // and no gate can tell them apart.
         .bad_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  let total = 5;
         \\  return Response.json({ total });
         \\}
         \\
         ,
         .good_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 2;
         \\  return Response.json({ total });
         \\}
@@ -131,7 +131,7 @@ pub const seeds = [_]DefectSeed{
         // Likewise: `+= 7` canonicalizes to `total = total + 7`, which the
         // baseline's `+ 2` does not match.
         .bad_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  let total = 1;
         \\  total += 7;
         \\  return Response.json({ total });
@@ -139,7 +139,7 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .good_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  let total = 1;
         \\  total = total + 3;
         \\  return Response.json({ total });
@@ -154,14 +154,14 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_total,
         .bad_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  var total = 1;
         \\  return Response.json({ total });
         \\}
         \\
         ,
         .good_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 3;
         \\  return Response.json({ total });
         \\}
@@ -175,7 +175,7 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_total,
         .bad_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 1;
         \\  return Response.json({ total });
         \\  const unreachable_total = 2;
@@ -183,7 +183,7 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .good_draft =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const total = 4;
         \\  return Response.json({ total });
         \\}
@@ -199,7 +199,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const result = validateJson("item", req.body ?? "");
         \\  const data = result.value;
         \\  return Response.json({ data });
@@ -217,7 +217,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { env } from "zttp:env";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const appName = env("APP_NAME");
         \\  return Response.json({ appName });
         \\}

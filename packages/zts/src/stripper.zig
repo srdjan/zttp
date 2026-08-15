@@ -48,6 +48,8 @@ pub const StripError = error{
     TypeAliasDeclaration,
     /// `distinct type` is not a declaration form in this profile
     DistinctTypeDeclaration,
+    /// `zttp:types` was the pre-model-1 source of proof marker types
+    LegacyTypesImport,
 };
 
 /// Kind of unsupported-TypeScript construct rejected by the stripper. Each
@@ -79,6 +81,10 @@ pub const StripDiagnosticKind = enum {
     /// the alias, because the repair differs by more than a word: the
     /// replacement is `nominal`, and `nominal` admits only a scalar base.
     distinct_type_declaration,
+    /// A type-only import from the removed synthetic `zttp:types` module.
+    /// Proof and effect witnesses are ambient in model-1, so erasing this
+    /// import would hide stale source instead of teaching the direct repair.
+    legacy_types_import,
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
@@ -90,6 +96,7 @@ pub const StripDiagnosticKind = enum {
             .interface_declaration => "`interface` is not a declaration form in this profile; write `structural Name = { ... };`",
             .type_alias_declaration => "`type` is not a declaration form in this profile; write `structural Name = ...;`",
             .distinct_type_declaration => "`distinct type` is not a declaration form in this profile; write `nominal Name = string;`",
+            .legacy_types_import => "`zttp:types` is not a module in this profile; remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
         };
     }
 };
@@ -1572,8 +1579,21 @@ const Stripper = struct {
             return false;
         }
 
-        // Skip to end of statement
+        // Skip to end of statement. The pre-model-1 synthetic `zttp:types`
+        // module must be refused rather than erased: its old `Spec` name could
+        // otherwise become an unresolved annotation after the only evidence of
+        // the stale spelling had disappeared.
         self.skipToStatementEnd();
+        const statement = self.source[saved_pos..self.pos];
+        if (std.mem.indexOf(u8, statement, "\"zttp:types\"") != null or
+            std.mem.indexOf(u8, statement, "'zttp:types'") != null)
+        {
+            if (self.report_errors) {
+                std.log.err("{}:{}: {s}", .{ saved_line, saved_col, StripDiagnosticKind.legacy_types_import.message() });
+            }
+            self.recordDiagnosticAt(.legacy_types_import, saved_line, saved_col);
+            return StripError.LegacyTypesImport;
+        }
         self.blankSpan(saved_pos, self.pos);
         return true;
     }
@@ -3164,14 +3184,19 @@ test "import type stripped" {
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
 }
 
-test "import type Spec from zttp:types stripped" {
-    // Author-declared proof obligations live behind `import type { Spec }
-    // from "zttp:types"`. Confirm the synthetic module path strips
-    // identically to any other type-only import.
-    const result = try strip(std.testing.allocator, "import type { Spec } from \"zttp:types\";", .{});
-    defer @constCast(&result).deinit();
-    const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
-    try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+test "legacy zttp types import is refused with ambient repair" {
+    var diag: ?StripDiagnostic = null;
+    try std.testing.expectError(
+        StripError.LegacyTypesImport,
+        strip(std.testing.allocator, "import type { Spec } from \"zttp:types\";", .{ .diagnostic_out = &diag }),
+    );
+    try std.testing.expectEqual(StripDiagnosticKind.legacy_types_import, diag.?.kind);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.line);
+    try std.testing.expectEqual(@as(u32, 1), diag.?.column);
+    try std.testing.expectEqualStrings(
+        "`zttp:types` is not a module in this profile; remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names",
+        diag.?.kind.message(),
+    );
 }
 
 test "export type stripped" {

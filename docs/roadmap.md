@@ -188,7 +188,7 @@ passes, so the intent column reads over 6 rather than a flattering 11.
 ### 2a. A clock or random read does not clear `deterministic` (done)
 
 `uuid()` reported `deterministic ....... PROVEN`, and a handler could then declare that
-property in a `Spec<...>` and have it discharged. It was a false proof: the function
+property in a proof capsule and have it discharged. It was a false proof: the function
 returns a different value on every call.
 
 `isNonDeterministic` (`effect_inference.zig`) cleared the flag for `Date.now` and
@@ -204,7 +204,7 @@ make it precise: `parseBearer` stays deterministic while `jwtVerify`, which read
 clock for `exp`, does not.
 
 The corpus re-record it was blocked on rode in the same commit. Landing it flipped the
-`jwt-auth` case, as expected: its recorded handler declares no `Spec<...>`, so the default
+`jwt-auth` case, as expected: its recorded handler declares no proof capsule, so the default
 profile demanded a `deterministic` it no longer held, the turn retried, and the committed
 cassette ran out of steps mid-turn. That one case was re-recorded with
 `ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_ONLY=jwt-auth`.

@@ -1,6 +1,6 @@
 //! pi_witnesses - inspect the on-disk witness corpus for a handler.
 //!
-//! Lets the agent see how thinly defended each declared `Spec<...>` is and
+//! Lets the agent see how thinly defended each declared `Proof<T, P>` is and
 //! pick up summaries of past falsifying inputs without leaving the
 //! conversation. Use before drafting a repair: a Spec with no witnesses
 //! is unprobed; a Spec with many pinned witnesses is the load-bearing one
@@ -41,7 +41,7 @@ pub const tool: registry_mod.ToolDef = .{
     \\counterexample input that some property at some site is known to
     \\fail under, plus per-property counts for coverage triage.
     \\
-    \\Use this before pi_repair_plan: source-declared Spec<...> tells you
+    \\Use this before pi_repair_plan: source-declared Proof<T, P> tells you
     \\which obligations the author cares about; this tool tells you which
     \\of those obligations already have defending evidence and which are
     \\unprobed. Pinned entries are load-bearing: a repair that removes
@@ -157,7 +157,7 @@ test "tool registers expected name and label" {
     try testing.expectEqualStrings("pi_witnesses", tool.name);
     try testing.expectEqualStrings("witnesses", tool.label);
     try testing.expect(std.mem.indexOf(u8, tool.description, "corpus") != null);
-    try testing.expect(std.mem.indexOf(u8, tool.description, "Spec<") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "Proof<T, ") != null);
 }
 
 test "execute on missing corpus emits zero-total response" {

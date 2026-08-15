@@ -1,4 +1,3 @@
-import type { Spec } from "zttp:types";
 import { schemaCompile, validateJson } from "zttp:validate";
 import { sql, sqlExec, sqlMany } from "zttp:sql";
 
@@ -11,7 +10,7 @@ import { sql, sqlExec, sqlMany } from "zttp:sql";
 // the last insert left in the table. This example declared it until the flow
 // checker learned that a read from mutable module state varies the same way a
 // clock read does - `zttp:sql` declares no clock, so nothing had caught it.
-structural CrudGuarantees = Spec<
+structural CrudGuarantees<T> = Proof<T,
     | "state_isolated"
     | "fault_covered"
     | "result_safe"
@@ -36,7 +35,7 @@ schemaCompile(
 sql("listTodos", "SELECT id, title, done FROM todos ORDER BY id ASC");
 sql("createTodo", "INSERT INTO todos (title, done) VALUES (:title, 0)");
 
-function handler(req: Request): Response & CrudGuarantees {
+function handler(req: Request): CrudGuarantees<Response> {
   if (req.method === "GET") {
     return Response.json({ items: sqlMany("listTodos") });
   }

@@ -56,6 +56,7 @@ reach clients through the version-2 `restrictions` operation.
 | `\|>`, `pipe()`, `guard()` | one spelling for calling a function | `language_simplicity` | `ZTS001` |
 | object methods, getters, setters | explicit functions and effects | `language_simplicity` | `ZTS001` |
 | `.js` and `.jsx` source files | one typed core and one explicit TSX frontend | `language_simplicity` | `ZTS052` |
+| `zttp:types` import | proof and effect witnesses are ambient type names | `language_simplicity` | `ZTS053` |
 
 ## Rows No Diagnostic Rejects
 
@@ -103,3 +104,4 @@ Per-restriction rationale, one sentence each.
 - **`\|>`, `pipe()`, `guard()`** - write the call directly; run guards by explicit early return
 - **object methods, getters, setters** - language-simplicity choice
 - **`.js` and `.jsx` source files** - source identity must select either the TypeScript core or the versioned TSX lowering frontend
+- **`zttp:types` import** - remove the import and write `Proof<T, P>` or `Effects<T, R>` directly

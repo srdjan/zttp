@@ -258,7 +258,7 @@ test "stand-in seeded arm: a foreign source gets a miss, not a scripted defect" 
     const allocator = arena.allocator();
 
     const seed = defect_seeds.findById("let-binding") orelse return error.MissingSeed;
-    const foreign = "function handler(req: Request): Response & Spec<\"deterministic\"> {\n  const other = 7;\n  return Response.json({ other });\n}\n";
+    const foreign = "function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const other = 7;\n  return Response.json({ other });\n}\n";
 
     var tmp = try IsolatedTmp.init(allocator, "standin-seed-foreign");
     defer tmp.cleanup(allocator);
@@ -332,7 +332,7 @@ test "stand-in hole seeds declare the holes their sources carry" {
 
     const single = hole_seeds.findById("single-hole") orelse return error.MissingHoleSeed;
     const foreign =
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const other = 9;
         \\  return hole();
         \\}
@@ -590,7 +590,7 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
     const violation_handler =
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
         \\    return Response.json({ data });
@@ -876,7 +876,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         .violation_fix =>
         \\import { validateJson } from "zttp:validate";
         \\
-        \\function handler(req: Request): Response & Spec<"deterministic"> {
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\    const result = validateJson("item", req.body ?? "");
         \\    const data = result.value;
         \\    return Response.json({ data });

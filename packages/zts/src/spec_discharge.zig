@@ -107,7 +107,7 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
         return "remove Date.now() / Math.random() / performance.now() or move the call inside a `durable.step`.";
     }
     if (std.mem.eql(u8, name, "read_only")) {
-        return "remove writing calls to zttp:cache / zttp:sql, or drop `read_only` from your Spec set.";
+        return "remove writing calls to zttp:cache / zttp:sql, or drop `read_only` from your proof-property set.";
     }
     if (std.mem.eql(u8, name, "retry_safe")) {
         return "wrap writes in `durable.step` so retried invocations replay deterministically.";
@@ -149,10 +149,10 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
 pub fn suggestionForIncompatible(spec_name: []const u8, module: []const u8) ?[]const u8 {
     if (std.mem.eql(u8, spec_name, "read_only")) {
         if (std.mem.eql(u8, module, "zttp:cache")) {
-            return "drop `read_only` from your Spec set, or remove the zttp:cache import from this handler.";
+            return "drop `read_only` from your proof-property set, or remove the zttp:cache import from this handler.";
         }
         if (std.mem.eql(u8, module, "zttp:sql")) {
-            return "drop `read_only` from your Spec set, or remove the zttp:sql import from this handler.";
+            return "drop `read_only` from your proof-property set, or remove the zttp:sql import from this handler.";
         }
     }
     return null;
@@ -251,8 +251,8 @@ pub fn dischargeSpecs(
     properties: ?HandlerProperties,
     modules: []const []const u8,
     /// True when `declared` is the implicit default profile (the handler
-    /// declared no `Spec<...>`). Every emitted ZTS500/ZTS501 then carries the
-    /// "declare a narrow Spec" remedy instead of the per-property hint, and is
+    /// declared no `Proof<T, P>`). Every emitted ZTS500/ZTS501 then carries the
+    /// "declare a narrow Proof capsule" remedy instead of the per-property hint, and is
     /// flagged so downstream surfaces stop claiming a spec was "declared".
     implicit_default: bool,
 ) !std.ArrayList(SpecDiagnostic) {
@@ -268,7 +268,7 @@ pub fn dischargeSpecs(
     // re-feeds each one to the model every retry, inflating the veto signal.
     // Instead, collect the undischarged property names here and emit a SINGLE
     // collapsed ZTS500 after the loop whose suggestion names the specific
-    // undischarged set plus the minimal Spec to declare. (ZTS502 cannot fire
+    // undischarged set plus the minimal proof set to declare. (ZTS502 cannot fire
     // in this mode - `declared` is the full v1 name set - so unknown-name and
     // collapsed-ZTS500 do not interleave.)
     var undischarged: std.ArrayList([]const u8) = .empty;
@@ -347,7 +347,7 @@ pub fn dischargeSpecs(
 
     // Emit the one collapsed ZTS500 for the implicit default profile. Its
     // spec_name carries the joined undischarged set so the JSON surface lists
-    // the real properties, and its suggestion names them plus the minimal Spec.
+    // the real properties, and its suggestion names them plus the minimal proof set.
     if (implicit_default and undischarged.items.len > 0) {
         const spec_name = try std.mem.join(allocator, ", ", undischarged.items);
         errdefer allocator.free(spec_name);
@@ -364,7 +364,7 @@ pub fn dischargeSpecs(
     return out;
 }
 
-/// Append a per-spec ZTS500 for an explicitly declared Spec that the handler
+/// Append a per-spec ZTS500 for an explicitly declared Proof capsule that the handler
 /// proof did not discharge. The implicit-default profile does not use this -
 /// it accumulates undischarged names and emits one collapsed diagnostic.
 fn appendNotDischarged(
@@ -388,10 +388,10 @@ fn appendNotDischarged(
 }
 
 /// Build the actionable remedy shown for the single collapsed ZTS500 emitted
-/// when the handler declares no `Spec<...>` (the IMPLICIT default profile).
+/// when the handler declares no `Proof<T, P>` (the IMPLICIT default profile).
 /// Data-driven from `undischarged`, the exact set of default-profile properties
 /// this handler does NOT hold: it names those properties, then offers the
-/// minimal Spec to declare - the default-profile properties the handler DOES
+/// minimal proof set to declare - the default-profile properties the handler DOES
 /// hold. Caller owns the result.
 fn implicitDefaultSuggestion(
     allocator: std.mem.Allocator,
@@ -399,7 +399,7 @@ fn implicitDefaultSuggestion(
     modules: []const []const u8,
     undischarged: []const []const u8,
 ) ![]u8 {
-    // The properties the handler still holds form the minimal Spec the author
+    // The properties the handler still holds form the minimal proof set the author
     // can declare and have pass immediately. Read them straight off the
     // classified `properties` so we never recommend one the handler fails.
     // Without classified properties, fall back to the v1 profile minus the
@@ -435,10 +435,10 @@ fn implicitDefaultSuggestion(
 
     return std.fmt.allocPrint(
         allocator,
-        "this handler declares no Spec<...>, so the compiler must prove the full " ++
-            "default profile, but it does not hold: {s}. Declare a narrow Spec on the " ++
-            "return type with only the properties it holds, e.g. " ++
-            "`function handler(req: Request): Response & Spec<{s}>`.",
+        "this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
+            "default profile, but it does not hold: {s}. Return a narrow Proof capsule " ++
+            "with only the properties it holds, e.g. " ++
+            "`function handler(req: Request): Proof<Response, {s}>`.",
         .{ missing, holds.items },
     );
 }
@@ -461,10 +461,10 @@ fn containsString(list: []const []const u8, target: []const u8) bool {
 // Proof-capsule discharge
 //
 // Function-level proof capsules (`Proof<T, S>`) discharge a smaller property
-// set than handler `Spec<...>`: the four keystone properties whose facts come
+// set than handler `Proof<T, P>`: the four keystone properties whose facts come
 // from per-function effect inference and path-return analysis. Capsule
 // discharge reuses the SpecDiagnostic shape (ZTS500 / ZTS502) so helper
-// failures flow through the same diagnostic channel as handler Spec failures.
+// failures flow through the same diagnostic channel as handler proof failures.
 // ZTS501 (import contradiction) has no capsule analogue: the per-function
 // EffectRow knows precisely whether a helper writes, so the coarse
 // import-level heuristic is unnecessary.
@@ -859,7 +859,7 @@ test "dischargeSpecs unknown name emits ZTS403" {
     try std.testing.expectEqualStrings("made_up_name", diags.items[0].spec_name);
 }
 
-test "dischargeSpecs implicit default profile gives the narrow-Spec remedy" {
+test "dischargeSpecs implicit default profile gives the narrow Proof remedy" {
     const allocator = std.testing.allocator;
     // A cache-writing handler: read_only/retry_safe/idempotent/pure are false,
     // but deterministic/injection_safe/state_isolated hold.
@@ -889,8 +889,8 @@ test "dischargeSpecs implicit default profile gives the narrow-Spec remedy" {
     for (diags.items) |d| {
         try std.testing.expect(d.implicit_default);
         const s = d.suggestion orelse continue;
-        if (std.mem.indexOf(u8, s, "declares no Spec") != null and
-            std.mem.indexOf(u8, s, "Response & Spec<") != null)
+        if (std.mem.indexOf(u8, s, "returns no Proof<T, P> capsule") != null and
+            std.mem.indexOf(u8, s, "Proof<Response, ") != null)
         {
             saw_remedy = true;
             // The example lists held properties and never an unheld one.
@@ -949,8 +949,8 @@ test "dischargeSpecs implicit default omits import-forbidden read_only from the 
     try std.testing.expect(saw_zts501); // read_only vs sql is still flagged separately
 }
 
-test "dischargeSpecs Spec-less pure handler collapses to one ZTS500 naming real props" {
-    // EXP-3/EXP-4 regression. A trivial pure/read-only Spec-less handler holds
+test "dischargeSpecs proof-less pure handler collapses to one ZTS500 naming real props" {
+    // EXP-3/EXP-4 regression. A trivial pure/read-only proof-less handler holds
     // pure/read_only/deterministic and every flow default, but the derived
     // properties (idempotent, fault_covered, result_safe, optional_safe,
     // canonical) default false. Previously the implicit default profile emitted
@@ -991,8 +991,8 @@ test "dischargeSpecs Spec-less pure handler collapses to one ZTS500 naming real 
     try std.testing.expect(std.mem.indexOf(u8, s, "optional_safe") != null);
     // Never the misdirecting cache/sql sentence on a handler that writes neither.
     try std.testing.expect(std.mem.indexOf(u8, s, "cache/zttp:sql cannot hold") == null);
-    // The minimal Spec it offers lists held properties, not the unheld ones.
-    try std.testing.expect(std.mem.indexOf(u8, s, "Response & Spec<") != null);
+    // The minimal Proof capsule it offers lists held properties, not the unheld ones.
+    try std.testing.expect(std.mem.indexOf(u8, s, "Proof<Response, ") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"pure\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"fault_covered\"") == null);
 }
@@ -1155,7 +1155,7 @@ test "dischargeSpecs recognises pure/stateless/result_safe/optional_safe" {
     // Regression guard for the v1_specs/HandlerProperties drift fix.
     // Before this change, dischargeSpecs would emit ZTS502 unknown_name
     // for every name below — yet ratchet treated them as real
-    // obligations, and the README told authors to write `Spec<"pure">`.
+    // obligations, and the README told authors to write `Proof<T, "pure">`.
     // Now each name resolves to its HandlerProperties field and follows
     // the standard ZTS500 not_discharged path when the property is false.
     const allocator = std.testing.allocator;

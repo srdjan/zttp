@@ -10,9 +10,8 @@
 //     --system examples/workflow/system.json --durable ./.durable --workflow-queue
 import { run } from "zttp:durable";
 import { call } from "zttp:workflow";
-import type { Spec } from "zttp:types";
 
-structural WorkflowDslGuarantees = Spec<
+structural WorkflowDslGuarantees<T> = Proof<T,
     | "deterministic"
     | "state_isolated"
     | "result_safe"
@@ -25,7 +24,7 @@ structural WorkflowDslGuarantees = Spec<
     | "canonical"
 >;
 
-function handler(req: Request): Response & WorkflowDslGuarantees {
+function handler(req: Request): WorkflowDslGuarantees<Response> {
   const key = req.headers.get("idempotency-key") ?? "workflow-dsl-demo";
   return run(
     key,

@@ -1,9 +1,8 @@
 // Should fail: if-without-else doesn't guarantee a return
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<"result_safe">;
+structural Guardrails<T> = Proof<T, "result_safe">;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
     const url = req.url;
     if (url === "/health") {
         return Response.json({ status: "ok" });

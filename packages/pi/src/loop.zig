@@ -1553,13 +1553,13 @@ fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir
 }
 
 const bad_handler =
-    "function handler(req: Request): Response & Spec<\"deterministic\"> { var x = 1; return Response.json({x}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({x}); }";
 const clean_handler =
-    "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }";
 const protocol_before_handler =
-    "function handler(req: Request): Response & Spec<\"deterministic\"> { let ok = true; return Response.json({ok}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { let ok = true; return Response.json({ok}); }";
 const protocol_after_handler =
-    "function handler(req: Request): Response & Spec<\"deterministic\"> { const ok = true; return Response.json({ok}); }";
+    "function handler(req: Request): Proof<Response, \"deterministic\"> { const ok = true; return Response.json({ok}); }";
 
 fn protocolPreviewExecute(
     allocator: std.mem.Allocator,
@@ -1677,7 +1677,7 @@ const RecordingRepairWriter = struct {
 // (ZTS303 unchecked_result_value) that the repair lane can author a fix for.
 const unchecked_result_handler =
     "import { validateJson } from \"zttp:validate\";\n" ++
-    "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
+    "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
     "  const result = validateJson(\"item\", req.body ?? \"\");\n" ++
     "  const data = result.value;\n" ++
     "  return Response.json({ data });\n" ++
@@ -2822,7 +2822,7 @@ test "verified edit path appends a verified_patch entry before the proof card" {
 // green arm is already canonical, so normalize is a behavior-preserving no-op
 // and the attested bytes equal the model's draft byte-for-byte.
 const arrow_handler =
-    "const handler = (req: Request): Response & Spec<\"deterministic\"> => Response.json({ok: true});";
+    "const handler = (req: Request): Proof<Response, \"deterministic\"> => Response.json({ok: true});";
 
 test "non-canonical-but-legal first draft lands in one attempt; disk == attested bytes and is_canonical" {
     var tmp = std.testing.tmpDir(.{});

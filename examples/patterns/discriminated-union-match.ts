@@ -9,11 +9,10 @@
 // An arm reads a field by binding it in the pattern (`text` below), not by
 // reading it back off the scrutinee.
 
-import type { Spec } from "zttp:types";
 
 structural Command = { kind: "echo", text: string } | { kind: "ping", text: string };
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -31,7 +30,7 @@ function run(cmd: Command): string {
   };
 }
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const cmd: Command = { kind: "echo", text: "hi" };
   return Response.json({ result: run(cmd) });
 }

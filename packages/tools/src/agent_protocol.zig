@@ -3321,11 +3321,10 @@ test "check on a clean handler succeeds with no diagnostics" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\structural Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
         \\
-        \\export function handler(req: Request): Response & Guardrails {
+        \\export function handler(req: Request): Guardrails<Response> {
         \\    return Response.json({ ok: true });
         \\}
         \\
@@ -3498,12 +3497,12 @@ test "apply_repair writes a graded repair and rebinds the digest" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const source =
-        \\import type { Spec } from "zttp:types";
         \\import { marker } from "./util.ts";
         \\
-        \\structural Guardrails = Spec<"state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guardrails {
+        \\structural Guardrails<T> = Proof<T, "state_isolated">;
+        \\
+        \\export function handler(req: Request): Guardrails<Response> {
         \\    let name = "world";
         \\    return Response.json({ hello: name, marker });
         \\}
@@ -3839,11 +3838,11 @@ test "simulate and apply refuse every stale repair binding" {
 test "simulate and apply refuse a mixed-binding batch atomically" {
     const a = testing.allocator;
     const source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guardrails = Spec<"state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guardrails {
+        \\structural Guardrails<T> = Proof<T, "state_isolated">;
+        \\
+        \\export function handler(req: Request): Guardrails<Response> {
         \\    let first = "a";
         \\    let second = "b";
         \\    return Response.json({ first, second });
@@ -4375,11 +4374,10 @@ test "success is exactly no error diagnostic, not no diagnostic" {
     // ZTS305 unused_variable is emitted at warning severity (measured), so this
     // handler carries a diagnostic and still succeeds - spec 4.8's success rule.
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\structural Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
         \\
-        \\export function handler(req: Request): Response & Guardrails {
+        \\export function handler(req: Request): Guardrails<Response> {
         \\    const unused = 1;
         \\    return Response.json({ ok: true });
         \\}
@@ -4421,11 +4419,10 @@ test "check publishes the path-coverage cause, not only a bool" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guardrails = Spec<"state_isolated" | "injection_safe">;
+        \\structural Guardrails<T> = Proof<T, "state_isolated" | "injection_safe">;
         \\
-        \\export function handler(req: Request): Response & Guardrails {
+        \\export function handler(req: Request): Guardrails<Response> {
         \\    return Response.json({ ok: true });
         \\}
         \\
@@ -4450,11 +4447,11 @@ test "check publishes the path-coverage cause, not only a bool" {
 }
 
 const let_handler =
-    \\import type { Spec } from "zttp:types";
     \\
-    \\structural Guardrails = Spec<"state_isolated">;
     \\
-    \\export function handler(req: Request): Response & Guardrails {
+    \\structural Guardrails<T> = Proof<T, "state_isolated">;
+    \\
+    \\export function handler(req: Request): Guardrails<Response> {
     \\    let name = "world";
     \\    return Response.json({ hello: name });
     \\}
@@ -4606,11 +4603,10 @@ test "normalize maps an applied intent back to the idiom row it realizes" {
     defer tmp.cleanup();
     // The ZTS619 vehicle: `.entries()` with an index the body never reads.
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guardrails = Spec<"state_isolated">;
+        \\structural Guardrails<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guardrails {
+        \\export function handler(req: Request): Guardrails<Response> {
         \\    const arr = [10, 20];
         \\    const out = [];
         \\    for (const pair of arr.entries()) {
@@ -4780,7 +4776,7 @@ test "check never answers success false with an empty diagnostics array" {
         "export function handler(req) { return Response.json({ ok: true }); }\n",
         // And one that does not fail at all, so the assertion below is about
         // the pairing rather than about everything being broken.
-        "import type { Spec } from \"zttp:types\";\nstructural G = Spec<\"state_isolated\">;\nexport function handler(req: Request): Response & G {\n  return Response.json({ ok: true });\n}\n",
+        "structural G<T> = Proof<T, \"state_isolated\">;\nexport function handler(req: Request): G<Response> {\n  return Response.json({ ok: true });\n}\n",
     };
 
     var saw_failure = false;

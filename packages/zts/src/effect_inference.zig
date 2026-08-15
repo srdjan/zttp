@@ -35,7 +35,7 @@ pub const CapabilitySet = std.EnumSet(Capability);
 /// `durable.step()` callback. `workflow.call` is only durable-recorded at
 /// step depth 0 (see runtime_workflow.zig); nested inside a user `step()`
 /// it silently loses durability at runtime with no error. This is an
-/// unconditional structural fact, not gated behind a declared `Spec<...>`
+/// unconditional structural fact, not gated behind a declared `Proof<T, P>`
 /// or `Effects<...>` capsule - ZTS509 fires for every function regardless
 /// of what it claims about itself.
 pub const NestedWorkflowCall = struct {
@@ -162,7 +162,7 @@ pub const Analyzer = struct {
     /// Every `zttp:workflow` call found nested inside a `step()` callback.
     /// See `NestedWorkflowCall` - this is collected unconditionally during
     /// the same walk that computes effect rows, regardless of any declared
-    /// `Spec<...>`/`Effects<...>` capsule.
+    /// `Proof<T, P>`/`Effects<...>` capsule.
     nested_workflow_calls: std.ArrayListUnmanaged(NestedWorkflowCall),
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*atom_table.AtomTable) Analyzer {
@@ -594,7 +594,7 @@ pub const Analyzer = struct {
             // different next time, so the enclosing function is not
             // deterministic. Only `Date.now` and `Math.random` cleared this
             // flag, so `uuid()` reported `deterministic ... PROVEN` - a false
-            // proof, and one a handler could then declare in a `Spec<...>` and
+            // proof, and one a handler could then declare in a `Proof<T, P>` and
             // have discharged.
             //
             // Per-export capability rows make this precise: `parseBearer`

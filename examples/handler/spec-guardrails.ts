@@ -1,8 +1,8 @@
-// Spec<...> example: author-declared proof obligations.
+// Proof<T, P> example: author-declared proof obligations.
 //
 // `Guardrails` is a normal TS type alias whose body is the built-in
-// `Spec<...>` marker imported from "zttp:types". When the handler's
-// return type intersects this alias (`Response & Guardrails`), the
+// ambient `Proof<T, P>` marker. When the handler return type instantiates this
+// alias (`Guardrails<Response>`), the
 // verifier runs after the analyzer pipeline and emits ZTS500 if any
 // declared spec is not discharged by the inferred HandlerProperties.
 //
@@ -10,15 +10,14 @@
 // non-determinism, and never touches an env-labelled secret, so every
 // member of the active spec set holds.
 
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "idempotent"
     | "deterministic"
     | "no_secret_leakage"
     | "injection_safe"
 >;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   return Response.json({ ok: true });
 }

@@ -15,7 +15,6 @@
 // callback that read a clock would join its row into this one and cost exactly
 // that property.
 
-import type { Spec } from "zttp:types";
 import {
   andThen,
   collectAll,
@@ -27,7 +26,7 @@ import {
   unwrapOr,
 } from "zttp:result";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -45,7 +44,7 @@ structural Guardrails = Spec<
     | "cost_bounded"
 >;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   // A chain: transform the value, then the failure, then recover from it.
   const doubled = mapResult(ok(21), (n) => n * 2);
   const chained = andThen(doubled, (n) => ok(n + 1));

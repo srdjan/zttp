@@ -3,7 +3,7 @@
 //! Slice 4 of the attest program. The compiler already infers and signs
 //! every handler's proven-property set (`provenSpecs` in contract.json,
 //! covered by the JWS payload) and records the active obligations in
-//! `contract.declared_specs`. An explicit handler `Spec<...>` narrows
+//! `contract.declared_specs`. An explicit handler `Proof<T, P>` narrows
 //! that active set; otherwise every supported spec is active by default.
 //! `ratchet check` ties the two together: it compiles the handler once,
 //! takes `declared_specs` as the obligation set, and fails when the
@@ -15,7 +15,7 @@
 //!
 //! There is no `--baseline` file. The earlier hand-maintained baseline
 //! JSON has been retired: the obligation set lives in the compiled
-//! contract, with source `Spec<...>` acting as a narrowing override.
+//! contract, with source `Proof<T, P>` acting as a narrowing override.
 //!
 //! `check` here is deprecated and unlisted, because the gate it provides
 //! already exists one layer down: `zttp check` compiles the same contract
@@ -191,13 +191,12 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
             std.debug.print(
                 \\zttp ratchet check: `--baseline` has been removed.
                 \\The baseline is now the active spec set in the compiled
-                \\contract. Drop the flag; use `Spec` from "zttp:types"
-                \\on the handler return type only when you need to narrow
+                \\contract. Drop the flag; return an ambient `Proof<T, P>`
+                \\capsule only when you need to narrow
                 \\the default supported set, e.g.
                 \\
-                \\    import type {{ Spec }} from "zttp:types";
-                \\    structural Guardrails = Spec<"pure" | "deterministic">;
-                \\    function handler(req: Request): Response & Guardrails {{ ... }}
+                \\    structural Guardrails<T> = Proof<T, "pure" | "deterministic">;
+                \\    function handler(req: Request): Guardrails<Response> {{ ... }}
                 \\
             , .{});
             return error.BaselineFlagRemoved;
@@ -229,7 +228,7 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
     var sets = try collectSpecSets(allocator, handler);
     defer sets.deinit(allocator);
 
-    // Non-monotonic declared names (e.g. `Spec<"has_egress">`) cannot be
+    // Non-monotonic declared names (e.g. `Proof<T, "has_egress">`) cannot be
     // ratcheted — a true value would be a weakening, not a strengthening.
     // collectSpecSets stores them in `sets.dropped` rather than printing
     // inline so this error path stays out of `ratchet show`. We fail
@@ -245,7 +244,7 @@ fn runCheck(allocator: std.mem.Allocator, argv: []const []const u8) RatchetError
             std.debug.print("  - {s}\n", .{name});
         }
         std.debug.print(
-            "\nRemove the non-monotonic name(s) from `Spec<...>` (or correct the typo). " ++
+            "\nRemove the non-monotonic name(s) from `Proof<T, P>` (or correct the typo). " ++
                 "spec_discharge has already emitted a compile-time diagnostic for any unknown name.\n",
             .{},
         );
@@ -392,7 +391,7 @@ fn collectSpecSets(allocator: std.mem.Allocator, handler_path: []const u8) Ratch
     }
 
     // Declared set: filter to monotonic names so a stray `has_egress`
-    // in a `Spec<...>` does not end up demanding "I do egress" as an
+    // in a `Proof<T, P>` does not end up demanding "I do egress" as an
     // obligation. Non-monotonic names go into `sets.dropped` (not
     // printed here) so that `runShow` stays a pure read-out and only
     // `runCheck` surfaces the warning — and surfaces it loudly, as a
@@ -427,9 +426,8 @@ test "runCheck holds when every declared spec is proven" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "held.ts",
         .data =
-        \\import type { Spec } from "zttp:types";
-        \\structural Guardrails = Spec<"pure" | "deterministic">;
-        \\function handler(req: Request): Response & Guardrails {
+        \\structural Guardrails<T> = Proof<T, "pure" | "deterministic">;
+        \\function handler(req: Request): Guardrails<Response> {
         \\    return Response.json({ ok: true });
         \\}
         ,
@@ -441,7 +439,7 @@ test "runCheck holds when every declared spec is proven" {
     const handler_path = try std.fs.path.join(allocator, &.{ tmp_path, "held.ts" });
     defer allocator.free(handler_path);
 
-    // No baseline arg. The declared set comes from the Spec<...> on the
+    // No baseline arg. The declared set comes from the Proof<T, P> on the
     // return type, the proven set from compile-time inference. A pure
     // handler with no I/O proves both `pure` and `deterministic`, so
     // the ratchet must hold.
@@ -456,9 +454,8 @@ test "runCheck fails when a declared spec is not proven" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "regress.ts",
         .data =
-        \\import type { Spec } from "zttp:types";
-        \\structural Guardrails = Spec<"fault_covered">;
-        \\function handler(req: Request): Response & Guardrails {
+        \\structural Guardrails<T> = Proof<T, "fault_covered">;
+        \\function handler(req: Request): Guardrails<Response> {
         \\    return Response.json({ ok: true });
         \\}
         ,
@@ -480,7 +477,7 @@ test "runCheck fails when a declared spec is not proven" {
     try std.testing.expectError(error.Regression, result);
 }
 
-test "runCheck enforces default specs when the handler declares no Spec<...>" {
+test "runCheck enforces default specs when the handler declares no Proof<T, P>" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -500,7 +497,7 @@ test "runCheck enforces default specs when the handler declares no Spec<...>" {
     const handler_path = try std.fs.path.join(allocator, &.{ tmp_path, "plain.ts" });
     defer allocator.free(handler_path);
 
-    // No `Spec<...>` activates every supported spec by default. This
+    // No `Proof<T, P>` activates every supported spec by default. This
     // plain handler does not prove the full set, so ratchet must surface
     // the gap as a regression.
     const result = runCheck(allocator, &.{handler_path});
@@ -549,9 +546,8 @@ test "runShow reports the declared/proven differences without failing" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "unmet.ts",
         .data =
-        \\import type { Spec } from "zttp:types";
-        \\structural Guardrails = Spec<"fault_covered">;
-        \\function handler(req: Request): Response & Guardrails {
+        \\structural Guardrails<T> = Proof<T, "fault_covered">;
+        \\function handler(req: Request): Guardrails<Response> {
         \\  return Response.json({ ok: true });
         \\}
         ,
@@ -598,9 +594,8 @@ test "runCheck fails NonRatchetableSpec when every declared name is non-monotoni
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "egress.ts",
         .data =
-        \\import type { Spec } from "zttp:types";
-        \\structural Egress = Spec<"has_egress">;
-        \\function handler(req: Request): Response & Egress {
+        \\structural Egress<T> = Proof<T, "has_egress">;
+        \\function handler(req: Request): Egress<Response> {
         \\    return Response.json({ ok: true });
         \\}
         ,
@@ -622,7 +617,7 @@ test "runCheck fails NonRatchetableSpec when every declared name is non-monotoni
     );
 }
 
-test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
+test "runCheck holds when Proof<T, \"pure\"> is declared on a pure handler" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -630,9 +625,8 @@ test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
     try tmp.dir.writeFile(std.testing.io, .{
         .sub_path = "pure.ts",
         .data =
-        \\import type { Spec } from "zttp:types";
-        \\structural G = Spec<"pure">;
-        \\function handler(req: Request): Response & G {
+        \\structural G<T> = Proof<T, "pure">;
+        \\function handler(req: Request): G<Response> {
         \\    return Response.json({ ok: true });
         \\}
         ,
@@ -652,25 +646,24 @@ test "runCheck holds when Spec<\"pure\"> is declared on a pure handler" {
 
 fn printHelp() void {
     std.debug.print(
-        \\zttp ratchet — Spec read-out for proven properties
+        \\zttp ratchet - proof read-out for proven properties
         \\
         \\Usage:
         \\  zttp ratchet show <handler.ts>
         \\      Compile the handler and print its declared and proven spec sets,
         \\      plus anything declared-but-unproven, proven-beyond-declared, or
         \\      declared-but-not-monotonic. Reports; never fails.
-        \\      A handler with no `Spec<...>` activates every supported spec.
+        \\      A handler with no `Proof<T, P>` activates every supported spec.
         \\
         \\  zttp ratchet check <handler.ts>
         \\      Deprecated. `zttp check` is the gate: it compiles the same
-        \\      contract and exits 1 on an undischarged Spec (ZTS500) and on a
+        \\      contract and exits 1 on an undischarged proof (ZTS500) and on a
         \\      non-monotonic declared name. Kept working for one release.
         \\
         \\Declaring obligations:
         \\
-        \\    import type {{ Spec }} from "zttp:types";
-        \\    structural Guardrails = Spec<"pure" | "deterministic">;
-        \\    function handler(req: Request): Response & Guardrails {{ ... }}
+        \\    structural Guardrails<T> = Proof<T, "pure" | "deterministic">;
+        \\    function handler(req: Request): Guardrails<Response> {{ ... }}
         \\
         \\The proven set is also written to contract.json under `provenSpecs`
         \\and rides inside the signed Zttp-Attest JWS, so cross-build diffs

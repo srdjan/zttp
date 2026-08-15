@@ -426,4 +426,23 @@ for row in "${prose_bans[@]}"; do
   fi
 done
 
+# The model-1 proof capsules are ambient. A stale `zttp:types` import is
+# refused as ZTS053, so no live source, scaffold, skill, or current document
+# may teach it. Historical records and the three refusal/negative probes must
+# retain the spelling. Count the tracked input first: a successful empty scan
+# over an accidentally empty corpus is not evidence.
+live_surface_count="$(git ls-files -z | tr -cd '\0' | wc -c | tr -d '[:space:]')"
+if (( live_surface_count < 100 )); then
+  fail "legacy types-import gate scanned only $live_surface_count tracked files"
+fi
+
+legacy_types_hits="$({
+  git ls-files -z |
+    xargs -0 rg -n -F -- 'zttp:types' 2>/dev/null || true
+} | grep -v -E '^(CHANGELOG\.md:|docs/(archive|plans|solutions)/|docs/(convergence|restrictions-to-proofs)\.md:|packages/pi/src/providers/testdata/codegen/|packages/pi/src/simulator/testdata/empirical/|packages/zts/src/(stripper|restriction_registry)\.zig:|packages/tools/src/precompile\.zig:|packages/pi/src/expert_persona\.zig:|scripts/check-docs-drift\.sh:)' || true)"
+if [[ -n "${legacy_types_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$legacy_types_hits" >&2
+  fail "live source still references removed zttp:types; use ambient Proof<T, P> and Effects<T, R>"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

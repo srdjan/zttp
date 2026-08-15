@@ -96,7 +96,7 @@ test "tool decodes simulate arg" {
 test "canonicalize registry returns bound version-2 candidates and optional simulation" {
     const source =
         \\const parse = (x: number): number => x;
-        \\function handler(req: Request): Response & Spec<"state_isolated"> {
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({ a, b });

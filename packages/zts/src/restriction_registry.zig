@@ -488,6 +488,14 @@ pub const entries = [_]RestrictionEntry{
         .alternative = "rename the handler to .ts, or use .tsx when JSX lowering is required",
         .enforced_by = &.{"ZTS052"},
     },
+    .{
+        .id = "restriction.legacy-types-module",
+        .feature = "`zttp:types` import",
+        .boundary = "proof and effect witnesses are ambient type names",
+        .nature = .language_simplicity,
+        .note = "remove the import and write `Proof<T, P>` or `Effects<T, R>` directly",
+        .enforced_by = &.{"ZTS053"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

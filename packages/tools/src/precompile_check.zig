@@ -200,7 +200,7 @@ pub fn appendSpecDiagnosticsJson(
 /// ZTS610 already refuses - exported, undeclared, nonempty inferred row - once
 /// `handler_reachable` came off ZTS610, so it added a warning behind a flag
 /// where an unconditional error already stood. The proof half stays because
-/// ZTS611 fires only when the handler declares a proof-supported `Spec<...>`
+/// ZTS611 fires only when the handler declares a proof-supported `Proof<T, P>`
 /// and this fires whether or not it does.
 pub fn appendExportCapsuleDiagnostics(
     allocator: std.mem.Allocator,
@@ -363,7 +363,7 @@ fn declaresProofSupportedSpec(specs: []const []const u8) bool {
 pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult) !void {
     const contract = if (result.contract) |*c| c else return;
 
-    // Re-discharge the handler's Spec<...> obligations against the freshly
+    // Re-discharge the handler's Proof<T, P> obligations against the freshly
     // classified properties. Capsule diagnostics - those carrying a
     // `function` - come from proof-carrying-function discharge, which this
     // refresh does not re-run; handler-level Effects diagnostics also come
@@ -535,15 +535,15 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 fn specDiagnosticMessage(diag: zts.SpecDiagnostic) []const u8 {
     if (diag.implicit_default) {
         switch (diag.kind) {
-            .not_discharged => return "handler declares no Spec<...>; the default proof profile demands a property this handler does not hold",
-            .incompatible_with_import => return "handler declares no Spec<...>; the default profile's read_only conflicts with a stateful module import",
+            .not_discharged => return "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+            .incompatible_with_import => return "handler returns no Proof<T, P> capsule; the default profile's read_only conflicts with a stateful module import",
             else => {},
         }
     }
     return switch (diag.kind) {
-        .not_discharged => "declared Spec was not discharged by handler proof",
-        .incompatible_with_import => "declared Spec is incompatible with imported module",
-        .unknown_name => "declared Spec name is not recognized",
+        .not_discharged => "declared Proof capsule was not discharged by handler proof",
+        .incompatible_with_import => "declared Proof capsule is incompatible with imported module",
+        .unknown_name => "declared Proof capsule name is not recognized",
         .missing_capsule => "helper breaks a handler-demanded property and carries no Proof<...> capsule",
         .effect_undeclared => "function reaches a capability outside its declared Effects<...> ceiling",
         .effect_unknown_capability => "Effects<...> names an unknown capability",

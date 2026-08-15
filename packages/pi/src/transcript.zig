@@ -621,7 +621,7 @@ test "renderRichEntryToOwnedTty leaves a small tool_result body untouched" {
 test "veto -> turn -> transcript pipeline still lands a proof entry" {
     var result = try veto.runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);
@@ -646,7 +646,7 @@ test "veto -> turn -> transcript pipeline still lands a proof entry" {
 test "renderRich renders a proof_card payload legibly, not as raw edit-simulate JSON" {
     var result = try veto.runVeto(testing.allocator, .{
         .file = "handler.ts",
-        .content = "function handler(req: Request): Response & Spec<\"deterministic\"> { return Response.json({ok: true}); }",
+        .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ok: true}); }",
         .before = null,
     });
     defer result.deinit(testing.allocator);

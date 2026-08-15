@@ -257,9 +257,8 @@ Authoring rules:
 ```typescript
 import { run } from "zttp:durable";
 import { call } from "zttp:workflow";
-import type { Spec } from "zttp:types";
 
-structural WorkflowGuarantees = Spec<
+structural WorkflowGuarantees<T> = Proof<T,
     | "deterministic"
     | "state_isolated"
     | "result_safe"
@@ -272,7 +271,7 @@ structural WorkflowGuarantees = Spec<
     | "canonical"
 >;
 
-function handler(req: Request): Response & WorkflowGuarantees {
+function handler(req: Request): WorkflowGuarantees<Response> {
     const key = req.headers.get("idempotency-key") ?? "workflow-demo";
     return run(key, () => {
         const child = call("greet", { method: "GET", path: "/workflow" });

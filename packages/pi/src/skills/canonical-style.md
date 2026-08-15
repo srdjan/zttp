@@ -16,7 +16,7 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Iteration | `for (const item of items)` over a finite collection |
 | Errors | `Result<T>` values plus explicit `.ok` checks |
 | External effects | `Effects<T, "...">` on public helpers that touch capabilities |
-| Proof obligations | `Spec<...>` on handlers; `Proof<T, "...">` on helpers that participate in declared proofs |
+| Proof obligations | Ambient `Proof<T, P>` on handlers and helpers that participate in declared proofs |
 | Module imports | Named imports from a literal `zttp:*` or registered `zttp-ext:*` specifier |
 | Capability keys | String literals or compiler-visible `const` literal aliases |
 | Arithmetic update | `x = x + 1`; never `x += 1` or `x++` |

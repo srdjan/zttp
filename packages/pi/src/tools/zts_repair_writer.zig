@@ -339,11 +339,10 @@ test "repair writer capability is explicitly injectable" {
 
 test "host repair writer applies exact approved v2 candidate" {
     const source =
-        \\import type { Spec } from "zttp:types";
         \\
-        \\structural Guardrails = Spec<"state_isolated">;
+        \\structural Guardrails<T> = Proof<T, "state_isolated">;
         \\
-        \\export function handler(req: Request): Response & Guardrails {
+        \\export function handler(req: Request): Guardrails<Response> {
         \\    let name = "world";
         \\    return Response.json({ hello: name });
         \\}

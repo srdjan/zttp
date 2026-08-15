@@ -6,9 +6,8 @@
 // the value is unusable until then. This covers tips 1 (prefer `unknown`)
 // and 8 (narrowing an unknown value before use).
 
-import type { Spec } from "zttp:types";
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -19,7 +18,7 @@ structural Guardrails = Spec<
     | "input_validated"
 >;
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const body: unknown = req.body;
 
   // `body` is `unknown` here; the `typeof` check narrows it to `string`

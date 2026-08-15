@@ -22,11 +22,11 @@ const TypeMap = type_map_mod.TypeMap;
 const TypeMapKind = type_map_mod.TypeMapKind;
 const TypeMapEntry = type_map_mod.TypeMapEntry;
 
-/// The field name used to mark a record as the body of an instantiated
-/// `Spec<...>` generic alias. The verifier looks for records bearing this
-/// field when extracting declared spec sets from a handler return type.
+/// The field name used to mark a record as the proof payload of an instantiated
+/// `Proof<T, P>` capsule. The verifier looks for records bearing this field
+/// when extracting declared proof sets from a function return type.
 /// Sized to be unmistakable for any user-authored field.
-pub const spec_marker_field = "__zttp_spec__";
+pub const proof_marker_field = "__zttp_proof__";
 
 /// Built-in object-deriving utility types. Recognized by name in
 /// tryInstantiateGenericApp; the transforms themselves live in TypePool.
@@ -42,8 +42,8 @@ fn utilityKind(name: []const u8) ?UtilityKind {
 }
 
 /// The field name marking the body of an instantiated `Effects<...>` generic
-/// alias. Distinct from `spec_marker_field` so a return type carrying both
-/// (`Effects<Response, "env"> & Spec<"deterministic">`) keeps capability
+/// alias. Distinct from `proof_marker_field` so a return type carrying both
+/// (`Proof<Effects<Response, "env">, "deterministic">`) keeps capability
 /// names and proof-property names in separate extraction passes.
 pub const effect_marker_field = "__zttp_effect__";
 
@@ -431,50 +431,14 @@ pub const TypeEnv = struct {
         self.allocation_failed = true;
     }
 
-    /// Register built-in type aliases (`Spec<S>` and friends) so user code
-    /// can write `import type { Spec } from "zttp:types"` and have the
-    /// type checker resolve it without a real source file. Idempotent;
-    /// user-declared aliases of the same name will overwrite the built-in
+    /// Register the ambient proof and effect capsules. Idempotent;
+    /// user-declared aliases of the same name overwrite the built-in
     /// (last-write-wins matches the existing populateFromTypeMap pattern).
     pub fn registerBuiltins(self: *TypeEnv) void {
-        self.registerSpecBuiltin();
         // Proof<T, S> and Effects<T, S> share the capsule shape
         // `T & { <marker>: S }`; they differ only in the marker field.
-        self.registerCapsuleAlias("Proof", spec_marker_field);
+        self.registerCapsuleAlias("Proof", proof_marker_field);
         self.registerCapsuleAlias("Effects", effect_marker_field);
-    }
-
-    /// Spec<S>: phantom marker carrying the declared spec name set as S.
-    /// Registered as a generic alias whose body is a record whose only
-    /// field is named `__zttp_spec__` with type S. After instantiation
-    /// with a literal-string union, the field type carries the spec
-    /// names. The verifier walks return-type intersections to extract
-    /// them via extractSpecMembers.
-    fn registerSpecBuiltin(self: *TypeEnv) void {
-        self.pushGenericScope();
-        const s_param = self.addGenericParam("S");
-        const field_name = self.pool.addName(self.allocator, spec_marker_field);
-        const body = self.pool.addRecord(self.allocator, &.{
-            .{
-                .name_start = field_name.start,
-                .name_len = field_name.len,
-                .type_idx = s_param,
-                .optional = false,
-            },
-        });
-        self.popGenericScope();
-
-        if (body == null_type_idx) return;
-
-        const owned_name = self.internName("Spec");
-        if (owned_name.len == 0) return;
-        const owned_param = self.internName("S");
-
-        var alias = GenericAlias{};
-        alias.param_names[0] = owned_param;
-        alias.param_count = 1;
-        alias.body = body;
-        self.generic_aliases.put(self.allocator, owned_name, alias) catch self.markAllocationFailure();
     }
 
     /// Register a two-param capsule alias `Name<T, S>` whose body is
@@ -483,7 +447,7 @@ pub const TypeEnv = struct {
     /// After instantiation the underlying return type `T` survives for type
     /// checking while the phantom marker record carries `S`. Distinct marker
     /// fields let a return type carry both capsules and have each extraction
-    /// (`extractSpecMembers` / `extractEffectMembers`) recover only its own.
+    /// (`extractProofMembers` / `extractEffectMembers`) recover only its own.
     fn registerCapsuleAlias(self: *TypeEnv, alias_name: []const u8, marker_field: []const u8) void {
         self.pushGenericScope();
         const t_param = self.addGenericParam("T");
@@ -934,7 +898,7 @@ pub const TypeEnv = struct {
     /// If idx is a t_generic_app whose base resolves to a generic alias,
     /// instantiate the alias body with the provided type arguments.
     /// Recurses through intersection and union members so a generic
-    /// application nested inside `Response & Spec<...>` or
+    /// application nested inside `Proof<Response, ...>` or
     /// `Result<T> | Foo` is instantiated as well.
     fn tryInstantiateGenericApp(self: *TypeEnv, idx: TypeIndex) TypeIndex {
         if (idx == null_type_idx) return idx;
@@ -1339,25 +1303,25 @@ pub const TypeEnv = struct {
 
     /// Walk a TypeIndex (typically a function return-type annotation),
     /// following intersections and resolving alias references, and append
-    /// every declared spec name string found inside a `Spec<...>` marker
+    /// every declared proof-property name found inside a `Proof<...>` marker
     /// to `out`. Strings live as long as the type pool's name storage;
-    /// the caller must not free them. Safe to call when no spec marker is
+    /// the caller must not free them. Safe to call when no proof marker is
     /// present (the slice stays empty). Read the returned `non_literal` before
     /// treating an empty slice as "no marker".
-    pub fn extractSpecMembers(
+    pub fn extractProofMembers(
         self: *const TypeEnv,
         idx: TypeIndex,
         out: *std.ArrayListUnmanaged([]const u8),
     ) std.mem.Allocator.Error!MarkerExtraction {
         if (self.allocation_failed) return error.OutOfMemory;
         var status: MarkerExtraction = .{};
-        try self.collectMarkedMembers(idx, out, spec_marker_field, 0, &status);
+        try self.collectMarkedMembers(idx, out, proof_marker_field, 0, &status);
         return status;
     }
 
-    /// Like `extractSpecMembers`, but recovers the capability name strings
+    /// Like `extractProofMembers`, but recovers the capability name strings
     /// inside an `Effects<...>` marker. A return type may carry both an
-    /// `Effects<...>` and a `Spec<...>` / `Proof<...>` marker; each extraction
+    /// `Effects<...>` and a `Proof<...>` marker; each extraction
     /// keys on its own field name and ignores the other.
     pub fn extractEffectMembers(
         self: *const TypeEnv,
@@ -1375,7 +1339,7 @@ pub const TypeEnv = struct {
     }
 
     /// Strip phantom proof-marker members (the capsule records behind
-    /// `Spec<...>`, `Proof<...>`, and `Effects<...>`) from a declared type,
+    /// `Proof<...>` and `Effects<...>`) from a declared type,
     /// returning the value type a returned expression must actually satisfy.
     /// Markers are compile-time obligations discharged by the verifier and
     /// the contract extractor, never by the runtime value, so `return s`
@@ -1421,7 +1385,7 @@ pub const TypeEnv = struct {
                     const fields = self.pool.getRecordFields(idx);
                     if (fields.len != 1) return false;
                     const fname = self.pool.getName(fields[0].name_start, fields[0].name_len);
-                    return std.mem.eql(u8, fname, spec_marker_field) or
+                    return std.mem.eql(u8, fname, proof_marker_field) or
                         std.mem.eql(u8, fname, effect_marker_field);
                 },
                 // exhaustive: false narrows erasure - the member is kept rather
@@ -2381,7 +2345,7 @@ test "TypeEnv object assignability accepts non-primitives and resolves known ali
     try std.testing.expect(!env.isAssignableTo(string_alias, object_ref));
 }
 
-test "TypeEnv registers Spec<S> built-in alias on init" {
+test "extractProofMembers walks a generic Proof alias to its literal union" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -2389,63 +2353,14 @@ test "TypeEnv registers Spec<S> built-in alias on init" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // Spec must live in generic_aliases (parametric), not type_aliases.
-    try std.testing.expect(env.getTypeAlias("Spec") == null);
-    try std.testing.expect(env.generic_aliases.get("Spec") != null);
-
-    // Body must be a record with the magic field name carrying S.
-    const alias = env.generic_aliases.get("Spec").?;
-    try std.testing.expectEqual(@as(u8, 1), alias.param_count);
-    try std.testing.expectEqualStrings("S", alias.param_names[0]);
-
-    const body_tag = pool.getTag(alias.body) orelse return error.MissingBody;
-    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, body_tag);
-
-    const fields = pool.getRecordFields(alias.body);
-    try std.testing.expectEqual(@as(usize, 1), fields.len);
-    try std.testing.expectEqualStrings(spec_marker_field, pool.getName(fields[0].name_start, fields[0].name_len));
-}
-
-test "TypeEnv resolveType Spec<\"a\" | \"b\"> instantiates marker" {
-    const allocator = std.testing.allocator;
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-
-    const idx = env.resolveType("Spec<\"a\" | \"b\">");
-    try std.testing.expectEqual(type_pool_mod.TypeTag.t_record, pool.getTag(idx).?);
-
-    const fields = pool.getRecordFields(idx);
-    try std.testing.expectEqual(@as(usize, 1), fields.len);
-    try std.testing.expectEqualStrings(spec_marker_field, pool.getName(fields[0].name_start, fields[0].name_len));
-
-    // Field type is the literal-string union "a" | "b".
-    const union_tag = pool.getTag(fields[0].type_idx) orelse return error.MissingBody;
-    try std.testing.expectEqual(type_pool_mod.TypeTag.t_union, union_tag);
-    try std.testing.expectEqual(@as(usize, 2), pool.getUnionMembers(fields[0].type_idx).len);
-}
-
-test "extractSpecMembers walks intersection through alias to literal union" {
-    const allocator = std.testing.allocator;
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-
-    var env = TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-
-    // Simulate:
-    //     structural Guardrails = Spec<"idempotent" | "deterministic">;
-    //     function handler(): Response & Guardrails { ... }
+    // Simulate a source-defined alias around the ambient capsule.
     const source =
-        "structural Guardrails = Spec<\"idempotent\" | \"deterministic\">;" ++
-        "function handler(): Response & Guardrails { return null; }";
+        "structural Guardrails<T> = Proof<T, \"idempotent\" | \"deterministic\">;" ++
+        "function handler(): Guardrails<Response> { return null; }";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
-    // Guardrails alias body: Spec<"idempotent" | "deterministic">
-    const body_span = testSpan(source, "Spec<\"idempotent\" | \"deterministic\">");
+    const body_span = testSpan(source, "Proof<T, \"idempotent\" | \"deterministic\">");
     const name_span = testSpan(source, "Guardrails");
     try tm.addEntry(allocator, .{
         .kind = .type_alias,
@@ -2456,8 +2371,17 @@ test "extractSpecMembers walks intersection through alias to literal union" {
         .name_start = name_span.start,
         .name_end = name_span.end,
     });
-    // Return annotation: Response & Guardrails
-    const ret_span = testSpan(source, "Response & Guardrails");
+    const param_span = testSpan(source, "T>");
+    try tm.addEntry(allocator, .{
+        .kind = .generic_params,
+        .source_start = param_span.start,
+        .source_end = param_span.start + 1,
+        .context_line = 1,
+        .context_col = 1,
+        .name_start = name_span.start,
+        .name_end = name_span.end,
+    });
+    const ret_span = testSpan(source, "Guardrails<Response>");
     try tm.addEntry(allocator, .{
         .kind = .return_annotation,
         .source_start = ret_span.start,
@@ -2474,14 +2398,14 @@ test "extractSpecMembers walks intersection through alias to literal union" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    _ = try env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractProofMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 2), names.items.len);
     try std.testing.expectEqualStrings("idempotent", names.items[0]);
     try std.testing.expectEqualStrings("deterministic", names.items[1]);
 }
 
-test "extractSpecMembers handles inline Response & Spec<\"name\">" {
+test "extractProofMembers handles an inline Proof return capsule" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -2489,15 +2413,14 @@ test "extractSpecMembers handles inline Response & Spec<\"name\">" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // function handler(): Response & Spec<"idempotent"> { ... }
-    const source = "function handler(): Response & Spec<\"idempotent\"> { return null; }";
+    const source = "function handler(): Proof<Response, \"idempotent\"> { return null; }";
     var tm = TypeMap.init(source);
     defer tm.deinit(allocator);
 
     try tm.addEntry(allocator, .{
         .kind = .return_annotation,
-        .source_start = 20,
-        .source_end = 49,
+        .source_start = testSpan(source, "Proof<Response, \"idempotent\">").start,
+        .source_end = testSpan(source, "Proof<Response, \"idempotent\">").end,
         .context_line = 3,
         .context_col = 1,
         .name_start = 0,
@@ -2510,13 +2433,13 @@ test "extractSpecMembers handles inline Response & Spec<\"name\">" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    _ = try env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractProofMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 1), names.items.len);
     try std.testing.expectEqualStrings("idempotent", names.items[0]);
 }
 
-test "extractSpecMembers returns empty when no Spec marker" {
+test "extractProofMembers returns empty when no Proof marker" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -2544,7 +2467,7 @@ test "extractSpecMembers returns empty when no Spec marker" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    _ = try env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractProofMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 0), names.items.len);
 }
@@ -2563,7 +2486,7 @@ test "TypeEnv registers Proof<T, S> built-in alias on init" {
     try std.testing.expectEqualStrings("T", alias.param_names[0]);
     try std.testing.expectEqualStrings("S", alias.param_names[1]);
 
-    // Body is an intersection: the underlying T plus the spec marker record.
+    // Body is an intersection: the underlying T plus the proof marker record.
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(alias.body).?);
 }
 
@@ -2580,14 +2503,14 @@ test "resolveType Proof<T, S> carries capsule property members" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    _ = try env.extractSpecMembers(idx, &names);
+    _ = try env.extractProofMembers(idx, &names);
 
     try std.testing.expectEqual(@as(usize, 2), names.items.len);
     try std.testing.expectEqualStrings("total", names.items[0]);
     try std.testing.expectEqualStrings("pure", names.items[1]);
 }
 
-test "extractSpecMembers handles inline return type Proof<T, \"name\">" {
+test "extractProofMembers handles inline return type Proof<T, \"name\">" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -2616,7 +2539,7 @@ test "extractSpecMembers handles inline return type Proof<T, \"name\">" {
 
     var names: std.ArrayListUnmanaged([]const u8) = .empty;
     defer names.deinit(allocator);
-    _ = try env.extractSpecMembers(sig.return_type, &names);
+    _ = try env.extractProofMembers(sig.return_type, &names);
 
     try std.testing.expectEqual(@as(usize, 1), names.items.len);
     try std.testing.expectEqualStrings("read_only", names.items[0]);
@@ -2654,11 +2577,11 @@ test "resolveType Effects<T, S> carries capability members under its own marker"
     try std.testing.expectEqualStrings("env", caps.items[0]);
     try std.testing.expectEqualStrings("crypto", caps.items[1]);
 
-    // The effect marker is distinct from the spec marker: an Effects<...>
-    // type carries no Spec/Proof members.
+    // The effect marker is distinct from the proof marker: an Effects<...>
+    // type carries no Proof members.
     var specs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer specs.deinit(allocator);
-    _ = try env.extractSpecMembers(idx, &specs);
+    _ = try env.extractProofMembers(idx, &specs);
     try std.testing.expectEqual(@as(usize, 0), specs.items.len);
 }
 
@@ -2793,7 +2716,7 @@ test "Proof<Effects<...>, ...> composes: each marker extracted independently" {
 
     var specs: std.ArrayListUnmanaged([]const u8) = .empty;
     defer specs.deinit(allocator);
-    _ = try env.extractSpecMembers(idx, &specs);
+    _ = try env.extractProofMembers(idx, &specs);
     try std.testing.expectEqual(@as(usize, 1), specs.items.len);
     try std.testing.expectEqualStrings("pure", specs.items[0]);
 }

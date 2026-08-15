@@ -8,12 +8,11 @@
 // Try it:
 //   curl http://localhost:3000/weather
 
-import type { Spec } from "zttp:types";
 import { fetch } from "zttp:fetch";
 
-structural WeatherProof = Spec<"state_isolated" | "no_secret_leakage">;
+structural WeatherProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
 
-function handler(req: Request): Response & WeatherProof {
+function handler(req: Request): WeatherProof<Response> {
   if (req.method !== "GET") {
     return Response.json({ error: "method_not_allowed" }, { status: 405 });
   }

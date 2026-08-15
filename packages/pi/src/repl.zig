@@ -369,7 +369,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
     try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
     try w.writeAll("Studio:        /studio <handler.ts>   show browser proof workbench command\n");
-    try w.writeAll("Specs:         /specs <handler.ts>   show declared Spec<...> obligations\n");
+    try w.writeAll("Specs:         /specs <handler.ts>   show declared Proof<T, P> obligations\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
@@ -601,7 +601,7 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
             "  Session branching: /fork, /tree, --fork, --continue\n" ++
             "  Session commands: /resume, /continue, /new, /compact, /fork, /tree\n" ++
             "  Proof ledger mode: /ledger, /chat, /ledger export, zttp ledger replay/export\n" ++
-            "  Author-declared specs: /specs reads Spec<...> obligations + discharge state\n" ++
+            "  Author-declared specs: /specs reads Proof<T, P> obligations + discharge state\n" ++
             "  Skills catalog (/skill:<name>)\n" ++
             "  Informational commands: /model, /status, /settings, /hotkeys, /changelog\n",
     );

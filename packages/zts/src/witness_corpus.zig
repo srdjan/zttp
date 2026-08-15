@@ -5,7 +5,7 @@
 //! violated by. Until now they were materialised on demand and discarded.
 //! This module persists them to disk so they survive across builds, deploys,
 //! live reloads, and developer machines, and so the corpus accumulates as
-//! the handler accrues `Spec<...>` declarations.
+//! the handler accrues `Proof<T, P>` declarations.
 //!
 //! Layout, all paths relative to the project root (cwd of the analyzer
 //! invocation):

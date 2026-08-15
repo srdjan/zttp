@@ -469,7 +469,7 @@ new DSL. For the copyable first shape, import `run` from `zttp:durable` and
 `call` from `zttp:workflow`, derive the run key from
 `req.headers.get("idempotency-key")`, and put the top-level `workflow.call`
 inside `run()`. Use `step()` for replayable JSON-snapshot work only. Because
-workflow modules are write-effect modules, declare a narrow `Spec<...>` with
+workflow modules are write-effect modules, declare a narrow `Proof<T, P>` with
 only the properties `zts check --json` proves.
 
 Never put `workflow.call`, `saga`, `fanout`, or `follow` inside a durable

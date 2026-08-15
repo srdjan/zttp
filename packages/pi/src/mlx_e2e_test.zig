@@ -15,7 +15,7 @@ const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
 
 const initial_handler =
-    "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
+    "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
     "  if (req.url === \"/old\") {\n" ++
     "    return Response.json({ legacy: true });\n" ++
     "  }\n" ++
@@ -23,7 +23,7 @@ const initial_handler =
     "}\n";
 
 const accepted_handler =
-    "function handler(req: Request): Response & Spec<\"deterministic\"> {\n" ++
+    "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
     "  if (req.url === \"/health\") {\n" ++
     "    return Response.json({ ok: true });\n" ++
     "  }\n" ++

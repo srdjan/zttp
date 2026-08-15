@@ -1348,7 +1348,7 @@ const record_corpus = [_]RecordCase{
     // paths, and reports its holes with an `expectedType` and an `inScope`
     // list. `hole()` is typed `never`, so a holed program still proves.
     //
-    // Each seed carries the narrow `Spec<...>` its finished form needs, and the
+    // Each seed carries the narrow `Proof<T, P>` its finished form needs, and the
     // first recording of this arm is why. Without it the seeds check with a
     // ZTS500 already outstanding, and that quietly broke the comparison in the
     // hole arm's favour.
@@ -1396,7 +1396,7 @@ const record_corpus = [_]RecordCase{
             .{
                 .path = "handler.ts",
                 .bytes =
-                \\function handler(req: Request): Response & Spec<"deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
                 \\  return hole();
                 \\}
                 \\
@@ -1426,7 +1426,7 @@ const record_corpus = [_]RecordCase{
                 .bytes =
                 \\import { cacheGet } from "zttp:cache";
                 \\
-                \\function handler(req: Request): Response & Spec<"retry_safe" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\function handler(req: Request): Proof<Response, "retry_safe" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
                 \\  const hits = cacheGet("counters", "hits");
                 \\  if (hits === undefined) {
                 \\    return Response.json({ hits: "0" });
@@ -1461,7 +1461,7 @@ const record_corpus = [_]RecordCase{
                 .bytes =
                 \\import { fetch } from "zttp:fetch";
                 \\
-                \\function handler(req: Request): Response & Spec<"state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\function handler(req: Request): Proof<Response, "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
                 \\  const res = fetch("https://api.example.com/v1/status", { method: "GET", headers: { accept: "application/json" } });
                 \\  if (!res.ok) {
                 \\    return Response.json({ error: "upstream" }, { status: 502 });
@@ -1512,7 +1512,7 @@ const record_corpus = [_]RecordCase{
                 .bytes =
                 \\import { apiToken, displayName } from "./lib/settings.ts";
                 \\
-                \\function handler(req: Request): Response & Spec<"deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+                \\function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
                 \\  if (apiToken() === undefined) {
                 \\    return Response.json({ error: "unconfigured" }, { status: 503 });
                 \\  }

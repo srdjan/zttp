@@ -7,11 +7,10 @@
 // reverse direction (`type Config = typeof config`) is unsupported, so the
 // alias is the single source of truth and the value is checked against it.
 
-import type { Spec } from "zttp:types";
 
 structural Config = { port: number; host: string; readonly version: string };
 
-structural Guardrails = Spec<
+structural Guardrails<T> = Proof<T,
     | "deterministic"
     | "read_only"
     | "retry_safe"
@@ -26,7 +25,7 @@ structural Guardrails = Spec<
 // literal against `Config` and pins the narrow type on its own.
 const config: Config = { port: 8080, host: "0.0.0.0", version: "1.0" };
 
-function handler(req: Request): Response & Guardrails {
+function handler(req: Request): Guardrails<Response> {
   const port: number = config.port;
   const host: string = config.host;
   const version: string = config.version;

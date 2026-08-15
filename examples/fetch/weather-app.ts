@@ -19,10 +19,9 @@
 //   open http://localhost:3000
 //   curl "http://localhost:3000/forecast?latitude=40.71&longitude=-74.01"
 
-import type { Spec } from "zttp:types";
 import { fetch } from "zttp:fetch";
 
-structural WeatherProof = Spec<"state_isolated" | "no_secret_leakage">;
+structural WeatherProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
 
 // The frontend UI. A static page: the form posts nothing - its submit handler
 // fetches /forecast and renders the result. (Browser-side script only; the
@@ -90,7 +89,7 @@ function page(): string {
 // GET /          serves the frontend UI.
 // GET /forecast  reads the user's coordinates from the query string, fetches
 //                the current conditions for them, and returns the parsed JSON.
-function handler(req: Request): Response & WeatherProof {
+function handler(req: Request): WeatherProof<Response> {
   if (req.method !== "GET") {
     return Response.json({ error: "method_not_allowed" }, { status: 405 });
   }
