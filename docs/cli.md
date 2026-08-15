@@ -329,6 +329,10 @@ error and never fails a build: it is reported at `advisory` severity, rewritten
 where the rewrite is provable, and otherwise left in place. Rows whose
 `rewrite_rule` is null are advisory-only.
 
+Parser-level syntax removals report `ZTS001`. In the model-minimal profile,
+remove `debugger;` and standalone empty statements, and spell a match catch-all
+as `default:` rather than `when _:`.
+
 | Code | Rule | Canonical form |
 |---|---|---|
 | ZTS602 | Dynamic capability access | Use literal env keys, cache namespaces, SQL query names, egress URLs, route paths, and service names. |

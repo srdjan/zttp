@@ -229,6 +229,14 @@ Logical compound assignments require short-circuit semantics and are not support
 | `yield` expressions | Generators are not available |
 | `delete` operator | Use object spread to omit properties |
 
+### Statement Forms
+
+| Feature | Suggested Alternative |
+|---------|----------------------|
+| `debugger;` | Remove the statement |
+| Empty statement `;` | Remove the standalone semicolon |
+| `when _:` catch-all | Write `default:` |
+
 ### Global Identifiers
 
 | Feature | Suggested Alternative |

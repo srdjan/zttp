@@ -204,9 +204,7 @@ pub const NodeTag = enum(u8) {
     continue_stmt,
     try_stmt,
     block,
-    empty_stmt,
     labeled_stmt,
-    debugger_stmt,
 
     // Declarations
     function_decl,
@@ -476,7 +474,7 @@ pub const Node = struct {
     };
 
     pub const MatchArm = struct {
-        pattern: NodeIndex, // literal node, match_pattern, or null_node (default/wildcard)
+        pattern: NodeIndex, // literal node, match_pattern, or null_node (default)
         body: NodeIndex, // single expression
     };
 
@@ -1282,8 +1280,6 @@ pub const IRStore = struct {
                 });
             },
             .expr_stmt => self.addNode(.expr_stmt, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
-            .empty_stmt => self.addNode(.empty_stmt, loc, .{ .a = 0, .b = 0 }),
-            .debugger_stmt => self.addNode(.debugger_stmt, loc, .{ .a = 0, .b = 0 }),
 
             // --- Patterns ---
             .pattern_element, .pattern_rest, .object_pattern, .array_pattern => blk: {
@@ -1451,7 +1447,7 @@ pub const IRStore = struct {
                 .lit_float => .{ .float_idx = @truncate(d.a) },
                 .lit_string => .{ .string_idx = @truncate(d.a) },
                 .lit_bool => .{ .bool_value = d.a != 0 },
-                .lit_null, .lit_undefined, .empty_stmt, .debugger_stmt => .{ .none = {} },
+                .lit_null, .lit_undefined => .{ .none = {} },
                 .identifier => .{ .binding = self.getBinding(idx) },
                 .binary_op => blk: {
                     const bin = d.toBinary();

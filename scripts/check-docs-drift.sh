@@ -485,4 +485,16 @@ if [[ -n "${removed_type_spelling_hits//[[:space:]]/}" ]]; then
   fail "tracked TypeScript still uses Array<T>, ReadonlyArray<T>, or void; use postfix arrays and undefined"
 fi
 
+# Statements must name an operation, and match has one catch-all spelling.
+# The parser is authoritative; this tracked-source census prevents live examples
+# and fixtures from continuing to teach the forms its ZTS001 diagnostics remove.
+removed_statement_form_hits="$({
+  git ls-files -z -- '*.ts' '*.tsx' |
+    xargs -0 rg -n -U --pcre2 -- '(?m)(?:\bdebugger\s*;|\bwhen\s+_\s*:|^\s*;\s*(?://[^\n]*)?$|;;)' 2>/dev/null || true
+} | grep -v -E '^docs/' || true)"
+if [[ -n "${removed_statement_form_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$removed_statement_form_hits" >&2
+  fail "tracked TypeScript still uses debugger, an empty statement, or when _; remove inert statements and use default:"
+fi
+
 printf 'docs drift: OK (%s builtin virtual modules)\n' "$module_count"

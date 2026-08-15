@@ -49,9 +49,9 @@ EXPECTED_GRAMMAR_HASH="8e832800e21e352785bcbcb230a3f787c1314219fa02f753ab10ced37
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
 EXPECTED_FRONTEND_GRAMMAR_HASH="67b7ec97cc658df59440c087d46e3b386f0863c3f461d12512ee4f458a757763"
 EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
-# Moved when phase 7 added the Array<T>, ReadonlyArray<T>, and void rows,
-# enforced by ZTS058-ZTS060 plus the unary-void ZTS001 refusal.
-EXPECTED_RESTRICTION_HASH="0d13bfaf7789a2a8b0e4d131b46275923d8bcf8dddb1ae1b9304184e2422e16a"
+# Moved when phase 7 added the debugger, empty-statement, and when-wildcard
+# rows, each enforced by an exact ZTS001 parser refusal.
+EXPECTED_RESTRICTION_HASH="8e9d071f54297fad4419e84e14d5b05f5ff084eca559e59439156232969c9f93"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

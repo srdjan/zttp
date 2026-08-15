@@ -849,7 +849,7 @@ pub const TypeChecker = struct {
                         .kind = .non_exhaustive_match,
                         .node = node,
                         .message = "match expression is not provably exhaustive",
-                        .help = "add 'default:' or 'when _:' arm, or cover every union variant",
+                        .help = "add a 'default:' arm, or cover every union variant",
                     });
                 }
             },

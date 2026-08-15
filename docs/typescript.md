@@ -734,7 +734,7 @@ In plain TypeScript the standard exhaustiveness guard is a `default` branch that
 assigns the discriminant to a `never`-typed parameter (`assertNever(x: never)`),
 which stops compiling when a new variant is added. zts checks `match`
 exhaustiveness directly, and the canonical profile requires every `match` to
-carry a `default` / `when _:` catch-all arm so the unexpected case is always
+carry a `default:` catch-all arm so the unexpected case is always
 handled. Full variant coverage satisfies the type-level exhaustiveness check but
 does not lift that requirement - it applies to a local discriminant just as much
 as a parameter. So the rule is simple: give every `match` a `default` arm, and

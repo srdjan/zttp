@@ -64,6 +64,9 @@ reach clients through the version-2 `restrictions` operation.
 | `Array<T>` type spelling | one postfix spelling for mutable arrays | `language_simplicity` | `ZTS058` |
 | `ReadonlyArray<T>` type spelling | one modifier-plus-postfix spelling for readonly arrays | `language_simplicity` | `ZTS059` |
 | `void` type and unary operator | one explicit absence value and type | `language_simplicity` | `ZTS001`, `ZTS060` |
+| `debugger` statement | runtime-observer-free execution | `language_simplicity` | `ZTS001` |
+| empty statement | every statement names an operation | `language_simplicity` | `ZTS001` |
+| `when _:` match arm | one explicit catch-all spelling | `canonical_simplicity` | `ZTS001` |
 
 ## Rows No Diagnostic Rejects
 
@@ -119,3 +122,6 @@ Per-restriction rationale, one sentence each.
 - **`Array<T>` type spelling** - write `T[]`
 - **`ReadonlyArray<T>` type spelling** - write `readonly T[]`
 - **`void` type and unary operator** - write `undefined`; evaluate a required effect as a separate statement
+- **`debugger` statement** - remove the statement
+- **empty statement** - remove the standalone semicolon
+- **`when _:` match arm** - write `default:`

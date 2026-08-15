@@ -552,6 +552,30 @@ pub const entries = [_]RestrictionEntry{
         .note = "write `undefined`; evaluate a required effect as a separate statement",
         .enforced_by = &.{ "ZTS001", "ZTS060" },
     },
+    .{
+        .id = "restriction.debugger-statement",
+        .feature = "`debugger` statement",
+        .boundary = "runtime-observer-free execution",
+        .nature = .language_simplicity,
+        .note = "remove the statement",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.empty-statement",
+        .feature = "empty statement",
+        .boundary = "every statement names an operation",
+        .nature = .language_simplicity,
+        .note = "remove the standalone semicolon",
+        .enforced_by = &.{"ZTS001"},
+    },
+    .{
+        .id = "restriction.match-wildcard-arm",
+        .feature = "`when _:` match arm",
+        .boundary = "one explicit catch-all spelling",
+        .nature = .canonical_simplicity,
+        .note = "write `default:`",
+        .enforced_by = &.{"ZTS001"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

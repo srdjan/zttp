@@ -139,7 +139,6 @@ pub fn functionAlwaysReturns(ir_view: IrView, body: NodeIndex) bool {
         .for_of_stmt,
         .var_decl,
         .expr_stmt,
-        .empty_stmt,
         .import_decl,
         .export_decl,
         .function_decl,
@@ -443,7 +442,6 @@ pub const HandlerVerifier = struct {
 
             .var_decl,
             .expr_stmt,
-            .empty_stmt,
             .import_decl,
             .export_decl,
             .function_decl,
@@ -815,7 +813,7 @@ pub const HandlerVerifier = struct {
                         .kind = .non_exhaustive_match,
                         .node = node,
                         .message = "match expression without default arm may not produce a value",
-                        .help = "add 'default:' or 'when _:' arm to handle all cases",
+                        .help = "add a 'default:' arm to handle all cases",
                         .repair_intent = .add_trailing_return,
                     });
                 }

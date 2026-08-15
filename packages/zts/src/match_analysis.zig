@@ -9,7 +9,7 @@ const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const null_type_idx = type_pool_mod.null_type_idx;
 
-/// True when the match has a catch-all (`default:` / `when _:`) arm, which the
+/// True when the match has a catch-all `default:` arm, which the
 /// parser records with a null pattern. A catch-all handles every residual case,
 /// so its presence alone makes the match exhaustive. Single owner of the rule,
 /// shared by the type checker, handler verifier, and strict checker.

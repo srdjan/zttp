@@ -117,7 +117,7 @@ verify warning: unused variable 'temp'
 
 ### 5. Non-Exhaustive Match
 
-Match expressions without a `default` or `when _` arm are rejected by strict ZigTS unless the type checker can prove every finite union variant is covered.
+Match expressions without a `default` arm are rejected by strict ZigTS unless the type checker can prove every finite union variant is covered.
 
 ```
 strict error: match expression must be exhaustive in strict ZigTS

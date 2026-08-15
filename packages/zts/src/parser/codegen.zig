@@ -414,8 +414,6 @@ pub const CodeGen = struct {
                 }
             },
 
-            .empty_stmt, .debugger_stmt => {},
-
             .break_stmt => {
                 if (self.loop_stack.items.len > 0) {
                     const ctx = self.loop_stack.items[self.loop_stack.items.len - 1];
@@ -2283,7 +2281,7 @@ pub const CodeGen = struct {
 
             if (arm.pattern == null_node) {
                 default_idx = i;
-                continue; // default/wildcard - no test needed
+                continue; // default - no test needed
             }
 
             const pattern_tag = self.ir.getTag(arm.pattern) orelse continue;

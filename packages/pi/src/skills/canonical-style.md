@@ -28,6 +28,8 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Optional parameter | `(a: T | undefined)`, not `(a?: T)` |
 | Array type | `T[]` or `readonly T[]`, never `Array<T>` or `ReadonlyArray<T>` |
 | Ignored result | Evaluate the call as a statement; use `undefined` for absence, never `void` |
+| Match catch-all | `default:`, never `when _:` |
+| Inert statements | Remove `debugger;` and standalone `;` statements |
 | Template interpolation | `${identifier}` or `${obj.literalField}` only; hoist anything else to a `const` |
 | Fallback | `??` for nullish defaults. Never `||` unless both operands are boolean |
 

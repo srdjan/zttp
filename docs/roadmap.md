@@ -1120,6 +1120,11 @@ ZTS001 refusal because preserving an effectful operand requires a statement,
 not a token substitution. The alias normalization and unary IR/bytecode paths
 were deleted after the authored-source gates went green.
 
+Statement syntax now has no inert forms and one catch-all spelling. `debugger;`
+and standalone empty statements are ZTS001 refusals with removal guidance, and
+`when _:` is refused in favor of `default:`. Their parser IR and bytecode nodes
+were deleted once the front-door refusal tests passed.
+
 **Owed, and this is the debt the cutover has been accumulating toward.** The
 recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases
 write `type X =`, so `zig build test` now fails two of them: `weather-egress`

@@ -392,8 +392,16 @@ pub const Parser = struct {
             .kw_import => self.parseImportDeclaration(),
             .kw_export => self.parseExportDeclaration(),
             .lbrace => self.parseBlock(),
-            .semicolon => self.parseEmptyStatement(),
-            .kw_debugger => self.parseDebuggerStatement(),
+            .semicolon => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "empty statements are not supported; remove the standalone `;`");
+                self.advance();
+                return error.ParseError;
+            },
+            .kw_debugger => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "`debugger` statements are not supported; remove the statement");
+                self.advance();
+                return error.ParseError;
+            },
             else => {
                 // Check for TypeScript namespace/module declarations
                 if (self.current.type == .identifier) {
@@ -1245,6 +1253,11 @@ pub const Parser = struct {
             errdefer self.scopes.popScope();
 
             if (self.match(.kw_when)) {
+                if (self.check(.identifier) and std.mem.eql(u8, self.current.text(self.source), "_")) {
+                    self.errors.addErrorAt(.unsupported_feature, self.current, "`when _:` is not supported; write `default:`");
+                    self.advance();
+                    return error.ParseError;
+                }
                 pattern = try self.parseMatchPattern();
             } else if (self.match(.kw_default)) {
                 // default arm - pattern stays null_node
@@ -1640,27 +1653,6 @@ pub const Parser = struct {
                 .stmts_count = stmts_count,
                 .scope_id = scope_id,
             } },
-        });
-    }
-
-    fn parseEmptyStatement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume ';'
-        return try self.nodes.add(.{
-            .tag = .empty_stmt,
-            .loc = loc,
-            .data = .{ .none = {} },
-        });
-    }
-
-    fn parseDebuggerStatement(self: *Parser) anyerror!NodeIndex {
-        const loc = self.current.location();
-        self.advance(); // consume 'debugger'
-        try self.expectSemicolon();
-        return try self.nodes.add(.{
-            .tag = .debugger_stmt,
-            .loc = loc,
-            .data = .{ .none = {} },
         });
     }
 
@@ -4704,6 +4696,24 @@ test "unsupported: unary void names the explicit undefined repair" {
     try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "undefined") != null);
 }
 
+test "unsupported: debugger statement names removal" {
+    var parser = try Parser.init(std.testing.allocator, "debugger;");
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "remove the statement") != null);
+}
+
+test "unsupported: empty statement names removal" {
+    var parser = try Parser.init(std.testing.allocator, ";");
+    defer parser.deinit();
+
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "standalone `;`") != null);
+}
+
 test "a statement error after a semicolon inside a block terminates" {
     // Regression. `parseBlock`'s recovery loop assumed `synchronize()` always
     // consumes a token. It returns immediately when `previous` is a semicolon,
@@ -5252,7 +5262,7 @@ test "parse match expression with object pattern" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "parse match expression with wildcard" {
+test "parse match expression refuses top-level wildcard" {
     var parser = try Parser.init(std.testing.allocator,
         \\const x = match (v) {
         \\  when 1: "one",
@@ -5261,13 +5271,9 @@ test "parse match expression with wildcard" {
     );
     defer parser.deinit();
 
-    const result = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-
-    try std.testing.expect(result != null_node);
-    try std.testing.expect(!parser.hasErrors());
+    try std.testing.expectError(error.ParseError, parser.parse());
+    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
+    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "default:") != null);
 }
 
 test "parse match expression with nested object and array patterns" {

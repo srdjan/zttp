@@ -4929,6 +4929,65 @@ test "runCheckOnlyFromSource explicitly refuses unary void" {
     try std.testing.expect(result.contract == null);
 }
 
+test "runCheckOnlyFromSource refuses debugger statements" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  debugger;
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("remove the statement", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses empty statements" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  ;
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("remove the standalone `;`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource refuses when wildcard arms" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const status = match (req.method) {
+        \\    when _: 200,
+        \\  };
+        \\  return Response.json({ status });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS001", diagnostic.code);
+    try std.testing.expectEqualStrings("write `default:`", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =

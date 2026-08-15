@@ -221,7 +221,7 @@ const Comparer = struct {
             // `null` is explicit data in this language and `undefined` is the
             // absence sentinel; neither carries a payload, and the tag equality
             // above is the whole comparison.
-            .lit_null, .lit_undefined, .empty_stmt => return .identical,
+            .lit_null, .lit_undefined => return .identical,
             // The parser's only construction site for either sets the label to
             // null, and `labeled_stmt` is unmodeled below, so there is no label
             // to compare. Measured, not assumed: parse.zig builds `break_stmt`
@@ -550,7 +550,6 @@ const Comparer = struct {
             .throw_stmt,
             .try_stmt,
             .labeled_stmt,
-            .debugger_stmt,
             .object_method,
             .object_getter,
             .object_setter,
@@ -752,7 +751,7 @@ test "the constructs the unmodeled arm names cannot reach this file" {
     }
 
     // The alphabet pin, read off the enum rather than off a list beside it.
-    try testing.expectEqual(@as(usize, 76), std.enums.values(NodeTag).len);
+    try testing.expectEqual(@as(usize, 74), std.enums.values(NodeTag).len);
 }
 
 /// One source exercising every form a handler is written in, used twice below:

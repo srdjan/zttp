@@ -548,7 +548,6 @@ pub const StrictChecker = struct {
             .continue_stmt,
             .try_stmt,
             .labeled_stmt,
-            .debugger_stmt,
             .function_decl,
             .import_decl,
             => false,
