@@ -82,13 +82,14 @@ pub const operations = [_]OperationSpec{
     // failing test rather than a promise on the wire. Task 11 grows both
     // together.
     .{ .op = .meta, .status = .implemented, .input_fields = &.{"view"}, .payload_fields = &.{
-        "compiler_version",      "profile_id",        "policy_version",
-        "policy_hash",           "idiom_table_hash",  "restriction_matrix_hash",
-        "builtin_registry_hash", "operations",        "error_codes",
-        "severities",            "idioms",            "limits",
-        "module_catalog",        "deferred_sections", "validators",
-        "verifiers",             "ambient_names",     "type_serialization",
-        "grammar",               "examples",          "decisions",
+        "compiler_version",        "profile_id",            "policy_version",
+        "policy_hash",             "grammar_hash",          "idiom_table_hash",
+        "restriction_matrix_hash", "builtin_registry_hash", "operations",
+        "error_codes",             "severities",            "idioms",
+        "limits",                  "module_catalog",        "deferred_sections",
+        "validators",              "verifiers",             "ambient_names",
+        "type_serialization",      "grammar",               "examples",
+        "decisions",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -674,6 +675,8 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(expert_meta.policy_version);
     try json.objectField("policy_hash");
     try json.write(&zts.policyHash());
+    try json.objectField("grammar_hash");
+    try json.write(&zts.grammarHash());
     try json.objectField("idiom_table_hash");
     try json.write(&zts.idiomTableHash());
     try json.objectField("restriction_matrix_hash");
@@ -711,6 +714,8 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(expert_meta.policy_version);
     try json.objectField("policy_hash");
     try json.write(&zts.policyHash());
+    try json.objectField("grammar_hash");
+    try json.write(&zts.grammarHash());
 
     try json.objectField("operations");
     try writeOperationCatalog(json, true);
@@ -2555,6 +2560,7 @@ test "meta bootstrap view is bounded and routes to full discovery" {
     const payload = root.get("payload").?.object;
     try testing.expectEqualStrings("bootstrap", payload.get("view").?.string);
     try testing.expectEqualStrings(&zts.policyHash(), payload.get("policy_hash").?.string);
+    try testing.expectEqualStrings(&zts.grammarHash(), payload.get("grammar_hash").?.string);
     try testing.expectEqualStrings(&zts.idiomTableHash(), payload.get("idiom_table_hash").?.string);
     try testing.expectEqualStrings(&zts.restrictionMatrixHash(), payload.get("restriction_matrix_hash").?.string);
     try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);
@@ -4577,7 +4583,7 @@ fn metaPayload(a: std.mem.Allocator, out: *[]u8) !std.json.Parsed(std.json.Value
     return parse(a, out.*);
 }
 
-test "meta publishes the three registry hashes it binds work to" {
+test "meta publishes the registry hashes it binds work to" {
     const a = testing.allocator;
     var raw: []u8 = undefined;
     var parsed = try metaPayload(a, &raw);
@@ -4586,6 +4592,7 @@ test "meta publishes the three registry hashes it binds work to" {
 
     const payload = parsed.value.object.get("payload").?.object;
     try testing.expectEqualStrings(&zts.policyHash(), payload.get("policy_hash").?.string);
+    try testing.expectEqualStrings(&zts.grammarHash(), payload.get("grammar_hash").?.string);
     try testing.expectEqualStrings(&zts.idiomTableHash(), payload.get("idiom_table_hash").?.string);
     try testing.expectEqualStrings(&zts.restrictionMatrixHash(), payload.get("restriction_matrix_hash").?.string);
     try testing.expectEqual(@as(usize, 64), payload.get("builtin_registry_hash").?.string.len);
@@ -4953,7 +4960,9 @@ test "meta publishes section 8's grammar production for production, in order" {
     defer a.free(raw);
     defer parsed.deinit();
 
-    const rows = parsed.value.object.get("payload").?.object.get("grammar").?.array;
+    const payload = parsed.value.object.get("payload").?.object;
+    try testing.expectEqualStrings(&zts.grammarHash(), payload.get("grammar_hash").?.string);
+    const rows = payload.get("grammar").?.array;
     const table = zts.GrammarCatalog.productions();
     try testing.expectEqual(table.len, rows.items.len);
 

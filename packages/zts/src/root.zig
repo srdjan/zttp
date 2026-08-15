@@ -445,6 +445,12 @@ pub const GrammarCatalog = struct {
     }
 };
 
+/// Identity of the complete published grammar, including each row's
+/// enforcement metadata.
+pub fn grammarHash() [64]u8 {
+    return compiler.grammar_registry.grammarHash();
+}
+
 test "stable GrammarCatalog exposes the productions and their enforcement points" {
     const rows = GrammarCatalog.productions();
     try std.testing.expectEqual(compiler.grammar_registry.productions.len, rows.len);
@@ -452,6 +458,7 @@ test "stable GrammarCatalog exposes the productions and their enforcement points
         return error.TestExpectedProduction;
     try std.testing.expectEqual(GrammarCatalog.Enforcement.check_time, match_expr.enforcement);
     try std.testing.expect(GrammarCatalog.findByName("NotAProduction") == null);
+    try std.testing.expectEqualStrings(&compiler.grammar_registry.grammarHash(), &grammarHash());
 }
 
 /// The canonical type serialization's published identity: what a client needs

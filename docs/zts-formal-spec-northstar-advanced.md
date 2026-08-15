@@ -533,7 +533,7 @@ result schema. An agent never chooses among undocumented verification commands.
 
 The `meta` operation accepts an optional `input.view`. `"full"` is the
 default and publishes the complete payload below. `"bootstrap"` publishes
-only the complete identity block, registry hashes, operation identifiers and
+only the complete identity block, grammar and registry hashes, operation identifiers and
 input fields, plus the exact request and section list for the full view. The
 bootstrap view is the bounded initial agent context; it MUST remain at or
 below 8 KiB. This projection does not remove a discovery surface because the
@@ -541,6 +541,9 @@ full view remains one explicit `meta` request away.
 
 The full `meta` payload MUST also publish:
 
+- `grammar_hash`: deterministic SHA-256 over every grammar production and its
+  enforcement metadata, so a client can bind cached syntax guidance to the
+  exact grammar it describes,
 - `grammar`: the machine-readable productions of Section 8, member for
   member, registry-generated and drift-gated,
 - `examples`: one canonical minimal example per admitted surface form,

@@ -371,11 +371,70 @@ pub fn findByName(name: []const u8) ?*const Production {
     return null;
 }
 
+/// Deterministic SHA-256 over the complete published grammar. Fields use NUL
+/// separators and each production ends with SOH, matching the other protocol
+/// registry identities. Optional fields carry an explicit presence byte, so
+/// absence cannot collide with any published field value.
+fn hashProductions(rows: []const Production) [64]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    for (rows) |*production| {
+        hasher.update(production.name);
+        hasher.update("\x00");
+        hasher.update(production.rhs);
+        hasher.update("\x00");
+        hasher.update(production.enforcement.id());
+        hasher.update("\x00");
+        if (production.rule_code) |rule_code| {
+            hasher.update("\x01");
+            hasher.update(rule_code);
+        } else {
+            hasher.update("\x00");
+        }
+        hasher.update("\x00");
+        if (production.note) |note| {
+            hasher.update("\x01");
+            hasher.update(note);
+        } else {
+            hasher.update("\x00");
+        }
+        hasher.update("\x01");
+    }
+    return std.fmt.bytesToHex(hasher.finalResult(), .lower);
+}
+
+pub fn grammarHash() [64]u8 {
+    return hashProductions(&productions);
+}
+
 // ---------------------------------------------------------------------------
 // Gates
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+test "grammarHash is stable lowercase hex" {
+    const first = grammarHash();
+    const second = grammarHash();
+    try testing.expectEqualSlices(u8, &first, &second);
+    for (first) |c| {
+        try testing.expect((c >= '0' and c <= '9') or (c >= 'a' and c <= 'f'));
+    }
+}
+
+test "grammarHash covers every published production field" {
+    const base = [_]Production{.{ .name = "A", .rhs = "B" }};
+    const expected = hashProductions(&base);
+    const variants = [_]Production{
+        .{ .name = "C", .rhs = "B" },
+        .{ .name = "A", .rhs = "D" },
+        .{ .name = "A", .rhs = "B", .enforcement = .check_time, .rule_code = "ZTS001" },
+        .{ .name = "A", .rhs = "B", .enforcement = .check_time, .note = "checked elsewhere" },
+    };
+    for (variants) |variant| {
+        const rows = [_]Production{variant};
+        try testing.expect(!std.mem.eql(u8, &expected, &hashProductions(&rows)));
+    }
+}
 
 test "every check_time row names either a registry rule or the band that answers" {
     var check_rows: usize = 0;
