@@ -915,9 +915,7 @@ fn findFile(ask: []const u8) ?[]const u8 {
     var words = std.mem.tokenizeAny(u8, ask, " \t\r\n`\"'(),;");
     while (words.next()) |raw| {
         const word = std.mem.trimEnd(u8, raw, ".!?");
-        if (std.mem.endsWith(u8, word, ".ts") or std.mem.endsWith(u8, word, ".tsx") or
-            std.mem.endsWith(u8, word, ".js") or std.mem.endsWith(u8, word, ".jsx"))
-        {
+        if (std.mem.endsWith(u8, word, ".ts") or std.mem.endsWith(u8, word, ".tsx")) {
             return word;
         }
     }

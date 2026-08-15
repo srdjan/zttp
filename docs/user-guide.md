@@ -1,6 +1,6 @@
 # User Guide
 
-zttp runs JavaScript, TypeScript, and TSX HTTP handlers from a single Zig
+zttp runs TypeScript and TSX HTTP handlers from a single Zig
 binary. The language surface is intentionally restricted so the compiler can
 prove handler properties before and during local development.
 
@@ -145,11 +145,16 @@ Result-producing virtual-module calls must be checked before `.value` access.
 Optional-producing calls must be narrowed before use. The verifier enforces both
 patterns.
 
-## JavaScript And TypeScript
+## TypeScript Source Profile
 
-zts supports a practical server-side JS/TS subset and rejects constructs that
+zts supports a practical server-side TypeScript subset and rejects constructs that
 weaken analysis. Commonly rejected constructs include `var`, `while`, `class`,
 `try/catch`, implicit globals, and unsupported module forms.
+
+Handler files use `.ts`. A handler containing JSX uses `.tsx` and enters the
+versioned TSX frontend. `.js`, `.jsx`, and unknown file extensions are refused
+with ZTS052 so source identity always selects one explicit frontend. Inline
+`-e` snippets remain virtual source and do not claim a file extension.
 
 Use:
 

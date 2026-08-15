@@ -528,9 +528,7 @@ fn refExists(allocator: std.mem.Allocator, cwd: []const u8, ref: []const u8) boo
 }
 
 fn isHandlerCandidate(path: []const u8) bool {
-    const has_ext = std.mem.endsWith(u8, path, ".ts") or std.mem.endsWith(u8, path, ".tsx") or
-        std.mem.endsWith(u8, path, ".js") or std.mem.endsWith(u8, path, ".jsx");
-    if (!has_ext) return false;
+    if (!zts.classifySourcePath(path).isSupportedFile()) return false;
     if (std.mem.indexOf(u8, path, ".test.") != null) return false;
     if (std.mem.indexOf(u8, path, ".spec.") != null) return false;
     if (std.mem.startsWith(u8, path, "tests/") or std.mem.indexOf(u8, path, "/tests/") != null) return false;
@@ -739,7 +737,7 @@ fn analyzeHandler(
     const before_is_handler = before_contract != null and isHandlerContract(before_contract.?);
     const after_is_handler = after_contract != null and isHandlerContract(after_contract.?);
 
-    // A `.ts`/`.js` file that exposes no routes/behaviors on EITHER side is a
+    // A `.ts`/`.tsx` file that exposes no routes/behaviors on EITHER side is a
     // library/config module, not a request handler. Skip it (only adds
     // equivalent-verdict noise to the report).
     if (!before_is_handler and !after_is_handler) return null;

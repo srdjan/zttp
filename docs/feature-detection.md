@@ -116,7 +116,7 @@ These are JavaScript and TypeScript language features that are syntactically val
 
 ### TypeScript Features (detected by parser)
 
-The parser owns these diagnostics so `.ts` and `.js` files get the same error
+The parser owns these diagnostics so every `.ts` core input gets the same error
 messages.
 
 | Feature | Suggested Alternative |
@@ -332,7 +332,7 @@ When adding detection for a new unsupported feature:
 
 **TypeScript Stripper**: Handles TypeScript syntax that exists only in type annotation positions (e.g., `any` type). These are stripped before parsing, so the parser never sees them.
 
-**Parser**: Handles all other feature detection - both JavaScript features and TypeScript keywords that appear as statements (enum, namespace, implements, decorators, access modifiers). Running detection in the parser ensures consistent error reporting for both .ts and .js files.
+**Parser**: Handles all other feature detection - both ECMAScript-derived forms and TypeScript keywords that appear as statements (enum, namespace, implements, decorators, access modifiers). Running detection in the parser gives every `.ts` core input the same rich diagnostic.
 
 ### Why Not Runtime Detection?
 
@@ -346,6 +346,6 @@ Runtime checks should only exist as defensive programming (e.g., `UnimplementedO
 
 ### Why Move Detection to the Parser?
 
-Before consolidation, features like `class` and `enum` were detected in the stripper for .ts files but only in the parser for .js files. This created inconsistent developer experience based on file extension. Moving all keyword-level detection to the parser ensures all developers see the same helpful error with rich formatting (source context, underlines) regardless of file type.
+Before consolidation, features like `class` and `enum` were split between the stripper and parser. Moving all keyword-level detection to the parser gives accepted `.ts` inputs one diagnostic path with source context and underlines. `.js` and `.jsx` are rejected earlier at the source-frontend boundary with ZTS052.
 
 The features remaining in the stripper are `any` type detection (because `any` only appears in type annotation positions that are stripped before the parser runs) and `as`/`satisfies` assertion rejection (because these are type-position syntax that the parser never sees).

@@ -56,7 +56,7 @@ for the full contract/proof verification pipeline before running edge.
 | Field                  | Type   | Default | Notes                                          |
 |------------------------|--------|---------|------------------------------------------------|
 | `name`                 | string | required| Referenced by routes via `target` or `targets` |
-| `entry`                | string | required| Path to handler `.ts`/`.tsx`/`.js`             |
+| `entry`                | string | required| Path to handler `.ts` or `.tsx`                 |
 | `pool`                 | integer| auto    | Runtime pool size for this handler             |
 | `poolWaitTimeoutMs`    | integer| `5000`  | Max wait for a pool slot before 503            |
 | `lifecycle`            | string | pool default | Optional override: `ephemeral` \| `bounded` \| `ttl` \| `reuse` |

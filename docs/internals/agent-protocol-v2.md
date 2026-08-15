@@ -140,6 +140,7 @@ source span. The code set is closed and published in `meta.payload.error_codes`.
 | `project_root_unresolvable` | `project_root` does not resolve to an existing directory |
 | `path_outside_project_root` | a request path escapes the root |
 | `file_unreadable` | the entry file could not be read |
+| `unsupported_source_extension` | `input.file` does not use `.ts` or `.tsx` |
 | `identity_mismatch` | an `expected` field is stale |
 | `internal_error` | a limit or fault inside the compiler |
 

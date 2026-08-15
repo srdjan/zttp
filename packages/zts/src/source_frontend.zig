@@ -19,13 +19,18 @@ pub const SourceKind = enum {
     legacy_javascript,
     legacy_jsx,
     virtual_javascript,
+    unsupported,
 
     pub fn isTyped(self: SourceKind) bool {
         return self == .typescript or self == .tsx;
     }
 
     pub fn enablesJsx(self: SourceKind) bool {
-        return self == .tsx or self == .legacy_jsx;
+        return self == .tsx;
+    }
+
+    pub fn isSupportedFile(self: SourceKind) bool {
+        return self == .typescript or self == .tsx;
     }
 };
 
@@ -34,8 +39,11 @@ pub fn classifyPath(path: []const u8) SourceKind {
     if (std.mem.endsWith(u8, path, ".ts")) return .typescript;
     if (std.mem.endsWith(u8, path, ".jsx")) return .legacy_jsx;
     if (std.mem.endsWith(u8, path, ".js")) return .legacy_javascript;
-    return .virtual_javascript;
+    if (path.len >= 2 and path[0] == '<' and path[path.len - 1] == '>') return .virtual_javascript;
+    return .unsupported;
 }
+
+pub const PrepareError = stripper.StripError || error{UnsupportedSourceExtension};
 
 /// Owned preprocessing result. `original_source` and `path` are borrowed;
 /// stripped code, type facts, diagnostics, and source-map edits are owned by
@@ -51,8 +59,12 @@ pub const PreparedSource = struct {
         source: []const u8,
         path: []const u8,
         options: stripper.StripOptions,
-    ) stripper.StripError!PreparedSource {
+    ) PrepareError!PreparedSource {
         const kind = classifyPath(path);
+        switch (kind) {
+            .legacy_javascript, .legacy_jsx, .unsupported => return error.UnsupportedSourceExtension,
+            .typescript, .tsx, .virtual_javascript => {},
+        }
         var result = PreparedSource{
             .original_source = source,
             .path = path,
@@ -102,6 +114,22 @@ test "classifyPath distinguishes typed, legacy, and virtual sources" {
     try std.testing.expectEqual(SourceKind.legacy_javascript, classifyPath("handler.js"));
     try std.testing.expectEqual(SourceKind.legacy_jsx, classifyPath("view.jsx"));
     try std.testing.expectEqual(SourceKind.virtual_javascript, classifyPath("<eval>"));
+    try std.testing.expectEqual(SourceKind.unsupported, classifyPath("handler.mts"));
+}
+
+test "PreparedSource refuses legacy and unknown file extensions" {
+    try std.testing.expectError(
+        error.UnsupportedSourceExtension,
+        PreparedSource.init(std.testing.allocator, "const value = 1;", "handler.js", .{}),
+    );
+    try std.testing.expectError(
+        error.UnsupportedSourceExtension,
+        PreparedSource.init(std.testing.allocator, "const view = <div />;", "handler.jsx", .{}),
+    );
+    try std.testing.expectError(
+        error.UnsupportedSourceExtension,
+        PreparedSource.init(std.testing.allocator, "const value = 1;", "handler.txt", .{}),
+    );
 }
 
 test "PreparedSource derives stripping and JSX mode from the path" {

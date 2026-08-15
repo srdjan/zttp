@@ -175,7 +175,7 @@ pub fn hasFlag(argv: []const []const u8, name: []const u8) bool {
 }
 
 fn looksLikeHandlerFile(path: []const u8) bool {
-    return zts.classifySourcePath(path) != .virtual_javascript;
+    return zts.classifySourcePath(path).isSupportedFile();
 }
 
 pub fn parseSize(str: []const u8) !usize {

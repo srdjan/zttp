@@ -532,7 +532,7 @@ Flags:
   signing on (the default) to append a signed receipt to `.zttp/proofs.jsonl`;
   CI passes `--no-sign` because runners hold no persistent attest identity.
 
-Files that are not handlers (a changed `.ts`/`.js` with no routes and no
+Files that are not handlers (a changed `.ts`/`.tsx` with no routes and no
 behavior paths, i.e. a config or library module) and files under `tests/`,
 `fixtures/`, or matching `*.test.*`/`*.spec.*` are skipped, and listed as such
 in the report.
@@ -564,4 +564,3 @@ pull request; the gate still posts the comment but does not fail the check.
   aggregates across a git range.
 - `zttp prove-behavior <before.ts> <after.ts>` is the one-shot, two-file form
   of the same per-handler verdict the gate computes for each changed file.
-

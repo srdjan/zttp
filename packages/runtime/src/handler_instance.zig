@@ -994,7 +994,9 @@ pub const HandlerInstance = struct {
         self.last_opt_stats = .{};
         self.interpreter.resetProfilingCounters();
         var prepared = zq.PreparedSource.init(self.allocator, code, filename, .{}) catch |err| {
-            std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
+            if (err != error.UnsupportedSourceExtension) {
+                std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
+            }
             return err;
         };
         defer prepared.deinit();
@@ -1006,7 +1008,7 @@ pub const HandlerInstance = struct {
         var p = try zq.Parser.init(self.allocator, prepared.parserInput(), self.strings, &self.ctx.atoms);
         defer p.deinit();
 
-        // Enable JSX mode for .jsx and .tsx files
+        // Enable JSX mode only for the accepted TSX frontend.
         if (prepared.enablesJsx()) {
             p.enableJsx();
         }

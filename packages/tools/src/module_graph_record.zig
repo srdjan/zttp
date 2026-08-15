@@ -77,6 +77,7 @@ pub const BuildError = error{
     /// which is a rejection inside an otherwise valid graph.
     EntryUnreadable,
     GraphTooLarge,
+    UnsupportedSourceExtension,
 } || std.mem.Allocator.Error || agent_identity.PathError;
 
 pub const GraphRecord = struct {
@@ -256,6 +257,7 @@ fn collectImports(
         .{},
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.UnsupportedSourceExtension => return error.UnsupportedSourceExtension,
         else => null,
     };
     defer if (prepared) |*owned| owned.deinit();
@@ -619,6 +621,23 @@ test "an unreadable entry file fails the build" {
     try testing.expectError(
         error.EntryUnreadable,
         build(a, std.testing.io, root, "nope.ts"),
+    );
+}
+
+test "a JavaScript entry extension is refused" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "handler.js",
+        .data = "export function handler(req) { return Response.text('ok'); }\n",
+    });
+    const root = try tmpRoot(&tmp, a);
+    defer a.free(root);
+
+    try testing.expectError(
+        error.UnsupportedSourceExtension,
+        build(a, std.testing.io, root, "handler.js"),
     );
 }
 

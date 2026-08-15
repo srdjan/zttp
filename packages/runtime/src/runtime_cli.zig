@@ -841,13 +841,13 @@ fn printEdgeHelp() void {
 
 fn printServeHelp() void {
     const help =
-        \\zttp serve [options] <handler.js>
+        \\zttp serve [options] <handler.ts>
         \\zttp serve -e "function handler(req) { return Response.json({ok:true}) }"
         \\
         \\Options:
         \\  -p, --port <PORT>     Port to listen on
         \\  -h, --host <HOST>     Host to bind to
-        \\  -e, --eval <CODE>     Evaluate inline JavaScript handler
+        \\  -e, --eval <CODE>     Evaluate virtual inline handler source
         \\  -m, --memory <SIZE>   JS runtime memory limit
         \\  --max-body-size <SIZE> Request body limit (default 1m); oversize returns 413
         \\  -n, --pool <N>        Runtime pool size

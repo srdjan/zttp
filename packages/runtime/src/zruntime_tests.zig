@@ -4182,8 +4182,8 @@ test "JSX rendering works" {
         \\  return Response.html(renderToString(elem));
         \\}
     ;
-    // Load as .jsx to enable JSX mode
-    try rt.loadHandler(handler_code, "test.jsx");
+    // Load through the TSX frontend to enable JSX mode.
+    try rt.loadHandler(handler_code, "test.tsx");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -4197,6 +4197,18 @@ test "JSX rendering works" {
     defer response.deinit();
 
     try std.testing.expectEqualStrings("<div>Hello</div>", response.body);
+}
+
+test "handler loading refuses JavaScript file extensions" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    const rt = try HandlerInstance.init(arena.allocator(), .{});
+    defer rt.deinit();
+    const source = "function handler(req) { return Response.text('ok'); }";
+
+    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadHandler(source, "handler.js"));
+    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadHandler(source, "handler.jsx"));
 }
 
 test "loadCodeNoHandler supports benchmark-style scripts" {
@@ -4232,22 +4244,22 @@ test "loadCodeNoHandler supports imported benchmark-style scripts" {
         \\}
     ;
     try tmp_dir.dir.writeFile(std.testing.io, .{
-        .sub_path = "dep.js",
+        .sub_path = "dep.ts",
         .data = dep_source,
     });
 
     const main_source =
-        \\import { addOne } from "./dep.js";
+        \\import { addOne } from "./dep.ts";
         \\function run(iterations) {
         \\  return addOne(iterations) + 1;
         \\}
     ;
     try tmp_dir.dir.writeFile(std.testing.io, .{
-        .sub_path = "main.js",
+        .sub_path = "main.ts",
         .data = main_source,
     });
 
-    const entry_path = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp_dir.sub_path[0..], "main.js" });
+    const entry_path = try std.fs.path.resolve(allocator, &.{ ".zig-cache", "tmp", tmp_dir.sub_path[0..], "main.ts" });
 
     var rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();

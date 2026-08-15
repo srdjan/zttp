@@ -1,6 +1,6 @@
 # JSX / TSX Patterns
 
-JSX is parsed natively for `.jsx`/`.tsx` files. SSR only - no client hydration.
+JSX enters through the `.tsx` frontend. SSR only - no client hydration. `.jsx` source files are refused.
 
 ## Component Structure
 

@@ -12,7 +12,7 @@ pub const LoadedHandler = struct {
     /// Owned buffer holding the handler source code. Free with `allocator.free`.
     code: []const u8,
     /// Filename for error messages. Points into the config for `file_path`,
-    /// or the static string "eval" for inline code.
+    /// or the static virtual-source identity "<eval>" for inline code.
     filename: []const u8,
 };
 
@@ -27,7 +27,7 @@ pub fn load(
         },
         .inline_code => |code| .{
             .code = try allocator.dupe(u8, code),
-            .filename = "eval",
+            .filename = "<eval>",
         },
         .embedded_bytecode, .appended_payload => error.UnsupportedHandlerSource,
     };
@@ -41,7 +41,7 @@ test "load inline_code returns duped buffer and eval filename" {
     defer allocator.free(loaded.code);
 
     try std.testing.expectEqualStrings(source, loaded.code);
-    try std.testing.expectEqualStrings("eval", loaded.filename);
+    try std.testing.expectEqualStrings("<eval>", loaded.filename);
     // Returned buffer is a separate allocation; callers free unconditionally.
     try std.testing.expect(loaded.code.ptr != source.ptr);
 }

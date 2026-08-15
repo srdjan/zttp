@@ -1,6 +1,6 @@
 ---
 name: zts-expert
-description: Write handler code in the zts TypeScript subset for zttp's serverless runtime. Covers the language spec, virtual modules, compile-time verification, sound mode type safety, and idiomatic FaaS patterns. Use for any .ts/.tsx/.js/.jsx files targeting zttp.
+description: Write handler code in the zts TypeScript subset for zttp's serverless runtime. Covers the language spec, virtual modules, compile-time verification, sound mode type safety, and idiomatic FaaS patterns. Use for .ts and .tsx files targeting zttp.
 ---
 
 # zts-expert - Skill + Compiler-in-the-Loop

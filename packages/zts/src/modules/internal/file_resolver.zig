@@ -1,12 +1,13 @@
 //! File Import Path Resolution
 //!
 //! Pure functions for resolving relative import specifiers to absolute file paths.
-//! Handles extension probing (.ts, .tsx, .js, .jsx) and path normalization.
+//! Handles extension probing (.ts, .tsx) and path normalization.
 
 const std = @import("std");
+const source_frontend = @import("../../source_frontend.zig");
 
 /// Extensions to probe when an import has no extension
-const probe_extensions = [_][]const u8{ ".ts", ".tsx", ".js", ".jsx" };
+const probe_extensions = [_][]const u8{ ".ts", ".tsx" };
 
 /// Maximum path length to prevent allocation issues
 /// Resolve an import specifier relative to the importing file's directory.
@@ -14,7 +15,7 @@ const probe_extensions = [_][]const u8{ ".ts", ".tsx", ".js", ".jsx" };
 /// Returns an owned absolute path string. Caller must free with the same allocator.
 ///
 /// If the specifier already has a recognized extension, it's used directly.
-/// Otherwise, tries .ts, .tsx, .js, .jsx in order using the provided `fileExists` callback.
+/// Otherwise, tries .ts and .tsx in order using the provided `fileExists` callback.
 /// If no callback is provided (null), the first probe extension (.ts) is used.
 pub fn resolve(
     allocator: std.mem.Allocator,
@@ -22,6 +23,11 @@ pub fn resolve(
     importing_file_dir: []const u8,
     fileExists: ?*const fn (path: []const u8) bool,
 ) ![]const u8 {
+    const source_kind = source_frontend.classifyPath(specifier);
+    if (source_kind == .legacy_javascript or source_kind == .legacy_jsx) {
+        return error.UnsupportedSourceExtension;
+    }
+
     // Join the importing directory with the specifier
     const joined = try joinPath(allocator, importing_file_dir, specifier);
     defer allocator.free(joined);
@@ -156,6 +162,17 @@ test "resolve: specifier with extension" {
     const result = try resolve(allocator, "./utils.ts", "/app/src/", null);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("/app/src/utils.ts", result);
+}
+
+test "resolve: JavaScript extensions are refused" {
+    try std.testing.expectError(
+        error.UnsupportedSourceExtension,
+        resolve(std.testing.allocator, "./utils.js", "/app/src/", null),
+    );
+    try std.testing.expectError(
+        error.UnsupportedSourceExtension,
+        resolve(std.testing.allocator, "./view.jsx", "/app/src/", null),
+    );
 }
 
 test "resolve: specifier without extension defaults to .ts" {

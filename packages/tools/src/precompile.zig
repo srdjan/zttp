@@ -1178,7 +1178,12 @@ fn runCheckOnPreparedSource(
         .collect_all_diagnostics = true,
     }) catch |err| {
         if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
-        if (strip_diag) |d| {
+        if (err == error.UnsupportedSourceExtension) {
+            result.json_diagnostics.append(
+                allocator,
+                json_diag.fromUnsupportedSourceExtension(handler_path),
+            ) catch {};
+        } else if (strip_diag) |d| {
             result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
         }
         result.parse_errors = 1;
@@ -1717,7 +1722,7 @@ pub fn compileHandler(
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
-    // Enable JSX mode for .jsx and .tsx files
+    // Enable JSX mode only for the accepted TSX frontend.
     if (prepared.enablesJsx()) {
         js_parser.tokenizer.enableJsx();
     }
@@ -3396,7 +3401,7 @@ test "compileHandler aggregates contract across file imports" {
     defer tmp.cleanup();
 
     const entry_source =
-        \\import { readSecret } from "./dep.js";
+        \\import { readSecret } from "./dep.ts";
         \\export function handler(req) {
         \\  return Response.text(readSecret());
         \\}
@@ -3408,11 +3413,11 @@ test "compileHandler aggregates contract across file imports" {
         \\}
     ;
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.js", .data = entry_source });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.js", .data = dep_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = dep_source });
 
     const allocator = std.testing.allocator;
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.js", allocator);
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
     defer allocator.free(entry_path);
 
     var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"JWT_SECRET\"]}}");
@@ -3435,7 +3440,7 @@ test "compileHandler rejects disallowed policy from imported module" {
     defer tmp.cleanup();
 
     const entry_source =
-        \\import { readSecret } from "./dep.js";
+        \\import { readSecret } from "./dep.ts";
         \\export function handler(req) {
         \\  return Response.text(readSecret());
         \\}
@@ -3447,11 +3452,11 @@ test "compileHandler rejects disallowed policy from imported module" {
         \\}
     ;
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.js", .data = entry_source });
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.js", .data = dep_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = dep_source });
 
     const allocator = std.testing.allocator;
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.js", allocator);
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
     defer allocator.free(entry_path);
 
     var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"PUBLIC_KEY\"]}}");
@@ -3644,10 +3649,10 @@ test "buildTestContractForSource keeps decodeQuery schemas out of request bodies
         \\}
     ;
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.js", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = source });
 
     const allocator = std.testing.allocator;
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.js", allocator);
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
     defer allocator.free(entry_path);
 
     var contract = try buildTestContractForSource(allocator, source, entry_path, null);
@@ -4797,20 +4802,21 @@ test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
     try std.testing.expect(result.totalErrors() > 0);
 }
 
-test "runCheckOnlyFromSource: no Spec activates all supported specs for JS" {
+test "runCheckOnlyFromSource refuses JavaScript extensions with ZTS052" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var contract = try buildTestContractForSource(allocator, source, "default-specs.js", null);
-    defer contract.deinit(allocator);
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.js", null, true, null, false);
+    defer result.deinit(allocator);
 
-    try std.testing.expectEqual(zts.spec_discharge.v1_specs.len, contract.declared_specs.items.len);
-    for (zts.spec_discharge.v1_specs) |spec| {
-        try std.testing.expect(handler_contract.containsString(contract.declared_specs.items, spec.name));
-    }
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS052", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("handler.js", result.json_diagnostics.items[0].file);
+    try std.testing.expect(result.contract == null);
 }
 
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
@@ -4934,11 +4940,11 @@ test "buildContractWithPolicy validates zttp:sql queries against schema" {
         \\);
     ;
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.js", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = source });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "schema.sql", .data = schema });
 
     const allocator = std.testing.allocator;
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.js", allocator);
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
     defer allocator.free(entry_path);
     const schema_path = try tmp.dir.realPathFileAlloc(std.testing.io, "schema.sql", allocator);
     defer allocator.free(schema_path);
@@ -4968,10 +4974,10 @@ test "buildContractWithPolicy requires sql schema when zttp:sql is used" {
         \\}
     ;
 
-    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.js", .data = source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = source });
 
     const allocator = std.testing.allocator;
-    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.js", allocator);
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
     defer allocator.free(entry_path);
 
     try std.testing.expectError(
@@ -4992,7 +4998,7 @@ test "compileHandler rejects invalid virtual-module imports" {
 
     try std.testing.expectError(
         error.InvalidImportSpecifier,
-        compileHandler(allocator, source, "handler.js", .{}),
+        compileHandler(allocator, source, "handler.ts", .{}),
     );
 }
 
@@ -5011,7 +5017,7 @@ test "compileHandler rejects an import of a module that does not exist" {
 
     try std.testing.expectError(
         error.UnknownVirtualModule,
-        compileHandler(allocator, source, "handler.js", .{}),
+        compileHandler(allocator, source, "handler.ts", .{}),
     );
 }
 

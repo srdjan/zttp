@@ -16,8 +16,8 @@
 //! - `any` type annotations
 //!
 //! Note: enum, namespace, implements, decorators, access modifiers, class,
-//! and abstract class are all handled by the parser for consistent error
-//! messages across .ts and .js files (see zts/parser/parse.zig)
+//! and abstract class are all handled by the parser for one consistent error
+//! path after TypeScript preparation (see zts/parser/parse.zig)
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -3184,7 +3184,7 @@ test "an exported interface is refused too" {
 
 // NOTE: enum, namespace, decorator, implements, and access modifier detection
 // has been moved to the parser (Stage 4). The stripper now passes these through
-// so the parser can produce consistent error messages for both .ts and .js files.
+// so the parser can produce consistent error messages for accepted .ts inputs.
 
 test "enum passes through to parser" {
     var result = try strip(std.testing.allocator, "enum Color { Red, Blue }", .{});

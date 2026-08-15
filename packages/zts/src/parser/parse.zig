@@ -363,7 +363,7 @@ pub const Parser = struct {
             },
             .kw_assert => self.parseAssertStatement(),
             // class keyword in statement context: class Foo { }
-            // Catches class declarations (both .js and .ts files after stripping)
+            // Catches class declarations after TypeScript preparation.
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");
                 self.advance();
@@ -1965,7 +1965,7 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             // class keyword in expression context: const X = class { }
-            // Catches class expressions (both .js and .ts files after stripping)
+            // Catches class expressions after TypeScript preparation.
             .kw_match => self.parseMatchExpression(),
             .kw_class => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'class' is not supported; use plain objects and functions instead");

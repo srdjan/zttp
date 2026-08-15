@@ -479,6 +479,15 @@ pub const entries = [_]RestrictionEntry{
         // the object it was written into. Rejecting at the parse site.
         .enforced_by = &.{"ZTS001"},
     },
+    .{
+        .id = "restriction.javascript-source-extension",
+        .feature = "`.js` and `.jsx` source files",
+        .boundary = "one typed core and one explicit TSX frontend",
+        .nature = .language_simplicity,
+        .note = "source identity must select either the TypeScript core or the versioned TSX lowering frontend",
+        .alternative = "rename the handler to .ts, or use .tsx when JSX lowering is required",
+        .enforced_by = &.{"ZTS052"},
+    },
 };
 
 pub fn findById(id: []const u8) ?*const RestrictionEntry {

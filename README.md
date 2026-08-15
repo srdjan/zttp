@@ -7,7 +7,7 @@
 
 **The agent writes only what the compiler can prove.**
 
-zttp is an agent-compiler: a restricted JavaScript and TypeScript profile whose
+zttp is an agent-compiler: a restricted TypeScript profile whose
 safety properties are decidable, a proof engine that is total over it, and an AI
 coding agent that can only author inside that proof boundary. Describe the handler
 you want in plain English. The agent drafts it, and the compiler simulates every

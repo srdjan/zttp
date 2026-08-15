@@ -19,7 +19,7 @@ pub fn main() !void {
 
     const config = ServerConfig{
         // Handler source. Required: the field has no default.
-        .handler = .{ .file_path = "handler.js" },
+        .handler = .{ .file_path = "handler.ts" },
 
         // Pool configuration
         .pool_size = 16,                        // Handler pool size (0 = auto)

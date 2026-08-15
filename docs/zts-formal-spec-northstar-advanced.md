@@ -598,10 +598,10 @@ across all present and future schema versions, so version negotiation is one
 deterministic round trip and the MUST-stop rule always has a recovery path.
 
 Protocol-level failures are not diagnostics. An unknown operation, an
-unresolvable or out-of-boundary path, a malformed request, or an internal
-fault returns a top-level `error` object with a stable error code, a message,
-and the offending request field. The mandatory diagnostic shape below applies
-only to source-bound diagnostics.
+unsupported source extension, an unresolvable or out-of-boundary path, a
+malformed request, or an internal fault returns a top-level `error` object with
+a stable error code, a message, and the offending request field. The mandatory
+diagnostic shape below applies only to source-bound diagnostics.
 
 The `expected` block obeys one rule for every operation: a supplied field that
 does not match the recomputed identity fails the request with a stable
@@ -2243,6 +2243,7 @@ keeps some cuts because one explicit form is easier to read and maintain.
 | fallback `assert` | one explicit early-return spelling | use `if` plus `return` |
 | interface, enum, namespace, decorator | one closed data and module model | language-simplicity choice |
 | object methods, getters, setters | explicit functions and effects | language-simplicity choice |
+| `.js` and `.jsx` source files | one typed core and one explicit TSX frontend | language-simplicity choice; use `.ts` or `.tsx` |
 
 Non-idiomatic spellings are absent from this matrix by design. They are not
 restrictions and eliminate no failure class: Section 4.2.1 supersedes them

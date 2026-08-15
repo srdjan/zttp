@@ -200,6 +200,7 @@ pub const SourceView = stripper.SourceView;
 pub const SourcePosition = stripper.Position;
 pub const strip = stripper.strip;
 pub const SourceKind = engine.source_frontend.SourceKind;
+pub const PrepareSourceError = engine.source_frontend.PrepareError;
 pub const PreparedSource = engine.source_frontend.PreparedSource;
 pub const classifySourcePath = engine.source_frontend.classifyPath;
 pub const ComptimeEvaluator = comptime_eval.ComptimeEvaluator;

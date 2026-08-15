@@ -151,6 +151,7 @@ pub const ModuleGraph = struct {
             .{},
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
+            error.UnsupportedSourceExtension => return error.UnsupportedSourceExtension,
             else => blk: {
                 std.debug.print("TypeScript strip failed for module '{s}': {}\n", .{ owned_path, err });
                 break :blk null;

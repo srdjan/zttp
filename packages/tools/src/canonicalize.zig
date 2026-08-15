@@ -147,7 +147,8 @@ pub fn collectFromSource(
 /// - The replacement is built from `trimEnd(line, " \t\r")`, so a line ending
 ///   in a `//` comment gets the `;` written inside the comment, and a CRLF file
 ///   loses its `\r`.
-/// - JSX is enabled for `.tsx` only, though `.jsx` reaches here too.
+/// - TSX is outside this line-based repair until source positions are composed
+///   through the frontend lowering map.
 ///
 /// The corpus needs zero of these repairs, so withdrawing costs nothing a user
 /// can feel, while leaving it in place kept `apply_repair` writing edits that

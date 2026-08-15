@@ -41,14 +41,11 @@ fi
 EXPECTED_PROFILE="zts-advanced-1"
 EXPECTED_POLICY_HASH="78c9fec96be277836842b2365a249ed26da46f1f0545f36753e33434cc3fd685"
 EXPECTED_IDIOM_HASH="483026f3713c7840df6c464df9670bf67789c1cde7544b8af78e854dab14e746"
-# Moved when phase 7 refused `type` and `distinct type`: the matrix gained
-# `restriction.type-alias` and `restriction.distinct-type`. Before that it
-# moved for `|>`, `pipe()`, and `guard()`, and before that for `interface`. Both are changes to what the matrix says rather than to how it is
-# rendered. `policy_hash` holds across both, and that is not an oversight: it
-# covers the rule rows - code, category, text, repair intent - and this change
-# added no rule and edited none. The same ZTS001 that judged a file yesterday
-# judges it today, over a form it now refuses.
-EXPECTED_RESTRICTION_HASH="292e27ed10df615603d6df48177d9f1657b2531be01d9ce1dd25b6a320959fbe"
+# Moved when phase 7 restricted source files to `.ts` and `.tsx`: the matrix
+# gained `restriction.javascript-source-extension`, enforced by the new ZTS052
+# source-boundary diagnostic. Earlier moves recorded the removal of `type`,
+# `distinct type`, `|>`, `pipe()`, `guard()`, and `interface`.
+EXPECTED_RESTRICTION_HASH="b89d024f9ab2cbcb91204d3b6e54c85be3243085495abc63b947148a3c55515c"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

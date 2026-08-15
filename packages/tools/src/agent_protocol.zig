@@ -55,6 +55,7 @@ pub const ErrorCode = enum {
     project_root_unresolvable,
     path_outside_project_root,
     file_unreadable,
+    unsupported_source_extension,
     identity_mismatch,
     operation_not_implemented,
     internal_error,
@@ -378,6 +379,11 @@ pub fn handleRequest(
                 error.EntryUnreadable => .{
                     .code = .file_unreadable,
                     .message = "input.file could not be read",
+                    .field = "input.file",
+                },
+                error.UnsupportedSourceExtension => .{
+                    .code = .unsupported_source_extension,
+                    .message = "input.file must use the .ts or .tsx extension",
                     .field = "input.file",
                 },
                 error.GraphTooLarge => .{
@@ -3216,6 +3222,30 @@ test "modules on a missing entry file reports file_unreadable" {
     defer parsed.deinit();
     const err = parsed.value.object.get("error").?.object;
     try testing.expectEqualStrings("file_unreadable", err.get("code").?.string);
+}
+
+test "modules refuses a JavaScript entry extension" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "handler.js",
+        .data = "export function handler(req) { return Response.text('ok'); }\n",
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.js"}}}}
+    , .{root});
+    defer a.free(req);
+
+    const out = try respond(a, req);
+    defer a.free(out);
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const err = parsed.value.object.get("error").?.object;
+    try testing.expectEqualStrings("unsupported_source_extension", err.get("code").?.string);
+    try testing.expectEqualStrings("input.file", err.get("field").?.string);
 }
 
 test "a stale module_graph_hash is caught against the real graph" {

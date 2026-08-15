@@ -70,7 +70,7 @@ pub const commands = [_]Command{
     .{ .name = "normalize", .run = canonicalize.runNormalizeWithArgs, .category = .analyze, .args = "<file>", .blurb = "Rewrite a handler into Canonical Normal Form", .usage = "normalize <file> [--write] [--check] [--json]" },
     .{ .name = "features", .run = runFeaturesCommand, .category = .machine, .args = "", .blurb = "List supported language features", .usage = "features [--json]" },
     .{ .name = "modules", .run = runModulesCommand, .category = .machine, .args = "", .blurb = "List virtual module exports", .usage = "modules [--json]" },
-    .{ .name = "restrictions", .run = runRestrictionsCommand, .category = .machine, .args = "", .blurb = "Show language restrictions and the proofs they unlock", .usage = "restrictions [--json] [--by proof|class]" },
+    .{ .name = "restrictions", .run = runRestrictionsCommand, .category = .machine, .args = "", .blurb = "Show language restrictions and the proofs they unlock", .usage = "restrictions [--json|--markdown] [--by proof|class]" },
     .{ .name = "meta", .run = expert.runMeta, .category = .machine, .args = "", .blurb = "Compiler and policy metadata", .usage = "meta [--json]" },
     .{ .name = "agent", .run = agent_protocol.runWithArgs, .category = .machine, .args = "--stdin-json", .blurb = "Version-2 agent protocol over stdin/stdout", .usage = "agent --stdin-json" },
     .{ .name = "describe-rule", .run = describe_rule.runWithArgs, .category = .machine, .args = "[name|code]", .blurb = "Look up a diagnostic rule", .usage = "describe-rule [rule-name|code] [--json] [--hash]" },
@@ -410,12 +410,17 @@ fn runFeaturesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
 
 fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var json_mode = false;
+    var markdown_mode = false;
     var group_by: json_diag.RestrictionGrouping = .none;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--markdown")) {
+            markdown_mode = true;
             continue;
         }
         if (std.mem.eql(u8, arg, "--by")) {
@@ -435,10 +440,11 @@ fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
             const help =
                 \\zts restrictions - language cuts mapped to the proofs they unlock
                 \\
-                \\Usage: zts restrictions [--json] [--by proof|class]
+                \\Usage: zts restrictions [--json|--markdown] [--by proof|class]
                 \\
                 \\Options:
                 \\  --json            Emit structured JSON
+                \\  --markdown        Emit the generated restrictions reference
                 \\  --by proof        Group entries by the proof they unlock
                 \\  --by class        Group entries by the failure class they prevent
                 \\
@@ -449,12 +455,17 @@ fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
         return error.InvalidArgument;
     }
 
+    if (json_mode and markdown_mode) return error.InvalidArgument;
+    if (markdown_mode and group_by != .none) return error.InvalidArgument;
+
     var buf: std.ArrayList(u8) = .empty;
     const allocator = std.heap.smp_allocator;
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
-    if (json_mode) {
+    if (markdown_mode) {
+        json_diag.writeRestrictionsMarkdown(&aw.writer) catch return;
+    } else if (json_mode) {
         json_diag.writeRestrictionsJson(&aw.writer) catch return;
     } else {
         json_diag.writeRestrictionsText(&aw.writer, group_by) catch return;
