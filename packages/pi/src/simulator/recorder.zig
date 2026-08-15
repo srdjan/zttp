@@ -37,8 +37,17 @@ pub const ModelCallCompleted = struct {
     wire_bytes: u64,
 };
 
+pub const ModelCallFailed = struct {
+    attempt_index: usize,
+    provider: model_request.Provider,
+    latency_ms: ?u64,
+    http_status: ?u16,
+    failure: anyerror,
+};
+
 pub const ProgressEvent = union(enum) {
     model_call_completed: ModelCallCompleted,
+    model_call_failed: ModelCallFailed,
 };
 
 pub const ProgressObserver = struct {
@@ -157,7 +166,7 @@ pub const Recorder = struct {
         return .{
             .context = self,
             .record_fn = recordModelExchange,
-            .diagnostics_fn = if (self.options.diagnostics_path != null)
+            .diagnostics_fn = if (self.options.diagnostics_path != null or self.options.progress != null)
                 recordResponseDiagnostics
             else
                 null,
@@ -467,6 +476,17 @@ pub const Recorder = struct {
         diagnostics: capture_sink.ResponseDiagnostics,
     ) anyerror!void {
         const self: *Recorder = @ptrCast(@alignCast(context));
+        if (diagnostics.failure) |failure| {
+            if (self.options.progress) |progress| progress.emit(.{
+                .model_call_failed = .{
+                    .attempt_index = attempt_index,
+                    .provider = diagnostic_context.provider,
+                    .latency_ms = diagnostics.latency_ms,
+                    .http_status = diagnostics.http_status,
+                    .failure = failure,
+                },
+            });
+        }
         const path = self.options.diagnostics_path orelse return;
         const line = try serializeResponseDiagnostics(
             self.allocator(),
@@ -639,6 +659,7 @@ fn serializeResponseDiagnostics(
         .model = diagnostic_context.model,
         .attempt_index = attempt_index,
         .latency_ms = diagnostics.latency_ms,
+        .http_status = diagnostics.http_status,
         .finish_reason = diagnostics.finish_reason,
         .completion_tokens = diagnostics.completion_tokens,
         .field_presence = diagnostics.field_presence,

@@ -109,6 +109,8 @@ test "simulator recorder appends metadata-only response diagnostics" {
         "local-response-diagnostics.jsonl",
     });
     defer testing.allocator.free(diagnostics_path);
+    var probe: ProgressProbe = .{};
+    defer probe.deinit();
 
     var recorder = try recorder_mod.Recorder.init(testing.allocator, .{
         .case_name = "diagnostic-case",
@@ -116,6 +118,7 @@ test "simulator recorder appends metadata-only response diagnostics" {
         .provider = .local,
         .model = "diagnostic-model",
         .diagnostics_path = diagnostics_path,
+        .progress = probe.observer(),
         .workspace_allowlist = &.{},
     });
     defer recorder.deinit();
@@ -146,6 +149,7 @@ test "simulator recorder appends metadata-only response diagnostics" {
         .model = "diagnostic-model",
     }, .{
         .latency_ms = 9,
+        .http_status = 429,
         .finish_reason = null,
         .completion_tokens = null,
         .field_presence = .{},
@@ -181,7 +185,25 @@ test "simulator recorder appends metadata-only response diagnostics" {
     try testing.expectEqualStrings("content_null", root.get("parser_warnings").?.array.items[0].string);
     try testing.expectEqualStrings("EmptyResponse", root.get("error_name").?.string);
     try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"attempt_index\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"http_status\":429") != null);
     try testing.expect(std.mem.indexOf(u8, bytes[second_start..second_end], "\"transport_failed\"") != null);
+    try testing.expectEqual(@as(usize, 2), probe.events.items.len);
+    switch (probe.events.items[0]) {
+        .model_call_failed => |failed| {
+            try testing.expectEqual(@as(usize, 0), failed.attempt_index);
+            try testing.expectEqual(@as(?u16, null), failed.http_status);
+            try testing.expectEqual(error.EmptyResponse, failed.failure);
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    switch (probe.events.items[1]) {
+        .model_call_failed => |failed| {
+            try testing.expectEqual(@as(usize, 1), failed.attempt_index);
+            try testing.expectEqual(@as(?u16, 429), failed.http_status);
+            try testing.expectEqual(error.LocalServerUnavailable, failed.failure);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "local client failure records diagnostics through the flow recorder" {
@@ -523,6 +545,7 @@ test "simulator recorder promotes and replays a complete two-Turn flow" {
             try testing.expectEqual(@as(u64, 2), completed.output_tokens);
             try testing.expect(completed.wire_bytes > 0);
         },
+        .model_call_failed => return error.TestUnexpectedResult,
     };
 
     var mismatched_config = request_config;

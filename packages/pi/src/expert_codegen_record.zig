@@ -1590,6 +1590,20 @@ const LiveRecordingProgress = struct {
                     completed.wire_bytes,
                 },
             ),
+            .model_call_failed => |failed| try writer.print(
+                "[codegen-record] [{d}/{d}] {s}: call attempt {d} failed " ++
+                    "(provider={s} latency={?d}ms http-status={?d} error={s})\n",
+                .{
+                    progress.case_index,
+                    progress.case_count,
+                    progress.case_name,
+                    failed.attempt_index + 1,
+                    @tagName(failed.provider),
+                    failed.latency_ms,
+                    failed.http_status,
+                    @errorName(failed.failure),
+                },
+            ),
         }
     }
 };
@@ -1620,6 +1634,27 @@ test "live codegen recorder progress renders metadata only" {
             "(turn=1 turn-call=4 purpose=normal input-reported=19861 " ++
             "input-logical=20394 (prior_density_projection) input-estimated=27308 " ++
             "(anchored_density) output=417 output-limit=32768 wire=77789B)\n",
+        text.written(),
+    );
+}
+
+test "live codegen recorder progress renders provider failure metadata only" {
+    var text = TextBuffer.init(testing.allocator);
+    defer text.deinit();
+    try LiveRecordingProgress.writeEvent(text.writer(), .{
+        .case_index = 1,
+        .case_count = 19,
+        .case_name = "health",
+    }, .{ .model_call_failed = .{
+        .attempt_index = 8,
+        .provider = .deepseek,
+        .latency_ms = 843,
+        .http_status = 429,
+        .failure = error.RateLimited,
+    } });
+    try testing.expectEqualStrings(
+        "[codegen-record] [1/19] health: call attempt 9 failed " ++
+            "(provider=deepseek latency=843ms http-status=429 error=RateLimited)\n",
         text.written(),
     );
 }
@@ -1710,15 +1745,12 @@ test "record codegen baseline corpus (live, gated)" {
     }
     // A fresh directory per invocation keeps failed attempts from different
     // corpus runs distinguishable without making diagnostics authoritative.
-    const diagnostics_run_id: ?[]const u8 = if (corpus_provider == .local)
-        try std.fmt.allocPrint(
-            allocator,
-            "{d}-{d}",
-            .{ zts.realtimeNowMs() catch 0, std.c.getpid() },
-        )
-    else
-        null;
-    defer if (diagnostics_run_id) |run_id| allocator.free(run_id);
+    const diagnostics_run_id = try std.fmt.allocPrint(
+        allocator,
+        "{d}-{d}",
+        .{ zts.realtimeNowMs() catch 0, std.c.getpid() },
+    );
+    defer allocator.free(diagnostics_run_id);
 
     var limit: usize = record_corpus.len;
     if (envValue("ZTTP_CODEGEN_LIMIT")) |lim| {
@@ -1751,14 +1783,11 @@ test "record codegen baseline corpus (live, gated)" {
         const case_dir = try std.fs.path.join(ca, &.{ out_dir, rc.name });
         try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, case_dir);
         const case_root_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(io, case_dir, ca);
-        const response_diagnostics_path: ?[]const u8 = if (diagnostics_run_id) |run_id|
-            try std.fmt.allocPrint(
-                ca,
-                "{s}/.zig-cache/codegen-record-diagnostics/{s}/{s}.jsonl",
-                .{ repo_root, run_id, rc.name },
-            )
-        else
-            null;
+        const response_diagnostics_path = try std.fmt.allocPrint(
+            ca,
+            "{s}/.zig-cache/codegen-record-diagnostics/{s}/{s}.jsonl",
+            .{ repo_root, diagnostics_run_id, rc.name },
+        );
 
         const workspace_allowlist = try workspaceCaptureAllowlist(ca, rc.seed_files);
         var live_progress: LiveRecordingProgress = .{
@@ -1813,9 +1842,10 @@ test "record codegen baseline corpus (live, gated)" {
             // Collection is memory-only until validation and replay both pass,
             // so a live failure cannot disturb the active case pointer.
             std.debug.print("[codegen-record] {s}: turn failed: {s}\n", .{ rc.name, @errorName(err) });
-            if (response_diagnostics_path) |path| {
-                std.debug.print("[codegen-record] metadata-only response diagnostics: {s}\n", .{path});
-            }
+            std.debug.print(
+                "[codegen-record] metadata-only response diagnostics: {s}\n",
+                .{response_diagnostics_path},
+            );
             return err;
         };
         try setSessionCapture(&session, null);

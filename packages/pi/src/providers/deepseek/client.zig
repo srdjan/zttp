@@ -46,6 +46,14 @@ const max_tool_name_bytes: usize = 128;
 const max_value_depth: usize = 16;
 const max_response_json_depth: usize = 64;
 
+const TransportResponse = union(enum) {
+    ok: []const u8,
+    http_error: struct {
+        status_code: u16,
+        body: []const u8,
+    },
+};
+
 /// How long a single completion may take before the request is called stalled.
 ///
 /// A non-streaming DeepSeek response sends its head at once and then nothing at
@@ -155,13 +163,30 @@ pub const Client = struct {
         const diagnostics_enabled = if (self.capture) |sink| sink.diagnostics_fn != null else false;
         const started_ns = if (diagnostics_enabled) monotonicNowNs() else null;
 
-        const raw_response = post_fn(arena, self.config, body) catch |err| {
+        const transport_response = post_fn(arena, self.config, body) catch |err| {
             if (diagnostics_enabled) {
                 var inspection: ResponseInspection = .{};
                 inspection.addWarning(.transport_failed);
-                self.recordResponseDiagnostics(&inspection, elapsedMs(started_ns), err);
+                self.recordResponseDiagnostics(&inspection, elapsedMs(started_ns), null, err);
             }
             return err;
+        };
+        const raw_response = switch (transport_response) {
+            .ok => |response_body| response_body,
+            .http_error => |http_failure| {
+                const err = http_errors.classify(http_failure.status_code, http_failure.body);
+                if (diagnostics_enabled) {
+                    var inspection: ResponseInspection = .{};
+                    inspection.addWarning(.transport_failed);
+                    self.recordResponseDiagnostics(
+                        &inspection,
+                        elapsedMs(started_ns),
+                        http_failure.status_code,
+                        err,
+                    );
+                }
+                return err;
+            },
         };
         const latency_ms = elapsedMs(started_ns);
         var inspection: ResponseInspection = .{};
@@ -172,7 +197,7 @@ pub const Client = struct {
         ) catch |err| {
             if (diagnostics_enabled) {
                 inspection.addWarning(.sanitizer_rejected_response);
-                self.recordResponseDiagnostics(&inspection, latency_ms, err);
+                self.recordResponseDiagnostics(&inspection, latency_ms, null, err);
             }
             return err;
         };
@@ -180,7 +205,7 @@ pub const Client = struct {
             sink.record(&snapshot, response.bytes) catch |err| {
                 if (diagnostics_enabled) {
                     inspection.addWarning(.capture_rejected_response);
-                    self.recordResponseDiagnostics(&inspection, latency_ms, err);
+                    self.recordResponseDiagnostics(&inspection, latency_ms, null, err);
                 }
                 return err;
             };
@@ -188,12 +213,12 @@ pub const Client = struct {
         const result = decodeResponseValue(arena, response.value) catch |err| {
             if (diagnostics_enabled) {
                 inspection.addWarning(.decoder_rejected_response);
-                self.recordResponseDiagnostics(&inspection, latency_ms, err);
+                self.recordResponseDiagnostics(&inspection, latency_ms, null, err);
             }
             return err;
         };
         if (diagnostics_enabled) {
-            self.recordResponseDiagnostics(&inspection, latency_ms, null);
+            self.recordResponseDiagnostics(&inspection, latency_ms, null, null);
         }
         return result;
     }
@@ -202,6 +227,7 @@ pub const Client = struct {
         self: *Client,
         inspection: *const ResponseInspection,
         latency_ms: ?u64,
+        http_status: ?u16,
         failure: ?anyerror,
     ) void {
         const sink = self.capture orelse return;
@@ -210,6 +236,7 @@ pub const Client = struct {
             .model = self.config.model,
         }, .{
             .latency_ms = latency_ms,
+            .http_status = http_status,
             .finish_reason = inspection.finish_reason,
             .completion_tokens = inspection.completion_tokens,
             .field_presence = inspection.field_presence,
@@ -630,7 +657,7 @@ fn isIdentifierContinue(byte: u8) bool {
 // Transport
 // -----------------------------------------------------------------------
 
-fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 {
+fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportResponse {
     const endpoint = try endpointUrl(arena, config.base_url);
     const uri = std.Uri.parse(endpoint) catch return ClientError.InvalidDeepSeekBaseUrl;
     var io_backend = std.Io.Threaded.init(arena, .{ .environ = .empty });
@@ -703,9 +730,12 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         else => return ClientError.DeepSeekServerUnavailable,
     };
     if (response.head.status != .ok) {
-        return http_errors.classify(@intFromEnum(response.head.status), response_body);
+        return .{ .http_error = .{
+            .status_code = @intFromEnum(response.head.status),
+            .body = response_body,
+        } };
     }
-    return response_body;
+    return .{ .ok = response_body };
 }
 
 /// Block until the socket has bytes to read, bounded by the generation
@@ -907,12 +937,12 @@ test "malformed responses are refused rather than half-decoded" {
 
 /// Stands in for the socket: asserts the request the client built, then hands
 /// back a canned response body.
-fn stubPost(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 {
+fn stubPost(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportResponse {
     _ = arena;
     try testing.expectEqualStrings("test-key", config.api_key);
     try testing.expect(std.mem.indexOf(u8, body, "\"content\":\"hello\"") != null);
-    return "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"done\"}}]," ++
-        "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}";
+    return .{ .ok = "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"done\"}}]," ++
+        "\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}" };
 }
 
 test "sendTurn drives the request through the injected transport" {
@@ -927,4 +957,67 @@ test "sendTurn drives the request through the injected transport" {
     try testing.expectEqualStrings("done", result.reply.response.final_text);
     try testing.expectEqual(@as(u64, 3), result.usage.input_tokens);
     try testing.expectEqual(@as(u64, 1), result.usage.output_tokens);
+}
+
+const FailureDiagnosticProbe = struct {
+    diagnostic_count: usize = 0,
+    captured_count: usize = 0,
+    http_status: ?u16 = null,
+    failure: ?anyerror = null,
+
+    fn record(
+        context: *anyopaque,
+        _: usize,
+        _: *const model_request.ModelRequestSnapshot,
+        _: []const u8,
+    ) anyerror!void {
+        const self: *FailureDiagnosticProbe = @ptrCast(@alignCast(context));
+        self.captured_count += 1;
+    }
+
+    fn diagnose(
+        context: *anyopaque,
+        _: usize,
+        _: capture_sink.ResponseDiagnosticContext,
+        diagnostics: capture_sink.ResponseDiagnostics,
+    ) anyerror!void {
+        const self: *FailureDiagnosticProbe = @ptrCast(@alignCast(context));
+        self.diagnostic_count += 1;
+        self.http_status = diagnostics.http_status;
+        self.failure = diagnostics.failure;
+    }
+};
+
+fn rateLimitedPost(_: std.mem.Allocator, _: Config, _: []const u8) !TransportResponse {
+    return .{ .http_error = .{
+        .status_code = 429,
+        .body = "{\"error\":{\"message\":\"rate limit reached\"}}",
+    } };
+}
+
+test "provider rejection records status without capturing response content" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "hello" });
+
+    var probe: FailureDiagnosticProbe = .{};
+    var sink: capture_sink.CaptureSink = .{
+        .context = &probe,
+        .record_fn = FailureDiagnosticProbe.record,
+        .diagnostics_fn = FailureDiagnosticProbe.diagnose,
+    };
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var client = Client.initWithCapture(
+        .{ .api_key = "test-key", .system_prompt = "zts expert" },
+        &sink,
+    );
+    try testing.expectError(
+        error.RateLimited,
+        client.sendTurnWithPost(arena.allocator(), &transcript, null, rateLimitedPost),
+    );
+    try testing.expectEqual(@as(usize, 0), probe.captured_count);
+    try testing.expectEqual(@as(usize, 1), probe.diagnostic_count);
+    try testing.expectEqual(@as(?u16, 429), probe.http_status);
+    try testing.expectEqual(error.RateLimited, probe.failure.?);
 }

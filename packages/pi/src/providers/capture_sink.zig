@@ -61,6 +61,9 @@ pub const ParserWarning = enum {
 /// provider strings, and user source.
 pub const ResponseDiagnostics = struct {
     latency_ms: ?u64,
+    /// Numeric HTTP status for a provider rejection. Null for successful
+    /// responses and failures that occurred before an HTTP response arrived.
+    http_status: ?u16 = null,
     finish_reason: ?FinishReason,
     completion_tokens: ?u64,
     field_presence: ResponseFieldPresence,
