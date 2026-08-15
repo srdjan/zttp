@@ -11,7 +11,7 @@ const resolver = @import("resolver.zig");
 // Engine types
 const zts_parser = @import("../../parser/root.zig");
 const context = @import("../../context.zig");
-const stripper = @import("../../stripper.zig");
+const source_frontend = @import("../../source_frontend.zig");
 
 pub const ModuleIndex = u16;
 
@@ -44,18 +44,16 @@ pub const ReadFileError = error{
 pub const Module = struct {
     path: []const u8,
     source: []const u8,
-    stripped_source: ?[]const u8,
+    prepared_source: ?source_frontend.PreparedSource,
     dependencies: []ModuleIndex,
     state: DfsState,
 
     const DfsState = enum { unvisited, visiting, visited };
 
     fn deinit(self: *Module, allocator: std.mem.Allocator) void {
+        if (self.prepared_source) |*prepared| prepared.deinit();
         allocator.free(self.path);
         allocator.free(self.source);
-        if (self.stripped_source) |ss| {
-            allocator.free(ss);
-        }
         if (self.dependencies.len > 0) {
             allocator.free(self.dependencies);
         }
@@ -105,7 +103,10 @@ pub const ModuleGraph = struct {
     ) !void {
         // Add entry module (dupe path and source since addModule takes ownership)
         const owned_path = try self.allocator.dupe(u8, entry_path);
-        const owned_source = try self.allocator.dupe(u8, entry_source);
+        const owned_source = self.allocator.dupe(u8, entry_source) catch |err| {
+            self.allocator.free(owned_path);
+            return err;
+        };
         const entry_idx = try self.addModule(owned_path, owned_source);
 
         // Recursively discover dependencies
@@ -119,28 +120,37 @@ pub const ModuleGraph = struct {
     fn addModule(self: *ModuleGraph, owned_path: []const u8, owned_source: []const u8) !ModuleIndex {
         const idx: ModuleIndex = @intCast(self.module_list.items.len);
 
-        // Strip TypeScript if needed
-        var stripped: ?[]const u8 = null;
-        if (std.mem.endsWith(u8, owned_path, ".ts") or std.mem.endsWith(u8, owned_path, ".tsx")) {
-            const is_tsx = std.mem.endsWith(u8, owned_path, ".tsx");
-            const strip_result = stripper.strip(self.allocator, owned_source, .{
-                .tsx_mode = is_tsx,
-            }) catch |err| blk: {
+        // Prepare the exact parser input and source map once. Invalid source
+        // still belongs in the graph so the compiler's check reports it, but
+        // allocation failure must not be mistaken for invalid source.
+        var prepared_source: ?source_frontend.PreparedSource = null;
+        var ownership_transferred = false;
+        errdefer if (!ownership_transferred) {
+            if (prepared_source) |*prepared| prepared.deinit();
+            self.allocator.free(owned_path);
+            self.allocator.free(owned_source);
+        };
+        prepared_source = source_frontend.PreparedSource.init(
+            self.allocator,
+            owned_source,
+            owned_path,
+            .{},
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => blk: {
                 std.debug.print("TypeScript strip failed for module '{s}': {}\n", .{ owned_path, err });
                 break :blk null;
-            };
-            if (strip_result) |sr| {
-                stripped = sr.code;
-            }
-        }
+            },
+        };
 
         try self.module_list.append(self.allocator, .{
             .path = owned_path,
             .source = owned_source,
-            .stripped_source = stripped,
+            .prepared_source = prepared_source,
             .dependencies = &.{},
             .state = .unvisited,
         });
+        ownership_transferred = true;
 
         // HashMap borrows path from the module (module owns it)
         try self.modules.put(owned_path, idx);
@@ -153,14 +163,21 @@ pub const ModuleGraph = struct {
 
         var module = &self.module_list.items[module_idx];
         const module_path = module.path;
-        const source = module.stripped_source orelse module.source;
+        const source = if (module.prepared_source) |*prepared|
+            prepared.parserInput()
+        else
+            module.source;
 
         // Quick-parse to extract import declarations
         var js_parser = try zts_parser.JsParser.init(self.allocator, source);
         defer js_parser.deinit();
 
         // Enable JSX if needed
-        if (std.mem.endsWith(u8, module.path, ".jsx") or std.mem.endsWith(u8, module.path, ".tsx")) {
+        const jsx_enabled = if (module.prepared_source) |*prepared|
+            prepared.enablesJsx()
+        else
+            source_frontend.classifyPath(module.path).enablesJsx();
+        if (jsx_enabled) {
             js_parser.tokenizer.enableJsx();
         }
 
@@ -334,4 +351,20 @@ test "module graph: circular import detected" {
         error.CircularImport,
         graph.build("/app/circular_a.ts", "import { b } from \"./circular_b.ts\"; export const a = 1;", testReadFile),
     );
+}
+
+test "module graph: typed preparation closes every allocation failure" {
+    const Context = struct {
+        fn run(allocator: std.mem.Allocator) !void {
+            var graph = ModuleGraph.init(allocator);
+            defer graph.deinit();
+
+            try graph.build(
+                "/app/handler.ts",
+                "export function handler(req: Request): Response { return Response.json({ ok: true }); }",
+                testReadFile,
+            );
+        }
+    };
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
 }

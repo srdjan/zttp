@@ -246,31 +246,28 @@ fn collectImports(
     queue: *std.ArrayList([]const u8),
     seen: *std.StringHashMap(void),
 ) !void {
-    const is_tsx = std.mem.endsWith(u8, importer_rel, ".tsx");
-    const is_ts = is_tsx or std.mem.endsWith(u8, importer_rel, ".ts");
-
     // The parser reads stripped source, exactly as the runtime graph does. A
     // strip failure is not fatal here: an unparseable module still belongs in
     // the graph with its digest, and `check` is what reports the error.
-    //
-    // The stripped code is copied out and the result released immediately, so
-    // this file names only the curated `zts.strip` and never the internal
-    // `stripper` module - keeping the module boundary as narrow as the work
-    // needs. The copy is one source file's bytes.
-    var stripped_code: ?[]u8 = null;
-    defer if (stripped_code) |c| allocator.free(c);
-    if (is_ts) {
-        if (zts.strip(allocator, source, .{ .tsx_mode = is_tsx })) |result| {
-            var owned = result;
-            stripped_code = allocator.dupe(u8, owned.code) catch null;
-            owned.deinit();
-        } else |_| {}
-    }
-    const parse_source = if (stripped_code) |c| c else source;
+    var prepared: ?zts.PreparedSource = zts.PreparedSource.init(
+        allocator,
+        source,
+        importer_rel,
+        .{},
+    ) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    };
+    defer if (prepared) |*owned| owned.deinit();
+    const parse_source = if (prepared) |*owned| owned.parserInput() else source;
 
     var js_parser = parser.JsParser.init(allocator, parse_source) catch return;
     defer js_parser.deinit();
-    if (is_tsx or std.mem.endsWith(u8, importer_rel, ".jsx")) js_parser.tokenizer.enableJsx();
+    const jsx_enabled = if (prepared) |*owned|
+        owned.enablesJsx()
+    else
+        zts.classifySourcePath(importer_rel).enablesJsx();
+    if (jsx_enabled) js_parser.tokenizer.enableJsx();
     _ = js_parser.parse() catch {};
 
     const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
