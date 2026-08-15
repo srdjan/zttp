@@ -94,11 +94,13 @@ explicitly imports and uses `zttp:queue`.
 For a handler source file:
 
 1. Strip supported TypeScript syntax.
-2. Parse the restricted JS/TS/TSX grammar.
-3. Resolve imports, including `zttp:*` virtual modules.
-4. Run type, path, Result/optional, state-isolation, flow, and spec checks.
-5. Extract a handler contract and module capability surface.
-6. Emit bytecode and optional artifacts such as contract JSON, OpenAPI, SDK,
+2. For `.tsx`, lower the `zts-tsx-1` surface to ordinary `h(...)` calls and
+   compose its source map with the stripping map.
+3. Parse only the restricted TypeScript core grammar.
+4. Resolve imports, including `zttp:*` virtual modules.
+5. Run type, path, Result/optional, state-isolation, flow, and spec checks.
+6. Extract a handler contract and module capability surface.
+7. Emit bytecode and optional artifacts such as contract JSON, OpenAPI, SDK,
    generated tests, or build reports.
 
 Unsupported language features fail before runtime. See
@@ -107,7 +109,7 @@ Unsupported language features fail before runtime. See
 
 ### Analysis passes
 
-Step 4 is implemented as four independent IR walkers, each traversing the same
+Step 5 is implemented as four independent IR walkers, each traversing the same
 IR tree with its own `switch` over node tags rather than through a shared
 visitor framework:
 

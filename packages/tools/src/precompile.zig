@@ -1168,20 +1168,32 @@ fn runCheckOnPreparedSource(
 
     // Stage 1: source preparation and TypeScript stripping.
     var strip_diag: ?zts.StripDiagnostic = null;
-    prepared_out.* = zts.PreparedSource.init(allocator, source, handler_path, .{
-        .enable_comptime = true,
-        .comptime_env = .{},
-        .diagnostic_out = &strip_diag,
-        // Report EVERY `as`/`satisfies`/`any` site in one pass instead of
-        // aborting at the first, so an agent (or `check`) fixes them all in
-        // a single round-trip rather than one per round-trip.
-        .collect_all_diagnostics = true,
-    }) catch |err| {
+    var frontend_diag: ?zts.PrepareSourceDiagnostic = null;
+    prepared_out.* = zts.PreparedSource.initWithDiagnostic(
+        allocator,
+        source,
+        handler_path,
+        .{
+            .enable_comptime = true,
+            .comptime_env = .{},
+            .diagnostic_out = &strip_diag,
+            // Report EVERY `as`/`satisfies`/`any` site in one pass instead of
+            // aborting at the first, so an agent (or `check`) fixes them all in
+            // a single round-trip rather than one per round-trip.
+            .collect_all_diagnostics = true,
+        },
+        &frontend_diag,
+    ) catch |err| {
         if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{err});
         if (err == error.UnsupportedSourceExtension) {
             result.json_diagnostics.append(
                 allocator,
                 json_diag.fromUnsupportedSourceExtension(handler_path),
+            ) catch {};
+        } else if (frontend_diag) |diagnostic| {
+            result.json_diagnostics.append(
+                allocator,
+                json_diag.fromPrepareSourceDiagnostic(diagnostic, handler_path),
             ) catch {};
         } else if (strip_diag) |d| {
             result.json_diagnostics.append(allocator, json_diag.fromStripError(d, handler_path)) catch {};
@@ -4718,6 +4730,24 @@ test "runCheckOnlyFromSource accepts annotated TSX handler after JSX block" {
     try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
 }
 
+test "runCheckOnlyFromSource reports malformed TSX at the authored tag" {
+    const source =
+        \\function Page(): JSX.Element {
+        \\    return <main><h1>zttp</h1></section>;
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "view.tsx", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS033", diagnostic.code);
+    try std.testing.expectEqualStrings("view.tsx", diagnostic.file);
+    try std.testing.expectEqual(@as(u32, 2), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 31), diagnostic.column);
+}
+
 test "an idiom advisory is neither an error nor a warning" {
     // Spec 4.2.1: a non-idiomatic spelling "is never an error and never fails a
     // build". A warning is a build failure on this CLI - it sets exit code 2 -
@@ -5370,7 +5400,7 @@ const bytecode_golden_cases = [_]struct {
         \\    return Response.html(<div class="page"><h1>{title}</h1></div>);
         \\}
         ,
-        .sha256 = "3c1db8a7ed4dee866f0d1166cee7232768aaf6db4f30b4553d5fc96d0c45fd2e",
+        .sha256 = "8e6ae8bdd4eac68f31b5858a23c731e55796aa0c91575411a8903c2a5c63bf45",
     },
     .{
         .name = "durable workflow",

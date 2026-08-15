@@ -11,7 +11,7 @@ behavior lives in [User Guide](user-guide.md).
 - Zig `0.16.0` as declared by `build.zig.zon`.
 - Threaded HTTP/1.1 server with per-request runtime isolation and decoded
   `Content-Length` or `Transfer-Encoding: chunked` request bodies.
-- Restricted JS/TS/TSX handler execution through `zts`.
+- Restricted TypeScript and TSX handler execution through `zts`.
 - The five core `zttp` commands: `init`, `dev`, `test`, `expert`, `deploy`.
 - Local self-contained deploy artifacts with default-on attestation.
 - Compile-time checks for response paths, Result and optional handling,
@@ -1083,6 +1083,15 @@ of participating in truthiness, so absence must be written explicitly as
 their existing names, but they are now derived from explicit comparisons or a
 module result whose declared return type is boolean. The published profile
 remains `zts-advanced-1` until the other phase 7 removals are complete.
+
+The source frontend is now one owned boundary, and file identity is explicit:
+`.ts` enters the core, `.tsx` enters the TSX lowering frontend, and `.js`,
+`.jsx`, and unknown extensions fail with ZTS052. Valid TSX is lowered to
+ordinary `h(...)` calls before parsing; its offset map composes with TypeScript
+stripping, so both malformed-tag diagnostics and later core diagnostics point
+back to the authored file. The old JSX IR remains only as dead compatibility
+machinery for one removal commit; no file-backed compiler or runtime path
+selects it.
 
 **Owed, and this is the debt the cutover has been accumulating toward.** The
 recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases

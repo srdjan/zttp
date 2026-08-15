@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const stripper = @import("zts-engine").stripper;
+const source_frontend = @import("zts-engine").source_frontend;
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const atom_table = @import("zts-engine").atom_table;
@@ -4464,11 +4465,12 @@ test "FlowChecker proves no_secret_leakage for benign method calls on untainted 
 
 const JsxCheckResult = struct { no_secret_leakage: bool, injection_safe: bool };
 
-/// JSX-enabled harness: parse `source` with JSX on, run the FlowChecker, and
-/// return the two properties the JSX-laundering tests assert on.
+/// TSX-frontend harness: lower `source` to the core before parsing, run the
+/// FlowChecker, and return the two properties the laundering tests assert on.
 fn runJsxCheck(allocator: std.mem.Allocator, source: []const u8) !JsxCheckResult {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
-    parser.enableJsx();
+    var prepared = try source_frontend.PreparedSource.init(allocator, source, "flow-check.tsx", .{});
+    defer prepared.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.init(allocator, prepared.parserInput());
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4489,9 +4491,9 @@ fn runJsxCheck(allocator: std.mem.Allocator, source: []const u8) !JsxCheckResult
     };
 }
 
-test "FlowChecker flags a secret interpolated into JSX reaching an HTML response" {
-    // A JSX expression container `{secret}` carries taint; renderToString
-    // embeds it verbatim into the body. HTML-escaping does not hide a secret.
+test "FlowChecker flags a secret interpolated through lowered TSX" {
+    // Lowering makes `{secret}` an ordinary `h` argument. The conservative
+    // call-argument union must retain that taint through renderToString.
     const source =
         \\import { env } from "zttp:env";
         \\function handler(req) {

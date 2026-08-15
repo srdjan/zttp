@@ -228,6 +228,25 @@ pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
     };
 }
 
+pub fn fromPrepareSourceDiagnostic(diagnostic: zts.PrepareSourceDiagnostic, file: []const u8) JsonDiagnostic {
+    const Detail = struct { code: []const u8, message: []const u8 };
+    const detail: Detail = switch (diagnostic.kind) {
+        .mismatched_tag => .{ .code = "ZTS033", .message = "mismatched JSX closing tag" },
+        .invalid_attribute => .{ .code = "ZTS034", .message = "invalid JSX attribute" },
+        .unclosed_element => .{ .code = "ZTS035", .message = "unclosed JSX element" },
+        .expression_expected => .{ .code = "ZTS036", .message = "JSX expression expected" },
+    };
+    return .{
+        .code = detail.code,
+        .severity = "error",
+        .message = detail.message,
+        .file = file,
+        .line = diagnostic.line,
+        .column = diagnostic.column,
+        .suggestion = "fix the TSX syntax before running core analysis",
+    };
+}
+
 /// Convert a checker `Diagnostic` into a `JsonDiagnostic`, duping the message
 /// into `allocator` at capture time.
 ///
@@ -1297,4 +1316,16 @@ test "unsupported source extensions have one exact repair" {
         "rename the handler to .ts, or use .tsx when JSX lowering is required",
         diagnostic.suggestion.?,
     );
+}
+
+test "TSX frontend diagnostics preserve stable JSX codes" {
+    const diagnostic = fromPrepareSourceDiagnostic(.{
+        .kind = .mismatched_tag,
+        .line = 7,
+        .column = 12,
+    }, "view.tsx");
+    try std.testing.expectEqualStrings("ZTS033", diagnostic.code);
+    try std.testing.expectEqualStrings("view.tsx", diagnostic.file);
+    try std.testing.expectEqual(@as(u32, 7), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 12), diagnostic.column);
 }

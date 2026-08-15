@@ -202,7 +202,14 @@ These produce clear error messages at strip or parse time:
 
 ### TSX Handling
 
-TSX is supported: JSX tags remain intact while type annotations inside `{ ... }` expressions are stripped normally. Angle-bracket type assertions (`<T>expr`) are disallowed in TSX to avoid JSX ambiguity.
+`.tsx` selects the versioned `zts-tsx-1` frontend. It strips type annotations,
+lowers elements, fragments, attributes, component references, text, and
+expression children to ordinary `h(tag, props, ...children)` calls, and then
+passes only core syntax to the parser. Its source map composes with the type
+stripper map, so diagnostics still point into the authored `.tsx` file.
+
+Angle-bracket type assertions (`<T>expr`) are disallowed in TSX to avoid JSX
+ambiguity. `.jsx` is not an alternate frontend and is refused with ZTS052.
 
 ---
 

@@ -136,6 +136,20 @@ pub const SpanEdit = struct {
     source_end: u32,
 };
 
+/// Map an offset through an ordered set of non-overlapping replacement spans.
+/// Both TypeScript folding and TSX lowering use this representation, so their
+/// maps compose without either frontend knowing about the other.
+pub fn sourceOffsetForEdits(edits: []const SpanEdit, output_offset: u32) u32 {
+    var shift: i64 = 0;
+    for (edits) |edit| {
+        if (output_offset < edit.stripped_start) break;
+        if (output_offset < edit.stripped_end) return edit.source_start;
+        shift = @as(i64, edit.source_end) - @as(i64, edit.stripped_end);
+    }
+    const mapped = @as(i64, output_offset) + shift;
+    return @intCast(std.math.clamp(mapped, 0, std.math.maxInt(u32)));
+}
+
 pub const StripResult = struct {
     code: []const u8,
     allocator: std.mem.Allocator,
@@ -167,16 +181,7 @@ pub const StripResult = struct {
     /// separate source of their own, and the expression is the span a reader or
     /// a repair has to be pointed at.
     pub fn sourceOffset(self: StripResult, stripped_offset: u32) u32 {
-        var shift: i64 = 0;
-        for (self.span_edits) |edit| {
-            if (stripped_offset < edit.stripped_start) break;
-            if (stripped_offset < edit.stripped_end) return edit.source_start;
-            // Both ends are absolute, so the newest applicable entry already
-            // carries the total shift; it does not accumulate.
-            shift = @as(i64, edit.source_end) - @as(i64, edit.stripped_end);
-        }
-        const mapped = @as(i64, stripped_offset) + shift;
-        return @intCast(std.math.clamp(mapped, 0, std.math.maxInt(u32)));
+        return sourceOffsetForEdits(self.span_edits, stripped_offset);
     }
 
     /// Map a 1-based line and column in `code` back to the line and column in
@@ -205,6 +210,10 @@ pub const SourceView = struct {
     text: []const u8,
     /// The strip that produced the parsed text, when it was not `text` itself.
     strip: ?*const StripResult = null,
+    /// The bytes the parser consumed after a second frontend transform.
+    parsed_text: ?[]const u8 = null,
+    /// Map from `parsed_text` into `strip.code`.
+    transform_edits: []const SpanEdit = &.{},
 
     /// A view whose text is what was parsed. The identity mapping.
     pub fn of(text: []const u8) SourceView {
@@ -216,9 +225,27 @@ pub const SourceView = struct {
         return .{ .text = source, .strip = result };
     }
 
+    /// A view that composes a second source transform with TypeScript stripping.
+    pub fn transformed(
+        source: []const u8,
+        result: *const StripResult,
+        parsed_text: []const u8,
+        edits: []const SpanEdit,
+    ) SourceView {
+        return .{
+            .text = source,
+            .strip = result,
+            .parsed_text = parsed_text,
+            .transform_edits = edits,
+        };
+    }
+
     pub fn position(self: SourceView, line: u32, column: u32) Position {
         const result = self.strip orelse return .{ .line = line, .column = column };
-        return result.sourcePosition(self.text, line, column);
+        const parsed = self.parsed_text orelse result.code;
+        const parsed_offset = offsetOfPosition(parsed, line, column);
+        const stripped_offset = sourceOffsetForEdits(self.transform_edits, parsed_offset);
+        return positionOfOffset(self.text, result.sourceOffset(stripped_offset));
     }
 
     /// Write the `--> line:column` header, the source line, and the caret under

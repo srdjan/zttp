@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const stripper = @import("stripper.zig");
+const tsx_lowerer = @import("tsx_lowerer.zig");
 const TypeMap = @import("zts-base").type_map.TypeMap;
 
 /// Current source classifications. The two legacy rows are explicit so the
@@ -43,7 +44,9 @@ pub fn classifyPath(path: []const u8) SourceKind {
     return .unsupported;
 }
 
-pub const PrepareError = stripper.StripError || error{UnsupportedSourceExtension};
+pub const PrepareDiagnostic = tsx_lowerer.Diagnostic;
+pub const PrepareDiagnosticKind = tsx_lowerer.DiagnosticKind;
+pub const PrepareError = stripper.StripError || tsx_lowerer.Error || error{UnsupportedSourceExtension};
 
 /// Owned preprocessing result. `original_source` and `path` are borrowed;
 /// stripped code, type facts, diagnostics, and source-map edits are owned by
@@ -53,6 +56,7 @@ pub const PreparedSource = struct {
     path: []const u8,
     kind: SourceKind,
     strip_result: ?stripper.StripResult = null,
+    lower_result: ?tsx_lowerer.Result = null,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -60,6 +64,17 @@ pub const PreparedSource = struct {
         path: []const u8,
         options: stripper.StripOptions,
     ) PrepareError!PreparedSource {
+        return initWithDiagnostic(allocator, source, path, options, null);
+    }
+
+    pub fn initWithDiagnostic(
+        allocator: std.mem.Allocator,
+        source: []const u8,
+        path: []const u8,
+        options: stripper.StripOptions,
+        diagnostic_out: ?*?PrepareDiagnostic,
+    ) PrepareError!PreparedSource {
+        if (diagnostic_out) |out| out.* = null;
         const kind = classifyPath(path);
         switch (kind) {
             .legacy_javascript, .legacy_jsx, .unsupported => return error.UnsupportedSourceExtension,
@@ -75,20 +90,43 @@ pub const PreparedSource = struct {
             derived_options.tsx_mode = kind == .tsx;
             result.strip_result = try stripper.strip(allocator, source, derived_options);
         }
+        if (kind == .tsx) {
+            var lower_diagnostic: ?tsx_lowerer.Diagnostic = null;
+            result.lower_result = tsx_lowerer.lower(
+                allocator,
+                result.strip_result.?.code,
+                &lower_diagnostic,
+            ) catch |err| {
+                if (lower_diagnostic) |diagnostic| {
+                    const at = result.strip_result.?.sourcePosition(source, diagnostic.line, diagnostic.column);
+                    if (diagnostic_out) |out| out.* = .{
+                        .kind = diagnostic.kind,
+                        .line = at.line,
+                        .column = at.column,
+                    };
+                }
+                result.deinit();
+                return err;
+            };
+        }
         return result;
     }
 
     pub fn deinit(self: *PreparedSource) void {
+        if (self.lower_result) |*result| result.deinit();
+        self.lower_result = null;
         if (self.strip_result) |*result| result.deinit();
         self.strip_result = null;
     }
 
     pub fn parserInput(self: *const PreparedSource) []const u8 {
+        if (self.lower_result) |result| return result.code;
         return if (self.strip_result) |result| result.code else self.original_source;
     }
 
     pub fn enablesJsx(self: *const PreparedSource) bool {
-        return self.kind.enablesJsx();
+        _ = self;
+        return false;
     }
 
     pub fn typeMap(self: *PreparedSource) ?*TypeMap {
@@ -100,10 +138,16 @@ pub const PreparedSource = struct {
     }
 
     pub fn sourceView(self: *const PreparedSource) stripper.SourceView {
-        return if (self.strip_result) |*result|
-            stripper.SourceView.stripped(self.original_source, result)
-        else
-            stripper.SourceView.of(self.original_source);
+        if (self.lower_result) |*lowered| {
+            return stripper.SourceView.transformed(
+                self.original_source,
+                &self.strip_result.?,
+                lowered.code,
+                lowered.span_edits,
+            );
+        }
+        if (self.strip_result) |*result| return stripper.SourceView.stripped(self.original_source, result);
+        return stripper.SourceView.of(self.original_source);
     }
 };
 
@@ -132,7 +176,7 @@ test "PreparedSource refuses legacy and unknown file extensions" {
     );
 }
 
-test "PreparedSource derives stripping and JSX mode from the path" {
+test "PreparedSource derives stripping and lowers TSX before parsing" {
     const allocator = std.testing.allocator;
 
     var typed = try PreparedSource.init(allocator, "const name: string = \"Ada\";", "handler.ts", .{});
@@ -145,8 +189,9 @@ test "PreparedSource derives stripping and JSX mode from the path" {
     var tsx = try PreparedSource.init(allocator, "const view: string = <div />;", "view.tsx", .{});
     defer tsx.deinit();
     try std.testing.expect(tsx.typeMap() != null);
-    try std.testing.expect(tsx.enablesJsx());
-    try std.testing.expect(std.mem.indexOf(u8, tsx.parserInput(), "<div />") != null);
+    try std.testing.expect(!tsx.enablesJsx());
+    try std.testing.expect(std.mem.indexOf(u8, tsx.parserInput(), "<div />") == null);
+    try std.testing.expect(std.mem.indexOf(u8, tsx.parserInput(), "h(\"div\", null)") != null);
 
     var untyped = try PreparedSource.init(allocator, "const value = 1;", "<eval>", .{});
     defer untyped.deinit();
@@ -155,13 +200,51 @@ test "PreparedSource derives stripping and JSX mode from the path" {
     try std.testing.expectEqualStrings(untyped.original_source, untyped.parserInput());
 }
 
+test "PreparedSource reports malformed TSX in original coordinates" {
+    var diagnostic: ?PrepareDiagnostic = null;
+    try std.testing.expectError(
+        error.InvalidTsx,
+        PreparedSource.initWithDiagnostic(
+            std.testing.allocator,
+            "const view: string = (\n  <div><span /></section>\n);",
+            "view.tsx",
+            .{},
+            &diagnostic,
+        ),
+    );
+    try std.testing.expectEqual(PrepareDiagnosticKind.mismatched_tag, diagnostic.?.kind);
+    try std.testing.expectEqual(@as(u32, 2), diagnostic.?.line);
+    try std.testing.expectEqual(@as(u32, 16), diagnostic.?.column);
+}
+
+test "PreparedSource maps a post-TSX diagnostic back to authored source" {
+    const source = "const view = <div />; const value = missing;";
+    var prepared = try PreparedSource.init(std.testing.allocator, source, "view.tsx", .{});
+    defer prepared.deinit();
+    const parsed_at = std.mem.indexOf(u8, prepared.parserInput(), "missing").?;
+    const source_at = std.mem.indexOf(u8, source, "missing").?;
+    const mapped = prepared.sourceView().position(1, @intCast(parsed_at + 1));
+    try std.testing.expectEqual(@as(u32, 1), mapped.line);
+    try std.testing.expectEqual(@as(u32, @intCast(source_at + 1)), mapped.column);
+}
+
+test "PreparedSource maps an expression inside lowered TSX" {
+    const source = "const view = <div>{missing}</div>;";
+    var prepared = try PreparedSource.init(std.testing.allocator, source, "view.tsx", .{});
+    defer prepared.deinit();
+    const parsed_at = std.mem.indexOf(u8, prepared.parserInput(), "missing").?;
+    const source_at = std.mem.indexOf(u8, source, "missing").?;
+    const mapped = prepared.sourceView().position(1, @intCast(parsed_at + 1));
+    try std.testing.expectEqual(@as(u32, @intCast(source_at + 1)), mapped.column);
+}
+
 test "PreparedSource closes every stripping allocation failure" {
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             var prepared = try PreparedSource.init(
                 allocator,
-                "const name: string = \"Ada\";",
-                "handler.ts",
+                "const name: string = \"Ada\"; const view = <div>{name}</div>;",
+                "handler.tsx",
                 .{},
             );
             defer prepared.deinit();
