@@ -17,7 +17,6 @@ pub const default_reserve_tokens: u64 = 16_384;
 /// cannot be less than the estimate of the complete wire body.
 const request_bytes_per_token: u64 = 3;
 const request_headroom_bytes_per_token: u64 = 36;
-const generic_bytes_per_token: u64 = 4;
 /// DeepSeek's cache boundaries can change whole-prompt token density between
 /// adjacent requests. Project the last stable density with this measured margin
 /// instead of treating the appended byte suffix as independently tokenizable.
@@ -105,11 +104,11 @@ pub fn estimate(
     const framing_bytes = wire_bytes -| logical_bytes;
     const total_bytes = try checkedAdd(logical_bytes, framing_bytes, error.RequestSizeOverflow);
 
-    const system_tokens = estimateRequestBytes(components.system);
-    const tool_tokens = estimateRequestBytes(components.tools);
-    const history_tokens = estimateRequestBytes(components.history);
-    const transient_tokens = estimateRequestBytes(components.transient);
-    const framing_tokens = estimateRequestBytes(framing_bytes);
+    const system_tokens = estimateBytes(components.system);
+    const tool_tokens = estimateBytes(components.tools);
+    const history_tokens = estimateBytes(components.history);
+    const transient_tokens = estimateBytes(components.transient);
+    const framing_tokens = estimateBytes(framing_bytes);
     const total_tokens = try sum5(
         system_tokens,
         tool_tokens,
@@ -328,11 +327,10 @@ fn isPersistentContinuation(previous: RequestBudget, current: RequestBudget) boo
         current.bytes.wire >= previous.bytes.wire;
 }
 
+/// The one density. The compaction planner sizes the suffix it keeps with the
+/// same function that admits the request built from it, so a plan that fits
+/// cannot be refused by the accountant that measures it.
 pub fn estimateBytes(bytes: u64) u64 {
-    return ceilingDivision(bytes, generic_bytes_per_token);
-}
-
-fn estimateRequestBytes(bytes: u64) u64 {
     return ceilingDivision(bytes, request_bytes_per_token) +|
         ceilingDivision(bytes, request_headroom_bytes_per_token);
 }

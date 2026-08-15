@@ -720,7 +720,9 @@ test "prepare prefers a whole external-user turn boundary" {
     try addText(&tr, .assistant, "answer " ** 100);
     try addText(&tr, .user, "second");
     try addText(&tr, .assistant, "kept");
-    const ready = (try prepare(testing.allocator, &tr, 20)).ready;
+    // Wide enough for the whole two-entry turn and far short of the 700-byte
+    // assistant answer before it, in the request density `entryTokens` uses.
+    const ready = (try prepare(testing.allocator, &tr, 30)).ready;
     try testing.expect(!ready.isSplitTurn());
     try testing.expectEqual(@as(usize, 2), ready.first_kept_index);
     try testing.expectEqual(@as(transcript_mod.EntryId, 3), ready.first_kept_entry_id);
