@@ -151,6 +151,15 @@ pub fn parse(arena: std.mem.Allocator, body: []const u8) !ParsedRequest {
                             pending_read = null;
                         }
                     } else {
+                        // An output that is not a page cannot answer a pending
+                        // continuation read. Abandon the read: leaving it set
+                        // re-issues the identical call, with the identical call
+                        // id, until the turn's tool budget aborts.
+                        if (pending_read != null) {
+                            pending_read = null;
+                            pages.clearRetainingCapacity();
+                            page_bytes = 0;
+                        }
                         step_index += 1;
                     }
                     last_output = output_value.string;
