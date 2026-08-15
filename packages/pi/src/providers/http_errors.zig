@@ -117,8 +117,12 @@ pub fn connectWithin(
     protocol: std.http.Client.Protocol,
     request_timeout_ms: ?u64,
 ) !*std.http.Client.Connection {
-    const remaining = @max(@as(u64, 1), request_timeout_ms orelse connect_timeout_ms);
-    const connect_budget_ms = @min(connect_timeout_ms, remaining);
+    // A caller with no deadline gets each budget's own default. Folding the
+    // absent case into the connect budget would cut the 120 s idle budgets to
+    // 15 s, and an under-sized `SO_RCVTIMEO` panics rather than returning (see
+    // `setReadTimeoutMs`).
+    const remaining: ?u64 = if (request_timeout_ms) |ms| @max(@as(u64, 1), ms) else null;
+    const connect_budget_ms = @min(connect_timeout_ms, remaining orelse connect_timeout_ms);
     const connection = client.connectTcpOptions(.{
         .host = host,
         .port = explicit_port orelse switch (protocol) {
@@ -137,8 +141,8 @@ pub fn connectWithin(
     // Bound a stalled stream so a hung response can't freeze the CLI forever,
     // on both the read side (SO_RCVTIMEO) and the body-write side (SO_SNDTIMEO).
     const sock_handle = connection.stream_reader.stream.socket.handle;
-    setReadTimeoutMs(sock_handle, @min(read_idle_timeout_ms, remaining));
-    setWriteTimeoutMs(sock_handle, @min(write_idle_timeout_ms, remaining));
+    setReadTimeoutMs(sock_handle, if (remaining) |ms| @min(read_idle_timeout_ms, ms) else read_idle_timeout_ms);
+    setWriteTimeoutMs(sock_handle, if (remaining) |ms| @min(write_idle_timeout_ms, ms) else write_idle_timeout_ms);
     return connection;
 }
 
