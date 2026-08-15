@@ -68,7 +68,7 @@ fn execute(
     };
     defer allocator.free(source);
 
-    var strip_result = zts.strip(allocator, source, .{
+    var prepared = zts.PreparedSource.init(allocator, source, args[0], .{
         .comptime_env = .{},
     }) catch |e| {
         return registry_mod.ToolResult.errFmt(
@@ -77,13 +77,14 @@ fn execute(
             .{@errorName(e)},
         );
     };
-    defer strip_result.deinit();
+    defer prepared.deinit();
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = try zts.parser.JsParser.init(allocator, strip_result.code);
+    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
+    if (prepared.enablesJsx()) js_parser.enableJsx();
 
     const program_root = js_parser.parse() catch |e| {
         return registry_mod.ToolResult.errFmt(

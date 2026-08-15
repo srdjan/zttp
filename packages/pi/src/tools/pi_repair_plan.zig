@@ -123,16 +123,17 @@ pub fn planFromSource(
         }
     }
 
-    var strip_result = zts.strip(allocator, source, .{ .comptime_env = .{} }) catch |e| {
+    var prepared = zts.PreparedSource.init(allocator, source, rel_path, .{ .comptime_env = .{} }) catch |e| {
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": TypeScript strip failed: {s}\n", .{@errorName(e)});
     };
-    defer strip_result.deinit();
+    defer prepared.deinit();
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = try zts.parser.JsParser.init(allocator, strip_result.code);
+    var js_parser = try zts.parser.JsParser.init(allocator, prepared.parserInput());
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
+    if (prepared.enablesJsx()) js_parser.enableJsx();
 
     const program_root = js_parser.parse() catch |e| {
         return registry_mod.ToolResult.errFmt(allocator, name ++ ": parse failed: {s}\n", .{@errorName(e)});
@@ -531,6 +532,20 @@ test "planFromSource preserves a local optional binding name in its repair" {
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (appName === undefined)") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "if (value === undefined)") == null);
+}
+
+test "planFromSource prepares TSX before analysis" {
+    const source =
+        \\export function handler(req: Request): Response {
+        \\  const view = <div />;
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try planFromSource(std.testing.allocator, source, "handler.tsx", &.{}, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expect(std.mem.indexOf(u8, result.llm_text, "parse failed") == null);
+    try std.testing.expect(std.mem.indexOf(u8, result.llm_text, "\"policy_hash\"") != null);
 }
 
 test "an unreadable path is reported as the caller wrote it, not as an absolute path" {
