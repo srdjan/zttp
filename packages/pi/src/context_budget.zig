@@ -16,9 +16,8 @@ pub const default_reserve_tokens: u64 = 16_384;
 /// Component estimates round independently so their sum cannot be less than
 /// the estimate of the complete wire body.
 const primary_bytes_per_token: u64 = 4;
+const trailing_bytes_per_token: u64 = 3;
 const trailing_uncertainty_tokens: u64 = 4_096;
-const tool_heavy_trailing_uncertainty_tokens: u64 = 8_192;
-const tool_heavy_history_bytes: u64 = 4_096;
 
 pub const BudgetError = error{
     RequestSizeOverflow,
@@ -230,11 +229,11 @@ pub fn selectInputEstimate(input: SelectEstimateInput) BudgetError!SelectedEstim
 
 /// Estimate growth after an exact provider count. A component decrease means
 /// the request is no longer an append-only extension and invalidates the
-/// anchor. DeepSeek's pinned corpus shows that cached logical-input growth can
-/// be substantially denser than wire-byte growth. Any non-empty suffix gets a
-/// 4,096-token uncertainty floor; once visible history exceeds 4 KiB, the
-/// pinned tool-heavy requests require an 8,192-token floor. A new exact count
-/// replaces the anchor after every response.
+/// anchor. Appended tool and code JSON is denser than the fresh-request
+/// fallback, so trailing bytes use a conservative three-byte ratio. Any
+/// non-empty suffix also gets a 4,096-token uncertainty floor for tokenizer
+/// boundary and provider-accounting shifts. A new exact count replaces the
+/// anchor after every response.
 pub fn estimateTrailing(previous: RequestBudget, current: RequestBudget) ?u64 {
     if (current.bytes.system < previous.bytes.system or
         current.bytes.tools < previous.bytes.tools or
@@ -251,11 +250,7 @@ pub fn estimateTrailing(previous: RequestBudget, current: RequestBudget) ?u64 {
     // and compacted requests that fit.
     const delta = current.bytes.wire - previous.bytes.wire;
     if (delta == 0) return 0;
-    const uncertainty = if (current.bytes.history >= tool_heavy_history_bytes)
-        tool_heavy_trailing_uncertainty_tokens
-    else
-        trailing_uncertainty_tokens;
-    return @max(estimateBytes(delta), uncertainty);
+    return @max(ceilingDivision(delta, trailing_bytes_per_token), trailing_uncertainty_tokens);
 }
 
 pub fn estimateBytes(bytes: u64) u64 {

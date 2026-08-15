@@ -249,3 +249,55 @@ test "pinned estimator fixtures reject undercounts and excessive overestimates" 
         context_budget.validateCalibration(40_000, 28_747),
     );
 }
+
+test "anchored estimate stays calibrated across captured DeepSeek health flow" {
+    // Captured from the rejected 2026-08-15 health recapture. Call 4 is the
+    // regression: its input grew by 745 tokens, while the old tool-heavy floor
+    // added 8,192 and exceeded the calibration ceiling.
+    const captured = [_]struct {
+        wire_bytes: u64,
+        history_bytes: u64,
+        actual_tokens: u64,
+    }{
+        .{ .wire_bytes = 28_217, .history_bytes = 503, .actual_tokens = 7_001 },
+        .{ .wire_bytes = 29_193, .history_bytes = 1_130, .actual_tokens = 7_300 },
+        .{ .wire_bytes = 51_739, .history_bytes = 21_524, .actual_tokens = 12_750 },
+        .{ .wire_bytes = 75_753, .history_bytes = 42_599, .actual_tokens = 19_116 },
+        .{ .wire_bytes = 77_789, .history_bytes = 44_049, .actual_tokens = 19_861 },
+        .{ .wire_bytes = 79_515, .history_bytes = 45_441, .actual_tokens = 20_394 },
+        .{ .wire_bytes = 82_305, .history_bytes = 47_750, .actual_tokens = 22_117 },
+        .{ .wire_bytes = 89_881, .history_bytes = 54_674, .actual_tokens = 25_115 },
+        .{ .wire_bytes = 90_561, .history_bytes = 55_045, .actual_tokens = 25_379 },
+        .{ .wire_bytes = 91_903, .history_bytes = 56_100, .actual_tokens = 26_617 },
+    };
+    const epoch: context_budget.UsageEpoch = .{
+        .provider = .deepseek,
+        .model = "deepseek-v4-flash",
+        .checkpoint_generation = 0,
+    };
+    const limits = context_budget.limitsForModel(epoch.provider, epoch.model);
+    var previous_budget: ?context_budget.RequestBudget = null;
+    var previous_usage: ?context_budget.ExactInputUsage = null;
+
+    for (captured) |fixture| {
+        const budget = try context_budget.estimate(.{
+            .system = 7_142,
+            .tools = 20_252,
+            .history = fixture.history_bytes,
+            .transient = 0,
+        }, fixture.wire_bytes, limits);
+        const trailing = if (previous_budget) |previous|
+            context_budget.estimateTrailing(previous, budget)
+        else
+            0;
+        const selected = try context_budget.selectInputEstimate(.{
+            .epoch = epoch,
+            .fallback_estimated_tokens = budget.tokens.total,
+            .trailing_estimated_tokens = trailing orelse 0,
+            .exact_usage = if (trailing != null) previous_usage else null,
+        });
+        try context_budget.validateCalibration(selected.tokens, fixture.actual_tokens);
+        previous_budget = budget;
+        previous_usage = .{ .epoch = epoch, .logical_input_tokens = fixture.actual_tokens };
+    }
+}
