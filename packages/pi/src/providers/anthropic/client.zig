@@ -26,6 +26,8 @@ pub const Config = struct {
     tools_json: ?[]const u8 = null,
     base_url: []const u8 = default_base_url,
     anthropic_version: []const u8 = default_anthropic_version,
+    purpose: model_request.Purpose = .normal,
+    cache_policy: model_request.CachePolicy = .enabled,
 };
 
 pub const ClientError = error{
@@ -80,6 +82,7 @@ pub const Client = struct {
 
         const body = try buildRequestBodyFromSnapshot(arena, &snapshot);
         try snapshot.completePreparation(body);
+        try snapshot.requireHardAdmission();
         const response_body = try post_fn(arena, self.config, body);
         if (self.capture) |sink| try sink.record(&snapshot, response_body);
 
@@ -114,6 +117,8 @@ fn createRequestSnapshot(
             .max_output_tokens = config.max_tokens,
             .system_prompt = config.system_prompt,
             .tools_json = config.tools_json,
+            .purpose = config.purpose,
+            .cache_policy = config.cache_policy,
         },
         .transcript = transcript,
         .extra_user_text = extra_user_text,

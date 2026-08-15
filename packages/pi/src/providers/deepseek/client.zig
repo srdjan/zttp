@@ -64,6 +64,8 @@ pub const Config = struct {
     max_tokens: u32 = default_max_tokens,
     tools_json: ?[]const u8 = null,
     base_url: []const u8 = default_base_url,
+    purpose: model_request.Purpose = .normal,
+    cache_policy: model_request.CachePolicy = .enabled,
 };
 
 pub const ClientError = error{
@@ -130,6 +132,8 @@ pub const Client = struct {
                 .stream = false,
                 .system_prompt = self.config.system_prompt,
                 .tools_json = self.config.tools_json,
+                .purpose = self.config.purpose,
+                .cache_policy = self.config.cache_policy,
             },
             .transcript = transcript,
             .extra_user_text = extra_user_text,
@@ -138,6 +142,7 @@ pub const Client = struct {
 
         const body = try chat_completions.buildRequestBodyFromSnapshot(arena, &snapshot);
         try snapshot.completePreparation(body);
+        try snapshot.requireHardAdmission();
         snapshot.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
         const diagnostics_enabled = if (self.capture) |sink| sink.diagnostics_fn != null else false;
         const started_ns = if (diagnostics_enabled) monotonicNowNs() else null;

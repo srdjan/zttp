@@ -10,6 +10,8 @@ const transcript_mod = @import("../transcript.zig");
 const models = @import("models.zig");
 
 pub const Provider = models.Provider;
+pub const Purpose = enum { normal, summarization };
+pub const CachePolicy = enum { enabled, disabled };
 
 pub const Config = struct {
     provider: Provider,
@@ -18,6 +20,8 @@ pub const Config = struct {
     stream: bool = true,
     system_prompt: []const u8,
     tools_json: ?[]const u8 = null,
+    purpose: Purpose = .normal,
+    cache_policy: CachePolicy = .enabled,
 };
 
 pub const ToolUse = struct {
@@ -106,12 +110,26 @@ pub const ModelRequestSnapshot = struct {
             context_budget.limitsForModel(self.config.provider, self.config.model),
         );
     }
+
+    pub fn requireHardAdmission(self: *const ModelRequestSnapshot) !void {
+        const budget = self.budget orelse return error.RequestNotPrepared;
+        if (context_budget.relation(budget.tokens.total, budget.limits.hard_input_tokens) == .exceeded) {
+            return error.RequestTooLarge;
+        }
+    }
 };
 
 pub const Input = struct {
     config: Config,
     transcript: *const transcript_mod.Transcript,
     extra_user_text: ?[]const u8 = null,
+    projection_override: ?ProjectionOverride = null,
+    use_projection_override: bool = false,
+};
+
+pub const ProjectionOverride = struct {
+    summary: []const u8,
+    first_kept_entry_id: transcript_mod.EntryId,
 };
 
 pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestSnapshot {
@@ -120,12 +138,24 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
     var item_groups: std.ArrayListUnmanaged(ItemGroup) = .empty;
     errdefer item_groups.deinit(allocator);
 
-    if (input.transcript.projection) |projection| {
-        try items.append(allocator, .{ .system_note = projection.summary });
+    const projection = if (input.use_projection_override)
+        input.projection_override
+    else if (input.transcript.projection) |current|
+        ProjectionOverride{
+            .summary = current.summary,
+            .first_kept_entry_id = current.first_kept_entry_id,
+        }
+    else
+        null;
+    if (projection) |active_projection| {
+        try items.append(allocator, .{ .system_note = active_projection.summary });
         try item_groups.append(allocator, .{ .start = 0, .len = 1 });
     }
 
-    const active_start = try input.transcript.activeStartIndex();
+    const active_start = if (projection) |active_projection|
+        try projectionStartIndex(input.transcript, active_projection.first_kept_entry_id)
+    else
+        0;
     for (input.transcript.entries.items[active_start..]) |entry| {
         const start = items.items.len;
         switch (entry) {
@@ -185,6 +215,16 @@ pub fn createSnapshot(allocator: std.mem.Allocator, input: Input) !ModelRequestS
     };
 }
 
+fn projectionStartIndex(
+    transcript: *const transcript_mod.Transcript,
+    first_kept_entry_id: transcript_mod.EntryId,
+) !usize {
+    if (first_kept_entry_id == 0 or first_kept_entry_id > transcript.nextEntryId()) {
+        return error.InvalidProjectionCut;
+    }
+    return @intCast(first_kept_entry_id - 1);
+}
+
 fn historyBytes(items: []const Item) !u64 {
     var total: u64 = 0;
     for (items) |item| switch (item) {
@@ -221,6 +261,8 @@ fn hashRequestContext(config: Config, system_digest: Sha256Hex, tools_digest: ?S
     hashFrame(&hasher, config.model);
     hashU64(&hasher, config.max_output_tokens);
     hashFrame(&hasher, if (config.stream) "stream" else "non-stream");
+    hashFrame(&hasher, @tagName(config.purpose));
+    hashFrame(&hasher, @tagName(config.cache_policy));
     hashFrame(&hasher, system_digest.slice());
     if (tools_digest) |digest| {
         hashFrame(&hasher, "tools-present");

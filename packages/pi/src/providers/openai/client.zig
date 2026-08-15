@@ -38,6 +38,8 @@ pub const Config = struct {
     max_tokens: u32 = default_max_tokens,
     tools_json: ?[]const u8 = null,
     base_url: []const u8 = default_base_url,
+    purpose: model_request.Purpose = .normal,
+    cache_policy: model_request.CachePolicy = .enabled,
 };
 
 pub const ClientError = error{
@@ -93,6 +95,7 @@ pub const Client = struct {
 
         const body = try buildRequestBodyFromSnapshot(arena, &snapshot);
         try snapshot.completePreparation(body);
+        try snapshot.requireHardAdmission();
         const response_body = try post_fn(arena, self.config, body);
         if (self.capture) |sink| try sink.record(&snapshot, response_body);
 
@@ -140,6 +143,8 @@ fn createRequestSnapshot(
             .max_output_tokens = config.max_tokens,
             .system_prompt = config.system_prompt,
             .tools_json = config.tools_json,
+            .purpose = config.purpose,
+            .cache_policy = config.cache_policy,
         },
         .transcript = transcript,
         .extra_user_text = extra_user_text,
@@ -505,6 +510,29 @@ test "buildRequestBody: first turn carries instructions + one user input item an
     const content = input[0].object.get("content").?.array.items;
     try testing.expectEqualStrings("input_text", content[0].object.get("type").?.string);
     try testing.expectEqualStrings("add a GET route", content[0].object.get("text").?.string);
+}
+
+test "summarization request is standalone and tool-free" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "summary payload" });
+    var snapshot = try model_request.createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .openai,
+            .model = "gpt-4o-mini",
+            .max_output_tokens = 4096,
+            .system_prompt = "summary system",
+            .purpose = .summarization,
+            .cache_policy = .disabled,
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+    const body = try buildRequestBodyFromSnapshot(testing.allocator, &snapshot);
+    defer testing.allocator.free(body);
+    try testing.expect(std.mem.indexOf(u8, body, "\"tools\"") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "summary payload") != null);
+    try testing.expectEqual(model_request.CachePolicy.disabled, snapshot.config.cache_policy);
 }
 
 test "buildRequestBody: tool-use and tool-result entries serialize as Responses-API items" {

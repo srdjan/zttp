@@ -181,12 +181,29 @@ fn applyCheckpoint(
     const summary = payload.object.get("summary") orelse return error.CorruptEventsLog;
     const first_kept = payload.object.get("first_kept_entry_id") orelse return error.CorruptEventsLog;
     const reason = payload.object.get("reason") orelse return error.CorruptEventsLog;
+    const read_files_value = payload.object.get("read_files") orelse return error.CorruptEventsLog;
+    const modified_files_value = payload.object.get("modified_files") orelse return error.CorruptEventsLog;
     if (summary != .string or first_kept != .integer or first_kept.integer <= 0 or reason != .string) {
         return error.CorruptEventsLog;
     }
     _ = std.meta.stringToEnum(events.CompactionReason, reason.string) orelse return error.CorruptEventsLog;
     const cut = std.math.cast(events.EntryId, first_kept.integer) orelse return error.CorruptEventsLog;
-    try tr.replaceProjection(allocator, summary.string, cut);
+    const read_files = try parseStringArray(allocator, read_files_value);
+    defer allocator.free(read_files);
+    const modified_files = try parseStringArray(allocator, modified_files_value);
+    defer allocator.free(modified_files);
+    try tr.replaceProjectionWithFiles(allocator, summary.string, cut, read_files, modified_files);
+}
+
+fn parseStringArray(allocator: std.mem.Allocator, value: std.json.Value) ![][]const u8 {
+    if (value != .array) return error.CorruptEventsLog;
+    const strings = try allocator.alloc([]const u8, value.array.items.len);
+    errdefer allocator.free(strings);
+    for (value.array.items, 0..) |item, index| {
+        if (item != .string) return error.CorruptEventsLog;
+        strings[index] = item.string;
+    }
+    return strings;
 }
 
 const TextKind = enum { user_text, model_text, system_note };

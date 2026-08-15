@@ -128,9 +128,15 @@ pub const EntryId = u64;
 pub const Projection = struct {
     summary: []const u8,
     first_kept_entry_id: EntryId,
+    read_files: []const []const u8,
+    modified_files: []const []const u8,
 
     fn deinit(self: *Projection, allocator: std.mem.Allocator) void {
         allocator.free(self.summary);
+        for (self.read_files) |file| allocator.free(file);
+        for (self.modified_files) |file| allocator.free(file);
+        if (self.read_files.len > 0) allocator.free(self.read_files);
+        if (self.modified_files.len > 0) allocator.free(self.modified_files);
         self.* = undefined;
     }
 };
@@ -205,14 +211,38 @@ pub const Transcript = struct {
         summary: []const u8,
         first_kept_entry_id: EntryId,
     ) !void {
+        return self.replaceProjectionWithFiles(
+            allocator,
+            summary,
+            first_kept_entry_id,
+            &.{},
+            &.{},
+        );
+    }
+
+    pub fn replaceProjectionWithFiles(
+        self: *Transcript,
+        allocator: std.mem.Allocator,
+        summary: []const u8,
+        first_kept_entry_id: EntryId,
+        read_files: []const []const u8,
+        modified_files: []const []const u8,
+    ) !void {
         if (first_kept_entry_id == 0 or first_kept_entry_id > self.nextEntryId()) {
             return error.InvalidProjectionCut;
         }
         const summary_copy = try allocator.dupe(u8, summary);
+        errdefer allocator.free(summary_copy);
+        const read_copies = try dupeStrings(allocator, read_files);
+        errdefer freeStrings(allocator, read_copies);
+        const modified_copies = try dupeStrings(allocator, modified_files);
+        errdefer freeStrings(allocator, modified_copies);
         if (self.projection) |*projection| projection.deinit(allocator);
         self.projection = .{
             .summary = summary_copy,
             .first_kept_entry_id = first_kept_entry_id,
+            .read_files = read_copies,
+            .modified_files = modified_copies,
         };
     }
 
@@ -227,9 +257,46 @@ pub const Transcript = struct {
         self.projection = .{
             .summary = summary,
             .first_kept_entry_id = first_kept_entry_id,
+            .read_files = &.{},
+            .modified_files = &.{},
+        };
+    }
+
+    pub fn installProjectionOwnedWithFiles(
+        self: *Transcript,
+        allocator: std.mem.Allocator,
+        summary: []u8,
+        first_kept_entry_id: EntryId,
+        read_files: [][]u8,
+        modified_files: [][]u8,
+    ) void {
+        std.debug.assert(first_kept_entry_id > 0 and first_kept_entry_id <= self.nextEntryId());
+        if (self.projection) |*projection| projection.deinit(allocator);
+        self.projection = .{
+            .summary = summary,
+            .first_kept_entry_id = first_kept_entry_id,
+            .read_files = read_files,
+            .modified_files = modified_files,
         };
     }
 };
+
+fn dupeStrings(allocator: std.mem.Allocator, strings: []const []const u8) ![][]u8 {
+    const copies = try allocator.alloc([]u8, strings.len);
+    errdefer allocator.free(copies);
+    var initialized: usize = 0;
+    errdefer for (copies[0..initialized]) |copy| allocator.free(copy);
+    for (strings, 0..) |string, index| {
+        copies[index] = try allocator.dupe(u8, string);
+        initialized += 1;
+    }
+    return copies;
+}
+
+fn freeStrings(allocator: std.mem.Allocator, strings: [][]u8) void {
+    for (strings) |string| allocator.free(string);
+    allocator.free(strings);
+}
 
 fn ownMessage(allocator: std.mem.Allocator, message: turn.Message) !OwnedEntry {
     return switch (message) {

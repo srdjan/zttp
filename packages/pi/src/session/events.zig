@@ -45,6 +45,7 @@ pub const CompactionCheckpoint = struct {
     estimated_tokens_after: u64 = 0,
     summary_input_tokens: u64 = 0,
     summary_output_tokens: u64 = 0,
+    will_retry: bool = false,
     read_files: []const []const u8 = &.{},
     modified_files: []const []const u8 = &.{},
 };
@@ -631,6 +632,8 @@ fn writeCompactionCheckpointPayload(writer: *std.Io.Writer, checkpoint: Compacti
     try writer.print(",\"estimated_tokens_after\":{d}", .{checkpoint.estimated_tokens_after});
     try writer.print(",\"summary_input_tokens\":{d}", .{checkpoint.summary_input_tokens});
     try writer.print(",\"summary_output_tokens\":{d}", .{checkpoint.summary_output_tokens});
+    try writer.writeAll(",\"will_retry\":");
+    try writer.writeAll(if (checkpoint.will_retry) "true" else "false");
     try writer.writeAll(",\"read_files\":[");
     for (checkpoint.read_files, 0..) |file, i| {
         if (i > 0) try writer.writeByte(',');

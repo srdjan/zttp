@@ -222,6 +222,35 @@ test "buildRequestBody omits the tools field when no catalog is supplied" {
     try testing.expect(std.mem.endsWith(u8, body, "]}"));
 }
 
+test "local and DeepSeek summarization bodies are standalone and tool-free" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const ta = arena.allocator();
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(ta);
+    try transcript.append(ta, .{ .user_text = "summary payload" });
+
+    inline for (.{ model_request.Provider.local, model_request.Provider.deepseek }) |provider| {
+        var snapshot = try model_request.createSnapshot(ta, .{
+            .config = .{
+                .provider = provider,
+                .model = if (provider == .local) "local-model" else "deepseek-model",
+                .max_output_tokens = 4096,
+                .stream = false,
+                .system_prompt = "summary system",
+                .purpose = .summarization,
+                .cache_policy = .disabled,
+            },
+            .transcript = &transcript,
+        });
+        defer snapshot.deinit(ta);
+        const body = try buildRequestBodyFromSnapshot(ta, &snapshot);
+        try testing.expect(std.mem.indexOf(u8, body, "\"tools\"") == null);
+        try testing.expect(std.mem.indexOf(u8, body, "summary payload") != null);
+        try testing.expectEqual(model_request.Purpose.summarization, snapshot.config.purpose);
+    }
+}
+
 test "an empty tool result still sends a non-empty content field" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

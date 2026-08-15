@@ -258,7 +258,7 @@ pub fn estimateTrailing(previous: RequestBudget, current: RequestBudget) ?u64 {
     return @max(estimateBytes(delta), uncertainty);
 }
 
-fn estimateBytes(bytes: u64) u64 {
+pub fn estimateBytes(bytes: u64) u64 {
     return ceilingDivision(bytes, primary_bytes_per_token);
 }
 

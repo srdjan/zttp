@@ -71,10 +71,19 @@ pub fn writeSnapshotRequestBody(
 
     try writer.writeAll(",\"system\":[{\"type\":\"text\",\"text\":");
     try json_writer.writeString(writer, snapshot.config.system_prompt);
-    try writer.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}}]");
+    if (snapshot.config.cache_policy == .enabled) {
+        try writer.writeAll(",\"cache_control\":{\"type\":\"ephemeral\"}");
+    }
+    try writer.writeAll("}]");
 
     try writer.writeAll(",\"messages\":");
-    try writeMessagesArray(writer, allocator, snapshot.items, snapshot.extra_user_text);
+    try writeMessagesArray(
+        writer,
+        allocator,
+        snapshot.items,
+        snapshot.extra_user_text,
+        snapshot.config.cache_policy,
+    );
 
     if (snapshot.config.tools_json) |tools| {
         try writer.writeAll(",\"tools\":");
@@ -89,6 +98,7 @@ fn writeMessagesArray(
     allocator: std.mem.Allocator,
     items: []const model_request.Item,
     extra_user_text: ?[]const u8,
+    cache_policy: model_request.CachePolicy,
 ) !void {
     var groups: std.ArrayListUnmanaged(MessageGroup) = .empty;
     defer {
@@ -131,7 +141,7 @@ fn writeMessagesArray(
         for (group.blocks.items, 0..) |block, block_index| {
             if (block_index > 0) try writer.writeByte(',');
             const is_last_block = is_last_group and block_index == group.blocks.items.len - 1;
-            try writeBlock(writer, block, is_last_block);
+            try writeBlock(writer, block, is_last_block and cache_policy == .enabled);
         }
         try writer.writeAll("]}");
     }
@@ -314,6 +324,32 @@ test "writeRequestBody: system block carries cache_control ephemeral marker" {
     try testing.expectEqualStrings("persona bytes", block.get("text").?.string);
     const cache = block.get("cache_control").?.object;
     try testing.expectEqualStrings("ephemeral", cache.get("type").?.string);
+}
+
+test "summarization request has one user message no tools and no cache writes" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "summary payload" });
+    var snapshot = try model_request.createSnapshot(testing.allocator, .{
+        .config = .{
+            .provider = .anthropic,
+            .model = "claude-sonnet-4-6",
+            .max_output_tokens = 4096,
+            .system_prompt = "summary system",
+            .purpose = .summarization,
+            .cache_policy = .disabled,
+        },
+        .transcript = &transcript,
+    });
+    defer snapshot.deinit(testing.allocator);
+    var buffer = TextBuffer.init(testing.allocator);
+    defer buffer.deinit();
+    try writeSnapshotRequestBody(buffer.writer(), testing.allocator, &snapshot);
+    const body = buffer.written();
+    try testing.expect(std.mem.indexOf(u8, body, "\"tools\"") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "cache_control") == null);
+    try testing.expect(std.mem.indexOf(u8, body, "summary payload") != null);
+    try testing.expectEqual(model_request.Purpose.summarization, snapshot.config.purpose);
 }
 
 test "writeRequestBody: rolling cache breakpoint marks only the last message block" {

@@ -23,6 +23,9 @@ const openai_client = @import("providers/openai/client.zig");
 const local_client = @import("providers/local/client.zig");
 const deepseek_client = @import("providers/deepseek/client.zig");
 const model_request = @import("providers/model_request.zig");
+const compaction = @import("compaction.zig");
+const context_budget = @import("context_budget.zig");
+const chat_completions = @import("providers/chat_completions.zig");
 const models_registry = @import("providers/models.zig");
 const provider_selection = @import("providers/selection.zig");
 const expert_persona = @import("expert_persona.zig");
@@ -304,6 +307,10 @@ pub const AgentSession = struct {
     last_persisted_len: usize = 0,
     /// Running total of tokens consumed by all turns in this session.
     token_totals: turn.Usage = .{},
+    /// Summarization usage is also included in `token_totals` for cost
+    /// accounting, but remains separately observable from normal generation.
+    summary_token_totals: turn.Usage = .{},
+    summary_attempt_count: u64 = 0,
     /// Per-session expert metrics, folded each turn and emitted as a
     /// `session_summary` event by `writeSessionSummary` at session close.
     metrics: SessionMetrics = .{},
@@ -497,6 +504,63 @@ pub const AgentSession = struct {
             .openai => (&self.backend.openai).asModelClient(),
             .deepseek => (&self.backend.deepseek).asModelClient(),
         };
+    }
+
+    pub fn summarizer(self: *AgentSession) ?compaction.Summarizer {
+        if (self.backend == .stub) return null;
+        return .{ .context = self, .summarize_fn = summarizeRequest };
+    }
+
+    fn summarizeRequest(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        request: compaction.SummaryRequest,
+    ) anyerror!compaction.SummaryResponse {
+        const self: *AgentSession = @ptrCast(@alignCast(context));
+        var summary_transcript: transcript_mod.Transcript = .{};
+        defer summary_transcript.deinit(arena);
+        try summary_transcript.append(arena, .{ .user_text = request.user_prompt });
+
+        const result = switch (self.backend) {
+            .stub => return error.CompactionUnavailable,
+            .local => |client| blk: {
+                var summary_client = client;
+                summary_client.config.system_prompt = request.system_prompt;
+                summary_client.config.tools_json = null;
+                summary_client.config.max_tokens = request.max_output_tokens;
+                summary_client.config.purpose = .summarization;
+                summary_client.config.cache_policy = .disabled;
+                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
+            },
+            .anthropic => |client| blk: {
+                var summary_client = client;
+                summary_client.config.system_prompt = request.system_prompt;
+                summary_client.config.tools_json = null;
+                summary_client.config.max_tokens = request.max_output_tokens;
+                summary_client.config.purpose = .summarization;
+                summary_client.config.cache_policy = .disabled;
+                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
+            },
+            .openai => |client| blk: {
+                var summary_client = client;
+                summary_client.config.system_prompt = request.system_prompt;
+                summary_client.config.tools_json = null;
+                summary_client.config.max_tokens = request.max_output_tokens;
+                summary_client.config.purpose = .summarization;
+                summary_client.config.cache_policy = .disabled;
+                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
+            },
+            .deepseek => |client| blk: {
+                var summary_client = client;
+                summary_client.config.system_prompt = request.system_prompt;
+                summary_client.config.tools_json = null;
+                summary_client.config.max_tokens = request.max_output_tokens;
+                summary_client.config.purpose = .summarization;
+                summary_client.config.cache_policy = .disabled;
+                break :blk try summary_client.sendTurn(arena, &summary_transcript, null);
+            },
+        };
+        return .{ .response = result.reply.response, .usage = result.usage };
     }
 
     /// Returns the model id currently in use, or null for the stub backend.
@@ -1143,59 +1207,331 @@ pub fn runOneTurnWithClient(
     return transcript_mod.renderRichEntryToOwned(allocator, tr.at(tr.len() - 1));
 }
 
-/// Compact the provider-visible projection without deleting the raw transcript.
-/// The temporary plain-text summary is replaced by the dedicated model
-/// summarizer in U6; the durable checkpoint and raw-journal semantics land here.
+pub const CompactedDetails = struct {
+    reason: session_events.CompactionReason,
+    first_kept_entry_id: transcript_mod.EntryId,
+    tokens_before: u64,
+    estimated_tokens_after: u64,
+    summary_usage: turn.Usage,
+};
+
+pub const CompactResult = union(enum) {
+    compacted: CompactedDetails,
+    no_change,
+    not_compactable: compaction.NotCompactableReason,
+    unavailable,
+    failed: anyerror,
+};
+
+/// Compatibility text wrapper for the current TTY command. U8 exposes the
+/// same controller's structured result directly to RPC and command surfaces.
 pub fn compact(
     allocator: std.mem.Allocator,
     session: *AgentSession,
 ) ![]u8 {
+    const result = try compactDetailed(
+        allocator,
+        session,
+        session.summarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    return switch (result) {
+        .compacted => |details| std.fmt.allocPrint(
+            allocator,
+            "Compacted context at entry {d}: {d} -> {d} estimated tokens.\n",
+            .{ details.first_kept_entry_id, details.tokens_before, details.estimated_tokens_after },
+        ),
+        .no_change => allocator.dupe(u8, "Nothing to compact.\n"),
+        .not_compactable => |reason| std.fmt.allocPrint(
+            allocator,
+            "Context is not compactable: {s}.\n",
+            .{@tagName(reason)},
+        ),
+        .unavailable => allocator.dupe(u8, "Compaction requires an active model backend.\n"),
+        .failed => |failure| return failure,
+    };
+}
+
+pub fn compactDetailed(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    maybe_summarizer: ?compaction.Summarizer,
+    settings: compaction.Settings,
+    reason: session_events.CompactionReason,
+    focus: ?[]const u8,
+    will_retry: bool,
+) !CompactResult {
     const tr = &session.transcript;
-    if (tr.len() == 0) {
-        return allocator.dupe(u8, "Nothing to compact.\n");
+    if (tr.len() == 0) return .no_change;
+    const summarizer = maybe_summarizer orelse return .unavailable;
+    const model = session.resolved_model orelse return .unavailable;
+
+    var empty_transcript: transcript_mod.Transcript = .{};
+    defer empty_transcript.deinit(allocator);
+    const fixed_budget = try requestBudgetForProjection(allocator, session, &empty_transcript, null);
+    const fixed_tokens = fixed_budget.tokens.system +| fixed_budget.tokens.tools;
+    const capacity = compaction.deriveCapacity(
+        settings,
+        model,
+        fixed_tokens,
+        fixed_budget.tokens.framing,
+    ) catch |err| return .{ .failed = err };
+    const current_budget = try requestBudgetForProjection(allocator, session, tr, null);
+    const preparation = try compaction.prepare(
+        allocator,
+        tr,
+        capacity.effective_keep_recent_tokens,
+    );
+    const ready = switch (preparation) {
+        .no_change => return .no_change,
+        .not_compactable => |not_compactable| return .{ .not_compactable = not_compactable },
+        .ready => |value| value,
+    };
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const temporary = arena.allocator();
+
+    var file_ops = try compaction.extractFileOps(
+        allocator,
+        tr,
+        ready.summarize_start,
+        ready.first_kept_index,
+    );
+    var file_ops_owned = true;
+    defer if (file_ops_owned) file_ops.deinit(allocator);
+
+    var summary_usage: turn.Usage = .{};
+    var regular_summary: ?[]const u8 = null;
+    if (ready.summarize_start < ready.summarize_end or tr.projection != null) {
+        const conversation = try compaction.serializeSpan(
+            temporary,
+            tr,
+            ready.summarize_start,
+            ready.summarize_end,
+        );
+        const prompt = try compaction.buildRegularPrompt(
+            temporary,
+            if (tr.projection) |projection| projection.summary else null,
+            conversation,
+            focus,
+        );
+        const request: compaction.SummaryRequest = .{
+            .system_prompt = compaction.regular_system_prompt,
+            .user_prompt = prompt,
+            .max_output_tokens = @intCast(capacity.summary_allowance_tokens),
+        };
+        admitSummaryRequest(temporary, session, request) catch |err| return .{ .failed = err };
+        const response = callSummarizer(
+            session,
+            summarizer,
+            temporary,
+            request,
+        ) catch |err| return .{ .failed = err };
+        summary_usage.add(response.usage);
+        regular_summary = switch (response.response) {
+            .final_text => |text| text,
+            .tool_calls => return .{ .failed = error.SummaryReturnedToolCall },
+            .edit => return .{ .failed = error.SummaryReturnedEdit },
+        };
+        compaction.validateRegularSummary(regular_summary.?) catch |err| return .{ .failed = err };
     }
 
-    var buf = TextBuffer.init(allocator);
-    defer buf.deinit();
-    try buf.writer().writeAll("[COMPACTED CONVERSATION HISTORY]\n");
-    if (tr.projection) |projection| {
-        try buf.writer().writeAll(projection.summary);
-        try buf.writer().writeByte('\n');
+    var prefix_summary: ?[]const u8 = null;
+    if (ready.prefix_start) |prefix_start| {
+        const conversation = try compaction.serializeSpan(
+            temporary,
+            tr,
+            prefix_start,
+            ready.prefix_end.?,
+        );
+        const prompt = try compaction.buildPrefixPrompt(temporary, conversation, focus);
+        const request: compaction.SummaryRequest = .{
+            .system_prompt = compaction.prefix_system_prompt,
+            .user_prompt = prompt,
+            .max_output_tokens = @intCast(capacity.summary_allowance_tokens),
+        };
+        admitSummaryRequest(temporary, session, request) catch |err| return .{ .failed = err };
+        const response = callSummarizer(
+            session,
+            summarizer,
+            temporary,
+            request,
+        ) catch |err| return .{ .failed = err };
+        summary_usage.add(response.usage);
+        prefix_summary = switch (response.response) {
+            .final_text => |text| text,
+            .tool_calls => return .{ .failed = error.SummaryReturnedToolCall },
+            .edit => return .{ .failed = error.SummaryReturnedEdit },
+        };
+        compaction.validatePrefixSummary(prefix_summary.?) catch |err| return .{ .failed = err };
     }
-    const active_start = try tr.activeStartIndex();
-    for (tr.entries.items[active_start..]) |*entry| {
-        try transcript_mod.renderPlain(buf.writer(), entry);
+
+    const summary = try compaction.assembleSummary(
+        allocator,
+        regular_summary,
+        prefix_summary,
+        file_ops,
+    );
+    var summary_owned = true;
+    defer if (summary_owned) allocator.free(summary);
+    const after_budget = try requestBudgetForProjection(allocator, session, tr, .{
+        .summary = summary,
+        .first_kept_entry_id = ready.first_kept_entry_id,
+    });
+    if (after_budget.tokens.total > capacity.admitted_input_tokens) {
+        return .{ .failed = error.CompactedRequestStillTooLarge };
     }
-    const summary = try buf.toOwnedSlice();
-    const first_kept_entry_id = tr.nextEntryId();
-    const active_entry_count = tr.len() - active_start;
-    errdefer allocator.free(summary);
 
     if (session.events_path) |path| {
         while (session.last_persisted_len < tr.len()) : (session.last_persisted_len += 1) {
-            try persister.appendEntry(
+            persister.appendEntry(
                 allocator,
                 path,
                 tr.entryIdAt(session.last_persisted_len),
                 tr.at(session.last_persisted_len),
                 session.persist_opts,
-            );
+            ) catch |err| return .{ .failed = err };
         }
-        try session_events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+        session_events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
             .summary = summary,
-            .first_kept_entry_id = first_kept_entry_id,
-            .reason = .manual,
-            .tokens_before = estimateContextTokens(session),
-        } });
+            .first_kept_entry_id = ready.first_kept_entry_id,
+            .reason = reason,
+            .tokens_before = current_budget.tokens.total,
+            .estimated_tokens_after = after_budget.tokens.total,
+            .summary_input_tokens = summary_usage.input_tokens,
+            .summary_output_tokens = summary_usage.output_tokens,
+            .will_retry = will_retry,
+            .read_files = file_ops.read_files,
+            .modified_files = file_ops.modified_files,
+        } }) catch |err| return .{ .failed = err };
     }
 
-    tr.installProjectionOwned(allocator, summary, first_kept_entry_id);
-
-    return std.fmt.allocPrint(
+    tr.installProjectionOwnedWithFiles(
         allocator,
-        "Compacted {d} active entries into a durable context projection.\n",
-        .{active_entry_count},
+        summary,
+        ready.first_kept_entry_id,
+        file_ops.read_files,
+        file_ops.modified_files,
     );
+    summary_owned = false;
+    file_ops_owned = false;
+    return .{ .compacted = .{
+        .reason = reason,
+        .first_kept_entry_id = ready.first_kept_entry_id,
+        .tokens_before = current_budget.tokens.total,
+        .estimated_tokens_after = after_budget.tokens.total,
+        .summary_usage = summary_usage,
+    } };
+}
+
+fn callSummarizer(
+    session: *AgentSession,
+    summarizer: compaction.Summarizer,
+    arena: std.mem.Allocator,
+    request: compaction.SummaryRequest,
+) !compaction.SummaryResponse {
+    session.summary_attempt_count +|= 1;
+    const response = try summarizer.summarize(arena, request);
+    session.summary_token_totals.add(response.usage);
+    session.token_totals.add(response.usage);
+    return response;
+}
+
+fn normalRequestConfig(session: *const AgentSession) !model_request.Config {
+    return switch (session.backend) {
+        .stub => error.CompactionUnavailable,
+        .local => |client| .{
+            .provider = .local,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .stream = false,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        .anthropic => |client| .{
+            .provider = .anthropic,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        .openai => |client| .{
+            .provider = .openai,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+        .deepseek => |client| .{
+            .provider = .deepseek,
+            .model = client.config.model,
+            .max_output_tokens = client.config.max_tokens,
+            .stream = false,
+            .system_prompt = client.config.system_prompt,
+            .tools_json = client.config.tools_json,
+        },
+    };
+}
+
+fn requestBudgetForProjection(
+    allocator: std.mem.Allocator,
+    session: *const AgentSession,
+    transcript: *const transcript_mod.Transcript,
+    projection_override: ?model_request.ProjectionOverride,
+) !context_budget.RequestBudget {
+    return requestBudgetForConfig(
+        allocator,
+        try normalRequestConfig(session),
+        transcript,
+        projection_override,
+        false,
+    );
+}
+
+fn admitSummaryRequest(
+    allocator: std.mem.Allocator,
+    session: *const AgentSession,
+    request: compaction.SummaryRequest,
+) !void {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try transcript.append(allocator, .{ .user_text = request.user_prompt });
+    var config = try normalRequestConfig(session);
+    config.system_prompt = request.system_prompt;
+    config.tools_json = null;
+    config.max_output_tokens = request.max_output_tokens;
+    config.purpose = .summarization;
+    config.cache_policy = .disabled;
+    _ = try requestBudgetForConfig(allocator, config, &transcript, null, true);
+}
+
+fn requestBudgetForConfig(
+    allocator: std.mem.Allocator,
+    config: model_request.Config,
+    transcript: *const transcript_mod.Transcript,
+    projection_override: ?model_request.ProjectionOverride,
+    require_hard_admission: bool,
+) !context_budget.RequestBudget {
+    var snapshot = try model_request.createSnapshot(allocator, .{
+        .config = config,
+        .transcript = transcript,
+        .projection_override = projection_override,
+        .use_projection_override = projection_override != null,
+    });
+    defer snapshot.deinit(allocator);
+    const body = switch (snapshot.config.provider) {
+        .anthropic => try anthropic_client.buildRequestBodyFromSnapshot(allocator, &snapshot),
+        .openai => try openai_client.buildRequestBodyFromSnapshot(allocator, &snapshot),
+        .local, .deepseek => try chat_completions.buildRequestBodyFromSnapshot(allocator, &snapshot),
+    };
+    defer allocator.free(body);
+    try snapshot.completePreparation(body);
+    if (require_hard_admission) try snapshot.requireHardAdmission();
+    return snapshot.budget orelse error.RequestNotPrepared;
 }
 
 /// Branch the current session: create a new session directory, copy the
@@ -2474,30 +2810,80 @@ test "compact: empty transcript returns early message" {
     try testing.expectEqual(@as(usize, 0), session.transcript.len());
 }
 
+const test_compaction_summary =
+    "## Goal\nContinue the implementation\n\n" ++
+    "## Constraints & Preferences\n- Preserve raw proof history\n\n" ++
+    "## Progress\n### Done\n- [x] Older work summarized\n\n" ++
+    "### In Progress\n- [ ] Continue recent work\n\n" ++
+    "### Blocked\n- None\n\n" ++
+    "## Key Decisions\n- Host owns checkpoints\n\n" ++
+    "## Next Steps\n1. Continue\n\n" ++
+    "## Critical Context\n- Stable entry IDs remain authoritative";
+
+const TestSummarizer = struct {
+    calls: usize = 0,
+    response: []const u8 = test_compaction_summary,
+    failure: ?anyerror = null,
+    saw_focus: bool = false,
+    saw_previous_summary: bool = false,
+
+    fn summarize(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        request: compaction.SummaryRequest,
+    ) anyerror!compaction.SummaryResponse {
+        const self: *TestSummarizer = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.saw_focus = self.saw_focus or std.mem.indexOf(u8, request.user_prompt, "<focus>") != null;
+        self.saw_previous_summary = self.saw_previous_summary or
+            std.mem.indexOf(u8, request.user_prompt, "<previous-summary>") != null;
+        if (self.failure) |failure| return failure;
+        return .{
+            .response = .{ .final_text = self.response },
+            .usage = .{ .input_tokens = 100, .output_tokens = 50 },
+        };
+    }
+
+    fn asSummarizer(self: *TestSummarizer) compaction.Summarizer {
+        return .{ .context = self, .summarize_fn = summarize };
+    }
+};
+
+fn appendCompactableHistory(allocator: std.mem.Allocator, session: *AgentSession) !void {
+    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4000 });
+    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4000 });
+    try session.transcript.append(allocator, .{ .user_text = "recent request" });
+    try session.transcript.append(allocator, .{ .model_text = "recent response" });
+}
+
 test "compact preserves raw entries and installs one active projection" {
-    var session = AgentSession.initStub();
+    var session = try AgentSession.initAnthropic(testing.allocator, "test-key", "test system", null);
     defer session.deinit(testing.allocator);
-    var registry: Registry = .{};
-    defer registry.deinit(testing.allocator);
-
-    const r1 = try runOneTurn(testing.allocator, &session, &registry, "first turn", null);
-    defer testing.allocator.free(r1);
-    const r2 = try runOneTurn(testing.allocator, &session, &registry, "second turn", null);
-    defer testing.allocator.free(r2);
+    try appendCompactableHistory(testing.allocator, &session);
     const before_len = session.transcript.len();
-    try testing.expect(before_len >= 2);
+    var summarizer: TestSummarizer = .{};
 
-    const msg = try compact(testing.allocator, &session);
-    defer testing.allocator.free(msg);
+    const result = try compactDetailed(
+        testing.allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        "focus on continuation safety",
+        false,
+    );
+    try testing.expect(result == .compacted);
 
     try testing.expectEqual(before_len, session.transcript.len());
     const projection = session.transcript.projection orelse return error.TestExpectedProjection;
-    try testing.expect(std.mem.indexOf(u8, projection.summary, "first turn") != null);
-    try testing.expect(std.mem.indexOf(u8, projection.summary, "[COMPACTED CONVERSATION HISTORY]") != null);
-    try testing.expectEqual(session.transcript.nextEntryId(), projection.first_kept_entry_id);
-    try testing.expectEqual(before_len, try session.transcript.activeStartIndex());
-    try testing.expect(std.mem.indexOf(u8, msg, "Compacted") != null);
+    try testing.expect(std.mem.indexOf(u8, projection.summary, "## Critical Context") != null);
+    try testing.expect(std.mem.indexOf(u8, projection.summary, "<read-files>") != null);
+    try testing.expectEqual(@as(transcript_mod.EntryId, 3), projection.first_kept_entry_id);
+    try testing.expectEqual(@as(usize, 2), try session.transcript.activeStartIndex());
+    try testing.expectEqual(@as(usize, 1), summarizer.calls);
+    try testing.expect(summarizer.saw_focus);
     try testing.expectEqual(@as(usize, 0), session.last_persisted_len);
+    try testing.expectEqual(@as(u64, 100), session.summary_token_totals.input_tokens);
 }
 
 test "compact checkpoint survives immediate session close and resume" {
@@ -2508,6 +2894,10 @@ test "compact checkpoint survives immediate session close and resume" {
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions.restore(allocator);
+    var api_key = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-key");
+    defer api_key.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
 
     const SourceProjection = struct {
         session_id: []u8,
@@ -2515,16 +2905,24 @@ test "compact checkpoint survives immediate session close and resume" {
         history_bytes: u64,
     };
     const source_projection: SourceProjection = blk: {
-        var source = try initFromEnvWithSessionConfig(allocator, null, .{
+        var source = try initFromEnvWithSessionConfig(allocator, &registry, .{
             .no_context_files = true,
             .provider = .anthropic,
             .model = "claude-opus-4-8",
         });
         defer source.deinit(allocator);
-        try source.transcript.append(allocator, .{ .user_text = "durable request" });
-        try source.transcript.append(allocator, .{ .model_text = "durable answer" });
-        const msg = try compact(allocator, &source);
-        defer allocator.free(msg);
+        try appendCompactableHistory(allocator, &source);
+        var summarizer: TestSummarizer = .{};
+        const result = try compactDetailed(
+            allocator,
+            &source,
+            summarizer.asSummarizer(),
+            .{},
+            .manual,
+            null,
+            false,
+        );
+        try testing.expect(result == .compacted);
         var snapshot = try model_request.createSnapshot(allocator, .{
             .config = .{
                 .provider = .anthropic,
@@ -2548,9 +2946,9 @@ test "compact checkpoint survives immediate session close and resume" {
         .session_id = source_projection.session_id,
     });
     defer resumed.deinit(allocator);
-    try testing.expectEqual(@as(usize, 2), resumed.transcript.len());
+    try testing.expectEqual(@as(usize, 4), resumed.transcript.len());
     const projection = resumed.transcript.projection orelse return error.TestExpectedProjection;
-    try testing.expect(std.mem.indexOf(u8, projection.summary, "durable request") != null);
+    try testing.expect(std.mem.indexOf(u8, projection.summary, "## Goal") != null);
     try testing.expectEqual(@as(transcript_mod.EntryId, 3), projection.first_kept_entry_id);
 
     var resumed_snapshot = try model_request.createSnapshot(allocator, .{
@@ -2568,14 +2966,186 @@ test "compact checkpoint survives immediate session close and resume" {
 }
 
 test "compact checkpoint write failure leaves the active projection unchanged" {
-    var session = AgentSession.initStub();
+    var session = try AgentSession.initAnthropic(testing.allocator, "test-key", "test system", null);
     defer session.deinit(testing.allocator);
-    try session.transcript.append(testing.allocator, .{ .user_text = "must remain active" });
+    try appendCompactableHistory(testing.allocator, &session);
     session.events_path = try testing.allocator.dupe(u8, "/nonexistent/zttp-events/checkpoint.jsonl");
+    var summarizer: TestSummarizer = .{};
 
-    try testing.expectError(error.FileOpenFailed, compact(testing.allocator, &session));
+    const result = try compactDetailed(
+        testing.allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expectEqual(error.FileOpenFailed, result.failed);
     try testing.expect(session.transcript.projection == null);
-    try testing.expectEqual(@as(usize, 1), session.transcript.len());
+    try testing.expectEqual(@as(usize, 4), session.transcript.len());
+}
+
+const test_summary_tool_calls = [_]turn.ToolCall{.{
+    .id = "summary_tool",
+    .name = "workspace_read_file",
+    .args_json = "{}",
+}};
+
+const ToolCallingSummarizer = struct {
+    fn summarize(
+        _: *anyopaque,
+        _: std.mem.Allocator,
+        _: compaction.SummaryRequest,
+    ) anyerror!compaction.SummaryResponse {
+        return .{ .response = .{ .tool_calls = &test_summary_tool_calls } };
+    }
+};
+
+test "compact fails closed on malformed tool-calling and provider-error summaries" {
+    const allocator = testing.allocator;
+
+    var malformed_session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer malformed_session.deinit(allocator);
+    try appendCompactableHistory(allocator, &malformed_session);
+    var malformed: TestSummarizer = .{ .response = "## Goal\nmissing required sections" };
+    const malformed_result = try compactDetailed(
+        allocator,
+        &malformed_session,
+        malformed.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expectEqual(error.MalformedSummary, malformed_result.failed);
+    try testing.expect(malformed_session.transcript.projection == null);
+    try testing.expectEqual(@as(u64, 100), malformed_session.summary_token_totals.input_tokens);
+
+    var tool_session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer tool_session.deinit(allocator);
+    try appendCompactableHistory(allocator, &tool_session);
+    var tool_context: u8 = 0;
+    const tool_result = try compactDetailed(
+        allocator,
+        &tool_session,
+        .{ .context = &tool_context, .summarize_fn = ToolCallingSummarizer.summarize },
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expectEqual(error.SummaryReturnedToolCall, tool_result.failed);
+    try testing.expect(tool_session.transcript.projection == null);
+
+    var provider_session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer provider_session.deinit(allocator);
+    try appendCompactableHistory(allocator, &provider_session);
+    var provider: TestSummarizer = .{ .failure = error.TestSummaryProviderFailure };
+    const provider_result = try compactDetailed(
+        allocator,
+        &provider_session,
+        provider.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expectEqual(error.TestSummaryProviderFailure, provider_result.failed);
+    try testing.expect(provider_session.transcript.projection == null);
+    try testing.expectEqual(@as(u64, 0), provider_session.summary_token_totals.input_tokens);
+}
+
+const SplitSummarizer = struct {
+    calls: usize = 0,
+
+    fn summarize(
+        context: *anyopaque,
+        _: std.mem.Allocator,
+        request: compaction.SummaryRequest,
+    ) anyerror!compaction.SummaryResponse {
+        const self: *SplitSummarizer = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        if (!std.mem.eql(u8, request.system_prompt, compaction.prefix_system_prompt)) {
+            return error.TestExpectedPrefixPrompt;
+        }
+        if (request.max_output_tokens != 4096) return error.TestExpectedSummaryAllowance;
+        return .{
+            .response = .{ .final_text = "## Original Request\nInspect and continue\n\n" ++
+                "## Early Progress\nRead planning context\n\n" ++
+                "## Context for Suffix\nThe retained tool call must run next" },
+            .usage = .{ .input_tokens = 80, .output_tokens = 30 },
+        };
+    }
+
+    fn asSummarizer(self: *SplitSummarizer) compaction.Summarizer {
+        return .{ .context = self, .summarize_fn = summarize };
+    }
+};
+
+test "compact splits one oversized turn before a closed tool pair" {
+    const allocator = testing.allocator;
+    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "inspect and continue" });
+    try session.transcript.append(allocator, .{ .model_text = "early work " ** 10_000 });
+    const calls = [_]turn.ToolCall{.{
+        .id = "call_1",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+    }};
+    try session.transcript.append(allocator, .{ .assistant_tool_use = &calls });
+    try session.transcript.append(allocator, .{ .tool_result = .{
+        .tool_use_id = "call_1",
+        .tool_name = "workspace_read_file",
+        .ok = true,
+        .llm_text = "retained result",
+    } });
+    try session.transcript.append(allocator, .{ .model_text = "retained continuation" });
+    var summarizer: SplitSummarizer = .{};
+    const result = try compactDetailed(
+        allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expect(result == .compacted);
+    try testing.expectEqual(@as(usize, 1), summarizer.calls);
+    const projection = session.transcript.projection orelse return error.TestExpectedProjection;
+    try testing.expectEqual(@as(transcript_mod.EntryId, 3), projection.first_kept_entry_id);
+    try testing.expect(std.mem.indexOf(u8, projection.summary, "## Original Request") != null);
+    try testing.expectEqual(@as(usize, 0), projection.read_files.len);
+    try testing.expect(session.transcript.at(2).* == .assistant_tool_use);
+    try testing.expect(session.transcript.at(3).* == .tool_result);
+}
+
+test "compact rejects an oversized standalone summary request before the effect" {
+    const allocator = testing.allocator;
+    var session = try AgentSession.initAnthropic(allocator, "test-key", "test system", null);
+    defer session.deinit(allocator);
+    const large = try allocator.alloc(u8, 400 * 1024);
+    defer allocator.free(large);
+    @memset(large, 'x');
+    try session.transcript.append(allocator, .{ .user_text = large });
+    try session.transcript.append(allocator, .{ .model_text = large });
+    try session.transcript.append(allocator, .{ .user_text = "recent" });
+    try session.transcript.append(allocator, .{ .model_text = "keep" });
+    var summarizer: TestSummarizer = .{};
+    const result = try compactDetailed(
+        allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expectEqual(error.RequestTooLarge, result.failed);
+    try testing.expectEqual(@as(usize, 0), summarizer.calls);
+    try testing.expect(session.transcript.projection == null);
 }
 
 test "fork: ephemeral session returns error message" {
@@ -2595,19 +3165,44 @@ test "fork copies raw ancestry and projection checkpoints before independent div
     defer allocator.free(sessions_dir);
     var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
     defer sessions.restore(allocator);
+    var api_key = try EnvOverride.set(allocator, "ANTHROPIC_API_KEY", "test-key");
+    defer api_key.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
 
-    var session = try initFromEnvWithSessionConfig(allocator, null, .{
+    var session = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_context_files = true,
         .provider = .anthropic,
         .model = "claude-opus-4-8",
     });
     defer session.deinit(allocator);
-    try session.transcript.append(allocator, .{ .user_text = "ancestor" });
-    try session.transcript.append(allocator, .{ .model_text = "answer" });
-    const compacted = try compact(allocator, &session);
-    defer allocator.free(compacted);
-    const repeated = try compact(allocator, &session);
-    defer allocator.free(repeated);
+    var summarizer: TestSummarizer = .{};
+    try appendCompactableHistory(allocator, &session);
+    const first = try compactDetailed(
+        allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expect(first == .compacted);
+    try session.transcript.append(allocator, .{ .user_text = "next old request " ** 4000 });
+    try session.transcript.append(allocator, .{ .model_text = "next old response " ** 4000 });
+    try session.transcript.append(allocator, .{ .user_text = "newest request" });
+    try session.transcript.append(allocator, .{ .model_text = "newest response" });
+    const repeated = try compactDetailed(
+        allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expect(repeated == .compacted);
+    try testing.expect(summarizer.saw_previous_summary);
 
     const source_events_path = try allocator.dupe(u8, session.events_path orelse return error.TestExpectedEvents);
     defer allocator.free(source_events_path);
@@ -2622,9 +3217,17 @@ test "fork copies raw ancestry and projection checkpoints before independent div
     try testing.expectEqualSlices(u8, source_before, fork_before);
     try testing.expect(session.transcript.projection != null);
 
-    try session.transcript.append(allocator, .{ .user_text = "fork-only" });
-    const compacted_again = try compact(allocator, &session);
-    defer allocator.free(compacted_again);
+    try appendCompactableHistory(allocator, &session);
+    const compacted_again = try compactDetailed(
+        allocator,
+        &session,
+        summarizer.asSummarizer(),
+        .{},
+        .manual,
+        null,
+        false,
+    );
+    try testing.expect(compacted_again == .compacted);
     const source_after = try zts.file_io.readFile(allocator, source_events_path, 1024 * 1024);
     defer allocator.free(source_after);
     try testing.expectEqualSlices(u8, source_before, source_after);
