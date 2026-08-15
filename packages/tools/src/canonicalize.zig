@@ -2081,8 +2081,8 @@ fn isCanonicalBandCode(code: []const u8) bool {
     return zts.PolicyCatalog.isCanonicalProfileCode(code);
 }
 
-/// JSX and TSX sources are outside the formatter's coverage: a bare tokenizer
-/// run is not in JSX mode, so element text would be re-read as code.
+/// Authored TSX is outside the source-preserving formatter's coverage because
+/// element text has no representation in the core token stream.
 fn isJsxLike(path: []const u8) bool {
     return zts.classifySourcePath(path) == .tsx;
 }

@@ -1,4 +1,4 @@
-//! Intermediate Representation for JavaScript/JSX
+//! Intermediate Representation for core JavaScript syntax.
 //!
 //! A lightweight IR that captures scope information for proper closure support.
 //! Expressions are tree-structured; statements are linearized.
@@ -220,14 +220,6 @@ pub const NodeTag = enum(u8) {
     pattern_rest,
     pattern_default,
 
-    // JSX
-    jsx_element,
-    jsx_fragment,
-    jsx_text,
-    jsx_expr_container,
-    jsx_attribute,
-    jsx_spread_attribute,
-
     // Module
     import_decl,
     import_specifier,
@@ -336,15 +328,6 @@ pub const Node = struct {
 
         // Block/program/list
         block: BlockData,
-
-        // JSX element
-        jsx_element: JsxElement,
-
-        // JSX attribute
-        jsx_attr: JsxAttr,
-
-        // JSX text
-        jsx_text: u16, // string constant index
 
         // Import declaration
         import_decl: ImportDecl,
@@ -533,22 +516,6 @@ pub const Node = struct {
         stmts_start: NodeIndex,
         stmts_count: u16,
         scope_id: ScopeId, // null_scope if block doesn't create scope
-    };
-
-    pub const JsxElement = struct {
-        tag_atom: u16, // 0 for fragment
-        is_component: bool, // Uppercase = component reference
-        props_start: NodeIndex,
-        props_count: u8,
-        children_start: NodeIndex,
-        children_count: u8,
-        self_closing: bool,
-    };
-
-    pub const JsxAttr = struct {
-        name_atom: u16,
-        value: NodeIndex, // null_node for boolean attrs like `disabled`
-        is_spread: bool, // {...props}
     };
 
     pub const ImportDecl = struct {
@@ -1340,34 +1307,6 @@ pub const IRStore = struct {
                 break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
             },
 
-            // --- JSX ---
-            .jsx_element, .jsx_fragment => blk: {
-                const j = node.data.jsx_element;
-                // Store in extra: [tag_atom, props_start, props_count, children_start, children_count | flags]
-                const flags = (@as(u32, j.children_count) << 8) |
-                    (@as(u32, if (j.is_component) 1 else 0)) |
-                    (@as(u32, if (j.self_closing) 1 else 0) << 1);
-                const extra_start = try self.addExtra(&.{
-                    j.tag_atom,
-                    j.props_start,
-                    j.props_count,
-                    j.children_start,
-                    flags,
-                });
-                break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
-            },
-            .jsx_attribute => blk: {
-                const a = node.data.jsx_attr;
-                const b_val = @as(u32, @as(u24, @truncate(a.value))) | (@as(u32, if (a.is_spread) 1 else 0) << 24);
-                break :blk self.addNode(.jsx_attribute, loc, .{ .a = a.name_atom, .b = b_val });
-            },
-            .jsx_spread_attribute => blk: {
-                const a = node.data.jsx_attr;
-                break :blk self.addNode(.jsx_spread_attribute, loc, .{ .a = a.value, .b = 0 });
-            },
-            .jsx_text => self.addNode(.jsx_text, loc, .{ .a = node.data.jsx_text, .b = 0 }),
-            .jsx_expr_container => self.addNode(.jsx_expr_container, loc, .{ .a = node.data.opt_value orelse null_node, .b = 0 }),
-
             // --- Imports/Exports ---
             .import_decl => blk: {
                 const i = node.data.import_decl;
@@ -1529,7 +1468,6 @@ pub const IRStore = struct {
                 .yield_expr,
                 .await_expr,
                 .template_part_expr,
-                .jsx_expr_container,
                 => .{ .opt_value = if (d.a == null_node) null else d.a },
                 .block, .program => .{ .block = .{
                     .stmts_start = d.a,
@@ -2280,55 +2218,6 @@ pub const IrView = struct {
                     .error_expr = d.b,
                 };
             },
-        };
-    }
-
-    // ============ JSX Accessors ============
-
-    /// Get JSX element data
-    pub fn getJsxElement(self: IrView, idx: NodeIndex) ?Node.JsxElement {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.jsx_element else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                const flags = extra[extra_start + 4];
-                break :blk .{
-                    .tag_atom = @truncate(extra[extra_start]),
-                    .is_component = (flags & 1) != 0,
-                    .props_start = extra[extra_start + 1],
-                    .props_count = @truncate(extra[extra_start + 2]),
-                    .children_start = extra[extra_start + 3],
-                    .children_count = @truncate(extra[extra_start + 4] >> 8),
-                    .self_closing = (flags >> 1) & 1 != 0,
-                };
-            },
-        };
-    }
-
-    /// Get JSX attribute data
-    pub fn getJsxAttr(self: IrView, idx: NodeIndex) ?Node.JsxAttr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.jsx_attr else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .name_atom = @truncate(d.a),
-                    .value = @truncate(d.b),
-                    .is_spread = (d.b >> 24) != 0,
-                };
-            },
-        };
-    }
-
-    /// Get JSX text index
-    pub fn getJsxText(self: IrView, idx: NodeIndex) ?u16 {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.jsx_text else null,
-            .ir_store => |ir| if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null,
         };
     }
 

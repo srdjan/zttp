@@ -1,7 +1,7 @@
-//! Unified Tokenizer for JavaScript and JSX
+//! Tokenizer for the core JavaScript syntax consumed by the ZTS parser.
 //!
-//! Single-pass tokenizer with JSX mode support, column tracking,
-//! and lookahead for arrow function detection.
+//! Single-pass tokenization with column tracking and lookahead for arrow
+//! function detection. TSX is lowered before this module receives source.
 
 const std = @import("std");
 const token = @import("token.zig");
@@ -17,12 +17,6 @@ pub const Tokenizer = struct {
     pos: u32,
     line: u32,
     line_start: u32,
-
-    /// JSX parsing mode
-    jsx_mode: bool,
-
-    /// Stack for tracking JSX depth (for nested elements)
-    jsx_depth: u16,
 
     /// Whether we just saw a token that could precede a regex
     can_be_regex: bool,
@@ -46,8 +40,6 @@ pub const Tokenizer = struct {
             .pos = 0,
             .line = 1,
             .line_start = 0,
-            .jsx_mode = false,
-            .jsx_depth = 0,
             .can_be_regex = true,
             .template_depth = 0,
             .subst_brace_depths = [_]u8{0} ** 16,
@@ -650,11 +642,6 @@ pub const Tokenizer = struct {
             => true,
             else => false,
         };
-    }
-
-    /// Enable JSX mode
-    pub fn enableJsx(self: *Tokenizer) void {
-        self.jsx_mode = true;
     }
 
     /// Save state for lookahead

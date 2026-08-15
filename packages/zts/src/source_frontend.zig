@@ -1,9 +1,9 @@
 //! One source-preparation boundary for every parser consumer.
 //!
-//! This module owns extension classification, TypeScript stripping, JSX-mode
-//! selection, the parser input, and the source-position view. Callers still
+//! This module owns extension classification, TypeScript stripping, TSX
+//! lowering, the parser input, and the source-position view. Callers still
 //! choose their parser and semantic options, but they cannot independently
-//! decide which bytes or syntax mode that parser sees.
+//! decide which bytes the core parser sees.
 
 const std = @import("std");
 const stripper = @import("stripper.zig");

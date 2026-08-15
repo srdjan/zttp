@@ -797,16 +797,6 @@ pub const StrictChecker = struct {
                 self.checkFunctionParams(node);
                 if (self.ir_view.getFunction(node)) |func| self.walkStmt(func.body);
             },
-            .jsx_element => {
-                const jsx = self.ir_view.getJsxElement(node) orelse return;
-                for (0..jsx.props_count) |i| {
-                    const attr_idx = self.ir_view.getListIndex(jsx.props_start, @intCast(i));
-                    if (self.ir_view.getJsxAttr(attr_idx)) |attr| self.walkExpr(attr.value);
-                }
-                for (0..jsx.children_count) |i| {
-                    self.walkExpr(self.ir_view.getListIndex(jsx.children_start, @intCast(i)));
-                }
-            },
             else => {},
         }
     }

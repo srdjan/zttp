@@ -20,13 +20,10 @@
 //! string, template, or regex logic to avoid mistaking `"// not a comment"` for
 //! a comment - the tokenizer already put that inside a token.
 //!
-//! One limitation, named rather than left to be discovered: a bare tokenizer
-//! run is not in JSX mode, since only the parser turns that on. Inside JSX
-//! text, `//` lexes as two operators and the bytes after it are ordinary
-//! tokens, so a comment marker in element text is not mistaken for a comment -
-//! but the text itself is tokenized as code, and a gap inside it is reported
-//! as whitespace. No layout rule reads JSX text yet; the printer will need its
-//! own answer when it covers JSX.
+//! One limitation, named rather than left to be discovered: authored TSX is
+//! lowered before core parsing, while this source-preserving pass sees the raw
+//! bytes. Element text would be tokenized as code and gaps inside it reported
+//! as whitespace, so the printer refuses TSX before collecting trivia.
 
 const std = @import("std");
 const token = @import("token.zig");

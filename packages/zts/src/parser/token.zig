@@ -1,10 +1,10 @@
-//! Token definitions for the JavaScript/JSX parser
+//! Token definitions for the core JavaScript syntax parser.
 //!
 //! Enhanced tokens with full source location tracking for better error messages.
 
 const std = @import("std");
 
-/// Token types for JavaScript and JSX
+/// Token types for core JavaScript syntax.
 pub const TokenType = enum(u8) {
     // Literals
     number,

@@ -385,6 +385,15 @@ test "legacy Parser API getImports returns imported names" {
     try std.testing.expectEqualStrings("base64Encode", imports[0].specifier_names[1]);
 }
 
+test "core parser rejects raw JSX element syntax" {
+    var parser = try JsParser.init(std.testing.allocator, "const view = <div />;");
+    defer parser.deinit();
+
+    try std.testing.expectError(error.UnexpectedToken, parser.parse());
+    try std.testing.expect(parser.hasErrors());
+    try std.testing.expectEqual(ErrorKind.unexpected_token, parser.getErrors()[0].kind);
+}
+
 test "var keyword is rejected with helpful error" {
     const allocator = std.testing.allocator;
     var strings = string.StringTable.init(allocator);

@@ -106,10 +106,6 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
         .too_many_upvalues => "ZTS030",
         .too_many_constants => "ZTS031",
         .jump_too_large => "ZTS032",
-        .mismatched_jsx_tag => "ZTS033",
-        .invalid_jsx_attribute => "ZTS034",
-        .unclosed_jsx_element => "ZTS035",
-        .jsx_expression_expected => "ZTS036",
         .invalid_import => "ZTS037",
         .invalid_export => "ZTS038",
         .duplicate_export => "ZTS039",
@@ -228,18 +224,26 @@ pub fn fromUnsupportedSourceExtension(file: []const u8) JsonDiagnostic {
     };
 }
 
+fn prepareSourceErrorCode(kind: zts.PrepareSourceDiagnosticKind) []const u8 {
+    return switch (kind) {
+        .mismatched_tag => "ZTS033",
+        .invalid_attribute => "ZTS034",
+        .unclosed_element => "ZTS035",
+        .expression_expected => "ZTS036",
+    };
+}
+
 pub fn fromPrepareSourceDiagnostic(diagnostic: zts.PrepareSourceDiagnostic, file: []const u8) JsonDiagnostic {
-    const Detail = struct { code: []const u8, message: []const u8 };
-    const detail: Detail = switch (diagnostic.kind) {
-        .mismatched_tag => .{ .code = "ZTS033", .message = "mismatched JSX closing tag" },
-        .invalid_attribute => .{ .code = "ZTS034", .message = "invalid JSX attribute" },
-        .unclosed_element => .{ .code = "ZTS035", .message = "unclosed JSX element" },
-        .expression_expected => .{ .code = "ZTS036", .message = "JSX expression expected" },
+    const message = switch (diagnostic.kind) {
+        .mismatched_tag => "mismatched JSX closing tag",
+        .invalid_attribute => "invalid JSX attribute",
+        .unclosed_element => "unclosed JSX element",
+        .expression_expected => "JSX expression expected",
     };
     return .{
-        .code = detail.code,
+        .code = prepareSourceErrorCode(diagnostic.kind),
         .severity = "error",
-        .message = detail.message,
+        .message = message,
         .file = file,
         .line = diagnostic.line,
         .column = diagnostic.column,
@@ -1253,6 +1257,7 @@ test "every diagnostic code names exactly one diagnostic" {
     const mappers = .{
         .{ ErrorKind, parserErrorCode },
         .{ zts.StripDiagnosticKind, stripErrorCode },
+        .{ zts.PrepareSourceDiagnosticKind, prepareSourceErrorCode },
     };
 
     inline for (mappers) |mapper| {

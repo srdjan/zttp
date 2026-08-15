@@ -1089,9 +1089,8 @@ The source frontend is now one owned boundary, and file identity is explicit:
 `.jsx`, and unknown extensions fail with ZTS052. Valid TSX is lowered to
 ordinary `h(...)` calls before parsing; its offset map composes with TypeScript
 stripping, so both malformed-tag diagnostics and later core diagnostics point
-back to the authored file. The old JSX IR remains only as dead compatibility
-machinery for one removal commit; no file-backed compiler or runtime path
-selects it.
+back to the authored file. The core tokenizer, parser, IR, checkers, and
+bytecode generator no longer contain a JSX mode or JSX-specific nodes.
 
 **Owed, and this is the debt the cutover has been accumulating toward.** The
 recorded codegen cassettes are pre-cutover model output and 10 of the 19 cases

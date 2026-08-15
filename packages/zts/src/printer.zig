@@ -51,8 +51,8 @@ pub const Error = error{ UnprintableConstruct, OutOfMemory };
 /// the file alone; widening coverage is driven by which of these the corpus
 /// produces.
 pub const Refusal = enum {
-    /// JSX and TSX: a bare tokenizer run is not in JSX mode, so element text
-    /// would be re-tokenized as code.
+    /// Authored TSX is lowered before core parsing. This source-preserving
+    /// printer has no TSX grammar, so it cannot safely re-tokenize element text.
     jsx_source,
     /// A CR in the source. Line endings are LF here and a printer that
     /// normalized them would be rewriting bytes it was not asked about.
@@ -92,7 +92,7 @@ pub const Refusal = enum {
 };
 
 pub const Options = struct {
-    /// True for `.tsx` and `.jsx` sources, which are refused.
+    /// True for `.tsx` sources, which are refused.
     jsx: bool = false,
     /// The soft target. A line with no break point may exceed it.
     width: u32 = 80,

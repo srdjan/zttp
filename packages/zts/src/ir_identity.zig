@@ -555,12 +555,6 @@ const Comparer = struct {
             .object_getter,
             .object_setter,
             .pattern_default,
-            .jsx_element,
-            .jsx_fragment,
-            .jsx_text,
-            .jsx_expr_container,
-            .jsx_attribute,
-            .jsx_spread_attribute,
             .import_default,
             .import_namespace,
             .export_specifier,
@@ -758,7 +752,7 @@ test "the constructs the unmodeled arm names cannot reach this file" {
     }
 
     // The alphabet pin, read off the enum rather than off a list beside it.
-    try testing.expectEqual(@as(usize, 82), std.enums.values(NodeTag).len);
+    try testing.expectEqual(@as(usize, 76), std.enums.values(NodeTag).len);
 }
 
 /// One source exercising every form a handler is written in, used twice below:

@@ -60,12 +60,6 @@ pub const ErrorKind = enum {
     jump_too_large,
     nesting_too_deep,
 
-    // JSX errors
-    mismatched_jsx_tag,
-    invalid_jsx_attribute,
-    unclosed_jsx_element,
-    jsx_expression_expected,
-
     // Module errors
     invalid_import,
     invalid_export,

@@ -1493,37 +1493,6 @@ pub const FlowChecker = struct {
                 return labels;
             },
 
-            .jsx_element, .jsx_fragment => {
-                // A JSX tree carries the union of every taint interpolated into
-                // its attribute values and children. renderToString embeds these
-                // verbatim into the HTML body, so a secret in a prop or child
-                // leaks even though the markup HTML-escapes it.
-                const el = self.ir_view.getJsxElement(node) orelse return LabelSet.empty;
-                var labels = LabelSet.empty;
-                var p: u16 = 0;
-                while (p < el.props_count) : (p += 1) {
-                    const prop_idx = self.ir_view.getListIndex(el.props_start, p);
-                    const prop_tag = self.ir_view.getTag(prop_idx) orelse continue;
-                    if (prop_tag == .jsx_attribute or prop_tag == .jsx_spread_attribute) {
-                        const attr = self.ir_view.getJsxAttr(prop_idx) orelse continue;
-                        if (attr.value != null_node) {
-                            labels = LabelSet.merge(labels, self.inferLabels(attr.value));
-                        }
-                    }
-                }
-                var c: u16 = 0;
-                while (c < el.children_count) : (c += 1) {
-                    const child_idx = self.ir_view.getListIndex(el.children_start, c);
-                    labels = LabelSet.merge(labels, self.inferLabels(child_idx));
-                }
-                return labels;
-            },
-
-            .jsx_expr_container => {
-                if (self.ir_view.getOptValue(node)) |expr| return self.inferLabels(expr);
-                return LabelSet.empty;
-            },
-
             // A closure passed as a value carries what calling it would
             // produce. Without this arm `["a"].map(() => env("SECRET_KEY"))`
             // unions an empty set for the callback and the secret rides out in
@@ -1536,7 +1505,8 @@ pub const FlowChecker = struct {
             // exhaustive: the empty set here means "carries no label", and the
             // arms above cover every expression that can hold one - literals,
             // identifiers, calls, operators, both literal containers, member and
-            // computed reads, templates, match, spread, and JSX. A new
+            // computed reads, templates, match, spread, and lowered `h` calls.
+            // A new
             // expression kind would land here silently, so adding one means
             // visiting this arm.
             else => return LabelSet.empty,
