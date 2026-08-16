@@ -1131,10 +1131,6 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
         ) catch "launch identity override applied and persisted\n";
         _ = std.c.write(std.c.STDOUT_FILENO, override_line.ptr, override_line.len);
     }
-
-    if (agent.policyDriftNote(session)) |note| {
-        _ = std.c.write(std.c.STDOUT_FILENO, note.ptr, note.len);
-    }
 }
 
 fn approveEdit(preview: loop.ApprovalPreview) !bool {

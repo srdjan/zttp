@@ -206,8 +206,7 @@ A new root under `packages/tools/` or `packages/pi/` is a row in the
 `host_test_roots` table in `build.zig`, which creates its named step and adds
 it to the aggregate in one place. Set `project_config` when the root resolves a
 project SQL schema through the shared `project_config` module, and `pi_modules`
-when it consumes the shared tool cores through the `zts_cli` and
-`zts_expert_skill` named modules.
+when it consumes the shared tool cores through the `zts_cli` named module.
 
 Reaching a new `zts` internal module from `runtime`, `tools`, `pi`, or
 `proof-review` also needs a row in `scripts/module-boundary.allow`, and a row

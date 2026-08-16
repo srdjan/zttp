@@ -85,12 +85,13 @@ pub const operations = [_]OperationSpec{
     .{ .op = .meta, .status = .implemented, .input_fields = &.{"view"}, .payload_fields = &.{
         "compiler_version",        "profile_id",            "policy_version",
         "policy_hash",             "grammar_hash",          "idiom_table_hash",
-        "restriction_matrix_hash", "builtin_registry_hash", "operations",
-        "error_codes",             "severities",            "idioms",
-        "limits",                  "module_catalog",        "deferred_sections",
-        "validators",              "verifiers",             "ambient_names",
-        "type_serialization",      "grammar",               "source_frontends",
-        "examples",                "decisions",
+        "restriction_matrix_hash", "builtin_registry_hash", "example_registry_hash",
+        "operations",              "error_codes",           "severities",
+        "idioms",                  "limits",                "module_catalog",
+        "deferred_sections",       "validators",            "verifiers",
+        "ambient_names",           "type_serialization",    "grammar",
+        "source_frontends",        "examples",              "module_examples",
+        "decisions",
     } },
     .{ .op = .features, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"features"} },
     .{ .op = .restrictions, .status = .implemented, .input_fields = &.{}, .payload_fields = &.{"restrictions"} },
@@ -192,6 +193,10 @@ pub fn schemaHash() [64]u8 {
         schemaHashField(&hasher, "error-code", field.name);
     }
     return std.fmt.bytesToHex(hasher.finalResult(), .lower);
+}
+
+pub fn exampleRegistryHash() [64]u8 {
+    return example_registry.catalogHash();
 }
 
 fn schemaHashField(hasher: *std.crypto.hash.sha2.Sha256, label: []const u8, value: []const u8) void {
@@ -791,6 +796,8 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(&zts.restrictionMatrixHash());
     try json.objectField("builtin_registry_hash");
     try json.write(&moduleMetadata.builtinRegistryHash());
+    try json.objectField("example_registry_hash");
+    try json.write(&example_registry.catalogHash());
     try json.objectField("source_frontends");
     try writeSourceFrontends(json, false);
     try json.objectField("operations");
@@ -841,6 +848,8 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.write(&zts.restrictionMatrixHash());
     try json.objectField("builtin_registry_hash");
     try json.write(&moduleMetadata.builtinRegistryHash());
+    try json.objectField("example_registry_hash");
+    try json.write(&example_registry.catalogHash());
     try json.objectField("source_frontends");
     try writeSourceFrontends(json, true);
 
@@ -991,6 +1000,24 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
         try json.beginObject();
         try json.objectField("feature");
         try json.write(entry.feature);
+        try json.objectField("source");
+        try json.write(entry.source);
+        try json.endObject();
+    }
+    try json.endArray();
+
+    try json.objectField("module_examples");
+    try json.beginArray();
+    for (&example_registry.module_examples) |entry| {
+        try json.beginObject();
+        try json.objectField("name");
+        try json.write(entry.name);
+        try json.objectField("purpose");
+        try json.write(entry.purpose);
+        try json.objectField("modules");
+        try json.beginArray();
+        for (entry.modules) |specifier| try json.write(specifier);
+        try json.endArray();
         try json.objectField("source");
         try json.write(entry.source);
         try json.endObject();
@@ -4930,6 +4957,33 @@ test "every published example checks clean, at every severity" {
     }
 }
 
+test "every published module example checks clean and names live modules" {
+    const a = testing.allocator;
+    try testing.expect(example_registry.module_examples.len > 0);
+    for (&example_registry.module_examples) |entry| {
+        for (entry.modules) |specifier| {
+            var found = false;
+            for (zts.builtinModules) |binding| {
+                if (std.mem.eql(u8, binding.specifier, specifier)) found = true;
+            }
+            if (!found) {
+                std.debug.print("module example {s} names unknown module {s}\n", .{ entry.name, specifier });
+                return error.UnknownExampleModule;
+            }
+        }
+
+        var result = try precompile.runCheckOnlyFromSource(a, entry.source, "module-example.ts", null, true, null, false);
+        defer result.deinit(a);
+        for (result.json_diagnostics.items) |diag| {
+            std.debug.print(
+                "module example {s} reports {s} ({s}): {s}\n",
+                .{ entry.name, diag.code, diag.severity, diag.message },
+            );
+        }
+        try testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    }
+}
+
 test "every published example exercises the form it names" {
     // A clean example that no longer contains its form still checks clean, so
     // legality alone would let an edit hollow one out. The evidence is read
@@ -5032,6 +5086,28 @@ test "the examples section stops being deferred" {
     }
     for (payload.get("deferred_sections").?.array.items) |section| {
         try testing.expect(!std.mem.eql(u8, section.object.get("name").?.string, "examples"));
+    }
+}
+
+test "meta publishes compiler-owned module examples exactly" {
+    const a = testing.allocator;
+    var raw: []u8 = undefined;
+    var parsed = try metaPayload(a, &raw);
+    defer a.free(raw);
+    defer parsed.deinit();
+
+    const rows = parsed.value.object.get("payload").?.object.get("module_examples").?.array;
+    try testing.expectEqual(example_registry.module_examples.len, rows.items.len);
+    for (rows.items, &example_registry.module_examples) |item, entry| {
+        const object = item.object;
+        try testing.expectEqualStrings(entry.name, object.get("name").?.string);
+        try testing.expectEqualStrings(entry.purpose, object.get("purpose").?.string);
+        try testing.expectEqualStrings(entry.source, object.get("source").?.string);
+        const modules = object.get("modules").?.array;
+        try testing.expectEqual(entry.modules.len, modules.items.len);
+        for (modules.items, entry.modules) |module, expected| {
+            try testing.expectEqualStrings(expected, module.string);
+        }
     }
 }
 

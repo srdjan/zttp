@@ -615,6 +615,12 @@ and `/new` keeps the process provider and current model. An explicit launch
 override is disclosed and persisted. To resume a session from another provider,
 restart with `--provider` and optional `--model`.
 
+Sessions also bind the stable expert persona, schema-v2 compiler registries,
+and the exact ordered model tool catalog. If any of those authorities changes,
+resume and fork refuse the stale session and leave its files untouched. Start a
+new session instead; old model reasoning is never silently restamped under the
+new protocol.
+
 `--model <id>` selects only within the active provider. It never infers or
 changes the provider. `/model` and RPC `model.set` follow the same rule and
 persist the choice atomically. Claude defaults to `claude-sonnet-4-6`; OpenAI

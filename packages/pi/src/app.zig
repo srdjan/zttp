@@ -16,43 +16,7 @@ const property_goals = @import("property_goals.zig");
 const models_registry = @import("providers/models.zig");
 const local_client = @import("providers/local/client.zig");
 const tools_common = @import("tools/common.zig");
-
-const meta_tool = @import("tools/zts_expert_meta.zig");
-const verify_paths_tool = @import("tools/zts_expert_verify_paths.zig");
-const canonicalize_tool = @import("tools/zts_expert_canonicalize.zig");
-const normalize_tool = @import("tools/zts_expert_normalize.zig");
-const describe_rule_tool = @import("tools/zts_expert_describe_rule.zig");
-const search_tool = @import("tools/zts_expert_search.zig");
-const review_patch_tool = @import("tools/zts_expert_review_patch.zig");
-const prove_patch_tool = @import("tools/zts_expert_prove_patch.zig");
-const system_proof_tool = @import("tools/zts_expert_system_proof.zig");
-const features_tool = @import("tools/zts_expert_features.zig");
-const restrictions_tool = @import("tools/zts_expert_restrictions.zig");
-const modules_tool = @import("tools/zts_expert_modules.zig");
-const verify_modules_tool = @import("tools/zts_expert_verify_modules.zig");
-const workspace_list_files_tool = @import("tools/workspace_list_files.zig");
-const workspace_read_file_tool = @import("tools/workspace_read_file.zig");
-const workspace_search_text_tool = @import("tools/workspace_search_text.zig");
-const zts_check_tool = @import("tools/zts_check.zig");
-const zig_build_step_tool = @import("tools/zig_build_step.zig");
-const zig_test_step_tool = @import("tools/zig_test_step.zig");
-const gen_tests_tool = @import("tools/gen_tests.zig");
-const pi_goal_check_tool = @import("tools/pi_goal_check.zig");
-const pi_goal_candidate_tool = @import("tools/pi_goal_candidate.zig");
-const pi_repair_plan_tool = @import("tools/pi_repair_plan.zig");
-const pi_apply_repair_plan_tool = @import("tools/pi_apply_repair_plan.zig");
-const ast_rewrite_tool = @import("tools/zts_expert_ast_rewrite.zig");
-const pi_specs_status_tool = @import("tools/pi_specs_status.zig");
-const pi_witnesses_tool = @import("tools/pi_witnesses.zig");
-const pi_remember_fact_tool = @import("tools/pi_remember_fact.zig");
-const pi_recall_facts_tool = @import("tools/pi_recall_facts.zig");
-const pi_extension_catalog_tool = @import("tools/pi_extension_catalog.zig");
-const effects_tool = @import("tools/zts_expert_effects.zig");
-const holes_tool = @import("tools/zts_expert_holes.zig");
-const fill_hole_tool = @import("tools/zts_expert_fill_hole.zig");
-const narrow_tool = @import("tools/zts_expert_narrow.zig");
-const ratchet_tool = @import("tools/zts_expert_ratchet.zig");
-const reference_tool = @import("tools/zts_expert_reference.zig");
+const tool_registry = @import("tool_registry.zig");
 
 /// Re-exported so the runtime-side witness replay implementation can
 /// share the canonical `Verdict` type and function pointer signature.
@@ -97,114 +61,10 @@ fn envHasNonBlank(name: [:0]const u8) bool {
 }
 
 const Registry = registry_mod.Registry;
-const ToolDef = registry_mod.ToolDef;
-
-/// The tool catalog, grouped by what a bundle lets the agent do rather than by
-/// which file each tool lives in. The `minimal` preset is the workspace bundle,
-/// so "read-only workspace access" is a named set instead of three names
-/// repeated in a second function that could fall out of step with the first.
-///
-/// A bundle is not an authorization boundary. That is `ToolDef.effect`, which
-/// every tool still declares for itself and which `ToolDef.allowedOn` reads.
-pub const Bundle = enum {
-    /// Read the workspace: list, read, search.
-    workspace,
-    /// Compiler analysis over handler sources and the rule registry.
-    analysis,
-    /// Run a process: the compiler, the build, the tests.
-    build,
-    /// Propose and dry-run source repairs. Nothing here writes a file.
-    repair,
-    /// Agent-owned memory: facts, witnesses, extension catalog.
-    memory,
-    /// Produce new project artifacts.
-    authoring,
-};
-
-const workspace_bundle = [_]ToolDef{
-    workspace_read_file_tool.tool,
-    workspace_list_files_tool.tool,
-    workspace_search_text_tool.tool,
-};
-
-const analysis_bundle = [_]ToolDef{
-    meta_tool.tool,
-    verify_paths_tool.tool,
-    canonicalize_tool.tool,
-    normalize_tool.tool,
-    describe_rule_tool.tool,
-    search_tool.tool,
-    review_patch_tool.tool,
-    prove_patch_tool.tool,
-    system_proof_tool.tool,
-    features_tool.tool,
-    restrictions_tool.tool,
-    modules_tool.tool,
-    verify_modules_tool.tool,
-    effects_tool.tool,
-    holes_tool.tool,
-    fill_hole_tool.tool,
-    narrow_tool.tool,
-    ratchet_tool.tool,
-    reference_tool.tool,
-};
-
-const build_bundle = [_]ToolDef{
-    zts_check_tool.tool,
-    zig_build_step_tool.tool,
-    zig_test_step_tool.tool,
-    pi_specs_status_tool.tool,
-};
-
-const repair_bundle = [_]ToolDef{
-    pi_goal_check_tool.tool,
-    pi_goal_candidate_tool.tool,
-    pi_repair_plan_tool.tool,
-    pi_apply_repair_plan_tool.tool,
-    ast_rewrite_tool.tool,
-};
-
-const memory_bundle = [_]ToolDef{
-    pi_witnesses_tool.tool,
-    pi_remember_fact_tool.tool,
-    pi_recall_facts_tool.tool,
-    pi_extension_catalog_tool.tool,
-};
-
-const authoring_bundle = [_]ToolDef{
-    gen_tests_tool.tool,
-};
-
-pub fn bundleTools(bundle: Bundle) []const ToolDef {
-    return switch (bundle) {
-        .workspace => &workspace_bundle,
-        .analysis => &analysis_bundle,
-        .build => &build_bundle,
-        .repair => &repair_bundle,
-        .memory => &memory_bundle,
-        .authoring => &authoring_bundle,
-    };
-}
-
-fn registerBundle(reg: *Registry, allocator: std.mem.Allocator, bundle: Bundle) !void {
-    for (bundleTools(bundle)) |tool| try reg.register(allocator, tool);
-}
-
-pub fn buildMinimalRegistry(allocator: std.mem.Allocator) !Registry {
-    var reg: Registry = .{};
-    errdefer reg.deinit(allocator);
-    try registerBundle(&reg, allocator, .workspace);
-    return reg;
-}
-
-pub fn buildRegistry(allocator: std.mem.Allocator) !Registry {
-    var reg: Registry = .{};
-    errdefer reg.deinit(allocator);
-    inline for (comptime std.enums.values(Bundle)) |bundle| {
-        try registerBundle(&reg, allocator, bundle);
-    }
-    return reg;
-}
+pub const Bundle = tool_registry.Bundle;
+pub const bundleTools = tool_registry.bundleTools;
+pub const buildMinimalRegistry = tool_registry.buildMinimalRegistry;
+pub const buildRegistry = tool_registry.buildRegistry;
 
 /// Long flags whose next token is a value. `zts_main.zig` consults this
 /// list so it can skip the value while scanning for stray positional args.
@@ -403,6 +263,7 @@ pub fn modeErrorMessage(err: anyerror) ?[]const u8 {
         error.UnsupportedOpenAIModelOverride => "error: ZTS_OPENAI_MODEL is no longer supported; use --provider openai --model <registered-id>\n",
         error.LegacySessionIdentity => "error: this historical session has no provider identity; resume once with --provider local|claude|openai|deepseek and optional --model\n",
         error.SchemaVersionUnsupported => "error: this session was journaled by an older schema that this build cannot read; its files are untouched under ~/.zttp/sessions, and a new session starts with `zttp expert`\n",
+        error.SessionProtocolMismatch => "error: this session was created with a different expert persona, compiler protocol, or tool catalog; start a new session with `zttp expert` instead of replaying stale authority\n",
         error.InvalidStoredProvider => "error: the stored session provider is invalid; restart with --provider and optional --model to override it\n",
         error.LocalServerUnavailable,
         error.LocalHealthNotOk,

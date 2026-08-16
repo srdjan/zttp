@@ -5,6 +5,7 @@ comptime {
     _ = @import("registry/registry.zig");
     _ = @import("tools/zts_expert_meta.zig");
     _ = @import("meta_bootstrap.zig");
+    _ = @import("tool_registry.zig");
     _ = @import("tools/zts_expert_verify_paths.zig");
     _ = @import("tools/zts_expert_canonicalize.zig");
     _ = @import("tools/zts_expert_normalize.zig");
@@ -88,6 +89,7 @@ comptime {
     _ = @import("print_mode.zig");
     _ = @import("session/paths.zig");
     _ = @import("session/events.zig");
+    _ = @import("session/protocol_identity.zig");
     _ = @import("session/persister.zig");
     _ = @import("session/reconstructor.zig");
     _ = @import("session/session_id.zig");

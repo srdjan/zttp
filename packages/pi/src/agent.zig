@@ -36,6 +36,7 @@ const expert_meta = zts_cli.expert_meta;
 const session_id_mod = @import("session/session_id.zig");
 const session_paths = @import("session/paths.zig");
 const session_events = @import("session/events.zig");
+const protocol_identity = @import("session/protocol_identity.zig");
 const persister = @import("session/persister.zig");
 const reconstructor = @import("session/reconstructor.zig");
 const project_context = @import("context/project_context.zig");
@@ -877,6 +878,18 @@ fn initFromEnvWithPreparedResume(
         if (owned_stored_meta) |*meta| stored_meta = meta;
     }
 
+    const current_protocol_hash_bytes = try protocol_identity.current(allocator, registry);
+    const current_protocol_hash = current_protocol_hash_bytes[0..];
+    const current_policy_hash_bytes = zts.policyHash();
+    const current_policy_hash = current_policy_hash_bytes[0..];
+    if (stored_meta) |meta| {
+        if (!std.mem.eql(u8, meta.protocol_hash, current_protocol_hash) or
+            !std.mem.eql(u8, meta.policy_hash, current_policy_hash))
+        {
+            return error.SessionProtocolMismatch;
+        }
+    }
+
     const resolution: ?provider_selection.Resolution = if (config.model_free)
         null
     else
@@ -1056,8 +1069,7 @@ fn initFromEnvWithPreparedResume(
     }
     try session_paths.writeWorkspacePointer(allocator, dir, realpath);
 
-    const current_hash_bytes = expert_meta.compute().policy_hash;
-    const current_hash = current_hash_bytes[0..];
+    const current_hash = current_policy_hash;
     const persisted_provider = if (resolution) |resolved|
         resolved.provider.publicName()
     else if (stored_meta) |meta|
@@ -1079,17 +1091,15 @@ fn initFromEnvWithPreparedResume(
         session.last_persisted_len = tr.len();
         session.replay_next_turn = true;
 
-        // Detect policy drift: if the resumed session's meta.json stamps a
-        // different hash than the current binary, prepend a system_note to
-        // the transcript so both the model and the user see the mismatch.
         const resume_meta = stored_meta orelse return error.MissingSessionMetadata;
-        try injectDriftNote(allocator, &session, current_hash, resume_meta);
+        restoreStoredApprovalPolicy(&session, resume_meta);
         try session_events.writeMeta(allocator, meta_path, .{
             .session_id = resume_meta.session_id,
             .workspace_realpath = resume_meta.workspace_realpath,
             .created_at_unix_ms = resume_meta.created_at_unix_ms,
             .parent_id = resume_meta.parent_id,
             .policy_hash = current_hash,
+            .protocol_hash = current_protocol_hash,
             .approval_policy = resume_meta.approval_policy,
             .provider = persisted_provider,
             .model = persisted_model,
@@ -1116,6 +1126,7 @@ fn initFromEnvWithPreparedResume(
             .created_at_unix_ms = nowUnixMs(),
             .parent_id = fork_id,
             .policy_hash = current_hash,
+            .protocol_hash = current_protocol_hash,
             .approval_policy = config.approval_policy_tag,
             .provider = persisted_provider,
             .model = persisted_model,
@@ -1129,6 +1140,7 @@ fn initFromEnvWithPreparedResume(
             .workspace_realpath = realpath,
             .created_at_unix_ms = nowUnixMs(),
             .policy_hash = current_hash,
+            .protocol_hash = current_protocol_hash,
             .approval_policy = config.approval_policy_tag,
             .provider = persisted_provider,
             .model = persisted_model,
@@ -1183,33 +1195,10 @@ fn sessionEventsExist(allocator: std.mem.Allocator, session_id: []const u8) !boo
     return zts.file_io.fileExists(allocator, events_path);
 }
 
-/// Compare the resumed session's stored policy_hash against the current
-/// binary's hash. On mismatch (or on a pre-Phase-2 session with no stamped
-/// hash), append a `system_note` to the transcript so the model is aware the
-/// reasoning in prior turns was produced under a different rule set.
-pub const POLICY_DRIFT_PREFIX = "[policy drift]";
-
-/// The policy-drift `system_note` carried by a resumed transcript, if any. The
-/// returned slice borrows from the transcript. Lets an interactive surface echo
-/// the warning to the user instead of leaving it visible only to the model.
-pub fn policyDriftNote(session: *const AgentSession) ?[]const u8 {
-    for (session.transcript.entries.items) |entry| {
-        switch (entry) {
-            .system_note => |note| {
-                if (std.mem.indexOf(u8, note, POLICY_DRIFT_PREFIX) != null) return note;
-            },
-            else => {},
-        }
-    }
-    return null;
-}
-
-fn injectDriftNote(
-    allocator: std.mem.Allocator,
+fn restoreStoredApprovalPolicy(
     session: *AgentSession,
-    current_hash: []const u8,
     meta: *const session_events.Meta,
-) !void {
+) void {
     // Restore the stored approval policy (if any) so --resume inherits it.
     // The policy tag string is parsed back to the enum; unknown tags are
     // silently ignored so old sessions without the field do not break.
@@ -1220,31 +1209,6 @@ fn injectDriftNote(
             session.stored_approval_policy = .auto_reject;
         } else if (std.mem.eql(u8, tag, "ask")) {
             session.stored_approval_policy = .ask;
-        }
-    }
-
-    // Pre-Phase-2 sessions (no saved hash) and matching hashes both skip the
-    // note; only the drift case appends + persists a system_note. All three
-    // cases leave the transcript unchanged. The caller forward-stamps the
-    // complete metadata once after this function returns.
-    if (meta.policy_hash) |saved| {
-        if (std.mem.eql(u8, saved, current_hash)) return;
-
-        const note = try std.fmt.allocPrint(
-            allocator,
-            "{s} Resumed session was created under policy_hash {s} but the current binary is {s}. Prior rule citations in this transcript may be stale against today's compiler policy.\n",
-            .{ POLICY_DRIFT_PREFIX, saved, current_hash },
-        );
-        errdefer allocator.free(note);
-        try session.transcript.entries.append(allocator, .{ .system_note = note });
-
-        if (session.events_path != null) {
-            try session.appendPersistedEntry(
-                allocator,
-                session.transcript.entryIdAt(session.transcript.entries.items.len - 1),
-                &session.transcript.entries.items[session.transcript.entries.items.len - 1],
-            );
-            session.last_persisted_len = session.transcript.len();
         }
     }
 }
@@ -1264,6 +1228,7 @@ fn restampSessionIdentity(
         .created_at_unix_ms = meta.created_at_unix_ms,
         .parent_id = meta.parent_id,
         .policy_hash = meta.policy_hash,
+        .protocol_hash = meta.protocol_hash,
         .approval_policy = meta.approval_policy,
         .provider = provider.publicName(),
         .model = model,
@@ -2205,11 +2170,18 @@ pub fn fork(
     }
     try next_writer.refresh(allocator, new_events_path);
 
+    const old_meta_path = session.meta_path orelse return error.MissingSessionPath;
+    var old_meta = try session_events.readMeta(allocator, old_meta_path);
+    defer session_events.freeMeta(allocator, &old_meta);
+
     try session_events.writeMeta(allocator, new_meta_path, .{
         .session_id = new_sid,
         .workspace_realpath = realpath,
         .created_at_unix_ms = nowUnixMs(),
         .parent_id = old_sid,
+        .policy_hash = old_meta.policy_hash,
+        .protocol_hash = old_meta.protocol_hash,
+        .approval_policy = old_meta.approval_policy,
         .provider = if (session.activeProvider()) |provider| provider.publicName() else null,
         .model = session.currentModel(),
     });
@@ -3429,6 +3401,7 @@ test "model-free legacy resume bypasses provider identity and preserves metadata
             .workspace_realpath = meta.workspace_realpath,
             .created_at_unix_ms = meta.created_at_unix_ms,
             .policy_hash = meta.policy_hash,
+            .protocol_hash = meta.protocol_hash,
             .provider = null,
             .model = null,
         });
@@ -3494,6 +3467,7 @@ test "legacy resume migrates once and cross-provider rebuild is atomic" {
             .workspace_realpath = meta.workspace_realpath,
             .created_at_unix_ms = meta.created_at_unix_ms,
             .policy_hash = meta.policy_hash,
+            .protocol_hash = meta.protocol_hash,
             .provider = null,
             .model = null,
         });
@@ -4258,7 +4232,7 @@ test "compact checkpoint survives immediate session close and resume" {
     };
     defer allocator.free(source_projection.session_id);
 
-    var resumed = try initFromEnvWithSessionConfig(allocator, null, .{
+    var resumed = try initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_context_files = true,
         .session_id = source_projection.session_id,
     });
@@ -4732,12 +4706,12 @@ test "initFromEnvWithSessionConfig stamps current policy_hash into meta.json" {
     var meta = try session_events.readMeta(allocator, meta_path);
     defer session_events.freeMeta(allocator, &meta);
 
-    const saved = meta.policy_hash orelse return error.TestExpected;
+    const saved = meta.policy_hash;
     const current = expert_meta.compute().policy_hash;
     try testing.expectEqualStrings(current[0..], saved);
 }
 
-test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_note" {
+test "initFromEnvWithSessionConfig refuses a drifted protocol without restamping" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -4771,41 +4745,31 @@ test "initFromEnvWithSessionConfig: resume with drifted hash injects a system_no
     };
     defer allocator.free(captured_meta_path);
 
-    // Forge a drifted hash into the stored meta, then resume.
+    // Forge a drifted protocol identity into the stored metadata. The failed
+    // resume must not rewrite it to the current value.
     var original = try session_events.readMeta(allocator, captured_meta_path);
     defer session_events.freeMeta(allocator, &original);
-    const drifted_hash = "b" ** 64;
+    const drifted_protocol = "b" ** 64;
     try session_events.writeMeta(allocator, captured_meta_path, .{
         .session_id = original.session_id,
         .workspace_realpath = original.workspace_realpath,
         .created_at_unix_ms = original.created_at_unix_ms,
         .parent_id = original.parent_id,
-        .policy_hash = drifted_hash,
+        .policy_hash = original.policy_hash,
+        .protocol_hash = drifted_protocol,
+        .approval_policy = original.approval_policy,
         .provider = original.provider,
         .model = original.model,
     });
 
-    var resumed = try initFromEnvWithSessionConfig(allocator, null, .{ .resume_latest = true });
-    defer resumed.deinit(allocator);
+    try testing.expectError(
+        error.SessionProtocolMismatch,
+        initFromEnvWithSessionConfig(allocator, null, .{ .resume_latest = true }),
+    );
 
-    var found_note = false;
-    for (resumed.transcript.entries.items) |*entry| {
-        switch (entry.*) {
-            .system_note => |body| {
-                if (std.mem.indexOf(u8, body, POLICY_DRIFT_PREFIX) != null) found_note = true;
-            },
-            else => {},
-        }
-    }
-    try testing.expect(found_note);
-
-    // After drift handling, meta should carry the current hash so a second
-    // resume does not re-warn against the already-acknowledged drift.
     var post = try session_events.readMeta(allocator, captured_meta_path);
     defer session_events.freeMeta(allocator, &post);
-    const current = expert_meta.compute().policy_hash;
-    const stamped = post.policy_hash orelse return error.TestExpected;
-    try testing.expectEqualStrings(current[0..], stamped);
+    try testing.expectEqualStrings(drifted_protocol, post.protocol_hash);
 }
 
 test "a loopback endpoint override is reported as local, a remote one is not" {

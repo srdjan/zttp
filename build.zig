@@ -260,16 +260,11 @@ pub fn build(b: *std.Build) void {
         .perf_histogram = perf_histogram_enabled,
     });
     const pi_zts_cli_host_mod = pi_host_tools_dep.module("zts_cli");
-    // The skill catalog is pi's own data, so it comes from a host-target pi
-    // dependency rather than from tools. The host target has to match the test
-    // modules built below, which is why this is a second dependency on the
-    // same package as `pi_dep`.
     const pi_host_dep = b.dependency("zttp_pi", .{
         .target = b.graph.host,
         .optimize = optimize,
         .perf_histogram = perf_histogram_enabled,
     });
-    const pi_zts_expert_skill_host_mod = pi_host_dep.module("zts_expert_skill");
 
     const HostTestRoot = struct {
         /// Which package owns the root source file.
@@ -365,7 +360,6 @@ pub fn build(b: *std.Build) void {
         if (root.project_config) tests.root_module.addImport("project_config", project_config_mod);
         if (root.pi_modules) {
             tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
-            tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
         }
         if (root.standin_only) tests.root_module.addOptions("standin_range_doc", standin_range_doc);
         host_test_runs[i] = b.addRunArtifact(tests);
@@ -390,7 +384,6 @@ pub fn build(b: *std.Build) void {
     mlx_e2e_tests.root_module.addImport("zts", zts_host_mod);
     mlx_e2e_tests.root_module.addImport("project_config", project_config_mod);
     mlx_e2e_tests.root_module.addImport("zts_cli", pi_zts_cli_host_mod);
-    mlx_e2e_tests.root_module.addImport("zts_expert_skill", pi_zts_expert_skill_host_mod);
     const run_mlx_e2e_tests = b.addRunArtifact(mlx_e2e_tests);
     const mlx_e2e_step = b.step("test-expert-mlx-e2e", "Run the real local MLX expert flow");
     mlx_e2e_step.dependOn(&run_mlx_e2e_tests.step);

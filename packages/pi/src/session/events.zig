@@ -3,6 +3,8 @@
 //! Event schema `v3` keeps the raw journal append-only, assigns stable logical
 //! entry IDs, and persists model-projection checkpoints independently from the
 //! proof and ledger history.
+//! Metadata schema `v4` adds the required expert protocol identity. The event
+//! envelope did not change, so its framed wire remains v3.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -11,6 +13,7 @@ const json_writer = @import("../providers/json_writer.zig");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 
 pub const schema_version: u32 = 3;
+pub const meta_schema_version: u32 = 4;
 
 const frame_magic = "ZTE3";
 const frame_header_len = frame_magic.len + @sizeOf(u64) + 32;
@@ -180,12 +183,15 @@ const Envelope = struct {
 };
 
 pub const Meta = struct {
-    schema_version: u32 = schema_version,
+    schema_version: u32 = meta_schema_version,
     session_id: []const u8,
     workspace_realpath: []const u8,
     created_at_unix_ms: i64,
     parent_id: ?[]const u8 = null,
-    policy_hash: ?[]const u8 = null,
+    policy_hash: []const u8,
+    /// Exact identity of the stable persona, schema-v2 compiler authority, and
+    /// ordered provider-neutral tool catalog used by this session.
+    protocol_hash: []const u8,
     /// String tag of the ApprovalPolicy in effect when the session was created
     /// ("ask", "auto_approve", "auto_reject"). Written on first create; re-read
     /// on --resume so the policy persists across sessions without re-passing flags.
@@ -1029,7 +1035,7 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
     const version_val = obj.get("schema_version") orelse return error.InvalidMetaJson;
     if (version_val != .integer or version_val.integer < 0) return error.InvalidMetaJson;
     const version: u32 = std.math.cast(u32, version_val.integer) orelse return error.SchemaVersionUnsupported;
-    if (version != schema_version) return error.SchemaVersionUnsupported;
+    if (version != meta_schema_version) return error.SchemaVersionUnsupported;
 
     const session_id = getRequiredString(obj, "session_id") orelse return error.InvalidMetaJson;
     const workspace_realpath = getRequiredString(obj, "workspace_realpath") orelse return error.InvalidMetaJson;
@@ -1047,11 +1053,17 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
         null;
     errdefer if (parent_id) |pid| allocator.free(pid);
 
-    const policy_hash = if (getRequiredString(obj, "policy_hash")) |hash|
-        try allocator.dupe(u8, hash)
-    else
-        null;
-    errdefer if (policy_hash) |hash| allocator.free(hash);
+    const policy_hash_value = getRequiredString(obj, "policy_hash") orelse
+        return error.InvalidMetaJson;
+    if (!isLowerHexDigest(policy_hash_value)) return error.InvalidMetaJson;
+    const policy_hash = try allocator.dupe(u8, policy_hash_value);
+    errdefer allocator.free(policy_hash);
+
+    const protocol_hash_value = getRequiredString(obj, "protocol_hash") orelse
+        return error.InvalidMetaJson;
+    if (!isLowerHexDigest(protocol_hash_value)) return error.InvalidMetaJson;
+    const protocol_hash = try allocator.dupe(u8, protocol_hash_value);
+    errdefer allocator.free(protocol_hash);
 
     const approval_policy = if (getRequiredString(obj, "approval_policy")) |ap|
         try allocator.dupe(u8, ap)
@@ -1078,6 +1090,7 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
         .created_at_unix_ms = created_at.integer,
         .parent_id = parent_id,
         .policy_hash = policy_hash,
+        .protocol_hash = protocol_hash,
         .approval_policy = approval_policy,
         .provider = provider,
         .model = model,
@@ -1085,6 +1098,8 @@ pub fn readMeta(allocator: std.mem.Allocator, meta_path: []const u8) !Meta {
 }
 
 pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta) !void {
+    if (!isLowerHexDigest(meta.policy_hash)) return error.InvalidPolicyHash;
+    if (!isLowerHexDigest(meta.protocol_hash)) return error.InvalidProtocolHash;
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
 
@@ -1094,7 +1109,7 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
     };
     try stream.beginObject();
     try stream.objectField("schema_version");
-    try stream.write(schema_version);
+    try stream.write(meta_schema_version);
     try stream.objectField("session_id");
     try stream.write(meta.session_id);
     try stream.objectField("workspace_realpath");
@@ -1105,10 +1120,10 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
         try stream.objectField("parent_id");
         try stream.write(parent_id);
     }
-    if (meta.policy_hash) |hash| {
-        try stream.objectField("policy_hash");
-        try stream.write(hash);
-    }
+    try stream.objectField("policy_hash");
+    try stream.write(meta.policy_hash);
+    try stream.objectField("protocol_hash");
+    try stream.write(meta.protocol_hash);
     if (meta.approval_policy) |ap| {
         try stream.objectField("approval_policy");
         try stream.write(ap);
@@ -1139,19 +1154,29 @@ pub fn freeMeta(allocator: std.mem.Allocator, meta: *Meta) void {
     allocator.free(meta.session_id);
     allocator.free(meta.workspace_realpath);
     if (meta.parent_id) |parent_id| allocator.free(parent_id);
-    if (meta.policy_hash) |hash| allocator.free(hash);
+    allocator.free(meta.policy_hash);
+    allocator.free(meta.protocol_hash);
     if (meta.approval_policy) |ap| allocator.free(ap);
     if (meta.provider) |provider| allocator.free(provider);
     if (meta.model) |model| allocator.free(model);
     meta.* = .{
-        .schema_version = schema_version,
+        .schema_version = meta_schema_version,
         .session_id = &.{},
         .workspace_realpath = &.{},
         .created_at_unix_ms = 0,
         .parent_id = null,
-        .policy_hash = null,
+        .policy_hash = &.{},
+        .protocol_hash = &.{},
         .approval_policy = null,
     };
+}
+
+fn isLowerHexDigest(value: []const u8) bool {
+    if (value.len != 64) return false;
+    for (value) |byte| {
+        if (!(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'))) return false;
+    }
+    return true;
 }
 
 fn getRequiredString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
@@ -1301,6 +1326,7 @@ test "writeMeta/readMeta round-trip current schema" {
         .created_at_unix_ms = 123,
         .parent_id = "parent",
         .policy_hash = "a" ** 64,
+        .protocol_hash = "b" ** 64,
         .provider = "local",
         .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
     });
@@ -1308,13 +1334,45 @@ test "writeMeta/readMeta round-trip current schema" {
     var meta = try readMeta(allocator, path);
     defer freeMeta(allocator, &meta);
 
-    try testing.expectEqual(@as(u32, schema_version), meta.schema_version);
+    try testing.expectEqual(@as(u32, meta_schema_version), meta.schema_version);
     try testing.expectEqualStrings("sid", meta.session_id);
     try testing.expectEqualStrings("/tmp/ws", meta.workspace_realpath);
     try testing.expectEqual(@as(i64, 123), meta.created_at_unix_ms);
     try testing.expectEqualStrings("parent", meta.parent_id.?);
+    try testing.expectEqualStrings("b" ** 64, meta.protocol_hash);
     try testing.expectEqualStrings("local", meta.provider.?);
     try testing.expectEqualStrings("LiquidAI/LFM2.5-2.6B-MLX-8bit", meta.model.?);
+}
+
+test "current metadata requires canonical policy and protocol identities" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "meta.json");
+    defer allocator.free(path);
+
+    try zts.file_io.writeFile(
+        allocator,
+        path,
+        \\{"schema_version":4,"session_id":"sid","workspace_realpath":"/tmp/ws","created_at_unix_ms":123,"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+        ,
+    );
+    try testing.expectError(error.InvalidMetaJson, readMeta(allocator, path));
+
+    try testing.expectError(error.InvalidProtocolHash, writeMeta(allocator, path, .{
+        .session_id = "sid",
+        .workspace_realpath = "/tmp/ws",
+        .created_at_unix_ms = 123,
+        .policy_hash = "a" ** 64,
+        .protocol_hash = "NOT-A-DIGEST",
+    }));
+    try testing.expectError(error.InvalidPolicyHash, writeMeta(allocator, path, .{
+        .session_id = "sid",
+        .workspace_realpath = "/tmp/ws",
+        .created_at_unix_ms = 123,
+        .policy_hash = "A" ** 64,
+        .protocol_hash = "b" ** 64,
+    }));
 }
 
 test "appendEvent serializes autoloop_outcome with goals and final hash" {
@@ -1367,7 +1425,7 @@ test "appendEvent omits final_patch_hash when null" {
     try testing.expect(std.mem.indexOf(u8, raw, "final_patch_hash") == null);
 }
 
-test "readMeta rejects older schema versions after the direct v3 cutover" {
+test "readMeta rejects older metadata schema versions after the protocol cutover" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);

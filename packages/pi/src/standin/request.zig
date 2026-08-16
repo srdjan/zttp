@@ -271,16 +271,13 @@ const ReadPage = struct {
 /// including a failed read, which carries no content field.
 ///
 /// Identified by shape rather than by the preceding call, because a compacted
-/// history can carry an output whose call is gone. `zts_expert_reference` pages
-/// share the shape and are excluded by their `topic` field, which a file read
-/// never has.
+/// history can carry an output whose call is gone.
 fn readPage(arena: std.mem.Allocator, output: []const u8) !?ReadPage {
     const value = std.json.parseFromSliceLeaky(std.json.Value, arena, output, .{}) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => return null,
     };
     if (value != .object) return null;
-    if (value.object.get("topic") != null) return null;
     const offset = value.object.get("offset") orelse return null;
     if (offset != .integer or offset.integer < 0) return null;
     const content = value.object.get("content") orelse return null;

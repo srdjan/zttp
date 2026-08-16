@@ -118,6 +118,69 @@ pub fn count(registry: *const registry_mod.Registry) usize {
     return total;
 }
 
+/// Stable identity of the exact ordered provider-neutral catalog. Provider
+/// serializers may wrap these definitions differently, but every model sees
+/// the same name, description, and schema bytes in this order.
+pub fn providerNeutralHash(registry: *const registry_mod.Registry) [64]u8 {
+    var hasher = CatalogHasher.init();
+    hasher.u64Field("definition-count", count(registry));
+    var definitions = iterator(registry);
+    var index: usize = 0;
+    while (definitions.next()) |definition| : (index += 1) {
+        hasher.definition(index, definition);
+    }
+    std.debug.assert(index == count(registry));
+    return hasher.finish();
+}
+
+/// Hash an explicit definition slice with the same identity used by the live
+/// catalog. This keeps evaluation manifests and sessions on one authority.
+pub fn providerNeutralHashForDefinitions(definitions: []const Definition) [64]u8 {
+    var hasher = CatalogHasher.init();
+    hasher.u64Field("definition-count", definitions.len);
+    for (definitions, 0..) |definition, index| hasher.definition(index, definition);
+    return hasher.finish();
+}
+
+const CatalogHasher = struct {
+    state: std.crypto.hash.sha2.Sha256,
+
+    fn init() CatalogHasher {
+        var out: CatalogHasher = .{ .state = std.crypto.hash.sha2.Sha256.init(.{}) };
+        out.field("domain", "zttp-expert-provider-neutral-catalog-v1");
+        return out;
+    }
+
+    fn frame(self: *CatalogHasher, value: []const u8) void {
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, @intCast(value.len), .big);
+        self.state.update(&length);
+        self.state.update(value);
+    }
+
+    fn field(self: *CatalogHasher, label: []const u8, value: []const u8) void {
+        self.frame(label);
+        self.frame(value);
+    }
+
+    fn u64Field(self: *CatalogHasher, label: []const u8, value: usize) void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, @intCast(value), .big);
+        self.field(label, &bytes);
+    }
+
+    fn definition(self: *CatalogHasher, index: usize, value: Definition) void {
+        self.u64Field("definition-index", index);
+        self.field("name", value.name);
+        self.field("description", value.description);
+        self.field("input-schema", value.input_schema);
+    }
+
+    fn finish(self: *CatalogHasher) [64]u8 {
+        return std.fmt.bytesToHex(self.state.finalResult(), .lower);
+    }
+};
+
 const testing = std.testing;
 
 test "projectArgsForModel strips host keys and never refuses model-authored args" {
@@ -153,4 +216,25 @@ test "projectArgsForModel strips host keys and never refuses model-authored args
         @as(?[]u8, null),
         try projectArgsForModel(testing.allocator, "apply_edit", "[\"baseline_sha256\"]"),
     );
+}
+
+test "provider-neutral identity binds ordered model-visible fields only" {
+    const definitions = [_]Definition{
+        .{ .name = "read", .description = "read a file", .input_schema = "{}" },
+    };
+    const baseline = providerNeutralHashForDefinitions(&definitions);
+    try testing.expectEqualStrings(&baseline, &providerNeutralHashForDefinitions(&definitions));
+
+    var changed = definitions;
+    changed[0].name = "write";
+    try testing.expect(!std.mem.eql(u8, &baseline, &providerNeutralHashForDefinitions(&changed)));
+    changed = definitions;
+    changed[0].description = "changed";
+    try testing.expect(!std.mem.eql(u8, &baseline, &providerNeutralHashForDefinitions(&changed)));
+    changed = definitions;
+    changed[0].input_schema = "{\"type\":\"object\"}";
+    try testing.expect(!std.mem.eql(u8, &baseline, &providerNeutralHashForDefinitions(&changed)));
+    changed = definitions;
+    changed[0].host_authoritative_keys = &.{"before"};
+    try testing.expectEqualStrings(&baseline, &providerNeutralHashForDefinitions(&changed));
 }

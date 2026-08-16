@@ -788,6 +788,8 @@ test "collectSessionLedger exports empty ledger when events file is missing" {
         .workspace_realpath = tmp.abs_path,
         .created_at_unix_ms = 1,
         .parent_id = null,
+        .policy_hash = "a" ** 64,
+        .protocol_hash = "b" ** 64,
     });
 
     var bundle = try collectSessionLedger(testing.allocator, "sess-fresh");

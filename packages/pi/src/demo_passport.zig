@@ -4,6 +4,9 @@ const zts = @import("zts");
 const session_events = @import("session/events.zig");
 const session_id_mod = @import("session/session_id.zig");
 const session_paths = @import("session/paths.zig");
+const protocol_identity = @import("session/protocol_identity.zig");
+const tool_registry = @import("tool_registry.zig");
+const models_registry = @import("providers/models.zig");
 const proof_enrichment = @import("proof_enrichment.zig");
 const ui_payload = @import("ui_payload.zig");
 
@@ -64,11 +67,18 @@ pub fn ensureSession(
 
     if (!zts.file_io.fileExists(allocator, meta_path)) {
         const policy_hash = zts.policyHash();
+        var registry = try tool_registry.buildRegistry(allocator);
+        defer registry.deinit(allocator);
+        const protocol_hash = try protocol_identity.current(allocator, &registry);
+        const model = models_registry.defaultForProvider(models_registry.default_provider);
         try session_events.writeMeta(allocator, meta_path, .{
             .session_id = session_id,
             .workspace_realpath = realpath,
             .created_at_unix_ms = nowUnixMs(),
             .policy_hash = policy_hash[0..],
+            .protocol_hash = protocol_hash[0..],
+            .provider = model.provider.publicName(),
+            .model = model.id,
         });
     }
 

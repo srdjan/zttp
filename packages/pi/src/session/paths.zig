@@ -390,6 +390,8 @@ fn writeMetaAt(
         .workspace_realpath = "/workspace/test",
         .created_at_unix_ms = created_at_unix_ms,
         .parent_id = parent_id,
+        .policy_hash = "a" ** 64,
+        .protocol_hash = "b" ** 64,
     });
 }
 

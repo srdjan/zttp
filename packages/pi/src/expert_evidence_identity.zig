@@ -310,15 +310,7 @@ pub fn policy(bytes: []const u8) PolicyIdentity {
 }
 
 pub fn providerNeutralCatalog(definitions: []const tool_catalog.Definition) ProviderNeutralCatalogIdentity {
-    var hasher = FramedHasher.init(ProviderNeutralCatalogIdentity.domain_tag);
-    hasher.u64Field("definition-count", definitions.len);
-    for (definitions, 0..) |definition, index| {
-        hasher.u64Field("definition-index", index);
-        hasher.field("name", definition.name);
-        hasher.field("description", definition.description);
-        hasher.field("input-schema", definition.input_schema);
-    }
-    return hasher.finish(ProviderNeutralCatalogIdentity);
+    return .{ .bytes = tool_catalog.providerNeutralHashForDefinitions(definitions) };
 }
 
 pub fn providerSerializedCatalog(bytes: []const u8) ProviderSerializedCatalogIdentity {

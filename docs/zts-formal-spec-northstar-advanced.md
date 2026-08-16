@@ -2873,7 +2873,8 @@ humans.
 - `packages/tools/src/canonicalize.zig`
 - `packages/tools/src/edit_simulate.zig`
 - `packages/tools/src/zts_cli.zig`
-- `packages/pi/src/skills/zts-expert/SKILL.md`
+- `packages/tools/src/agent_protocol.zig`
+- `packages/tools/src/example_registry.zig`
 - `packages/tools/src/precompile.zig`
 - the live `zts meta`, `features`, `restrictions`, `modules`, and `spec-check`
   JSON surfaces

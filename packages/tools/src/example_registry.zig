@@ -457,6 +457,186 @@ pub fn findByFeature(feature: []const u8) ?*const Example {
     return null;
 }
 
+/// Compiler-owned whole-handler examples for cross-cutting virtual-module
+/// patterns. These are separate from `examples`: that table is exhaustive over
+/// syntax features, while this one may teach several modules in one program.
+pub const ModuleExample = struct {
+    name: []const u8,
+    purpose: []const u8,
+    modules: []const []const u8,
+    source: []const u8,
+};
+
+pub const module_examples = [_]ModuleExample{
+    .{
+        .name = "log-clock-without-response-flow",
+        .purpose = "A clock value used only in structured logging does not make the response nondeterministic.",
+        .modules = &.{"zttp:log"},
+        .source =
+        \\
+        \\import { logInfo } from "zttp:log";
+        \\
+        \\structural LoggedResponse<T> = Proof<T, "deterministic" | "state_isolated">;
+        \\
+        \\export function handler(req: Request): LoggedResponse<Response> {
+        \\  const at = Date.now();
+        \\  logInfo("served request", { at: at });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+        ,
+    },
+    .{
+        .name = "validated-fetch-query",
+        .purpose = "Validate dynamic query data, keep the egress URL literal, bound the response, and handle upstream failure.",
+        .modules = &.{ "zttp:fetch", "zttp:validate" },
+        .source =
+        \\
+        \\import { fetch } from "zttp:fetch";
+        \\import { schemaCompile, validateObject } from "zttp:validate";
+        \\
+        \\schemaCompile("cityQuery", JSON.stringify({
+        \\  type: "object",
+        \\  required: ["city"],
+        \\  properties: {
+        \\    city: { type: "string", minLength: 1, maxLength: 64 }
+        \\  }
+        \\}));
+        \\
+        \\export function handler(req: Request): Proof<Response,
+        \\  | "deterministic"
+        \\  | "state_isolated"
+        \\  | "fault_covered"
+        \\  | "result_safe"
+        \\  | "optional_safe"
+        \\  | "no_secret_leakage"
+        \\  | "no_credential_leakage"
+        \\  | "input_validated"
+        \\  | "pii_contained"
+        \\  | "injection_safe"
+        \\  | "canonical"
+        \\  | "cost_bounded"
+        \\> {
+        \\  const checked = validateObject("cityQuery", { city: req.query["city"] });
+        \\  if (!checked.ok) {
+        \\    return Response.json({ error: "missing or invalid city query parameter" }, { status: 400 });
+        \\  }
+        \\  const upstream = fetch("https://api.open-meteo.com/v1/forecast", {
+        \\    query: { city: checked.value["city"] },
+        \\    maxResponseBytes: 65536
+        \\  });
+        \\  if (!upstream.ok) {
+        \\    return Response.json({ error: "weather service unavailable" }, { status: 502 });
+        \\  }
+        \\  return Response.json(upstream.json());
+        \\}
+        \\
+        ,
+    },
+    .{
+        .name = "durable-wait-and-signal",
+        .purpose = "Use one idempotency key to park and resume a durable run through separate request paths.",
+        .modules = &.{"zttp:durable"},
+        .source =
+        \\
+        \\import { run, waitSignal, signal } from "zttp:durable";
+        \\
+        \\structural ApprovalProof<T> = Proof<T,
+        \\  | "deterministic"
+        \\  | "retry_safe"
+        \\  | "idempotent"
+        \\  | "state_isolated"
+        \\  | "result_safe"
+        \\  | "optional_safe"
+        \\  | "no_secret_leakage"
+        \\  | "no_credential_leakage"
+        \\  | "input_validated"
+        \\  | "pii_contained"
+        \\  | "injection_safe"
+        \\  | "canonical"
+        \\  | "cost_bounded"
+        \\>;
+        \\
+        \\export function handler(req: Request): ApprovalProof<Response> {
+        \\  const key = req.headers.get("Idempotency-Key");
+        \\  if (key === undefined) {
+        \\    return Response.json({ error: "missing Idempotency-Key" }, { status: 400 });
+        \\  }
+        \\  if (req.method === "POST" && req.path === "/signal") {
+        \\    const delivered = signal(key, "approval", { approved: true });
+        \\    return Response.json({ delivered: delivered });
+        \\  }
+        \\  if (req.method !== "GET" || req.path !== "/wait") {
+        \\    return Response.json({ error: "not found" }, { status: 404 });
+        \\  }
+        \\  return run(key, () => {
+        \\    const approval = waitSignal("approval");
+        \\    return Response.json({ approved: approval !== undefined });
+        \\  });
+        \\}
+        \\
+        ,
+    },
+};
+
+/// Identity of every compiler-published example, including order and field
+/// boundaries. The protocol and persisted sessions bind this value so changed
+/// guidance cannot be replayed as if the old authority were still active.
+pub fn catalogHash() [64]u8 {
+    var hasher = ExampleHasher.init();
+    hasher.usizeField("syntax-example-count", examples.len);
+    for (&examples, 0..) |entry, index| {
+        hasher.usizeField("syntax-example-index", index);
+        hasher.field("feature", entry.feature);
+        hasher.field("source", entry.source);
+    }
+    hasher.usizeField("module-example-count", module_examples.len);
+    for (&module_examples, 0..) |entry, index| {
+        hasher.usizeField("module-example-index", index);
+        hasher.field("name", entry.name);
+        hasher.field("purpose", entry.purpose);
+        hasher.usizeField("module-count", entry.modules.len);
+        for (entry.modules, 0..) |specifier, module_index| {
+            hasher.usizeField("module-index", module_index);
+            hasher.field("module", specifier);
+        }
+        hasher.field("source", entry.source);
+    }
+    return hasher.finish();
+}
+
+const ExampleHasher = struct {
+    state: std.crypto.hash.sha2.Sha256,
+
+    fn init() ExampleHasher {
+        var out: ExampleHasher = .{ .state = std.crypto.hash.sha2.Sha256.init(.{}) };
+        out.field("domain", "zts-agent-example-registry-v1");
+        return out;
+    }
+
+    fn frame(self: *ExampleHasher, value: []const u8) void {
+        var length: [8]u8 = undefined;
+        std.mem.writeInt(u64, &length, @intCast(value.len), .big);
+        self.state.update(&length);
+        self.state.update(value);
+    }
+
+    fn field(self: *ExampleHasher, label: []const u8, value: []const u8) void {
+        self.frame(label);
+        self.frame(value);
+    }
+
+    fn usizeField(self: *ExampleHasher, label: []const u8, value: usize) void {
+        var bytes: [8]u8 = undefined;
+        std.mem.writeInt(u64, &bytes, @intCast(value), .big);
+        self.field(label, &bytes);
+    }
+
+    fn finish(self: *ExampleHasher) [64]u8 {
+        return std.fmt.bytesToHex(self.state.finalResult(), .lower);
+    }
+};
+
 const testing = std.testing;
 
 test "no form is published twice, and every example is a whole handler" {
@@ -473,4 +653,29 @@ test "no form is published twice, and every example is a whole handler" {
     }
     try testing.expect(findByFeature("match expression") != null);
     try testing.expect(findByFeature("classes") == null);
+}
+
+test "module examples have unique names and explicit whole-handler evidence" {
+    try testing.expect(module_examples.len > 0);
+    for (&module_examples, 0..) |entry, index| {
+        try testing.expect(entry.name.len > 0);
+        try testing.expect(entry.purpose.len > 0);
+        try testing.expect(entry.modules.len > 0);
+        try testing.expect(std.mem.indexOf(u8, entry.source, "export function handler(") != null);
+        for (module_examples[index + 1 ..]) |other| {
+            try testing.expect(!std.mem.eql(u8, entry.name, other.name));
+        }
+        for (entry.modules) |specifier| {
+            const quoted = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{specifier});
+            defer testing.allocator.free(quoted);
+            try testing.expect(std.mem.indexOf(u8, entry.source, quoted) != null);
+        }
+    }
+}
+
+test "example registry hash is deterministic lowercase hex" {
+    const first = catalogHash();
+    try testing.expectEqualStrings(&first, &catalogHash());
+    try testing.expectEqual(@as(usize, 64), first.len);
+    for (first) |byte| try testing.expect(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'));
 }
