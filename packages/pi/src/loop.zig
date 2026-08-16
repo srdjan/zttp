@@ -473,7 +473,10 @@ pub fn runTurnWith(
     var auto_repair_block: ?[]const u8 = null;
     // Project SQL schema for the veto, discovered lazily on the first edit
     // attempt and reused for every retry in the turn (the discovery walks the
-    // filesystem for zttp.json; once per turn is enough). Arena-owned.
+    // filesystem for zttp.json; once per turn is enough). Rooted at that first
+    // edit's resolved path: the retries of a turn are drafts of one handler, so
+    // one project answers them all, and anchoring at cwd instead picked up
+    // whichever project the process happened to be standing in. Arena-owned.
     var sql_schema_resolved = false;
     var sql_schema_path: ?[]u8 = null;
     // How many times a SQL veto has failed in this turn. When it reaches 2, an
@@ -602,7 +605,7 @@ pub fn runTurnWith(
                 }
                 if (!sql_schema_resolved) {
                     sql_schema_resolved = true;
-                    sql_schema_path = veto.discoverSqlSchemaPath(ta);
+                    sql_schema_path = veto.discoverSqlSchemaPath(ta, prepared.resolved_path);
                 }
                 const veto_result = try veto.runVetoWithSchema(ta, .{
                     .file = prepared.edit.file,

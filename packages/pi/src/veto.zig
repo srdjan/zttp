@@ -104,15 +104,20 @@ pub fn runVeto(
     allocator: std.mem.Allocator,
     edit: Edit,
 ) !VetoResult {
-    const discovered_schema = discoverSqlSchemaPath(allocator);
+    const discovered_schema = discoverSqlSchemaPath(allocator, edit.file);
     defer if (discovered_schema) |path| allocator.free(path);
     return runVetoWithSchema(allocator, edit, discovered_schema);
 }
 
-/// Resolve the project's SQL schema from the nearest zttp.json (cwd-anchored).
-/// Returns null when no project or no `sqlite` entry. Caller frees.
-pub fn discoverSqlSchemaPath(allocator: std.mem.Allocator) ?[]u8 {
-    return edit_simulate.discoverProjectSqlSchemaPath(allocator, null);
+/// Resolve the project's SQL schema from the nearest zttp.json, walking up
+/// from `start_path`. Returns null when no project or no `sqlite` entry.
+/// Caller frees.
+///
+/// Pass the edited handler, not null. Anchored at cwd, a loop started outside
+/// the handler's project validated its queries against a different zttp.json
+/// than the one the rest of the analysis came from.
+pub fn discoverSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
+    return edit_simulate.discoverProjectSqlSchemaPath(allocator, start_path);
 }
 
 /// `runVeto` with an explicit SQL schema path instead of project discovery.
