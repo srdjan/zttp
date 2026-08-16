@@ -821,7 +821,8 @@ test "the request body is the shared Chat Completions framing" {
     try testing.expectEqualStrings(default_model, root.get("model").?.string);
     try testing.expect(!root.get("stream").?.bool);
     try testing.expectEqual(@as(i64, default_max_tokens), root.get("max_tokens").?.integer);
-    try testing.expectEqualStrings("auto", root.get("tool_choice").?.string);
+    try testing.expectEqual(@as(usize, 0), root.get("tools").?.array.items.len);
+    try testing.expect(root.get("tool_choice") == null);
     try testing.expect(std.mem.indexOf(u8, body, "\"api_key\"") == null);
     const messages = root.get("messages").?.array.items;
     try testing.expectEqual(@as(usize, 2), messages.len);

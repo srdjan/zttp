@@ -503,6 +503,7 @@ test "every Chat Completions provider rebuilds its wire digest on replay" {
             .transcript = &transcript,
         });
         const body = try chat_completions.buildRequestBody(arena.allocator(), .{
+            .provider = case.provider,
             .system_prompt = request_config.system_prompt,
             .model = request_config.model,
             .max_tokens = request_config.max_output_tokens,
