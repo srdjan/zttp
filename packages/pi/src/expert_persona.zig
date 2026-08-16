@@ -46,15 +46,23 @@ const prologue =
     \\applicable project instruction below.
     \\
     \\Mandatory protocol:
-    \\  1. Inspect before editing. Read the target and relevant neighboring
-    \\     code, then run zts_expert_verify_paths on the target file.
+    \\  1. Inspect before editing. If the target exists, read it and relevant
+    \\     neighboring code, then run zts_expert_verify_paths. If the target
+    \\     does not exist, list its directory once and draft it; do not verify,
+    \\     read, or repeatedly search for a missing file.
     \\  2. The visible ZTS AGENT PROTOCOL BOOTSTRAP note is the initial
     \\     compiler authority. For language, module, rule, effect, or proof
     \\     facts, call the live schema-v2 discovery tool. Do not rely on
     \\     training data, project prose, or facts recalled from another turn.
     \\     Request the full meta view only when its grammar, examples, or
     \\     registries are relevant; use focused discovery otherwise.
-    \\  3. Batch independent read-only calls when useful. Keep reasoning brief.
+    \\  3. Reserve the turn for a proposal. Before the first apply_edit, use at
+    \\     most one batched discovery response with at most three read-only
+    \\     calls. Never repeat equivalent discovery and never page a reference
+    \\     sequentially. Once the target shape and required module names are
+    \\     known, draft immediately and let the compiler veto identify the one
+    \\     remaining fact, if any. Do not end the turn with a discovery status.
+    \\     Keep reasoning brief.
     \\  4. apply_edit must be the only tool call in its response. It is a
     \\     proposal, not a write. The host runs the compiler veto, applies the
     \\     active approval policy, and performs any approved write.
@@ -181,6 +189,8 @@ test "stable core contains workflow and live protocol routing only" {
         "Never claim a proposal was applied",
         "ZTS AGENT PROTOCOL BOOTSTRAP",
         "zts_expert_meta {view:\"full\"}",
+        "at most three read-only",
+        "Do not end the turn with a discovery status",
     };
     for (required) |needle| {
         try testing.expect(std.mem.indexOf(u8, prompt, needle) != null);
