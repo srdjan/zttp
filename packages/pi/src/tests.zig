@@ -42,6 +42,10 @@ comptime {
     _ = @import("repl.zig");
     _ = @import("commands.zig");
     _ = @import("turn.zig");
+    _ = @import("change_set.zig");
+    _ = @import("workspace_snapshot.zig");
+    _ = @import("aggregate_proof.zig");
+    _ = @import("change_transaction.zig");
     _ = @import("veto.zig");
     _ = @import("transcript.zig");
     _ = @import("context_budget_test.zig");

@@ -1,0 +1,858 @@
+//! Crash-consistent workspace transaction for one proven source change set.
+//!
+//! POSIX cannot make several path renames instantaneously visible to processes
+//! that ignore this workspace lock. Cooperating zttp writers are serialized,
+//! and the journal guarantees recovery to one complete final state.
+
+const std = @import("std");
+const zts = @import("zts");
+const TextBuffer = @import("text_buffer.zig").TextBuffer;
+const change_set = @import("change_set.zig");
+const workspace_snapshot = @import("workspace_snapshot.zig");
+const aggregate_proof = @import("aggregate_proof.zig");
+const common = @import("tools/common.zig");
+
+const journal_schema_version: u32 = 1;
+
+pub const FaultPoint = union(enum) {
+    none,
+    after_prepared,
+    after_applying,
+    after_rename: usize,
+    after_committed,
+};
+
+pub const CommitOptions = struct {
+    fault: FaultPoint = .none,
+};
+
+pub const CommitReceipt = struct {
+    transaction_id: [64]u8,
+    receipt_path: []u8,
+
+    pub fn deinit(self: *CommitReceipt, allocator: std.mem.Allocator) void {
+        allocator.free(self.receipt_path);
+        self.* = undefined;
+    }
+};
+
+pub const WorkspaceLock = struct {
+    allocator: std.mem.Allocator,
+    fd: std.c.fd_t,
+    path: []u8,
+
+    pub fn acquire(allocator: std.mem.Allocator, workspace_root: []const u8) !WorkspaceLock {
+        const state_dir = try std.fs.path.resolve(allocator, &.{ workspace_root, ".zttp" });
+        defer allocator.free(state_dir);
+        var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+        defer io_backend.deinit();
+        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), state_dir);
+        try syncDirectory(allocator, state_dir);
+
+        const path = try std.fs.path.resolve(allocator, &.{ state_dir, "change-set.lock" });
+        errdefer allocator.free(path);
+        const path_z = try allocator.dupeZ(u8, path);
+        defer allocator.free(path_z);
+        const fd = try std.posix.openatZ(
+            std.posix.AT.FDCWD,
+            path_z,
+            .{ .ACCMODE = .WRONLY, .CREAT = true },
+            0o600,
+        );
+        errdefer std.Io.Threaded.closeFd(fd);
+        try lockExclusiveNonBlocking(fd);
+        return .{ .allocator = allocator, .fd = fd, .path = path };
+    }
+
+    pub fn deinit(self: *WorkspaceLock) void {
+        _ = std.c.flock(self.fd, std.posix.LOCK.UN);
+        std.Io.Threaded.closeFd(self.fd);
+        self.allocator.free(self.path);
+        self.* = undefined;
+    }
+};
+
+const ManifestChange = struct {
+    path: []const u8,
+    baseline_state: []const u8,
+    baseline_sha256: []const u8,
+    candidate_sha256: []const u8,
+};
+
+const Manifest = struct {
+    schema_version: u32,
+    proof_id: []const u8,
+    workspace_root: []const u8,
+    changes: []const ManifestChange,
+};
+
+pub fn commitLocked(
+    allocator: std.mem.Allocator,
+    lock: *const WorkspaceLock,
+    prepared: *const change_set.PreparedChangeSet,
+    snapshot: *const workspace_snapshot.Snapshot,
+    proof: *const aggregate_proof.AggregateProof,
+    options: CommitOptions,
+) !CommitReceipt {
+    _ = lock;
+    try snapshot.recheck(allocator);
+
+    const transaction_dir = try transactionPath(allocator, prepared.workspace_root, &proof.proof_id);
+    defer allocator.free(transaction_dir);
+    if (try pathExists(allocator, transaction_dir)) return error.TransactionAlreadyExists;
+    const images_dir = try std.fs.path.resolve(allocator, &.{ transaction_dir, "images" });
+    defer allocator.free(images_dir);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, images_dir);
+
+    try writeManifest(allocator, transaction_dir, prepared, proof);
+    try writeImages(allocator, transaction_dir, prepared);
+    try writeReceipt(allocator, transaction_dir, prepared, proof);
+    try writeMarker(allocator, transaction_dir, "prepared");
+    try syncDirectory(allocator, transaction_dir);
+    if (options.fault == .after_prepared) return error.InjectedTransactionFailure;
+
+    try snapshot.recheck(allocator);
+    const stages = try stageCandidates(allocator, prepared, &proof.proof_id);
+    defer {
+        for (stages) |stage| {
+            deleteFileIfPresent(allocator, stage) catch {};
+            allocator.free(stage);
+        }
+        allocator.free(stages);
+    }
+    try snapshot.recheck(allocator);
+    try writeMarker(allocator, transaction_dir, "applying");
+    if (options.fault == .after_applying) return error.InjectedTransactionFailure;
+
+    for (prepared.changes, stages, 0..) |change, stage, index| {
+        try renameAndSync(allocator, stage, change.resolved_path);
+        try writeProgressMarker(allocator, transaction_dir, index);
+        switch (options.fault) {
+            .after_rename => |fault_index| if (fault_index == index) return error.InjectedTransactionFailure,
+            else => {},
+        }
+    }
+    try verifyCandidates(allocator, prepared);
+    try writeMarker(allocator, transaction_dir, "committed");
+    if (options.fault == .after_committed) return error.InjectedTransactionFailure;
+    try writeMarker(allocator, transaction_dir, "receipted");
+
+    return .{
+        .transaction_id = proof.proof_id,
+        .receipt_path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "receipt.json" }),
+    };
+}
+
+pub fn recoverAllLocked(
+    allocator: std.mem.Allocator,
+    lock: *const WorkspaceLock,
+    workspace_root: []const u8,
+) !usize {
+    _ = lock;
+    const root = try std.fs.path.resolve(allocator, &.{ workspace_root, ".zttp", "change-sets" });
+    defer allocator.free(root);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var dir = std.Io.Dir.openDirAbsolute(io, root, .{ .iterate = true, .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return 0,
+        else => return err,
+    };
+    defer dir.close(io);
+    var recovered: usize = 0;
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind != .directory or !isCanonicalProofId(entry.name)) return error.CorruptTransactionDirectory;
+        const transaction_dir = try std.fs.path.resolve(allocator, &.{ root, entry.name });
+        defer allocator.free(transaction_dir);
+        if (try recoverOne(allocator, transaction_dir)) recovered += 1;
+    }
+    return recovered;
+}
+
+fn recoverOne(allocator: std.mem.Allocator, transaction_dir: []const u8) !bool {
+    if (!try markerPresent(allocator, transaction_dir, "prepared")) {
+        if (try markerPresent(allocator, transaction_dir, "applying") or
+            try markerPresent(allocator, transaction_dir, "committed") or
+            try markerPresent(allocator, transaction_dir, "receipted"))
+        {
+            return error.CorruptTransactionJournal;
+        }
+        try deleteTransactionDirectory(allocator, transaction_dir);
+        return true;
+    }
+    var parsed = try loadManifest(allocator, transaction_dir);
+    defer parsed.deinit();
+    const manifest = parsed.value;
+    try validateManifestAndImages(allocator, transaction_dir, manifest);
+    if (try markerPresent(allocator, transaction_dir, "aborted")) {
+        try deleteTransactionDirectory(allocator, transaction_dir);
+        return true;
+    }
+    if (try markerPresent(allocator, transaction_dir, "committed")) {
+        try validateReceipt(allocator, transaction_dir);
+        if (!try markerPresent(allocator, transaction_dir, "receipted")) try writeMarker(allocator, transaction_dir, "receipted");
+        return false;
+    }
+    if (!try markerPresent(allocator, transaction_dir, "applying")) {
+        try writeMarker(allocator, transaction_dir, "aborted");
+        try deleteTransactionDirectory(allocator, transaction_dir);
+        return true;
+    }
+
+    const needs_write = try allocator.alloc(bool, manifest.changes.len);
+    defer allocator.free(needs_write);
+    for (manifest.changes, 0..) |change, index| {
+        const current = try readStateDigest(allocator, change.path);
+        const candidate_digest = parseDigest(change.candidate_sha256) orelse return error.CorruptTransactionJournal;
+        const baseline_digest = parseDigest(change.baseline_sha256) orelse return error.CorruptTransactionJournal;
+        if (std.mem.eql(u8, &current, &candidate_digest)) {
+            needs_write[index] = false;
+            continue;
+        }
+        if (!std.mem.eql(u8, &current, &baseline_digest)) return error.WorkspaceRecoveryConflict;
+        needs_write[index] = true;
+    }
+    for (manifest.changes, needs_write, 0..) |change, should_write, index| {
+        if (!should_write) continue;
+        const after_path = try imagePath(allocator, transaction_dir, index, "after");
+        defer allocator.free(after_path);
+        const after = try zts.file_io.readFile(allocator, after_path, change_set.max_file_bytes);
+        defer allocator.free(after);
+        try durableWrite(allocator, change.path, after);
+    }
+    try verifyManifestCandidates(allocator, manifest);
+    try writeMarker(allocator, transaction_dir, "committed");
+    try writeMarker(allocator, transaction_dir, "receipted");
+    return true;
+}
+
+fn writeManifest(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    prepared: *const change_set.PreparedChangeSet,
+    proof: *const aggregate_proof.AggregateProof,
+) !void {
+    const changes = try allocator.alloc(ManifestChange, prepared.changes.len);
+    defer allocator.free(changes);
+    const digest_strings = try allocator.alloc([64]u8, prepared.changes.len * 2);
+    defer allocator.free(digest_strings);
+    for (prepared.changes, 0..) |change, index| {
+        const candidate_digest = change_set.digestBaseline(change.candidate);
+        digest_strings[index * 2] = std.fmt.bytesToHex(change.baseline_sha256, .lower);
+        digest_strings[index * 2 + 1] = std.fmt.bytesToHex(candidate_digest, .lower);
+        changes[index] = .{
+            .path = change.resolved_path,
+            .baseline_state = if (change.baseline == .absent) "absent" else "present",
+            .baseline_sha256 = &digest_strings[index * 2],
+            .candidate_sha256 = &digest_strings[index * 2 + 1],
+        };
+    }
+    var buffer = TextBuffer.init(allocator);
+    defer buffer.deinit();
+    try std.json.Stringify.value(Manifest{
+        .schema_version = journal_schema_version,
+        .proof_id = proof.proof_id[0..],
+        .workspace_root = prepared.workspace_root,
+        .changes = changes,
+    }, .{}, buffer.writer());
+    const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "manifest.json" });
+    defer allocator.free(path);
+    try durableWriteWithDigest(allocator, path, buffer.written());
+}
+
+fn writeImages(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    prepared: *const change_set.PreparedChangeSet,
+) !void {
+    for (prepared.changes, 0..) |change, index| {
+        if (change.baseline.bytes()) |before| {
+            const before_path = try imagePath(allocator, transaction_dir, index, "before");
+            defer allocator.free(before_path);
+            try durableWrite(allocator, before_path, before);
+        }
+        const after_path = try imagePath(allocator, transaction_dir, index, "after");
+        defer allocator.free(after_path);
+        try durableWrite(allocator, after_path, change.candidate);
+    }
+}
+
+fn writeReceipt(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    prepared: *const change_set.PreparedChangeSet,
+    proof: *const aggregate_proof.AggregateProof,
+) !void {
+    var buffer = TextBuffer.init(allocator);
+    defer buffer.deinit();
+    const writer = buffer.writer();
+    try writer.writeAll("{\"schema_version\":1,\"kind\":\"verified_change_set\",\"transaction_id\":");
+    try std.json.Stringify.value(&proof.proof_id, .{}, writer);
+    try writer.writeAll(",\"policy_hash\":");
+    try std.json.Stringify.value(&proof.policy_hash, .{}, writer);
+    try writer.writeAll(",\"read_set_digest\":");
+    try std.json.Stringify.value(&proof.read_set_digest, .{}, writer);
+    try writer.writeAll(",\"system_proven\":");
+    try writer.writeAll(if (proof.system_proven) "true" else "false");
+    try writer.writeAll(",\"changes\":[");
+    for (prepared.changes, 0..) |change, index| {
+        if (index > 0) try writer.writeByte(',');
+        var candidate_digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(change.candidate, &candidate_digest, .{});
+        const candidate_hex = std.fmt.bytesToHex(candidate_digest, .lower);
+        try writer.writeAll("{\"file\":");
+        try std.json.Stringify.value(change.authored_path, .{}, writer);
+        try writer.writeAll(",\"baseline_state\":");
+        try std.json.Stringify.value(if (change.baseline == .absent) "absent" else "present", .{}, writer);
+        try writer.writeAll(",\"baseline_sha256\":");
+        const baseline_hex = std.fmt.bytesToHex(change.baseline_sha256, .lower);
+        try std.json.Stringify.value(&baseline_hex, .{}, writer);
+        try writer.writeAll(",\"candidate_sha256\":");
+        try std.json.Stringify.value(&candidate_hex, .{}, writer);
+        try writer.writeAll("}");
+    }
+    try writer.writeAll("]}");
+    const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "receipt.json" });
+    defer allocator.free(path);
+    try durableWriteWithDigest(allocator, path, buffer.written());
+}
+
+fn stageCandidates(
+    allocator: std.mem.Allocator,
+    prepared: *const change_set.PreparedChangeSet,
+    proof_id: *const [64]u8,
+) ![][]u8 {
+    const stages = try allocator.alloc([]u8, prepared.changes.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (stages[0..initialized]) |stage| {
+            deleteFileIfPresent(allocator, stage) catch {};
+            allocator.free(stage);
+        }
+        allocator.free(stages);
+    }
+    for (prepared.changes, 0..) |change, index| {
+        const parent = std.fs.path.dirname(change.resolved_path) orelse return error.InvalidTargetPath;
+        const base = std.fs.path.basename(change.resolved_path);
+        const stage = try std.fmt.allocPrint(allocator, "{s}/.{s}.zttp-{s}.stage", .{ parent, base, proof_id[0..16] });
+        errdefer allocator.free(stage);
+        if (try pathExists(allocator, stage)) return error.StaleStageFile;
+        try durableWrite(allocator, stage, change.candidate);
+        stages[index] = stage;
+        initialized += 1;
+    }
+    return stages;
+}
+
+fn verifyCandidates(allocator: std.mem.Allocator, prepared: *const change_set.PreparedChangeSet) !void {
+    for (prepared.changes) |change| {
+        const current = try zts.file_io.readFile(allocator, change.resolved_path, change_set.max_file_bytes);
+        defer allocator.free(current);
+        if (!std.mem.eql(u8, current, change.candidate)) return error.PostCommitVerificationFailed;
+    }
+}
+
+fn verifyManifestCandidates(allocator: std.mem.Allocator, manifest: Manifest) !void {
+    for (manifest.changes) |change| {
+        const expected = parseDigest(change.candidate_sha256) orelse return error.CorruptTransactionJournal;
+        const current = try readStateDigest(allocator, change.path);
+        if (!std.mem.eql(u8, &current, &expected)) return error.PostCommitVerificationFailed;
+    }
+}
+
+fn durableWrite(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return error.InvalidJournalPath;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), parent);
+    try zts.file_io.writeFile(allocator, path, bytes);
+    try syncFile(allocator, path);
+    try syncDirectory(allocator, parent);
+}
+
+fn durableWriteWithDigest(allocator: std.mem.Allocator, path: []const u8, bytes: []const u8) !void {
+    try durableWrite(allocator, path, bytes);
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    const digest_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{path});
+    defer allocator.free(digest_path);
+    try durableWrite(allocator, digest_path, &digest_hex);
+}
+
+fn readVerifiedFile(
+    allocator: std.mem.Allocator,
+    path: []const u8,
+    max_bytes: usize,
+) ![]u8 {
+    const bytes = try zts.file_io.readFile(allocator, path, max_bytes);
+    errdefer allocator.free(bytes);
+    const digest_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{path});
+    defer allocator.free(digest_path);
+    const digest_bytes = try zts.file_io.readFile(allocator, digest_path, 64);
+    defer allocator.free(digest_bytes);
+    const expected = parseDigest(digest_bytes) orelse return error.CorruptTransactionJournal;
+    var actual: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &actual, .{});
+    if (!std.mem.eql(u8, &actual, &expected)) return error.CorruptTransactionJournal;
+    return bytes;
+}
+
+fn syncFile(allocator: std.mem.Allocator, path: []const u8) !void {
+    const path_z = try allocator.dupeZ(u8, path);
+    defer allocator.free(path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    if (std.c.fsync(fd) != 0) return error.SyncFailure;
+}
+
+fn syncDirectory(allocator: std.mem.Allocator, path: []const u8) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    var dir = try std.Io.Dir.openDirAbsolute(io_backend.io(), path, .{});
+    defer dir.close(io_backend.io());
+    if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailure;
+}
+
+fn renameAndSync(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !void {
+    const source_z = try allocator.dupeZ(u8, source);
+    defer allocator.free(source_z);
+    const target_z = try allocator.dupeZ(u8, target);
+    defer allocator.free(target_z);
+    if (std.c.rename(source_z, target_z) != 0) return error.RenameFailure;
+    try syncDirectory(allocator, std.fs.path.dirname(target) orelse return error.InvalidTargetPath);
+}
+
+fn writeMarker(allocator: std.mem.Allocator, transaction_dir: []const u8, name: []const u8) !void {
+    const path = try markerPath(allocator, transaction_dir, name);
+    defer allocator.free(path);
+    try durableWrite(allocator, path, name);
+}
+
+fn markerPresent(allocator: std.mem.Allocator, transaction_dir: []const u8, name: []const u8) !bool {
+    const path = try markerPath(allocator, transaction_dir, name);
+    defer allocator.free(path);
+    const bytes = zts.file_io.readFile(allocator, path, 128) catch |err| switch (err) {
+        error.FileNotFound => return false,
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    if (!std.mem.eql(u8, bytes, name)) return error.CorruptTransactionJournal;
+    return true;
+}
+
+fn writeProgressMarker(allocator: std.mem.Allocator, transaction_dir: []const u8, index: usize) !void {
+    const name = try std.fmt.allocPrint(allocator, "applied-{d}", .{index});
+    defer allocator.free(name);
+    try writeMarker(allocator, transaction_dir, name);
+}
+
+fn markerPath(allocator: std.mem.Allocator, transaction_dir: []const u8, name: []const u8) ![]u8 {
+    return std.fs.path.resolve(allocator, &.{ transaction_dir, name });
+}
+
+fn imagePath(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    index: usize,
+    suffix: []const u8,
+) ![]u8 {
+    const filename = try std.fmt.allocPrint(allocator, "{d}.{s}", .{ index, suffix });
+    defer allocator.free(filename);
+    return std.fs.path.resolve(allocator, &.{ transaction_dir, "images", filename });
+}
+
+fn transactionPath(allocator: std.mem.Allocator, workspace_root: []const u8, proof_id: *const [64]u8) ![]u8 {
+    return std.fs.path.resolve(allocator, &.{ workspace_root, ".zttp", "change-sets", proof_id[0..] });
+}
+
+fn loadManifest(allocator: std.mem.Allocator, transaction_dir: []const u8) !std.json.Parsed(Manifest) {
+    const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "manifest.json" });
+    defer allocator.free(path);
+    const bytes = try readVerifiedFile(allocator, path, 4 * 1024 * 1024);
+    defer allocator.free(bytes);
+    const parsed = try std.json.parseFromSlice(Manifest, allocator, bytes, .{
+        .allocate = .alloc_always,
+        .duplicate_field_behavior = .@"error",
+        .ignore_unknown_fields = false,
+    });
+    if (parsed.value.schema_version != journal_schema_version or
+        !isCanonicalProofId(parsed.value.proof_id) or
+        parsed.value.changes.len == 0 or
+        parsed.value.changes.len > change_set.max_changes)
+    {
+        var owned = parsed;
+        owned.deinit();
+        return error.CorruptTransactionJournal;
+    }
+    return parsed;
+}
+
+fn validateManifestAndImages(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    manifest: Manifest,
+) !void {
+    if (!std.fs.path.isAbsolute(manifest.workspace_root)) return error.CorruptTransactionJournal;
+    const change_sets_dir = std.fs.path.dirname(transaction_dir) orelse return error.CorruptTransactionJournal;
+    const state_dir = std.fs.path.dirname(change_sets_dir) orelse return error.CorruptTransactionJournal;
+    const expected_workspace = std.fs.path.dirname(state_dir) orelse return error.CorruptTransactionJournal;
+    if (!std.mem.eql(u8, manifest.workspace_root, expected_workspace) or
+        !std.mem.eql(u8, manifest.proof_id, std.fs.path.basename(transaction_dir)))
+    {
+        return error.CorruptTransactionJournal;
+    }
+
+    for (manifest.changes, 0..) |change, index| {
+        if (!std.fs.path.isAbsolute(change.path) or !common.isPathInsideRoot(manifest.workspace_root, change.path)) {
+            return error.CorruptTransactionJournal;
+        }
+        for (manifest.changes[0..index]) |prior| {
+            if (std.mem.eql(u8, prior.path, change.path)) return error.CorruptTransactionJournal;
+        }
+        const baseline_digest = parseDigest(change.baseline_sha256) orelse return error.CorruptTransactionJournal;
+        const candidate_digest = parseDigest(change.candidate_sha256) orelse return error.CorruptTransactionJournal;
+        const after_path = try imagePath(allocator, transaction_dir, index, "after");
+        defer allocator.free(after_path);
+        const after = try zts.file_io.readFile(allocator, after_path, change_set.max_file_bytes);
+        defer allocator.free(after);
+        const after_digest = change_set.digestBaseline(after);
+        if (!std.mem.eql(u8, &after_digest, &candidate_digest)) return error.CorruptTransactionJournal;
+
+        const before_path = try imagePath(allocator, transaction_dir, index, "before");
+        defer allocator.free(before_path);
+        if (std.mem.eql(u8, change.baseline_state, "present")) {
+            const before = try zts.file_io.readFile(allocator, before_path, change_set.max_file_bytes);
+            defer allocator.free(before);
+            const before_digest = change_set.digestBaseline(before);
+            if (!std.mem.eql(u8, &before_digest, &baseline_digest)) return error.CorruptTransactionJournal;
+        } else if (std.mem.eql(u8, change.baseline_state, "absent")) {
+            if (try pathExists(allocator, before_path) or
+                !std.mem.eql(u8, &baseline_digest, &change_set.digestBaseline(null)))
+            {
+                return error.CorruptTransactionJournal;
+            }
+        } else {
+            return error.CorruptTransactionJournal;
+        }
+    }
+}
+
+fn validateReceipt(allocator: std.mem.Allocator, transaction_dir: []const u8) !void {
+    const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "receipt.json" });
+    defer allocator.free(path);
+    const bytes = try readVerifiedFile(allocator, path, 4 * 1024 * 1024);
+    defer allocator.free(bytes);
+    if (bytes.len == 0) return error.CorruptTransactionJournal;
+}
+
+fn deleteFileIfPresent(allocator: std.mem.Allocator, path: []const u8) !void {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    std.Io.Dir.cwd().deleteFile(io_backend.io(), path) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+}
+
+fn deleteTransactionDirectory(allocator: std.mem.Allocator, transaction_dir: []const u8) !void {
+    const parent_path = std.fs.path.dirname(transaction_dir) orelse return error.CorruptTransactionDirectory;
+    const name = std.fs.path.basename(transaction_dir);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    var parent = try std.Io.Dir.openDirAbsolute(io_backend.io(), parent_path, .{});
+    defer parent.close(io_backend.io());
+    try parent.deleteTree(io_backend.io(), name);
+    if (std.c.fsync(parent.handle) != 0) return error.DirectorySyncFailure;
+}
+
+fn readStateDigest(allocator: std.mem.Allocator, path: []const u8) ![32]u8 {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const stat = std.Io.Dir.cwd().statFile(io_backend.io(), path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return change_set.digestBaseline(null),
+        else => return err,
+    };
+    if (stat.kind != .file) return error.NonRegularTransactionTarget;
+    const bytes = zts.file_io.readFile(allocator, path, change_set.max_file_bytes) catch |err| switch (err) {
+        error.FileNotFound => return change_set.digestBaseline(null),
+        else => return err,
+    };
+    defer allocator.free(bytes);
+    return change_set.digestBaseline(bytes);
+}
+
+fn parseDigest(value: []const u8) ?[32]u8 {
+    if (value.len != 64) return null;
+    var out: [32]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, value) catch return null;
+    return out;
+}
+
+fn pathExists(allocator: std.mem.Allocator, path: []const u8) !bool {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    _ = std.Io.Dir.cwd().statFile(io_backend.io(), path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return false,
+        else => return err,
+    };
+    return true;
+}
+
+fn isCanonicalProofId(value: []const u8) bool {
+    if (value.len != 64) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
+}
+
+fn lockExclusiveNonBlocking(fd: std.c.fd_t) !void {
+    while (true) switch (std.posix.errno(std.c.flock(fd, std.posix.LOCK.EX | std.posix.LOCK.NB))) {
+        .SUCCESS => return,
+        .INTR => continue,
+        .AGAIN => return error.WorkspaceChangeSetActive,
+        else => return error.WorkspaceLockFailed,
+    };
+}
+
+const testing = std.testing;
+
+const Fixture = struct {
+    root: []u8,
+    prepared: change_set.PreparedChangeSet,
+    snapshot: workspace_snapshot.Snapshot,
+    proof: aggregate_proof.AggregateProof,
+
+    fn init(allocator: std.mem.Allocator, tmp: *std.testing.TmpDir) !Fixture {
+        try tmp.dir.createDirPath(testing.io, "src");
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old-a" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/b.ts", .data = "old-b" });
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/context.ts", .data = "stable" });
+        const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+        defer allocator.free(root_z);
+        const root = try allocator.dupe(u8, root_z);
+        errdefer allocator.free(root);
+        const tail = [_]@import("turn.zig").Change{.{ .file = "src/b.ts", .content = "new-b" }};
+        var prepared = try change_set.prepare(allocator, root, .{
+            .file = "src/a.ts",
+            .content = "new-a",
+            .additional = &tail,
+        });
+        errdefer prepared.deinit(allocator);
+        var snapshot = try workspace_snapshot.Snapshot.capture(allocator, &prepared);
+        errdefer snapshot.deinit(allocator);
+        const roots = try allocator.alloc([]u8, 1);
+        roots[0] = try allocator.dupe(u8, "src/a.ts");
+        return .{
+            .root = root,
+            .prepared = prepared,
+            .snapshot = snapshot,
+            .proof = .{
+                .proof_id = @splat('a'),
+                .policy_hash = zts.policyHash(),
+                .read_set_digest = @splat('b'),
+                .proof_roots = roots,
+                .diagnostics = try allocator.alloc(aggregate_proof.Diagnostic, 0),
+                .system_proven = false,
+            },
+        };
+    }
+
+    fn deinit(self: *Fixture, allocator: std.mem.Allocator) void {
+        self.proof.deinit(allocator);
+        self.snapshot.deinit(allocator);
+        self.prepared.deinit(allocator);
+        allocator.free(self.root);
+    }
+};
+
+test "transaction commits every path and one durable receipt" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    var receipt = try commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer receipt.deinit(testing.allocator);
+    try testing.expect(try pathExists(testing.allocator, receipt.receipt_path));
+    for (fixture.prepared.changes) |change| {
+        const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
+        defer testing.allocator.free(bytes);
+        try testing.expectEqualStrings(change.candidate, bytes);
+    }
+}
+
+test "recovery rolls a partial rename sequence forward" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    try testing.expectError(
+        error.InjectedTransactionFailure,
+        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+            .fault = .{ .after_rename = 0 },
+        }),
+    );
+    try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
+    for (fixture.prepared.changes) |change| {
+        const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
+        defer testing.allocator.free(bytes);
+        try testing.expectEqualStrings(change.candidate, bytes);
+    }
+}
+
+test "recovery never overwrites a concurrent third state" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    try testing.expectError(
+        error.InjectedTransactionFailure,
+        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+            .fault = .{ .after_rename = 0 },
+        }),
+    );
+    try zts.file_io.writeFile(testing.allocator, fixture.prepared.changes[1].resolved_path, "user-edit");
+    try testing.expectError(
+        error.WorkspaceRecoveryConflict,
+        recoverAllLocked(testing.allocator, &lock, fixture.root),
+    );
+    const bytes = try zts.file_io.readFile(testing.allocator, fixture.prepared.changes[1].resolved_path, 64);
+    defer testing.allocator.free(bytes);
+    try testing.expectEqualStrings("user-edit", bytes);
+}
+
+test "recovery validates every target before writing any baseline" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    try testing.expectError(
+        error.InjectedTransactionFailure,
+        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+            .fault = .after_applying,
+        }),
+    );
+    try zts.file_io.writeFile(testing.allocator, fixture.prepared.changes[1].resolved_path, "user-edit");
+    try testing.expectError(
+        error.WorkspaceRecoveryConflict,
+        recoverAllLocked(testing.allocator, &lock, fixture.root),
+    );
+    const first = try zts.file_io.readFile(testing.allocator, fixture.prepared.changes[0].resolved_path, 64);
+    defer testing.allocator.free(first);
+    try testing.expectEqualStrings("old-a", first);
+}
+
+test "recovery removes a prepared transaction that changed no source" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    try testing.expectError(
+        error.InjectedTransactionFailure,
+        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+            .fault = .after_prepared,
+        }),
+    );
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    try testing.expect(try pathExists(testing.allocator, transaction_dir));
+    try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
+    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    for (fixture.prepared.changes) |change| {
+        const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
+        defer testing.allocator.free(bytes);
+        try testing.expectEqualStrings(change.baseline.bytes().?, bytes);
+    }
+}
+
+test "recovery rejects a corrupt candidate image before writing" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    try testing.expectError(
+        error.InjectedTransactionFailure,
+        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+            .fault = .after_applying,
+        }),
+    );
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    const after_path = try imagePath(testing.allocator, transaction_dir, 0, "after");
+    defer testing.allocator.free(after_path);
+    try zts.file_io.writeFile(testing.allocator, after_path, "corrupt");
+    try testing.expectError(
+        error.CorruptTransactionJournal,
+        recoverAllLocked(testing.allocator, &lock, fixture.root),
+    );
+    for (fixture.prepared.changes) |change| {
+        const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
+        defer testing.allocator.free(bytes);
+        try testing.expectEqualStrings(change.baseline.bytes().?, bytes);
+    }
+}
+
+test "recovery completes receipt state after source commit" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    try testing.expectError(
+        error.InjectedTransactionFailure,
+        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+            .fault = .after_committed,
+        }),
+    );
+    try testing.expectEqual(@as(usize, 0), try recoverAllLocked(testing.allocator, &lock, fixture.root));
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    try testing.expect(try markerPresent(testing.allocator, transaction_dir, "receipted"));
+}
+
+test "full read set mutation causes zero writes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/context.ts", .data = "concurrent" });
+    var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+    defer lock.deinit();
+    try testing.expectError(
+        error.ProofReadSetChanged,
+        commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{}),
+    );
+    for (fixture.prepared.changes) |change| {
+        const bytes = try zts.file_io.readFile(testing.allocator, change.resolved_path, 64);
+        defer testing.allocator.free(bytes);
+        try testing.expectEqualStrings(change.baseline.bytes().?, bytes);
+    }
+}
+
+test "workspace lock excludes a second writer" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var first = try WorkspaceLock.acquire(testing.allocator, root);
+    defer first.deinit();
+    try testing.expectError(error.WorkspaceChangeSetActive, WorkspaceLock.acquire(testing.allocator, root));
+}
