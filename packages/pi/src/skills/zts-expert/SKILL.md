@@ -187,8 +187,14 @@ Rules:
   declarations unless the export is intentionally a first-class value.
 - Public helpers that reach capabilities should declare an explicit
   `Effects<...>` return capsule.
-- Public helpers used under declared specs should declare an explicit
-  `Proof<...>` return capsule.
+- Public non-handler helpers used under declared specs should declare an
+  explicit `Proof<...>` return capsule. Helper capsules have a deliberately
+  smaller vocabulary than handler proofs: only `total`, `pure`, `read_only`,
+  and `deterministic` are valid helper properties. Do not copy handler proof
+  properties onto helpers. Module-internal helpers should normally return
+  their plain value type unless one of those four keystone capsules is needed.
+- A handler `Proof<Response, P>` may name any handler property published by
+  the live `zts check --json` result.
 
 Canonical diagnostics start at ZTS608. Existing strict diagnostics keep their
 current meanings: ZTS602 for dynamic capability keys, ZTS604 for avoidable
@@ -469,8 +475,11 @@ new DSL. For the copyable first shape, import `run` from `zttp:durable` and
 `call` from `zttp:workflow`, derive the run key from
 `req.headers.get("idempotency-key")`, and put the top-level `workflow.call`
 inside `run()`. Use `step()` for replayable JSON-snapshot work only. Because
-workflow modules are write-effect modules, declare a narrow `Proof<T, P>` with
-only the properties `zts check --json` proves.
+workflow modules are write-effect modules, declare a narrow handler
+`Proof<Response, P>` with only the handler properties `zts check --json`
+proves. A helper `Proof<T, P>` remains limited to `total`, `pure`, `read_only`,
+and `deterministic`; internal workflow helpers should normally return plain
+`T` instead.
 
 Never put `workflow.call`, `saga`, `fanout`, or `follow` inside a durable
 `step()` callback; ZTS509 rejects that shape. For `saga([...])`, every non-last

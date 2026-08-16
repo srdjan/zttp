@@ -8,6 +8,8 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const zts_cli = @import("zts_cli");
+const zts_expert_skill = @import("zts_expert_skill");
 const anthropic = @import("providers/anthropic/client.zig");
 const anthropic_tools = @import("providers/anthropic/tools_schema.zig");
 const local = @import("providers/local/client.zig");
@@ -948,6 +950,33 @@ test "corpus version changes when a case changes" {
         if (c != '0') nonzero = true;
     }
     try testing.expect(nonzero);
+}
+
+test "embedded durable wait-signal reference passes the live compiler" {
+    const start_marker = "<!-- compiler-probe: durable-wait-signal:start -->\n```typescript\n";
+    const end_marker = "\n```\n<!-- compiler-probe: durable-wait-signal:end -->";
+    const source_start = (std.mem.indexOf(u8, zts_expert_skill.virtual_modules_md, start_marker) orelse
+        return error.MissingDurableWaitSignalProbe) + start_marker.len;
+    const source_end = std.mem.indexOfPos(
+        u8,
+        zts_expert_skill.virtual_modules_md,
+        source_start,
+        end_marker,
+    ) orelse return error.UnterminatedDurableWaitSignalProbe;
+
+    var check = try zts_cli.precompile.runCheckOnlyFromSource(
+        testing.allocator,
+        zts_expert_skill.virtual_modules_md[source_start..source_end],
+        "handler.ts",
+        null,
+        true,
+        null,
+        false,
+    );
+    defer check.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 0), check.totalErrors());
+    try testing.expectEqual(@as(usize, 0), check.json_diagnostics.items.len);
 }
 
 // The corpus spans common tasks the agent handles cleanly and harder ones that

@@ -221,6 +221,13 @@ Crash recovery for long-running workflows. Requires `--durable <dir>`. Pending w
 
 `stepWithTimeout` wraps a step with a deadline - returns a Result so you can handle timeout without crashing the workflow.
 
+Handler proofs and helper proof capsules use different property vocabularies.
+A handler `Proof<Response, P>` may declare any handler property published by
+the live compiler. A non-handler helper `Proof<T, P>` may declare only
+`total`, `pure`, `read_only`, or `deterministic`. Do not copy handler
+properties such as `state_isolated` or `no_secret_leakage` onto helpers.
+Module-internal helpers should normally return their plain value type.
+
 ```typescript
 structural DurableProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
 
@@ -240,6 +247,50 @@ function handler(req: Request): DurableProof<Response> {
     });
 }
 ```
+
+A complete approval workflow uses the same idempotency key to park and resume
+the durable run. Keep the handler proof on the handler rather than splitting
+the two paths into helpers with handler-only proof properties.
+
+<!-- compiler-probe: durable-wait-signal:start -->
+```typescript
+import { run, waitSignal, signal } from "zttp:durable";
+
+structural ApprovalProof<T> = Proof<T,
+    | "deterministic"
+    | "retry_safe"
+    | "idempotent"
+    | "state_isolated"
+    | "result_safe"
+    | "optional_safe"
+    | "no_secret_leakage"
+    | "no_credential_leakage"
+    | "input_validated"
+    | "pii_contained"
+    | "injection_safe"
+    | "canonical"
+    | "cost_bounded"
+>;
+
+function handler(req: Request): ApprovalProof<Response> {
+    const key = req.headers.get("Idempotency-Key");
+    if (key === undefined) {
+        return Response.json({ error: "missing Idempotency-Key" }, { status: 400 });
+    }
+    if (req.method === "POST" && req.path === "/signal") {
+        const delivered = signal(key, "approval", { approved: true });
+        return Response.json({ delivered: delivered });
+    }
+    if (req.method !== "GET" || req.path !== "/wait") {
+        return Response.json({ error: "not found" }, { status: 404 });
+    }
+    return run(key, () => {
+        const approval = waitSignal("approval");
+        return Response.json({ approved: approval !== undefined });
+    });
+}
+```
+<!-- compiler-probe: durable-wait-signal:end -->
 
 ## zttp:workflow (effect: write)
 
