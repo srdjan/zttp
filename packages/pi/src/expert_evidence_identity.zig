@@ -50,12 +50,9 @@ pub const HeadlineCase = struct {
     mode: codegen_types.InputMode,
 };
 
-pub const UnsupportedIntentKind = enum { pending_runtime, compiler_veto_only };
-
 pub const IntentScenario = union(enum) {
-    unsupported: struct {
+    compiler_veto_only: struct {
         name: []const u8,
-        kind: UnsupportedIntentKind,
         reason: []const u8,
     },
     runtime: struct {
@@ -65,6 +62,7 @@ pub const IntentScenario = union(enum) {
         revision: ?[]const u8 = null,
         handler_path: []const u8,
         config: ?[]const u8 = null,
+        runtime_files: []const codegen_types.SeedFile = &.{},
     },
 };
 
@@ -353,14 +351,14 @@ pub fn intentSuite(scenarios: []const IntentScenario) IntentSuiteIdentity {
     for (scenarios, 0..) |scenario, scenario_index| {
         hasher.u64Field("scenario-index", scenario_index);
         switch (scenario) {
-            .unsupported => |unsupported| {
-                hasher.field("scenario-name", unsupported.name);
+            .compiler_veto_only => |compiler_only| {
+                hasher.field("scenario-name", compiler_only.name);
                 hasher.optionalField("spec", null);
-                hasher.field("runtime-support", "unsupported");
-                hasher.field("unsupported-kind", @tagName(unsupported.kind));
-                hasher.field("unsupported-reason", unsupported.reason);
+                hasher.field("runtime-support", "compiler-veto-only");
+                hasher.field("unsupported-reason", compiler_only.reason);
                 hasher.optionalField("handler-path", null);
                 hasher.optionalField("config", null);
+                hasher.u64Field("runtime-file-count", 0);
             },
             .runtime => |runtime| {
                 hasher.field("scenario-name", runtime.name);
@@ -370,6 +368,12 @@ pub fn intentSuite(scenarios: []const IntentScenario) IntentSuiteIdentity {
                 hasher.optionalField("runtime-revision", runtime.revision);
                 hasher.optionalField("handler-path", runtime.handler_path);
                 hasher.optionalField("config", runtime.config);
+                hasher.u64Field("runtime-file-count", runtime.runtime_files.len);
+                for (runtime.runtime_files, 0..) |runtime_file, file_index| {
+                    hasher.u64Field("runtime-file-index", file_index);
+                    hasher.field("runtime-file-path", runtime_file.path);
+                    hasher.field("runtime-file-bytes", runtime_file.bytes);
+                }
             },
         }
     }
@@ -549,11 +553,11 @@ test "cohort identities are deterministic domain separated and field isolated" {
             .revision = "1",
             .handler_path = "handler.ts",
             .config = "{\"handler\":\"handler.ts\"}",
+            .runtime_files = &.{.{ .path = "system.json", .bytes = "{}" }},
         } },
-        .{ .unsupported = .{
+        .{ .compiler_veto_only = .{
             .name = "beta",
-            .kind = .pending_runtime,
-            .reason = "durable-runtime-unavailable",
+            .reason = "compiler-boundary-probe",
         } },
     };
     const intent = intentSuite(&intents);
@@ -566,6 +570,7 @@ test "cohort identities are deterministic domain separated and field isolated" {
         .revision = "1",
         .handler_path = "handler.ts",
         .config = "{\"handler\":\"handler.ts\"}",
+        .runtime_files = &.{.{ .path = "system.json", .bytes = "{}" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
@@ -576,6 +581,7 @@ test "cohort identities are deterministic domain separated and field isolated" {
         .revision = "1",
         .handler_path = "handler.ts",
         .config = "{\"handler\":\"handler.ts\"}",
+        .runtime_files = &.{.{ .path = "system.json", .bytes = "{}" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
@@ -586,6 +592,7 @@ test "cohort identities are deterministic domain separated and field isolated" {
         .revision = "1",
         .handler_path = "other.ts",
         .config = "{\"handler\":\"handler.ts\"}",
+        .runtime_files = &.{.{ .path = "system.json", .bytes = "{}" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
@@ -596,6 +603,7 @@ test "cohort identities are deterministic domain separated and field isolated" {
         .revision = "1",
         .handler_path = "handler.ts",
         .config = null,
+        .runtime_files = &.{.{ .path = "system.json", .bytes = "{}" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
@@ -606,6 +614,7 @@ test "cohort identities are deterministic domain separated and field isolated" {
         .revision = "1",
         .handler_path = "handler.ts",
         .config = "{\"handler\":\"handler.ts\"}",
+        .runtime_files = &.{.{ .path = "system.json", .bytes = "{}" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
@@ -616,26 +625,40 @@ test "cohort identities are deterministic domain separated and field isolated" {
         .revision = "2",
         .handler_path = "handler.ts",
         .config = "{\"handler\":\"handler.ts\"}",
+        .runtime_files = &.{.{ .path = "system.json", .bytes = "{}" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
-    changed_intents[0] = .{ .unsupported = .{
+    changed_intents[0] = .{ .runtime = .{
         .name = "alpha",
-        .kind = .pending_runtime,
-        .reason = "runtime-unavailable",
+        .spec = "{\"type\":\"test\"}\n",
+        .runner = "zttp-test-jsonl",
+        .revision = "1",
+        .handler_path = "handler.ts",
+        .config = "{\"handler\":\"handler.ts\"}",
+        .runtime_files = &.{.{ .path = "other-system.json", .bytes = "{}" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
-    changed_intents[1] = .{ .unsupported = .{
-        .name = "beta",
-        .kind = .compiler_veto_only,
-        .reason = "durable-runtime-unavailable",
+    changed_intents[0] = .{ .runtime = .{
+        .name = "alpha",
+        .spec = "{\"type\":\"test\"}\n",
+        .runner = "zttp-test-jsonl",
+        .revision = "1",
+        .handler_path = "handler.ts",
+        .config = "{\"handler\":\"handler.ts\"}",
+        .runtime_files = &.{.{ .path = "system.json", .bytes = "changed" }},
     } };
     try expectChanged(intent, intentSuite(&changed_intents));
     changed_intents = intents;
-    changed_intents[1] = .{ .unsupported = .{
+    changed_intents[0] = .{ .compiler_veto_only = .{
+        .name = "alpha",
+        .reason = "compiler-boundary-probe",
+    } };
+    try expectChanged(intent, intentSuite(&changed_intents));
+    changed_intents = intents;
+    changed_intents[1] = .{ .compiler_veto_only = .{
         .name = "beta",
-        .kind = .pending_runtime,
         .reason = "different-reason",
     } };
     try expectChanged(intent, intentSuite(&changed_intents));

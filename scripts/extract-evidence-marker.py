@@ -210,6 +210,14 @@ def validate_convergence(payload: dict[str, Any]) -> None:
         fail("convergence marker intentPassPercent disagrees with its count")
     if payload["medianRoundtrips"] <= 0:
         fail("convergence marker has no round-trip sample")
+    if raw < 14:
+        fail("publishable convergence marker has fewer than 14 raw first-draft passes")
+    if final != 19:
+        fail("publishable convergence marker is not final-green on all 19 cases")
+    if payload["medianRoundtrips"] > 4:
+        fail("publishable convergence marker exceeds four median round-trips")
+    if (passed, checked) != (18, 18):
+        fail("publishable convergence marker does not pass all 18 runtime intents")
     for name in ("emptyResponses", "timeoutFailures", "decodeFailures"):
         if payload[name] != 0:
             fail(f"publishable convergence marker reports {name}")

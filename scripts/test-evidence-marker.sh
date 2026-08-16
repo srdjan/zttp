@@ -74,8 +74,8 @@ convergence = common | {
     "finalGreens": 19,
     "medianRoundtrips": 4,
     "intentPassPercent": 100,
-    "intentPasses": 13,
-    "intentChecked": 13,
+    "intentPasses": 18,
+    "intentChecked": 18,
     "emptyResponses": 0,
     "timeoutFailures": 0,
     "decodeFailures": 0,
@@ -194,6 +194,17 @@ for field, value in (
 ):
     changed = copy.deepcopy(convergence)
     changed[field] = value
+    invoke("convergence", changed, False)
+
+for updates in (
+    {"rawFirstDraftPasses": 13, "rawFirstDraftPassPercent": 68},
+    {"finalGreens": 18, "finalGreenPercent": 94},
+    {"medianRoundtrips": 5},
+    {"intentPasses": 17, "intentChecked": 18, "intentPassPercent": 94},
+    {"intentPasses": 17, "intentChecked": 17, "intentPassPercent": 100},
+):
+    changed = copy.deepcopy(convergence)
+    changed.update(updates)
     invoke("convergence", changed, False)
 
 for field, value in (

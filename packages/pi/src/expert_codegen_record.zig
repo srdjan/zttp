@@ -709,14 +709,13 @@ test "record-tee captures a faithful anthropic cassette offline" {
 
 const IntentPolicy = union(enum) {
     runtime: codegen.IntentCheck,
-    pending_runtime: []const u8,
     compiler_veto_only: []const u8,
 };
 
 fn runtimeIntent(policy: IntentPolicy) ?codegen.IntentCheck {
     return switch (policy) {
         .runtime => |intent| intent,
-        .pending_runtime, .compiler_veto_only => null,
+        .compiler_veto_only => null,
     };
 }
 
@@ -897,18 +896,13 @@ pub fn intentSuiteIdentity() evidence_identity.IntentSuiteIdentity {
             .runtime => |intent| .{ .runtime = .{
                 .name = rc.name,
                 .spec = intent.tests_jsonl,
-                .runner = "zttp-test-jsonl-v1",
+                .runner = "zttp-test-runtime-scenario-v1",
                 .handler_path = intent.handler_path,
                 .config = intent.zttp_json,
+                .runtime_files = intent.runtime_files,
             } },
-            .pending_runtime => |reason| .{ .unsupported = .{
+            .compiler_veto_only => |reason| .{ .compiler_veto_only = .{
                 .name = rc.name,
-                .kind = .pending_runtime,
-                .reason = reason,
-            } },
-            .compiler_veto_only => |reason| .{ .unsupported = .{
-                .name = rc.name,
-                .kind = .compiler_veto_only,
                 .reason = reason,
             } },
         };
@@ -972,23 +966,18 @@ test "evaluation identities are deterministic and the corpus accessor is input o
 
 test "intent cohort is explicit and non-vacuous" {
     var executable: usize = 0;
-    var pending_runtime: usize = 0;
     var compiler_veto_only: usize = 0;
     for (record_corpus) |rc| switch (rc.intent) {
         .runtime => {
             executable += 1;
         },
-        .pending_runtime => |reason| {
-            try testing.expect(reason.len > 0);
-            pending_runtime += 1;
-        },
         .compiler_veto_only => |reason| {
+            try testing.expectEqualStrings("parallel-secret", rc.name);
             try testing.expect(reason.len > 0);
             compiler_veto_only += 1;
         },
     };
-    try testing.expectEqual(@as(usize, 13), executable);
-    try testing.expectEqual(@as(usize, 5), pending_runtime);
+    try testing.expectEqual(@as(usize, 18), executable);
     try testing.expectEqual(@as(usize, 1), compiler_veto_only);
     try testing.expect(security_probes.corpus.len > 0);
 }
@@ -1166,17 +1155,12 @@ test "every corpus virtual module has a dedicated embedded reference" {
 // workflows). Each elicits realistic multi-roundtrip behaviour (explore then
 // edit) and records as step_0/step_1/...
 //
-// Thirteen of the nineteen carry an intent spec. The five durable and workflow
-// cases do not: executing them needs the durable store and queue the runtime
-// stands up, and `zttp test` has no offline story for either - `saga()` fails
-// with NativeFunctionError before any assertion runs, and an io stub does not
-// intercept it. Those cases stay veto-checked and report `.not_checked`, which
-// the summary counts apart from passes, so the published figure reads 13 of 19
-// covered instead of pretending to 20. Closing that gap means giving the test
-// runner a durable backend, which is its own piece of work.
-//
-// `parallel-secret` is the sixth without a spec, for a different reason given
-// at the case.
+// Eighteen of the nineteen cases carry executable runtime intent. The five
+// durable and workflow cases use the scenario header to own a private durable
+// store, optional queue/system backend, and exact event evidence. Auxiliary
+// system handlers are written only after the model turn, so they cannot affect
+// the authored prompt cohort. `parallel-secret` is intentionally compiler-only
+// for the reason given at that case.
 //
 // The last five cases were added because eleven could not separate nine
 // consecutive builds - every row read 90%, which was the corpus reporting its
@@ -1247,6 +1231,83 @@ fn applyToolAllowlist(registry: *registry_mod.Registry) !void {
 /// `ZTTP_CODEGEN_TURN_TIMEOUT_MS` overrides it; zero restores the old
 /// unbounded behavior for a case that legitimately needs longer.
 const default_record_turn_timeout_ms: u64 = 180_000;
+
+const queued_call_runtime_files = [_]codegen.SeedFile{
+    .{
+        .path = "intent-system.json",
+        .bytes =
+        \\{"version":1,"handlers":[
+        \\  {"name":"greet","path":"intent-greet.ts","baseUrl":"https://greet.internal"}
+        \\]}
+        ,
+    },
+    .{
+        .path = "intent-greet.ts",
+        .bytes =
+        \\function handler(req) {
+        \\  return Response.json({ from: "greet-child", path: req.path });
+        \\}
+        ,
+    },
+};
+
+const nested_dispatch_runtime_files = [_]codegen.SeedFile{
+    .{
+        .path = "intent-system.json",
+        .bytes =
+        \\{"version":1,"handlers":[
+        \\  {"name":"notify","path":"intent-notify.ts","baseUrl":"https://notify.internal"}
+        \\]}
+        ,
+    },
+    .{
+        .path = "intent-notify.ts",
+        .bytes =
+        \\function handler(req) {
+        \\  return Response.json({ notified: "notify-child", path: req.path });
+        \\}
+        ,
+    },
+};
+
+const saga_runtime_files = [_]codegen.SeedFile{
+    .{
+        .path = "intent-system.json",
+        .bytes =
+        \\{"version":1,"handlers":[
+        \\  {"name":"inventory","path":"intent-inventory.ts","baseUrl":"https://inventory.internal"},
+        \\  {"name":"billing","path":"intent-billing.ts","baseUrl":"https://billing.internal"},
+        \\  {"name":"shipping","path":"intent-shipping.ts","baseUrl":"https://shipping.internal"}
+        \\]}
+        ,
+    },
+    .{
+        .path = "intent-inventory.ts",
+        .bytes =
+        \\function handler(req) {
+        \\  if (req.path === "/release") return Response.json({ marker: "release-compensation" });
+        \\  return Response.json({ marker: "reserve-complete" });
+        \\}
+        ,
+    },
+    .{
+        .path = "intent-billing.ts",
+        .bytes =
+        \\function handler(req) {
+        \\  if (req.path === "/refund") return Response.json({ marker: "refund-compensation" });
+        \\  return Response.json({ marker: "charge-complete" });
+        \\}
+        ,
+    },
+    .{
+        .path = "intent-shipping.ts",
+        .bytes =
+        \\function handler(req) {
+        \\  return Response.json({ marker: "ship-failure" }, { status: 503 });
+        \\}
+        ,
+    },
+};
 
 const record_corpus = [_]RecordCase{
     .{
@@ -1350,7 +1411,24 @@ const record_corpus = [_]RecordCase{
         .name = "durable-order",
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow: a `reserve` step then a `charge` step, via run() and step().",
-        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-store" },
+        .intent = .{ .runtime = .{
+            .tests_jsonl =
+            \\{"type":"runtime","durable":true,"workflowQueue":false}
+            \\{"type":"test","name":"the order runs reserve then charge"}
+            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"order-1"},"body":null}
+            \\{"type":"expect","status":201,"bodyContains":"\"charged\":true"}
+            \\{"type":"test","name":"the completed order replays without duplicate steps"}
+            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"order-1"},"body":null}
+            \\{"type":"expect","status":201,"bodyContains":"\"reserved\":true"}
+            \\{"type":"expect-run","runKey":"order-1","complete":true}
+            \\{"type":"expect-event","runKey":"order-1","kind":"step_start","name":"reserve"}
+            \\{"type":"expect-event","runKey":"order-1","kind":"step_result","name":"reserve","resultContains":"reservationId"}
+            \\{"type":"expect-event","runKey":"order-1","kind":"step_start","name":"charge"}
+            \\{"type":"expect-event","runKey":"order-1","kind":"step_result","name":"charge","resultContains":"chargeId"}
+            \\{"type":"expect-signals","count":0}
+            \\
+            ,
+        } },
         // Was ZTS042/narrowing death-spiral (never converged); closed by the
         // "use untyped values directly, never narrow with as/guards" teaching.
         .expect_first_attempt_green = true,
@@ -1360,7 +1438,21 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable workflow handler in handler.ts using zttp:durable and " ++
             "zttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
             "and dispatch a greet child handler with workflow.call at durable depth 0.",
-        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
+        .intent = .{ .runtime = .{
+            .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
+            .runtime_files = &queued_call_runtime_files,
+            .tests_jsonl =
+            \\{"type":"runtime","durable":true,"workflowQueue":true}
+            \\{"type":"test","name":"the queued greet child is dispatched"}
+            \\{"type":"request","method":"GET","url":"/","headers":{"idempotency-key":"queued-1"},"body":null}
+            \\{"type":"expect","status":200,"bodyContains":"greet-child"}
+            \\{"type":"expect-run","runKey":"queued-1","complete":true}
+            \\{"type":"expect-event","runKey":"queued-1","kind":"step_start","name":"workflow.call#0"}
+            \\{"type":"expect-event","runKey":"queued-1","kind":"step_result","name":"workflow.call#0","resultContains":"greet-child"}
+            \\{"type":"expect-queue","runKey":"queued-1","step":"workflow.call#0","status":200,"bodyContains":"greet-child"}
+            \\
+            ,
+        } },
         .expect_first_attempt_green = true,
     },
     .{
@@ -1368,7 +1460,24 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
             "durable step, then dispatch a notify child handler with workflow.call after the " ++
             "step completes. Keep the child dispatch outside the step callback.",
-        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
+        .intent = .{ .runtime = .{
+            .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
+            .runtime_files = &nested_dispatch_runtime_files,
+            .tests_jsonl =
+            \\{"type":"runtime","durable":true,"workflowQueue":true}
+            \\{"type":"test","name":"notify dispatch occurs outside the durable step"}
+            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"nested-1"},"body":"{\"sku\":\"one\"}"}
+            \\{"type":"io","seq":0,"module":"fetch","fn":"fetch","args":["https://inventory.internal/reserve"],"result":{"status":200,"body":"{\"reserved\":true}"}}
+            \\{"type":"expect","status":201,"bodyContains":"\"notified\":200"}
+            \\{"type":"expect-run","runKey":"nested-1","complete":true}
+            \\{"type":"expect-event","runKey":"nested-1","kind":"step_start","name":"reserve"}
+            \\{"type":"expect-event","runKey":"nested-1","kind":"step_result","name":"reserve","resultContains":"reserved"}
+            \\{"type":"expect-event","runKey":"nested-1","kind":"step_start","name":"workflow.call#0"}
+            \\{"type":"expect-event","runKey":"nested-1","kind":"step_result","name":"workflow.call#0","resultContains":"notify-child"}
+            \\{"type":"expect-queue","runKey":"nested-1","step":"workflow.call#0","status":200,"bodyContains":"notify-child"}
+            \\
+            ,
+        } },
         // Flipped to false on the 2026-08-03 re-record, and back to true on
         // 2026-08-04 when the compiler defect that caused the failure was
         // fixed. Both flips are worth keeping, because they say different
@@ -1395,7 +1504,28 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts using zttp:workflow saga() for reserve, " ++
             "charge, and ship steps. Include compensate functions for every non-last static " ++
             "saga step so the saga compensation proof can pass.",
-        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
+        .intent = .{ .runtime = .{
+            .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"system\": \"intent-system.json\"\n}\n",
+            .runtime_files = &saga_runtime_files,
+            .tests_jsonl =
+            \\{"type":"runtime","durable":true,"workflowQueue":false}
+            \\{"type":"test","name":"shipping failure compensates charge then reserve"}
+            \\{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"saga-1"},"body":null}
+            \\{"type":"expect","bodyContains":"outcome"}
+            \\{"type":"expect-run","runKey":"saga-1","complete":true}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"do:reserve"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"do:reserve","resultContains":"reserve-complete"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"do:charge"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"do:charge","resultContains":"charge-complete"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"do:ship"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"do:ship","resultContains":"ship-failure"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"undo:charge"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"undo:charge","resultContains":"refund-compensation"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_start","name":"undo:reserve"}
+            \\{"type":"expect-event","runKey":"saga-1","kind":"step_result","name":"undo:reserve","resultContains":"release-compensation"}
+            \\
+            ,
+        } },
         .expect_first_attempt_green = true,
     },
     .{
@@ -1403,7 +1533,25 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable approval workflow in handler.ts using waitSignal and " ++
             "signal. The /wait path should park a run using the Idempotency-Key header, and " ++
             "the /signal path should resume the same key with an approved payload.",
-        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-store" },
+        .intent = .{ .runtime = .{
+            .tests_jsonl =
+            \\{"type":"runtime","durable":true,"workflowQueue":false}
+            \\{"type":"test","name":"the approval run parks"}
+            \\{"type":"request","method":"POST","url":"/wait","headers":{"Idempotency-Key":"approval-1"},"body":null}
+            \\{"type":"expect","status":202,"bodyContains":"signal"}
+            \\{"type":"test","name":"the approval signal is delivered"}
+            \\{"type":"request","method":"POST","url":"/signal","headers":{"Idempotency-Key":"approval-1"},"body":null}
+            \\{"type":"expect","status":200,"bodyContains":"\"delivered\":true"}
+            \\{"type":"test","name":"the parked run resumes with approval"}
+            \\{"type":"request","method":"POST","url":"/wait","headers":{"Idempotency-Key":"approval-1"},"body":null}
+            \\{"type":"expect","status":200,"bodyContains":"\"approved\":true"}
+            \\{"type":"expect-run","runKey":"approval-1","complete":true}
+            \\{"type":"expect-event","runKey":"approval-1","kind":"wait_signal","name":"approval"}
+            \\{"type":"expect-event","runKey":"approval-1","kind":"resume_signal","name":"approval","payloadContains":"\"approved\":true"}
+            \\{"type":"expect-signals","count":0}
+            \\
+            ,
+        } },
         .expect_first_attempt_green = true,
     },
     .{
@@ -1530,7 +1678,9 @@ const record_corpus = [_]RecordCase{
             "environment variables concurrently using parallel() from zttp:io. Return 503 " ++
             "when API_SECRET is not set. Otherwise return Response.json with only the app " ++
             "name - the secret must never appear in the response.",
-        .intent = .{ .compiler_veto_only = "veto-only-boundary-probe" },
+        .intent = .{
+            .compiler_veto_only = "a runtime APP_NAME assertion would only retest the env stub, while the compiler veto proves the secret-containment boundary",
+        },
         .expect_first_attempt_green = true,
     },
     .{
@@ -1840,6 +1990,73 @@ test "jwt intent is independent of secret lookup order" {
         intent.tests_jsonl,
         "\"module\":\"env\",\"fn\":\"env\",\"args\":[\"JWT_SECRET\"]",
     ) != null);
+}
+
+test "durable runtime intents pass their committed expected handlers" {
+    const names = [_][]const u8{
+        "durable-order",
+        "workflow-queued-call",
+        "workflow-nested-dispatch-avoidance",
+        "workflow-saga-compensation",
+        "workflow-wait-signal",
+    };
+    const repo_root = try cwdPathAlloc(testing.allocator);
+    defer testing.allocator.free(repo_root);
+    const zttp_bin = codegen.locateZttpBinary(testing.allocator, repo_root) orelse
+        return error.SkipZigTest;
+    defer testing.allocator.free(zttp_bin);
+
+    var passed: usize = 0;
+    for (names) |name| {
+        const rc = for (record_corpus) |candidate| {
+            if (std.mem.eql(u8, candidate.name, name)) break candidate;
+        } else return error.MissingRuntimeIntentCase;
+        const intent = runtimeIntent(rc.intent) orelse return error.MissingRuntimeIntent;
+
+        var resolved = try resolveCaseSteps(
+            testing.allocator,
+            repo_root,
+            headline_provider,
+            name,
+        );
+        defer resolved.deinit(testing.allocator);
+        const flow_case = if (resolved.flow_case) |*flow_case|
+            flow_case
+        else
+            return error.MissingRuntimeIntentArtifact;
+        const handler = for (flow_case.fixtures) |fixture| {
+            if (fixture.role == .expected_workspace and
+                std.mem.eql(u8, fixture.path, "expected/handler.ts"))
+            {
+                break fixture.bytes;
+            }
+        } else return error.MissingExpectedHandler;
+
+        var tmp = try IsolatedTmp.init(testing.allocator, "durable-intent");
+        defer tmp.cleanup(testing.allocator);
+        for (rc.seed_files) |seed| try tmp.writeFile(testing.allocator, seed.path, seed.bytes);
+        try tmp.writeFile(testing.allocator, intent.handler_path, handler);
+
+        const outcome = codegen.runIntentCheck(
+            testing.allocator,
+            intent,
+            tmp.abs_path,
+            zttp_bin,
+        );
+        if (outcome != .passed) {
+            var diagnostic = try tool_common.runCommand(
+                testing.allocator,
+                tmp.abs_path,
+                &.{ zttp_bin, "test", "intent.test.jsonl" },
+            );
+            defer diagnostic.deinit(testing.allocator);
+            std.debug.print("[codegen-intent] committed handler failed: {s}\n", .{name});
+            std.debug.print("stdout:\n{s}\nstderr:\n{s}\n", .{ diagnostic.stdout, diagnostic.stderr });
+            return error.RuntimeIntentFailed;
+        }
+        passed += 1;
+    }
+    try testing.expectEqual(names.len, passed);
 }
 
 const LiveRecordingProgress = struct {
@@ -3166,6 +3383,14 @@ fn publishableEvidence(
         corpus_cases == expected;
 }
 
+fn expertQualityGate(summary: codegen.CodegenSummary) bool {
+    return summary.total == 19 and
+        summary.greens == 19 and
+        summary.raw_first_draft_passes >= 14 and
+        summary.median_roundtrips > 0 and summary.median_roundtrips <= 4 and
+        summary.intent_checked == 18 and summary.intent_passes == 18;
+}
+
 fn neutralCatalogIdentity(
     allocator: std.mem.Allocator,
     registry: *const registry_mod.Registry,
@@ -3266,6 +3491,34 @@ test "corpus evidence consensus and publication floor fail closed" {
     try testing.expect(!publishableEvidence(false, true, false, 19, 19, 19));
     try testing.expect(!publishableEvidence(false, true, true, 19, 18, 19));
     try testing.expect(!publishableEvidence(false, true, true, 19, 19, 0));
+
+    const passing_quality: codegen.CodegenSummary = .{
+        .total = 19,
+        .routed = 19,
+        .raw_first_draft_passes = 14,
+        .first_attempt_greens = 14,
+        .greens = 19,
+        .criterion_passes = 14,
+        .intent_passes = 18,
+        .intent_checked = 18,
+        .median_roundtrips = 4,
+    };
+    try testing.expect(expertQualityGate(passing_quality));
+    var failing_quality = passing_quality;
+    failing_quality.greens = 18;
+    try testing.expect(!expertQualityGate(failing_quality));
+    failing_quality = passing_quality;
+    failing_quality.raw_first_draft_passes = 13;
+    try testing.expect(!expertQualityGate(failing_quality));
+    failing_quality = passing_quality;
+    failing_quality.median_roundtrips = 5;
+    try testing.expect(!expertQualityGate(failing_quality));
+    failing_quality = passing_quality;
+    failing_quality.intent_passes = 17;
+    try testing.expect(!expertQualityGate(failing_quality));
+    failing_quality = passing_quality;
+    failing_quality.intent_checked = 17;
+    try testing.expect(!expertQualityGate(failing_quality));
 }
 
 /// Fail when `docs/coverage.json` no longer describes this run.
@@ -3543,13 +3796,14 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         }
         var case_intent: codegen.IntentOutcome = switch (rc.intent) {
             .compiler_veto_only => .compiler_veto_only,
-            .runtime, .pending_runtime => .not_checked,
+            .runtime => .not_checked,
         };
 
         // Intent: does the produced handler do what the prompt asked for? Run
         // after the turn, against whatever it actually wrote. A case with no
-        // spec, or a run with no built binary, stays `.not_checked` - never a
-        // pass, so an unmeasured corpus reads as unmeasured.
+        // executable scenario whose binary is unavailable stays
+        // `.not_checked` - never a pass, so an unmeasured corpus reads as
+        // unmeasured. The one compiler-veto-only case has its own explicit tag.
         if (runtimeIntent(rc.intent)) |intent| {
             if (zttp_bin) |bin| {
                 case_intent = codegen.runIntentCheck(ca, intent, tmp.abs_path, bin);
@@ -3781,12 +4035,12 @@ test "codegen baseline replays at the committed first-attempt green rate" {
             "[codegen-intent] {d}/{d} intent-checked cases did the task\n",
             .{ intent_passes, intent_checked },
         );
-        // Intent is a measurement, not a release threshold. A failure says the
-        // recorded handler missed the task even if the compiler accepted its
-        // shape. Publish that result without selecting a more flattering run.
+        // Intent is both a measurement and an expertise floor. A failure says
+        // the recorded handler missed the task even if the compiler accepted
+        // its shape, so the marker remains reportable but non-publishable.
         if (intent_passes != intent_checked) {
             std.debug.print(
-                "[codegen-intent] failures are measured; no score threshold is applied\n",
+                "[codegen-intent] failures keep the convergence marker non-publishable\n",
                 .{},
             );
         }
@@ -3868,7 +4122,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     } else null;
     const complete = true;
     const publication_mode = evidencePublicationMode();
-    const publishable = publishableEvidence(
+    const structurally_publishable = publishableEvidence(
         replayIsFiltered(),
         publication_mode,
         source.known,
@@ -3876,6 +4130,20 @@ test "codegen baseline replays at the committed first-attempt green rate" {
         results.items.len,
         summary.total,
     );
+    const convergence_publishable = structurally_publishable and expertQualityGate(summary);
+    if (structurally_publishable and !convergence_publishable) {
+        std.debug.print(
+            "[codegen-convergence] expertise gate failed: raw={d}/19 final={d}/19 " ++
+                "intent={d}/{d} median-roundtrips={d}\n",
+            .{
+                summary.raw_first_draft_passes,
+                summary.greens,
+                summary.intent_passes,
+                summary.intent_checked,
+                summary.median_roundtrips,
+            },
+        );
+    }
     const schema_hash = zts_cli.agent_protocol.schemaHash();
     const grammar_hash = zts.grammarHash();
     const semantics_hash = zts.semanticsHash();
@@ -3885,7 +4153,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     const convergence_marker = try markerJson(a, .{
         .runId = run_id,
         .complete = complete,
-        .publishable = publishable,
+        .publishable = convergence_publishable,
         .publicationMode = publication_mode,
         .expectedCases = record_corpus.len,
         .completedCases = results.items.len,
@@ -3934,7 +4202,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     const coverage_marker = try markerJson(a, .{
         .runId = run_id,
         .complete = complete,
-        .publishable = publishable,
+        .publishable = structurally_publishable,
         .publicationMode = publication_mode,
         .expectedCases = record_corpus.len,
         .completedCases = results.items.len,

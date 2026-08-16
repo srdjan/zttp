@@ -26,6 +26,7 @@ const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const expert_workflow = @import("expert_workflow.zig");
 const codegen_types = @import("expert_codegen_types.zig");
+const tools_common = @import("tools/common.zig");
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const zts = @import("zts");
 
@@ -50,6 +51,10 @@ pub const IntentCheck = struct {
     /// top of a seeded config would silently drop that key and the case would
     /// fail for a reason that has nothing to do with the model.
     zttp_json: ?[]const u8 = null,
+    /// Auxiliary handlers and manifests needed only by the runtime proof.
+    /// These are written after the model turn, so they cannot influence the
+    /// model or be captured as authored workspace input.
+    runtime_files: []const SeedFile = &.{},
 };
 
 pub const Criterion = enum {
@@ -176,6 +181,7 @@ pub fn runIntentCheck(
     zttp_bin: []const u8,
 ) IntentOutcome {
     const spec_rel = "intent.test.jsonl";
+    writeRuntimeFiles(allocator, workspace_abs, intent) catch return .failed;
     writeWorkspaceFile(allocator, workspace_abs, spec_rel, intent.tests_jsonl) catch return .failed;
 
     const config = if (intent.zttp_json) |verbatim|
@@ -209,13 +215,49 @@ pub fn runIntentCheck(
     };
 }
 
+fn writeRuntimeFiles(
+    allocator: std.mem.Allocator,
+    workspace_abs: []const u8,
+    intent: IntentCheck,
+) !void {
+    var resolved_paths: std.ArrayList([]u8) = .empty;
+    defer {
+        for (resolved_paths.items) |path| allocator.free(path);
+        resolved_paths.deinit(allocator);
+    }
+
+    for (intent.runtime_files) |runtime_file| {
+        if (runtime_file.path.len == 0 or
+            std.mem.eql(u8, runtime_file.path, intent.handler_path) or
+            std.mem.eql(u8, runtime_file.path, "intent.test.jsonl") or
+            std.mem.eql(u8, runtime_file.path, "zttp.json"))
+        {
+            return error.InvalidRuntimeSupportFile;
+        }
+        const resolved = tools_common.resolveInsideWorkspace(
+            allocator,
+            workspace_abs,
+            runtime_file.path,
+        ) catch return error.InvalidRuntimeSupportFile;
+        errdefer allocator.free(resolved);
+        for (resolved_paths.items) |prior| {
+            if (std.mem.eql(u8, prior, resolved)) return error.DuplicateRuntimeSupportFile;
+        }
+        try resolved_paths.append(allocator, resolved);
+    }
+
+    for (intent.runtime_files, resolved_paths.items) |runtime_file, resolved| {
+        try zts.file_io.writeFile(allocator, resolved, runtime_file.bytes);
+    }
+}
+
 fn writeWorkspaceFile(
     allocator: std.mem.Allocator,
     workspace_abs: []const u8,
     rel: []const u8,
     bytes: []const u8,
 ) !void {
-    const path = try std.fs.path.resolve(allocator, &.{ workspace_abs, rel });
+    const path = try tools_common.resolveInsideWorkspace(allocator, workspace_abs, rel);
     defer allocator.free(path);
     try zts.file_io.writeFile(allocator, path, bytes);
 }
@@ -485,6 +527,63 @@ fn findZts(text: []const u8) ?[]const u8 {
 }
 
 const testing = std.testing;
+
+test "runtime support files validate the full set before writing" {
+    var tmp = try IsolatedTmp.init(testing.allocator, "intent-runtime-files");
+    defer tmp.cleanup(testing.allocator);
+
+    try writeRuntimeFiles(testing.allocator, tmp.abs_path, .{
+        .tests_jsonl = "fixture",
+        .runtime_files = &.{.{ .path = "support.ts", .bytes = "const marker = true;" }},
+    });
+    const support_path = try tmp.childPath(testing.allocator, "support.ts");
+    defer testing.allocator.free(support_path);
+    const support = try zts.file_io.readFile(testing.allocator, support_path, 1024);
+    defer testing.allocator.free(support);
+    try testing.expectEqualStrings("const marker = true;", support);
+
+    const untouched_path = try tmp.childPath(testing.allocator, "untouched.ts");
+    defer testing.allocator.free(untouched_path);
+    try testing.expectError(error.InvalidRuntimeSupportFile, writeRuntimeFiles(
+        testing.allocator,
+        tmp.abs_path,
+        .{
+            .tests_jsonl = "fixture",
+            .runtime_files = &.{
+                .{ .path = "untouched.ts", .bytes = "must not land" },
+                .{ .path = "../outside.ts", .bytes = "escape" },
+            },
+        },
+    ));
+    try testing.expect(!zts.file_io.fileExists(testing.allocator, untouched_path));
+}
+
+test "runtime support files reject reserved and duplicate targets" {
+    var tmp = try IsolatedTmp.init(testing.allocator, "intent-runtime-boundaries");
+    defer tmp.cleanup(testing.allocator);
+
+    inline for (&.{ "", "handler.ts", "intent.test.jsonl", "zttp.json" }) |reserved| {
+        try testing.expectError(error.InvalidRuntimeSupportFile, writeRuntimeFiles(
+            testing.allocator,
+            tmp.abs_path,
+            .{
+                .tests_jsonl = "fixture",
+                .runtime_files = &.{.{ .path = reserved, .bytes = "forbidden" }},
+            },
+        ));
+    }
+    try testing.expectError(error.DuplicateRuntimeSupportFile, writeRuntimeFiles(
+        testing.allocator,
+        tmp.abs_path,
+        .{
+            .tests_jsonl = "fixture",
+            .runtime_files = &.{
+                .{ .path = "same.ts", .bytes = "one" },
+                .{ .path = "sub/../same.ts", .bytes = "two" },
+            },
+        },
+    ));
+}
 
 // A model client that returns one fixed reply, ignoring the transcript. Stands
 // in for cassette replay in the deterministic self-test: it exercises runCase,
