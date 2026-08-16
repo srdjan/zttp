@@ -15,6 +15,7 @@ pub const ResponseHandle = HandlerPool.ResponseHandle;
 pub const HandlerContract = zq.HandlerContract;
 pub const HandlerProperties = zq.HandlerProperties;
 pub const RuntimePolicy = zq.RuntimePolicy;
+pub const SourceIdentity = zq.SourceIdentity;
 pub const SqlQueryInfo = zq.handler_policy.SqlQueryInfo;
 pub const normalizedSqlQuery = zq.handler_policy.normalizedSqlQuery;
 pub const sqlQueryIsReadOnly = zq.handler_policy.sqlQueryIsReadOnly;
@@ -26,6 +27,10 @@ pub const RwLock = zq.compat.RwLock;
 
 pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_bytes: usize) ![]const u8 {
     return zq.file_io.readFile(allocator, path, max_bytes);
+}
+
+pub fn sourceIdentityForPath(path: []const u8) SourceIdentity {
+    return zq.sourceIdentityForPath(path);
 }
 
 pub fn initSecurityEvents(allocator: std.mem.Allocator, capacity: usize) !void {

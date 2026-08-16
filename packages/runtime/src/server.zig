@@ -7,7 +7,6 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
-const zq = @import("zts");
 const engine = @import("engine_adapter.zig");
 const Io = std.Io;
 const net = std.Io.net;
@@ -3787,7 +3786,7 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     const artifact_bytes = [_]u8{0x22} ** 32;
     const policy_hex = std.fmt.bytesToHex(policy_bytes, .lower);
     const artifact_hex = std.fmt.bytesToHex(artifact_bytes, .lower);
-    const source_identity = zq.sourceIdentityForPath("handler.ts");
+    const source_identity = engine.sourceIdentityForPath("handler.ts");
     const core_grammar_hex = std.fmt.bytesToHex(source_identity.core_grammar_hash, .lower);
     const semantics_hex = std.fmt.bytesToHex(source_identity.semantics_hash, .lower);
 
@@ -3842,7 +3841,7 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
 }
 
 test "attestation source identity binds the optional TSX frontend" {
-    const source_identity = zq.sourceIdentityForPath("handler.tsx");
+    const source_identity = engine.sourceIdentityForPath("handler.tsx");
     const core_grammar_hex = std.fmt.bytesToHex(source_identity.core_grammar_hash, .lower);
     const semantics_hex = std.fmt.bytesToHex(source_identity.semantics_hash, .lower);
     const frontend_grammar_hex = std.fmt.bytesToHex(source_identity.frontend.?.grammar_hash, .lower);
@@ -3877,7 +3876,7 @@ test "attestation source identity binds the optional TSX frontend" {
     claims.frontend_grammar_sha256 = null;
     try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
 
-    live.source_identity = zq.sourceIdentityForPath("handler.ts");
+    live.source_identity = engine.sourceIdentityForPath("handler.ts");
     try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
 }
 
