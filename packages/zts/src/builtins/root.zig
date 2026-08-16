@@ -187,8 +187,9 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try ctx.setPropertyChecked(ref_error_ctor, .prototype, error_proto.toValue());
     try ctx.setGlobal(.ReferenceError, ref_error_ctor.toValue());
 
-    // Create Number object with static methods
-    const number_obj = try createBuiltinObject(ctx, pool, root_class_idx);
+    // Number is both a callable constructor and the namespace for its static
+    // methods and constants.
+    const number_obj = try createBuiltinNativeFunction(ctx, pool, root_class_idx, wrap(number.numberConstructor), .Number, 1);
     try addMethodDynamic(ctx, number_obj, "isInteger", wrap(number.numberIsInteger), 1);
     try addMethodDynamic(ctx, number_obj, "isNaN", wrap(number.numberIsNaN), 1);
     try addMethodDynamic(ctx, number_obj, "isFinite", wrap(number.numberIsFinite), 1);

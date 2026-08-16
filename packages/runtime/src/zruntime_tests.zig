@@ -4032,6 +4032,37 @@ test "for loop locals preserve numeric values" {
     try std.testing.expectEqualStrings("number", response.body);
 }
 
+test "Number converts numeric cache-shaped strings" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req) {
+        \\  const hits = Number("41");
+        \\  return Response.json({ hits: hits });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<number-constructor>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("{\"hits\":41}", response.body);
+}
+
 test "object property access works" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -15,6 +15,17 @@ const createArrayWithPrototype = h.createArrayWithPrototype;
 // Number methods
 // ============================================================================
 
+/// Number(value) - Convert a value with the subset's JavaScript ToNumber rules.
+///
+/// `Number` is a callable global in the language surface. Keeping its static
+/// methods on a plain object makes programs that pass analysis fail at runtime
+/// with `NotCallable`, so the constructor and the object must be one function
+/// object, as they are in JavaScript.
+pub fn numberConstructor(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+    if (args.len == 0) return value.JSValue.fromInt(0);
+    return allocFloat(ctx, coerceToNumber(args[0]));
+}
+
 /// Number.isInteger(value) - Returns true if value is an integer
 pub fn numberIsInteger(_: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
     if (args.len == 0) return value.JSValue.fromBool(false);
