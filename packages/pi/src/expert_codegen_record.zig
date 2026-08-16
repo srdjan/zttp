@@ -952,17 +952,27 @@ test "corpus version changes when a case changes" {
     try testing.expect(nonzero);
 }
 
-test "embedded durable wait-signal reference passes the live compiler" {
-    const start_marker = "<!-- compiler-probe: durable-wait-signal:start -->\n```typescript\n";
-    const end_marker = "\n```\n<!-- compiler-probe: durable-wait-signal:end -->";
+fn expectEmbeddedReferenceProbeCompiles(probe_name: []const u8) !void {
+    const start_marker = try std.fmt.allocPrint(
+        testing.allocator,
+        "<!-- compiler-probe: {s}:start -->\n```typescript\n",
+        .{probe_name},
+    );
+    defer testing.allocator.free(start_marker);
+    const end_marker = try std.fmt.allocPrint(
+        testing.allocator,
+        "\n```\n<!-- compiler-probe: {s}:end -->",
+        .{probe_name},
+    );
+    defer testing.allocator.free(end_marker);
     const source_start = (std.mem.indexOf(u8, zts_expert_skill.virtual_modules_md, start_marker) orelse
-        return error.MissingDurableWaitSignalProbe) + start_marker.len;
+        return error.MissingEmbeddedCompilerProbe) + start_marker.len;
     const source_end = std.mem.indexOfPos(
         u8,
         zts_expert_skill.virtual_modules_md,
         source_start,
         end_marker,
-    ) orelse return error.UnterminatedDurableWaitSignalProbe;
+    ) orelse return error.UnterminatedEmbeddedCompilerProbe;
 
     var check = try zts_cli.precompile.runCheckOnlyFromSource(
         testing.allocator,
@@ -977,6 +987,14 @@ test "embedded durable wait-signal reference passes the live compiler" {
 
     try testing.expectEqual(@as(u32, 0), check.totalErrors());
     try testing.expectEqual(@as(usize, 0), check.json_diagnostics.items.len);
+}
+
+test "embedded durable wait-signal reference passes the live compiler" {
+    try expectEmbeddedReferenceProbeCompiles("durable-wait-signal");
+}
+
+test "embedded literal-fetch query reference passes the live compiler" {
+    try expectEmbeddedReferenceProbeCompiles("fetch-literal-query");
 }
 
 // The corpus spans common tasks the agent handles cleanly and harder ones that

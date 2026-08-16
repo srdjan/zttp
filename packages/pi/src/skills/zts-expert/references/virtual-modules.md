@@ -52,6 +52,85 @@ schemaDrop(name: string): boolean
 
 Schema supports: `type`, `required`, `properties`, `minLength`/`maxLength`, `minimum`/`maximum`, `enum`, `items`, `format`. Supported format values: `email`, `uuid`, `iso-date`, `iso-datetime`. `coerceJson` converts string numbers before validation.
 
+## zttp:fetch (effect: write)
+
+```typescript
+import { fetch } from "zttp:fetch";
+
+fetch(url: string, init?: {
+    method?: "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "HEAD" | "OPTIONS",
+    headers?: object,
+    body?: string | Bytes,
+    query?: object,
+    maxResponseBytes?: number,
+    durable?: object
+}): {
+    ok: boolean,
+    status: number,
+    statusText: string,
+    body: string,
+    headers: object,
+    json: () => unknown,
+    text: () => string
+}
+```
+
+The URL argument must be a compiler-visible string literal so the contract can
+prove the egress host. Never concatenate or interpolate user input into that
+URL. Put dynamic values in `init.query`; the runtime percent-encodes them at
+the boundary. Validate user input before placing it in the query object, and
+check `upstream.ok` before reading the response:
+
+```typescript
+const upstream = fetch("https://api.example.com/v1/weather", {
+    query: { city: checked.value["city"] },
+    maxResponseBytes: 65536
+});
+```
+
+<!-- compiler-probe: fetch-literal-query:start -->
+```typescript
+import { fetch } from "zttp:fetch";
+import { schemaCompile, validateObject } from "zttp:validate";
+
+schemaCompile("cityQuery", JSON.stringify({
+    type: "object",
+    required: ["city"],
+    properties: {
+        city: { type: "string", minLength: 1, maxLength: 64 }
+    }
+}));
+
+export function handler(req: Request): Proof<Response,
+    | "deterministic"
+    | "state_isolated"
+    | "fault_covered"
+    | "result_safe"
+    | "optional_safe"
+    | "no_secret_leakage"
+    | "no_credential_leakage"
+    | "input_validated"
+    | "pii_contained"
+    | "injection_safe"
+    | "canonical"
+    | "cost_bounded"
+> {
+    const checked = validateObject("cityQuery", { city: req.query["city"] });
+    if (!checked.ok) {
+        return Response.json({ error: "missing or invalid city query parameter" }, { status: 400 });
+    }
+    const upstream = fetch("https://api.open-meteo.com/v1/forecast", {
+        query: { city: checked.value["city"] },
+        maxResponseBytes: 65536
+    });
+    if (!upstream.ok) {
+        return Response.json({ error: "weather service unavailable" }, { status: 502 });
+    }
+    return Response.json(upstream.json());
+}
+```
+<!-- compiler-probe: fetch-literal-query:end -->
+
 ## zttp:decode (effect: read)
 
 Typed request ingress helpers. All require a prior `schemaCompile` call for the named schema. Return values carry the `validated` label for data flow analysis.
