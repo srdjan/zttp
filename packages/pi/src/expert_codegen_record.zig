@@ -1321,8 +1321,16 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "durable-order",
+        // The prompt states the observable contract the intent test asserts.
+        // It used to name only the two steps, while the test demanded a 201, a
+        // `reserved`/`charged` body, and step results carrying `reservationId`
+        // and `chargeId` - none of which a reader of the prompt could derive.
+        // A case whose test asks for more than its prompt says measures
+        // guessing, not convergence.
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
-            "two-step order workflow: a `reserve` step then a `charge` step, via run() and step().",
+            "two-step order workflow via run() and step(): a `reserve` step returning a " ++
+            "reservationId, then a `charge` step returning a chargeId. Respond 201 with a " ++
+            "body carrying reserved and charged as true.",
         .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"runtime","durable":true,"workflowQueue":false}
@@ -1442,9 +1450,16 @@ const record_corpus = [_]RecordCase{
     },
     .{
         .name = "workflow-wait-signal",
+        // Same defect as durable-order. The test drives POST on both paths and
+        // expects 202 on park, 200 on resume, and an "approval" signal name;
+        // the prompt named no method, no status, and no signal name. The last
+        // recording restricted /wait to GET, which the prompt never forbade,
+        // and every request in the test then missed the route.
         .prompt = "Create a durable approval workflow in handler.ts using waitSignal and " ++
-            "signal. The /wait path should park a run using the Idempotency-Key header, and " ++
-            "the /signal path should resume the same key with an approved payload.",
+            "signal, both paths served on POST. POST /wait parks a run under the " ++
+            "Idempotency-Key header waiting on a signal named `approval`, answering 202 " ++
+            "until it resumes and 200 with approved true once it has. POST /signal " ++
+            "delivers the approval payload to the same key and answers 200 with delivered true.",
         .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"runtime","durable":true,"workflowQueue":false}
@@ -3352,7 +3367,17 @@ const deepseek_coverage_baseline = [_][]const u8{
     "ZTS501",
     "ZTS502",
 };
-const deepseek_coverage_headline_input_id = "8481ef07048c4dd5b78338d6dd8a4488a11fddf08f1d7b51eb0736f541269921";
+// Moved when durable-order and workflow-wait-signal had their prompts state the
+// contract their intent tests already asserted. The identity covers the
+// model-visible input, so a prompt edit moves it by construction.
+//
+// The list above still reads five of seventy-one, measured over the corpus this
+// identity replaced. It is NOT a measurement of the new corpus: no recording of
+// the new prompts exists yet, and the pin has to move in this commit or
+// `coverageBaseline` returns null and the ratchet silently stops applying.
+// Re-measure with `bash scripts/update-coverage.sh` once a corpus records, and
+// correct the list and this note from that run rather than from this one.
+const deepseek_coverage_headline_input_id = "4330e42f0ec264c3775846827fa3e23ca38280939d1adfc01f1761b5c3003f1b";
 
 /// Return the live coverage floor for one exact model-visible input and model.
 /// Expected outcomes and thresholds cannot reset this ratchet.
