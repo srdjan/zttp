@@ -396,7 +396,7 @@ pub fn collectCodes(
     for (tr.entries.items) |entry| {
         const text: []const u8 = switch (entry) {
             .diagnostic_box => |b| b.llm_text,
-            .tool_result => |t| if (isViolationTool(t.tool_name)) t.llm_text else continue,
+            .tool_result => |t| if (isDiagnosticResult(t)) t.llm_text else continue,
             else => continue,
         };
 
@@ -446,7 +446,7 @@ pub fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
             // draft tripped, even when the turn recovered (so no terminal
             // diagnostic box). A clean result lists no violations, so it has no
             // ZTSxxx code and is skipped.
-            .tool_result => |t| if (isViolationTool(t.tool_name)) t.llm_text else continue,
+            .tool_result => |t| if (isDiagnosticResult(t)) t.llm_text else continue,
             else => continue,
         };
         if (findZts(text)) |code| return code;
@@ -454,9 +454,12 @@ pub fn firstZtsCode(tr: *const transcript_mod.Transcript) ?[]const u8 {
     return null;
 }
 
-fn isViolationTool(tool_name: []const u8) bool {
-    return std.mem.eql(u8, tool_name, "zts_expert_review_patch") or
-        std.mem.eql(u8, tool_name, "zts_check");
+fn isDiagnosticResult(result: transcript_mod.OwnedToolResult) bool {
+    if (std.mem.eql(u8, result.tool_name, "zts_expert_review_patch") or
+        std.mem.eql(u8, result.tool_name, "zts_check")) return true;
+    return !result.ok and
+        std.mem.eql(u8, result.tool_name, "apply_edit") and
+        std.mem.startsWith(u8, result.llm_text, loop.veto_reject_preamble);
 }
 
 fn findZts(text: []const u8) ?[]const u8 {
@@ -656,4 +659,27 @@ test "code collection separates registry rules from codes the registry cannot se
     // published figure is how many distinct rules the corpus reaches.
     try collectCodes(testing.allocator, &tr, &hits, &off);
     try testing.expectEqual(@as(usize, 1), off.count());
+}
+
+test "code collection reads persisted apply edit compiler rejections" {
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "apply-1",
+        .tool_name = "apply_edit",
+        .ok = false,
+        .llm_text = "The compiler rejected this edit. ZTS400 secret data flows into response body",
+    } });
+
+    var hits: CodeSet = .empty;
+    defer hits.deinit(testing.allocator);
+    var off: CodeSet = .empty;
+    defer {
+        for (off.keys()) |key| testing.allocator.free(key);
+        off.deinit(testing.allocator);
+    }
+
+    try collectCodes(testing.allocator, &tr, &hits, &off);
+    try testing.expect(hits.contains("ZTS400"));
+    try testing.expectEqualStrings("ZTS400", firstZtsCode(&tr).?);
 }

@@ -2375,30 +2375,35 @@ const anthropic_coverage_baseline = [_][]const u8{
     "ZTS500",
     "ZTS502",
 };
+const anthropic_coverage_corpus_version = "83c9c0c040e8e6f1f659ddc7d853f9f21bc4c0e1db1837f8cedfb11bad1baf08";
 
-/// Five of seventy-four, measured 2026-08-14 over the complete 19-case DeepSeek
-/// corpus. It is not the Anthropic set: DeepSeek trips ZTS305 and ZTS501, which
-/// Claude's recordings never reached, and never reaches ZTS407 or ZTS502, which
-/// Claude's do. Two fence sets of the same size describing different rules is
-/// the reason a headline may not borrow another provider's baseline.
+/// Five of seventy-one, measured 2026-08-16 over the complete post-cutover
+/// 19-case DeepSeek corpus. The corpus now asks jwt-auth to return only public
+/// confirmation, so it no longer trips the old corpus's ZTS401 credential leak;
+/// workflow helper capsules now trip ZTS502 instead. That is a corpus change,
+/// not lost coverage within one frozen sample, which is why the baseline binds
+/// the corpus hash as well as provider and model.
 const deepseek_coverage_baseline = [_][]const u8{
     "ZTS305",
     "ZTS400",
-    "ZTS401",
     "ZTS500",
     "ZTS501",
+    "ZTS502",
 };
+const deepseek_coverage_corpus_version = "19dc67a54ec34cf9a26e03a03aef15e251f9e197cbbbcb20d1408c047b1048a9";
 
-/// Return the coverage floor measured for one exact provider/model identity.
-/// A new headline identity must publish its own complete corpus before the
-/// default can move; borrowing another provider's fence set is never valid.
-fn coverageBaseline(provider: agent.Provider, model: []const u8) ?[]const []const u8 {
+/// Return the coverage floor measured for one exact corpus and model identity.
+/// A prompt or seed change creates a new corpus and must publish a new floor;
+/// silently borrowing an older sample's fence set is not a valid ratchet.
+fn coverageBaseline(provider: agent.Provider, model: []const u8, corpus_version: []const u8) ?[]const []const u8 {
     return switch (provider) {
-        .anthropic => if (std.mem.eql(u8, model, models.defaultForProvider(.anthropic).id))
+        .anthropic => if (std.mem.eql(u8, model, models.defaultForProvider(.anthropic).id) and
+            std.mem.eql(u8, corpus_version, anthropic_coverage_corpus_version))
             &anthropic_coverage_baseline
         else
             null,
-        .deepseek => if (std.mem.eql(u8, model, models.defaultForProvider(.deepseek).id))
+        .deepseek => if (std.mem.eql(u8, model, models.defaultForProvider(.deepseek).id) and
+            std.mem.eql(u8, corpus_version, deepseek_coverage_corpus_version))
             &deepseek_coverage_baseline
         else
             null,
@@ -2406,18 +2411,20 @@ fn coverageBaseline(provider: agent.Provider, model: []const u8) ?[]const []cons
     };
 }
 
-test "coverage baselines are provider and model qualified" {
+test "coverage baselines are corpus provider and model qualified" {
     try testing.expectEqual(
         @as(?[]const []const u8, &anthropic_coverage_baseline),
-        coverageBaseline(.anthropic, models.defaultForProvider(.anthropic).id),
+        coverageBaseline(.anthropic, models.defaultForProvider(.anthropic).id, anthropic_coverage_corpus_version),
     );
     try testing.expectEqual(
         @as(?[]const []const u8, &deepseek_coverage_baseline),
-        coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id),
+        coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, deepseek_coverage_corpus_version),
     );
-    try testing.expect(coverageBaseline(.local, local.default_model) == null);
-    try testing.expect(coverageBaseline(.anthropic, "claude-other") == null);
-    try testing.expect(coverageBaseline(.deepseek, "deepseek-v4-pro") == null);
+    try testing.expectEqualStrings(deepseek_coverage_corpus_version, &corpusVersion());
+    try testing.expect(coverageBaseline(.local, local.default_model, deepseek_coverage_corpus_version) == null);
+    try testing.expect(coverageBaseline(.anthropic, "claude-other", anthropic_coverage_corpus_version) == null);
+    try testing.expect(coverageBaseline(.deepseek, "deepseek-v4-pro", deepseek_coverage_corpus_version) == null);
+    try testing.expect(coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, "old-corpus") == null);
     // The two sets are measurements of different models, not copies.
     try testing.expect(anthropic_coverage_baseline.len == deepseek_coverage_baseline.len);
     var identical = true;
@@ -2868,7 +2875,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
 
         const on_headline = replay_provider == headline_provider and
             std.mem.eql(u8, published_model, headline_model);
-        if (coverageBaseline(replay_provider, published_model)) |baseline| {
+        if (coverageBaseline(replay_provider, published_model, version[0..])) |baseline| {
             // Floor on the selected baseline itself. An emptied list makes the
             // loop below iterate nothing and report a clean ratchet over no
             // claim at all, which is the shape this repo has been bitten by.
