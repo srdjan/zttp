@@ -123,7 +123,7 @@ pub const StripDiagnosticKind = enum {
             .as_assertion => "'as' type assertion is not supported; use type-safe patterns instead",
             .satisfies_assertion => "'satisfies' type assertion is not supported; use type-safe patterns instead",
             .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",
-            .nominal_base_not_scalar => "a nominal declaration carries scalar identity only; its base must be `string` or `number`",
+            .nominal_base_not_scalar => "a nominal declaration carries scalar identity only; its base must be `string`, `number`, or `boolean`",
             .interface_declaration => "`interface` is not a declaration form in this profile; write `structural Name = { ... };`",
             .type_alias_declaration => "`type` is not a declaration form in this profile; write `structural Name = ...;`",
             .distinct_type_declaration => "`distinct type` is not a declaration form in this profile; write `nominal Name = string;`",
@@ -2306,12 +2306,15 @@ const Stripper = struct {
         self.recordDiagnosticAt(kind, self.line, self.col);
     }
 
-    /// Spec 8's `ScalarType`, which is `"number" | "string"` and nothing else.
+    /// The scalar bases a nominal declaration may brand. Records, tuples,
+    /// unions, and functions remain structural types.
     /// Compared as text because this runs before any type is resolved, and a
     /// trailing `;` is not part of the base the author wrote.
     fn isScalarBaseText(text: []const u8) bool {
         const trimmed = std.mem.trim(u8, text, " \t\r\n;");
-        return std.mem.eql(u8, trimmed, "string") or std.mem.eql(u8, trimmed, "number");
+        return std.mem.eql(u8, trimmed, "string") or
+            std.mem.eql(u8, trimmed, "number") or
+            std.mem.eql(u8, trimmed, "boolean");
     }
 
     const RemovedTypeForm = struct {
@@ -3438,8 +3441,12 @@ test "a nominal base refusal points at the base, not the declaration" {
     try std.testing.expectEqual(@as(u32, 15), diag.?.column);
 }
 
-test "both scalar bases are admitted" {
-    for ([_][]const u8{ "nominal UserId = string;", "nominal Retries = number;" }) |source| {
+test "all scalar nominal bases are admitted" {
+    for ([_][]const u8{
+        "nominal UserId = string;",
+        "nominal Retries = number;",
+        "nominal Enabled = boolean;",
+    }) |source| {
         const result = try strip(std.testing.allocator, source, .{});
         defer @constCast(&result).deinit();
         const trimmed = std.mem.trim(u8, result.code, " \n\r\t");

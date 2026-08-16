@@ -50,7 +50,7 @@ found it writing semicolons onto the wrong line and into trailing comments.
 
 | Form | Code | What it does instead |
 |---|---|---|
-| `nominal Bad = { a: number };` - a nominal base that is not scalar | ZTS048 | A nominal declaration carries scalar identity only, so its base is `string` or `number`. Use `structural` for a record, a tuple, a union, or a function |
+| `nominal Bad = { a: number };` - a nominal base that is not scalar | ZTS048 | A nominal declaration carries scalar identity only, so its base is `string`, `number`, or `boolean`. Use `structural` for a record, a tuple, a union, or a function |
 | `interface X { ... }` | ZTS049 | Write `structural X = { ... };`. The `export` form is refused the same way |
 | `type X = ...;` | ZTS050 | Write `structural X = ...;`. `import type` and `export type { ... }` keep the keyword |
 | `distinct type X = string;` | ZTS051 | Write `nominal X = string;` |
@@ -285,6 +285,7 @@ The strict checker enforces the **canonical ZigTS profile** on every `zttp check
 | `ZTS058` | `Array<T>` type spelling | write `T[]` |
 | `ZTS059` | `ReadonlyArray<T>` type spelling | write `readonly T[]` |
 | `ZTS060` | `void` type spelling | write `undefined` |
+| `ZTS061` | raw built-in type in an exported parameter or return | declare a `nominal` or `structural` alias and name it in the signature |
 | `ZTS620` | boolean compared to a boolean literal (`x === true`) | use the boolean directly: `x` (or `!x` for `=== false`) |
 | `ZTS622` | the iterated collection is mutated in the loop body (`for (const x of xs) { xs.push(x); }`) | iterate a snapshot: read one collection, build the mutated one separately |
 

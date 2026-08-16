@@ -177,7 +177,7 @@ const verifier_meta = [_]struct {
 };
 
 // ---------------------------------------------------------------------------
-// Strict rules (ZTS6xx) - default expert language profile
+// Strict rules (ZTS061 and ZTS6xx) - default expert language profile
 // ---------------------------------------------------------------------------
 
 const strict_meta = [_]struct {
@@ -211,6 +211,14 @@ const strict_meta = [_]struct {
         .example = "function handler(req) { return Response.json({ok: true}); }",
         .help = "Annotate every parameter and the return type, for example `function handler(req: Request): Response`.",
         .repair = null,
+    },
+    .{
+        .kind = .raw_exported_boundary_type,
+        .code = "ZTS061",
+        .description = "An exported function parameter or return type exposes a raw built-in open type.",
+        .example = "export function greet(name: string): string { return name; }",
+        .help = "Declare a nominal or structural alias and name it in the exported signature.",
+        .repair = .declare_boundary_type,
     },
     .{
         .kind = .dynamic_capability_access,
@@ -1067,6 +1075,12 @@ test "findByCode returns entry" {
     try std.testing.expectEqualStrings("unchecked_result_value", entry.?.name);
 }
 
+test "ZTS061 publishes the non-automatic boundary repair intent" {
+    const entry = findByCode("ZTS061") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("raw_exported_boundary_type", entry.name);
+    try std.testing.expectEqual(RepairIntent.declare_boundary_type, entry.repair.?);
+}
+
 test "isCanonicalProfileCode follows the registry rule names" {
     try std.testing.expect(isCanonicalProfileCode("ZTS604"));
     try std.testing.expect(isCanonicalProfileCode("ZTS605"));
@@ -1100,10 +1114,10 @@ test "policyHash is deterministic and 64 hex chars" {
     try std.testing.expectEqual(@as(usize, 64), hash1.len);
 }
 
-test "all verifier rules have ZTS3xx, ZTS5xx, or ZTS6xx codes" {
+test "all verifier rules use the strict or verifier diagnostic bands" {
     // ZTS3xx covers the structural checks (return analysis, result/optional
     // checking, dead code, state isolation, websocket consistency).
-    // ZTS4xx is reserved for FlowChecker (defined in tools/json_diagnostics
+    // ZTS061 is the exported-boundary declaration rule. ZTS4xx is reserved for FlowChecker (defined in tools/json_diagnostics
     // alongside the runtime flow analysis pipeline). ZTS5xx covers
     // author-declared spec discharge (ZTS500 not_discharged, ZTS501
     // incompatible_with_import, ZTS502 unknown_name). ZTS6xx covers the
@@ -1111,7 +1125,8 @@ test "all verifier rules have ZTS3xx, ZTS5xx, or ZTS6xx codes" {
     for (&all_rules) |*rule| {
         if (rule.category == .verifier) {
             try std.testing.expect(
-                std.mem.startsWith(u8, rule.code, "ZTS3") or
+                std.mem.eql(u8, rule.code, "ZTS061") or
+                    std.mem.startsWith(u8, rule.code, "ZTS3") or
                     std.mem.startsWith(u8, rule.code, "ZTS5") or
                     std.mem.startsWith(u8, rule.code, "ZTS6"),
             );

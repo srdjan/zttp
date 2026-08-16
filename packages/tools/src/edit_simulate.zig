@@ -708,8 +708,10 @@ test "simulate preserves sibling module proof context" {
     ;
     const settings =
         \\import { env } from "zttp:env";
-        \\export function apiToken(): string | undefined { return env("API_TOKEN"); }
-        \\export function displayName(): string { return env("APP_NAME") ?? "unnamed"; }
+        \\export structural ApiToken = string | undefined;
+        \\export structural DisplayName = string;
+        \\export function apiToken(): ApiToken { return env("API_TOKEN"); }
+        \\export function displayName(): DisplayName { return env("APP_NAME") ?? "unnamed"; }
     ;
 
     try tmp.dir.createDirPath(std.testing.io, "lib");

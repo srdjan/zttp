@@ -50,6 +50,11 @@ pub const RepairIntent = enum {
     /// prior variant's `@intFromEnum` value.
     insert_semicolon,
 
+    /// Introduce a declared type for a raw exported parameter or return type.
+    /// The compiler can locate the position and name its base, but choosing a
+    /// domain name is authorial, so no automatic rewrite is advertised.
+    declare_boundary_type,
+
     pub fn asString(self: RepairIntent) []const u8 {
         return @tagName(self);
     }

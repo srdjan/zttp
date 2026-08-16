@@ -29,6 +29,41 @@ pub const RESPONSE_TYPE_NAME = "Response";
 /// The name a handler writes to annotate its parameter.
 pub const REQUEST_TYPE_NAME = "Request";
 
+/// Compiler-owned names that may cross an exported function boundary without
+/// a user-declared alias. Keep this registry beside the ABI implementations so
+/// a new ABI type cannot require a second handwritten exemption in the strict
+/// checker.
+pub const boundary_type_names = [_][]const u8{
+    REQUEST_TYPE_NAME,
+    RESPONSE_TYPE_NAME,
+    "Bytes",
+    "Dict",
+    "JsonValue",
+    "Result",
+};
+
+/// Whether an annotation starts with one of the fixed application ABI types.
+/// Generic arguments and postfix arrays do not change the owning type name.
+pub fn isBoundaryTypeAnnotation(annotation: []const u8) bool {
+    var text = std.mem.trim(u8, annotation, " \t\r\n");
+    if (std.mem.startsWith(u8, text, "readonly")) {
+        const after = text["readonly".len..];
+        if (after.len > 0 and std.ascii.isWhitespace(after[0])) {
+            text = std.mem.trim(u8, after, " \t\r\n");
+        }
+    }
+    for (boundary_type_names) |name| {
+        if (!std.mem.startsWith(u8, text, name)) continue;
+        const rest = std.mem.trim(u8, text[name.len..], " \t\r\n");
+        if (rest.len == 0) return true;
+        return switch (rest[0]) {
+            '<', '[' => true,
+            else => false,
+        };
+    }
+    return false;
+}
+
 /// The constructors on the `Response` global. Each returns a `Response`, and
 /// there is no other way for a handler to make one.
 ///
@@ -227,6 +262,23 @@ test "populateHandlerAbiTypes registers a nominal Response" {
     const response = responseType(&env);
     try std.testing.expect(response != null_type_idx);
     try std.testing.expect(pool.isNominal(response));
+}
+
+test "the exported-boundary ABI registry owns every fixed exemption" {
+    for ([_][]const u8{
+        "Request",
+        "Response",
+        "Bytes",
+        "Dict<string, number>",
+        "JsonValue",
+        "Result<string, string>",
+        "readonly Bytes[]",
+    }) |annotation| {
+        try std.testing.expect(isBoundaryTypeAnnotation(annotation));
+    }
+    try std.testing.expect(!isBoundaryTypeAnnotation("ResponseBody"));
+    try std.testing.expect(!isBoundaryTypeAnnotation("Request | string"));
+    try std.testing.expect(!isBoundaryTypeAnnotation("string"));
 }
 
 test "an object missing a response field is not a Response" {

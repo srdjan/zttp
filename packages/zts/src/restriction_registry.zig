@@ -370,6 +370,15 @@ pub const entries = [_]RestrictionEntry{
         .enforced_by = &.{ "ZTS041", "ZTS042", "ZTS043" },
     },
     .{
+        .id = "restriction.raw-export-boundary-type",
+        .feature = "raw built-in type in an exported function signature",
+        .boundary = "declared cross-module contracts",
+        .nature = .replaced,
+        .note = "exported parameter and return types name a nominal or structural declaration instead of an open built-in type",
+        .alternative = "declare a nominal or structural alias and use it in the exported signature",
+        .enforced_by = &.{"ZTS061"},
+    },
+    .{
         .id = "restriction.effectful-ternary",
         .feature = "effectful `?:`",
         .boundary = "visible evaluation and one mutation spelling",
@@ -777,6 +786,12 @@ test "findById resolves a published row and rejects an unknown one" {
     const entry = findById("restriction.chained-conditional") orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings("ZTS621", entry.enforced_by[0]);
     try std.testing.expect(findById("restriction.nope") == null);
+}
+
+test "the raw exported boundary row resolves to ZTS061" {
+    const entry = findById("restriction.raw-export-boundary-type") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("ZTS061", entry.enforced_by[0]);
 }
 
 test "matrixHash is stable and covers the enforcement column" {

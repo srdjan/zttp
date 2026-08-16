@@ -221,7 +221,7 @@ The type checker (`packages/zts/src/type_checker.zig`) validates type annotation
 
 Object literals are structurally matched against declared alias types. A `{ message: string, count: number }` literal passes as a `ResponseData` alias if the fields match.
 
-A record alias is transparent, whatever the keyword. Nominal identity comes only from a `nominal` declaration, and only over `string` or `number`. `interface` used to be the exception - one whose members were all functions became nominal by a heuristic no declaration expressed - and both the form and the heuristic are gone.
+A record alias is transparent, whatever the keyword. Nominal identity comes only from a `nominal` declaration, and only over `string`, `number`, or `boolean`. `interface` used to be the exception - one whose members were all functions became nominal by a heuristic no declaration expressed - and both the form and the heuristic are gone.
 
 ### Optional Narrowing
 
@@ -286,8 +286,8 @@ When `assert` fails with no error expression, the handler halts. With an explici
 nominal UserId = string;
 nominal SessionId = string;
 
-const uid: UserId = UserId("usr_123");     // constructor wraps the base type
-const sid: SessionId = SessionId("sess");
+const uid: UserId = "usr_123";             // the annotation brands the value
+const sid: SessionId = "sess";
 
 function lookup(id: UserId): UserId {
     return id;
@@ -299,7 +299,7 @@ lookup("raw");  // ERROR: string is not assignable to UserId
 uid.toUpperCase();  // operations unwrap to base type
 ```
 
-The base must be `string` or `number`. A nominal declaration over a record, a
+The base must be `string`, `number`, or `boolean`. A nominal declaration over a record, a
 union, or a function is refused with ZTS048: nominal identity is scalar, and a
 record that needs a name is a `structural` alias.
 

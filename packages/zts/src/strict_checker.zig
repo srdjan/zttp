@@ -16,6 +16,7 @@ const match_analysis_mod = @import("match_analysis.zig");
 const bool_checker = @import("bool_checker.zig");
 const repair_intent_mod = @import("repair_intent.zig");
 const module_facts_mod = @import("module_facts.zig");
+const abi_types = @import("abi_types.zig");
 const builtin_modules = @import("zts-engine").builtin_modules;
 const known_globals = @import("zts-base").known_globals;
 
@@ -88,6 +89,10 @@ pub const DiagnosticKind = enum {
     non_exhaustive_profile_match,
     avoidable_let,
     computed_property_access,
+    /// A raw built-in type appears in an exported function's parameter or
+    /// return position. Cross-file contracts name declared types; internal
+    /// functions keep inference-friendly raw types.
+    raw_exported_boundary_type,
     mutable_live_iteration,
     canonical_arrow_helper,
     canonical_export_function_const,
@@ -235,6 +240,7 @@ pub const StrictChecker = struct {
     }
 
     pub fn check(self: *StrictChecker, root: NodeIndex) !u32 {
+        if (self.type_env) |env| try env.ensureHealthy();
         if (self.type_checker) |tc| try tc.ensureHealthy();
         self.scanImports();
         self.collectAnnotatedFunctions(root);
@@ -243,6 +249,7 @@ pub const StrictChecker = struct {
         self.collectAssignments(root);
         self.collectCallCounts(root);
         self.walkStmt(root);
+        if (self.type_env) |env| try env.ensureHealthy();
         if (self.type_checker) |tc| try tc.ensureHealthy();
         if (self.allocation_failed) return error.OutOfMemory;
 
@@ -792,16 +799,18 @@ pub const StrictChecker = struct {
         }
     }
 
-    /// Checks only what being *exported* adds: ZTS609. Annotation is not
-    /// checked here. `walkStmt`'s `.export_decl` arm walks the declaration
-    /// right after this call, and that walk already reaches every function
-    /// node - `.function_decl` directly, a function-valued initializer through
-    /// `walkExpr`. Checking it here too emitted ZTS601 twice at one position
-    /// for every `export function`.
+    /// Checks rules whose scope is the exported declaration itself. ZTS061 is
+    /// deliberately limited to `.function_decl`; function-valued constants
+    /// remain under ZTS609 until their boundary semantics are specified.
+    /// Annotation completeness is still handled by the normal statement walk,
+    /// which avoids emitting ZTS601 twice for one `export function`.
     fn checkExportedDeclaration(self: *StrictChecker, node: NodeIndex) void {
         const tag = self.ir_view.getTag(node) orelse return;
-        if (tag != .var_decl) return;
         const decl = self.ir_view.getVarDecl(node) orelse return;
+        if (tag == .function_decl and decl.init != null_node and self.isFunctionNode(decl.init)) {
+            self.checkExportedBoundaryTypes(decl.init);
+        }
+        if (tag != .var_decl) return;
         if (decl.init == null_node or !self.isFunctionNode(decl.init)) return;
         if (decl.kind != .@"const") return;
         self.addDiagnostic(.{
@@ -812,6 +821,84 @@ pub const StrictChecker = struct {
             .help = "use `export function name(...) { ... }` unless the export is intentionally a first-class function value",
             .repair_intent = .replace_export_arrow_with_function,
         });
+    }
+
+    /// ZTS061: an exported signature is a contract another file reads, so its
+    /// raw open types must be named. The source spelling is load-bearing: a
+    /// structural scalar alias resolves to the same TypeIndex as its base.
+    fn checkExportedBoundaryTypes(self: *StrictChecker, node: NodeIndex) void {
+        const func = self.ir_view.getFunction(node) orelse return;
+        const source_sig = self.functionSignature(node, func) orelse return;
+        const sig = source_sig.sig;
+        const env = self.type_env orelse return;
+
+        // With an incomplete annotation list the remaining entries no longer
+        // map one-to-one onto parameter nodes. ZTS601 owns that malformed
+        // signature; do not guess which parameter an entry belonged to.
+        if (sig.param_count == func.params_count) {
+            for (0..func.params_count) |i| {
+                const annotation = env.getSourceFnParamAnnotation(source_sig.line, @intCast(i)) orelse continue;
+                const raw = rawBoundaryBase(annotation) orelse continue;
+                const param = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                self.addRawBoundaryDiagnostic(param, "parameter", annotation, raw);
+            }
+        }
+
+        if (env.getSourceFnReturnAnnotation(source_sig.line)) |annotation| {
+            if (rawBoundaryBase(annotation)) |raw| {
+                self.addRawBoundaryDiagnostic(node, "return", annotation, raw);
+            }
+        }
+    }
+
+    const SourceFunctionSig = struct {
+        sig: FunctionSig,
+        line: u32,
+    };
+
+    fn functionSignature(
+        self: *const StrictChecker,
+        node: NodeIndex,
+        func: ir.Node.FunctionExpr,
+    ) ?SourceFunctionSig {
+        const env = self.type_env orelse return null;
+        const loc = self.ir_view.getLoc(node) orelse return null;
+        if (env.getFnSigByLoc(loc.line)) |sig| return .{ .sig = sig, .line = loc.line };
+        if (func.name_atom == 0) return null;
+        const name = self.resolveAtomName(func.name_atom) orelse return null;
+        const sig = env.getSourceFnSigByName(name) orelse return null;
+        const line = env.getSourceFnLineByName(name) orelse return null;
+        return .{ .sig = sig, .line = line };
+    }
+
+    fn addRawBoundaryDiagnostic(
+        self: *StrictChecker,
+        node: NodeIndex,
+        position: []const u8,
+        annotation: []const u8,
+        raw: []const u8,
+    ) void {
+        const displayed_annotation = std.mem.trim(u8, annotation, " \t\r\n");
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "exported function {s} type `{s}` exposes raw `{s}`",
+            .{ position, displayed_annotation, raw },
+        ) catch {
+            self.markAllocationFailure();
+            return;
+        };
+        self.diagnostics.append(self.allocator, .{
+            .severity = .err,
+            .kind = .raw_exported_boundary_type,
+            .node = node,
+            .message = message,
+            .help = "declare a nominal or structural alias and name it in the exported signature",
+            .message_owned = true,
+            .repair_intent = .declare_boundary_type,
+        }) catch {
+            self.allocator.free(message);
+            self.markAllocationFailure();
+        };
     }
 
     fn checkFunctionAnnotation(self: *StrictChecker, node: NodeIndex) void {
@@ -1811,6 +1898,106 @@ fn isArrayMutator(name: []const u8) bool {
     return false;
 }
 
+/// Return the raw open type at the base of `annotation`, or null when the
+/// annotation names a declared/ABI/closed type. Arrays inherit the decision
+/// from their element, including nested and readonly arrays.
+fn rawBoundaryBase(annotation: []const u8) ?[]const u8 {
+    var text = std.mem.trim(u8, annotation, " \t\r\n");
+    if (std.mem.startsWith(u8, text, "readonly")) {
+        const after = text["readonly".len..];
+        if (after.len > 0 and std.ascii.isWhitespace(after[0])) {
+            text = std.mem.trim(u8, after, " \t\r\n");
+        }
+    }
+
+    while (stripOuterParens(text)) |inner| {
+        text = inner;
+    }
+    while (text.len >= 2 and text[text.len - 2] == '[' and text[text.len - 1] == ']') {
+        text = std.mem.trim(u8, text[0 .. text.len - 2], " \t\r\n");
+        while (stripOuterParens(text)) |inner| {
+            text = inner;
+        }
+    }
+
+    var member_start: usize = 0;
+    var found_union = false;
+    var angle_depth: u32 = 0;
+    var bracket_depth: u32 = 0;
+    var quote: ?u8 = null;
+    var escaped = false;
+    for (text, 0..) |c, i| {
+        if (quote) |q| {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == q) {
+                quote = null;
+            }
+            continue;
+        }
+        switch (c) {
+            '\'', '"', '`' => quote = c,
+            '<' => angle_depth += 1,
+            '>' => if (angle_depth > 0) {
+                angle_depth -= 1;
+            },
+            '{', '[', '(' => bracket_depth += 1,
+            '}', ']', ')' => if (bracket_depth > 0) {
+                bracket_depth -= 1;
+            },
+            '|' => if (angle_depth == 0 and bracket_depth == 0) {
+                found_union = true;
+                if (rawBoundaryBase(text[member_start..i])) |raw| return raw;
+                member_start = i + 1;
+            },
+            else => {},
+        }
+    }
+    if (found_union) return rawBoundaryBase(text[member_start..]);
+
+    if (abi_types.isBoundaryTypeAnnotation(text)) return null;
+    for ([_][]const u8{ "string", "number", "boolean", "object", "unknown" }) |raw| {
+        if (std.mem.eql(u8, text, raw)) return raw;
+    }
+    return null;
+}
+
+/// Strip one pair of parentheses only when it encloses the whole annotation.
+fn stripOuterParens(annotation: []const u8) ?[]const u8 {
+    const text = std.mem.trim(u8, annotation, " \t\r\n");
+    if (text.len < 2 or text[0] != '(' or text[text.len - 1] != ')') return null;
+
+    var depth: u32 = 0;
+    var quote: ?u8 = null;
+    var escaped = false;
+    for (text, 0..) |c, i| {
+        if (quote) |q| {
+            if (escaped) {
+                escaped = false;
+            } else if (c == '\\') {
+                escaped = true;
+            } else if (c == q) {
+                quote = null;
+            }
+            continue;
+        }
+        switch (c) {
+            '\'', '"', '`' => quote = c,
+            '(' => depth += 1,
+            ')' => {
+                if (depth == 0) return null;
+                depth -= 1;
+                if (depth == 0 and i != text.len - 1) return null;
+            },
+            else => {},
+        }
+    }
+    if (depth != 0) return null;
+    return std.mem.trim(u8, text[1 .. text.len - 1], " \t\r\n");
+}
+
 fn bindingKey(binding: ir.BindingRef) u32 {
     return bool_checker.packBindingKey(binding.scope_id, binding.slot);
 }
@@ -2177,6 +2364,94 @@ test "a multi-line signature missing the return type still fails" {
     );
     defer h.deinit();
     try expectKind(&h.checker, .missing_public_annotation);
+}
+
+test "raw exported boundary types are refused in every specified shape" {
+    const sources = [_][]const u8{
+        "export function expose(value: string): string { return value; }",
+        "export function expose(value: number): number { return value; }",
+        "export function expose(value: boolean): boolean { return value; }",
+        "export function expose(value: object): object { return value; }",
+        "export function expose(value: unknown): unknown { return value; }",
+        "export function expose(value: string[]): string[] { return value; }",
+        "export function expose(value: readonly number[]): readonly number[] { return value; }",
+    };
+    for (sources) |source| {
+        var h = try checkStripped(source);
+        defer h.deinit();
+        try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
+    }
+}
+
+test "raw union members cannot hide behind a closed or ABI member" {
+    const sources = [_][]const u8{
+        "export function expose(value: string | \"fallback\"): string | \"fallback\" { return value; }",
+        "export function expose(value: Request | string): Request | string { return value; }",
+    };
+    for (sources) |source| {
+        var h = try checkStripped(source);
+        defer h.deinit();
+        try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
+    }
+}
+
+test "exported function-valued constants stay outside ZTS061 scope" {
+    var h = try checkStripped(
+        "export const widen = (value: string): string => value;",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_export_function_const);
+    try expectNoKind(&h.checker, .raw_exported_boundary_type);
+}
+
+test "raw exported boundary types are refused in a multi-line signature" {
+    var h = try checkStripped(
+        \\export function expose(
+        \\    value: string[],
+        \\): number {
+        \\    return value.length;
+        \\}
+    );
+    defer h.deinit();
+    try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
+}
+
+test "raw exported boundaries survive a next-line function brace" {
+    var h = try checkStripped(
+        \\export function expose(value: string): string
+        \\{
+        \\    return value;
+        \\}
+    );
+    defer h.deinit();
+    try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
+}
+
+test "declared ABI and literal-union boundary types are admitted" {
+    const sources = [_][]const u8{
+        "structural Text = string; export function expose(value: Text): Text { return value; }",
+        "nominal UserId = string; export function expose(value: UserId): UserId { return value; }",
+        "structural Text = string; export function expose(value: Text[]): Text[] { return value; }",
+        "nominal UserId = string; export function expose(value: readonly UserId[]): readonly UserId[] { return value; }",
+        "export function expose(value: Request): Response { return Response.json({}); }",
+        "export function expose(value: Bytes): Bytes { return value; }",
+        "export function expose(value: Dict<string, number>): Dict<string, number> { return value; }",
+        "export function expose(value: JsonValue): JsonValue { return value; }",
+        "export function expose(value: Result<string, string>): Result<string, string> { return value; }",
+        "export function expose(value: \"GET\" | \"POST\"): \"GET\" | \"POST\" { return value; }",
+        "export function expose(value: Request | \"fallback\"): Request | \"fallback\" { return value; }",
+    };
+    for (sources) |source| {
+        var h = try checkStripped(source);
+        defer h.deinit();
+        try expectNoKind(&h.checker, .raw_exported_boundary_type);
+    }
+}
+
+test "raw internal function boundary types remain admitted" {
+    var h = try checkStripped("function expose(value: string): string { return value; }");
+    defer h.deinit();
+    try expectNoKind(&h.checker, .raw_exported_boundary_type);
 }
 
 test "canonical_redundant_bool_compare fires for a const-bound literal boolean" {

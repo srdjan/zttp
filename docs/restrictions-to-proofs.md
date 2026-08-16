@@ -43,6 +43,7 @@ reach clients through the version-2 `restrictions` operation.
 | unchecked recursive cycle | totality and bounded cost | `essential` | no diagnostic |
 | native module with unbound contract | effect and authority integrity | `essential` | no diagnostic |
 | `any`, type assertions (`as` and angle-bracket forms), `satisfies` | type evidence integrity | `essential` | `ZTS041`, `ZTS042`, `ZTS043` |
+| raw built-in type in an exported function signature | declared cross-module contracts | `replaced` | `ZTS061` |
 | effectful `?:` | visible evaluation and one mutation spelling | `provisional` | `ZTS612` |
 | compound assignment | visible evaluation and one mutation spelling | `provisional` | `ZTS613` |
 | rest parameters | visible evaluation and one mutation spelling | `provisional` | `ZTS001` |
@@ -111,6 +112,7 @@ Per-restriction rationale, one sentence each.
 - **unchecked recursive cycle** - recursion runs, but these claims require evidence
 - **native module with unbound contract** - essential
 - **`any`, type assertions (`as` and angle-bracket forms), `satisfies`** - essential to the selected checker model
+- **raw built-in type in an exported function signature** - exported parameter and return types name a nominal or structural declaration instead of an open built-in type
 - **effectful `?:`** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
 - **compound assignment** - language-simplicity choice, provisional pending the 14.2 paired-task measurement
 - **rest parameters** - language-simplicity choice, provisional pending the 14.2 paired-task measurement

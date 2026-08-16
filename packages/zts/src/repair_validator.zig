@@ -231,6 +231,12 @@ pub const rows = [_]Row{
         .status = .not_applicable,
         .precondition = null,
     },
+    .{
+        .intent = .declare_boundary_type,
+        .method = .none,
+        .status = .not_applicable,
+        .precondition = null,
+    },
 };
 
 pub fn find(intent: RepairIntent) ?Row {
@@ -856,6 +862,14 @@ test "a behaviour-changing repair claims no equivalence" {
     try std.testing.expectEqual(Method.none, row.method);
     try std.testing.expect(row.precondition == null);
     try std.testing.expect(!row.gradable());
+}
+
+test "declaring an exported boundary type is not advertised as an automatic repair" {
+    const row = find(.declare_boundary_type) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(Method.none, row.method);
+    try std.testing.expectEqual(Status.not_applicable, row.status);
+    try std.testing.expect(!row.gradable());
+    try std.testing.expect(!gradable(.declare_boundary_type));
 }
 
 test "naming a method is not the same as having one" {

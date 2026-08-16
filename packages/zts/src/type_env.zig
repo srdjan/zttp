@@ -360,6 +360,10 @@ pub const TypeEnv = struct {
     var_types: std.AutoHashMapUnmanaged(u32, TypeIndex),
     /// Function signatures: packed(context_line, context_col) -> FunctionSig
     fn_signatures: std.AutoHashMapUnmanaged(u32, FunctionSig),
+    /// Source spellings used by declaration-shape rules, keyed by function
+    /// line and parameter position. Keeping them outside `FunctionSig` avoids
+    /// copying sixteen slices through every name and location signature map.
+    source_fn_annotations: std.AutoHashMapUnmanaged(u64, []const u8),
     /// Variable name -> declared type (for name-based lookup)
     var_types_by_name: std.StringHashMapUnmanaged(TypeIndex),
     /// All variable annotations keyed by semantic (name, occurrence), in source order.
@@ -372,6 +376,9 @@ pub const TypeEnv = struct {
     /// exports so a colliding module name cannot masquerade as a user's
     /// function declaration while binding-local metadata is established.
     source_fn_sigs_by_name: std.StringHashMapUnmanaged(FunctionSig),
+    /// Source line paired with `source_fn_sigs_by_name`, used when the parser's
+    /// function node is located at a later-line opening brace.
+    source_fn_lines_by_name: std.StringHashMapUnmanaged(u32),
     /// Generic scope stack
     generic_scopes: std.ArrayListUnmanaged(GenericScope),
     /// Explicit call-site type arguments, keyed by the byte offset of the
@@ -409,11 +416,13 @@ pub const TypeEnv = struct {
             .generic_aliases = .empty,
             .var_types = .empty,
             .fn_signatures = .empty,
+            .source_fn_annotations = .empty,
             .var_types_by_name = .empty,
             .var_annotations = .empty,
             .var_types_by_binding = .empty,
             .fn_sigs_by_name = .empty,
             .source_fn_sigs_by_name = .empty,
+            .source_fn_lines_by_name = .empty,
             .generic_scopes = .empty,
             .call_type_args = .empty,
             .non_contractive_aliases = .empty,
@@ -486,11 +495,13 @@ pub const TypeEnv = struct {
         self.generic_aliases.deinit(self.allocator);
         self.var_types.deinit(self.allocator);
         self.fn_signatures.deinit(self.allocator);
+        self.source_fn_annotations.deinit(self.allocator);
         self.var_types_by_name.deinit(self.allocator);
         self.var_annotations.deinit(self.allocator);
         self.var_types_by_binding.deinit(self.allocator);
         self.fn_sigs_by_name.deinit(self.allocator);
         self.source_fn_sigs_by_name.deinit(self.allocator);
+        self.source_fn_lines_by_name.deinit(self.allocator);
         self.generic_scopes.deinit(self.allocator);
         self.call_type_args.deinit(self.allocator);
         for (self.name_storage.items) |name| {
@@ -598,7 +609,14 @@ pub const TypeEnv = struct {
                     const generics = fn_generics_by_line.get(entry.context_line);
                     const type_idx = self.resolveTypeInGenerics(type_text, generics);
                     if (gop.value_ptr.param_count < 16) {
-                        gop.value_ptr.param_types[gop.value_ptr.param_count] = type_idx;
+                        const param_index = gop.value_ptr.param_count;
+                        gop.value_ptr.param_types[param_index] = type_idx;
+                        const annotation = self.internName(type_text);
+                        self.source_fn_annotations.put(
+                            self.allocator,
+                            sourceFnAnnotationKey(entry.context_line, param_index),
+                            annotation,
+                        ) catch self.markAllocationFailure();
                         gop.value_ptr.param_count += 1;
                     }
                     if (tm.getNameText(entry)) |param_name| {
@@ -622,6 +640,12 @@ pub const TypeEnv = struct {
                         gop.value_ptr.* = .{};
                     }
                     gop.value_ptr.return_type = type_idx;
+                    const annotation = self.internName(type_text);
+                    self.source_fn_annotations.put(
+                        self.allocator,
+                        sourceFnAnnotationKey(entry.context_line, return_annotation_slot),
+                        annotation,
+                    ) catch self.markAllocationFailure();
                     if (tm.getNameText(entry)) |name| {
                         const owned_name = self.internName(name);
                         fn_names_by_line.put(self.allocator, entry.context_line, owned_name) catch self.markAllocationFailure();
@@ -669,6 +693,7 @@ pub const TypeEnv = struct {
             if (fn_names_by_line.get(kv.key_ptr.*)) |name| {
                 self.fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
                 self.source_fn_sigs_by_name.put(self.allocator, name, kv.value_ptr.*) catch self.markAllocationFailure();
+                self.source_fn_lines_by_name.put(self.allocator, name, kv.key_ptr.*) catch self.markAllocationFailure();
             }
         }
     }
@@ -1264,6 +1289,11 @@ pub const TypeEnv = struct {
         return self.source_fn_sigs_by_name.get(name);
     }
 
+    /// Signature source line for a source-declared function name.
+    pub fn getSourceFnLineByName(self: *const TypeEnv, name: []const u8) ?u32 {
+        return self.source_fn_lines_by_name.get(name);
+    }
+
     /// Look up a type alias by name.
     pub fn getTypeAlias(self: *const TypeEnv, name: []const u8) ?TypeIndex {
         return self.type_aliases.get(name);
@@ -1280,6 +1310,22 @@ pub const TypeEnv = struct {
     /// Look up a function signature by source location.
     pub fn getFnSigByLoc(self: *const TypeEnv, line: u32) ?FunctionSig {
         return self.fn_signatures.get(line);
+    }
+
+    /// Exact source spelling of one declared parameter annotation.
+    pub fn getSourceFnParamAnnotation(self: *const TypeEnv, line: u32, index: u8) ?[]const u8 {
+        return self.source_fn_annotations.get(sourceFnAnnotationKey(line, index));
+    }
+
+    /// Exact source spelling of a declared return annotation.
+    pub fn getSourceFnReturnAnnotation(self: *const TypeEnv, line: u32) ?[]const u8 {
+        return self.source_fn_annotations.get(sourceFnAnnotationKey(line, return_annotation_slot));
+    }
+
+    /// Refuse consumers that would otherwise interpret allocation-dropped
+    /// declarations as declarations the author never wrote.
+    pub fn ensureHealthy(self: *const TypeEnv) error{OutOfMemory}!void {
+        if (self.allocation_failed) return error.OutOfMemory;
     }
 
     /// Explicit type arguments written at the call whose `(` sits at `offset`.
@@ -1561,6 +1607,12 @@ pub const TypeEnv = struct {
 fn packLocationKey(line: u32, col: u32) u32 {
     // Pack line (20 bits) + col (12 bits) into u32
     return (line << 12) | (col & 0xFFF);
+}
+
+const return_annotation_slot = std.math.maxInt(u8);
+
+fn sourceFnAnnotationKey(line: u32, slot: u8) u64 {
+    return (@as(u64, line) << 8) | slot;
 }
 
 fn packBindingNameKey(scope_id: u16, name_atom: u16) u32 {

@@ -3824,7 +3824,10 @@ test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\export function digest(s: string): string {
+        \\structural DigestInput = string;
+        \\structural DigestOutput = string;
+        \\
+        \\export function digest(s: DigestInput): DigestOutput {
         \\  return sha256(s);
         \\}
         \\
@@ -3851,7 +3854,10 @@ test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
 test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
     const allocator = std.testing.allocator;
     const source =
-        \\export function stable(s: string): string {
+        \\structural StableInput = string;
+        \\structural StableOutput = string;
+        \\
+        \\export function stable(s: StableInput): StableOutput {
         \\  return s;
         \\}
         \\
@@ -3881,7 +3887,10 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
     // the rule conditions on: the module's public surface owes its callers a
     // capsule whether or not this handler is one of them.
     const source =
-        \\export function unrelated(s: string): string {
+        \\structural UnrelatedInput = string;
+        \\structural UnrelatedOutput = string;
+        \\
+        \\export function unrelated(s: UnrelatedInput): UnrelatedOutput {
         \\  return s;
         \\}
         \\
@@ -3909,7 +3918,10 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
 test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs" {
     const allocator = std.testing.allocator;
     const source =
-        \\export function stable(s: string): string {
+        \\structural StableInput = string;
+        \\structural StableOutput = string;
+        \\
+        \\export function stable(s: StableInput): StableOutput {
         \\  return s;
         \\}
         \\
@@ -3933,7 +3945,10 @@ test "formatProofCard: canonical public helper diagnostics are visible in text m
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\export function digest(s: string): string {
+        \\structural DigestInput = string;
+        \\structural DigestOutput = string;
+        \\
+        \\export function digest(s: DigestInput): DigestOutput {
         \\  return sha256(s);
         \\}
         \\
@@ -4380,7 +4395,9 @@ test "appendExportCapsuleDiagnostics: the docs mode asks only for a Proof capsul
     const source =
         \\import { env } from "zttp:env";
         \\
-        \\export function region(): string {
+        \\structural Region = string;
+        \\
+        \\export function region(): Region {
         \\  return env("REGION") ?? "unknown";
         \\}
         \\
@@ -4554,7 +4571,9 @@ test "a pure-typed callback parameter contributes the empty row" {
     // row - spec 6.5's "its callback MUST be pure" made representable. The
     // call through `f` used to defeat the row entirely and report ZTS512.
     const source =
-        \\export function apply(f: (n: number) => number, x: number): Effects<number, "clock"> {
+        \\structural Count = number;
+        \\
+        \\export function apply(f: (n: number) => number, x: Count): Effects<number, "clock"> {
         \\  return f(x);
         \\}
         \\
@@ -4585,7 +4604,9 @@ test "an unreached exported helper with a nonempty row reports ZTS610" {
     const source =
         \\import { env } from "zttp:env";
         \\
-        \\export function unused(): string | undefined {
+        \\structural OptionalSecret = string | undefined;
+        \\
+        \\export function unused(): OptionalSecret {
         \\  return env("API_KEY");
         \\}
         \\
@@ -4858,6 +4879,29 @@ test "runCheckOnlyFromSource refuses void type spelling with ZTS060" {
     try std.testing.expectEqualStrings("ZTS060", diagnostic.code);
     try std.testing.expectEqualStrings("write `undefined`", diagnostic.suggestion.?);
     try std.testing.expect(result.contract == null);
+}
+
+test "runCheckOnlyFromSource reports ZTS061 for a raw exported boundary" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function expose(value: string): string {
+        \\  return value;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  return Response.text(expose("ok"));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    var zts061_count: usize = 0;
+    for (result.json_diagnostics.items) |diagnostic| {
+        if (!std.mem.eql(u8, diagnostic.code, "ZTS061")) continue;
+        zts061_count += 1;
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "type `string` exposes raw `string`") != null);
+    }
+    try std.testing.expectEqual(@as(usize, 2), zts061_count);
+    try std.testing.expectEqual(@as(u32, 2), result.strict_errors);
 }
 
 test "runCheckOnlyFromSource explicitly refuses unary void" {
