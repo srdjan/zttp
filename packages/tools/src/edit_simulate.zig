@@ -27,6 +27,10 @@ pub const EditSimulateInput = struct {
     /// via `discoverProjectSqlSchemaPath`; when null, zttp:sql edits fail
     /// analysis with MissingSqlSchema exactly like a schema-less `check`.
     sql_schema_path: ?[]const u8 = null,
+    /// Optional system manifest for cross-handler type and policy context.
+    /// When omitted, simulation discovers the same project system as
+    /// `zts check`, starting from `file` rather than from process cwd.
+    system_path: ?[]const u8 = null,
 };
 
 pub const SimulatedViolation = struct {
@@ -72,12 +76,6 @@ pub fn simulate(
     allocator: std.mem.Allocator,
     input: EditSimulateInput,
 ) !SimulateResult {
-    const tmp_path = try writeTempFile(allocator, input.file, input.content);
-    defer {
-        deleteTempFile(allocator, tmp_path);
-        allocator.free(tmp_path);
-    }
-
     // When the caller passes no explicit schema, discover the project's from cwd
     // exactly as the CLI boundary (`run`) does. Without this, every in-process
     // tool that simulates a zttp:sql handler (the repair-apply lane, review
@@ -85,26 +83,47 @@ pub fn simulate(
     // project has a configured schema. The veto and CLI already pass a non-null
     // path, so discovery only runs for the schema-less in-process callers.
     const discovered_schema: ?[]u8 = if (input.sql_schema_path == null)
-        discoverProjectSqlSchemaPath(allocator, null)
+        discoverProjectSqlSchemaPath(allocator, input.file)
     else
         null;
     defer if (discovered_schema) |p| allocator.free(p);
     const schema_path = input.sql_schema_path orelse discovered_schema;
 
-    var new_check = try precompile.runCheckOnly(allocator, tmp_path, schema_path, true, null);
+    const discovered_system: ?[]u8 = if (input.system_path == null)
+        discoverProjectSystemPath(allocator, input.file)
+    else
+        null;
+    defer if (discovered_system) |p| allocator.free(p);
+    const system_path = input.system_path orelse discovered_system;
+
+    // Analyze the proposed bytes under the original file identity. Writing
+    // them to `/tmp` severed relative imports, so a valid sibling helper was
+    // treated as an unknown external call and four Proof properties failed in
+    // edit-simulate even though `zts check` accepted the same handler.
+    var new_check = try precompile.runCheckOnlyFromSource(
+        allocator,
+        input.content,
+        input.file,
+        schema_path,
+        true,
+        system_path,
+        false,
+    );
     defer new_check.deinit(allocator);
 
     var baseline_counts: ?std.AutoHashMapUnmanaged(ViolationKey, u32) = null;
     defer if (baseline_counts) |*bk| bk.deinit(allocator);
 
     if (input.before) |before_content| {
-        const before_path = try writeTempFile(allocator, input.file, before_content);
-        defer {
-            deleteTempFile(allocator, before_path);
-            allocator.free(before_path);
-        }
-
-        var old_check = try precompile.runCheckOnly(allocator, before_path, schema_path, true, null);
+        var old_check = try precompile.runCheckOnlyFromSource(
+            allocator,
+            before_content,
+            input.file,
+            schema_path,
+            true,
+            system_path,
+            false,
+        );
         defer old_check.deinit(allocator);
 
         baseline_counts = .empty;
@@ -355,6 +374,21 @@ pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[
     return null;
 }
 
+/// Resolve the project system manifest from the edited file. This mirrors the
+/// `zts check` boundary without importing zts_cli back into its dependency.
+pub fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var project = project_config_mod.discover(allocator, io, start_path) catch return null;
+    defer if (project) |*p| p.deinit(allocator);
+    if (project) |*cfg| {
+        return cfg.resolvedSystemPath(allocator) catch null;
+    }
+    return null;
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -403,27 +437,6 @@ fn deleteTempFile(allocator: std.mem.Allocator, path: []const u8) void {
     _ = std.c.unlink(path_z);
 }
 
-fn writeTempFile(allocator: std.mem.Allocator, original_name: []const u8, content: []const u8) ![]u8 {
-    const ext = blk: {
-        if (std.mem.lastIndexOf(u8, original_name, ".")) |dot_idx| {
-            break :blk original_name[dot_idx..];
-        }
-        break :blk ".ts";
-    };
-
-    var rand_bytes: [8]u8 = undefined;
-    fillRandom(&rand_bytes);
-    const rand_int = std.mem.readInt(u64, &rand_bytes, .little);
-    const tmp_path = try std.fmt.allocPrint(allocator, "/tmp/zts-edit-sim-{x:0>16}{s}", .{
-        rand_int,
-        ext,
-    });
-    errdefer allocator.free(tmp_path);
-
-    try file_io.writeFile(allocator, tmp_path, content);
-    return tmp_path;
-}
-
 /// Read stdin to EOF, capped at `max_stdin_json_bytes`. Public so the v2
 /// agent transport reads its request through the same capped reader.
 pub fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
@@ -461,25 +474,6 @@ fn printHelp() void {
         \\
     ;
     _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
-}
-
-/// Fill `buf` with cryptographically random bytes via /dev/urandom.
-/// Falls back to leaving `buf` zeroed only if /dev/urandom is unavailable
-/// (which should never happen on any supported platform).
-fn fillRandom(buf: []u8) void {
-    const fd = std.c.open("/dev/urandom", .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
-    if (fd < 0) return;
-    defer _ = std.c.close(fd);
-    var filled: usize = 0;
-    while (filled < buf.len) {
-        const n = std.c.read(fd, buf[filled..].ptr, buf.len - filled);
-        if (n < 0) {
-            if (std.c.errno(n) == .INTR) continue;
-            return;
-        }
-        if (n == 0) return;
-        filled += @intCast(n);
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +656,53 @@ test "simulate flags newly introduced canonical diagnostics" {
     }
     try std.testing.expect(saw_608);
     try std.testing.expect(result.new_count > 0);
+}
+
+test "simulate preserves sibling module proof context" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const before =
+        \\import { apiToken, displayName } from "./lib/settings.ts";
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "no_secret_leakage"> {
+        \\  if (apiToken() === undefined) return Response.json({ error: "unconfigured" }, { status: 503 });
+        \\  return hole();
+        \\}
+    ;
+    const after =
+        \\import { apiToken, displayName } from "./lib/settings.ts";
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "no_secret_leakage"> {
+        \\  if (apiToken() === undefined) return Response.json({ error: "unconfigured" }, { status: 503 });
+        \\  return Response.json({ name: displayName() });
+        \\}
+    ;
+    const settings =
+        \\import { env } from "zttp:env";
+        \\export function apiToken(): string | undefined { return env("API_TOKEN"); }
+        \\export function displayName(): string { return env("APP_NAME") ?? "unnamed"; }
+    ;
+
+    try tmp.dir.makePath(std.testing.io, "lib");
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = before });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/settings.ts", .data = settings });
+
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", std.testing.allocator);
+    defer std.testing.allocator.free(handler_path);
+
+    var result = try simulate(std.testing.allocator, .{
+        .file = handler_path,
+        .content = after,
+        .before = before,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.total);
+    try std.testing.expectEqual(@as(u32, 0), result.new_count);
+    const properties = result.properties orelse return error.MissingProperties;
+    try std.testing.expect(properties.deterministic);
+    try std.testing.expect(properties.read_only);
+    try std.testing.expect(properties.retry_safe);
+    try std.testing.expect(properties.idempotent);
 }
 
 test "simulate vetoes a nonexistent virtual module export" {
