@@ -91,7 +91,8 @@ pub const SessionSummary = struct {
     tracked_properties: u32 = 0,
     workflow_hint_count: u32 = 0,
     high_confidence_workflow_hint_count: u32 = 0,
-    first_draft_veto_pass_count: u32 = 0,
+    raw_first_draft_veto_pass_count: u32 = 0,
+    first_attempt_green_count: u32 = 0,
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
     /// Edits that landed via the compiler-authored repair lane with no model
@@ -954,7 +955,8 @@ fn writeSessionSummaryPayload(writer: *std.Io.Writer, s: SessionSummary) !void {
     try writer.print(",\"proven_path_ratio\":{d:.3}", .{s.provenPathRatio()});
     try writer.print(",\"workflow_hint_count\":{d}", .{s.workflow_hint_count});
     try writer.print(",\"high_confidence_workflow_hint_count\":{d}", .{s.high_confidence_workflow_hint_count});
-    try writer.print(",\"first_draft_veto_pass_count\":{d}", .{s.first_draft_veto_pass_count});
+    try writer.print(",\"raw_first_draft_veto_pass_count\":{d}", .{s.raw_first_draft_veto_pass_count});
+    try writer.print(",\"first_attempt_green_count\":{d}", .{s.first_attempt_green_count});
     try writer.print(",\"veto_retry_count\":{d}", .{s.veto_retry_count});
     try writer.print(",\"tool_call_count\":{d}", .{s.tool_call_count});
     try writer.print(",\"compiler_authored_apply_count\":{d}", .{s.compiler_authored_apply_count});
@@ -1652,7 +1654,8 @@ test "appendEvent serializes session_summary with metrics" {
         .tracked_properties = 16,
         .workflow_hint_count = 2,
         .high_confidence_workflow_hint_count = 1,
-        .first_draft_veto_pass_count = 1,
+        .raw_first_draft_veto_pass_count = 1,
+        .first_attempt_green_count = 2,
         .veto_retry_count = 3,
         .tool_call_count = 5,
         .compiler_authored_apply_count = 2,
@@ -1670,7 +1673,8 @@ test "appendEvent serializes session_summary with metrics" {
     try testing.expect(std.mem.indexOf(u8, raw, "\"round_trips_to_first_green\":4") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"proven_path_ratio\":0.750") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"workflow_hint_count\":2") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"first_draft_veto_pass_count\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"raw_first_draft_veto_pass_count\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"first_attempt_green_count\":2") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"veto_retry_count\":3") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"tool_call_count\":5") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"compiler_authored_apply_count\":2") != null);

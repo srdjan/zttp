@@ -16,6 +16,7 @@ const tools_common = @import("tools/common.zig");
 const json_writer = @import("providers/json_writer.zig");
 const session_events = @import("session/events.zig");
 const expert_workflow = @import("expert_workflow.zig");
+const codegen_types = @import("expert_codegen_types.zig");
 const auto_repair = @import("auto_repair.zig");
 const pi_goal_candidate = @import("tools/pi_goal_candidate.zig");
 const zts_repair_writer = @import("tools/zts_repair_writer.zig");
@@ -228,16 +229,31 @@ pub const TurnResult = struct {
     workflow_kind: expert_workflow.TaskKind = .unknown,
     workflow_confidence: expert_workflow.Confidence = .low,
     workflow_hint_injected: bool = false,
-    /// True when the first model draft passed the edit-simulate veto. This is
-    /// a quality signal for "expert first draft" effectiveness, not an apply
-    /// authorization.
-    first_draft_veto_pass: bool = false,
+    /// Closed cause behind the two published first-attempt metrics.
+    draft_quality: codegen_types.DraftQuality = .not_green,
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
     /// True when this turn applied a compiler-authored repair candidate with no
     /// model round-trip (the model's draft failed veto, the deterministic lane
     /// produced a fix that passed the full veto, and it landed through the
     /// approval gate). The headline "model-free apply" signal.
+    compiler_authored_apply: bool = false,
+
+    pub fn rawFirstDraftVetoPass(self: TurnResult) bool {
+        return self.draft_quality.rawFirstDraftVetoPass();
+    }
+
+    pub fn firstAttemptGreen(self: TurnResult) bool {
+        return self.draft_quality.firstAttemptGreen();
+    }
+};
+
+const TurnProgress = struct {
+    applied_edit: bool = false,
+    applied_proven: u32 = 0,
+    applied_tracked: u32 = 0,
+    draft_quality: codegen_types.DraftQuality = .not_green,
+    veto_retry_count: u32 = 0,
     compiler_authored_apply: bool = false,
 };
 
@@ -483,17 +499,8 @@ pub fn runTurnWith(
     // extra escalation hint is folded into the failed draft's tool_result so the
     // model gets diagnostic guidance without burning another attempt blind.
     var sql_veto_fail_count: u32 = 0;
-    // Set when this turn applies a compiler-verified edit; carries the proof
-    // guarantee counts of the applied bytes back to the session layer for metrics.
-    var applied_edit = false;
-    var applied_proven: u32 = 0;
-    var applied_tracked: u32 = 0;
-    var first_draft_veto_pass = false;
-    var veto_retry_count: u32 = 0;
-    // Set when this turn lands a compiler-authored repair candidate model-free
-    // (Phase B). Carried into the TurnResult so the session layer can report
-    // "% of edits that became model-free".
-    var compiler_authored_apply = false;
+    // Mutable outcome facts accumulated across the state-machine exits.
+    var progress: TurnProgress = .{};
 
     while (true) {
         const action = machine.transition(next_event);
@@ -529,7 +536,7 @@ pub fn runTurnWith(
                     next_event = .budget_exhausted;
                     continue;
                 }
-                veto_retry_count += 1;
+                progress.veto_retry_count += 1;
                 model_roundtrips += 1;
                 // The failed draft and its full diagnostic - plus any compiler-
                 // authored repair block and SQL escalation - are already in the
@@ -643,15 +650,20 @@ pub fn runTurnWith(
                     );
                     try appendEditToolResult(allocator, transcript, edit_call_id, false, body);
                 }
+                if (veto_result.outcome.ok and machine.attempt == 1) {
+                    progress.draft_quality = if (veto_result.report.normalized_content == null)
+                        .raw_veto_pass
+                    else
+                        .normalized;
+                }
                 if (veto_result.outcome.ok and !options.replay_mode) {
-                    if (machine.attempt == 1) first_draft_veto_pass = true;
                     const st = try applyVerifiedEdit(allocator, ta, registry, transcript, options, prepared, veto_result.report, null);
                     if (st.denied) {
-                        return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, applied_edit, applied_proven, applied_tracked, workflow_hint, workflow_hint_injected, first_draft_veto_pass, veto_retry_count, tool_calls_used, compiler_authored_apply);
+                        return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, workflow_hint, workflow_hint_injected, tool_calls_used, progress);
                     }
-                    applied_edit = st.applied;
-                    applied_proven = st.proven;
-                    applied_tracked = st.tracked;
+                    progress.applied_edit = st.applied;
+                    progress.applied_proven = st.proven;
+                    progress.applied_tracked = st.tracked;
                 }
                 // Failed draft: run the deterministic repair lane in-process on
                 // the un-written draft. If it produces a candidate that ALSO
@@ -682,14 +694,15 @@ pub fn runTurnWith(
                                     .before = synth.before,
                                 }, sql_schema_path);
                                 if (reveto.outcome.ok) {
+                                    if (machine.attempt == 1) progress.draft_quality = .compiler_repaired;
                                     const st = try applyVerifiedEdit(allocator, ta, registry, transcript, options, synth, reveto.report, cand.plan_ids);
                                     if (st.denied) {
-                                        return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, applied_edit, applied_proven, applied_tracked, workflow_hint, workflow_hint_injected, first_draft_veto_pass, veto_retry_count, tool_calls_used, compiler_authored_apply);
+                                        return finishTurn(&machine, turn_usage, .approval_denied, model_roundtrips, workflow_hint, workflow_hint_injected, tool_calls_used, progress);
                                     }
-                                    applied_edit = st.applied;
-                                    applied_proven = st.proven;
-                                    applied_tracked = st.tracked;
-                                    compiler_authored_apply = true;
+                                    progress.applied_edit = st.applied;
+                                    progress.applied_proven = st.proven;
+                                    progress.applied_tracked = st.tracked;
+                                    progress.compiler_authored_apply = true;
                                     // Carry the re-veto's proof HUD so the model-
                                     // free apply renders the same proof card as an
                                     // ordinary verified apply (ui_payload is on
@@ -806,15 +819,10 @@ pub fn runTurnWith(
                     turn_usage,
                     end_reason,
                     model_roundtrips,
-                    applied_edit,
-                    applied_proven,
-                    applied_tracked,
                     workflow_hint,
                     workflow_hint_injected,
-                    first_draft_veto_pass,
-                    veto_retry_count,
                     tool_calls_used,
-                    compiler_authored_apply,
+                    progress,
                 );
             },
             .prompt_user => |question| {
@@ -835,15 +843,10 @@ pub fn runTurnWith(
                     turn_usage,
                     budget_reason,
                     model_roundtrips,
-                    applied_edit,
-                    applied_proven,
-                    applied_tracked,
                     workflow_hint,
                     workflow_hint_injected,
-                    first_draft_veto_pass,
-                    veto_retry_count,
                     tool_calls_used,
-                    compiler_authored_apply,
+                    progress,
                 );
             },
             .end_turn => return finishTurn(
@@ -851,30 +854,20 @@ pub fn runTurnWith(
                 turn_usage,
                 if (hit_tool_budget) .budget_tool_calls else .approved,
                 model_roundtrips,
-                applied_edit,
-                applied_proven,
-                applied_tracked,
                 workflow_hint,
                 workflow_hint_injected,
-                first_draft_veto_pass,
-                veto_retry_count,
                 tool_calls_used,
-                compiler_authored_apply,
+                progress,
             ),
             .none => return finishTurn(
                 &machine,
                 turn_usage,
                 if (hit_tool_budget) .budget_tool_calls else .approved,
                 model_roundtrips,
-                applied_edit,
-                applied_proven,
-                applied_tracked,
                 workflow_hint,
                 workflow_hint_injected,
-                first_draft_veto_pass,
-                veto_retry_count,
                 tool_calls_used,
-                compiler_authored_apply,
+                progress,
             ),
         }
     }
@@ -885,15 +878,10 @@ fn finishTurn(
     usage: turn.Usage,
     reason: session_events.TurnEndReason,
     model_roundtrips: u8,
-    applied_edit: bool,
-    applied_proven: u32,
-    applied_tracked: u32,
     workflow_hint: expert_workflow.WorkflowHint,
     workflow_hint_injected: bool,
-    first_draft_veto_pass: bool,
-    veto_retry_count: u32,
     tool_calls_used: usize,
-    compiler_authored_apply: bool,
+    progress: TurnProgress,
 ) TurnResult {
     return .{
         .final_state = machine.state,
@@ -901,16 +889,16 @@ fn finishTurn(
         .usage = usage,
         .end_reason = reason,
         .roundtrips = model_roundtrips,
-        .applied_edit = applied_edit,
-        .proven_guarantees = applied_proven,
-        .tracked_guarantees = applied_tracked,
+        .applied_edit = progress.applied_edit,
+        .proven_guarantees = progress.applied_proven,
+        .tracked_guarantees = progress.applied_tracked,
         .workflow_kind = workflow_hint.kind,
         .workflow_confidence = workflow_hint.confidence,
         .workflow_hint_injected = workflow_hint_injected,
-        .first_draft_veto_pass = first_draft_veto_pass,
-        .veto_retry_count = veto_retry_count,
+        .draft_quality = progress.draft_quality,
+        .veto_retry_count = progress.veto_retry_count,
         .tool_call_count = @intCast(@min(tool_calls_used, std.math.maxInt(u32))),
-        .compiler_authored_apply = compiler_authored_apply,
+        .compiler_authored_apply = progress.compiler_authored_apply,
     };
 }
 
@@ -2118,7 +2106,8 @@ test "retry: one bad draft then one good draft lands a proof card" {
 
     try testing.expectEqual(@as(u8, 2), result.attempt);
     try testing.expectEqual(@as(u32, 1), result.veto_retry_count);
-    try testing.expect(!result.first_draft_veto_pass);
+    try testing.expect(!result.rawFirstDraftVetoPass());
+    try testing.expect(!result.firstAttemptGreen());
     switch (tr.at(tr.len() - 1).*) {
         .proof_card => {},
         else => return error.TestFailed,

@@ -16,6 +16,7 @@ pub const TranscriptItemKind = contract.TranscriptItemKind;
 pub const WorkspaceChangeKind = contract.WorkspaceChangeKind;
 pub const CaseDescriptor = contract.CaseDescriptor;
 pub const TurnExpectation = contract.TurnExpectation;
+pub const DraftExpectation = contract.DraftExpectation;
 pub const ResponseFixture = contract.ResponseFixture;
 pub const ApprovalExpectation = contract.ApprovalExpectation;
 pub const EventExpectation = contract.EventExpectation;
@@ -493,6 +494,13 @@ fn validateManifest(loader: *Loader, manifest: *const FlowManifest) LoadInternal
             loader.diagnostic.turn_index = turn.index;
             return loader.fail(.invalid_index, .manifest, "manifest.json");
         }
+        // Current recordings carry the precise pair. Historical recordings
+        // may carry the old aggregate field or no metric at all, but mixing
+        // formats or carrying half the pair is ambiguous and refused.
+        _ = turn.draftExpectation() catch {
+            loader.diagnostic.turn_index = turn.index;
+            return loader.fail(.invalid_inventory, .manifest, "manifest.json");
+        };
     }
     try validateModelIndexes(loader, manifest.model_responses, manifest.turns.len, .manifest);
     try validateApprovalIndexes(loader, manifest.approvals, manifest.turns.len, .manifest);

@@ -160,7 +160,8 @@ pub const SessionMetrics = struct {
     tracked_properties: u32 = 0,
     workflow_hint_count: u32 = 0,
     high_confidence_workflow_hint_count: u32 = 0,
-    first_draft_veto_pass_count: u32 = 0,
+    raw_first_draft_veto_pass_count: u32 = 0,
+    first_attempt_green_count: u32 = 0,
     veto_retry_count: u32 = 0,
     tool_call_count: u32 = 0,
     /// Edits that landed via the compiler-authored repair lane with no model
@@ -184,7 +185,8 @@ pub const SessionMetrics = struct {
                 self.high_confidence_workflow_hint_count += 1;
             }
         }
-        if (result.first_draft_veto_pass) self.first_draft_veto_pass_count += 1;
+        if (result.rawFirstDraftVetoPass()) self.raw_first_draft_veto_pass_count += 1;
+        if (result.firstAttemptGreen()) self.first_attempt_green_count += 1;
         self.veto_retry_count +|= result.veto_retry_count;
         self.tool_call_count +|= result.tool_call_count;
         if (result.compiler_authored_apply) self.compiler_authored_apply_count += 1;
@@ -211,7 +213,8 @@ pub const SessionMetrics = struct {
             .tracked_properties = self.tracked_properties,
             .workflow_hint_count = self.workflow_hint_count,
             .high_confidence_workflow_hint_count = self.high_confidence_workflow_hint_count,
-            .first_draft_veto_pass_count = self.first_draft_veto_pass_count,
+            .raw_first_draft_veto_pass_count = self.raw_first_draft_veto_pass_count,
+            .first_attempt_green_count = self.first_attempt_green_count,
             .veto_retry_count = self.veto_retry_count,
             .tool_call_count = self.tool_call_count,
             .compiler_authored_apply_count = self.compiler_authored_apply_count,
@@ -2404,7 +2407,7 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
         .workflow_kind = .route_add,
         .workflow_confidence = .high,
         .workflow_hint_injected = true,
-        .first_draft_veto_pass = true,
+        .draft_quality = .raw_veto_pass,
         .tool_call_count = 2,
     });
 
@@ -2419,7 +2422,8 @@ test "SessionMetrics folds a clarifying text turn then an applied edit" {
     try testing.expectEqual(@as(u32, 16), s.proven_properties);
     try testing.expectEqual(@as(u32, 1), s.workflow_hint_count);
     try testing.expectEqual(@as(u32, 1), s.high_confidence_workflow_hint_count);
-    try testing.expectEqual(@as(u32, 1), s.first_draft_veto_pass_count);
+    try testing.expectEqual(@as(u32, 1), s.raw_first_draft_veto_pass_count);
+    try testing.expectEqual(@as(u32, 1), s.first_attempt_green_count);
     try testing.expectEqual(@as(u32, 2), s.tool_call_count);
     try testing.expectEqualStrings("route_add", s.last_workflow_kind);
     try testing.expectEqualStrings("high", s.last_workflow_confidence);

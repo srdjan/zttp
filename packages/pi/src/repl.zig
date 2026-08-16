@@ -537,7 +537,8 @@ fn renderLedgerGuidance(allocator: std.mem.Allocator, summary: session_events.Se
             summary.workflow_hint_count,
             summary.high_confidence_workflow_hint_count,
         });
-        try w.print("  first-draft passes:{d}\n", .{summary.first_draft_veto_pass_count});
+        try w.print("  raw draft passes:  {d}\n", .{summary.raw_first_draft_veto_pass_count});
+        try w.print("  first-attempt green:{d}\n", .{summary.first_attempt_green_count});
         try w.print("  veto retries:      {d}\n", .{summary.veto_retry_count});
         try w.print("  tool calls:        {d}\n", .{summary.tool_call_count});
         if (summary.reached_proof) {
@@ -2174,7 +2175,8 @@ test "renderLedgerGuidance shows live session metrics when turns exist" {
         .tracked_properties = 16,
         .workflow_hint_count = 2,
         .high_confidence_workflow_hint_count = 1,
-        .first_draft_veto_pass_count = 1,
+        .raw_first_draft_veto_pass_count = 1,
+        .first_attempt_green_count = 2,
         .veto_retry_count = 3,
         .tool_call_count = 4,
     });

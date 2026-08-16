@@ -5,6 +5,7 @@ const agent = @import("agent.zig");
 const app = @import("app.zig");
 const expert_persona = @import("expert_persona.zig");
 const expert_workflow = @import("expert_workflow.zig");
+const codegen_types = @import("expert_codegen_types.zig");
 const loop = @import("loop.zig");
 const openai_client = @import("providers/openai/client.zig");
 const response_assembler = @import("providers/openai/response_assembler.zig");
@@ -85,7 +86,8 @@ test "stand-in add-route playbook applies an edit through the real OpenAI agent 
     try server.stop();
 
     try testing.expect(result.applied_edit);
-    try testing.expect(result.first_draft_veto_pass);
+    try testing.expect(result.rawFirstDraftVetoPass());
+    try testing.expect(result.firstAttemptGreen());
     try testing.expectEqual(expert_workflow.TaskKind.route_add, result.workflow_kind);
 
     const handler_path = try tmp.childPath(allocator, "handler.ts");
@@ -168,7 +170,8 @@ test "stand-in seeded arm: a rejected draft is repaired on the retry round trip"
         checked += 1;
 
         const run = try runSeedArm(allocator, seed);
-        try testing.expect(!run.result.first_draft_veto_pass);
+        try testing.expect(!run.result.rawFirstDraftVetoPass());
+        try testing.expect(!run.result.firstAttemptGreen());
         try testing.expectEqual(@as(u32, 1), run.result.veto_retry_count);
         try testing.expect(run.result.applied_edit);
         try testing.expectEqualStrings(seed.good_draft, run.on_disk);
@@ -191,7 +194,9 @@ test "stand-in seeded arm: compiler repair lands without a model retry" {
         checked += 1;
 
         const run = try runSeedArm(allocator, seed);
-        try testing.expect(!run.result.first_draft_veto_pass);
+        try testing.expect(!run.result.rawFirstDraftVetoPass());
+        try testing.expect(run.result.firstAttemptGreen());
+        try testing.expectEqual(codegen_types.DraftQuality.compiler_repaired, run.result.draft_quality);
         try testing.expect(run.result.compiler_authored_apply);
         try testing.expectEqual(@as(u32, 0), run.result.veto_retry_count);
         // Four loopback wire turns gather facts and submit the bad draft. The
@@ -206,11 +211,11 @@ test "stand-in seeded arm: compiler repair lands without a model retry" {
     std.debug.print("[standin-gate] compiler repair arm {d}/{d} seeds\n", .{ checked, checked });
 }
 
-// Salvage is the other half, and it is a different claim: the draft is rejected
-// by the checker and rescued by normalization, so the model never sees a
-// rejection and the turn still counts as a first-draft pass. Asserting
-// `veto_retry_count == 0` is what separates the two arms; without it a seed that
-// quietly started being retried would pass here.
+// Salvage is the other half, and it is a different claim: the model-authored
+// bytes are rejected by the checker and rescued by normalization, so the model
+// never sees a rejection. It counts as first-attempt green, never as a raw
+// first-draft pass. Asserting `veto_retry_count == 0` separates this arm from a
+// retry that happened to land the same canonical bytes.
 test "stand-in seeded arm: a canonical slip is salvaged without a retry" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -222,7 +227,9 @@ test "stand-in seeded arm: a canonical slip is salvaged without a retry" {
         checked += 1;
 
         const run = try runSeedArm(allocator, seed);
-        try testing.expect(run.result.first_draft_veto_pass);
+        try testing.expect(!run.result.rawFirstDraftVetoPass());
+        try testing.expect(run.result.firstAttemptGreen());
+        try testing.expectEqual(codegen_types.DraftQuality.normalized, run.result.draft_quality);
         try testing.expectEqual(@as(u32, 0), run.result.veto_retry_count);
         try testing.expect(run.result.applied_edit);
 
@@ -958,7 +965,8 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         },
         .edit => {
             try testing.expect(result.applied_edit);
-            try testing.expect(result.first_draft_veto_pass);
+            try testing.expect(result.rawFirstDraftVetoPass());
+            try testing.expect(result.firstAttemptGreen());
             if (std.mem.eql(u8, entry.id, "add-route")) {
                 try testing.expect(std.mem.indexOf(u8, handler, "\"GET /health\": handleGetHealth") != null);
             } else if (std.mem.eql(u8, entry.id, "add-env")) {

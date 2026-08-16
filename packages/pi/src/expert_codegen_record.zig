@@ -798,11 +798,11 @@ const RecordCase = struct {
     name: []const u8,
     prompt: []const u8,
     seed_files: []const codegen.SeedFile = &.{},
-    /// The recorded first-draft outcome, locked in after recording. The offline
-    /// ratchet asserts replay reproduces exactly this, so a case the agent
+    /// The recorded first-attempt-green outcome, locked in after recording. The
+    /// offline ratchet asserts replay reproduces exactly this, so a case the agent
     /// currently fails is a valid, pinned corpus entry (it feeds the gap
     /// histogram) - not a broken test.
-    expect_first_draft_pass: bool = true,
+    expect_first_attempt_green: bool = true,
     /// Runtime evidence or an explicit reason this case cannot execute. The
     /// union prevents a missing spec from being represented as an executable
     /// case and prevents a runtime spec from carrying an unsupported reason.
@@ -904,22 +904,22 @@ test "empirical recording requires declared intent to pass" {
     try requireRecordedIntent(testing.allocator, intent, "/workspace", "/zttp", Probe.passed);
 }
 
-test "first draft expectations are provider qualified" {
+test "first attempt expectations are provider qualified" {
     try testing.expectEqual(
         @as(?bool, false),
-        firstDraftExpectation(.local, false, true),
+        firstAttemptExpectation(.local, false, true),
     );
     try testing.expectEqual(
         @as(?bool, null),
-        firstDraftExpectation(.local, null, true),
+        firstAttemptExpectation(.local, null, true),
     );
     try testing.expectEqual(
         @as(?bool, true),
-        firstDraftExpectation(.anthropic, null, true),
+        firstAttemptExpectation(.anthropic, null, true),
     );
 }
 
-fn firstDraftExpectation(
+fn firstAttemptExpectation(
     provider: agent.Provider,
     recorded: ?bool,
     claude_expectation: bool,
@@ -1005,7 +1005,7 @@ pub fn thresholdIdentity() evidence_identity.ThresholdIdentity {
         outcomes[index] = .{
             .scenario = rc.name,
             .metric = .first_attempt_green,
-            .verdict = if (rc.expect_first_draft_pass) .pass else .fail,
+            .verdict = if (rc.expect_first_attempt_green) .pass else .fail,
         };
     }
     return evidence_identity.thresholds(&outcomes, &.{});
@@ -1324,7 +1324,7 @@ const record_corpus = [_]RecordCase{
         .name = "health",
         .prompt = "Create a handler in handler.ts that responds to GET /health with " ++
             "Response.json({ ok: true }). Keep it minimal and deterministic.",
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
         // Asserts the task the prompt names, not the shape of one recording: a
         // different-but-correct handler must still pass, or the check measures
         // the cassette instead of the model.
@@ -1365,7 +1365,7 @@ const record_corpus = [_]RecordCase{
         // veto reports the assertion first and the model never reaches the
         // type mismatch. An earlier version of this comment named ZTS200 and
         // that second gap; it described a draft this cassette no longer holds.
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "jwt-auth",
@@ -1395,7 +1395,7 @@ const record_corpus = [_]RecordCase{
         // meant to measure. Asking for raw claims and accepting a confirmation
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "weather-egress",
@@ -1415,7 +1415,7 @@ const record_corpus = [_]RecordCase{
         } },
         // Was ZTS602 (never converged); closed by the literal-URL + init-query
         // egress teaching.
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "durable-order",
@@ -1424,7 +1424,7 @@ const record_corpus = [_]RecordCase{
         .intent = .{ .pending_runtime = "zttp-test-has-no-durable-store" },
         // Was ZTS042/narrowing death-spiral (never converged); closed by the
         // "use untyped values directly, never narrow with as/guards" teaching.
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "workflow-queued-call",
@@ -1432,7 +1432,7 @@ const record_corpus = [_]RecordCase{
             "zttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
             "and dispatch a greet child handler with workflow.call at durable depth 0.",
         .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "workflow-nested-dispatch-avoidance",
@@ -1459,7 +1459,7 @@ const record_corpus = [_]RecordCase{
         // correct inner return was measured against the outer contract. The
         // draft was right and the compiler was wrong, and the round-trip the
         // model spent working around it is the cost of that.
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "workflow-saga-compensation",
@@ -1467,7 +1467,7 @@ const record_corpus = [_]RecordCase{
             "charge, and ship steps. Include compensate functions for every non-last static " ++
             "saga step so the saga compensation proof can pass.",
         .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "workflow-wait-signal",
@@ -1475,7 +1475,7 @@ const record_corpus = [_]RecordCase{
             "signal. The /wait path should park a run using the Idempotency-Key header, and " ++
             "the /signal path should resume the same key with an approved payload.",
         .intent = .{ .pending_runtime = "zttp-test-has-no-durable-store" },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "sql-users",
@@ -1511,7 +1511,7 @@ const record_corpus = [_]RecordCase{
         // agent declared it (then ZTS501 rejected it); the classifier now gates
         // declarable read_only on write-effect imports, so the agent is no
         // longer told to declare a property the import forbids.
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: the `deterministic` loosening. The property moved from "was a
@@ -1538,7 +1538,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         } },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: a read from mutable module state is its own varying source,
@@ -1564,7 +1564,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         } },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: labels crossing a module boundary through a caller's callback.
@@ -1602,7 +1602,7 @@ const record_corpus = [_]RecordCase{
             "when API_SECRET is not set. Otherwise return Response.json with only the app " ++
             "name - the secret must never appear in the response.",
         .intent = .{ .compiler_veto_only = "veto-only-boundary-probe" },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: the shapes of egress options object the flow checker could not
@@ -1628,7 +1628,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         } },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: walking a helper imported from a sibling file. Every other case
@@ -1677,7 +1677,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         } },
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
 
     // ---------------------------------------------------------------------
@@ -1767,7 +1767,7 @@ const record_corpus = [_]RecordCase{
             ,
         } },
         .mode = .holes,
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "cache-counter-holes",
@@ -1802,7 +1802,7 @@ const record_corpus = [_]RecordCase{
             ,
         } },
         .mode = .holes,
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "egress-options-holes",
@@ -1837,7 +1837,7 @@ const record_corpus = [_]RecordCase{
             ,
         } },
         .mode = .holes,
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
     .{
         .name = "sibling-helper-holes",
@@ -1891,7 +1891,7 @@ const record_corpus = [_]RecordCase{
             ,
         } },
         .mode = .holes,
-        .expect_first_draft_pass = true,
+        .expect_first_attempt_green = true,
     },
 };
 
@@ -2277,7 +2277,8 @@ test "record codegen baseline corpus (live, gated)" {
         .{ corpus_provider.publicName(), corpus_model, selected_case_count },
     );
 
-    var first_draft_passes: usize = 0;
+    var raw_first_draft_passes: usize = 0;
+    var first_attempt_greens: usize = 0;
     var greens: usize = 0;
     var total: usize = 0;
     for (record_corpus, 0..) |rc, i| {
@@ -2400,11 +2401,11 @@ test "record codegen baseline corpus (live, gated)" {
             },
         );
         if (corpus_provider == headline_provider) {
-            if (firstDraftExpectation(corpus_provider, null, rc.expect_first_draft_pass)) |expected| {
-                if (result.first_draft_veto_pass != expected) {
+            if (firstAttemptExpectation(corpus_provider, null, rc.expect_first_attempt_green)) |expected| {
+                if (result.firstAttemptGreen() != expected) {
                     std.debug.print(
-                        "[codegen-record] {s}: pinned first_draft_pass={} but fresh flow observed {}; active case unchanged\n",
-                        .{ rc.name, expected, result.first_draft_veto_pass },
+                        "[codegen-record] {s}: pinned first_attempt_green={} but fresh flow observed {}; active case unchanged\n",
+                        .{ rc.name, expected, result.firstAttemptGreen() },
                     );
                     return error.PinnedExpectationMismatch;
                 }
@@ -2474,11 +2475,12 @@ test "record codegen baseline corpus (live, gated)" {
             &registry,
             request_config,
         );
-        if (result.first_draft_veto_pass) first_draft_passes += 1;
+        if (result.rawFirstDraftVetoPass()) raw_first_draft_passes += 1;
+        if (result.firstAttemptGreen()) first_attempt_greens += 1;
         if (result.applied_edit) greens += 1;
         const fail_code = codegen.firstZtsCode(&tr) orelse "-";
         std.debug.print(
-            "[codegen-record] [{d}/{d}] {s}: promoted provider={s} model={s} flow={s} first_draft_pass={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
+            "[codegen-record] [{d}/{d}] {s}: promoted provider={s} model={s} flow={s} raw_first_draft_pass={} first_attempt_green={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
             .{
                 total,
                 selected_case_count,
@@ -2486,7 +2488,8 @@ test "record codegen baseline corpus (live, gated)" {
                 corpus_provider.publicName(),
                 corpus_model,
                 active_version.slice()[0..12],
-                result.first_draft_veto_pass,
+                result.rawFirstDraftVetoPass(),
+                result.firstAttemptGreen(),
                 result.applied_edit,
                 result.compiler_authored_apply,
                 result.roundtrips,
@@ -2498,8 +2501,8 @@ test "record codegen baseline corpus (live, gated)" {
         );
     }
     std.debug.print(
-        "[codegen-record] BASELINE first-draft pass: {d}/{d}; reached-green: {d}/{d}\n",
-        .{ first_draft_passes, total, greens, total },
+        "[codegen-record] BASELINE raw first-draft pass: {d}/{d}; first-attempt green: {d}/{d}; reached-green: {d}/{d}\n",
+        .{ raw_first_draft_passes, total, first_attempt_greens, total, greens, total },
     );
     if (only_case != null and total != 1) return error.NamedCodegenCaseNotFound;
     if (only_case == null and limit >= record_corpus.len and total != record_corpus.len) {
@@ -2540,9 +2543,9 @@ test "cassetteModel reads the recorded model from a cassette header" {
 }
 
 // Offline ratchet: replay every committed cassette through the real veto and
-// require it still passes on the first draft. Runs in normal CI (no network, no
-// key): it reproduces the recorded baseline deterministically and fails if a
-// compiler/policy change would make a previously-clean recorded edit regress.
+// require its recorded first-attempt-green observation to stay stable. Runs in
+// normal CI (no network, no key): it reproduces the recorded baseline
+// deterministically and fails if a compiler/policy change would regress it.
 // Uses an arena over the page allocator (the replay executes the full tool +
 // veto stack; this is a fidelity check, not a leak test).
 /// Registry rules at least one corpus case trips, as measured on the headline
@@ -2744,7 +2747,7 @@ fn jsonUntripped(a: std.mem.Allocator, tripped: *const codegen.CodeSet) ![]u8 {
     return try buf.toOwnedSlice(a);
 }
 
-test "codegen baseline replays at the committed first-draft pass rate" {
+test "codegen baseline replays at the committed first-attempt green rate" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const a = arena.allocator();
@@ -2878,26 +2881,37 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         // Ratchet each provider against its own recorded observation. Claude's
         // historical flat cassettes predate provider-qualified turn metadata,
         // so their immutable corpus pin remains the compatibility source.
-        const recorded_expectation = if (resolved.flow_case) |flow_case|
-            flow_case.manifest.turns[0].first_draft_veto_pass
-        else
-            null;
-        const expected_first_draft = firstDraftExpectation(
-            replay_provider,
-            recorded_expectation,
-            rc.expect_first_draft_pass,
-        );
+        const recorded_draft: ?flow_artifact.DraftExpectation = if (resolved.flow_case) |flow_case| blk: {
+            const expectation = flow_case.manifest.turns[0].draftExpectation() catch unreachable;
+            break :blk switch (expectation) {
+                .unmeasured => null,
+                else => expectation,
+            };
+        } else null;
         const case_model = resolved.model() orelse headline_model;
         const on_headline = replay_provider == headline_provider and
             std.mem.eql(u8, case_model, headline_model);
-        if (expected_first_draft) |expected| {
-            if (result.first_draft_veto_pass != expected) {
+        if (recorded_draft) |expected| {
+            if (!expected.matches(result.draft_quality)) {
                 std.debug.print(
-                    "[codegen-replay] {s}: expected first_draft_pass={} got {} (code {s}){s}\n",
+                    "[codegen-replay] {s}: recorded draft metric disagrees with {s} (code {s}){s}\n",
+                    .{
+                        rc.name,
+                        @tagName(result.draft_quality),
+                        codegen.firstZtsCode(tr) orelse "-",
+                        if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
+                    },
+                );
+                if (on_headline) return error.CassetteRatchetMismatch;
+            }
+        } else if (firstAttemptExpectation(replay_provider, null, rc.expect_first_attempt_green)) |expected| {
+            if (result.firstAttemptGreen() != expected) {
+                std.debug.print(
+                    "[codegen-replay] {s}: expected first_attempt_green={} got {} (code {s}){s}\n",
                     .{
                         rc.name,
                         expected,
-                        result.first_draft_veto_pass,
+                        result.firstAttemptGreen(),
                         codegen.firstZtsCode(tr) orelse "-",
                         if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
                     },
@@ -2906,7 +2920,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             }
         } else {
             std.debug.print(
-                "[codegen-replay] {s}: provider {s} has no recorded first-draft expectation{s}\n",
+                "[codegen-replay] {s}: provider {s} has no recorded first-attempt expectation{s}\n",
                 .{
                     rc.name,
                     replay_provider.publicName(),
@@ -2936,7 +2950,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
 
         // Gap histogram: the first rule each non-passing case tripped, ranking
         // which teaching gap to close next.
-        if (!result.first_draft_veto_pass) {
+        if (!result.rawFirstDraftVetoPass()) {
             std.debug.print("[codegen-gap] {s}: {s} (green={})\n", .{
                 rc.name,
                 codegen.firstZtsCode(tr) orelse "?",
@@ -2946,9 +2960,9 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         try results.append(a, .{
             .name = rc.name,
             .routed = true,
-            .first_draft_pass = result.first_draft_veto_pass,
+            .draft_quality = result.draft_quality,
             .applied = result.applied_edit,
-            .passed_criterion = result.first_draft_veto_pass,
+            .passed_criterion = result.rawFirstDraftVetoPass(),
             .roundtrips = result.roundtrips,
             .tool_calls = result.tool_call_count,
             .proven_guarantees = result.proven_guarantees,
@@ -3007,8 +3021,9 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     const version = headline_input.bytes;
     std.debug.print(
         "[codegen-convergence] {{\"corpusVersion\":\"{s}\",\"corpusCases\":{d}," ++
-            "\"provider\":\"{s}\",\"model\":\"{s}\",\"policyHash\":\"{s}\",\"firstDraftPassPercent\":{d}," ++
-            "\"firstDraftPasses\":{d},\"medianRoundtrips\":{d},\"intentPassPercent\":{d}," ++
+            "\"provider\":\"{s}\",\"model\":\"{s}\",\"policyHash\":\"{s}\",\"rawFirstDraftPassPercent\":{d}," ++
+            "\"rawFirstDraftPasses\":{d},\"firstAttemptGreenPercent\":{d},\"firstAttemptGreens\":{d}," ++
+            "\"medianRoundtrips\":{d},\"intentPassPercent\":{d}," ++
             "\"intentPasses\":{d},\"intentChecked\":{d}}}\n",
         .{
             version[0..],
@@ -3016,8 +3031,10 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             replay_provider.publicName(),
             published_model,
             zts.policyHash()[0..],
-            summary.firstDraftPassPercent(),
-            summary.first_draft_passes,
+            summary.rawFirstDraftPassPercent(),
+            summary.raw_first_draft_passes,
+            summary.firstAttemptGreenPercent(),
+            summary.first_attempt_greens,
             summary.median_roundtrips,
             summary.intentPassPercent(),
             summary.intent_passes,
@@ -3028,7 +3045,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     // What the corpus covers, published apart from the headline and under its
     // own marker.
     //
-    // The headline says how often a first draft lands. It cannot say whether the
+    // The headline says how often exact model-authored bytes pass. It cannot say whether the
     // corpus stands on the fences that moved, and for nine consecutive rows over
     // one corpus it did not: every row read 90% across six tightenings and one
     // loosening, and the page argued in prose, per row, that no case could feel

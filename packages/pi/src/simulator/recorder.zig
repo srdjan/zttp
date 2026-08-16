@@ -221,7 +221,8 @@ pub const Recorder = struct {
             .user_input = pending.user_input,
             .outcome = observation.outcomeFromResult(result),
             .final_response_sha256 = artifact.Sha256Hex.fromBytes(final_text),
-            .first_draft_veto_pass = result.first_draft_veto_pass,
+            .raw_first_draft_veto_pass = result.rawFirstDraftVetoPass(),
+            .first_attempt_green = result.firstAttemptGreen(),
         });
 
         for (transcript.entries.items[pending.transcript_start..]) |*entry| {

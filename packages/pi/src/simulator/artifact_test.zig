@@ -25,6 +25,9 @@ const Mutation = enum {
     local_runtime_name_only,
     local_runtime_version_only,
     cloud_runtime,
+    draft_metric_half,
+    draft_metric_mixed,
+    draft_metric_impossible,
 };
 
 const Fixture = struct {
@@ -49,6 +52,39 @@ fn renderJson(allocator: std.mem.Allocator, value: anytype) ![]u8 {
 
 fn zeroDigest() artifact.Sha256Hex {
     return .{ .bytes = [_]u8{'0'} ** 64 };
+}
+
+test "draft expectations preserve legacy meaning and reject impossible pairs" {
+    const legacy = try (artifact.TurnExpectation{
+        .index = 0,
+        .user_input = "x",
+        .outcome = .approved,
+        .final_response_sha256 = artifact.Sha256Hex.fromBytes(""),
+        .first_draft_veto_pass = true,
+    }).draftExpectation();
+    try testing.expect(legacy.matches(.raw_veto_pass));
+    try testing.expect(legacy.matches(.normalized));
+    try testing.expect(!legacy.matches(.compiler_repaired));
+
+    const current = try (artifact.TurnExpectation{
+        .index = 0,
+        .user_input = "x",
+        .outcome = .approved,
+        .final_response_sha256 = artifact.Sha256Hex.fromBytes(""),
+        .raw_first_draft_veto_pass = false,
+        .first_attempt_green = true,
+    }).draftExpectation();
+    try testing.expect(current.matches(.normalized));
+    try testing.expect(current.matches(.compiler_repaired));
+    try testing.expect(!current.matches(.not_green));
+    try testing.expectError(error.InvalidDraftExpectation, (artifact.TurnExpectation{
+        .index = 0,
+        .user_input = "x",
+        .outcome = .approved,
+        .final_response_sha256 = artifact.Sha256Hex.fromBytes(""),
+        .raw_first_draft_veto_pass = true,
+        .first_attempt_green = false,
+    }).draftExpectation());
 }
 
 fn buildCase(mutation: Mutation) !Fixture {
@@ -133,6 +169,24 @@ fn buildCase(mutation: Mutation) !Fixture {
     if (mutation == .event_gap) events[1].index = 2;
     if (mutation == .approval_duplicate) approvals[1].index = 0;
 
+    var turns = [_]artifact.TurnExpectation{
+        .{ .index = 0, .user_input = "first", .outcome = .approved, .final_response_sha256 = artifact.Sha256Hex.fromBytes("done-0") },
+        .{ .index = 1, .user_input = "second", .outcome = .approved, .final_response_sha256 = artifact.Sha256Hex.fromBytes("done-1") },
+    };
+    switch (mutation) {
+        .draft_metric_half => turns[0].raw_first_draft_veto_pass = true,
+        .draft_metric_mixed => {
+            turns[0].first_draft_veto_pass = true;
+            turns[0].raw_first_draft_veto_pass = true;
+            turns[0].first_attempt_green = true;
+        },
+        .draft_metric_impossible => {
+            turns[0].raw_first_draft_veto_pass = true;
+            turns[0].first_attempt_green = false;
+        },
+        else => {},
+    }
+
     var manifest = artifact.FlowManifest{
         .schema_version = artifact.schema_version,
         .flow_version = zeroDigest(),
@@ -174,10 +228,7 @@ fn buildCase(mutation: Mutation) !Fixture {
             .cloud_runtime => "0.12.11",
             else => null,
         },
-        .turns = &.{
-            .{ .index = 0, .user_input = "first", .outcome = .approved, .final_response_sha256 = artifact.Sha256Hex.fromBytes("done-0") },
-            .{ .index = 1, .user_input = "second", .outcome = .approved, .final_response_sha256 = artifact.Sha256Hex.fromBytes("done-1") },
-        },
+        .turns = &turns,
         .model_responses = if (mutation == .response_orphan) &responses else responses[0..2],
         .approvals = &approvals,
         .events = &events,
@@ -398,6 +449,9 @@ test "flow artifact loader rejects strict checkpoint mutations" {
         .{ .mutation = .local_runtime_name_only, .failure = .invalid_inventory },
         .{ .mutation = .local_runtime_version_only, .failure = .invalid_inventory },
         .{ .mutation = .cloud_runtime, .failure = .invalid_inventory },
+        .{ .mutation = .draft_metric_half, .failure = .invalid_inventory },
+        .{ .mutation = .draft_metric_mixed, .failure = .invalid_inventory },
+        .{ .mutation = .draft_metric_impossible, .failure = .invalid_inventory },
     };
     for (cases) |case| {
         var fixture = try buildCase(case.mutation);

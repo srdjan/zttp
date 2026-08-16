@@ -289,6 +289,13 @@ pub const Runner = struct {
                 .turn_index = expected.index,
             } });
         }
+        const draft_expectation = expected.draftExpectation() catch unreachable;
+        if (!draft_expectation.matches(result.draft_quality)) {
+            return self.fail(.{ .turn_outcome_mismatch = .{
+                .component = .trace,
+                .turn_index = expected.index,
+            } });
+        }
         const final_text = observation.lastModelText(transcript, transcript_start) orelse "";
         if (!artifact.Sha256Hex.fromBytes(final_text).eql(expected.final_response_sha256)) {
             return self.fail(.{ .turn_outcome_mismatch = .{

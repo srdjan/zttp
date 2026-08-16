@@ -138,8 +138,7 @@ pub const SourceRevision = struct {
 pub const ObservedResult = struct {
     scenario: []const u8,
     artifact_identity: ?ContentDigest,
-    raw_first_draft_pass: bool,
-    first_attempt_green: bool,
+    draft_quality: codegen_types.DraftQuality,
     intent_outcome: codegen_types.IntentOutcome,
     applied: bool,
     roundtrips: u64,
@@ -414,8 +413,9 @@ pub fn resultRun(input: ResultRunInput) ResultRunIdentity {
         hasher.u64Field("observation-index", observation_index);
         hasher.field("scenario", observation.scenario);
         hasher.optionalDigestField("artifact-identity", observation.artifact_identity);
-        hasher.boolField("raw-first-draft-pass", observation.raw_first_draft_pass);
-        hasher.boolField("first-attempt-green", observation.first_attempt_green);
+        hasher.field("draft-quality", @tagName(observation.draft_quality));
+        hasher.boolField("raw-first-draft-pass", observation.draft_quality.rawFirstDraftVetoPass());
+        hasher.boolField("first-attempt-green", observation.draft_quality.firstAttemptGreen());
         hasher.field("intent-outcome", @tagName(observation.intent_outcome));
         hasher.boolField("applied", observation.applied);
         hasher.u64Field("roundtrips", observation.roundtrips);
@@ -681,8 +681,7 @@ test "result run identity binds every report provenance class" {
     const observations = [_]ObservedResult{.{
         .scenario = "alpha",
         .artifact_identity = testDigest('1'),
-        .raw_first_draft_pass = true,
-        .first_attempt_green = true,
+        .draft_quality = .raw_veto_pass,
         .intent_outcome = .passed,
         .applied = true,
         .roundtrips = 1,
@@ -814,8 +813,8 @@ test "result run identity binds every report provenance class" {
         switch (index) {
             0 => changed_observations[0].scenario = "beta",
             1 => changed_observations[0].artifact_identity = null,
-            2 => changed_observations[0].raw_first_draft_pass = false,
-            3 => changed_observations[0].first_attempt_green = false,
+            2 => changed_observations[0].draft_quality = .normalized,
+            3 => changed_observations[0].draft_quality = .not_green,
             4 => changed_observations[0].intent_outcome = .failed,
             5 => changed_observations[0].applied = false,
             6 => changed_observations[0].roundtrips += 1,

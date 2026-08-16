@@ -4,8 +4,9 @@
 //! right compiler-native tool). This module measures the next thing: given the
 //! model's drafts, how good is the generated zts code? It drives a real turn
 //! through the real compiler veto in an isolated workspace and reports the
-//! headline number - first-draft veto-pass rate - plus round-trips-to-green and
-//! a per-ZTS-code gap histogram that ranks which teaching gap to close next.
+//! headline number - raw first-draft veto-pass rate - plus first-attempt green,
+//! round-trips-to-green, and a per-ZTS-code gap histogram that ranks which
+//! teaching gap to close next.
 //!
 //! Where the drafts come from is the client's job: scripted replies in the unit
 //! tests below (deterministic, free), or cassette replay of recorded model
@@ -13,7 +14,7 @@
 //! way the veto, the apply path, and the metrics are the production loop, so the
 //! score is a measured count over a fixed sample, not an estimate.
 //!
-//! First-slice scope: length-1 (edit-only) cases, criteria passes_veto and
+//! First-slice scope: length-1 (edit-only) cases, criteria raw_first_draft_veto and
 //! reaches_green. Multi-roundtrip cases (explore->edit, retry-to-green) and a
 //! discharges_property criterion are deferred until the baseline histogram says
 //! they are worth the cassette cost.
@@ -52,8 +53,8 @@ pub const IntentCheck = struct {
 };
 
 pub const Criterion = enum {
-    /// The first model draft must pass the compiler veto with no retries.
-    passes_veto,
+    /// The exact first model draft must pass the compiler veto unchanged.
+    raw_first_draft_veto,
     /// The handler must reach a verified applied edit within max_attempts.
     reaches_green,
 };
@@ -86,7 +87,7 @@ pub const CaseResult = struct {
     name: []const u8,
     /// classify(prompt) matched expected_kind.
     routed: bool,
-    first_draft_pass: bool,
+    draft_quality: codegen_types.DraftQuality,
     applied: bool,
     passed_criterion: bool,
     roundtrips: u8,
@@ -132,14 +133,14 @@ pub fn runCase(
     });
 
     const passed = switch (case.criterion) {
-        .passes_veto => result.first_draft_veto_pass,
+        .raw_first_draft_veto => result.rawFirstDraftVetoPass(),
         .reaches_green => result.applied_edit,
     };
 
     var cr: CaseResult = .{
         .name = case.name,
         .routed = expert_workflow.classify(case.prompt).kind == case.expected_kind,
-        .first_draft_pass = result.first_draft_veto_pass,
+        .draft_quality = result.draft_quality,
         .applied = result.applied_edit,
         .passed_criterion = passed,
         .roundtrips = result.roundtrips,
@@ -233,7 +234,8 @@ pub fn locateZttpBinary(allocator: std.mem.Allocator, repo_root: []const u8) ?[]
 pub const CodegenSummary = struct {
     total: usize,
     routed: usize,
-    first_draft_passes: usize,
+    raw_first_draft_passes: usize,
+    first_attempt_greens: usize,
     greens: usize,
     criterion_passes: usize,
     /// Cases whose produced handler did the task the prompt asked for.
@@ -247,12 +249,18 @@ pub const CodegenSummary = struct {
     /// costs.
     median_roundtrips: u8 = 0,
 
-    /// First-draft veto-pass rate in percent (0-100), 0 when empty. Integer to
+    /// Raw first-draft veto-pass rate in percent (0-100), 0 when empty. Integer to
     /// keep the eval free of float-formatting noise; the count fields carry the
     /// exact numerator/denominator for callers that want a precise ratio.
-    pub fn firstDraftPassPercent(self: CodegenSummary) usize {
+    pub fn rawFirstDraftPassPercent(self: CodegenSummary) usize {
         if (self.total == 0) return 0;
-        return self.first_draft_passes * 100 / self.total;
+        return self.raw_first_draft_passes * 100 / self.total;
+    }
+
+    /// Attempt-one green rate after compiler normalization or repair.
+    pub fn firstAttemptGreenPercent(self: CodegenSummary) usize {
+        if (self.total == 0) return 0;
+        return self.first_attempt_greens * 100 / self.total;
     }
 
     /// Intent-pass rate over the cases that were actually checked, in percent.
@@ -268,13 +276,15 @@ pub fn summarize(results: []const CaseResult) CodegenSummary {
     var s: CodegenSummary = .{
         .total = results.len,
         .routed = 0,
-        .first_draft_passes = 0,
+        .raw_first_draft_passes = 0,
+        .first_attempt_greens = 0,
         .greens = 0,
         .criterion_passes = 0,
     };
     for (results) |r| {
         if (r.routed) s.routed += 1;
-        if (r.first_draft_pass) s.first_draft_passes += 1;
+        if (r.draft_quality.rawFirstDraftVetoPass()) s.raw_first_draft_passes += 1;
+        if (r.draft_quality.firstAttemptGreen()) s.first_attempt_greens += 1;
         if (r.applied) s.greens += 1;
         if (r.passed_criterion) s.criterion_passes += 1;
         switch (r.intent) {
@@ -312,7 +322,7 @@ test "median roundtrips reports a value a case actually took" {
             return .{
                 .name = "x",
                 .routed = true,
-                .first_draft_pass = true,
+                .draft_quality = .raw_veto_pass,
                 .applied = true,
                 .passed_criterion = true,
                 .roundtrips = n,
@@ -332,7 +342,7 @@ test "intent rate is measured over checked cases, not the whole corpus" {
             return .{
                 .name = "x",
                 .routed = true,
-                .first_draft_pass = true,
+                .draft_quality = .raw_veto_pass,
                 .applied = true,
                 .passed_criterion = true,
                 .roundtrips = 1,
@@ -512,12 +522,13 @@ test "runCase scores a clean first draft as a veto pass" {
         .name = "health-scaffold",
         .prompt = "scaffold a minimal GET /health handler",
         .expected_kind = .route_add,
-        .criterion = .passes_veto,
+        .criterion = .raw_first_draft_veto,
     };
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
     const r = try runCase(testing.allocator, case, client.asClient(), &registry);
-    try testing.expect(r.first_draft_pass);
+    try testing.expect(r.draft_quality.rawFirstDraftVetoPass());
+    try testing.expect(r.draft_quality.firstAttemptGreen());
     try testing.expect(r.applied);
     try testing.expect(r.passed_criterion);
     try testing.expect(r.failingCode() == null);
@@ -544,13 +555,14 @@ test "runCase scores a clean workflow first draft as a veto pass" {
         .name = "queued-workflow",
         .prompt = "Create a durable workflow handler that calls a greet child handler via workflow.call",
         .expected_kind = .workflow_authoring,
-        .criterion = .passes_veto,
+        .criterion = .raw_first_draft_veto,
     };
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
     const r = try runCase(testing.allocator, case, client.asClient(), &registry);
     try testing.expect(r.routed);
-    try testing.expect(r.first_draft_pass);
+    try testing.expect(r.draft_quality.rawFirstDraftVetoPass());
+    try testing.expect(r.draft_quality.firstAttemptGreen());
     try testing.expect(r.applied);
     try testing.expect(r.failingCode() == null);
 }
@@ -567,12 +579,13 @@ test "runCase records the failing ZTS code for a bad first draft" {
         .name = "forbidden-var",
         .prompt = "fix the violation",
         .expected_kind = .violation_fix,
-        .criterion = .passes_veto,
+        .criterion = .raw_first_draft_veto,
     };
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
     const r = try runCase(testing.allocator, case, client.asClient(), &registry);
-    try testing.expect(!r.first_draft_pass);
+    try testing.expect(!r.draft_quality.rawFirstDraftVetoPass());
+    try testing.expect(!r.draft_quality.firstAttemptGreen());
     try testing.expect(!r.passed_criterion);
     const code = r.failingCode() orelse return error.ExpectedFailingCode;
     try testing.expect(std.mem.startsWith(u8, code, "ZTS"));
@@ -582,7 +595,7 @@ test "summarize aggregates pass rate and failing-code histogram" {
     var bad: CaseResult = .{
         .name = "b",
         .routed = true,
-        .first_draft_pass = false,
+        .draft_quality = .not_green,
         .applied = false,
         .passed_criterion = false,
         .roundtrips = 1,
@@ -596,9 +609,19 @@ test "summarize aggregates pass rate and failing-code histogram" {
         .{
             .name = "a",
             .routed = true,
-            .first_draft_pass = true,
+            .draft_quality = .raw_veto_pass,
             .applied = true,
             .passed_criterion = true,
+            .roundtrips = 1,
+            .tool_calls = 0,
+            .proven_guarantees = 1,
+        },
+        .{
+            .name = "salvaged",
+            .routed = true,
+            .draft_quality = .normalized,
+            .applied = true,
+            .passed_criterion = false,
             .roundtrips = 1,
             .tool_calls = 0,
             .proven_guarantees = 1,
@@ -606,10 +629,12 @@ test "summarize aggregates pass rate and failing-code histogram" {
         bad,
     };
     const s = summarize(&results);
-    try testing.expectEqual(@as(usize, 2), s.total);
-    try testing.expectEqual(@as(usize, 1), s.first_draft_passes);
-    try testing.expectEqual(@as(usize, 1), s.greens);
-    try testing.expectEqual(@as(usize, 50), s.firstDraftPassPercent());
+    try testing.expectEqual(@as(usize, 3), s.total);
+    try testing.expectEqual(@as(usize, 1), s.raw_first_draft_passes);
+    try testing.expectEqual(@as(usize, 2), s.first_attempt_greens);
+    try testing.expectEqual(@as(usize, 2), s.greens);
+    try testing.expectEqual(@as(usize, 33), s.rawFirstDraftPassPercent());
+    try testing.expectEqual(@as(usize, 66), s.firstAttemptGreenPercent());
     try testing.expectEqual(@as(usize, 1), countFailingCode(&results, "ZTS303"));
     try testing.expectEqual(@as(usize, 0), countFailingCode(&results, "ZTS999"));
 }
