@@ -1,9 +1,12 @@
 # ZTS advanced formal-spec northstar
 
-**Status:** proposed language and assurance profile  
+**Status:** implemented language profile; advanced assurance certificate proposed
+
 **Profile name:** `zts-model-1`
-**Grounded against:** ZTS 0.18.0, policy 2026.04.2, 2026-07-30  
-**Revision:** 4, 2026-07-30. Revision 2 applied the multi-lens design review:
+
+**Grounded against:** ZTS 0.18.0, policy 2026.04.2, 2026-08-16
+
+**Revision:** 5, 2026-08-16. Revision 2 applied the multi-lens design review:
 stronger `match`, effect-aware `Result` combinators, a completed pure
 standard surface, decidable canonical-choice rules, and a closed
 agent-protocol contract. Revision 3 pushed the canonical-form law to "each
@@ -12,7 +15,11 @@ needed to enforce it. Revision 4 refines that law to Zig's "there is an
 idiomatic way to do it": the table becomes an idiom table, non-idiomatic
 spellings stay legal and advisory, and idiom becomes machine-discoverable
 because an agent-first language cannot inherit idiom from a community
-(Section 4.2).  
+(Section 4.2). Revision 5 records the direct `zts-model-1` cutover: the
+model-minimal core grammar, the separate `zts-tsx-1` frontend, complete
+reachable-node and opcode classification, and artifact-bound source-profile
+identity. The independent assurance certificate remains a proposal.
+
 **Relationship to the earlier northstar:** this document replaces its design
 claims, not its historical record. The earlier artifact remains useful context,
 but it does not define the advanced profile.
@@ -147,70 +154,35 @@ target class compile, run, and verify without:
 - manual human correction of profile syntax within the declared agent repair
   budget
 
-## 3. Current baseline and the gap
+## 3. Implemented baseline and remaining assurance gap
 
-The live compiler already has most of the right shape:
+The live compiler implements the `zts-model-1` language boundary described by
+this revision:
 
-- block-scoped `const` and necessary `let`
-- named functions, direct arrow callbacks, lexical closures, and recursion
-- records, arrays, tuples, fixed-shape mutation, explicit member reads, spread,
-  string literals, explicit text joins, optional chaining, and nullish coalescing
-- `if`/`else`, `for...of`, `match`, `assert`, `return`, `break`, and
-  `continue`
-- static named modules and type-only imports
-- aliases, interfaces, literals, unions, intersections, tuples, generic
-  aliases and functions, `distinct type`, readonly and optional fields, type
-  guards, template literal types, and a small utility-type family
-- TSX
-- explicit `zttp:*` capability modules and structured I/O
+- `structural` aliases and scalar `nominal` identities are the only source
+  declaration spellings;
+- boolean-only conditions, boolean operators, and predicates have no
+  JavaScript truthiness or operand-returning behavior;
+- text construction uses double-quoted literals, explicit `String(value)`
+  conversion, and string-array `join`;
+- `Proof<T, P>` and `Effects<T, R>` are ambient checker types;
+- `.ts` is the core source form, while `.tsx` is lowered by the independently
+  identified `zts-tsx-1` frontend before core parsing;
+- version-2 agent discovery, diagnostics, bound repair, normalization, and
+  verification publish the profile and its hashes;
+- contracts, caches, receipts, attestations, capsules, and Pi repair evidence
+  bind the core profile, grammar, semantics, and optional frontend identity;
+- `spec-check --audit` classifies all 69 reachable IR nodes and all 127
+  reachable opcodes, with every classification carrying its stated evidence
+  class.
 
-The canonical checker is narrower than the parser and the feature catalog. It
-currently rejects forms including ternaries, compound assignment, call spread,
-non-leading object spread and
-reusable function-valued constants. The advanced profile reassesses each form
-under the agent-first decision rule rather than treating every current
-restriction as permanent.
-
-The important gaps are not more loop or class syntax:
-
-1. Generic function syntax is accepted, but sound instantiation and inference
-   are incomplete.
-2. Dynamic keyed data has no supported typed collection. Internal JavaScript
-   `Map` and `Set` implementations existed but were never reachable, and have
-   since been removed.
-3. Runtime `Result` values are not represented by one precise generic ADT
-   across the type and module surfaces.
-4. Recursive application data cannot be expressed soundly as a recursive
-   alias.
-5. JSON `null` exists at runtime but cannot be named as source data.
-6. Array higher-order functions exist at runtime, but their callback and
-   result types are not uniformly modeled.
-7. `for...of` and recursive functions invalidate the old claim that every
-   execution is bounded by IR-tree depth.
-8. The declarative semantics currently covers 10 of 81 IR nodes and 7 of 130
-   opcodes. That is a useful verified slice, not a complete language
-   semantics.
-9. The earlier signed semantics receipt was removed because it had no
-   consumer. A future certificate must start from a verifier and trust model,
-   not from a producer-only artifact.
-10. Current return-coverage analysis can label a recursive function `total`,
-    and the cost path can label it bounded without a decreasing argument.
-11. Current path generation summarizes a `for...of` body once but may label
-    the resulting branch skeleton exhaustive.
-12. A caller-supplied extension manifest is not yet authenticated and bound to
-    a runtime implementation, so its declared effects cannot support a proof.
-13. Several current UI and upgrade summaries use proof-certificate language
-    for structural or textual evidence that has no independent verifier.
-14. The live CLI already exposes JSON metadata, feature and module discovery,
-    diagnostics, repair simulation, canonicalization, and normalization, but
-    the language profile does not yet bind them into one versioned agent
-    protocol.
-15. Diagnostic suggestions, exact repair intents, rule descriptions, and
-    normalization traces exist across separate surfaces. Their identifiers,
-    compatibility rules, and convergence guarantees are not yet one stable
-    agent-facing contract.
-
-The advanced profile treats those facts as its starting point.
+Complete classification is not the same claim as complete mechanized
+semantics. Twelve IR nodes and seven opcodes are specified directly, one
+opcode path is translation-validated, and the remaining reachable items are
+explicitly trusted with narrow reasons. The independent assurance certificate,
+authenticated extension trust, proof-obligation reconstruction, and solver
+isolation remain proposed work. No producer-only receipt may be presented as
+that future certificate.
 
 ## 4. Design laws
 
@@ -289,7 +261,7 @@ Examples of level-1 exclusion:
 - `assert` for invariants and `if` plus `return` for expected guards
 - named reusable functions, not exported or reusable function-valued
   constants
-- `type`, not both `type` and `interface`, for application data contracts
+- `structural`, not `type` or `interface`, for application data contracts
 - annotations and narrowing, not `as` or `satisfies`
 - `Dict`, not computed keys on shape records
 
@@ -332,8 +304,6 @@ registry-generated and drift-gated; this document is its readable view.
 | absent member read | `x?.f` | `x === undefined ? undefined : x.f` | same as above |
 | two-way pure selection | `c ? a : b` | a two-arm `match` over a `boolean` scrutinee whose arms are both pure | none |
 | record update | an explicit literal | a leading spread that overrides every field | the spread operand is pure |
-| scalar to text | `String(n)` | implicit conversion through template interpolation or string addition | the source value is scalar |
-| string concatenation | `[a, b, c].join("")` | left-associated `a + b + c`, template interpolation | every non-string operand is converted explicitly with `String(value)` |
 | array concatenation | `[...a, ...b]` | `a.concat(b)` | none |
 | membership test | `items.includes(v)` | `items.indexOf(v) !== -1`, `items.indexOf(v) >= 0` | element type excludes `number` (`NaN` distinguishes the two equalities) |
 | existence test | `items.some(p)` | `items.find(p) !== undefined` | element type excludes `undefined` |
@@ -345,10 +315,15 @@ registry-generated and drift-gated; this document is its readable view.
 | dictionary fold | `dictFold(d, f, init)` | `dictEntries(d).reduce(...)` | the fold has one accumulator |
 | pure single-accumulator fold | `map`, then `filter`, then `some`, then `every`, then `find`, then `findIndex`, then `reduce`: the first that fits | `let` plus `for...of` with no `break`, `continue`, or effect | the body is pure and the loop head is already idiomatic under the element-iteration row |
 | pure search loop | `find`, `findIndex`, `some`, or `every`, by what the loop yields and whether its flag starts `false` or `true` | `let` plus `for...of` whose only early exit is `break` | the body is pure, carries one accumulator, uses no `continue`, and the loop head is already idiomatic under the element-iteration row |
-| field read | `const id = user.id;`, or `const first = pair[0];` for a tuple | any declaration destructuring pattern | none |
 | matched field read | a binding pattern field | a `match` arm that reads the field off the scrutinee | none |
 | match binding field name | match shorthand `{ value }` | match pattern `{ value: value }` | none |
 | element iteration | `for (const item of items)` | `for...of` over `range(items.length)` whose body only indexes `items` | none |
+
+The exclusion registry, not this table, owns declaration destructuring,
+template interpolation, and string addition. Those forms are errors in
+`zts-model-1`; they are not admitted alternatives that an idiom advisory may
+leave in source. Their restriction rows name explicit member reads,
+`String(value)`, and string-array `join` as the replacements.
 
 Three entries are declared preferences rather than derivations, recorded here
 so no reader has to infer them:
@@ -547,7 +522,7 @@ The full `meta` payload MUST also publish:
   target, and machine-readable productions,
 - `examples`: one canonical minimal example per admitted surface form,
   registry-generated, so an agent can learn ZTS-specific syntax (`match`,
-  `distinct type`, `assert`, `comptime()`, `parallel`) without hidden
+  `nominal`, `assert`, `comptime()`, `parallel`) without hidden
   instructions,
 - `ambient_names`: the closed table of ambient type and value names from
   Section 6,
@@ -981,7 +956,7 @@ so `string | number` and `number | string` have one identity and one digest.
 That identity keys digests, registry entries, and `Schema<T>` bindings; it
 never decides which of two members a reader sees first.
 Literals do not widen unless a branch already supplies a receiving wider type.
-`null`, `undefined`, distinct types, and generic variables retain their own
+`null`, `undefined`, nominal types, and generic variables retain their own
 identities unless the ordinary assignability rules remove them. A contextual
 expected type does not change the join; assignability to it is checked
 afterward.
@@ -1042,7 +1017,7 @@ the assignment so evaluation order remains explicit.
 `match` is the only multi-way selection over one scrutinee:
 
 ```ts
-type Command =
+structural Command =
   | { kind: "echo"; text: string }
   | { kind: "ping" };
 
@@ -1197,15 +1172,16 @@ No runtime stack cap may be presented as a termination proof.
 The canonical type declaration forms are:
 
 ```ts
-type Name<T> = Type;
-distinct type UserId = string;
+structural Name<T> = Type;
+nominal UserId = string;
 ```
 
-`interface` is excluded from the advanced canonical profile because record
-aliases already provide its admitted behavior. Open interfaces, declaration
-merging, inheritance, and `implements` remain excluded.
+`type`, `distinct type`, and `interface` are excluded. `structural` is the one
+transparent alias declaration; `nominal` is the one scalar identity
+declaration. Open interfaces, declaration merging, inheritance, and
+`implements` remain excluded.
 
-`distinct type UserId = string;` introduces:
+`nominal UserId = string;` introduces:
 
 ```ts
 UserId(value: string): UserId
@@ -1214,7 +1190,7 @@ UserId(value: string): UserId
 The constructor is pure, total, and represented at runtime by the unchanged
 base value. Only that constructor or a function already returning `UserId` can
 create the nominal type. A distinct value supports the operations of its base
-type, but a raw base value or a different distinct type is not assignable to
+type, but a raw base value or a different nominal type is not assignable to
 it.
 
 Admitted types are:
@@ -1227,7 +1203,7 @@ Admitted types are:
 - fixed records with readonly and optional fields
 - function types
 - unions and intersections
-- named aliases and nominal `distinct type`
+- named `structural` aliases and scalar `nominal` identities
 - generic applications and constrained generic parameters
 - template literal types
 - `Readonly`, `Pick`, `Omit`, `Partial`, and `Required`
@@ -1256,7 +1232,7 @@ A recursive alias is contractive when every cycle passes through a record,
 tuple, array, or `Dict` constructor:
 
 ```ts
-type JsonValue =
+structural JsonValue =
   | null
   | boolean
   | number
@@ -1266,7 +1242,7 @@ type JsonValue =
 ```
 
 Union and intersection edges do not guard recursion. Direct cycles such as
-`type Loop = Loop`, negative recursion through a function parameter, and
+`structural Loop = Loop`, negative recursion through a function parameter, and
 recursive conditional expansion are errors. Recursive aliases are represented
 as a finite named type graph. Assignability unfolds guarded nodes with
 memoized pair comparison and never expands a cycle into an infinite type.
@@ -1339,7 +1315,7 @@ The surface elaborates through the ambient `h` constructor:
 The constructor has the equivalent typed surface:
 
 ```ts
-type HtmlChild =
+structural HtmlChild =
   | HtmlNode
   | string
   | number
@@ -1348,7 +1324,7 @@ type HtmlChild =
   | undefined
   | readonly HtmlChild[];
 
-type Component<P> = (
+structural Component<P> = (
   props: P & { readonly children?: readonly HtmlChild[] },
 ) => HtmlNode;
 ```
@@ -1396,7 +1372,7 @@ The complete ambient table (types and values) is published through
 `Result` is the one recoverable-failure representation:
 
 ```ts
-type Result<T, E> =
+structural Result<T, E> =
   | { readonly ok: true; readonly value: T }
   | { readonly ok: false; readonly error: E };
 ```
@@ -1475,7 +1451,7 @@ named programmer or resource fault, not a recoverable application error.
 `Dict` supplies dynamic keyed data without dynamic record shapes:
 
 ```ts
-type DuplicateKey<K> = {
+structural DuplicateKey<K> = {
   readonly kind: "duplicate-key";
   readonly key: K;
 };
@@ -1534,7 +1510,7 @@ list: the duplicate-key check is discharged at compile time, the expression
 fails the build on a duplicate, and its type is the plain `Dict<K, V>`.
 
 `DictKey` is a checker-recognized generic bound, not a source alias. It accepts
-`string`, `number`, or a `distinct type` over one of those bases. Nominal keys
+`string`, `number`, or a `nominal` type over one of those bases. Nominal keys
 compare only within the same `K` instantiation, using the wrapped base value.
 
 `dictSet` and `dictRemove` return new dictionaries. Iteration order is the
@@ -1551,7 +1527,7 @@ Its pure surface includes length, indexing, slicing, concatenation, equality,
 hex, Base64, and UTF-8 codecs.
 
 ```ts
-type BytesError =
+structural BytesError =
   | { kind: "invalid-octet"; index: number; value: number }
   | { kind: "invalid-encoding"; encoding: string; offset: number }
   | { kind: "invalid-bounds"; start: number; end: number }
@@ -1585,7 +1561,7 @@ JSON uses the recursive `JsonValue` type from Section 5.7. Object nodes are
 The JSON boundary is:
 
 ```ts
-type JsonError =
+structural JsonError =
   | { kind: "invalid-syntax"; offset: number }
   | { kind: "duplicate-key"; key: string; offset: number }
   | { kind: "depth-limit"; limit: number }
@@ -1774,9 +1750,9 @@ contracts.
 #### HTTP
 
 ```ts
-type HttpHandler = (request: Request) => Response;
+structural HttpHandler = (request: Request) => Response;
 
-type FetchOptions = {
+structural FetchOptions = {
   readonly method?:
     | "GET"
     | "POST"
@@ -1820,18 +1796,18 @@ trusted `unknown`.
 #### WebSocket
 
 ```ts
-distinct type SocketId = string;
+nominal SocketId = string;
 
-type WebSocketEvent =
+structural WebSocketEvent =
   | { kind: "open"; socket: SocketId }
   | { kind: "message"; socket: SocketId; data: string | Bytes }
   | { kind: "close"; socket: SocketId; code: number; reason: string };
 
-type WebSocketCommand =
+structural WebSocketCommand =
   | { kind: "send"; socket: SocketId; data: string | Bytes }
   | { kind: "close"; socket: SocketId; code: number; reason: string };
 
-type WebSocketHandler<E> = (
+structural WebSocketHandler<E> = (
   event: WebSocketEvent,
 ) => Result<readonly WebSocketCommand[], E>;
 ```
@@ -1843,22 +1819,22 @@ typed-error contracts.
 #### Queue
 
 ```ts
-distinct type MessageId = string;
-distinct type ReceiptId = string;
+nominal MessageId = string;
+nominal ReceiptId = string;
 
-type QueueMessage<T> = {
+structural QueueMessage<T> = {
   readonly id: MessageId;
   readonly receipt: ReceiptId;
   readonly attempt: number;
   readonly payload: T;
 };
 
-type QueueDecision =
+structural QueueDecision =
   | { kind: "ack"; receipt: ReceiptId }
   | { kind: "retry"; receipt: ReceiptId; afterMs: number; reason: string }
   | { kind: "dead-letter"; receipt: ReceiptId; reason: string };
 
-type QueueHandler<T, E> = (
+structural QueueHandler<T, E> = (
   message: QueueMessage<T>,
 ) => Result<QueueDecision, E>;
 
@@ -1911,16 +1887,12 @@ Import       ::= "import" ["type"] "{" ImportNames "}" "from" String ";"
 ImportNames  ::= ImportName ("," ImportName)* [","]
 ImportName   ::= Ident ["as" Ident]
 
-TopDecl      ::= ["export"] TypeDecl
-               | ["export"] StructuralDecl
-               | ["export"] DistinctDecl
+TopDecl      ::= ["export"] StructuralDecl
                | ["export"] NominalDecl
                | ["export"] FunctionDecl
                | ["export"] TopBindingDecl
 
-TypeDecl     ::= "type" Ident TypeParams? "=" Type ";"
 StructuralDecl ::= "structural" Ident TypeParams? "=" Type ";"
-DistinctDecl ::= "distinct" "type" Ident "=" ScalarType ";"
 NominalDecl  ::= "nominal" Ident "=" ScalarType ";"
 TypeParams   ::= "<" TypeParam ("," TypeParam)* ">"
 TypeParam    ::= Ident ["extends" Type]
@@ -2055,11 +2027,10 @@ The advanced surface is intentionally richer than the executable kernel.
 
 | Surface form | Canonical elaboration |
 |---|---|
-| type annotations and aliases | erased after producing checked type evidence |
+| type annotations and structural aliases | erased after producing checked type evidence |
 | constrained generics | checker instantiation, then erasure |
 | contractive recursive aliases | finite named type graph, then erasure |
-| `distinct type` | nominal checker identity plus specified base-value constructor |
-| closed compile-time scalar default | optional ingress plus embedded constant selection |
+| `nominal` | nominal checker identity plus specified scalar base |
 | optional member access | evaluate receiver once, branch on `null` or `undefined` |
 | nullish coalescing | evaluate left once, branch on `null` or `undefined` |
 | pure conditional expression | evaluate the boolean condition and exactly one branch |
@@ -2536,16 +2507,11 @@ The corpus MUST include:
 
 ## 15. Feature ledger
 
-> Reconciled against the engine on 2026-08-03, across all 29 "Add or complete"
-> entries and all 12 "Tighten" entries. Four entries had shipped and were still
-> listed as outstanding, and five restrictions were already enforced. A ledger
-> entry is a claim about what does not exist yet, so it rots in the one
-> direction nobody notices: silently, as the work lands.
->
-> Two entries below are open design conflicts rather than unfinished work, and
-> are marked as such. Reconcile against engine code rather than against the
-> other documents: `docs/internals/agent-protocol-v2.md` was found stale in the
-> same pass, still listing three shipped operations as deferred.
+> Reconciled against the engine on 2026-08-16 after the `zts-model-1` cutover.
+> The earlier 29-item implementation backlog has landed and is represented by
+> the registries and gates named in this document. This ledger now lists only
+> work whose acceptance condition is not implemented. Reconcile it against
+> engine code, not against older phase prose.
 
 ### Keep
 
@@ -2558,18 +2524,18 @@ The corpus MUST include:
 - pure boolean conditional expressions, with impure arms rejected as ZTS612 and
   chained forms as ZTS621, both carrying the `replace_ternary_with_if` repair
 - static named modules
-- aliases, unions, intersections, literals, readonly, optionals, nominal
+- structural aliases, unions, intersections, literals, readonly, optionals, nominal
   types, guards, utility types, and proof/effect capsules
 - TSX as pure elaboration
 - explicit capability modules and structured I/O
 - familiar TypeScript lexical conventions and human-readable block structure
 - a machine-readable idiom registry, published with a table hash and reachable
   through `describe-rule --idioms`, so idiom is discoverable rather than
-  conventional; the rows themselves are still being filled in
+  conventional; the current model-minimal table contains all 18 legal rows
 - a versioned agent protocol over `zts agent --stdin-json`: a closed
   eleven-operation set spanning discovery, diagnostics, repair, and
   verification, with schema-version negotiation, a frozen mismatch reply, and a
-  byte-determinism gate. Its `meta` payload still names ten deferred sections,
+  byte-determinism gate. Its `meta` payload names three deferred sections,
   machine-readably rather than by omission
 - deterministic fixed-point normalization and edit simulation, bounded at 64
   iterations and confluent, with idempotence asserted both by unit test and by
@@ -2580,70 +2546,41 @@ The corpus MUST include:
 - reusable arrows reported as named functions, with a typed repair
 - accepted recursion held distinct from proved termination: recursion runs, and
   the totality and cost claims are downgraded rather than the program refused
-- the 10-node, 7-opcode symbolic semantics classified in code as a partial
-  slice, not as slice-wide law
+- all 69 parser-node tags and all 127 interpreter opcodes classified in code,
+  with direct symbolic semantics for 12 nodes and 7 opcodes, one validated
+  opcode translation, and the remaining classified cases explicitly trusted
 - targeted diagnostics for rejected TypeScript forms, each carrying an exact
   alternative, with stable `restriction.<slug>` identifiers
 
-### Add or complete
+### Remaining assurance and policy work
 
-- sound generic-function inference and instantiation
-- limited `extends` constraints
-- binding fields and type-test patterns in `match`
-- the closed narrowing rule list
-- decidable branch-choice and iteration-choice rules
-- explicit parameter absence - phase 5's default-parameter support was removed
-  in phase 7; ZTS054 and ZTS055 direct both declaration shorthands to
-  `T | undefined` plus a visible body-level resolution
-- contractive recursive aliases
-- precise `Result<T, E>` with effect-row polymorphic combinators,
-  `unwrapOr`, `orElse`, and `collectAll`
-- immutable deterministic `Dict<K, V>` with bulk operations and
-  `comptime()` static tables
-- immutable `Bytes`
-- the completed array operation set and `push`
-- a total `responseText` constructor in the HTTP ABI
-- the ambient-name criterion and registry table
-- the remaining idiom rows and their rewrites: the registry mechanism ships,
-  publishes all 23 current rows with a hash, and reports them as advisory-only
-- an ordered `Result` consumption procedure with disjoint clauses
-- one `responseJson` result type at every call site
-- opaque typed `HtmlNode` and finite `HtmlChild`
-- explicit JSON `null` - OPEN CONFLICT, not unfinished work. The engine has
-  one absent-value sentinel by design: the parser rejects `null` and the JSON
-  codec decodes wire `null` to `undefined`. Satisfying this needs either a
-  second sentinel or a JSON-only opaque null, and either splits optional
-  narrowing into two lattices. Decide before scheduling
-- a typed, resource-bounded JSON codec
-- fully typed finite array operations
-- tuple-preserving `parallel` and tagged `race`
-- precise minimum HTTP, WebSocket, queue, and durable-workflow ABIs
-- snapshot semantics for every finite traversal
-- an independent certificate verifier: the proof grades themselves ship, but
-  the verify path re-checks a signature and re-hashes a manifest, shares its
-  code with the producer, reconstructs no obligation, and runs no solver
-- stable rule, diagnostic, repair, and explanation-graph identifiers
-- an agent conformance corpus with bounded convergence
+- an independent certificate verifier: proof grades ship, but the current
+  verify path shares producer code, reconstructs no proof obligation, and runs
+  no isolated solver;
+- authenticated extension manifests with an issuer, key-rotation, revocation,
+  and runtime-implementation trust policy;
+- a rule-severity projection, if emission-site severity is first replaced by a
+  registry-owned policy that can answer it without guessing;
+- a default repair and tool-call budget, once a client loop enforces the number
+  it publishes;
+- live-model convergence at the phase-7 exit threshold. The corpus and bounded
+  recorder exist, but the measured result remains the authority until every
+  supported model reaches green and preserves declared intent;
+- rejection or typed recovery for any remaining trapping operation at an
+  untrusted boundary.
 
-### Tighten
+### Settled tightening decisions
 
-- reserve `assert` for programmer invariants
-- use direct named calls instead of custom pipe syntax - DONE in phase 7. The
-  scope was wider than one operator: `|>` was parser syntax, and `pipe()` and
-  `guard()` from `zttp:compose` were compile-time forms wearing a module's
-  clothes, with native implementations that never executed. All three are
-  gone, `|>` reports ZTS001 naming the direct call, and the module with them
-- reject ambient time, random, logging, and I/O - OPEN CONFLICT. The engine
-  admits these names deliberately and charges a property instead of refusing
-  the program: reading a clock is legitimate and costs `deterministic`. That is
-  a different model from rejection, not an unapplied restriction, and the two
-  should not both stand. One real gap either way: `performance.now` is absent
-  from the varying-read set, so it reads a clock and costs nothing
-- reject unchecked trapping operations at untrusted boundaries
-- make a closed profile registry the source of truth
-- identify ZTS as a distinct constrained language rather than imply TypeScript
-  source compatibility
-- treat the removed signed receipt as historical, not shipped
+- `assert` is reserved for programmer invariants; expected guards use explicit
+  branching and returns;
+- direct named calls replaced `|>`, `pipe()`, `guard()`, and `zttp:compose`;
+- the profile registry and source-profile hashes are the identity authority;
+- ZTS is identified as a constrained language, not TypeScript compatibility;
+- the removed producer-only signed receipt remains historical;
+- ambient clock, random, logging, and I/O capabilities are admitted and charged
+  to their proof properties rather than rejected. The centralized varying-read
+  registry includes `Date.now`, `Math.random`, and `performance.now`, so this
+  policy has no uncharged clock exception.
 
 ### Keep excluded
 
@@ -2668,7 +2605,7 @@ The corpus MUST include:
 ```ts
 import { err, ok } from "zttp:result";
 
-type DivideError = { kind: "division-by-zero" };
+structural DivideError = { kind: "division-by-zero" };
 
 function divide(
   numerator: number,
@@ -2724,7 +2661,7 @@ count rather than fail as a duplicate key, and that is the one behavior
 ```ts
 import { dictFold } from "zttp:collections";
 
-type JsonValue =
+structural JsonValue =
   | null
   | boolean
   | number
@@ -2774,7 +2711,7 @@ import { parallel } from "zttp:io";
 import { err } from "zttp:result";
 import type { FetchError } from "zttp:fetch";
 
-type LoadError =
+structural LoadError =
   | FetchError
   | { kind: "missing-config"; name: string };
 

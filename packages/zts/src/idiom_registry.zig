@@ -7,7 +7,7 @@
 //! `advisory` severity, rewritten where the rewrite is provable, and otherwise
 //! left alone.
 //!
-//! The table is complete against spec 4.2.1: 21 rows, in the document's own
+//! The table is complete against spec 4.2.1: 18 rows, in the document's own
 //! order, held there by `scripts/check-idiom-table.sh`. Phase 0 seeded the rows
 //! that needed no language the engine lacked; the Dict rows arrived with
 //! `Dict`; the `Result`, selection, record-update, fold, and search-loop rows
@@ -77,22 +77,6 @@ pub const entries = [_]IdiomEntry{
         .idiomatic = "an explicit literal",
         .superseded = "a leading spread that overrides every field",
         .precondition = "the spread operand is pure",
-        .rewrite_rule = null,
-    },
-    .{
-        .id = "idiom.scalar-to-text",
-        .operation = "scalar to text",
-        .idiomatic = "String(n)",
-        .superseded = "implicit conversion through template interpolation or string addition",
-        .precondition = "the source value is scalar",
-        .rewrite_rule = null,
-    },
-    .{
-        .id = "idiom.string-concatenation",
-        .operation = "string concatenation",
-        .idiomatic = "[a, b, c].join(\"\")",
-        .superseded = "left-associated a + b + c, template interpolation",
-        .precondition = "every non-string operand is converted explicitly with String(value)",
         .rewrite_rule = null,
     },
     .{
@@ -181,14 +165,6 @@ pub const entries = [_]IdiomEntry{
         .idiomatic = "find, findIndex, some, or every, by what the loop yields and whether its flag starts false or true",
         .superseded = "let plus for...of whose only early exit is break",
         .precondition = "the body is pure, carries one accumulator, uses no continue, and the loop head is already idiomatic under the element-iteration row",
-        .rewrite_rule = null,
-    },
-    .{
-        .id = "idiom.field-read",
-        .operation = "field read",
-        .idiomatic = "const id = user.id;, or const first = pair[0]; for a tuple",
-        .superseded = "any declaration destructuring pattern",
-        .precondition = "none",
         .rewrite_rule = null,
     },
     .{
@@ -294,7 +270,7 @@ test "idiom registry has unique stable ids" {
     // here fails `scripts/check-idiom-table.sh`; a row added here and not there
     // fails it too. This asserts the number itself so a same-size swap of one
     // row for another still has to face the text comparison.
-    try std.testing.expectEqual(@as(usize, 21), entries.len);
+    try std.testing.expectEqual(@as(usize, 18), entries.len);
 }
 
 test "idiom registry rows are fully populated" {

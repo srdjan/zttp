@@ -29,9 +29,9 @@ cd "$(dirname "$0")/.."
 spec_doc="docs/zts-formal-spec-northstar-advanced.md"
 registry_file="packages/zts/src/grammar_registry.zig"
 
-# The production count measured on 2026-08-15, when phase 7 removed the
-# ObjectBind, BindField, and ArrayBind alternatives.
-MIN_ROWS=68
+# The production count measured on 2026-08-16 after the model-minimal cutover
+# removed the legacy TypeDecl and DistinctDecl productions.
+MIN_ROWS=66
 
 fail() {
   printf 'grammar drift: %s\n' "$1" >&2

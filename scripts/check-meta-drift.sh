@@ -38,18 +38,18 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-15 after phase 7 made text construction explicit. The core
-# grammar no longer admits interpolated templates, the idiom table names joins
-# as the one text-construction form, and the restriction matrix refuses both
-# interpolation and string-valued addition.
+# Pinned 2026-08-16 after the model-minimal authority cut. The core grammar
+# removed the legacy `type` and `distinct type` productions, the idiom table
+# removed preferences whose alternative is now forbidden, and ZTS629 added the
+# closed ambient-name refusal to the policy registry.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="36fbd29e0fe71693d73c8278d3786ffca1eb184da9d3f66b11310bad5033aeb5"
-# Moved when template expressions were removed from the core grammar. TSX is a
-# separately hashed frontend that lowers into this exact core identity.
-EXPECTED_GRAMMAR_HASH="6201baf9b3b206ae89c59443478fc58305935e5142f9a4672a66b71bb2ddc955"
+EXPECTED_POLICY_HASH="63caf9a6922901f94ee576502debf37de18b7eb3cf8271a980fd252ee1ab8b93"
+# TSX is separately identified, and its hash binds the core grammar it lowers
+# into, so the declaration cut moves both hashes even though TSX syntax did not.
+EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
-EXPECTED_FRONTEND_GRAMMAR_HASH="80d4ca8ff675262efc2bca83a4bfeb066f36a66a9c5c29bca27d7dce691033db"
-EXPECTED_IDIOM_HASH="740830f33b0ea1dd2be2f244e4e978e8d60e9ae4418d53effca305f86244be6e"
+EXPECTED_FRONTEND_GRAMMAR_HASH="7c9617420918404b14782ce11ffff71f3f1c42f967cb2ca656b7109e417d283d"
+EXPECTED_IDIOM_HASH="2a7059a7e3d4747c26af855ebd3a80b9fbb853bc5feb5ea16010bd300a5992db"
 EXPECTED_RESTRICTION_HASH="be9e7992e7afb176eb4dbb47638b596204660a6127be9a59cf72a506375b8895"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's

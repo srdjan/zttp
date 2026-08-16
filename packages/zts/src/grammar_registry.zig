@@ -74,23 +74,13 @@ pub const productions = [_]Production{
     },
     .{
         .name = "TopDecl",
-        .rhs = "[\"export\"] TypeDecl | [\"export\"] StructuralDecl | [\"export\"] DistinctDecl | [\"export\"] NominalDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl",
-    },
-    .{
-        .name = "TypeDecl",
-        .rhs = "\"type\" Ident TypeParams? \"=\" Type \";\"",
-        .enforcement = .check_time,
-        .note = "ZTS212, the type-checker band, which is outside the policy-hashed registry: a recursive alias must be contractive and the grammar admits one that is not",
+        .rhs = "[\"export\"] StructuralDecl | [\"export\"] NominalDecl | [\"export\"] FunctionDecl | [\"export\"] TopBindingDecl",
     },
     .{
         .name = "StructuralDecl",
         .rhs = "\"structural\" Ident TypeParams? \"=\" Type \";\"",
         .enforcement = .check_time,
-        .note = "ZTS212, the same rule `TypeDecl` carries: `structural` is the phase-7 spelling of `type` and resolves through the same alias table, so a non-contractive cycle is refused identically",
-    },
-    .{
-        .name = "DistinctDecl",
-        .rhs = "\"distinct\" \"type\" Ident \"=\" ScalarType \";\"",
+        .note = "ZTS212, the type-checker band, which is outside the policy-hashed registry: a recursive structural alias must be contractive and the grammar admits one that is not",
     },
     .{
         .name = "NominalDecl",
@@ -453,17 +443,19 @@ test "every check_time row names either a registry rule or the band that answers
     // The floor. A table where every row said parse_time would satisfy the loop
     // above while publishing the over-approximation the section preamble warns
     // about as if it were exact.
-    try testing.expect(check_rows >= 10);
+    // Nine rows remain after the model-minimal cut removed TypeDecl. Keeping
+    // this exact floor catches a registry that silently relabels a wider
+    // production as parser-exact.
+    try testing.expect(check_rows >= 9);
 }
 
 test "every noted row names a code the projection really emits" {
-    // The note is prose, and prose is where a claim rots. `TypeDecl` and its
-    // phase-7 spelling `StructuralDecl` both admit a recursive alias no data
-    // constructor guards, and the refusal is ZTS212 from the type-checker band -
-    // a band the policy-hashed registry does not cover, which is why these rows
-    // carry a note instead of a `rule_code`. Bound to the projection here so a
-    // renamed code fails the build rather than leaving a client chasing a code
-    // nothing emits.
+    // The note is prose, and prose is where a claim rots. `StructuralDecl`
+    // admits a recursive alias no data constructor guards, and the refusal is
+    // ZTS212 from the type-checker band - a band the policy-hashed registry does
+    // not cover, which is why this row carries a note instead of a `rule_code`.
+    // Bound to the projection here so a renamed code fails the build rather
+    // than leaving a client chasing a code nothing emits.
     //
     // Every noted row names ZTS212 today. A note that names some other code
     // needs its own binding added here; the count assertion is what makes that
@@ -480,7 +472,7 @@ test "every noted row names a code the projection really emits" {
             return error.UnboundNote;
         }
     }
-    try testing.expectEqual(@as(usize, 2), noted);
+    try testing.expectEqual(@as(usize, 1), noted);
     try testing.expect(findByName("StructuralDecl").?.note != null);
 }
 

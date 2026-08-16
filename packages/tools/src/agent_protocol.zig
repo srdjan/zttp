@@ -5044,7 +5044,10 @@ test "a production that over-admits says which rule refuses the excess" {
     }
     // The floor. A payload of nothing but parse_time rows would satisfy the
     // loop while publishing the over-approximation as if it were exact.
-    try testing.expect(check_rows >= 10);
+    // The model-minimal grammar has nine wider productions after removing the
+    // legacy TypeDecl row. Keep the wire-level floor aligned with the source
+    // registry so an empty enforcement projection cannot pass.
+    try testing.expect(check_rows >= 9);
 }
 
 test "the grammar section stops being deferred" {

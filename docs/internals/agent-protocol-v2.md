@@ -198,7 +198,7 @@ where its enforcement happens: `parse_time` when the parser admits exactly the
 production, `check_time` when the parser admits more and a later pass refuses
 the excess. A `check_time` row names the rule that refuses - a registry code
 where one exists, and otherwise a note naming the band that answers, which today
-is `TypeDecl` and ZTS212. Each enforcement point was measured by running
+is `StructuralDecl` and ZTS212. Each enforcement point was measured by running
 `zts check` on a program that exercises the wider form, not reasoned about.
 
 `decisions` publishes the kinds a client keys on, with a version, the response
