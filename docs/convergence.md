@@ -37,6 +37,7 @@ counted result over a frozen corpus, not an estimate.
 | 2026-08-12 | `dcee3baf-dirty` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
 | 2026-08-12 | `734f0c8b` | `760bc9965c67` | 19 | anthropic | claude-sonnet-4-6 | `78c9fec96be2` | 100% (19/19) | 4 | 100% (13/13) |
 | 2026-08-14 | `29038503-dirty` | `760bc9965c67` | 19 | deepseek | deepseek-v4-flash | `78c9fec96be2` | 89% (17/19) | 3 | 84% (11/13) |
+| 2026-08-16 | `38743443` | `19dc67a54ec3` | 19 | deepseek | deepseek-v4-flash | `63caf9a69229` | 47% (9/19) | 5 | 100% (13/13) |
 
 Regenerate with `bash scripts/update-convergence.sh`, which appends a row and
 rewrites [convergence.json](convergence.json). History is git history on those
