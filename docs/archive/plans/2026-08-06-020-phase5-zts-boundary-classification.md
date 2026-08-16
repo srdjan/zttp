@@ -1,5 +1,9 @@
 # Phase 5 ZTS boundary classification
 
+Archived 2026-08-16. The 101-row ceiling below is superseded: later migrations
+took `scripts/module-boundary.allow` to 56 rows. Read this for the
+classification method and the per-reach dispositions, not for the count.
+
 Status: classification complete; first two migrations implemented
 
 Date: 2026-08-06

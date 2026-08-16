@@ -12,6 +12,13 @@ execution: code
 
 # Bounded Pi Context and Model-Backed Compaction
 
+Archived 2026-08-16. The work shipped: the 40,000-token soft target is
+`compaction.default_max_input_tokens` and `context_budget.soft_input_target_tokens`,
+and the overflow retry, checkpoint, resume, fork, and fail-closed admission
+criteria each have named tests in `packages/pi/src/agent.zig`. The acceptance
+checkboxes below were never ticked, so treat the list as the plan's own gate
+rather than as a record of what was signed off.
+
 ## Goal Capsule
 
 - **Objective:** Replace Pi's local transcript flattening with model-backed compaction adapted from upstream Pi, and make every normal provider request pass through a measurable, bounded context projection so the agent no longer sends unnecessarily large messages.
