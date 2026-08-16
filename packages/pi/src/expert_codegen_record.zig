@@ -230,6 +230,11 @@ fn resolveCaseSteps(
 /// current evidence. Skip those tests until an explicitly authorized fresh
 /// recording exists. Publication scripts still fail because a skipped replay
 /// emits no complete evidence marker.
+///
+/// A skip is silent, so it is not the signal on its own: the test named
+/// "every headline empirical case resolves to a current recording" is what
+/// fails and names the re-record command. Do not loosen it to accept a stale
+/// cohort, or this skip becomes a corpus that quietly covers nothing.
 fn resolveCurrentCaseStepsForTest(
     allocator: std.mem.Allocator,
     repo_root: []const u8,
@@ -301,15 +306,30 @@ fn recordingAuthAvailable(provider: agent.Provider) bool {
     };
 }
 
+/// A DeepSeek turn is slower than a local one, and the heavier cases exceed the
+/// 3-minute default. A turn cut off there can never replay, so the recorder
+/// refuses to promote it - which reads as a recording failure rather than as a
+/// ceiling that was set too low. The corpus was recorded at 600000, so the
+/// remediation names that value rather than leaving the operator to rediscover
+/// it from a refused promotion.
+const deepseek_record_turn_timeout_ms: u64 = 600_000;
+
 fn recordingCommand(
     allocator: std.mem.Allocator,
     provider: agent.Provider,
 ) ![]u8 {
+    const timeout: []const u8 = if (provider == .deepseek)
+        std.fmt.comptimePrint(
+            "ZTTP_CODEGEN_TURN_TIMEOUT_MS={d} ",
+            .{deepseek_record_turn_timeout_ms},
+        )
+    else
+        "";
     return std.fmt.allocPrint(
         allocator,
-        "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} " ++
+        "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} {s}" ++
             "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"",
-        .{provider.publicName()},
+        .{ provider.publicName(), timeout },
     );
 }
 
@@ -322,6 +342,15 @@ test "recording remediation preserves the replay provider and requires the full 
     defer testing.allocator.free(local_full);
     try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_PROVIDER=local") != null);
     try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_ONLY") == null);
+
+    // The DeepSeek ceiling is named because the default truncates the heavier
+    // cases into refused promotions. The local default is the stall guard, so
+    // the remediation must not raise it there.
+    const deepseek_command = try recordingCommand(testing.allocator, .deepseek);
+    defer testing.allocator.free(deepseek_command);
+    try testing.expect(std.mem.indexOf(u8, deepseek_command, "ZTTP_CODEGEN_PROVIDER=deepseek") != null);
+    try testing.expect(std.mem.indexOf(u8, deepseek_command, "ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000") != null);
+    try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_TURN_TIMEOUT_MS") == null);
 }
 
 /// The declared local server stack, as `name@version`.
@@ -4549,7 +4578,22 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     std.debug.print("[proof-coverage] {s}\n", .{coverage_marker});
 }
 
-test "headline empirical cohort is uniformly current or quarantined as stale" {
+// Every headline case must resolve to a loadable recording.
+//
+// This assertion used to read "uniformly current or quarantined as stale" and
+// accepted an all-stale cohort because all-stale is uniform. An all-stale
+// cohort is not a tidy quarantine, it is the corpus being gone: every replay
+// skips, no evidence marker is emitted, and the suite still exits zero. That
+// state shipped in `f2252b31`, which bumped the artifact schema to 2 and left
+// all 19 recordings at 1, and it survived four commits because the one test
+// written to notice it counted the stale cases and then blessed them.
+//
+// So assert the value expected - current - rather than a shape that the
+// excluded values also satisfy. A schema bump that outruns the recordings now
+// fails here and prints the command that fixes it. The replay tests still skip
+// on stale rather than fail, because twenty identical failures bury the one
+// that says what to do; this is the test that says it.
+test "every headline empirical case resolves to a current recording" {
     const allocator = std.testing.allocator;
     const repo_root = try cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
@@ -4565,6 +4609,10 @@ test "headline empirical cohort is uniformly current or quarantined as stale" {
             rc.name,
         ) catch |err| switch (err) {
             error.StaleFlowArtifact => {
+                std.debug.print(
+                    "[codegen-corpus] {s}: recording is stale for the current artifact schema\n",
+                    .{rc.name},
+                );
                 stale += 1;
                 continue;
             },
@@ -4576,7 +4624,18 @@ test "headline empirical cohort is uniformly current or quarantined as stale" {
         current += 1;
     }
     try std.testing.expectEqual(record_corpus.len, current + stale);
-    try std.testing.expect(current == record_corpus.len or stale == record_corpus.len);
+    if (stale > 0) {
+        const command = try recordingCommand(allocator, headline_provider);
+        defer allocator.free(command);
+        std.debug.print(
+            "[codegen-corpus] {d} of {d} headline recordings are stale;" ++
+                " the offline replay covers {d} cases and publishes nothing." ++
+                " Re-record with:\n  {s}\n",
+            .{ stale, record_corpus.len, current, command },
+        );
+        return error.StaleHeadlineCorpus;
+    }
+    try std.testing.expectEqual(record_corpus.len, current);
 }
 
 test "every current corpus case resolves to exactly one recording source" {
