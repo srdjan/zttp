@@ -2,8 +2,8 @@
 //!
 //! Corpus recording spends real model time and stays gated behind
 //! `ZTTP_CODEGEN_RECORD=1`. `ZTTP_CODEGEN_PROVIDER` selects the provider;
-//! `ZTTP_CODEGEN_REQUIRE_GREEN=1` refuses to promote a turn that did not apply
-//! an edit or whose declared runtime intent did not pass.
+//! `ZTTP_CODEGEN_REQUIRE_GREEN=1` refuses to stage a case that did not apply an
+//! edit or whose declared runtime intent did not pass.
 //! cloud credentials are required only for an explicitly selected cloud
 //! provider. Transport, capture, disk, and replay are tested offline.
 //! Live cassettes remain the only source for model-behavior measurements.
@@ -110,74 +110,6 @@ const CassetteSequenceClient = struct {
         return .{ .context = self, .request_fn = requestFn };
     }
 };
-
-/// Delete a case's cassette directory (`<out_dir_abs>/<name>`) via its absolute
-/// parent, so it works regardless of the current working directory. Best-effort.
-fn removeCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return;
-    defer parent.close(io);
-    parent.deleteTree(io, name) catch {};
-}
-
-/// Suffix for a case's stashed cassette while a live recording runs.
-const stash_suffix = ".recording-backup";
-
-/// Move a case's committed cassette aside before recording over it.
-///
-/// The recorder used to delete the directory outright, and its failure path
-/// deleted the partial too - so a run that failed left nothing where a working
-/// cassette had been. That is survivable only because cassettes are committed,
-/// and it has cost the whole corpus once: a full run with every turn failing
-/// clears all eleven cases. Stashing makes a failed recording a no-op instead.
-///
-/// Returns true when a stash was taken, so the caller knows whether there is
-/// anything to restore.
-fn stashCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) bool {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return false;
-    defer parent.close(io);
-
-    const stashed = std.fmt.allocPrint(allocator, "{s}{s}", .{ name, stash_suffix }) catch return false;
-    defer allocator.free(stashed);
-
-    // A stash left behind by an interrupted run would block the rename.
-    parent.deleteTree(io, stashed) catch {};
-    parent.rename(name, parent, stashed, io) catch return false;
-    return true;
-}
-
-/// Put the stashed cassette back, discarding whatever the failed run wrote.
-fn restoreCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return;
-    defer parent.close(io);
-
-    const stashed = std.fmt.allocPrint(allocator, "{s}{s}", .{ name, stash_suffix }) catch return;
-    defer allocator.free(stashed);
-
-    parent.deleteTree(io, name) catch {};
-    parent.rename(stashed, parent, name, io) catch {};
-}
-
-/// Drop the stash after a recording that succeeded.
-fn dropStashedCaseDir(allocator: std.mem.Allocator, out_dir_abs: []const u8, name: []const u8) void {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    var parent = std.Io.Dir.openDirAbsolute(io, out_dir_abs, .{}) catch return;
-    defer parent.close(io);
-
-    const stashed = std.fmt.allocPrint(allocator, "{s}{s}", .{ name, stash_suffix }) catch return;
-    defer allocator.free(stashed);
-    parent.deleteTree(io, stashed) catch {};
-}
 
 /// Where one case's provider responses were read from.
 pub const StepSource = enum { flow_artifact, flat_cassette, missing };
@@ -349,33 +281,24 @@ fn recordingAuthAvailable(provider: agent.Provider) bool {
 fn recordingCommand(
     allocator: std.mem.Allocator,
     provider: agent.Provider,
-    named_case: bool,
 ) ![]u8 {
-    return if (named_case)
-        std.fmt.allocPrint(
-            allocator,
-            "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} ZTTP_CODEGEN_ONLY=<name> " ++
-                "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"",
-            .{provider.publicName()},
-        )
-    else
-        std.fmt.allocPrint(
-            allocator,
-            "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} " ++
-                "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"",
-            .{provider.publicName()},
-        );
+    return std.fmt.allocPrint(
+        allocator,
+        "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} " ++
+            "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"",
+        .{provider.publicName()},
+    );
 }
 
-test "recording remediation preserves the replay provider" {
-    const claude = try recordingCommand(testing.allocator, .anthropic, false);
+test "recording remediation preserves the replay provider and requires the full corpus" {
+    const claude = try recordingCommand(testing.allocator, .anthropic);
     defer testing.allocator.free(claude);
     try testing.expect(std.mem.indexOf(u8, claude, "ZTTP_CODEGEN_PROVIDER=claude") != null);
 
-    const local_named = try recordingCommand(testing.allocator, .local, true);
-    defer testing.allocator.free(local_named);
-    try testing.expect(std.mem.indexOf(u8, local_named, "ZTTP_CODEGEN_PROVIDER=local") != null);
-    try testing.expect(std.mem.indexOf(u8, local_named, "ZTTP_CODEGEN_ONLY=<name>") != null);
+    const local_full = try recordingCommand(testing.allocator, .local);
+    defer testing.allocator.free(local_full);
+    try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_PROVIDER=local") != null);
+    try testing.expect(std.mem.indexOf(u8, local_full, "ZTTP_CODEGEN_ONLY") == null);
 }
 
 /// The declared local server stack, as `name@version`.
@@ -2199,34 +2122,600 @@ fn selectedRecordCaseCount(limit: usize, only_case: ?[]const u8) usize {
     return count;
 }
 
+fn recordingShapeCanActivate(
+    only_case: ?[]const u8,
+    has_limit: bool,
+    has_tool_filter: bool,
+    selected_count: usize,
+    model: []const u8,
+    default_model: []const u8,
+) bool {
+    return only_case == null and !has_limit and !has_tool_filter and
+        selected_count == record_corpus.len and std.mem.eql(u8, model, default_model);
+}
+
+const RecordingRunSummary = struct {
+    selected: usize,
+    staged: usize,
+    applied: usize,
+    intents_passed: usize,
+    failures: usize,
+};
+
+fn recordingRunCanActivate(canonical_shape: bool, summary: RecordingRunSummary) bool {
+    return canonical_shape and summary.selected == record_corpus.len and
+        summary.staged == summary.selected and summary.applied == summary.selected and
+        summary.intents_passed == summary.selected and summary.failures == 0;
+}
+
+test "only a complete green unfiltered default-model recording can activate" {
+    const canonical = recordingShapeCanActivate(null, false, false, 19, "default", "default");
+    try testing.expect(canonical);
+    try testing.expect(recordingRunCanActivate(canonical, .{
+        .selected = 19,
+        .staged = 19,
+        .applied = 19,
+        .intents_passed = 19,
+        .failures = 0,
+    }));
+    try testing.expect(!recordingShapeCanActivate("health", false, false, 1, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, true, false, 19, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, true, 19, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, false, 18, "default", "default"));
+    try testing.expect(!recordingShapeCanActivate(null, false, false, 19, "candidate", "default"));
+    try testing.expect(!recordingRunCanActivate(canonical, .{
+        .selected = 19,
+        .staged = 19,
+        .applied = 18,
+        .intents_passed = 19,
+        .failures = 1,
+    }));
+    try testing.expect(!recordingRunCanActivate(canonical, .{
+        .selected = 19,
+        .staged = 19,
+        .applied = 19,
+        .intents_passed = 18,
+        .failures = 1,
+    }));
+}
+
+const RecordingFailureKind = enum {
+    empty_response,
+    timeout,
+    decode,
+    provider,
+    intent,
+    validation,
+    internal,
+};
+
+const RecordingFailure = struct {
+    case_name: []const u8,
+    kind: RecordingFailureKind,
+    error_name: []const u8,
+};
+
+fn classifyRecordingFailure(err: anyerror) RecordingFailureKind {
+    return switch (err) {
+        error.EmptyResponse => .empty_response,
+        error.RequestTimedOut,
+        error.RecordedTurnHitTimeBudget,
+        => .timeout,
+        error.InvalidResponseJson,
+        error.MalformedToolCall,
+        error.MalformedToolEnvelope,
+        error.UnexpectedResponseShape,
+        error.MalformedSse,
+        error.MissingType,
+        error.UnknownEventType,
+        error.UnexpectedJsonShape,
+        => .decode,
+        error.IntentCheckUnavailable,
+        error.RecordedIntentCheckFailed,
+        => .intent,
+        error.InvalidRecordedFlow,
+        error.NonDeterministicFlowVersion,
+        error.PinnedExpectationMismatch,
+        error.RecordedEditNotApplied,
+        => .validation,
+        error.AuthFailed,
+        error.InsufficientCredit,
+        error.RateLimited,
+        error.ModelNotFound,
+        error.ProviderOverloaded,
+        error.ProviderServerError,
+        error.ApiError,
+        error.HttpNotOk,
+        error.DeepSeekServerUnavailable,
+        error.LocalServerUnavailable,
+        error.LocalHealthNotOk,
+        error.LocalModelUnavailable,
+        => .provider,
+        else => if (loop.providerErrorRemediation(err) != null) .provider else .internal,
+    };
+}
+
+const CorpusSwapFault = enum { after_old_rename, after_new_rename };
+
+const CorpusSwapHooks = struct {
+    fail_at: ?CorpusSwapFault = null,
+
+    fn reach(self: CorpusSwapHooks, point: CorpusSwapFault) !void {
+        if (self.fail_at == point) return error.InjectedCorpusSwapFault;
+    }
+};
+
+fn pathKind(io: std.Io, path: []const u8) !?std.Io.File.Kind {
+    const stat = std.Io.Dir.cwd().statFile(io, path, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return null,
+        else => return err,
+    };
+    return stat.kind;
+}
+
+fn requireDirectory(io: std.Io, path: []const u8) !bool {
+    const kind = try pathKind(io, path) orelse return false;
+    if (kind != .directory) return error.CorpusSwapPathNotDirectory;
+    return true;
+}
+
+fn syncParent(io: std.Io, path: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return error.CorpusSwapMissingParent;
+    var dir = try std.Io.Dir.openDirAbsolute(io, parent, .{ .follow_symlinks = false });
+    defer dir.close(io);
+    if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailed;
+}
+
+fn deleteTreeAbsolute(io: std.Io, path: []const u8) !void {
+    const parent = std.fs.path.dirname(path) orelse return error.CorpusSwapMissingParent;
+    const base = std.fs.path.basename(path);
+    var dir = try std.Io.Dir.openDirAbsolute(io, parent, .{ .follow_symlinks = false });
+    defer dir.close(io);
+    try dir.deleteTree(io, base);
+    if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailed;
+}
+
+fn corpusBackupPath(allocator: std.mem.Allocator, active_root: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "{s}.recording-backup", .{active_root});
+}
+
+/// Complete or undo the only two interrupted directory-swap states.
+fn recoverCorpusSwap(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    active_root: []const u8,
+) !void {
+    const backup = try corpusBackupPath(allocator, active_root);
+    defer allocator.free(backup);
+    if (!try requireDirectory(io, backup)) return;
+
+    if (try requireDirectory(io, active_root)) {
+        // New active root exists, so the complete staged corpus won the second
+        // rename. Only cleanup was interrupted.
+        try deleteTreeAbsolute(io, backup);
+        std.debug.print("[codegen-record] completed interrupted corpus swap cleanup\n", .{});
+        return;
+    }
+    // The old root moved but the staged root did not. Restore the old root and
+    // leave the staged run quarantined at its unique path.
+    try std.Io.Dir.renameAbsolute(backup, active_root, io);
+    try syncParent(io, active_root);
+    std.debug.print("[codegen-record] restored active corpus after interrupted swap\n", .{});
+}
+
+fn commitStagedCorpus(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stage_root: []const u8,
+    active_root: []const u8,
+) !void {
+    return commitStagedCorpusWithHooks(allocator, io, stage_root, active_root, .{});
+}
+
+fn commitStagedCorpusWithHooks(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    stage_root: []const u8,
+    active_root: []const u8,
+    hooks: CorpusSwapHooks,
+) !void {
+    if (!try requireDirectory(io, stage_root)) return error.MissingStagedCorpus;
+    const backup = try corpusBackupPath(allocator, active_root);
+    defer allocator.free(backup);
+    if (try pathKind(io, backup) != null) return error.CorpusSwapRecoveryRequired;
+
+    const had_active = try requireDirectory(io, active_root);
+    if (had_active) {
+        try std.Io.Dir.renameAbsolute(active_root, backup, io);
+        try syncParent(io, active_root);
+        try hooks.reach(.after_old_rename);
+    }
+
+    std.Io.Dir.renameAbsolute(stage_root, active_root, io) catch |err| {
+        if (had_active) {
+            std.Io.Dir.renameAbsolute(backup, active_root, io) catch
+                return error.CorpusSwapRecoveryRequired;
+            syncParent(io, active_root) catch return error.CorpusSwapRecoveryRequired;
+        }
+        return err;
+    };
+    syncParent(io, active_root) catch return error.CorpusActivatedRecoveryRequired;
+    syncParent(io, stage_root) catch return error.CorpusActivatedRecoveryRequired;
+    hooks.reach(.after_new_rename) catch return error.CorpusActivatedRecoveryRequired;
+
+    if (had_active) {
+        deleteTreeAbsolute(io, backup) catch return error.CorpusActivatedRecoveryRequired;
+    }
+}
+
+test "recording failures preserve empty timeout decode and provider classes" {
+    try testing.expectEqual(RecordingFailureKind.empty_response, classifyRecordingFailure(error.EmptyResponse));
+    try testing.expectEqual(RecordingFailureKind.timeout, classifyRecordingFailure(error.RequestTimedOut));
+    try testing.expectEqual(RecordingFailureKind.decode, classifyRecordingFailure(error.InvalidResponseJson));
+    try testing.expectEqual(RecordingFailureKind.provider, classifyRecordingFailure(error.RateLimited));
+    try testing.expectEqual(RecordingFailureKind.provider, classifyRecordingFailure(error.DeepSeekServerUnavailable));
+    try testing.expectEqual(RecordingFailureKind.internal, classifyRecordingFailure(error.OutOfMemory));
+}
+
+test "whole corpus swap recovers both crash boundaries" {
+    var tmp = try IsolatedTmp.init(testing.allocator, "codegen-corpus-swap");
+    defer tmp.cleanup(testing.allocator);
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    const active = try std.fs.path.join(testing.allocator, &.{ tmp.abs_path, "active" });
+    defer testing.allocator.free(active);
+    const stage = try std.fs.path.join(testing.allocator, &.{ tmp.abs_path, "stage" });
+    defer testing.allocator.free(stage);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, active);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, stage);
+    const active_file = try std.fs.path.join(testing.allocator, &.{ active, "value" });
+    defer testing.allocator.free(active_file);
+    const stage_file = try std.fs.path.join(testing.allocator, &.{ stage, "value" });
+    defer testing.allocator.free(stage_file);
+    try zts.file_io.writeFile(testing.allocator, active_file, "old");
+    try zts.file_io.writeFile(testing.allocator, stage_file, "new");
+
+    try testing.expectError(
+        error.InjectedCorpusSwapFault,
+        commitStagedCorpusWithHooks(
+            testing.allocator,
+            io,
+            stage,
+            active,
+            .{ .fail_at = .after_old_rename },
+        ),
+    );
+    try recoverCorpusSwap(testing.allocator, io, active);
+    const restored = try zts.file_io.readFile(testing.allocator, active_file, 16);
+    defer testing.allocator.free(restored);
+    try testing.expectEqualStrings("old", restored);
+
+    // The first staged root remains quarantined. Use a fresh complete stage for
+    // the post-activation crash point.
+    const stage_two = try std.fs.path.join(testing.allocator, &.{ tmp.abs_path, "stage-two" });
+    defer testing.allocator.free(stage_two);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, stage_two);
+    const stage_two_file = try std.fs.path.join(testing.allocator, &.{ stage_two, "value" });
+    defer testing.allocator.free(stage_two_file);
+    try zts.file_io.writeFile(testing.allocator, stage_two_file, "new");
+    try testing.expectError(
+        error.CorpusActivatedRecoveryRequired,
+        commitStagedCorpusWithHooks(
+            testing.allocator,
+            io,
+            stage_two,
+            active,
+            .{ .fail_at = .after_new_rename },
+        ),
+    );
+    try recoverCorpusSwap(testing.allocator, io, active);
+    const activated = try zts.file_io.readFile(testing.allocator, active_file, 16);
+    defer testing.allocator.free(activated);
+    try testing.expectEqualStrings("new", activated);
+
+    const stage_three = try std.fs.path.join(testing.allocator, &.{ tmp.abs_path, "stage-three" });
+    defer testing.allocator.free(stage_three);
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, stage_three);
+    const stage_three_file = try std.fs.path.join(testing.allocator, &.{ stage_three, "value" });
+    defer testing.allocator.free(stage_three_file);
+    try zts.file_io.writeFile(testing.allocator, stage_three_file, "newer");
+    try commitStagedCorpus(testing.allocator, io, stage_three, active);
+    const committed = try zts.file_io.readFile(testing.allocator, active_file, 16);
+    defer testing.allocator.free(committed);
+    try testing.expectEqualStrings("newer", committed);
+    const backup = try corpusBackupPath(testing.allocator, active);
+    defer testing.allocator.free(backup);
+    try testing.expect(try pathKind(io, backup) == null);
+}
+
+const LiveRecordContext = struct {
+    io: std.Io,
+    registry: *registry_mod.Registry,
+    session: *agent.AgentSession,
+    request_config: model_request.Config,
+    provider: agent.Provider,
+    model: []const u8,
+    model_revision: ?[]const u8,
+    runtime_identity: ?RuntimeIdentity,
+    repo_root: []const u8,
+    stage_root: []const u8,
+    diagnostics_run_id: []const u8,
+    turn_timeout_ms: u64,
+    require_green: bool,
+};
+
+const LiveRecordOutcome = struct {
+    raw_first_draft_pass: bool,
+    first_attempt_green: bool,
+    applied: bool,
+    intent_passed: bool,
+};
+
+fn recordLiveCase(
+    context: *LiveRecordContext,
+    rc: RecordCase,
+    case_index: usize,
+    case_count: usize,
+) !LiveRecordOutcome {
+    var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer case_arena.deinit();
+    const allocator = case_arena.allocator();
+
+    var tmp = try IsolatedTmp.init(allocator, "codegen-record");
+    defer tmp.cleanup(allocator);
+    for (rc.seed_files) |seed| try tmp.writeFile(allocator, seed.path, seed.bytes);
+
+    const case_dir = try std.fs.path.join(allocator, &.{ context.stage_root, rc.name });
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), context.io, case_dir);
+    const case_root_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(context.io, case_dir, allocator);
+    const response_diagnostics_path = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.zig-cache/codegen-record-diagnostics/{s}/{s}.jsonl",
+        .{ context.repo_root, context.diagnostics_run_id, rc.name },
+    );
+
+    const workspace_allowlist = try workspaceCaptureAllowlist(allocator, rc.seed_files);
+    var live_progress: LiveRecordingProgress = .{
+        .case_index = case_index,
+        .case_count = case_count,
+        .case_name = rc.name,
+    };
+    var recorder = try flow_recorder.Recorder.init(allocator, .{
+        .case_name = rc.name,
+        .evidence_class = .empirical_model,
+        .provider = switch (context.provider) {
+            .local => .local,
+            .anthropic => .anthropic,
+            .openai => .openai,
+            .deepseek => .deepseek,
+        },
+        .model = context.model,
+        .model_revision = context.model_revision,
+        .runtime_name = if (context.runtime_identity) |identity| identity.name else null,
+        .runtime_version = if (context.runtime_identity) |identity| identity.version else null,
+        .diagnostics_path = response_diagnostics_path,
+        .progress = live_progress.observer(),
+        .workspace_allowlist = workspace_allowlist,
+    });
+    defer recorder.deinit();
+    try recorder.captureInitialWorkspace(tmp.abs_path);
+
+    const saved_cwd = try cwdPathAlloc(allocator);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var sink = recorder.captureSink();
+    try setSessionCapture(context.session, &sink);
+    defer setSessionCapture(context.session, null) catch {};
+
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try recorder.beginTurn(rc.prompt, transcript.len(), .approve);
+    var recording_client: RecorderModelClient = .{
+        .inner = context.session.modelClient(),
+        .progress = live_progress,
+    };
+    const result = loop.runTurnWith(
+        allocator,
+        recording_client.asModelClient(),
+        context.registry,
+        &transcript,
+        rc.prompt,
+        .{
+            .workspace_root = ".",
+            .max_attempts = loop.interactive_max_attempts,
+            .approval_fn = recorder.approvalFn(),
+            .replay_mode = false,
+            .turn_timeout_ms = context.turn_timeout_ms,
+        },
+    ) catch |err| {
+        std.debug.print("[codegen-record] {s}: turn failed: {s}\n", .{ rc.name, @errorName(err) });
+        std.debug.print(
+            "[codegen-record] metadata-only response diagnostics: {s}\n",
+            .{response_diagnostics_path},
+        );
+        return err;
+    };
+    try setSessionCapture(context.session, null);
+
+    if (result.end_reason == .budget_timeout) {
+        std.debug.print(
+            "[codegen-record] {s}: turn hit the {d}s wall-clock ceiling, so its recording " ++
+                "would not replay; raise ZTTP_CODEGEN_TURN_TIMEOUT_MS for this corpus\n",
+            .{ rc.name, context.turn_timeout_ms / 1000 },
+        );
+        return error.RecordedTurnHitTimeBudget;
+    }
+    try recorder.finishTurn(result, &transcript);
+    try recorder.captureExpectedWorkspace(tmp.abs_path);
+    std.debug.print(
+        "[codegen-record] [{d}/{d}] {s}: live turn captured " ++
+            "(calls={d} roundtrips={d} retries={d} tools={d}); checking result\n",
+        .{
+            case_index,
+            case_count,
+            rc.name,
+            sink.next_call_index,
+            result.roundtrips,
+            result.veto_retry_count,
+            result.tool_call_count,
+        },
+    );
+    if (context.provider == headline_provider) {
+        if (firstAttemptExpectation(context.provider, null, rc.expect_first_attempt_green)) |expected| {
+            if (result.firstAttemptGreen() != expected) {
+                std.debug.print(
+                    "[codegen-record] {s}: pinned first_attempt_green={} but fresh flow observed {}\n",
+                    .{ rc.name, expected, result.firstAttemptGreen() },
+                );
+                return error.PinnedExpectationMismatch;
+            }
+        }
+    }
+
+    const zttp_bin: ?[]u8 = if (runtimeIntent(rc.intent) != null)
+        codegen.locateZttpBinary(allocator, context.repo_root) orelse {
+            std.debug.print(
+                "[codegen-record] {s}: declared intent cannot run because zig-out/bin/zttp is unavailable\n",
+                .{rc.name},
+            );
+            return error.IntentCheckUnavailable;
+        }
+    else
+        null;
+    var intent_passed = true;
+    requireRecordedIntent(
+        allocator,
+        runtimeIntent(rc.intent),
+        tmp.abs_path,
+        zttp_bin,
+        codegen.runIntentCheck,
+    ) catch |err| {
+        intent_passed = false;
+        const handler_path: ?[]u8 = std.fs.path.join(
+            allocator,
+            &.{ tmp.abs_path, "handler.ts" },
+        ) catch null;
+        if (handler_path) |path| {
+            if (zts.file_io.readFile(allocator, path, 1024 * 1024)) |handler| {
+                std.debug.print("[codegen-record] {s}: produced handler:\n{s}\n", .{ rc.name, handler });
+            } else |_| {}
+        }
+        const outcome: []const u8 = if (context.require_green)
+            "required-green mode will refuse staging"
+        else
+            "failure will be measured and staged in quarantine";
+        std.debug.print(
+            "[codegen-record] {s}: declared intent did not pass ({s}); {s}\n",
+            .{ rc.name, @errorName(err), outcome },
+        );
+        if (err == error.IntentCheckUnavailable) return err;
+    };
+
+    requireGreenRecording(
+        context.require_green,
+        result.applied_edit,
+        intent_passed,
+    ) catch |err| {
+        std.debug.print(
+            "[codegen-record] {s}: required-green check failed " ++
+                "(applied={} intent-passed={} error={s})\n",
+            .{ rc.name, result.applied_edit, intent_passed, @errorName(err) },
+        );
+        return err;
+    };
+
+    std.debug.print(
+        "[codegen-record] [{d}/{d}] {s}: validating replay and staging\n",
+        .{ case_index, case_count, rc.name },
+    );
+    const staged_version = try flow_promotion.validateAndPromote(
+        allocator,
+        &recorder,
+        case_root_abs,
+        context.registry,
+        context.request_config,
+    );
+    const fail_code = codegen.firstZtsCode(&transcript) orelse "-";
+    std.debug.print(
+        "[codegen-record] [{d}/{d}] {s}: staged provider={s} model={s} flow={s} raw_first_draft_pass={} first_attempt_green={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
+        .{
+            case_index,
+            case_count,
+            rc.name,
+            context.provider.publicName(),
+            context.model,
+            staged_version.slice()[0..12],
+            result.rawFirstDraftVetoPass(),
+            result.firstAttemptGreen(),
+            result.applied_edit,
+            result.compiler_authored_apply,
+            result.roundtrips,
+            result.veto_retry_count,
+            result.tool_call_count,
+            sink.next_call_index,
+            fail_code,
+        },
+    );
+    return .{
+        .raw_first_draft_pass = result.rawFirstDraftVetoPass(),
+        .first_attempt_green = result.firstAttemptGreen(),
+        .applied = result.applied_edit,
+        .intent_passed = intent_passed,
+    };
+}
+
 // Record the real expert agent against the corpus and report the live baseline.
 // Gated: ZTTP_CODEGEN_RECORD=1. Cloud providers additionally require their
 // named key. Each case runs in its own tmp
 // workspace with cwd switched to it, so the agent's tools and the edit veto
 // resolve the same files; cassettes are written to an absolute repo path so the
-// chdir does not misplace them. ZTTP_CODEGEN_LIMIT caps the case count for a
-// cheap small-scale validation before the full run.
+// chdir does not misplace them. Filtered, limited, non-default-model, and
+// failed runs stay under `.zig-cache/codegen-record-staging`; only a complete
+// unfiltered run swaps the provider corpus root.
 test "record codegen baseline corpus (live, gated)" {
     if (!recordingRequested()) return error.SkipZigTest;
     const corpus_provider = try recordingProvider();
     if (!recordingAuthAvailable(corpus_provider)) return error.SkipZigTest;
-    // A live recording driver, not a memory-correctness test: use an arena over
-    // the page allocator so the strict test allocator's leak check does not flag
-    // the live HTTP/TLS stack (which the deterministic tests never exercise).
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    const corpus_model = envValue("ZTTP_CODEGEN_MODEL") orelse
+        models.defaultForProvider(corpus_provider).id;
+    const only_case: ?[]const u8 = if (envValue("ZTTP_CODEGEN_ONLY")) |value|
+        if (value.len == 0) null else value
+    else
+        null;
+    const require_green = greenRecordingRequired();
+    const record_turn_timeout_ms: u64 = if (envValue("ZTTP_CODEGEN_TURN_TIMEOUT_MS")) |raw|
+        std.fmt.parseInt(u64, raw, 10) catch default_record_turn_timeout_ms
+    else
+        default_record_turn_timeout_ms;
+    var limit: usize = record_corpus.len;
+    if (envValue("ZTTP_CODEGEN_LIMIT")) |raw| {
+        limit = std.fmt.parseInt(usize, raw, 10) catch limit;
+    }
+    const selected_case_count = selectedRecordCaseCount(limit, only_case);
+    if (selected_case_count == 0) {
+        if (only_case != null) return error.NamedCodegenCaseNotFound;
+        return error.CodegenCorpusCountMismatch;
+    }
+
+    const repo_root = try cwdPathAlloc(allocator);
+    const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, flowRoot(corpus_provider) });
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    // Recovery precedes provider/session initialization. A prior crash cannot
+    // leave the active corpus absent while a new model call starts.
+    try recoverCorpusSwap(allocator, io, out_dir);
+
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
     try applyToolAllowlist(&registry);
-    // The published number describes the model a user actually gets, so the
-    // corpus records against the product default rather than a hand-picked
-    // tier - see `headline_model`. ZTTP_CODEGEN_MODEL overrides it (e.g. Haiku)
-    // for cheap harness testing, or to record a second row against another
-    // tier. Env strings live for the process, so the borrowed slice is safe.
-    const corpus_model = envValue("ZTTP_CODEGEN_MODEL") orelse
-        models.defaultForProvider(corpus_provider).id;
     var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
@@ -2235,32 +2724,9 @@ test "record codegen baseline corpus (live, gated)" {
     });
     defer session.deinit(allocator);
     if (session.activeProvider() != corpus_provider) return error.UnsupportedRecordingProvider;
-    // ZTTP_CODEGEN_ONLY=<name> records just one case, leaving the others'
-    // committed cassettes untouched.
-    const only_case = envValue("ZTTP_CODEGEN_ONLY");
-    const require_green = greenRecordingRequired();
-
-    const record_turn_timeout_ms: u64 = if (envValue("ZTTP_CODEGEN_TURN_TIMEOUT_MS")) |raw|
-        std.fmt.parseInt(u64, raw, 10) catch default_record_turn_timeout_ms
-    else
-        default_record_turn_timeout_ms;
-    std.debug.print(
-        "[codegen-record] per-turn ceiling: {d}ms; require-green={}\n",
-        .{ record_turn_timeout_ms, require_green },
-    );
-
-    const repo_root = try cwdPathAlloc(allocator);
-    defer allocator.free(repo_root);
-    const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, flowRoot(corpus_provider) });
-    defer allocator.free(out_dir);
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, out_dir);
 
     const request_config = try requestConfigForSession(&session);
     const model_revision = try cachedModelRevision(allocator, corpus_provider, corpus_model);
-    defer if (model_revision) |revision| allocator.free(revision);
     const runtime_identity = try declaredRuntime(corpus_provider);
     if (runtime_identity) |identity| {
         std.debug.print(
@@ -2268,29 +2734,66 @@ test "record codegen baseline corpus (live, gated)" {
             .{ identity.name, identity.version },
         );
     }
-    // A fresh directory per invocation keeps failed attempts from different
-    // corpus runs distinguishable without making diagnostics authoritative.
     const diagnostics_run_id = try std.fmt.allocPrint(
         allocator,
         "{d}-{d}",
         .{ zts.realtimeNowMs() catch 0, std.c.getpid() },
     );
-    defer allocator.free(diagnostics_run_id);
+    const stage_root = try std.fmt.allocPrint(
+        allocator,
+        "{s}/.zig-cache/codegen-record-staging/{s}-{s}",
+        .{ repo_root, corpus_provider.publicName(), diagnostics_run_id },
+    );
+    if (try pathKind(io, stage_root) != null) return error.CorpusStagingPathExists;
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, stage_root);
 
-    var limit: usize = record_corpus.len;
-    if (envValue("ZTTP_CODEGEN_LIMIT")) |lim| {
-        limit = std.fmt.parseInt(usize, lim, 10) catch limit;
-    }
-    const selected_case_count = selectedRecordCaseCount(limit, only_case);
+    const has_limit = if (envValue("ZTTP_CODEGEN_LIMIT")) |value| value.len != 0 else false;
+    const has_tool_filter = if (envValue("ZTTP_CODEGEN_TOOLS")) |value| value.len != 0 else false;
+    const canonical_full_run = recordingShapeCanActivate(
+        only_case,
+        has_limit,
+        has_tool_filter,
+        selected_case_count,
+        corpus_model,
+        models.defaultForProvider(corpus_provider).id,
+    );
     std.debug.print(
-        "[codegen-record] corpus start: provider={s} model={s} cases={d}\n",
-        .{ corpus_provider.publicName(), corpus_model, selected_case_count },
+        "[codegen-record] corpus start: provider={s} model={s} cases={d} " ++
+            "timeout={d}ms require-green={} canonical-full-run={} stage={s}\n",
+        .{
+            corpus_provider.publicName(),
+            corpus_model,
+            selected_case_count,
+            record_turn_timeout_ms,
+            require_green,
+            canonical_full_run,
+            stage_root,
+        },
     );
 
+    var context: LiveRecordContext = .{
+        .io = io,
+        .registry = &registry,
+        .session = &session,
+        .request_config = request_config,
+        .provider = corpus_provider,
+        .model = corpus_model,
+        .model_revision = model_revision,
+        .runtime_identity = runtime_identity,
+        .repo_root = repo_root,
+        .stage_root = stage_root,
+        .diagnostics_run_id = diagnostics_run_id,
+        .turn_timeout_ms = record_turn_timeout_ms,
+        .require_green = require_green,
+    };
     var raw_first_draft_passes: usize = 0;
     var first_attempt_greens: usize = 0;
     var greens: usize = 0;
+    var intent_passes: usize = 0;
     var total: usize = 0;
+    var staged: usize = 0;
+    var failures: std.ArrayList(RecordingFailure) = .empty;
+    defer failures.deinit(allocator);
     for (record_corpus, 0..) |rc, i| {
         if (!recordCaseSelected(i, limit, only_case, rc.name)) continue;
         total += 1;
@@ -2298,226 +2801,87 @@ test "record codegen baseline corpus (live, gated)" {
             "[codegen-record] [{d}/{d}] {s}: case start\n",
             .{ total, selected_case_count, rc.name },
         );
-        var case_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        defer case_arena.deinit();
-        const ca = case_arena.allocator();
-
-        var tmp = try IsolatedTmp.init(ca, "codegen-record");
-        defer tmp.cleanup(ca);
-        for (rc.seed_files) |sf| try tmp.writeFile(ca, sf.path, sf.bytes);
-
-        const case_dir = try std.fs.path.join(ca, &.{ out_dir, rc.name });
-        try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, case_dir);
-        const case_root_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(io, case_dir, ca);
-        const response_diagnostics_path = try std.fmt.allocPrint(
-            ca,
-            "{s}/.zig-cache/codegen-record-diagnostics/{s}/{s}.jsonl",
-            .{ repo_root, diagnostics_run_id, rc.name },
-        );
-
-        const workspace_allowlist = try workspaceCaptureAllowlist(ca, rc.seed_files);
-        var live_progress: LiveRecordingProgress = .{
-            .case_index = total,
-            .case_count = selected_case_count,
-            .case_name = rc.name,
-        };
-        var recorder = try flow_recorder.Recorder.init(ca, .{
-            .case_name = rc.name,
-            .evidence_class = .empirical_model,
-            .provider = switch (corpus_provider) {
-                .local => .local,
-                .anthropic => .anthropic,
-                .openai => .openai,
-                .deepseek => .deepseek,
-            },
-            .model = corpus_model,
-            .model_revision = model_revision,
-            .runtime_name = if (runtime_identity) |identity| identity.name else null,
-            .runtime_version = if (runtime_identity) |identity| identity.version else null,
-            .diagnostics_path = response_diagnostics_path,
-            .progress = live_progress.observer(),
-            .workspace_allowlist = workspace_allowlist,
-        });
-        defer recorder.deinit();
-        try recorder.captureInitialWorkspace(tmp.abs_path);
-
-        const saved_cwd = try cwdPathAlloc(ca);
-        try std.Io.Threaded.chdir(tmp.abs_path);
-        defer std.Io.Threaded.chdir(saved_cwd) catch {};
-
-        var sink = recorder.captureSink();
-        try setSessionCapture(&session, &sink);
-
-        var tr: transcript_mod.Transcript = .{};
-        defer tr.deinit(ca);
-        try recorder.beginTurn(rc.prompt, tr.len(), .approve);
-        var recording_client: RecorderModelClient = .{
-            .inner = session.modelClient(),
-            .progress = live_progress,
-        };
-        const result = loop.runTurnWith(ca, recording_client.asModelClient(), &registry, &tr, rc.prompt, .{
-            .workspace_root = ".",
-            .max_attempts = loop.interactive_max_attempts,
-            .approval_fn = recorder.approvalFn(),
-            .replay_mode = false,
-            // Three minutes per cassette. This was 0, which disables the bound
-            // entirely: a local model that stops producing tokens mid-turn
-            // hangs the whole corpus run rather than failing that one case, and
-            // `durable-order` has ended in `EmptyResponse` after doing exactly
-            // that. A capped case fails, gets named in the run's output, and
-            // the remaining cases still record.
-            .turn_timeout_ms = record_turn_timeout_ms,
-        }) catch |err| {
-            try setSessionCapture(&session, null);
-            // Collection is memory-only until validation and replay both pass,
-            // so a live failure cannot disturb the active case pointer.
-            std.debug.print("[codegen-record] {s}: turn failed: {s}\n", .{ rc.name, @errorName(err) });
+        const outcome = recordLiveCase(&context, rc, total, selected_case_count) catch |err| {
+            const kind = classifyRecordingFailure(err);
+            try failures.append(allocator, .{
+                .case_name = rc.name,
+                .kind = kind,
+                .error_name = @errorName(err),
+            });
             std.debug.print(
-                "[codegen-record] metadata-only response diagnostics: {s}\n",
-                .{response_diagnostics_path},
+                "[codegen-record] [{d}/{d}] {s}: quarantined failure kind={s} error={s}\n",
+                .{ total, selected_case_count, rc.name, @tagName(kind), @errorName(err) },
             );
-            return err;
+            continue;
         };
-        try setSessionCapture(&session, null);
-        // A turn the wall clock cut short cannot be replayed. The live loop
-        // stopped asking for model calls because the elapsed time crossed
-        // `turn_timeout_ms`; a replay of the same turn finishes in
-        // milliseconds, never crosses it, and asks for one more call than the
-        // recording holds. Promotion would surface that as `response_underflow`
-        // at the last call, which reads like a divergence and is not one.
-        // Refuse here, where the reason is still known and can be acted on.
-        if (result.end_reason == .budget_timeout) {
-            std.debug.print(
-                "[codegen-record] {s}: turn hit the {d}s wall-clock ceiling, so its recording " ++
-                    "would not replay; raise ZTTP_CODEGEN_TURN_TIMEOUT_MS for this corpus. " ++
-                    "Active case unchanged.\n",
-                .{ rc.name, record_turn_timeout_ms / 1000 },
-            );
-            return error.RecordedTurnHitTimeBudget;
+        staged += 1;
+        if (outcome.raw_first_draft_pass) raw_first_draft_passes += 1;
+        if (outcome.first_attempt_green) first_attempt_greens += 1;
+        if (outcome.applied) greens += 1;
+        if (outcome.intent_passed) intent_passes += 1;
+        if (!outcome.applied) {
+            try failures.append(allocator, .{
+                .case_name = rc.name,
+                .kind = .validation,
+                .error_name = @errorName(error.RecordedEditNotApplied),
+            });
         }
-        try recorder.finishTurn(result, &tr);
-        try recorder.captureExpectedWorkspace(tmp.abs_path);
-        std.debug.print(
-            "[codegen-record] [{d}/{d}] {s}: live turn captured " ++
-                "(calls={d} roundtrips={d} retries={d} tools={d}); checking result\n",
-            .{
-                total,
-                selected_case_count,
-                rc.name,
-                sink.next_call_index,
-                result.roundtrips,
-                result.veto_retry_count,
-                result.tool_call_count,
-            },
-        );
-        if (corpus_provider == headline_provider) {
-            if (firstAttemptExpectation(corpus_provider, null, rc.expect_first_attempt_green)) |expected| {
-                if (result.firstAttemptGreen() != expected) {
-                    std.debug.print(
-                        "[codegen-record] {s}: pinned first_attempt_green={} but fresh flow observed {}; active case unchanged\n",
-                        .{ rc.name, expected, result.firstAttemptGreen() },
-                    );
-                    return error.PinnedExpectationMismatch;
-                }
-            }
+        if (!outcome.intent_passed) {
+            try failures.append(allocator, .{
+                .case_name = rc.name,
+                .kind = .intent,
+                .error_name = @errorName(error.RecordedIntentCheckFailed),
+            });
         }
-
-        const zttp_bin: ?[]u8 = if (runtimeIntent(rc.intent) != null)
-            codegen.locateZttpBinary(ca, repo_root) orelse {
-                std.debug.print(
-                    "[codegen-record] {s}: declared intent cannot run because zig-out/bin/zttp is unavailable; active case unchanged\n",
-                    .{rc.name},
-                );
-                return error.IntentCheckUnavailable;
-            }
-        else
-            null;
-        var intent_passed = true;
-        requireRecordedIntent(
-            ca,
-            runtimeIntent(rc.intent),
-            tmp.abs_path,
-            zttp_bin,
-            codegen.runIntentCheck,
-        ) catch |err| {
-            intent_passed = false;
-            const handler_path: ?[]u8 = std.fs.path.join(
-                ca,
-                &.{ tmp.abs_path, "handler.ts" },
-            ) catch null;
-            if (handler_path) |path| {
-                if (zts.file_io.readFile(ca, path, 1024 * 1024)) |handler| {
-                    std.debug.print("[codegen-record] {s}: produced handler:\n{s}\n", .{ rc.name, handler });
-                } else |_| {}
-            }
-            const outcome: []const u8 = if (require_green)
-                "required-green mode will refuse promotion"
-            else
-                "failure will be measured and promoted";
-            std.debug.print(
-                "[codegen-record] {s}: declared intent did not pass ({s}); {s}\n",
-                .{ rc.name, @errorName(err), outcome },
-            );
-            if (err == error.IntentCheckUnavailable) return err;
-        };
-
-        requireGreenRecording(
-            require_green,
-            result.applied_edit,
-            intent_passed,
-        ) catch |err| {
-            std.debug.print(
-                "[codegen-record] {s}: required-green check failed " ++
-                    "(applied={} intent-passed={} error={s}); active case unchanged\n",
-                .{ rc.name, result.applied_edit, intent_passed, @errorName(err) },
-            );
-            return err;
-        };
-
-        std.debug.print(
-            "[codegen-record] [{d}/{d}] {s}: validating replay and promoting\n",
-            .{ total, selected_case_count, rc.name },
-        );
-        const active_version = try flow_promotion.validateAndPromote(
-            ca,
-            &recorder,
-            case_root_abs,
-            &registry,
-            request_config,
-        );
-        if (result.rawFirstDraftVetoPass()) raw_first_draft_passes += 1;
-        if (result.firstAttemptGreen()) first_attempt_greens += 1;
-        if (result.applied_edit) greens += 1;
-        const fail_code = codegen.firstZtsCode(&tr) orelse "-";
-        std.debug.print(
-            "[codegen-record] [{d}/{d}] {s}: promoted provider={s} model={s} flow={s} raw_first_draft_pass={} first_attempt_green={} applied={} compiler_authored={} roundtrips={d} retries={d} tools={d} calls={d} fail={s}\n",
-            .{
-                total,
-                selected_case_count,
-                rc.name,
-                corpus_provider.publicName(),
-                corpus_model,
-                active_version.slice()[0..12],
-                result.rawFirstDraftVetoPass(),
-                result.firstAttemptGreen(),
-                result.applied_edit,
-                result.compiler_authored_apply,
-                result.roundtrips,
-                result.veto_retry_count,
-                result.tool_call_count,
-                sink.next_call_index,
-                fail_code,
-            },
-        );
     }
     std.debug.print(
-        "[codegen-record] BASELINE raw first-draft pass: {d}/{d}; first-attempt green: {d}/{d}; reached-green: {d}/{d}\n",
-        .{ raw_first_draft_passes, total, first_attempt_greens, total, greens, total },
+        "[codegen-record] RUN raw first-draft pass: {d}/{d}; first-attempt green: {d}/{d}; " ++
+            "reached-green: {d}/{d}; intent-qualified: {d}/{d}; staged={d}; failures={d}\n",
+        .{
+            raw_first_draft_passes,
+            total,
+            first_attempt_greens,
+            total,
+            greens,
+            total,
+            intent_passes,
+            total,
+            staged,
+            failures.items.len,
+        },
     );
-    if (only_case != null and total != 1) return error.NamedCodegenCaseNotFound;
-    if (only_case == null and limit >= record_corpus.len and total != record_corpus.len) {
-        return error.CodegenCorpusCountMismatch;
+    for (failures.items) |failure| {
+        std.debug.print(
+            "[codegen-record] failure case={s} kind={s} error={s}\n",
+            .{ failure.case_name, @tagName(failure.kind), failure.error_name },
+        );
     }
+    if (total != selected_case_count) return error.CodegenCorpusCountMismatch;
+    const complete_green_run = recordingRunCanActivate(canonical_full_run, .{
+        .selected = total,
+        .staged = staged,
+        .applied = greens,
+        .intents_passed = intent_passes,
+        .failures = failures.items.len,
+    });
+    if (failures.items.len != 0 or staged != selected_case_count or
+        greens != selected_case_count or intent_passes != selected_case_count)
+    {
+        std.debug.print("[codegen-record] incomplete run quarantined at {s}\n", .{stage_root});
+        return error.CodegenRecordingRunFailed;
+    }
+    if (!complete_green_run) {
+        std.debug.print(
+            "[codegen-record] partial, filtered, or non-default-model run quarantined at {s}\n",
+            .{stage_root},
+        );
+        return error.PartialRecordingQuarantined;
+    }
+    try commitStagedCorpus(allocator, io, stage_root, out_dir);
+    std.debug.print(
+        "[codegen-record] activated complete {d}-case corpus at {s}\n",
+        .{ staged, out_dir },
+    );
 }
 
 /// The model a committed cassette was recorded against, read from the header
@@ -3241,7 +3605,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     if (stale.items.len > 0) {
         std.debug.print("[codegen-replay] {d} cassette(s) need re-recording:\n", .{stale.items.len});
         for (stale.items) |name| std.debug.print("  - {s}\n", .{name});
-        const command = try recordingCommand(a, replay_provider, true);
+        const command = try recordingCommand(a, replay_provider);
         std.debug.print("  {s}\n", .{command});
         return error.StaleCodegenCassette;
     }
@@ -3249,7 +3613,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     if (missing.items.len > 0) {
         std.debug.print("[codegen-replay] missing committed cassette(s) for {d} case(s):\n", .{missing.items.len});
         for (missing.items) |name| std.debug.print("  - {s}\n", .{name});
-        const command = try recordingCommand(a, replay_provider, false);
+        const command = try recordingCommand(a, replay_provider);
         std.debug.print(
             "  record with: {s}\n" ++
                 "  (the filter is a build option; `-- --test-filter` is dropped and records the whole corpus)\n",
@@ -3793,60 +4157,4 @@ test "a case with neither recording resolves to no steps" {
     defer anthropic_resolved.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 0), anthropic_resolved.responseCount());
     try std.testing.expectEqual(StepSource.flat_cassette, anthropic_resolved.source);
-}
-
-test "a failed recording restores the previous cassette" {
-    // The recorder deletes the case directory before recording over it, and its
-    // failure path deletes the partial too. Without a stash a failed run leaves
-    // the case with nothing where a working cassette had been - which has
-    // wiped the corpus once, recoverable only because cassettes are committed.
-    const allocator = testing.allocator;
-
-    var tmp = try IsolatedTmp.init(allocator, "codegen-stash");
-    defer tmp.cleanup(allocator);
-    try tmp.writeFile(allocator, "case/step_0.jsonl", "{\"sse\":\"original\"}\n");
-
-    // Stash, then clear, as the recorder does before a live turn.
-    try testing.expect(stashCaseDir(allocator, tmp.abs_path, "case"));
-    removeCaseDir(allocator, tmp.abs_path, "case");
-
-    const cleared = try tmp.childPath(allocator, "case/step_0.jsonl");
-    defer allocator.free(cleared);
-    try testing.expect(!zts.file_io.fileExists(allocator, cleared));
-
-    // The turn fails: restore.
-    restoreCaseDir(allocator, tmp.abs_path, "case");
-
-    const restored = try zts.file_io.readFile(allocator, cleared, 4096);
-    defer allocator.free(restored);
-    try testing.expectEqualStrings("{\"sse\":\"original\"}\n", restored);
-
-    // The stash itself is gone, so a later run does not trip over it.
-    const leftover = try tmp.childPath(allocator, "case" ++ stash_suffix ++ "/step_0.jsonl");
-    defer allocator.free(leftover);
-    try testing.expect(!zts.file_io.fileExists(allocator, leftover));
-}
-
-test "a successful recording drops the stash" {
-    const allocator = testing.allocator;
-
-    var tmp = try IsolatedTmp.init(allocator, "codegen-stash-ok");
-    defer tmp.cleanup(allocator);
-    try tmp.writeFile(allocator, "case/step_0.jsonl", "{\"sse\":\"old\"}\n");
-
-    try testing.expect(stashCaseDir(allocator, tmp.abs_path, "case"));
-    removeCaseDir(allocator, tmp.abs_path, "case");
-    // The turn succeeds and writes a new cassette.
-    try tmp.writeFile(allocator, "case/step_0.jsonl", "{\"sse\":\"new\"}\n");
-    dropStashedCaseDir(allocator, tmp.abs_path, "case");
-
-    const current = try tmp.childPath(allocator, "case/step_0.jsonl");
-    defer allocator.free(current);
-    const bytes = try zts.file_io.readFile(allocator, current, 4096);
-    defer allocator.free(bytes);
-    try testing.expectEqualStrings("{\"sse\":\"new\"}\n", bytes);
-
-    const leftover = try tmp.childPath(allocator, "case" ++ stash_suffix ++ "/step_0.jsonl");
-    defer allocator.free(leftover);
-    try testing.expect(!zts.file_io.fileExists(allocator, leftover));
 }
