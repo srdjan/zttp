@@ -328,20 +328,23 @@ assert that a raw literal is still refused at a call site.
 task 3's mitigation. A hand-written list would pass on the day it is written and
 start refusing a legitimate ABI type the first time one is added.
 
-**An inline record-array type resolves to its element.** Found while correcting
-the persona's JSX example on 2026-08-16, and unrelated to this plan's rule:
+**An inline record-array type resolved to its element. Fixed 2026-08-16.** Found
+while correcting the persona's JSX example, and unrelated to this plan's rule.
+`{ name: string }[]` was read as `{ name: string }`, so a member access on an
+element failed and an array argument was refused against a record parameter.
 
-```ts
-structural User = { name: string };
-function names(users: { name: string }[]): string { ... }  // property does not exist on type
-function names(users: User[]): string { ... }              // checks clean
-```
+`maybeArrayWrap` was reached from `resolveIdentType` alone, so a named or
+primitive element took the `[]` suffix and every other element form dropped it.
+Applying it across the record, tuple, paren, string-literal, template-literal,
+and number-literal paths closed it.
 
-`{ name: string }[]` is read as `{ name: string }`, so a member access on an
-element fails and an array argument is refused against a record parameter. The
-named-alias form is the workaround and the persona now teaches it. This wants
-its own reproduction and fix; it is noted here because the probe that found it
-belongs to this work, not because this plan closes it.
+The probe for that fix surfaced a second gap in the same parser: a parenthesised
+group whose body does not start with an identifier resolved to nothing at all.
+`(string | number)` parsed only because scanning for a parameter name found
+`string` and reached the missing-colon backtrack; `(() => string)` broke out of
+the loop and fell through to a `)` match that could not succeed. Both now take
+the same backtrack. This is why the array-suffix regression test also covers
+`(() => string)[]` and `("a" | "b")[]`.
 
 **Section 1.9 of the draft is not closed by this plan.** Whether a `structural`
 alias over a bare scalar should satisfy the rule is decided empirically by the

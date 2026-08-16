@@ -2169,24 +2169,34 @@ const TypeExprParser = struct {
 
         const c = self.source[self.pos];
 
+        // Every element form takes the `[]` suffix, not just a named one.
+        //
+        // `maybeArrayWrap` was reached through `resolveIdentType` alone, so
+        // `number[]` and `User[]` were arrays while every other form parsed its
+        // element and left the `[]` for nobody to consume. A declared
+        // `{ name: string }[]` resolved to `{ name: string }`, which then
+        // refused the array it was initialized with and refused `.length` on
+        // it. The alias form was the only spelling that worked, which is why
+        // the persona had to teach it.
+        //
         // Object type: { ... }
-        if (c == '{') return self.parseRecord();
+        if (c == '{') return self.maybeArrayWrap(self.parseRecord());
 
         // Tuple type: [ ... ]
-        if (c == '[') return self.parseTuple();
+        if (c == '[') return self.maybeArrayWrap(self.parseTuple());
 
         // Parenthesized type or function type: ( ... )
-        if (c == '(') return self.parseFunctionOrParen();
+        if (c == '(') return self.maybeArrayWrap(self.parseFunctionOrParen());
 
         // String literal type: "..." or '...'
-        if (c == '"' or c == '\'') return self.parseStringLiteral();
+        if (c == '"' or c == '\'') return self.maybeArrayWrap(self.parseStringLiteral());
 
         // Template literal type: `...${T}...`
-        if (c == '`') return self.parseTemplateLiteralType();
+        if (c == '`') return self.maybeArrayWrap(self.parseTemplateLiteralType());
 
         // Number literal (including negative)
         if (std.ascii.isDigit(c) or (c == '-' and self.pos + 1 < self.source.len and std.ascii.isDigit(self.source[self.pos + 1]))) {
-            return self.parseNumberLiteral();
+            return self.maybeArrayWrap(self.parseNumberLiteral());
         }
 
         // Identifier-based types
@@ -2330,7 +2340,24 @@ const TypeExprParser = struct {
         while (self.pos < self.source.len and self.source[self.pos] != ')') {
             self.skipWs();
             const param_name = self.scanIdent();
-            if (param_name.len == 0) break;
+            if (param_name.len == 0) {
+                // Not a parameter list: these parens group a type. Scanning for
+                // a parameter name found a token that cannot start one, which
+                // is every grouped form that does not begin with an identifier
+                // - `(() => string)`, `("a" | "b")`, `({ a: string } | null)`.
+                //
+                // Breaking here used to fall through to a `)` match that could
+                // not succeed, and the function returned null: the whole
+                // annotation resolved to nothing. An identifier-led group
+                // survived only because it reached the missing-colon backtrack
+                // below, so `(string | number)` parsed and `(() => string)` did
+                // not. Take the same backtrack.
+                self.pos = saved + 1;
+                const grouped = self.parseUnion();
+                self.skipWs();
+                _ = self.match(')');
+                return grouped;
+            }
 
             self.skipWs();
             var optional = false;
@@ -2456,6 +2483,10 @@ const TypeExprParser = struct {
     /// Consume any trailing `[]` array suffixes (`number[]`, `T[][]`) and wrap
     /// `base` in an array type for each one.
     fn maybeArrayWrap(self: *TypeExprParser, base: TypeIndex) TypeIndex {
+        // A failed element parse stays failed. Wrapping it would answer
+        // `never[]` for a type expression nobody could read, which is a worse
+        // answer than none and hides the failure from the caller.
+        if (base == null_type_idx) return base;
         var result = base;
         while (true) {
             self.skipWs();
@@ -3054,6 +3085,58 @@ test "parseTypeExpr array" {
     const idx = parseTypeExpr(&pool, allocator, "number[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(idx).?);
     try std.testing.expectEqual(pool.idx_number, pool.getArrayElement(idx));
+}
+
+test "parseTypeExpr applies the array suffix to every element form" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    // The suffix was applied in `resolveIdentType` only, so `number[]` and
+    // `User[]` were arrays while every other element form silently dropped the
+    // `[]` and resolved to the element. A declared `{ name: string }[]` became
+    // `{ name: string }`, which refused the array it was initialized with and
+    // then refused `.length` on it.
+    const record = parseTypeExpr(&pool, allocator, "{ name: string }[]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(record).?);
+    try std.testing.expectEqual(TypeTag.t_record, pool.getTag(pool.getArrayElement(record)).?);
+
+    const paren = parseTypeExpr(&pool, allocator, "(string | number)[]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(paren).?);
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(pool.getArrayElement(paren)).?);
+
+    // A parenthesised group whose body does not start with an identifier used
+    // to resolve to nothing at all, so this covers the grouping fix as well as
+    // the suffix.
+    const fn_paren = parseTypeExpr(&pool, allocator, "(() => string)");
+    try std.testing.expectEqual(TypeTag.t_function, pool.getTag(fn_paren).?);
+
+    const func = parseTypeExpr(&pool, allocator, "(() => string)[]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(func).?);
+    try std.testing.expectEqual(TypeTag.t_function, pool.getTag(pool.getArrayElement(func)).?);
+
+    const grouped_literals = parseTypeExpr(&pool, allocator, "(\"a\" | \"b\")[]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(grouped_literals).?);
+    try std.testing.expectEqual(TypeTag.t_union, pool.getTag(pool.getArrayElement(grouped_literals)).?);
+
+    const literal = parseTypeExpr(&pool, allocator, "\"GET\"[]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(literal).?);
+    try std.testing.expectEqual(TypeTag.t_literal_string, pool.getTag(pool.getArrayElement(literal)).?);
+
+    const tuple = parseTypeExpr(&pool, allocator, "[string, number][]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(tuple).?);
+    try std.testing.expectEqual(TypeTag.t_tuple, pool.getTag(pool.getArrayElement(tuple)).?);
+
+    // Nesting still stacks, and a bare element form is untouched.
+    const nested = parseTypeExpr(&pool, allocator, "{ name: string }[][]");
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(nested).?);
+    try std.testing.expectEqual(TypeTag.t_array, pool.getTag(pool.getArrayElement(nested)).?);
+
+    const bare = parseTypeExpr(&pool, allocator, "{ name: string }");
+    try std.testing.expectEqual(TypeTag.t_record, pool.getTag(bare).?);
+
+    const bare_tuple = parseTypeExpr(&pool, allocator, "[string, number]");
+    try std.testing.expectEqual(TypeTag.t_tuple, pool.getTag(bare_tuple).?);
 }
 
 test "parseTypeExpr string literal" {
