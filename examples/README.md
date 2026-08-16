@@ -32,7 +32,7 @@ The core shape of a zttp handler. Start with the three above, then:
 - [handler.ts](handler/handler.ts) - the canonical TS handler with `Proof<T, P>`.
 - [handler.tsx](handler/handler.tsx) - the same shape in TSX.
 - [handler-with-imports.ts](handler/handler-with-imports.ts) - importing multiple virtual modules.
-- [sugar.ts](handler/sugar.ts) - the small syntactic conveniences (array HOFs, `Object.keys`, arrow callbacks) the parser permits. Its `score += 50` is not one of them any more: compound assignment is a ZTS613 canonical error, so `zts check` reports it.
+- [sugar.ts](handler/sugar.ts) - the small syntactic conveniences the model-minimal profile keeps: arrow callbacks, array HOFs, and `Object.keys`. Compound assignment is not one of them, so the counter update is written in full.
 - [effects-capsule.ts](handler/effects-capsule.ts) - `Effects<T, "...">` as a handler budget, and the decidable rule for where a helper ceiling goes (ZTS610 and ZTS623).
 - [feature-probes.ts](handler/feature-probes.ts) - exact-output probes for runtime language features tracked in the feature matrix.
 - [spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) - a deliberately failing `Proof<T, P>` for the discharge diagnostics path.

@@ -1,19 +1,23 @@
-// Syntactic sugar demo
+// Syntactic sugar demo.
+//
+// The conveniences the model-minimal profile keeps: arrow callbacks, the array
+// higher-order functions, and `Object.keys`. Compound assignment is not one of
+// them - `score += 50` is ZTS613, so the update is written in full.
 
-function handler(req) {
-  const double = (x) => x * 2;
+function handler(req: Request): Response {
+  const double = (x: number): number => x * 2;
 
   let score = 100;
-  score += 50;
+  score = score + 50;
 
   const items = [1, 2, 3, 4, 5];
-  const evens = items.filter((n) => n % 2 === 0);
-  const doubled = evens.map((n) => n * 2);
-  const total = doubled.reduce((acc, n) => acc + n, 0);
+  const evens = items.filter((n: number) => n % 2 === 0);
+  const doubled = evens.map((n: number) => n * 2);
+  const total = doubled.reduce((acc: number, n: number) => acc + n, 0);
 
   const piped = double(score);
 
-  const keys = Object.keys({a: 1, b: 2});
+  const keys = Object.keys({ a: 1, b: 2 });
 
   return Response.json({
     score: score,
@@ -21,6 +25,6 @@ function handler(req) {
     doubled: doubled,
     total: total,
     piped: piped,
-    keys: keys
+    keys: keys,
   });
 }
