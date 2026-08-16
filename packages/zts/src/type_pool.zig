@@ -382,12 +382,27 @@ pub const TypePool = struct {
         return self.getName(node.nominal_name.start, node.nominal_name.len);
     }
 
-    /// Unwrap a nominal type to its base primitive. For non-nominal types, returns unchanged.
-    /// Nominal types are branded wrappers around primitives (string, number, boolean),
-    /// so widening always recovers the correct base type.
+    /// Unwrap a nominal type to its base primitive. A non-nominal type, and a
+    /// nominal one over a base this does not name, come back unchanged.
+    ///
+    /// The base is recovered from the tag rather than stored. `addNominalAlias`
+    /// copies the base node's tag and data and keeps no pointer back to it, so
+    /// the tag is the only record of what was branded. That is exact while a
+    /// nominal base is a scalar, which ZTS048 enforces at the declaration.
+    ///
+    /// This used to delegate to `widenLiteral` and answered wrongly for every
+    /// nominal that exists: a brand over `string` carries `.t_string`, not
+    /// `.t_literal_string`, so it fell through the literal arms and the
+    /// function returned its own argument. Nothing caught it because the one
+    /// caller keys on the tag, which is the same either way.
     pub fn unwrapNominal(self: *const TypePool, idx: TypeIndex) TypeIndex {
         if (!self.isNominal(idx)) return idx;
-        return self.widenLiteral(idx);
+        return switch (self.getTag(idx) orelse return idx) {
+            .t_string => self.idx_string,
+            .t_number => self.idx_number,
+            .t_boolean => self.idx_boolean,
+            else => idx,
+        };
     }
 
     // -------------------------------------------------------------------

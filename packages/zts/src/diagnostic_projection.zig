@@ -152,6 +152,7 @@ fn typeCode(kind: type_checker.DiagnosticKind) []const u8 {
         .non_contractive_alias => "ZTS212",
         .unencodable_json_payload => "ZTS213",
         .string_add => "ZTS105",
+        .nominal_constructor_call => "ZTS214",
     };
 }
 
@@ -255,7 +256,7 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    try std.testing.expectEqual(@as(usize, 66), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 67), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

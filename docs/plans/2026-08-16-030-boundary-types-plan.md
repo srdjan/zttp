@@ -93,6 +93,31 @@ DeepSeek and the local provider.
 
 ## Task 1: give `nominal` a construction path
 
+**Done.** `const id: UserId = "u-1"` brands and runs; `UserId("u-1")` reports
+ZTS214 and `serve` refuses it before the handler executes, so it cannot reach a
+runtime fault. `examples/patterns/nominal-brand.ts` asserts the erasure through
+a served response rather than only in the checker.
+
+Four things the work found that the task as written did not anticipate:
+
+- `type_pool.unwrapNominal` was broken and had been since it was written. It
+  delegated to `widenLiteral`, which fires only on the `.t_literal_*` tags,
+  while a brand over `string` carries `.t_string` copied from its base. It
+  returned its own argument for every nominal that can exist. Its one caller
+  keys on the tag, which is identical either way, so nothing observed it.
+- The literal-of-base narrowing at the annotated declaration had to be guarded.
+  A nominal node carries its base's tag, so `const id: UserId = "u-1"` read as
+  a plain string and the declaration collapsed to the literal type, dropping the
+  brand at the exact site that creates it.
+- The refusal cannot be reported from inference, which is `*const TypeChecker`.
+  It is reported from `walkExpr`, the mutable pass, and inference still answers
+  the alias type so the declaration does not raise a second mismatch on the same
+  line.
+- Three existing tests pinned the broken behaviour, asserting that
+  `UserId("usr_123")` was accepted and that the annotation form was refused.
+  They encoded a form that type-checked and then answered 500. The `distinct
+  type` and `nominal` test sets were also verbatim duplicates and are collapsed.
+
 The blocking prerequisite. Nothing else in this plan is testable until a nominal
 value can exist.
 
@@ -192,10 +217,32 @@ sites move with it.
 Run `bash scripts/test-examples.sh` after. This is the task that proves the rule
 is livable before it is imposed on recorded turns.
 
-## Task 7: re-record the two corpus cases
+## Task 7: re-record the corpus
 
-`sibling-helper` and `sibling-helper-holes`, against both the DeepSeek and the
-local provider, per [Cassette Recording](../internals/cassette-recording.md).
+**Owed now, and wider than this plan predicted.** Task 1 already staled the
+whole corpus, and `zig build test` is red on
+`codegen baseline replays at the committed first-draft pass rate` and
+`flow-backed corpus replay executes recorded compaction` until this task runs.
+
+The cause is attributed rather than guessed: reverting only the one-line fix to
+`packages/tools/src/example_registry.zig` makes the codegen replay pass again,
+with every other Task 1 change still in place. That file publishes
+`meta.payload.examples`, which the expert sends, so its bytes are inside the
+request digest each cassette pins. The new diagnostic is not the cause; the
+`policy_hash` did not move, because a type-checker code is not a rule-registry
+row.
+
+The conflict is between two gates and neither can yield. The published-example
+gate requires the `nominal` example to stop using `OrderId("o-1")`, because that
+form is now refused. Changing it stales every cassette. So the re-record is the
+only way both go green, and it was taken as a known debt rather than reverting a
+correct fix.
+
+This is therefore a full re-record, not the two cases the original scope named.
+`sibling-helper` and `sibling-helper-holes` remain the two whose *workspaces*
+trip `ZTS061` once task 3 lands, so running this task after task 3 rather than
+before it pays the cost once. Per
+[Cassette Recording](../internals/cassette-recording.md).
 
 The local corpus is parked at 16 of 19 cases and neither of these two is among
 the three that fail, so both should record. If either does not, that is the

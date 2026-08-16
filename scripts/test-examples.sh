@@ -274,6 +274,7 @@ run_tests_with_args "examples/patterns/derive-types.ts"              "examples/p
 run_tests_with_args "examples/patterns/json-and-dict.ts"             "examples/patterns/json-and-dict.test.jsonl"
 run_tests_with_args "examples/patterns/result-combinators.ts"      "examples/patterns/result-combinators.test.jsonl"
 run_tests_with_args "examples/patterns/bytes-boundary.ts"            "examples/patterns/bytes-boundary.test.jsonl"
+run_tests_with_args "examples/patterns/nominal-brand.ts"           "examples/patterns/nominal-brand.test.jsonl"
 
 # sql/ - a zttp:sql handler needs its schema to type-check; assert it proves
 # clean (this is the example whose one-arg sqlMany("listTodos") regressed when

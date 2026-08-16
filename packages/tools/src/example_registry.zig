@@ -346,7 +346,7 @@ pub const examples = [_]Example{
         \\}
         \\
         \\export function handler(req: Request): Guard<Response> {
-        \\  const id: OrderId = OrderId("o-1");
+        \\  const id: OrderId = "o-1";
         \\  return Response.text(label(id));
         \\}
         \\

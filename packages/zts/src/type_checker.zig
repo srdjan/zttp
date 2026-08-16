@@ -76,6 +76,7 @@ pub const DiagnosticKind = enum {
     non_contractive_alias, // a recursive alias whose cycle no data constructor guards
     unencodable_json_payload, // a `Response.json` payload whose type cannot be JSON
     string_add, // string-valued use of + instead of explicit join
+    nominal_constructor_call, // a nominal type name used in call position
 };
 
 pub const Diagnostic = struct {
@@ -461,7 +462,9 @@ pub const TypeChecker = struct {
                     const key = bindingKey(binding);
 
                     if (declared != null_type_idx and inferred != null_type_idx) {
-                        if (!self.env.isAssignableTo(inferred, declared)) {
+                        if (!self.env.isAssignableTo(inferred, declared) and
+                            !self.brandsAtDeclaration(declared, inferred))
+                        {
                             self.addTypeMismatch(node, declared, inferred);
                         }
                     }
@@ -486,6 +489,14 @@ pub const TypeChecker = struct {
                             if (vd.kind != .@"const") break :blk declared;
                             const dt = self.env.pool.getTag(declared) orelse break :blk declared;
                             const it = self.env.pool.getTag(inferred) orelse break :blk declared;
+                            // A nominal declared type is never narrowed to the
+                            // initializer's literal. It copies its base node's
+                            // tag, so a brand over `string` reads as `.t_string`
+                            // here and would be replaced by the literal type -
+                            // dropping the brand at the one site that creates
+                            // it, which is the opposite of what the annotation
+                            // was written to do.
+                            if (self.env.pool.isNominal(declared)) break :blk declared;
                             const is_literal_of_base =
                                 (dt == .t_number and it == .t_literal_number) or
                                 (dt == .t_string and it == .t_literal_string) or
@@ -736,6 +747,7 @@ pub const TypeChecker = struct {
             .call => {
                 const c = self.ir_view.getCall(node) orelse return;
                 self.collectSchemaCompileCall(c) catch self.markAllocationFailure();
+                self.reportNominalConstructorCall(node, c);
                 self.walkExpr(c.callee);
                 // Check argument types against function signature
                 self.checkCallArgs(node, c);
@@ -2714,7 +2726,10 @@ pub const TypeChecker = struct {
                 }
             }
         }
-        // Check if this is a nominal type constructor: UserId("str")
+        // A nominal name in call position keeps answering its own type here,
+        // which is what stops the declaration it sits in from raising a second,
+        // misleading mismatch on the same line. The refusal is reported once by
+        // `walkExpr`, which is the mutable pass; inference stays pure.
         if (self.env.getTypeAlias(name)) |alias_type| {
             if (self.env.pool.isNominal(alias_type)) {
                 return alias_type;
@@ -3887,6 +3902,75 @@ pub const TypeChecker = struct {
             .help = "route the recursion through a record, a tuple, or an array, the way `type JsonValue = ... | readonly JsonValue[]` does; a union or intersection edge does not guard it",
             .allocated = true,
         });
+    }
+
+    /// Refuse a nominal type name used in call position.
+    ///
+    /// `UserId("u-1")` used to check clean and then fault at runtime with
+    /// `NotCallable`. Inference answered the call's type from the alias table
+    /// and nothing lowered it, so codegen emitted an ordinary call to a name no
+    /// function defines. Erasing it in codegen is not available:
+    /// `parser/codegen.zig` receives its node types from
+    /// `packages/tools/src/precompile.zig` and from nowhere else, so an erasure
+    /// keyed on them would work under `zttp build` and fault under `zttp dev`.
+    ///
+    /// Refusing costs nothing. The form was unusable, and the annotated
+    /// declaration is the construction path that replaces it.
+    fn reportNominalConstructorCall(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag != .identifier) return;
+        const binding = self.ir_view.getBinding(call.callee) orelse return;
+        const name = self.resolveAtomName(binding.name_atom) orelse return;
+        const alias_type = self.env.getTypeAlias(name) orelse return;
+        if (!self.env.pool.isNominal(alias_type)) return;
+        self.addNominalConstructorCall(node, name);
+    }
+
+    fn addNominalConstructorCall(self: *TypeChecker, node: NodeIndex, name: []const u8) void {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "`{s}` is a nominal type, not a constructor",
+            .{name},
+        ) catch {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .nominal_constructor_call,
+                .node = node,
+                .message = "a nominal type is not a constructor",
+                .help = "brand at an annotated declaration: `const x: Name = value;`",
+            });
+            return;
+        };
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .nominal_constructor_call,
+            .node = node,
+            .message = msg,
+            .help = "brand at an annotated declaration: `const x: Name = value;`",
+            .allocated = true,
+        });
+    }
+
+    /// Whether an explicitly annotated declaration brands its initializer.
+    ///
+    /// A nominal type has to be creatable or it is a type no program can
+    /// produce a value of, and the annotated declaration is the site chosen for
+    /// it: `const id: UserId = "u-1";` brands, and nothing else does. The
+    /// admission deliberately stops here rather than living in
+    /// `isAssignableTo`, because a general rule would also admit
+    /// `takesUserId("u-1")` at every call site and leave the brand describing
+    /// nothing.
+    ///
+    /// The initializer must be assignable to the brand's own base. That keeps a
+    /// `nominal Port = number` from accepting a string, and keeps one brand
+    /// from accepting another - `unwrapNominal` answers the base, and a
+    /// different nominal is not assignable to it.
+    fn brandsAtDeclaration(self: *TypeChecker, declared: TypeIndex, inferred: TypeIndex) bool {
+        if (!self.env.pool.isNominal(declared)) return false;
+        if (self.env.pool.isNominal(inferred)) return false;
+        const base = self.env.pool.unwrapNominal(declared);
+        if (base == declared) return false;
+        return self.env.isAssignableTo(inferred, base);
     }
 
     fn addTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
@@ -5088,29 +5172,51 @@ test "TypeChecker: allows assignment to non-readonly property" {
     , 0, 0);
 }
 
-test "TypeChecker: distinct type rejects cross-nominal assignment" {
-    // SessionId should not be assignable to UserId
+test "TypeChecker: nominal construction is the annotated declaration" {
+    // The construction path, and the only one. A base-typed value becomes
+    // branded at an explicitly annotated declaration, which is the single
+    // visible widening point the brand allows.
     try checkTypedSource(
         \\nominal UserId = string;
-        \\nominal SessionId = string;
-        \\const sid: SessionId = SessionId("sess_456");
-        \\const uid: UserId = sid;
-    , 1, 0);
-}
-
-test "TypeChecker: distinct type constructor returns nominal type" {
-    // UserId("str") should produce a UserId, accepted where UserId is expected
-    try checkTypedSource(
-        \\nominal UserId = string;
-        \\const uid: UserId = UserId("usr_123");
+        \\const uid: UserId = "usr_123";
     , 0, 0);
 }
 
-test "TypeChecker: distinct type rejects raw base type" {
-    // raw string should not be assignable to UserId
+test "TypeChecker: the branded binding keeps its brand" {
+    // The declaration must not collapse to the initializer's literal type. A
+    // nominal node copies its base node's tag, so the literal-of-base
+    // narrowing that keeps `const n: number = 1` at type `1` reads a nominal
+    // over string as a plain string and would drop the brand silently. Without
+    // the guard this fails on the last line, and for the wrong reason.
     try checkTypedSource(
         \\nominal UserId = string;
-        \\const uid: UserId = "raw_string";
+        \\function widen(id: UserId): string { return id; }
+        \\const uid: UserId = "usr_123";
+        \\const out: string = widen(uid);
+    , 0, 0);
+}
+
+test "TypeChecker: a nominal constructor call is refused" {
+    // `UserId("usr_123")` used to type-check and then fault at runtime with
+    // NotCallable: the checker answered the call's type from the alias table
+    // and nothing lowered it, so codegen emitted a call to a name no function
+    // defines. Erasing it in codegen is not available - node types reach the
+    // generator on the precompile path only - so the refusal is what converts
+    // a 500 into a compile error.
+    try checkTypedSourceSaying(
+        \\nominal UserId = string;
+        \\const uid: UserId = UserId("usr_123");
+    , 1, "not a constructor");
+}
+
+test "TypeChecker: a raw value is still refused at a call site" {
+    // The admission is scoped to an annotated declaration on purpose. Widening
+    // it to every position where the expected type is known would admit this
+    // line and leave the brand doing nothing at all.
+    try checkTypedSource(
+        \\nominal UserId = string;
+        \\function widen(id: UserId): string { return id; }
+        \\const out: string = widen("usr_123");
     , 1, 0);
 }
 
@@ -5118,22 +5224,19 @@ test "TypeChecker: nominal rejects cross-nominal assignment" {
     try checkTypedSource(
         \\nominal UserId = string;
         \\nominal SessionId = string;
-        \\const sid: SessionId = SessionId("sess_456");
+        \\const sid: SessionId = "sess_456";
         \\const uid: UserId = sid;
     , 1, 0);
 }
 
-test "TypeChecker: nominal constructor returns nominal type" {
+test "TypeChecker: a nominal admits its own base and no other" {
     try checkTypedSource(
-        \\nominal UserId = string;
-        \\const uid: UserId = UserId("usr_123");
+        \\nominal Port = number;
+        \\const p: Port = 8080;
     , 0, 0);
-}
-
-test "TypeChecker: nominal rejects raw base type" {
     try checkTypedSource(
-        \\nominal UserId = string;
-        \\const uid: UserId = "raw_string";
+        \\nominal Port = number;
+        \\const p: Port = "8080";
     , 1, 0);
 }
 
