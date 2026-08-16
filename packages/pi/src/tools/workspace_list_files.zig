@@ -11,6 +11,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "list files",
     .effect = .read_workspace,
     .context_policy = .replayable_preview,
+    .model_exposure = .visible,
     .description = "List a bounded page of workspace files. Continue with next_offset until it is null.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":200}},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

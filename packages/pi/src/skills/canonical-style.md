@@ -2,7 +2,7 @@
 name: canonical-style
 description: Write handler code in the one-way ZigTS profile. One canonical spelling per operation; the compiler rejects the rest.
 ---
-ZigTS already cuts most of TypeScript. The one-way profile cuts further: for every operation there is exactly one canonical spelling, and the compiler rejects the alternates as ZTS6xx errors. Before writing or rewriting a handler, consult `zts_expert_describe_rule` and `zts_expert_features` for the live rule set rather than answering from memory.
+ZigTS already cuts most of TypeScript. The one-way profile cuts further: for every operation there is exactly one canonical spelling, and the compiler rejects the alternates as ZTS6xx errors. Before writing or rewriting a handler, call `zts_expert_query` with `describe_rule` or `features` for the live rule set rather than answering from memory.
 
 ## Canonical forms
 
@@ -154,7 +154,7 @@ Only flagged when `ready` is statically boolean: `x === true` is exactly `x` and
 
 ## Working rules for the agent
 
-1. Always consult live tools for rules and modules. Never answer language or module questions from memory: call `zts_expert_describe_rule`, `zts_expert_features`, `zts_expert_modules`.
+1. Always consult live tools for rules and modules. Never answer language or module questions from memory: call `zts_expert_query` with `describe_rule`, `features`, or `modules`.
 2. Run `zts_expert_canonicalize` against any file you edit before claiming the edit is done. The veto path rejects anything that introduces new violations.
-3. For optimizations, call `zts_expert_effects` and `zts_expert_ratchet` first, then include the proof-card delta in the reply. The loop emits a system note if you skip this step.
+3. For optimizations, call `zts_expert_query` with `effects` and `ratchet` first, then include the proof-card delta in the reply. The loop emits a system note if you skip this step.
 4. When the user asks about syntax that is rejected, cite the ZTS code and the canonical form from this skill.

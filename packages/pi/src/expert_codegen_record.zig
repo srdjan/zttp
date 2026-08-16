@@ -1024,10 +1024,10 @@ test "intent cohort is explicit and non-vacuous" {
 /// convergence. Unset leaves every registered tool in place, which is the
 /// shape every committed recording was made under.
 ///
-/// The motivating measurement: a case's *first* model call carries ~29,000
-/// prompt tokens before the task is even stated, and the whole 18-roundtrip
-/// transcript adds only ~5,000 more. Thirty-seven tools contribute roughly
-/// 21 KB of that preamble and the recorded traces call eight of them.
+/// The original motivating measurement found 37 tools and roughly 21 KB of
+/// provider schemas while recorded traces called eight. The frozen production
+/// catalog now exposes 21 tools and 11.2-11.8 KB depending on provider shape;
+/// this filter remains an experiment only and cannot publish evidence.
 ///
 /// Two things this deliberately does not do. It never drops `propose_change_set`,
 /// which `tool_catalog` emits ahead of the registry and is the only way an
@@ -1044,8 +1044,9 @@ fn applyToolAllowlist(registry: *registry_mod.Registry) !void {
     while (wanted.next()) |name_raw| {
         const name = std.mem.trim(u8, name_raw, " \t");
         if (name.len == 0) continue;
-        if (registry.findByName(name) == null) {
-            std.debug.print("[codegen-tools] no registered tool named '{s}'\n", .{name});
+        const definition = registry.findByName(name);
+        if (definition == null or !definition.?.allowedOn(.model)) {
+            std.debug.print("[codegen-tools] no model-visible tool named '{s}'\n", .{name});
             return error.UnknownToolInAllowlist;
         }
     }
@@ -1675,7 +1676,7 @@ const record_corpus = [_]RecordCase{
         .name = "health-holes",
         .prompt = "handler.ts has a hole() where its response belongs. Fill it so the " ++
             "handler responds to GET /health with Response.json({ ok: true }). Use " ++
-            "zts_expert_holes to read the frame and zts_expert_fill_hole to fill it.",
+            "zts_expert_query operation holes to read the frame and zts_expert_fill_hole to fill it.",
         .seed_files = &.{
             .{
                 .path = "handler.ts",
@@ -1703,7 +1704,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "handler.ts reads the \"hits\" counter from the \"counters\" namespace and " ++
             "has a hole() on each branch. Fill them so the handler returns the counter as " ++
             "JSON under a \"hits\" key, treating a missing counter as \"0\". Use " ++
-            "zts_expert_holes for the frame and zts_expert_fill_hole to fill each one.",
+            "zts_expert_query operation holes for the frame and zts_expert_fill_hole to fill each one.",
         .seed_files = &.{
             .{
                 .path = "handler.ts",
@@ -1737,7 +1738,7 @@ const record_corpus = [_]RecordCase{
         .name = "egress-options-holes",
         .prompt = "handler.ts already calls the upstream with an init object and has a hole() " ++
             "on each branch. Fill them so it returns the upstream JSON on success and a 502 " ++
-            "when the call fails. Use zts_expert_holes for the frame and " ++
+            "when the call fails. Use zts_expert_query operation holes for the frame and " ++
             "zts_expert_fill_hole to fill each one.",
         .seed_files = &.{
             .{
@@ -1773,7 +1774,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "handler.ts imports displayName() and apiToken() from ./lib/settings.ts and " ++
             "has a hole() on each branch. Fill them so the handler returns 503 when " ++
             "apiToken() is undefined and otherwise Response.json({ name: displayName() }). " ++
-            "The token must never appear in the response. Use zts_expert_holes for the " ++
+            "The token must never appear in the response. Use zts_expert_query operation holes for the " ++
             "frame and zts_expert_fill_hole to fill each one.",
         .seed_files = &.{
             .{
@@ -3022,7 +3023,7 @@ const deepseek_coverage_baseline = [_][]const u8{
     "ZTS501",
     "ZTS502",
 };
-const deepseek_coverage_headline_input_id = "2ab88da3e4754662a707350241d21c6062ce83fbf6bd2c16dfe33f726bc2f22d";
+const deepseek_coverage_headline_input_id = "8481ef07048c4dd5b78338d6dd8a4488a11fddf08f1d7b51eb0736f541269921";
 
 /// Return the live coverage floor for one exact model-visible input and model.
 /// Expected outcomes and thresholds cannot reset this ratchet.

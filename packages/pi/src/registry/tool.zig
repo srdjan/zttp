@@ -150,12 +150,22 @@ pub const InvocationSurface = enum {
     rpc,
 };
 
+/// Whether a trusted/RPC tool also belongs in the static model prefix. Some
+/// local commands are deliberately retained after a model-facing authority is
+/// consolidated; keeping that choice on the definition avoids name-based
+/// filtering in provider serializers.
+pub const ModelExposure = enum {
+    visible,
+    local_only,
+};
+
 pub const ToolDef = struct {
     name: []const u8,
     label: []const u8,
     description: []const u8,
     effect: ToolEffect,
     context_policy: ContextPolicy,
+    model_exposure: ModelExposure,
     input_schema: []const u8,
     decode_json: DecodeJsonFn,
     execute: ExecuteFn,
@@ -163,7 +173,7 @@ pub const ToolDef = struct {
     pub fn allowedOn(self: ToolDef, surface: InvocationSurface) bool {
         return switch (surface) {
             .trusted => true,
-            .model => switch (self.effect) {
+            .model => self.model_exposure == .visible and switch (self.effect) {
                 .analyze, .read_workspace, .execute_process, .persist_agent_state => true,
                 .write_workspace => false,
             },
@@ -334,4 +344,28 @@ test "singleArg allocates a one-element argv on the allocator" {
     defer testing.allocator.free(args);
     try testing.expectEqual(@as(usize, 1), args.len);
     try testing.expectEqualStrings("hello", args[0]);
+}
+
+test "local-only tools remain trusted but cannot enter the model prefix" {
+    const local_only: ToolDef = .{
+        .name = "local",
+        .label = "local",
+        .description = "local",
+        .effect = .analyze,
+        .context_policy = .exact,
+        .model_exposure = .local_only,
+        .input_schema = "{}",
+        .decode_json = decodeNoArgs,
+        .execute = testExecute,
+    };
+    try testing.expect(local_only.allowedOn(.trusted));
+    try testing.expect(!local_only.allowedOn(.model));
+    try testing.expect(local_only.allowedOn(.rpc));
+}
+
+fn testExecute(
+    allocator: std.mem.Allocator,
+    _: []const []const u8,
+) anyerror!ToolResult {
+    return .{ .ok = true, .llm_text = try allocator.dupe(u8, "ok") };
 }

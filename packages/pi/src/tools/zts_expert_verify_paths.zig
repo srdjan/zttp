@@ -12,6 +12,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "check handler",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Run one file-bound schema-v2 check and return its complete diagnostics, proof payload, and identity envelope.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"Handler file to check.\"}},\"required\":[\"file\"]}",
     .decode_json = decodeJson,

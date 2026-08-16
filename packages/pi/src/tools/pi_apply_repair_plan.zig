@@ -20,6 +20,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "apply-repair-plan",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description =
     \\Preview one or more exact bound repair candidates returned by
     \\zts_expert_canonicalize. The compiler rechecks source, profile, policy,

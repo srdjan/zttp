@@ -21,6 +21,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "narrow",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description =
     \\Report per-path label flow for a handler. Each diagnostic carries the
     \\path constraints (request method comparisons, stub truthiness checks,

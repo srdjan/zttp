@@ -28,6 +28,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "ast-rewrite",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .local_only,
     .description =
     \\Dispatch a typed RepairIntent into a verified in-memory canonical
     \\rewrite. Supported canonicalize refactors:

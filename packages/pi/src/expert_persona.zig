@@ -78,11 +78,9 @@ const prologue =
     \\
     \\Schema-v2 language discovery:
     \\  Identity and operation index           -> visible bootstrap note
-    \\  Full registries, grammar, examples     -> zts_expert_meta {view:"full"}
-    \\  Allowed and blocked language features  -> zts_expert_features
-    \\  Restrictions and rationale             -> zts_expert_restrictions
-    \\  Rules by code/name or full rule list   -> zts_expert_describe_rule
-    \\  Resolved module graph and exports      -> zts_expert_modules
+    \\  Meta, features, restrictions, rules,    -> zts_expert_query
+    \\  module graph, effects, holes, narrowing,
+    \\  and proven-property facts
     \\  File diagnostics and proof state       -> zts_expert_verify_paths
     \\  Canonical source and bound repairs     -> zts_expert_normalize,
     \\                                            zts_expert_canonicalize
@@ -188,7 +186,7 @@ test "stable core contains workflow and live protocol routing only" {
         "propose_change_set must be the only tool call",
         "Never claim a proposal was applied",
         "ZTS AGENT PROTOCOL BOOTSTRAP",
-        "zts_expert_meta {view:\"full\"}",
+        "zts_expert_query",
         "at most three read-only",
         "Do not end the turn with a discovery status",
     };
@@ -220,10 +218,11 @@ test "stable core routes language facts through schema-v2 discovery" {
     const prompt = try buildSystemPrompt(testing.allocator);
     defer testing.allocator.free(prompt);
 
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_describe_rule") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_features") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_restrictions") != null);
-    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_modules") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_query") != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_meta") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_features") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_restrictions") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_modules") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_recall_facts") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "zts_expert_reference") == null);
     try testing.expect(std.mem.indexOf(u8, prompt, "pi_witnesses") == null);

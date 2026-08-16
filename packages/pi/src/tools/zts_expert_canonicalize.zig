@@ -11,6 +11,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "canonicalize preview",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Preview local canonical ZigTS refactor intents. Set simulate=true to apply previews in memory through edit_simulate.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"Handler file to analyze.\"},\"simulate\":{\"type\":\"boolean\",\"description\":\"Apply previews in memory and run edit_simulate.\"}},\"required\":[\"file\"]}",
     .decode_json = decodeJson,

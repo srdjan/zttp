@@ -11,6 +11,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "resolved modules",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Resolve one handler's complete module graph and return built-ins, extensions, rejections, and the bound graph hash through schema v2.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"file\":{\"type\":\"string\",\"description\":\"Entry handler file to resolve.\"}},\"required\":[\"file\"]}",
     .decode_json = decodeJson,

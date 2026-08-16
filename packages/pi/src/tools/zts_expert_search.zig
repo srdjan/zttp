@@ -16,6 +16,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "search rules",
     .effect = .analyze,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Search schema-v2 diagnostic rules by keyword substring across name, description, and help.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"description\":\"Case-sensitive keyword substring to search for.\"}},\"required\":[\"query\"]}",
     .decode_json = decodeJson,

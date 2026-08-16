@@ -11,6 +11,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "describe rule",
     .effect = .analyze,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Discover a rule by name or code, or list all rules when called without a rule, through the schema-v2 compiler protocol.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"rule\":{\"type\":\"string\",\"description\":\"Optional rule code or name.\"}},\"required\":[]}",
     .decode_json = decodeJson,

@@ -1820,6 +1820,7 @@ test "local tool serializer uses Chat Completions function wrappers" {
         .description = "Inspect the workspace.",
         .effect = .read_workspace,
         .context_policy = .exact,
+        .model_exposure = .visible,
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
         .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = unusedExecute,

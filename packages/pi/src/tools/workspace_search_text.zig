@@ -12,6 +12,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "search text",
     .effect = .execute_process,
     .context_policy = .replayable_preview,
+    .model_exposure = .visible,
     .description = "Search a bounded page of path/line matches. Continue with next_offset until it is null; read the cited line for complete text. inventory_complete is false when the match inventory itself hit its ceiling, so narrow the query or path.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\",\"maxLength\":512},\"path\":{\"type\":\"string\"},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"limit\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":50}},\"required\":[\"query\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

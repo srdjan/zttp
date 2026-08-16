@@ -17,6 +17,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "repair-plan",
     .effect = .persist_agent_state,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description =
     \\Generate compiler-native typed repair plans for a handler.
     \\The tool runs handler verification and property witness analysis,

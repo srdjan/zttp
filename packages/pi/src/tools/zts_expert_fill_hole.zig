@@ -1,6 +1,6 @@
 //! zts_expert_fill_hole - spend a turn on exactly one hole.
 //!
-//! `zts_expert_holes` publishes the frame around each `hole()`, and the persona
+//! `zts_expert_query` operation `holes` publishes the frame around each `hole()`, and the persona
 //! asks the agent to fill one per turn. Asking is not the mechanism. A turn that
 //! hands back a whole file is emitting from the model's full distribution no
 //! matter what the instruction said, and the veto is left to reject whatever
@@ -46,14 +46,15 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "fill hole",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description =
     \\Replace one `hole()` with one expression and report the compiler's
-    \\verdict. Takes the `line` and `column` from a `zts_expert_holes` entry
+    \\verdict. Takes the `line` and `column` from a `zts_expert_query` holes entry
     \\and the expression to put there.
     \\
     \\This is the only edit the tool can make: the bytes of that `hole()` call
     \\are replaced and nothing else in the file moves. Use it instead of
-    \\rewriting the file - the frame `zts_expert_holes` gave you (expectedType,
+    \\rewriting the file - the frame from query operation `holes` (expectedType,
     \\inScope, remainingBudget, undischarged) is the whole specification of the
     \\expression, and a file rewrite throws that away.
     \\
@@ -139,7 +140,7 @@ fn execute(
             line,
             column,
             "no_hole_at_site",
-            "no `hole()` starts at that line and column; re-read zts_expert_holes, because a fill earlier in the turn moves every later hole's coordinates",
+            "no `hole()` starts at that line and column; re-run zts_expert_query operation holes, because a fill earlier in the turn moves every later hole's coordinates",
         );
     };
 

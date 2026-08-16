@@ -3,9 +3,11 @@
 comptime {
     _ = @import("registry/tool.zig");
     _ = @import("registry/registry.zig");
+    _ = @import("tools/zts_expert_query.zig");
     _ = @import("tools/zts_expert_meta.zig");
     _ = @import("meta_bootstrap.zig");
     _ = @import("tool_registry.zig");
+    _ = @import("tool_catalog_consolidation_test.zig");
     _ = @import("tools/zts_expert_verify_paths.zig");
     _ = @import("tools/zts_expert_canonicalize.zig");
     _ = @import("tools/zts_expert_normalize.zig");

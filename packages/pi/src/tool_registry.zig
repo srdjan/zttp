@@ -3,18 +3,13 @@
 const std = @import("std");
 const registry_mod = @import("registry/registry.zig");
 
-const meta_tool = @import("tools/zts_expert_meta.zig");
+const query_tool = @import("tools/zts_expert_query.zig");
 const verify_paths_tool = @import("tools/zts_expert_verify_paths.zig");
 const canonicalize_tool = @import("tools/zts_expert_canonicalize.zig");
 const normalize_tool = @import("tools/zts_expert_normalize.zig");
-const describe_rule_tool = @import("tools/zts_expert_describe_rule.zig");
-const search_tool = @import("tools/zts_expert_search.zig");
 const review_patch_tool = @import("tools/zts_expert_review_patch.zig");
 const prove_patch_tool = @import("tools/zts_expert_prove_patch.zig");
 const system_proof_tool = @import("tools/zts_expert_system_proof.zig");
-const features_tool = @import("tools/zts_expert_features.zig");
-const restrictions_tool = @import("tools/zts_expert_restrictions.zig");
-const modules_tool = @import("tools/zts_expert_modules.zig");
 const verify_modules_tool = @import("tools/zts_expert_verify_modules.zig");
 const workspace_list_files_tool = @import("tools/workspace_list_files.zig");
 const workspace_read_file_tool = @import("tools/workspace_read_file.zig");
@@ -33,11 +28,7 @@ const pi_witnesses_tool = @import("tools/pi_witnesses.zig");
 const pi_remember_fact_tool = @import("tools/pi_remember_fact.zig");
 const pi_recall_facts_tool = @import("tools/pi_recall_facts.zig");
 const pi_extension_catalog_tool = @import("tools/pi_extension_catalog.zig");
-const effects_tool = @import("tools/zts_expert_effects.zig");
-const holes_tool = @import("tools/zts_expert_holes.zig");
 const fill_hole_tool = @import("tools/zts_expert_fill_hole.zig");
-const narrow_tool = @import("tools/zts_expert_narrow.zig");
-const ratchet_tool = @import("tools/zts_expert_ratchet.zig");
 
 const Registry = registry_mod.Registry;
 const ToolDef = registry_mod.ToolDef;
@@ -60,24 +51,15 @@ const workspace_bundle = [_]ToolDef{
 };
 
 const analysis_bundle = [_]ToolDef{
-    meta_tool.tool,
+    query_tool.tool,
     verify_paths_tool.tool,
     canonicalize_tool.tool,
     normalize_tool.tool,
-    describe_rule_tool.tool,
-    search_tool.tool,
     review_patch_tool.tool,
     prove_patch_tool.tool,
     system_proof_tool.tool,
-    features_tool.tool,
-    restrictions_tool.tool,
-    modules_tool.tool,
     verify_modules_tool.tool,
-    effects_tool.tool,
-    holes_tool.tool,
     fill_hole_tool.tool,
-    narrow_tool.tool,
-    ratchet_tool.tool,
 };
 
 const build_bundle = [_]ToolDef{

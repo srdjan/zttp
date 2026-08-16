@@ -11,6 +11,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "language features",
     .effect = .analyze,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Discover allowed and blocked language features from the schema-v2 compiler protocol. Takes no arguments.",
     .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeNoArgs,

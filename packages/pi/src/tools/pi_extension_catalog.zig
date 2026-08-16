@@ -38,6 +38,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "extension-catalog",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .local_only,
     .description =
     \\Confirm whether a partner specifier (`zttp-ext:*`) is registered for
     \\this session via one or more `zttp-module.json` manifests. Pass the

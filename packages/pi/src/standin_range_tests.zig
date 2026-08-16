@@ -177,7 +177,7 @@ test "stand-in gate: shared review kind keeps each entry behavior" {
         const expected_tool = if (std.mem.eql(u8, entry.id, "review"))
             "workspace_read_file"
         else
-            "zts_expert_modules";
+            "zts_expert_query";
         for (entry.paraphrases) |paraphrase| {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
@@ -253,15 +253,15 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
         outputs: []const ?[]const u8 = &.{},
     };
     const cases = [_]SequenceCase{
-        .{ .entry_id = "explain", .tools = &.{"zts_expert_modules"} },
+        .{ .entry_id = "explain", .tools = &.{"zts_expert_query"} },
         .{ .entry_id = "review", .tools = &.{"workspace_read_file"} },
-        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_modules", "propose_change_set" } },
-        .{ .entry_id = "add-env", .tools = &.{ "zts_expert_modules", "workspace_read_file", "propose_change_set" } },
+        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_query", "propose_change_set" } },
+        .{ .entry_id = "add-env", .tools = &.{ "zts_expert_query", "workspace_read_file", "propose_change_set" } },
         .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file" } },
         .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "propose_change_set" } },
         .{
             .entry_id = "fill-hole",
-            .tools = &.{ "workspace_read_file", "zts_expert_holes", "zts_expert_fill_hole", "propose_change_set" },
+            .tools = &.{ "workspace_read_file", "zts_expert_query", "zts_expert_fill_hole", "propose_change_set" },
             .outputs = &.{
                 null,
                 null,

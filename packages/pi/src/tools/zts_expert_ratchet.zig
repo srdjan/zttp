@@ -23,6 +23,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "ratchet",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description =
     \\Report the property set the compiler currently proves for a handler.
     \\The set comes from contract.json under provenSpecs (also signed inside

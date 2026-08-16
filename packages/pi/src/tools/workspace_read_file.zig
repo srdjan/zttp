@@ -14,6 +14,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "read file",
     .effect = .read_workspace,
     .context_policy = .replayable_preview,
+    .model_exposure = .visible,
     .description = "Read a bounded, replayable page of a workspace file. Continue with next_offset until complete.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"start_line\":{\"type\":\"integer\",\"minimum\":1},\"end_line\":{\"type\":\"integer\",\"minimum\":1},\"offset\":{\"type\":\"integer\",\"minimum\":0},\"max_bytes\":{\"type\":\"integer\",\"minimum\":1,\"maximum\":6144}},\"required\":[\"path\"]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

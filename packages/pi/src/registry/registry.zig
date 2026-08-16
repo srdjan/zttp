@@ -113,6 +113,7 @@ const echo_tool: ToolDef = .{
     .description = "Concatenate args with spaces",
     .effect = .analyze,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .input_schema =
     \\{"type":"object","properties":{"parts":{"type":"array","items":{"type":"string"}}},"required":["parts"]}
     ,
@@ -126,6 +127,7 @@ const writer_tool: ToolDef = .{
     .description = "Test-only workspace writer",
     .effect = .write_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .input_schema = "{}",
     .decode_json = tool_mod.decodeNoArgs,
     .execute = echoExecute,
@@ -199,13 +201,20 @@ test "unknown tool fails on findByName and invoke" {
     try testing.expectError(RegistryError.ToolNotFound, err);
 }
 
-test "context policy has no default and must be selected by every tool" {
+test "context policy and model exposure have no defaults" {
     const fields = @typeInfo(ToolDef).@"struct".fields;
+    var found_context = false;
+    var found_exposure = false;
     inline for (fields) |field| {
         if (comptime std.mem.eql(u8, field.name, "context_policy")) {
             try testing.expect(field.default_value_ptr == null);
-            return;
+            found_context = true;
+        }
+        if (comptime std.mem.eql(u8, field.name, "model_exposure")) {
+            try testing.expect(field.default_value_ptr == null);
+            found_exposure = true;
         }
     }
-    return error.TestExpectedContextPolicyField;
+    try testing.expect(found_context);
+    try testing.expect(found_exposure);
 }

@@ -916,7 +916,7 @@ fn emitNotificationEnvelope(
 
 const testing = std.testing;
 const turn = @import("turn.zig");
-const meta_tool = @import("tools/zts_expert_meta.zig");
+const query_tool = @import("tools/zts_expert_query.zig");
 
 const CannedClient = struct {
     reply: turn.AssistantReply,
@@ -942,13 +942,14 @@ const CannedClient = struct {
 fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
-    try reg.register(allocator, meta_tool.tool);
+    try reg.register(allocator, query_tool.tool);
     try reg.register(allocator, .{
         .name = "test_workspace_writer",
         .label = "test writer",
         .description = "Must never be exposed or invoked over RPC.",
         .effect = .write_workspace,
         .context_policy = .exact,
+        .model_exposure = .visible,
         .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
         .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = struct {
@@ -966,6 +967,7 @@ fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
         .description = "Must never be exposed or invoked over RPC.",
         .effect = .execute_process,
         .context_policy = .structured_digest,
+        .model_exposure = .visible,
         .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
         .decode_json = registry_mod.helpers.decodeNoArgs,
         .execute = struct {
@@ -1216,8 +1218,8 @@ test "rpc: tools.list returns registered tool names" {
         &buf,
     );
 
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "zts_expert_meta") != null);
-    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"effect\":\"analyze\"") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "zts_expert_query") != null);
+    try testing.expect(std.mem.indexOf(u8, buf.written(), "\"effect\":\"read_workspace\"") != null);
     try testing.expect(std.mem.indexOf(u8, buf.written(), "test_workspace_writer") == null);
     try testing.expect(std.mem.indexOf(u8, buf.written(), "test_process_runner") == null);
 }
@@ -1453,7 +1455,7 @@ test "rpc: tools.invoke with known tool returns {ok, body}" {
 
     try driveWith(
         allocator,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"zts_expert_meta\"}}\n" ++
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools.invoke\",\"params\":{\"name\":\"zts_expert_query\",\"args_json\":\"{\\\"operation\\\":\\\"meta\\\"}\"}}\n" ++
             "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}\n",
         &buf,
     );

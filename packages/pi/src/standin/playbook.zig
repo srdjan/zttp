@@ -87,7 +87,11 @@ fn renderRouteAdd(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 1, "zts_expert_verify_paths", args);
         },
-        2 => try renderToolCall(allocator, 2, "zts_expert_modules", "{}"),
+        2 => blk: {
+            const args = try renderQueryArgs(allocator, "modules", "file", spec.file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 2, "zts_expert_query", args);
+        },
         // The host veto is the one pre-apply authority, so the playbook submits
         // the complete draft once instead of duplicating it through a second
         // model-visible simulation tool.
@@ -146,7 +150,16 @@ fn renderReviewExplain(allocator: std.mem.Allocator, parsed: request.ParsedReque
             const args = try renderReadArgs(allocator, findFile(parsed.ask) orelse "handler.ts");
             defer allocator.free(args);
             break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
-        } else try renderToolCall(allocator, 0, "zts_expert_modules", "{}"),
+        } else blk: {
+            const args = try renderQueryArgs(
+                allocator,
+                "modules",
+                "file",
+                findFile(parsed.ask) orelse "handler.ts",
+            );
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 0, "zts_expert_query", args);
+        },
         else => if (is_review)
             // Review answers in text and applies no edit, so an unreadable
             // file costs an answer rather than a file.
@@ -192,7 +205,11 @@ fn renderReviewText(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
 fn renderEnvFeature(allocator: std.mem.Allocator, parsed: request.ParsedRequest) ![]u8 {
     const file = findFile(parsed.ask) orelse "handler.ts";
     return switch (parsed.step_index) {
-        0 => try renderToolCall(allocator, 0, "zts_expert_modules", "{}"),
+        0 => blk: {
+            const args = try renderQueryArgs(allocator, "modules", "file", file);
+            defer allocator.free(args);
+            break :blk try renderToolCall(allocator, 0, "zts_expert_query", args);
+        },
         1 => blk: {
             const args = try renderReadArgs(allocator, file);
             defer allocator.free(args);
@@ -355,9 +372,9 @@ fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             break :blk try renderToolCall(allocator, 0, "workspace_read_file", args);
         },
         1 => blk: {
-            const args = try renderReadArgs(allocator, file);
+            const args = try renderQueryArgs(allocator, "holes", "path", file);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 1, "zts_expert_holes", args);
+            break :blk try renderToolCall(allocator, 1, "zts_expert_query", args);
         },
         2 => blk: {
             const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fill-hole");
@@ -1167,6 +1184,25 @@ fn renderVerifyPathsArgs(allocator: std.mem.Allocator, file: []const u8) ![]u8 {
     try buf.writer().writeAll("{\"file\":");
     try writeJsonString(buf.writer(), file);
     try buf.writer().writeByte('}');
+    return try buf.toOwnedSlice();
+}
+
+fn renderQueryArgs(
+    allocator: std.mem.Allocator,
+    operation: []const u8,
+    field: []const u8,
+    value: []const u8,
+) ![]u8 {
+    var buf = TextBuffer.init(allocator);
+    defer buf.deinit();
+    const writer = buf.writer();
+    try writer.writeAll("{\"operation\":");
+    try writeJsonString(writer, operation);
+    try writer.writeAll(",");
+    try writeJsonString(writer, field);
+    try writer.writeByte(':');
+    try writeJsonString(writer, value);
+    try writer.writeByte('}');
     return try buf.toOwnedSlice();
 }
 

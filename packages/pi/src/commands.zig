@@ -16,15 +16,18 @@ const CommandRow = struct {
     tool: []const u8,
     takes_trailing_args: bool,
     exact_trailing_args: ?usize = null,
+    /// The unified query needs its operation tag as argv[0]. For slash forms
+    /// that is the slash token; for explicit `zts` forms it is the subcommand.
+    include_command: bool = false,
 };
 
 pub const command_table = [_]CommandRow{
-    .{ .slash = "/meta", .explicit = "meta", .tool = "zts_expert_meta", .takes_trailing_args = false },
-    .{ .slash = "/features", .explicit = "features", .tool = "zts_expert_features", .takes_trailing_args = false },
-    .{ .slash = "/restrictions", .explicit = "restrictions", .tool = "zts_expert_restrictions", .takes_trailing_args = false },
-    .{ .slash = "/modules", .explicit = "modules", .tool = "zts_expert_modules", .takes_trailing_args = true },
-    .{ .slash = "/rule", .explicit = "describe-rule", .tool = "zts_expert_describe_rule", .takes_trailing_args = true },
-    .{ .slash = "/search", .explicit = "search", .tool = "zts_expert_search", .takes_trailing_args = true },
+    .{ .slash = "/meta", .explicit = "meta", .tool = "zts_expert_query", .takes_trailing_args = false, .include_command = true },
+    .{ .slash = "/features", .explicit = "features", .tool = "zts_expert_query", .takes_trailing_args = false, .include_command = true },
+    .{ .slash = "/restrictions", .explicit = "restrictions", .tool = "zts_expert_query", .takes_trailing_args = false, .include_command = true },
+    .{ .slash = "/modules", .explicit = "modules", .tool = "zts_expert_query", .takes_trailing_args = true, .include_command = true },
+    .{ .slash = "/rule", .explicit = "describe-rule", .tool = "zts_expert_query", .takes_trailing_args = true, .include_command = true },
+    .{ .slash = "/search", .explicit = "search", .tool = "zts_expert_query", .takes_trailing_args = true, .include_command = true },
     .{ .slash = "/verify", .explicit = "verify-paths", .tool = "zts_expert_verify_paths", .takes_trailing_args = true, .exact_trailing_args = 1 },
     .{ .slash = null, .explicit = "verify-modules", .tool = "zts_expert_verify_modules", .takes_trailing_args = true },
     .{ .slash = "/check", .explicit = "check", .tool = "zts_check", .takes_trailing_args = true },
@@ -41,8 +44,9 @@ pub fn lookup(argv: []const []const u8) ?LocalCommand {
         inline for (command_table) |row| {
             if (row.slash) |slash| {
                 if (std.mem.eql(u8, argv[0], slash)) {
-                    const args: []const []const u8 = if (row.takes_trailing_args) argv[1..] else &.{};
-                    if (row.exact_trailing_args) |count| if (args.len != count) return null;
+                    const trailing: []const []const u8 = if (row.takes_trailing_args) argv[1..] else &.{};
+                    if (row.exact_trailing_args) |count| if (trailing.len != count) return null;
+                    const args = if (row.include_command) argv else trailing;
                     return .{ .tool_name = row.tool, .args = args };
                 }
             }
@@ -55,8 +59,9 @@ pub fn lookup(argv: []const []const u8) ?LocalCommand {
         inline for (command_table) |row| {
             if (row.explicit) |name| {
                 if (std.mem.eql(u8, argv[1], name)) {
-                    const args: []const []const u8 = if (row.takes_trailing_args) argv[2..] else &.{};
-                    if (row.exact_trailing_args) |count| if (args.len != count) return null;
+                    const trailing: []const []const u8 = if (row.takes_trailing_args) argv[2..] else &.{};
+                    if (row.exact_trailing_args) |count| if (trailing.len != count) return null;
+                    const args = if (row.include_command) argv[1..] else trailing;
                     return .{ .tool_name = row.tool, .args = args };
                 }
             }
@@ -140,18 +145,18 @@ pub fn isViewChat(name: []const u8) bool {
 
 const testing = std.testing;
 
-test "lookup slash /meta returns meta tool" {
+test "lookup slash /meta returns the tagged query" {
     const argv = [_][]const u8{"/meta"};
     const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zts_expert_meta", cmd.tool_name);
-    try testing.expectEqual(@as(usize, 0), cmd.args.len);
+    try testing.expectEqualStrings("zts_expert_query", cmd.tool_name);
+    try testing.expectEqualSlices([]const u8, &.{"/meta"}, cmd.args);
 }
 
-test "lookup explicit zts meta returns meta tool" {
+test "lookup explicit zts meta returns the tagged query" {
     const argv = [_][]const u8{ "zts", "meta" };
     const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zts_expert_meta", cmd.tool_name);
-    try testing.expectEqual(@as(usize, 0), cmd.args.len);
+    try testing.expectEqualStrings("zts_expert_query", cmd.tool_name);
+    try testing.expectEqualSlices([]const u8, &.{"meta"}, cmd.args);
 }
 
 test "lookup unknown slash returns null" {
@@ -177,22 +182,20 @@ test "lookup zig build my-step routes to zig_build_step" {
 test "lookup /rule forwards trailing args" {
     const argv = [_][]const u8{ "/rule", "ZTS303" };
     const cmd = lookup(&argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zts_expert_describe_rule", cmd.tool_name);
-    try testing.expectEqual(@as(usize, 1), cmd.args.len);
-    try testing.expectEqualStrings("ZTS303", cmd.args[0]);
+    try testing.expectEqualStrings("zts_expert_query", cmd.tool_name);
+    try testing.expectEqualSlices([]const u8, &.{ "/rule", "ZTS303" }, cmd.args);
 }
 
 test "lookup discovery commands routes restrictions and requires a modules argument" {
     const restrictions_argv = [_][]const u8{"/restrictions"};
     const restrictions = lookup(&restrictions_argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zts_expert_restrictions", restrictions.tool_name);
-    try testing.expectEqual(@as(usize, 0), restrictions.args.len);
+    try testing.expectEqualStrings("zts_expert_query", restrictions.tool_name);
+    try testing.expectEqualSlices([]const u8, &.{"/restrictions"}, restrictions.args);
 
     const modules_argv = [_][]const u8{ "/modules", "handler.ts" };
     const modules = lookup(&modules_argv) orelse return error.TestFailed;
-    try testing.expectEqualStrings("zts_expert_modules", modules.tool_name);
-    try testing.expectEqual(@as(usize, 1), modules.args.len);
-    try testing.expectEqualStrings("handler.ts", modules.args[0]);
+    try testing.expectEqualStrings("zts_expert_query", modules.tool_name);
+    try testing.expectEqualSlices([]const u8, &.{ "/modules", "handler.ts" }, modules.args);
 }
 
 test "lookup verify routes exactly one file" {

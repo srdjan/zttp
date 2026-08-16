@@ -73,7 +73,7 @@ explicitly.
 | `ZTTP_CODEGEN_TURN_TIMEOUT_MS` | Per-turn ceiling. Defaults to 180000. |
 | `ZTTP_CODEGEN_LOCAL_RUNTIME` | `name@version` of the local server stack. Local provider only. |
 | `ZTTP_CODEGEN_MODEL_REVISION` | Overrides the model revision the recorder otherwise reads from the Hugging Face cache. Local provider only. |
-| `ZTTP_CODEGEN_TOOLS` | Comma-separated allowlist that shrinks the model-facing tool catalog, for measuring whether a smaller preamble changes convergence. It never drops `apply_edit`, and it fails on a name matching no registered tool. Unset is the shape every committed recording was made under. |
+| `ZTTP_CODEGEN_TOOLS` | Comma-separated allowlist that shrinks the model-facing tool catalog, for non-publishable experiments. It never drops `propose_change_set`, and it fails on a name matching no model-visible tool. |
 | `ZTTP_CODEGEN_REPLAY_PROVIDER` | Replays a non-headline corpus. Recording ignores it. |
 
 ### The per-turn ceiling

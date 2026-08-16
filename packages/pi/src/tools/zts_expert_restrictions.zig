@@ -11,6 +11,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "language restrictions",
     .effect = .analyze,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Discover language restrictions and their proof rationale from the schema-v2 compiler protocol. Takes no arguments.",
     .input_schema = "{\"type\":\"object\",\"properties\":{},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeNoArgs,

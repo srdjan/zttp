@@ -9,6 +9,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "zig test",
     .effect = .execute_process,
     .context_policy = .structured_digest,
+    .model_exposure = .visible,
     .description = "Run a safe `zig build <test-step>` invocation in the repo root.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"step\":{\"type\":\"string\"}},\"required\":[]}",
     .decode_json = decodeJson,

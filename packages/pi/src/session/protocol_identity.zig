@@ -94,6 +94,7 @@ test "protocol identity is deterministic and binds the live catalog" {
         .label = "read",
         .effect = .analyze,
         .context_policy = .exact,
+        .model_exposure = .visible,
         .description = "read compiler data",
         .input_schema = "{\"type\":\"object\",\"properties\":{}}",
         .decode_json = testDecode,

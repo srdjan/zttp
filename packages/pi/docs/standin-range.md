@@ -106,7 +106,7 @@ Drafts the stand-in emits expecting the veto to reject them, so the rejection ha
 
 ## Hole seeds
 
-Skeletons whose response expressions are holes. The arm reads the file, publishes the frame through the real in-process `zts_expert_holes`, fills one site through `zts_expert_fill_hole`, and applies what the tool returns. Multi-hole seeds repeat that sequence on the next turn, so each accepted proposal becomes the next frame's baseline.
+Skeletons whose response expressions are holes. The arm reads the file, publishes the frame through the real in-process `zts_expert_query` holes operation, fills one site through `zts_expert_fill_hole`, and applies what the tool returns. Multi-hole seeds repeat that sequence on the next turn, so each accepted proposal becomes the next frame's baseline.
 
 | Seed | Holes |
 |---|---|

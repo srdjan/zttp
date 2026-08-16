@@ -17,6 +17,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "verify module(s)",
     .effect = .read_workspace,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Audit built-in virtual module files for capability and effect discipline.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"paths\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},\"builtins\":{\"type\":\"boolean\"},\"strict\":{\"type\":\"boolean\"}},\"required\":[]}",
     .decode_json = registry_mod.helpers.decodeJsonPassthrough,

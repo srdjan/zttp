@@ -422,13 +422,13 @@ test "stand-in hole arm: two one-fill turns compose through publisher and apply"
     for (seed.expressions) |expression| {
         try testing.expect(std.mem.indexOf(u8, after_second, expression) != null);
     }
-    try testing.expectEqual(@as(usize, 2), transcriptToolResultCount(&session.transcript, "zts_expert_holes"));
+    try testing.expectEqual(@as(usize, 2), transcriptToolResultCount(&session.transcript, "zts_expert_query"));
 
     // The second publisher result must describe the file after the first fill,
     // not replay the original two-hole frame. Its remaining hole is the return
     // expression on line 4, and the first fill makes `label` available as an
     // unannotated binding there.
-    const second_frame = transcriptToolResultAt(&session.transcript, "zts_expert_holes", 1) orelse
+    const second_frame = transcriptToolResultAt(&session.transcript, "zts_expert_query", 1) orelse
         return error.MissingSecondHoleFrame;
     var parsed_frame = try std.json.parseFromSlice(std.json.Value, allocator, second_frame, .{});
     defer parsed_frame.deinit();

@@ -405,12 +405,12 @@ const CannedClient = struct {
     }
 };
 
-const meta_tool = @import("tools/zts_expert_meta.zig");
+const query_tool = @import("tools/zts_expert_query.zig");
 
 fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
-    try reg.register(allocator, meta_tool.tool);
+    try reg.register(allocator, query_tool.tool);
     return reg;
 }
 

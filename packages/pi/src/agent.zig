@@ -4196,6 +4196,7 @@ const overflow_probe_tool: registry_mod.ToolDef = .{
     .description = "One deterministic read-only effect for compaction flow coverage",
     .effect = .analyze,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .input_schema = "{}",
     .decode_json = registry_mod.helpers.decodeNoArgs,
     .execute = overflowProbeExecute,

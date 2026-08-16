@@ -1499,14 +1499,14 @@ fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
 }
 
 const testing = std.testing;
-const meta_tool_mod = @import("tools/zts_expert_meta.zig");
+const query_tool_mod = @import("tools/zts_expert_query.zig");
 const check_tool_mod = @import("tools/zts_check.zig");
 const test_tool_mod = @import("tools/zig_test_step.zig");
 
 fn buildMiniRegistry(allocator: std.mem.Allocator) !Registry {
     var reg: Registry = .{};
     errdefer reg.deinit(allocator);
-    try reg.register(allocator, meta_tool_mod.tool);
+    try reg.register(allocator, query_tool_mod.tool);
     try reg.register(allocator, check_tool_mod.tool);
     try reg.register(allocator, test_tool_mod.tool);
     return reg;
@@ -1607,7 +1607,7 @@ test "raw tool name still dispatches directly" {
     var reg = try buildMiniRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    var outcome = try dispatchLine(testing.allocator, &reg, "zts_expert_meta");
+    var outcome = try dispatchLine(testing.allocator, &reg, "zts_expert_query meta");
     try expectResult(&outcome, testing.allocator, "\"compiler_version\"", true);
 }
 

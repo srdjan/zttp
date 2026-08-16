@@ -514,18 +514,13 @@ test "buildRegistry registers every first-party compiler primitive" {
     defer reg.deinit(testing.allocator);
 
     const expected_names = [_][]const u8{
-        "zts_expert_meta",
+        "zts_expert_query",
         "zts_expert_verify_paths",
         "zts_expert_canonicalize",
         "zts_expert_normalize",
-        "zts_expert_describe_rule",
-        "zts_expert_search",
         "zts_expert_review_patch",
         "zts_expert_prove_patch",
         "zts_expert_system_proof",
-        "zts_expert_features",
-        "zts_expert_restrictions",
-        "zts_expert_modules",
         "zts_expert_verify_modules",
         "workspace_list_files",
         "workspace_read_file",
@@ -543,11 +538,7 @@ test "buildRegistry registers every first-party compiler primitive" {
         "pi_remember_fact",
         "pi_recall_facts",
         "pi_extension_catalog",
-        "zts_expert_effects",
-        "zts_expert_holes",
         "zts_expert_fill_hole",
-        "zts_expert_narrow",
-        "zts_expert_ratchet",
     };
 
     for (expected_names) |expected| {
@@ -559,7 +550,7 @@ test "buildRegistry registers every first-party compiler primitive" {
     try testing.expect(reg.count() >= expected_names.len);
 }
 
-test "buildRegistry omits the direct feature-plan writer from model tools" {
+test "buildRegistry omits writers and retired duplicate routes from model tools" {
     var reg = try buildRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
@@ -570,16 +561,16 @@ test "buildRegistry omits the direct feature-plan writer from model tools" {
         }
     }
 
-    const process_tools = [_][]const u8{
-        "workspace_search_text",
-        "zts_check",
-        "pi_specs_status",
-    };
-    for (process_tools) |process_tool_name| {
-        const registered = reg.findByName(process_tool_name) orelse return error.TestFailed;
-        try testing.expectEqual(registry_mod.ToolEffect.execute_process, registered.effect);
-        try testing.expect(registered.allowedOn(.model));
-        try testing.expect(!registered.allowedOn(.rpc));
+    const search = reg.findByName("workspace_search_text") orelse return error.TestFailed;
+    try testing.expectEqual(registry_mod.ToolEffect.execute_process, search.effect);
+    try testing.expect(search.allowedOn(.model));
+    try testing.expect(!search.allowedOn(.rpc));
+
+    inline for (&.{ "zts_check", "pi_specs_status" }) |name| {
+        const local_only = reg.findByName(name) orelse return error.TestFailed;
+        try testing.expectEqual(registry_mod.ToolEffect.execute_process, local_only.effect);
+        try testing.expect(!local_only.allowedOn(.model));
+        try testing.expect(!local_only.allowedOn(.rpc));
     }
 }
 
@@ -879,13 +870,13 @@ test "buildRegistry + dispatchLine end-to-end against every tool" {
     var reg = try buildRegistry(testing.allocator);
     defer reg.deinit(testing.allocator);
 
-    var meta_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_meta");
+    var meta_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_query meta");
     try expectOkContains(&meta_outcome, testing.allocator, "\"compiler_version\"");
 
-    var rule_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_describe_rule ZTS303");
+    var rule_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_query describe_rule ZTS303");
     try expectOkContains(&rule_outcome, testing.allocator, "\"ZTS303\"");
 
-    var search_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_search result");
+    var search_outcome = try repl.dispatchLine(testing.allocator, &reg, "zts_expert_query search_rules result");
     try expectOkContains(&search_outcome, testing.allocator, "\"code\":");
 }
 
@@ -1030,11 +1021,7 @@ test "expert persona documents the protocol and approval-critical tools" {
     // cannot silently grow every request.
     const persona_text = @import("expert_persona.zig").prologue_text_for_test;
     const required = [_][]const u8{
-        "zts_expert_meta",
-        "zts_expert_features",
-        "zts_expert_restrictions",
-        "zts_expert_describe_rule",
-        "zts_expert_modules",
+        "zts_expert_query",
         "zts_expert_verify_paths",
         "zts_expert_canonicalize",
         "pi_apply_repair_plan",

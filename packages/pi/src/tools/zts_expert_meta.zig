@@ -11,6 +11,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "policy meta",
     .effect = .analyze,
     .context_policy = .exact,
+    .model_exposure = .visible,
     .description = "Discover the active schema-v2 compiler profile and operation index. Use view full for registries, grammar, examples, and decisions; new sessions already contain the bounded bootstrap view.",
     .input_schema = "{\"type\":\"object\",\"properties\":{\"view\":{\"type\":\"string\",\"enum\":[\"bootstrap\",\"full\"],\"description\":\"Optional metadata projection; defaults to full.\"}},\"required\":[]}",
     .decode_json = decodeJson,

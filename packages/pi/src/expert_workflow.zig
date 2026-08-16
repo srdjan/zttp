@@ -150,7 +150,7 @@ pub fn renderSystemNote(
 fn workflowRoute(kind: TaskKind) []const u8 {
     return switch (kind) {
         .route_add =>
-        \\Read the target file, run `zts_expert_verify_paths`, and gather current module facts with `zts_expert_modules`. Author the COMPLETE file content yourself, then submit exactly one `propose_change_set` call so the host veto checks the draft and the approval gate owns the write.
+        \\Read the target file, run `zts_expert_verify_paths`, and gather current module facts with `zts_expert_query` operation `modules`. Author the COMPLETE file content yourself, then submit exactly one `propose_change_set` call so the host veto checks the draft and the approval gate owns the write.
         ,
         .handler_scaffold =>
         \\Create the smallest canonical handler that satisfies the request. Read nearby handlers first, use live module/rule tools for imports and syntax, then let the compiler veto verify the complete scaffold before apply.
@@ -162,13 +162,13 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         \\Drive proof work through the proof tools. Start with `pi_specs_status`, `pi_witnesses`, and `pi_repair_plan`; inspect `proof.proofTrace.durable_workflow_*` when durable retry/idempotency is involved, use `pi_goal_candidate` or `pi_apply_repair_plan` for supported repairs, then `pi_goal_check` to confirm the requested goals.
         ,
         .workflow_authoring =>
-        \\Author workflow code from the shipped ZigTS grammar. Call `zts_expert_modules` for `zttp:durable`/`zttp:workflow`, use `req.headers.get("idempotency-key")` for durable run keys, keep `workflow.call`/`fanout`/`follow` at step depth 0 inside `run()` and never inside `step()` (ZTS509), check ZTS510 before saga drafts, confirm the child handler resolves with `zts_expert_system_proof` (a single-file veto cannot see a dangling child), then submit one `propose_change_set` and inspect `proof.proofTrace.durable_workflow_*` after the host veto/proof card.
+        \\Author workflow code from the shipped ZigTS grammar. Call `zts_expert_query` operation `modules` for `zttp:durable`/`zttp:workflow`, use `req.headers.get("idempotency-key")` for durable run keys, keep `workflow.call`/`fanout`/`follow` at step depth 0 inside `run()` and never inside `step()` (ZTS509), check ZTS510 before saga drafts, confirm the child handler resolves with `zts_expert_system_proof` (a single-file veto cannot see a dangling child), then submit one `propose_change_set` and inspect `proof.proofTrace.durable_workflow_*` after the host veto/proof card.
         ,
         .sql_feature =>
         \\Check SQL support before drafting. Read the handler and `zttp.json`, verify the configured sqlite schema exists, use named parameters supported by the analyzer, and do not retry unchanged if the veto reports missing SQL schema configuration.
         ,
         .auth_jwt =>
-        \\Use the auth module path deliberately. Check `zts_expert_modules` for `zttp:auth`, keep bearer tokens and claims out of responses/logs, avoid fallback secrets, and verify no credential leakage after the edit.
+        \\Use the auth module path deliberately. Check `zts_expert_query` operation `modules` for `zttp:auth`, keep bearer tokens and claims out of responses/logs, avoid fallback secrets, and verify no credential leakage after the edit.
         ,
         .env_feature =>
         \\Treat environment values as toxic. Check `zttp:env` with live module tools, avoid fallback secrets, redact in output, and verify no secret leakage before applying the edit.
@@ -180,7 +180,7 @@ fn workflowRoute(kind: TaskKind) []const u8 {
         \\Do not edit unless the user asks for a change. Use live rule/module tools for ZigTS facts and cite compiler diagnostics or proof output rather than relying on memory.
         ,
         .hole_fill =>
-        \\Read the frame with `zts_expert_holes` and spend the turn on one hole. Call `zts_expert_fill_hole` with that hole's line, column, and one expression; the frame is the whole specification of it, and rewriting the file throws the frame away. Commit the returned `proposed_content` only when the tool reports `ok`.
+        \\Read the frame with `zts_expert_query` operation `holes` and spend the turn on one hole. Call `zts_expert_fill_hole` with that hole's line, column, and one expression; the frame is the whole specification of it, and rewriting the file throws the frame away. Commit the returned `proposed_content` only when the tool reports `ok`.
         ,
         .unknown => "",
     };

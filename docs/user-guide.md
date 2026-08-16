@@ -538,14 +538,26 @@ model-shipped generation defaults.
 ### How a turn runs
 
 1. You state a goal in plain English.
-2. The agent gathers facts with read-only tools before proposing anything.
-3. It authors a complete file and submits one `apply_edit` proposal.
-4. Before any write, the host compiler veto counts violations the draft introduces relative to the
-   file's current contents. A draft that adds none passes; one that adds any is
-   rejected and the agent retries.
-5. On a pass you see a proof card and approve or reject. `--yes` approves every
-   verified edit; `--no-edit` blocks writes entirely.
-6. The host writes the file. The agent never writes to disk itself.
+2. The agent gathers compiler facts through the strict `zts_expert_query`
+   operation union and uses separate proof tools where a verdict is required.
+3. It authors complete source for one or more files and submits one ordered
+   `propose_change_set` proposal.
+4. Before any write, the host normalizes the whole source overlay, proves it
+   once, and records every proof input in a read set. A draft that introduces a
+   violation is rejected and the agent retries.
+5. On a pass you see every normalized diff plus one aggregate proof card and
+   approve or reject once. `--yes` approves every verified change set;
+   `--no-edit` blocks writes entirely.
+6. The host rechecks the full read set and commits under a workspace lock and
+   crash-recovery journal. The agent never writes source files itself.
+
+The static model prefix contains 21 tools. The six schema-v2 discovery views
+and four focused compiler projections share the `zts_expert_query` ADT;
+normalization, proof, repair, and change-set application remain distinct
+authorities. Exact provider serialization is pinned in tests: 11,502 bytes for
+OpenAI, 11,203 for Anthropic, and 11,775 for the DeepSeek/local chat shape.
+The pre-cutover prefixes were 19,722, 19,199, and 20,177 bytes respectively,
+so every supported provider stays beyond the 40% reduction gate.
 
 ### Context compaction
 

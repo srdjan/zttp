@@ -31,6 +31,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "specs-status",
     .effect = .execute_process,
     .context_policy = .exact,
+    .model_exposure = .local_only,
     .description =
     \\Read the handler's active spec set and return each active spec's
     \\current discharge state. A source `Proof<T, P>` narrows

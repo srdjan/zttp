@@ -9,6 +9,7 @@ pub const tool: registry_mod.ToolDef = .{
     .label = "zts check",
     .effect = .execute_process,
     .context_policy = .structured_digest,
+    .model_exposure = .local_only,
     .description =
     \\Run `zts check --json` for a handler path. On success the output
     \\includes a "proof.properties" object with compiler-proven behavioral
