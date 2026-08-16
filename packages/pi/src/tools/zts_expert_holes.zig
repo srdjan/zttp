@@ -102,7 +102,10 @@ fn renderFromSource(
     // - so the one hole the model asked about never came back with a frame.
     // Both paths come from one walk: resolving them separately walked the same
     // ancestors and parsed the same zttp.json twice per render.
-    var project_paths = zts_cli.edit_simulate.discoverProjectPaths(allocator, source_path);
+    // `try`, not a swallow: this tool publishes an `ok` verdict, and a verdict
+    // computed without the system manifest because zttp.json failed to read is
+    // the fail-open class AGENTS.md documents.
+    var project_paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, source_path);
     defer project_paths.deinit(allocator);
     const system_path = project_paths.system;
     const sql_schema_path = project_paths.sqlite;

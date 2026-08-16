@@ -523,18 +523,14 @@ fn defaultProjectEntry(allocator: std.mem.Allocator) ![]u8 {
 
 /// Resolve the system config exactly as `zts check` does for a handler path.
 /// In-process analyzer clients use this rather than re-parsing `zttp.json`.
+/// One walk backs both this and the schema resolver: a third hand-written copy
+/// here let `check` and `edit-simulate` drift into different verdicts for the
+/// same handler.
 pub fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) !?[]u8 {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var project = try project_config_mod.discover(allocator, io, start_path);
-    defer if (project) |*p| p.deinit(allocator);
-
-    if (project) |*cfg| {
-        return try cfg.resolvedSystemPath(allocator);
-    }
-    return null;
+    var paths = try edit_simulate.discoverProjectPaths(allocator, start_path);
+    if (paths.sqlite) |p| allocator.free(p);
+    paths.sqlite = null;
+    return paths.system;
 }
 
 pub fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]const []const u8 {

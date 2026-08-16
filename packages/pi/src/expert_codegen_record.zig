@@ -680,20 +680,29 @@ fn greenRecordingRequired() bool {
     return std.mem.eql(u8, flag, "1");
 }
 
-fn requireGreenRecording(applied_edit: bool, intent_passed: bool) !void {
+/// `required` stays a parameter rather than an `if` at the call site: the only
+/// call site is inside the live-gated recorder test, so guarding there leaves
+/// "a non-required run refuses nothing" with no offline assertion at all. That
+/// branch is the one that keeps the measured-failure corpus behind
+/// docs/convergence.md and docs/coverage.md populated.
+fn requireGreenRecording(required: bool, applied_edit: bool, intent_passed: bool) !void {
+    if (!required) return;
     if (!applied_edit) return error.RecordedEditNotApplied;
     if (!intent_passed) return error.RecordedIntentCheckFailed;
 }
 
 test "required-green recording refuses unapplied and failed-intent turns" {
-    try requireGreenRecording(true, true);
+    // A non-required run accepts a turn that applied no edit and failed its
+    // intent check. Without this line the not-required branch is untested.
+    try requireGreenRecording(false, false, false);
+    try requireGreenRecording(true, true, true);
     try testing.expectError(
         error.RecordedEditNotApplied,
-        requireGreenRecording(false, true),
+        requireGreenRecording(true, false, true),
     );
     try testing.expectError(
         error.RecordedIntentCheckFailed,
-        requireGreenRecording(true, false),
+        requireGreenRecording(true, true, false),
     );
 }
 
@@ -976,7 +985,12 @@ test "corpus version changes when a case changes" {
     try testing.expect(nonzero);
 }
 
-fn expectEmbeddedReferenceProbeCompiles(probe_name: []const u8) !void {
+/// Compile the fenced block opened by the `:start` marker at `marker_at`.
+/// Resolving by name instead would always find the FIRST block with that name,
+/// so a duplicated probe name would compile one block twice and leave the other
+/// uncompiled while the caller's count still rose.
+fn expectEmbeddedReferenceProbeCompiles(probe_name: []const u8, marker_at: usize) !void {
+    const md = zts_expert_skill.virtual_modules_md;
     const start_marker = try std.fmt.allocPrint(
         testing.allocator,
         "<!-- compiler-probe: {s}:start -->\n```typescript\n",
@@ -989,18 +1003,22 @@ fn expectEmbeddedReferenceProbeCompiles(probe_name: []const u8) !void {
         .{probe_name},
     );
     defer testing.allocator.free(end_marker);
-    const source_start = (std.mem.indexOf(u8, zts_expert_skill.virtual_modules_md, start_marker) orelse
-        return error.MissingEmbeddedCompilerProbe) + start_marker.len;
-    const source_end = std.mem.indexOfPos(
-        u8,
-        zts_expert_skill.virtual_modules_md,
-        source_start,
-        end_marker,
-    ) orelse return error.UnterminatedEmbeddedCompilerProbe;
+    if (!std.mem.startsWith(u8, md[marker_at..], start_marker)) {
+        std.debug.print(
+            "[reference-probe] {s}: marker is not followed by a ```typescript fence\n",
+            .{probe_name},
+        );
+        return error.MissingEmbeddedCompilerProbe;
+    }
+    const source_start = marker_at + start_marker.len;
+    const source_end = std.mem.indexOfPos(u8, md, source_start, end_marker) orelse {
+        std.debug.print("[reference-probe] {s}: no matching :end marker\n", .{probe_name});
+        return error.UnterminatedEmbeddedCompilerProbe;
+    };
 
     var check = try zts_cli.precompile.runCheckOnlyFromSource(
         testing.allocator,
-        zts_expert_skill.virtual_modules_md[source_start..source_end],
+        md[source_start..source_end],
         "handler.ts",
         null,
         true,
@@ -1009,30 +1027,110 @@ fn expectEmbeddedReferenceProbeCompiles(probe_name: []const u8) !void {
     );
     defer check.deinit(testing.allocator);
 
+    // Name the probe and its diagnostics. Collapsing the three hand-written
+    // tests into one loop otherwise reports "expected 0, found 2" with no way
+    // to tell which block regressed, and this reference is a persona input
+    // whose edits invalidate every cassette at once.
+    if (check.totalErrors() != 0 or check.json_diagnostics.items.len != 0) {
+        std.debug.print("[reference-probe] {s}: {d} error(s)\n", .{ probe_name, check.totalErrors() });
+        for (check.json_diagnostics.items) |diag| {
+            std.debug.print(
+                "[reference-probe] {s}: {s} at {d}:{d}: {s}\n",
+                .{ probe_name, diag.code, diag.line, diag.column, diag.message },
+            );
+        }
+    }
     try testing.expectEqual(@as(u32, 0), check.totalErrors());
     try testing.expectEqual(@as(usize, 0), check.json_diagnostics.items.len);
+}
+
+const probe_marker_prefix = "<!-- compiler-probe: ";
+
+/// One `:start` marker: the probe's name and the byte its marker begins at.
+const ProbeMarker = struct { name: []const u8, at: usize };
+
+/// Scan `md` for the `:start` markers, in document order. A marker whose tag
+/// does not close on its own line is an error, not a skipped probe: searching
+/// the whole remaining document for the terminator let one malformed marker
+/// swallow every probe up to the next one, and the scan reported success
+/// having compiled none of them.
+///
+/// Separated from the document so the malformed and duplicate-name cases can
+/// be tested on synthetic input. The reference itself is a persona input whose
+/// edits invalidate all nineteen cassettes, so it must not be mutated to
+/// exercise a parser branch.
+fn scanProbeMarkers(md: []const u8, out: *std.ArrayListUnmanaged(ProbeMarker), allocator: std.mem.Allocator) !void {
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, md, cursor, probe_marker_prefix)) |at| {
+        const name_start = at + probe_marker_prefix.len;
+        const line_end = std.mem.indexOfScalarPos(u8, md, name_start, '\n') orelse md.len;
+        const name_end = std.mem.indexOfPos(u8, md[0..line_end], name_start, " -->") orelse {
+            std.debug.print("[reference-probe] malformed marker at byte {d}\n", .{at});
+            return error.UnterminatedEmbeddedCompilerProbe;
+        };
+        cursor = name_end;
+        const tag = md[name_start..name_end];
+        if (!std.mem.endsWith(u8, tag, ":start")) continue;
+        try out.append(allocator, .{ .name = tag[0 .. tag.len - ":start".len], .at = at });
+    }
+}
+
+test "the probe scanner refuses a malformed marker instead of skipping past it" {
+    const a = testing.allocator;
+    var found: std.ArrayListUnmanaged(ProbeMarker) = .empty;
+    defer found.deinit(a);
+
+    // Well-formed: both probes are seen, in order, with distinct offsets.
+    try scanProbeMarkers(
+        "<!-- compiler-probe: one:start -->\nx\n<!-- compiler-probe: one:end -->\n" ++
+            "<!-- compiler-probe: two:start -->\ny\n<!-- compiler-probe: two:end -->\n",
+        &found,
+        a,
+    );
+    try testing.expectEqual(@as(usize, 2), found.items.len);
+    try testing.expectEqualStrings("one", found.items[0].name);
+    try testing.expectEqualStrings("two", found.items[1].name);
+    try testing.expect(found.items[0].at < found.items[1].at);
+
+    // A marker with no space before `-->` must fail, not silently consume the
+    // probe that follows it. Unbounded terminator search returned 0 markers
+    // here and the gate still passed.
+    found.clearRetainingCapacity();
+    try testing.expectError(error.UnterminatedEmbeddedCompilerProbe, scanProbeMarkers(
+        "<!-- compiler-probe: one:start-->\nx\n" ++
+            "<!-- compiler-probe: two:start -->\ny\n<!-- compiler-probe: two:end -->\n",
+        &found,
+        a,
+    ));
+
+    // A duplicated name yields two DISTINCT offsets, so each block is compiled
+    // where it sits rather than resolving both to the first by name.
+    found.clearRetainingCapacity();
+    try scanProbeMarkers(
+        "<!-- compiler-probe: dup:start -->\nx\n<!-- compiler-probe: dup:end -->\n" ++
+            "<!-- compiler-probe: dup:start -->\ny\n<!-- compiler-probe: dup:end -->\n",
+        &found,
+        a,
+    );
+    try testing.expectEqual(@as(usize, 2), found.items.len);
+    try testing.expect(found.items[0].at != found.items[1].at);
 }
 
 test "every embedded compiler probe in the reference passes the live compiler" {
     // Discover the probes rather than naming them: three hand-written tests
     // compiled three blocks, so a fourth probe added to the reference was
     // never compiled and the gate still reported a pass.
-    const marker_prefix = "<!-- compiler-probe: ";
-    var probes: usize = 0;
-    var cursor: usize = 0;
-    while (std.mem.indexOfPos(u8, zts_expert_skill.virtual_modules_md, cursor, marker_prefix)) |at| {
-        const name_start = at + marker_prefix.len;
-        const name_end = std.mem.indexOfPos(u8, zts_expert_skill.virtual_modules_md, name_start, " -->") orelse
-            return error.UnterminatedEmbeddedCompilerProbe;
-        cursor = name_end;
-        const tag = zts_expert_skill.virtual_modules_md[name_start..name_end];
-        if (!std.mem.endsWith(u8, tag, ":start")) continue;
-        try expectEmbeddedReferenceProbeCompiles(tag[0 .. tag.len - ":start".len]);
-        probes += 1;
+    const a = testing.allocator;
+    var markers: std.ArrayListUnmanaged(ProbeMarker) = .empty;
+    defer markers.deinit(a);
+    try scanProbeMarkers(zts_expert_skill.virtual_modules_md, &markers, a);
+
+    for (markers.items) |marker| {
+        try expectEmbeddedReferenceProbeCompiles(marker.name, marker.at);
     }
     // The gate's own input: a reference that lost its markers would compile
     // nothing and still pass the loop above.
-    try testing.expect(probes >= 3);
+    try testing.expect(markers.items.len >= 3);
 }
 
 test "every corpus virtual module has a dedicated embedded reference" {
@@ -2261,7 +2359,8 @@ test "record codegen baseline corpus (live, gated)" {
             if (err == error.IntentCheckUnavailable) return err;
         };
 
-        if (require_green) requireGreenRecording(
+        requireGreenRecording(
+            require_green,
             result.applied_edit,
             intent_passed,
         ) catch |err| {

@@ -255,11 +255,13 @@ pub fn analyzePatch(
     const system_path = try discoverSystemPath(allocator, workspace_root, absolute_path);
     defer if (system_path) |path| allocator.free(path);
 
-    // zttp:sql handlers need the project SQL schema to analyze; discover it
-    // from cwd exactly as the veto does. Without it, simulate() on a SQL handler
-    // throws MissingSqlSchema and crashes the receipt build after an otherwise
-    // successful apply.
-    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, null);
+    // zttp:sql handlers need the project SQL schema to analyze. Without it,
+    // simulate() on a SQL handler throws MissingSqlSchema and crashes the
+    // receipt build after an otherwise successful apply. Root it at the handler
+    // like the system path above: from cwd, a run started outside the handler's
+    // project validated queries against a different zttp.json than the one the
+    // system manifest came from.
+    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, absolute_path);
     defer if (sql_schema_path) |p| allocator.free(p);
 
     var simulated = try edit_simulate.simulate(allocator, .{
@@ -329,7 +331,8 @@ pub fn loadProveSummaryForPatch(
     defer allocator.free(absolute_path);
     const system_path = try discoverSystemPath(allocator, workspace_root, absolute_path);
     defer if (system_path) |path| allocator.free(path);
-    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, null);
+    // Rooted at the handler, like the system path above.
+    const sql_schema_path = edit_simulate.discoverProjectSqlSchemaPath(allocator, absolute_path);
     defer if (sql_schema_path) |p| allocator.free(p);
     return computeProveSummary(allocator, absolute_path, before, after, system_path, sql_schema_path);
 }
