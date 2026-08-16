@@ -2031,14 +2031,15 @@ test "record codegen baseline corpus (live, gated)" {
     // ZTTP_CODEGEN_ONLY=<name> records just one case, leaving the others'
     // committed cassettes untouched.
     const only_case = envValue("ZTTP_CODEGEN_ONLY");
+    const require_green = greenRecordingRequired();
 
     const record_turn_timeout_ms: u64 = if (envValue("ZTTP_CODEGEN_TURN_TIMEOUT_MS")) |raw|
         std.fmt.parseInt(u64, raw, 10) catch default_record_turn_timeout_ms
     else
         default_record_turn_timeout_ms;
     std.debug.print(
-        "[codegen-record] per-turn ceiling: {d}ms\n",
-        .{record_turn_timeout_ms},
+        "[codegen-record] per-turn ceiling: {d}ms; require-green={}\n",
+        .{ record_turn_timeout_ms, require_green },
     );
 
     const repo_root = try cwdPathAlloc(allocator);
@@ -2241,15 +2242,24 @@ test "record codegen baseline corpus (live, gated)" {
                     std.debug.print("[codegen-record] {s}: produced handler:\n{s}\n", .{ rc.name, handler });
                 } else |_| {}
             }
-            std.debug.print(
-                "[codegen-record] {s}: declared intent did not pass ({s}); failure will be measured and promoted\n",
-                .{ rc.name, @errorName(err) },
-            );
+            if (require_green) {
+                std.debug.print(
+                    "[codegen-record] {s}: declared intent did not pass ({s}); " ++
+                        "required-green mode will refuse promotion\n",
+                    .{ rc.name, @errorName(err) },
+                );
+            } else {
+                std.debug.print(
+                    "[codegen-record] {s}: declared intent did not pass ({s}); " ++
+                        "failure will be measured and promoted\n",
+                    .{ rc.name, @errorName(err) },
+                );
+            }
             if (err == error.IntentCheckUnavailable) return err;
         };
 
         requireGreenRecording(
-            greenRecordingRequired(),
+            require_green,
             result.applied_edit,
             intent_passed,
         ) catch |err| {
