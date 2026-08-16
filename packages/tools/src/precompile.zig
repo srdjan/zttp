@@ -3824,15 +3824,16 @@ test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural DigestInput = string;
-        \\structural DigestOutput = string;
+        \\nominal Digest = string;
         \\
-        \\export function digest(s: DigestInput): DigestOutput {
-        \\  return sha256(s);
+        \\export function digest(s: Digest): Digest {
+        \\  const out: Digest = sha256(s);
+        \\  return out;
         \\}
         \\
         \\function handler(req: Request): Effects<Response, "crypto"> {
-        \\  return Response.text(digest("x"));
+        \\  const seed: Digest = "x";
+        \\  return Response.text(digest(seed));
         \\}
     ;
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-effects.ts", .{
@@ -3854,15 +3855,15 @@ test "runCheckOnlyFromSource: one-way public helper effects diagnostic" {
 test "runCheckOnlyFromSource: one-way public helper proof diagnostic" {
     const allocator = std.testing.allocator;
     const source =
-        \\structural StableInput = string;
-        \\structural StableOutput = string;
+        \\nominal Stable = string;
         \\
-        \\export function stable(s: StableInput): StableOutput {
+        \\export function stable(s: Stable): Stable {
         \\  return s;
         \\}
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  return Response.text(stable("x"));
+        \\  const seed: Stable = "x";
+        \\  return Response.text(stable(seed));
         \\}
     ;
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-proof.ts", .{
@@ -3887,10 +3888,9 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
     // the rule conditions on: the module's public surface owes its callers a
     // capsule whether or not this handler is one of them.
     const source =
-        \\structural UnrelatedInput = string;
-        \\structural UnrelatedOutput = string;
+        \\nominal Unrelated = string;
         \\
-        \\export function unrelated(s: UnrelatedInput): UnrelatedOutput {
+        \\export function unrelated(s: Unrelated): Unrelated {
         \\  return s;
         \\}
         \\
@@ -3918,15 +3918,15 @@ test "runCheckOnlyFromSource: proof capsule diagnostic covers an unreachable exp
 test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs" {
     const allocator = std.testing.allocator;
     const source =
-        \\structural StableInput = string;
-        \\structural StableOutput = string;
+        \\nominal Stable = string;
         \\
-        \\export function stable(s: StableInput): StableOutput {
+        \\export function stable(s: Stable): Stable {
         \\  return s;
         \\}
         \\
         \\function handler(req: Request): Proof<Response, "result_safe"> {
-        \\  return Response.text(stable("x"));
+        \\  const seed: Stable = "x";
+        \\  return Response.text(stable(seed));
         \\}
     ;
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-result-safe-proof.ts", .{
@@ -3945,15 +3945,16 @@ test "formatProofCard: canonical public helper diagnostics are visible in text m
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\
-        \\structural DigestInput = string;
-        \\structural DigestOutput = string;
+        \\nominal Digest = string;
         \\
-        \\export function digest(s: DigestInput): DigestOutput {
-        \\  return sha256(s);
+        \\export function digest(s: Digest): Digest {
+        \\  const out: Digest = sha256(s);
+        \\  return out;
         \\}
         \\
         \\function handler(req: Request): Effects<Response, "crypto"> {
-        \\  return Response.text(digest("x"));
+        \\  const seed: Digest = "x";
+        \\  return Response.text(digest(seed));
         \\}
     ;
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "one-way-effects-text.ts", .{});
@@ -4395,10 +4396,11 @@ test "appendExportCapsuleDiagnostics: the docs mode asks only for a Proof capsul
     const source =
         \\import { env } from "zttp:env";
         \\
-        \\structural Region = string;
+        \\nominal Region = string;
         \\
         \\export function region(): Region {
-        \\  return env("REGION") ?? "unknown";
+        \\  const value: Region = env("REGION") ?? "unknown";
+        \\  return value;
         \\}
         \\
         \\function handler(req: Request): Response {
@@ -4571,7 +4573,7 @@ test "a pure-typed callback parameter contributes the empty row" {
     // row - spec 6.5's "its callback MUST be pure" made representable. The
     // call through `f` used to defeat the row entirely and report ZTS512.
     const source =
-        \\structural Count = number;
+        \\nominal Count = number;
         \\
         \\export function apply(f: (n: number) => number, x: Count): Effects<number, "clock"> {
         \\  return f(x);

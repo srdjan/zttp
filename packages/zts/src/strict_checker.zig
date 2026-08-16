@@ -838,14 +838,14 @@ pub const StrictChecker = struct {
         if (sig.param_count == func.params_count) {
             for (0..func.params_count) |i| {
                 const annotation = env.getSourceFnParamAnnotation(source_sig.line, @intCast(i)) orelse continue;
-                const raw = rawBoundaryBase(annotation) orelse continue;
+                const raw = rawBoundaryBase(env, annotation) orelse continue;
                 const param = self.ir_view.getListIndex(func.params_start, @intCast(i));
                 self.addRawBoundaryDiagnostic(param, "parameter", annotation, raw);
             }
         }
 
         if (env.getSourceFnReturnAnnotation(source_sig.line)) |annotation| {
-            if (rawBoundaryBase(annotation)) |raw| {
+            if (rawBoundaryBase(env, annotation)) |raw| {
                 self.addRawBoundaryDiagnostic(node, "return", annotation, raw);
             }
         }
@@ -1901,7 +1901,7 @@ fn isArrayMutator(name: []const u8) bool {
 /// Return the raw open type at the base of `annotation`, or null when the
 /// annotation names a declared/ABI/closed type. Arrays inherit the decision
 /// from their element, including nested and readonly arrays.
-fn rawBoundaryBase(annotation: []const u8) ?[]const u8 {
+fn rawBoundaryBase(env: ?*const TypeEnv, annotation: []const u8) ?[]const u8 {
     var text = std.mem.trim(u8, annotation, " \t\r\n");
     if (std.mem.startsWith(u8, text, "readonly")) {
         const after = text["readonly".len..];
@@ -1949,19 +1949,51 @@ fn rawBoundaryBase(annotation: []const u8) ?[]const u8 {
             },
             '|' => if (angle_depth == 0 and bracket_depth == 0) {
                 found_union = true;
-                if (rawBoundaryBase(text[member_start..i])) |raw| return raw;
+                if (rawBoundaryBase(env, text[member_start..i])) |raw| return raw;
                 member_start = i + 1;
             },
             else => {},
         }
     }
-    if (found_union) return rawBoundaryBase(text[member_start..]);
+    if (found_union) return rawBoundaryBase(env, text[member_start..]);
 
     if (abi_types.isBoundaryTypeAnnotation(text)) return null;
     for ([_][]const u8{ "string", "number", "boolean", "object", "unknown" }) |raw| {
         if (std.mem.eql(u8, text, raw)) return raw;
     }
-    return null;
+
+    // What is left is a name. Only `nominal` mints an identity, so a
+    // `structural` alias over a raw scalar is a rename: it *is* `string` for
+    // assignability, `expose("raw")` is accepted, and the boundary closes
+    // nothing. Resolve the name and judge what it actually denotes.
+    //
+    // Array and readonly wrappers were stripped above, and a union recurses
+    // member by member, so `Text[]`, `readonly Text[]`, and `Text | Request`
+    // all reach here as the bare alias name.
+    return transparentRawAlias(env orelse return null, text);
+}
+
+/// The raw built-in a name resolves to when nothing along the way brands it, or
+/// null when the name carries an identity or real structure.
+fn transparentRawAlias(env: *const TypeEnv, name: []const u8) ?[]const u8 {
+    var current = env.getTypeAlias(name) orelse return null;
+
+    // An alias over an array of a transparent scalar is transparent too.
+    while (env.pool.getTag(current)) |tag| {
+        if (tag != .t_array) break;
+        current = env.pool.getArrayElement(current);
+    }
+
+    // A brand stops the walk: that is the whole point of `nominal`.
+    if (env.pool.isNominal(current)) return null;
+
+    return switch (env.pool.getTag(current) orelse return null) {
+        .t_string => "string",
+        .t_number => "number",
+        .t_boolean => "boolean",
+        .t_unknown_type => "unknown",
+        else => null,
+    };
 }
 
 /// Strip one pair of parentheses only when it encloses the whole annotation.
@@ -2427,11 +2459,49 @@ test "raw exported boundaries survive a next-line function brace" {
     try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
 }
 
-test "declared ABI and literal-union boundary types are admitted" {
+test "a structural alias over a raw scalar does not satisfy the boundary" {
+    // Only `nominal` mints an identity. `structural Text = string` is a
+    // transparent alias: it *is* `string` for assignability, so `expose("raw")`
+    // is accepted and the boundary closes nothing it was written to close.
+    // Admitting it gave one operation two spellings, one of which did no work.
     const sources = [_][]const u8{
         "structural Text = string; export function expose(value: Text): Text { return value; }",
-        "nominal UserId = string; export function expose(value: UserId): UserId { return value; }",
+        "structural Count = number; export function expose(value: Count): Count { return value; }",
+        "structural Flag = boolean; export function expose(value: Flag): Flag { return value; }",
+        // Through an array, and through a chain of aliases: transparency is not
+        // interrupted by either.
         "structural Text = string; export function expose(value: Text[]): Text[] { return value; }",
+        // Separate lines: the stripper scans one type declaration per line, so
+        // two on one line is a parse failure unrelated to this rule.
+        "structural A = string;\nstructural B = A;\nexport function expose(value: B): B { return value; }",
+        "structural Text = string; export function expose(value: readonly Text[]): readonly Text[] { return value; }",
+    };
+    for (sources) |source| {
+        var h = try checkStripped(source);
+        defer h.deinit();
+        try testing.expectEqual(@as(usize, 2), countKind(&h.checker, .raw_exported_boundary_type));
+    }
+}
+
+test "a structural alias carrying real structure still satisfies the boundary" {
+    // The companion direction. The rule refuses a rename of a raw scalar, not
+    // `structural` itself: a record and a closed literal union both name
+    // something `string` does not.
+    const sources = [_][]const u8{
+        "structural Cfg = { host: string }; export function expose(value: Cfg): Cfg { return value; }",
+        "structural Method = \"GET\" | \"POST\"; export function expose(value: Method): Method { return value; }",
+        "structural Pair = [string, number]; export function expose(value: Pair): Pair { return value; }",
+    };
+    for (sources) |source| {
+        var h = try checkStripped(source);
+        defer h.deinit();
+        try expectNoKind(&h.checker, .raw_exported_boundary_type);
+    }
+}
+
+test "declared ABI and literal-union boundary types are admitted" {
+    const sources = [_][]const u8{
+        "nominal UserId = string; export function expose(value: UserId): UserId { return value; }",
         "nominal UserId = string; export function expose(value: readonly UserId[]): readonly UserId[] { return value; }",
         "export function expose(value: Request): Response { return Response.json({}); }",
         "export function expose(value: Bytes): Bytes { return value; }",
