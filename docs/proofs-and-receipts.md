@@ -459,10 +459,10 @@ Single op: given a handler path, return the corpus listing.
 }
 ```
 
-Use `pi_witnesses` before drafting a repair against a `Spec` failure.
-`Spec`s with zero witnesses are unprobed: the proof currently relies on
+Use `pi_witnesses` before drafting a repair against a proof failure.
+Proof properties with zero witnesses are unprobed: the proof currently relies on
 the classifier alone, and a regression there would silently slip past
-the corpus. `Spec`s with pinned witnesses are load-bearing; a repair
+the corpus. Properties with pinned witnesses are load-bearing; a repair
 that removes them weakens coverage.
 
 The slash command `/witnesses <path>` invokes the same tool from the
@@ -477,7 +477,7 @@ in particular be treated as part of the source of truth.
 
 ### See also
 
-- [verification.md - Author-Declared Spec Discharge](verification.md#8-author-declared-spec-discharge)
+- [verification.md - Author-Declared Proof Discharge](verification.md#8-author-declared-proof-discharge)
 - `packages/zts/src/witness_corpus.zig` - persistence library
 - `packages/zts/src/counterexample.zig` - solver and JSONL wire format
 - `packages/runtime/src/witnesses_cli.zig` - `zttp witnesses` subcommand

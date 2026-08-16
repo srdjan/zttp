@@ -242,7 +242,7 @@ diagnosticMessage?, sourceLine?, sourceColumn?, sourceSnippet?}]` per
 swap event; the diagnostic fields appear only on failed specs),
 `zts check --json` (`declared_specs` as the effective active set and
 `spec_diagnostics` arrays), and the `pi_specs_status` agent tool. See
-[user-guide.md](user-guide.md#author-declared-specs) for the author-side
+[user-guide.md](user-guide.md#author-declared-proofs) for the author-side
 view.
 
 ### 9. Proof-Carrying Functions
