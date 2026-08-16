@@ -551,6 +551,13 @@ const CorpusReplayClient = union(enum) {
         };
     }
 
+    fn asSummarizer(self: *CorpusReplayClient) ?@import("compaction.zig").Summarizer {
+        return switch (self.*) {
+            .flow => |*client| client.asSummarizer(),
+            .flat => null,
+        };
+    }
+
     fn finish(self: *CorpusReplayClient) !void {
         return switch (self.*) {
             .flow => |*client| client.finish(),
@@ -565,6 +572,81 @@ const CorpusReplayClient = union(enum) {
         };
     }
 };
+
+const CorpusReplayOutcome = struct {
+    result: loop.TurnResult,
+    transcript: transcript_mod.Transcript,
+
+    fn deinit(self: *CorpusReplayOutcome, allocator: std.mem.Allocator) void {
+        self.transcript.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// Replays one corpus turn through the same provider-neutral admission and
+/// compaction controller as a live session. Flow artifacts record standalone
+/// summarizer calls as part of the model script, so bypassing this controller
+/// makes every compacted recording diverge at its first summary checkpoint.
+/// Legacy flat Anthropic cassettes predate that controller and retain their
+/// direct model-client path until they are deliberately re-recorded.
+fn replayCorpusTurn(
+    allocator: std.mem.Allocator,
+    resolved: *const ResolvedSteps,
+    client: *CorpusReplayClient,
+    request_config: ?model_request.Config,
+    provider: agent.Provider,
+    registry: *const registry_mod.Registry,
+    prompt: []const u8,
+) !CorpusReplayOutcome {
+    var transcript: transcript_mod.Transcript = .{};
+    errdefer transcript.deinit(allocator);
+
+    if (resolved.flow_case) |*flow_case| {
+        const config = request_config orelse return error.MissingFlowRequestConfig;
+        const selected_model = try models.resolveForProvider(provider, flow_case.manifest.model);
+        var session = agent.AgentSession.initControlled(allocator, selected_model, config);
+        defer session.deinit(allocator);
+        var controller: agent.RequestController = .{
+            .allocator = allocator,
+            .session = &session,
+            .raw_client = client.asModelClient(),
+            .summarizer = client.asSummarizer(),
+        };
+        const result = try loop.runTurnWith(
+            allocator,
+            controller.asModelClient(),
+            registry,
+            &session.transcript,
+            prompt,
+            .{
+                .workspace_root = ".",
+                .max_attempts = loop.interactive_max_attempts,
+                .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
+                .replay_mode = false,
+                .turn_timeout_ms = 0,
+            },
+        );
+        transcript = session.transcript;
+        session.transcript = .{};
+        return .{ .result = result, .transcript = transcript };
+    }
+
+    const result = try loop.runTurnWith(
+        allocator,
+        client.asModelClient(),
+        registry,
+        &transcript,
+        prompt,
+        .{
+            .workspace_root = ".",
+            .max_attempts = loop.interactive_max_attempts,
+            .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
+            .replay_mode = false,
+            .turn_timeout_ms = 0,
+        },
+    );
+    return .{ .result = result, .transcript = transcript };
+}
 
 fn setSessionCapture(session: *agent.AgentSession, sink: ?*capture_sink.CaptureSink) !void {
     switch (session.backend) {
@@ -2429,18 +2511,19 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             &resolved,
             if (replay_context) |context| context.config else null,
         );
-        var tr: transcript_mod.Transcript = .{};
         // A cassette that no longer covers its turn is collected, not thrown.
         // Returning at the first stale case means a compiler change that
         // invalidates several is discovered one paid recording at a time; the
         // whole re-record list is worth more than the early exit.
-        const result = loop.runTurnWith(ca, client.asModelClient(), &registry, &tr, rc.prompt, .{
-            .workspace_root = ".",
-            .max_attempts = loop.interactive_max_attempts,
-            .approval_fn = loop.ApprovalFn.fromFn(loop.autoApprove),
-            .replay_mode = false,
-            .turn_timeout_ms = 0,
-        }) catch |err| {
+        var outcome = replayCorpusTurn(
+            ca,
+            &resolved,
+            &client,
+            if (replay_context) |context| context.config else null,
+            replay_provider,
+            &registry,
+            rc.prompt,
+        ) catch |err| {
             try stale.append(a, rc.name);
             std.debug.print(
                 "[codegen-replay] {s}: {s} - its {d}-step cassette no longer covers the turn\n",
@@ -2448,6 +2531,9 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
             continue;
         };
+        defer outcome.deinit(ca);
+        const result = outcome.result;
+        const tr = &outcome.transcript;
         client.finish() catch |err| {
             try stale.append(a, rc.name);
             std.debug.print(
@@ -2456,7 +2542,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
             continue;
         };
-        try codegen.collectCodes(a, &tr, &tripped, &off_registry);
+        try codegen.collectCodes(a, tr, &tripped, &off_registry);
 
         // Ratchet each provider against its own recorded observation. Claude's
         // historical flat cassettes predate provider-qualified turn metadata,
@@ -2481,7 +2567,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
                         rc.name,
                         expected,
                         result.first_draft_veto_pass,
-                        codegen.firstZtsCode(&tr) orelse "-",
+                        codegen.firstZtsCode(tr) orelse "-",
                         if (on_headline) "" else " - off-headline provider or model, measured not ratcheted",
                     },
                 );
@@ -2519,7 +2605,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
         if (!result.first_draft_veto_pass) {
             std.debug.print("[codegen-gap] {s}: {s} (green={})\n", .{
                 rc.name,
-                codegen.firstZtsCode(&tr) orelse "?",
+                codegen.firstZtsCode(tr) orelse "?",
                 result.applied_edit,
             });
         }
@@ -2835,6 +2921,53 @@ test "flow-backed replay validates the current request checkpoint" {
         ),
     );
     try std.testing.expect(client.lastFlowMismatch() != null);
+}
+
+test "flow-backed corpus replay executes recorded compaction" {
+    const allocator = std.testing.allocator;
+    const repo_root = try cwdPathAlloc(allocator);
+    defer allocator.free(repo_root);
+    const rc = blk: {
+        for (&record_corpus) |*candidate| {
+            if (std.mem.eql(u8, candidate.name, "durable-order")) break :blk candidate;
+        }
+        return error.MissingCorpusCase;
+    };
+    var resolved = try resolveCaseSteps(allocator, repo_root, headline_provider, rc.name);
+    defer resolved.deinit(allocator);
+    const flow_case = if (resolved.flow_case) |*case| case else return error.ExpectedFlowArtifact;
+
+    var registry = try app.buildRegistry(allocator);
+    defer registry.deinit(allocator);
+    var request_context = try ReplayRequestContext.init(
+        allocator,
+        &registry,
+        headline_provider,
+        flow_case.manifest.model,
+    );
+    defer request_context.deinit(allocator);
+    var client = try CorpusReplayClient.init(&resolved, request_context.config);
+
+    var tmp = try IsolatedTmp.init(allocator, "codegen-compacted-replay");
+    defer tmp.cleanup(allocator);
+    for (rc.seed_files) |seed| try tmp.writeFile(allocator, seed.path, seed.bytes);
+    const saved_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var outcome = try replayCorpusTurn(
+        allocator,
+        &resolved,
+        &client,
+        request_context.config,
+        headline_provider,
+        &registry,
+        rc.prompt,
+    );
+    defer outcome.deinit(allocator);
+    try client.finish();
+    try std.testing.expect(outcome.transcript.projection != null);
 }
 
 test "a broken flow artifact is refused rather than falling back" {
