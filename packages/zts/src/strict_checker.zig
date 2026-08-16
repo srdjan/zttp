@@ -304,7 +304,7 @@ pub const StrictChecker = struct {
             .kind = .unpublished_ambient_global,
             .node = node,
             .message = message,
-            .help = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names.",
+            .help = ambientGlobalHelp(name),
             .message_owned = true,
         }) catch {
             self.allocator.free(message);
@@ -1773,6 +1773,13 @@ pub const StrictChecker = struct {
         return null;
     }
 };
+
+fn ambientGlobalHelp(name: []const u8) []const u8 {
+    if (std.mem.eql(u8, name, "fetchSync")) {
+        return "Import `fetch` from `zttp:fetch` and call `fetch(...)`; raw `fetchSync` is outside the model-minimal ambient namespace.";
+    }
+    return "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names.";
+}
 
 fn literalRequiredArg(module: []const u8, name: []const u8) ?u8 {
     if (std.mem.eql(u8, module, "zttp:env") and std.mem.eql(u8, name, "env")) return 0;

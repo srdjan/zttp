@@ -247,7 +247,7 @@ The IR tree IS the control flow graph. No cycles, no hidden exception paths, no 
 | Regular expressions | String methods: `includes`, `startsWith`, `endsWith`, `indexOf` |
 | `new` (constructors) | Factory functions, object literals |
 | `this` | Explicit parameter passing |
-| `async`/`await`/`Promise` | `fetchSync()`, `parallel()`, `race()` |
+| `async`/`await`/`Promise` | `fetch()` from `zttp:fetch`, `parallel()`, `race()` |
 | `delete` | New object literal with only the keys you keep |
 | `\|>`, `pipe()`, `guard()` | Call directly; run guards by explicit early return |
 | `interface` | `structural Name = { ... };` |
@@ -454,7 +454,7 @@ The BoolChecker enforces type-directed safety rules at compile time:
 
 ### Built-in Globals
 
-`Object.keys/values/entries`, array HOFs (`map`, `filter`, `reduce`, `find`, `some`, `every`, `forEach`), all `String` methods, `Math`, `JSON.parse/stringify`, `Date.now()`, `console.log`, `range(end)`, `fetchSync(url, init?)`, `parseInt`, `parseFloat`, `structuredClone`.
+`Object.keys/values/entries`, array HOFs (`map`, `filter`, `reduce`, `find`, `some`, `every`, `forEach`), all `String` methods, `Math`, `JSON.parse/stringify`, `Date.now()`, `console.log`, `range(end)`, `parseInt`, `parseFloat`, `structuredClone`.
 
 ### Compile-Time Features
 

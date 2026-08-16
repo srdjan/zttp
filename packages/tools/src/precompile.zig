@@ -5182,6 +5182,49 @@ test "runCheckOnlyFromSource refuses an unpublished ambient global" {
     try std.testing.expect(result.contract == null);
 }
 
+test "runCheckOnlyFromSource repairs raw fetchSync through zttp fetch" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  return fetchSync("https://example.internal");
+        \\}
+    ;
+
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    const diagnostic = for (result.json_diagnostics.items) |candidate| {
+        if (std.mem.eql(u8, candidate.code, "ZTS629")) break candidate;
+    } else return error.TestExpectedEqual;
+
+    try std.testing.expectEqualStrings("unpublished ambient global 'fetchSync'", diagnostic.message);
+    try std.testing.expectEqualStrings(
+        "Import `fetch` from `zttp:fetch` and call `fetch(...)`; raw `fetchSync` is outside the model-minimal ambient namespace.",
+        diagnostic.suggestion.?,
+    );
+}
+
+test "runCheckOnlyFromSource composes zttp fetch through durable steps" {
+    const source =
+        \\import { run, step } from "zttp:durable";
+        \\import { fetch } from "zttp:fetch";
+        \\structural DurableProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+        \\function handler(req: Request): DurableProof<Response> {
+        \\  const key = req.headers.get("idempotency-key") ?? "order";
+        \\  return run(key, () => {
+        \\    const reservation = step("reserve", () => fetch("https://inventory.internal/reserve"));
+        \\    const charge = step("charge", () => fetch("https://payments.internal/charge"));
+        \\    return Response.json({ reserved: reservation.status, charged: charge.status });
+        \\  });
+        \\}
+    ;
+
+    var result = try runCheckOnlyFromSource(std.testing.allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =

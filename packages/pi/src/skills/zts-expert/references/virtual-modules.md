@@ -138,17 +138,18 @@ function handler(req: Request): Response {
 
 ```typescript
 import { parallel, race } from "zttp:io";
+import { fetch } from "zttp:fetch";
 
 parallel(thunks: Array<() => Response>): Array<Response>
 race(thunks: Array<() => Response>): Response
 ```
 
-Concurrent `fetchSync` execution. Max 8 parallel thunks. Results in declaration order for `parallel`. The runtime intercepts `fetchSync` calls during thunk execution to dispatch them concurrently.
+Concurrent outbound fetch execution. Max 8 parallel thunks. Results remain in declaration order for `parallel`.
 
 ```typescript
 const [user, orders] = parallel([
-    () => fetchSync(`https://users.internal/${id}`),
-    () => fetchSync(`https://orders.internal?user=${id}`)
+    () => fetch(["https://users.internal/", id].join("")),
+    () => fetch(["https://orders.internal?user=", id].join(""))
 ]);
 
 return Response.json({
@@ -203,6 +204,7 @@ when it gives one.
 ```typescript
 import { run, step, stepWithTimeout, sleep, sleepUntil,
          waitSignal, signal, signalAt } from "zttp:durable";
+import { fetch } from "zttp:fetch";
 
 run(key: string, fn: () => Response): Response
 step(name: string, fn: () => unknown): unknown
@@ -220,15 +222,21 @@ Crash recovery for long-running workflows. Requires `--durable <dir>`. Pending w
 `stepWithTimeout` wraps a step with a deadline - returns a Result so you can handle timeout without crashing the workflow.
 
 ```typescript
-function handler(req: Request): Response {
-    return run(`order-${req.body}`, () => {
-        const validated = step("validate", () => validateOrder(req.body));
+structural DurableProof<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+
+function handler(req: Request): DurableProof<Response> {
+    const key = req.headers.get("idempotency-key") ?? "order";
+    return run(key, () => {
+        const body = req.body ?? "{}";
+        const reservation = step("reserve", () =>
+            fetch("https://inventory.internal/reserve", { method: "POST", body: body })
+        );
         sleep(5000);
         const charge = stepWithTimeout("charge", 10000, () =>
-            fetchSync("https://payments.internal/charge", { method: "POST", body: validated })
+            fetch("https://payments.internal/charge", { method: "POST", body: body })
         );
         if (!charge.ok) return Response.json({ error: "payment timeout" }, { status: 504 });
-        return Response.json({ order: charge.value.json() }, { status: 201 });
+        return Response.json({ reserved: reservation.status, charged: charge.value.status }, { status: 201 });
     });
 }
 ```
