@@ -39,11 +39,17 @@ function handler(req: Request): Response {
 - Conditional rendering: use ternary or `&&` in JSX expressions.
 - List rendering: use `Array.map` inside JSX.
 
+Name a record before putting it in an array. `Array<T>` is refused outright
+(ZTS058, write `T[]`), and an inline `{ name: string }[]` currently resolves to
+the element rather than the array, so the alias is the spelling that checks.
+
 ```tsx
-function UserList(props: { users: Array<{ name: string }> }): JSX.Element {
+structural User = { name: string };
+
+function UserList(props: { users: User[] }): JSX.Element {
     return (
         <ul>
-            {props.users.map((u) => <li>{u.name}</li>)}
+            {props.users.map((u: User) => <li>{u.name}</li>)}
         </ul>
     );
 }

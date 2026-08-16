@@ -393,12 +393,14 @@ import { cacheGet, cacheSet, cacheIncr } from "zttp:cache";
 import { parallel, race } from "zttp:io";
 import { logInfo, logError } from "zttp:log";
 import { serviceCall } from "zttp:service";
-import { send, close, getWebSockets, setAutoResponse, serializeAttachment, deserializeAttachment } from "zttp:websocket";
+import { fetch, fetchWithRetry } from "zttp:fetch";
+import { sql, sqlOne, sqlMany, sqlExec } from "zttp:sql";
+import { run, step, waitSignal } from "zttp:durable";
 ```
 
 ### Pattern Matching
 
-The `match` expression matches values against object patterns. Every match must have a `default` arm.
+The `match` expression matches values against object patterns. A match over an open domain such as `string` or `number` needs a `default` arm. A closed union covered member by member is already exhaustive and takes no `default` - that is the spelling spec 5.5 requires of one.
 
 ```typescript
 function handler(req: Request): Response {

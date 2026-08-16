@@ -249,8 +249,8 @@ function handler(req: Request): Response {
 import { parallel, race } from "zttp:io";
 import { fetch } from "zttp:fetch";
 
-parallel(thunks: Array<() => Response>): Array<Response>
-race(thunks: Array<() => Response>): Response
+parallel(thunks: (() => Response)[]): Response[]
+race(thunks: (() => Response)[]): Response
 ```
 
 Concurrent outbound fetch execution. Max 8 parallel thunks. Results remain in declaration order for `parallel`.

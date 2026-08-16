@@ -238,6 +238,19 @@ form is now refused. Changing it stales every cassette. So the re-record is the
 only way both go green, and it was taken as a known debt rather than reverting a
 correct fix.
 
+Four persona-bundle corrections ride in the same run, each of which would have
+owed a re-record on its own:
+
+- `SKILL.md` imported six exports from `zttp:websocket`, a module phase 5
+  removed. Replaced with `zttp:fetch`, `zttp:sql`, and `zttp:durable`, verified
+  against the live registry.
+- `SKILL.md` claimed every `match` needs a `default` arm. A closed union covered
+  member by member takes none, and that is the spelling spec 5.5 requires.
+- `references/jsx-patterns.md` and `references/virtual-modules.md` published
+  `Array<T>`, which ZTS058 refuses at the parser.
+- The jsx-patterns list example also hit a live type-checker defect, recorded
+  below.
+
 This is therefore a full re-record, not the two cases the original scope named.
 `sibling-helper` and `sibling-helper-holes` remain the two whose *workspaces*
 trip `ZTS061` once task 3 lands, so running this task after task 3 rather than
@@ -314,6 +327,21 @@ assert that a raw literal is still refused at a call site.
 **The ABI carve-out is a list that rots.** Deriving it from `abi_types.zig` is
 task 3's mitigation. A hand-written list would pass on the day it is written and
 start refusing a legitimate ABI type the first time one is added.
+
+**An inline record-array type resolves to its element.** Found while correcting
+the persona's JSX example on 2026-08-16, and unrelated to this plan's rule:
+
+```ts
+structural User = { name: string };
+function names(users: { name: string }[]): string { ... }  // property does not exist on type
+function names(users: User[]): string { ... }              // checks clean
+```
+
+`{ name: string }[]` is read as `{ name: string }`, so a member access on an
+element fails and an array argument is refused against a record parameter. The
+named-alias form is the workaround and the persona now teaches it. This wants
+its own reproduction and fix; it is noted here because the probe that found it
+belongs to this work, not because this plan closes it.
 
 **Section 1.9 of the draft is not closed by this plan.** Whether a `structural`
 alias over a bare scalar should satisfy the rule is decided empirically by the
