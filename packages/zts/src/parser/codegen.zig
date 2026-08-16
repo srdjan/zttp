@@ -1589,9 +1589,9 @@ pub const CodeGen = struct {
         const scope = self.scopes.getScope(func.scope_id);
         var upvalue_info_list: std.ArrayList(UpvalueInfo) = .empty;
         for (scope.upvalues.items) |uv| {
-            try upvalue_info_list.append(self.allocator, .{
-                .is_local = uv.is_direct,
-                .index = uv.outer_slot,
+            try upvalue_info_list.append(self.allocator, switch (uv.capture) {
+                .local => |index| .{ .is_local = true, .index = index },
+                .upvalue => |index| .{ .is_local = false, .index = index },
             });
         }
 

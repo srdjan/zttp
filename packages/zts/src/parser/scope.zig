@@ -30,16 +30,24 @@ pub const Binding = struct {
 
 /// Upvalue - a variable captured from an outer function scope
 pub const Upvalue = struct {
-    /// Reference to the binding in the outer scope
-    outer_scope_id: ScopeId,
-    outer_slot: u8,
+    pub const Capture = union(enum) {
+        local: u8,
+        upvalue: u8,
+    };
+
+    /// Stable identity of the source binding. These fields are used to
+    /// deduplicate captures when the same binding is referenced more than
+    /// once in a function.
+    source_scope_id: ScopeId,
+    source_slot: u8,
 
     /// Slot in this function's upvalue array
     slot: u8,
 
-    /// true: captured from immediate parent's locals
-    /// false: captured from parent's upvalues (transitive)
-    is_direct: bool,
+    /// The location from which this function's immediate parent supplies the
+    /// value. A transitive capture must first be installed in every
+    /// intervening function so the emitted parent-upvalue index is valid.
+    capture: Capture,
 
     /// Name for debugging
     name: []const u8,
@@ -252,7 +260,7 @@ pub const ScopeAnalyzer = struct {
     pub fn resolveBinding(self: *ScopeAnalyzer, name: []const u8, name_atom: u16) !BindingRef {
         var scope_id = self.current_scope;
         var crossed_function = false;
-        var current_function_scope: ScopeId = self.scopes.items[scope_id].enclosing_function;
+        const current_function_scope: ScopeId = self.scopes.items[scope_id].enclosing_function;
 
         while (true) {
             const scope = &self.scopes.items[scope_id];
@@ -299,7 +307,6 @@ pub const ScopeAnalyzer = struct {
             // Track if we crossed a function boundary
             if (scope.kind == .function) {
                 crossed_function = true;
-                current_function_scope = scope_id;
             }
 
             // Move to parent scope
@@ -325,29 +332,40 @@ pub const ScopeAnalyzer = struct {
         outer_slot: u8,
         name: []const u8,
     ) !u8 {
-        const inner_scope = &self.scopes.items[inner_function_scope];
-        const outer = &self.scopes.items[outer_scope];
+        const source_function_scope = self.scopes.items[outer_scope].enclosing_function;
+        const parent_scope = self.scopes.items[inner_function_scope].parent orelse
+            return error.InvalidScopeChain;
+        const parent_function_scope = self.scopes.items[parent_scope].enclosing_function;
 
-        // Check if the outer scope is a direct parent function
-        const is_direct = inner_scope.parent != null and
-            self.scopes.items[inner_scope.parent.?].enclosing_function == outer.enclosing_function;
-
-        // Check if upvalue already exists
-        for (inner_scope.upvalues.items, 0..) |uv, i| {
-            if (uv.outer_scope_id == outer_scope and uv.outer_slot == outer_slot) {
+        // Check if this source binding is already captured by the inner
+        // function. The immediate parent location can differ at each level,
+        // so it is not a safe identity for deduplication.
+        for (self.scopes.items[inner_function_scope].upvalues.items, 0..) |uv, i| {
+            if (uv.source_scope_id == outer_scope and uv.source_slot == outer_slot) {
                 return @intCast(i);
             }
         }
 
+        const capture: Upvalue.Capture = if (parent_function_scope == source_function_scope)
+            .{ .local = outer_slot }
+        else
+            .{ .upvalue = try self.createUpvalueChain(
+                parent_function_scope,
+                outer_scope,
+                outer_slot,
+                name,
+            ) };
+
         // Create new upvalue
+        const inner_scope = &self.scopes.items[inner_function_scope];
         const slot: u8 = @intCast(inner_scope.upvalues.items.len);
         if (slot >= 255) return error.TooManyUpvalues;
 
         try inner_scope.upvalues.append(self.allocator, .{
-            .outer_scope_id = outer_scope,
-            .outer_slot = outer_slot,
+            .source_scope_id = outer_scope,
+            .source_slot = outer_slot,
             .slot = slot,
-            .is_direct = is_direct,
+            .capture = capture,
             .name = name,
         });
 
@@ -426,6 +444,30 @@ test "nested function creates upvalue" {
     const upvalues = analyzer.getUpvalues(inner_scope_id);
     try std.testing.expectEqual(@as(usize, 1), upvalues.len);
     try std.testing.expectEqualStrings("y", upvalues[0].name);
+    try std.testing.expectEqual(@as(u8, 0), upvalues[0].capture.local);
+}
+
+test "transitive capture installs an upvalue in every parent function" {
+    var analyzer = try ScopeAnalyzer.init(std.testing.allocator);
+    defer analyzer.deinit();
+
+    const outer_scope = try analyzer.pushScope(.function);
+    _ = try analyzer.declareBinding("value", 1, .variable, false);
+    const middle_scope = try analyzer.pushScope(.function);
+    const inner_scope = try analyzer.pushScope(.function);
+
+    const resolved = try analyzer.resolveBinding("value", 1);
+    try std.testing.expectEqual(BindingRef.BindingKind.upvalue, resolved.kind);
+
+    const middle_upvalues = analyzer.getUpvalues(middle_scope);
+    try std.testing.expectEqual(@as(usize, 1), middle_upvalues.len);
+    try std.testing.expectEqual(@as(u8, 0), middle_upvalues[0].capture.local);
+    try std.testing.expectEqual(outer_scope, middle_upvalues[0].source_scope_id);
+
+    const inner_upvalues = analyzer.getUpvalues(inner_scope);
+    try std.testing.expectEqual(@as(usize, 1), inner_upvalues.len);
+    try std.testing.expectEqual(@as(u8, 0), inner_upvalues[0].capture.upvalue);
+    try std.testing.expectEqual(outer_scope, inner_upvalues[0].source_scope_id);
 }
 
 test "block scope inherits local slots" {

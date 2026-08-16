@@ -525,6 +525,11 @@ pub const UpvaluePool = struct {
     pool_hits: u64 = 0,
     /// Allocator for new allocations when pool is empty
     allocator: std.mem.Allocator,
+    /// Every live allocation, including checked-out upvalues. Closures can
+    /// share an upvalue and therefore cannot destroy it independently. This
+    /// registry gives the owning GC a complete teardown path even when an
+    /// upvalue never returns to the free list.
+    allocated: std.ArrayListUnmanaged(*object.Upvalue) = .empty,
     /// Maximum size of the free list (to bound memory usage)
     max_pool_size: u32 = 256,
 
@@ -533,13 +538,10 @@ pub const UpvaluePool = struct {
     }
 
     pub fn deinit(self: *UpvaluePool) void {
-        // Free all pooled upvalues
-        var current = self.free_list;
-        while (current) |uv| {
-            const next = uv.next;
+        for (self.allocated.items) |uv| {
             self.allocator.destroy(uv);
-            current = next;
         }
+        self.allocated.deinit(self.allocator);
         self.free_list = null;
         self.free_count = 0;
     }
@@ -556,6 +558,8 @@ pub const UpvaluePool = struct {
         }
         // Slow path: allocate new
         const uv = try self.allocator.create(object.Upvalue);
+        errdefer self.allocator.destroy(uv);
+        try self.allocated.append(self.allocator, uv);
         self.total_allocated += 1;
         return uv;
     }
@@ -564,6 +568,14 @@ pub const UpvaluePool = struct {
     pub fn release(self: *UpvaluePool, uv: *object.Upvalue) void {
         if (self.free_count >= self.max_pool_size) {
             // Pool is full, just free it
+            var found = false;
+            for (self.allocated.items, 0..) |allocated, index| {
+                if (allocated != uv) continue;
+                _ = self.allocated.swapRemove(index);
+                found = true;
+                break;
+            }
+            std.debug.assert(found);
             self.allocator.destroy(uv);
             return;
         }
@@ -1989,6 +2001,16 @@ test "UpvaluePool acquire and release" {
     pool.release(uv2);
     pool.release(uv3);
     try std.testing.expectEqual(@as(u32, 2), pool.free_count);
+}
+
+test "UpvaluePool owns checked-out allocations through teardown" {
+    const allocator = std.testing.allocator;
+    var pool = UpvaluePool.init(allocator);
+    defer pool.deinit();
+
+    _ = try pool.acquire();
+    try std.testing.expectEqual(@as(usize, 1), pool.allocated.items.len);
+    try std.testing.expectEqual(@as(u32, 0), pool.free_count);
 }
 
 test "UpvaluePool max size limit" {
