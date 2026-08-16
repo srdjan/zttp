@@ -109,13 +109,13 @@ pub fn renderRouteSource(allocator: std.mem.Allocator, v: RouteVariant) ![]u8 {
 
     if (v.has_routes) {
         try w.writeAll(
-            \\const routes = {
-            \\    "GET /existing": handleGetExisting,
-            \\};
-            \\
             \\function handleGetExisting(req: Request): Response {
             \\    return Response.json({ existing: true });
             \\}
+            \\
+            \\const routes = {
+            \\    "GET /existing": handleGetExisting,
+            \\};
             \\
             \\
         );

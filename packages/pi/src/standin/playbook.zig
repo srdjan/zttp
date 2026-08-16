@@ -1070,6 +1070,8 @@ pub fn synthesizeRoute(
         if (source_without_handler.len > 0 and source_without_handler[source_without_handler.len - 1] != '\n') {
             try out.append(allocator, '\n');
         }
+        if (source_without_handler.len > 0) try out.append(allocator, '\n');
+        try appendRouteHandler(allocator, &out, spec, handler_name);
         try out.append(allocator, '\n');
         try out.print(allocator, "const routes = {{\n    \"{s} {s}\": {s},\n}};\n\n", .{ spec.method, spec.path, handler_name });
     }
@@ -1090,6 +1092,15 @@ pub fn synthesizeRoute(
     } else {
         try out.append(allocator, '\n');
     }
+    return try out.toOwnedSlice(allocator);
+}
+
+fn appendRouteHandler(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(u8),
+    spec: RouteSpec,
+    handler_name: []const u8,
+) !void {
     try out.print(allocator, "function {s}(req: Request): Response {{\n", .{handler_name});
     if (spec.body_schema) |schema| {
         try out.print(
@@ -1103,8 +1114,6 @@ pub fn synthesizeRoute(
         try out.print(allocator, "    return Response.json({{ ok: true }}, {{ status: {d} }});\n", .{spec.status});
     }
     try out.appendSlice(allocator, "}\n");
-
-    return try out.toOwnedSlice(allocator);
 }
 
 fn appendWithRouteEntry(
@@ -1123,7 +1132,11 @@ fn appendWithRouteEntry(
         try out.appendSlice(allocator, source);
         return;
     };
-    try out.appendSlice(allocator, source[0..close]);
+    try out.appendSlice(allocator, source[0..start]);
+    if (start > 0 and source[start - 1] != '\n') try out.append(allocator, '\n');
+    try appendRouteHandler(allocator, out, spec, handler_name);
+    try out.append(allocator, '\n');
+    try out.appendSlice(allocator, source[start..close]);
     if (close > 0 and source[close - 1] != '\n') try out.append(allocator, '\n');
     try out.print(allocator, "    \"{s} {s}\": {s},\n", .{ spec.method, spec.path, handler_name });
     try out.appendSlice(allocator, source[close..]);
