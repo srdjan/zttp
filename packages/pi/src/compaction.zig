@@ -162,7 +162,7 @@ pub fn prepare(
             .summarize_start = active_start,
             .summarize_end = cut,
             .first_kept_index = cut,
-            .first_kept_entry_id = transcript.entryIdAt(cut),
+            .first_kept_entry_id = entryIdAtCut(transcript, cut),
         } };
     }
 
@@ -171,14 +171,14 @@ pub fn prepare(
         const split_cut = splitBoundary(entries, active_start, threshold) orelse {
             return .{ .not_compactable = .no_valid_cut };
         };
-        if (split_cut <= active_start or split_cut >= entries.len) {
+        if (split_cut <= active_start or split_cut > entries.len) {
             return .{ .not_compactable = .no_valid_cut };
         }
         return .{ .ready = .{
             .summarize_start = active_start,
             .summarize_end = split_cut,
             .first_kept_index = split_cut,
-            .first_kept_entry_id = transcript.entryIdAt(split_cut),
+            .first_kept_entry_id = entryIdAtCut(transcript, split_cut),
         } };
     }
     const split_cut = splitBoundary(entries, current_turn_start, threshold) orelse {
@@ -187,7 +187,7 @@ pub fn prepare(
         }
         return .{ .not_compactable = .no_valid_cut };
     };
-    if (split_cut <= current_turn_start or split_cut >= entries.len) {
+    if (split_cut <= current_turn_start or split_cut > entries.len) {
         return .{ .not_compactable = .no_valid_cut };
     }
     return .{ .ready = .{
@@ -196,8 +196,13 @@ pub fn prepare(
         .prefix_start = current_turn_start,
         .prefix_end = split_cut,
         .first_kept_index = split_cut,
-        .first_kept_entry_id = transcript.entryIdAt(split_cut),
+        .first_kept_entry_id = entryIdAtCut(transcript, split_cut),
     } };
+}
+
+fn entryIdAtCut(transcript: *const transcript_mod.Transcript, cut: usize) transcript_mod.EntryId {
+    std.debug.assert(cut <= transcript.len());
+    return if (cut == transcript.len()) transcript.nextEntryId() else transcript.entryIdAt(cut);
 }
 
 fn entryTokens(entry: *const transcript_mod.OwnedEntry) u64 {
@@ -272,6 +277,16 @@ fn splitBoundary(
     var i = @max(turn_start + 1, threshold);
     while (i < entries.len) : (i += 1) {
         if (isAssistantBoundary(entries[i])) return i;
+    }
+    // A closed tool pair can end with a tool result whose preceding assistant
+    // message is itself larger than the retained-suffix target. Backing up to
+    // that assistant boundary would retain the mandatory provider reasoning
+    // verbatim and defeat compaction. The exclusive tail boundary is safe once
+    // validateToolPairs has proved that no tool call is unresolved. Keep an
+    // oversized standalone user request verbatim rather than summarizing away
+    // the only authoritative statement of the task.
+    if (entries.len > turn_start + 1 or entries[turn_start] != .user_text) {
+        return entries.len;
     }
     i = @min(threshold, entries.len);
     while (i > turn_start + 1) {
@@ -778,9 +793,10 @@ test "prepare splits an oversized turn only at an assistant boundary" {
         .llm_text = "result " ** 100,
     } });
     try addText(&tr, .assistant, "late answer");
-    const ready = (try prepare(testing.allocator, &tr, 10)).ready;
+    const ready = (try prepare(testing.allocator, &tr, 30)).ready;
     try testing.expect(ready.isSplitTurn());
     try testing.expect(ready.first_kept_index != 3);
+    try testing.expect(ready.first_kept_index < tr.len());
     try testing.expect(isAssistantBoundary(tr.entries.items[ready.first_kept_index]));
 }
 
@@ -858,6 +874,40 @@ test "prepare counts opaque tool reasoning when selecting the retained suffix" {
         .ready => |ready| {
             try testing.expectEqual(@as(usize, 3), ready.first_kept_index);
             try testing.expectEqual(@as(transcript_mod.EntryId, 4), ready.first_kept_entry_id);
+        },
+        else => return error.TestExpectedCompactionCut,
+    }
+}
+
+test "prepare summarizes a completed oversized tool tail instead of retaining it" {
+    const reasoning = try testing.allocator.alloc(u8, 100_000);
+    defer testing.allocator.free(reasoning);
+    @memset(reasoning, 'r');
+
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    try tr.append(testing.allocator, .{ .user_text = "finish the repair" });
+    const calls = [_]turn.ToolCall{.{
+        .id = "large",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\"handler.ts\"}",
+        .reasoning_content = reasoning,
+    }};
+    try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
+    try tr.append(testing.allocator, .{ .tool_result = .{
+        .tool_use_id = "large",
+        .tool_name = "workspace_read_file",
+        .ok = true,
+        .llm_text = "closed",
+    } });
+
+    const result = try prepare(testing.allocator, &tr, 20_000);
+    switch (result) {
+        .ready => |ready| {
+            try testing.expect(ready.isSplitTurn());
+            try testing.expectEqual(tr.len(), ready.first_kept_index);
+            try testing.expectEqual(tr.nextEntryId(), ready.first_kept_entry_id);
+            try testing.expectEqual(tr.len(), ready.prefix_end.?);
         },
         else => return error.TestExpectedCompactionCut,
     }

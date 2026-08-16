@@ -666,7 +666,11 @@ fn applySequenceTransition(
         if (first_kept != .integer or first_kept.integer <= 0) return error.CorruptEventsLog;
         const kept_id = std.math.cast(EntryId, first_kept.integer) orelse
             return error.CorruptEventsLog;
-        if (kept_id >= sequence.next_entry_id) return error.CorruptEventsLog;
+        // The next entry ID is an exclusive tail boundary. It represents a
+        // checkpoint whose summary covers every entry currently in the raw
+        // journal; a later append with that ID becomes the first visible suffix
+        // entry. Anything beyond the next ID is still a corrupt cut identity.
+        if (kept_id > sequence.next_entry_id) return error.CorruptEventsLog;
     }
 }
 

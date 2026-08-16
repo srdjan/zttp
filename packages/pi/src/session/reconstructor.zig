@@ -681,6 +681,31 @@ test "reconstructTranscript restores the latest projection checkpoint" {
     try testing.expectEqual(@as(events.EntryId, 3), tr.projection.?.first_kept_entry_id);
 }
 
+test "reconstructTranscript accepts a checkpoint at the next entry boundary" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    const path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(path);
+
+    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "old" });
+    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "old answer" });
+    try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
+        .summary = "summary through the completed tail",
+        .first_kept_entry_id = 3,
+        .reason = .threshold,
+    } });
+    try events.appendEntryEvent(allocator, path, 3, null, .{ .model_text = "continued" });
+
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    try testing.expectEqual(@as(usize, 3), tr.len());
+    try testing.expectEqual(@as(events.EntryId, 3), tr.projection.?.first_kept_entry_id);
+    try testing.expectEqual(@as(usize, 2), try tr.activeStartIndex());
+    try testing.expectEqualStrings("continued", tr.at(2).model_text);
+}
+
 test "journal writer rejects a checkpoint with a missing cut identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
