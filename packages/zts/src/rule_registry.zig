@@ -197,6 +197,14 @@ const strict_meta = [_]struct {
         .repair = null,
     },
     .{
+        .kind = .unpublished_ambient_global,
+        .code = "ZTS629",
+        .description = "An identifier refers to a value outside the profile's closed ambient namespace.",
+        .example = "const secret = process.env.JWT_SECRET;",
+        .help = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names.",
+        .repair = null,
+    },
+    .{
         .kind = .missing_public_annotation,
         .code = "ZTS601",
         .description = "A function lacks explicit parameter or return annotations.",

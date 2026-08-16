@@ -663,3 +663,22 @@ test "simulate flags newly introduced canonical diagnostics" {
     try std.testing.expect(saw_608);
     try std.testing.expect(result.new_count > 0);
 }
+
+test "simulate vetoes a nonexistent virtual module export" {
+    const source =
+        \\import { requireJWT } from "zttp:auth";
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ authenticated: true });
+        \\}
+    ;
+    var result = try simulate(std.testing.allocator, .{
+        .file = "handler.ts",
+        .content = source,
+    });
+    defer result.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.new_count);
+    try std.testing.expectEqual(@as(usize, 1), result.violations.items.len);
+    try std.testing.expectEqualStrings("ZTS207", result.violations.items[0].code);
+    try std.testing.expect(result.violations.items[0].introduced_by_patch);
+}

@@ -190,6 +190,7 @@ fn flowCode(kind: flow_checker.DiagnosticKind) []const u8 {
 fn strictCode(kind: strict_checker.DiagnosticKind) []const u8 {
     return switch (kind) {
         .implicit_unknown => "ZTS600",
+        .unpublished_ambient_global => "ZTS629",
         .missing_public_annotation => "ZTS601",
         .dynamic_capability_access => "ZTS602",
         .non_exhaustive_profile_match => "ZTS603",
@@ -254,7 +255,7 @@ const all_codes: [code_count]CodeEntry = blk: {
 };
 
 test "checker diagnostic codes are globally unique" {
-    try std.testing.expectEqual(@as(usize, 65), allCodes().len);
+    try std.testing.expectEqual(@as(usize, 66), allCodes().len);
 
     var seen: std.StringHashMapUnmanaged(CodeEntry) = .empty;
     defer seen.deinit(std.testing.allocator);

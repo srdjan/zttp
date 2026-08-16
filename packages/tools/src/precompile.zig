@@ -339,6 +339,7 @@ fn buildContractForServiceContext(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
         &atoms,
         handler_path,
+        null,
     );
     _ = zts.parser.optimizeIR(allocator, &js_parser.nodes, &js_parser.constants, root) catch {};
 
@@ -1244,11 +1245,47 @@ fn runCheckOnPreparedSource(
     };
 
     // Stage 3: Import validation
+    var import_diagnostic: ?VirtualImportDiagnostic = null;
     validateVirtualModuleImports(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
         &atoms,
         handler_path,
+        &import_diagnostic,
     ) catch {
+        if (json_mode) {
+            if (import_diagnostic) |diagnostic| {
+                const message = switch (diagnostic.kind) {
+                    .unknown_module => try std.fmt.allocPrint(
+                        allocator,
+                        "unknown virtual module '{s}'",
+                        .{diagnostic.module},
+                    ),
+                    .missing_export => try std.fmt.allocPrint(
+                        allocator,
+                        "module '{s}' does not export '{s}'",
+                        .{ diagnostic.module, diagnostic.missing_export.? },
+                    ),
+                };
+                errdefer allocator.free(message);
+                const suggestion = switch (diagnostic.kind) {
+                    .unknown_module => "Use a specifier published by meta.module_catalog.",
+                    .missing_export => "Use an export published for this module by meta.module_catalog.",
+                };
+                try result.json_diagnostics.append(allocator, .{
+                    .code = switch (diagnostic.kind) {
+                        .unknown_module => "ZTS206",
+                        .missing_export => "ZTS207",
+                    },
+                    .severity = "error",
+                    .message = message,
+                    .file = handler_path,
+                    .line = diagnostic.line,
+                    .column = diagnostic.column,
+                    .suggestion = suggestion,
+                    .message_owned = true,
+                });
+            }
+        }
         result.parse_errors = 1;
         return result;
     };
@@ -1743,6 +1780,7 @@ pub fn compileHandler(
         zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants),
         &atoms,
         filename,
+        null,
     );
 
     // Check for file imports before proceeding with single-module compilation
@@ -2288,10 +2326,19 @@ fn resolveImportedAtomName(
     return null;
 }
 
+const VirtualImportDiagnostic = struct {
+    kind: enum { unknown_module, missing_export },
+    module: []const u8,
+    missing_export: ?[]const u8 = null,
+    line: u32,
+    column: u32,
+};
+
 fn validateVirtualModuleImports(
     view: zts.IrView,
     atoms: ?*zts.AtomTable,
     filename: []const u8,
+    diagnostic_out: ?*?VirtualImportDiagnostic,
 ) !void {
     const node_count = view.nodeCount();
     for (0..node_count) |idx| {
@@ -2301,6 +2348,9 @@ fn validateVirtualModuleImports(
 
         const import_decl = view.getImportDecl(node_idx) orelse continue;
         const module_str = view.getString(import_decl.module_idx) orelse continue;
+        const location = view.getLoc(node_idx);
+        const line: u32 = if (location) |loc| loc.line else 1;
+        const column: u32 = if (location) |loc| loc.column else 1;
         const binding = zts.builtin_modules.fromSpecifier(module_str) orelse {
             // A specifier in the built-in namespace that resolves to nothing
             // is an import of a module that does not exist, and it used to
@@ -2315,6 +2365,12 @@ fn validateVirtualModuleImports(
             // session's manifest registry rather than the comptime table, and
             // is deliberately not judged here.
             if (std.mem.startsWith(u8, module_str, "zttp:")) {
+                if (diagnostic_out) |out| out.* = .{
+                    .kind = .unknown_module,
+                    .module = module_str,
+                    .line = line,
+                    .column = column,
+                };
                 if (!builtin.is_test) debugPrint(
                     "import error: unknown module '{s}'\n  --> {s}\n  run `zttp modules` for the modules that exist\n",
                     .{ module_str, filename },
@@ -2338,6 +2394,13 @@ fn validateVirtualModuleImports(
         }
 
         if (zts.modules.validateImports(binding, name_buf[0..name_count])) |missing| {
+            if (diagnostic_out) |out| out.* = .{
+                .kind = .missing_export,
+                .module = module_str,
+                .missing_export = missing,
+                .line = line,
+                .column = column,
+            };
             if (!builtin.is_test) debugPrint(
                 "import error: module '{s}' does not export '{s}'\n  --> {s}\n",
                 .{ module_str, missing, filename },
@@ -3485,7 +3548,6 @@ test "runCheckOnly propagates path analysis allocation failure" {
     const source =
         \\import { env } from "zttp:env";
         \\function handler(req: Request): Response {
-        \\  _ = req;
         \\  const value = env("NAME") ?? "world";
         \\  return Response.text(value);
         \\}
@@ -3937,7 +3999,6 @@ test "formatProofCard: spec-less handler renders ZTS500 lines matching the foote
     // now render and that the printed error lines equal the footer count.
     const source =
         \\function handler(req: Request): Response {
-        \\  _ = req;
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -4409,7 +4470,6 @@ test "runCheckOnly keeps mirrored properties aligned with finalized fault covera
         \\import { jwtVerify } from "zttp:auth";
         \\
         \\function handler(req: Request): Proof<Response, "fault_covered"> {
-        \\  _ = req;
         \\  const auth = jwtVerify("token", "secret");
         \\  if (!auth.ok) {
         \\    return Response.text("unauthorized", { status: 401 });
@@ -4604,7 +4664,6 @@ test "runCheckOnlyFromSource: no Spec activates all supported specs for TS" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req: Request): Response {
-        \\  _ = req;
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -4641,7 +4700,6 @@ test "runCheckOnlyFromSource refuses legacy zttp types import with ZTS053" {
     const source =
         \\import type { Spec } from "zttp:types";
         \\function handler(req: Request): Response & Spec<"deterministic"> {
-        \\  _ = req;
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -4789,7 +4847,6 @@ test "runCheckOnlyFromSource refuses void type spelling with ZTS060" {
     const allocator = std.testing.allocator;
     const source =
         \\function ignore(value: string): void {
-        \\  _ = value;
         \\}
     ;
     var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
@@ -5105,11 +5162,30 @@ test "runCheckOnlyFromSource keeps numeric addition" {
     try std.testing.expect(result.contract == null);
 }
 
+test "runCheckOnlyFromSource refuses an unpublished ambient global" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const secret = process.env.JWT_SECRET;
+        \\  return Response.json({ authenticated: secret !== undefined });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSource(allocator, source, "handler.ts", null, true, null, false);
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), result.strict_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS629", diagnostic.code);
+    try std.testing.expectEqualStrings("unpublished ambient global 'process'", diagnostic.message);
+    try std.testing.expectEqualStrings("Import a published virtual-module capability or use an ambient name listed by meta.ambient_names.", diagnostic.suggestion.?);
+    try std.testing.expect(result.contract == null);
+}
+
 test "runCheckOnlyFromSource: explicit Spec narrows active spec set" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  _ = req;
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -5126,7 +5202,6 @@ test "runCheckOnlyFromSource: explicit unknown Spec suppresses defaults and emit
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req: Request): Proof<Response, "made_up"> {
-        \\  _ = req;
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -5155,18 +5230,18 @@ test "compileHandler honors a registered partner manifest" {
         \\}
     ;
     var manifest = try zts.ModuleMetadata.parse(allocator, manifest_json);
-    errdefer manifest.deinit(allocator);
 
     var registry = zts.ManifestRegistry.init(allocator);
     defer registry.deinit();
-    try registry.register(manifest);
+    registry.register(manifest) catch |err| {
+        manifest.deinit(allocator);
+        return err;
+    };
 
     const source =
         \\import { writeRow } from "zttp-ext:partner";
         \\function handler(req: Request): Response {
-        \\  _ = req;
-        \\  const r = writeRow("k", "v");
-        \\  _ = r;
+        \\  writeRow("k", "v");
         \\  return Response.text("ok");
         \\}
     ;
@@ -5305,6 +5380,45 @@ test "compileHandler rejects an import of a module that does not exist" {
         error.UnknownVirtualModule,
         compileHandler(allocator, source, "handler.ts", .{}),
     );
+}
+
+test "runCheckOnly returns structured diagnostics for invalid virtual imports" {
+    const cases = [_]struct {
+        source: []const u8,
+        code: []const u8,
+        message: []const u8,
+    }{
+        .{
+            .source =
+            \\import { send } from "zttp:websocket";
+            \\function handler(req: Request): Response { return Response.json({ ok: true }); }
+            ,
+            .code = "ZTS206",
+            .message = "unknown virtual module 'zttp:websocket'",
+        },
+        .{
+            .source =
+            \\import { requireJWT } from "zttp:auth";
+            \\function handler(req: Request): Response { return Response.json({ ok: true }); }
+            ,
+            .code = "ZTS207",
+            .message = "module 'zttp:auth' does not export 'requireJWT'",
+        },
+    };
+
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(
+            std.testing.allocator,
+            case.source,
+            "handler.ts",
+            .{ .json_mode = true },
+        );
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings(case.code, result.json_diagnostics.items[0].code);
+        try std.testing.expectEqualStrings(case.message, result.json_diagnostics.items[0].message);
+    }
 }
 
 test "resolveGeneratorPack parses integration paths" {

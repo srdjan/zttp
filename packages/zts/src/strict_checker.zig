@@ -82,6 +82,7 @@ fn countErrors(checker: *const StrictChecker) usize {
 
 pub const DiagnosticKind = enum {
     implicit_unknown,
+    unpublished_ambient_global,
     missing_public_annotation,
     dynamic_capability_access,
     non_exhaustive_profile_match,
@@ -132,6 +133,7 @@ pub const Diagnostic = struct {
     node: NodeIndex,
     message: []const u8,
     help: ?[]const u8,
+    message_owned: bool = false,
     /// Typed repair primitive the agent uses to pick an apply step directly.
     /// `null` when no single canonical
     /// repair applies (e.g. implicit_unknown — needs a type annotation that
@@ -218,6 +220,9 @@ pub const StrictChecker = struct {
     }
 
     pub fn deinit(self: *StrictChecker) void {
+        for (self.diagnostics.items) |diagnostic| {
+            if (diagnostic.message_owned) self.allocator.free(diagnostic.message);
+        }
         if (self.owned_facts) |*owned| owned.deinit();
         self.imported_functions.deinit(self.allocator);
         self.call_counts.deinit(self.allocator);
@@ -273,6 +278,38 @@ pub const StrictChecker = struct {
 
     fn addDiagnostic(self: *StrictChecker, diag: Diagnostic) void {
         self.diagnostics.append(self.allocator, diag) catch self.markAllocationFailure();
+    }
+
+    fn checkAmbientGlobal(self: *StrictChecker, node: NodeIndex) void {
+        const binding = self.ir_view.getBinding(node) orelse return;
+        if (binding.kind != .undeclared_global) return;
+        const name = self.resolveAtomName(binding.name_atom) orelse return;
+        if (isKnownGlobalFunction(name)) return;
+        if (self.type_env) |env| {
+            if (env.getTypeAlias(name)) |type_idx| {
+                if (env.pool.isNominal(type_idx)) return;
+            }
+        }
+
+        const message = std.fmt.allocPrint(
+            self.allocator,
+            "unpublished ambient global '{s}'",
+            .{name},
+        ) catch {
+            self.markAllocationFailure();
+            return;
+        };
+        self.diagnostics.append(self.allocator, .{
+            .severity = .err,
+            .kind = .unpublished_ambient_global,
+            .node = node,
+            .message = message,
+            .help = "Import a published virtual-module capability or use an ambient name listed by meta.ambient_names.",
+            .message_owned = true,
+        }) catch {
+            self.allocator.free(message);
+            self.markAllocationFailure();
+        };
     }
 
     fn markAllocationFailure(self: *StrictChecker) void {
@@ -622,6 +659,7 @@ pub const StrictChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return;
 
         switch (tag) {
+            .identifier => self.checkAmbientGlobal(node),
             .binary_op => {
                 const bin = self.ir_view.getBinary(node) orelse return;
                 self.checkRedundantBoolCompare(node, bin);
