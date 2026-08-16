@@ -38,19 +38,20 @@ if [ ! -x "$ZTS" ]; then
   exit 1
 fi
 
-# Pinned 2026-08-16 after the model-minimal authority cut. The core grammar
-# removed the legacy `type` and `distinct type` productions, the idiom table
-# removed preferences whose alternative is now forbidden, and ZTS629 added the
-# closed ambient-name refusal to the policy registry.
+# Pinned 2026-08-16 after the declared export-boundary rule joined the
+# compiler-owned policy registry. ZTS061 adds one verifier rule and makes the
+# policy identity cover that cross-module contract requirement.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="63caf9a6922901f94ee576502debf37de18b7eb3cf8271a980fd252ee1ab8b93"
+EXPECTED_POLICY_HASH="1c0a024766ab61a1fb327da0f201c7b1b52fbc3cb0a7adac64a2de34fa8d18cb"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"
 EXPECTED_FRONTEND_PROFILE="zts-tsx-1"
 EXPECTED_FRONTEND_GRAMMAR_HASH="7c9617420918404b14782ce11ffff71f3f1c42f967cb2ca656b7109e417d283d"
 EXPECTED_IDIOM_HASH="2a7059a7e3d4747c26af855ebd3a80b9fbb853bc5feb5ea16010bd300a5992db"
-EXPECTED_RESTRICTION_HASH="be9e7992e7afb176eb4dbb47638b596204660a6127be9a59cf72a506375b8895"
+# The same boundary cut adds `restriction.raw-export-boundary-type`, so the
+# generated restriction matrix and the policy registry move together.
+EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe9652025e80911f1b"
 # Moved when `zttp:compose` was deleted: the module surface went from 24
 # specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
 # clothes, so their native implementations never ran, but they were published

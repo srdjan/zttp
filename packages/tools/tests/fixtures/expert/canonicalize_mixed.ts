@@ -1,6 +1,6 @@
 import { env } from "zttp:env";
 
-export const load = (id: string): Response => Response.text(id);
+export const load = (req: Request): Response => Response.text(req.path);
 
 const parse = (x: number): number => x;
 

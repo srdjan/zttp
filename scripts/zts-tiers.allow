@@ -166,6 +166,7 @@ zts-compiler compiler.zig
 zts-compiler contract_builder.zig
 zts-compiler contract_diff.zig
 zts-compiler counterexample.zig
+zts-compiler diagnostic_catalog.zig
 zts-compiler diagnostic_projection.zig
 zts-compiler effect_inference.zig
 zts-compiler fanout_extractor.zig
