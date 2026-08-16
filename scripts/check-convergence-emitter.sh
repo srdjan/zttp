@@ -7,12 +7,13 @@
 #   [codegen-convergence] - a measurement of a live model, carrying its name.
 #   [proof-coverage]      - a fact about the corpus and the compiler.
 #
-# Each is printed by the cassette replay and lifted out of the whole
-# `test-expert-app` output by a publisher that greps for the first matching
-# line. Neither publisher checks where the line came from, so a second emitter -
-# an offline summary that copies a format, a debug print left in a harness -
-# would be published as though it were the real one. That matters most for the
-# convergence row, where a stand-in number would appear under a model's name.
+# Each is printed by the cassette replay and lifted out of the complete
+# `test-expert-app` output only after that build succeeds. The publisher
+# requires exactly one matching line, but it cannot establish which source
+# emitted that line. A second emitter, such as an offline summary that copies a
+# format or a debug print left in a harness, could still replace the authority.
+# That matters most for the convergence row, where a stand-in number would
+# appear under a model's name.
 #
 # This gate holds each marker to one producer and one consumer, named by path,
 # and forbids either publisher from reading the other's marker.
@@ -107,6 +108,8 @@ fi
 if grep -q -F "$convergence_marker" "$coverage_publisher"; then
   fail "$coverage_publisher reads $convergence_marker"
 fi
+
+bash scripts/test-evidence-marker.sh
 
 printf 'convergence emitter OK: %s and %s each have one producer (%s) and one publisher\n' \
   "$convergence_marker" "$coverage_marker" "$producer"

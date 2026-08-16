@@ -24,23 +24,59 @@ cd "$(dirname "$0")/.."
 json_out="docs/coverage.json"
 md_out="docs/coverage.md"
 
-echo ">> replaying the codegen corpus"
-# Not anchored to the line start, and the JSON brace is required. The replay
-# prints this line unindented when the test passes and indented under a failure
-# header when it does not - and "does not" is the whole reason to run this
-# script, since a stale page is what fails it. An anchored match worked only in
-# the case where regenerating was unnecessary. The brace is what keeps the
-# match off the neighbouring "docs/coverage.json is stale" advice line.
-line="$(zig build test-expert-app 2>&1 | grep -m1 '\[proof-coverage\] {' || true)"
-line="${line#"${line%%\[proof-coverage\]*}"}"
+for filtered_var in ZTTP_CODEGEN_ONLY ZTTP_CODEGEN_LIMIT ZTTP_CODEGEN_TOOLS; do
+  if [[ -n "${!filtered_var:-}" ]]; then
+    echo "error: $filtered_var makes a coverage run non-publishable" >&2
+    exit 1
+  fi
+done
 
-if [[ -z "$line" ]]; then
-  echo "error: the replay emitted no [proof-coverage] line" >&2
-  echo "Run 'zig build test-expert-app' and read the output; the corpus may be failing." >&2
+evidence_tmp="$(mktemp -d "${TMPDIR:-/tmp}/zttp-coverage.XXXXXX")"
+cleanup() {
+  rm -rf "$evidence_tmp"
+}
+trap cleanup EXIT HUP INT TERM
+replay_log="$evidence_tmp/replay.log"
+json_tmp="$evidence_tmp/coverage.json"
+md_tmp="$evidence_tmp/coverage.md"
+
+# Intent scenarios invoke the built CLI. A replay without it reports less
+# coverage than the declared suite and must not reach the publisher.
+echo ">> building zttp (the intent checks drive it)"
+zig build
+
+echo ">> replaying the codegen corpus"
+# Read evidence only after the whole producer exits successfully. A marker
+# printed before a later test failure is not a completed run.
+if ! ZTTP_EVIDENCE_PUBLISH=1 zig build test-expert-app >"$replay_log" 2>&1; then
+  cat "$replay_log" >&2
+  echo "error: the codegen replay failed; generated evidence is unchanged" >&2
   exit 1
 fi
 
-payload="${line#\[proof-coverage\] }"
+if ! payload="$(python3 scripts/extract-evidence-marker.py \
+  "$replay_log" '[proof-coverage] ' coverage)"; then
+  cat "$replay_log" >&2
+  echo "error: the replay emitted no valid complete coverage marker" >&2
+  exit 1
+fi
+
+read -r marker_commit marker_dirty <<EOF
+$(printf '%s' "$payload" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d["sourceCommit"], "true" if d["sourceDirty"] else "false")
+')
+EOF
+current_commit="$(git rev-parse HEAD 2>/dev/null || true)"
+current_dirty=false
+if [[ -n "$(git status --porcelain --untracked-files=normal 2>/dev/null)" ]]; then
+  current_dirty=true
+fi
+if [[ "$current_commit" != "$marker_commit" || "$current_dirty" != "$marker_dirty" ]]; then
+  echo "error: source state changed after replay; generated evidence is unchanged" >&2
+  exit 1
+fi
 
 # No commit field. convergence.md carries one because its rows accumulate and a
 # reader needs to know which build produced each. This page is a single
@@ -52,10 +88,9 @@ import json, sys
 d = json.load(sys.stdin)
 d["recorded"] = sys.argv[1]
 print(json.dumps(d, indent=2))
-' "$(date -u +%Y-%m-%d)" > "$json_out"
-echo ">> wrote $json_out"
+' "$(date -u +%Y-%m-%d)" > "$json_tmp"
 
-python3 - "$json_out" "$md_out" <<'PY'
+python3 - "$json_tmp" "$md_tmp" <<'PY'
 import json, sys
 
 json_path, md_path = sys.argv[1], sys.argv[2]
@@ -80,7 +115,8 @@ What the offline suite proves, and what it does not.
 > hole loop execute correctly over their declared fixtures. And the
 > corpus is load-bearing: of the compiler's {total} advertised rules,
 > {len(tripped)} are tripped by at least one case. It proves nothing about what a
-> model will draft. First-draft pass rate, median round-trips, and intent pass
+> model will draft. Raw first-draft pass, first-attempt green, median
+> round-trips, and intent pass
 > exist only as recordings of a live model, an offline run is structurally unable
 > to produce or update them, and any figure of that shape that does not carry a
 > cassette-derived model column is a defect in
@@ -157,4 +193,20 @@ open(md_path, "w").write(out)
 print(">> wrote", md_path)
 PY
 
+python3 - "$json_tmp" "$md_tmp" <<'PY'
+import json, os, sys
+
+with open(sys.argv[1]) as f:
+    payload = json.load(f)
+if payload.get("complete") is not True or payload.get("completedCases") != 19:
+    raise SystemExit("error: rendered coverage JSON lost its completion floor")
+if payload.get("rulesTotal", 0) <= 0 or payload.get("rulesTripped", 0) <= 0:
+    raise SystemExit("error: rendered coverage JSON counted no rules")
+if os.path.getsize(sys.argv[2]) == 0:
+    raise SystemExit("error: rendered coverage Markdown is empty")
+PY
+
+mv "$json_tmp" "$json_out"
+mv "$md_tmp" "$md_out"
+echo ">> wrote $json_out and $md_out"
 echo ">> done. Review the diff, then commit both files."

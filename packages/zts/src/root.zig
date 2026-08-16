@@ -457,6 +457,11 @@ pub fn grammarHash() [64]u8 {
     return compiler.grammar_registry.grammarHash();
 }
 
+/// Identity of the complete executable semantics registry.
+pub fn semanticsHash() [64]u8 {
+    return compiler.semantics.semanticsHash();
+}
+
 /// The optional TSX source frontend. Its grammar hash includes the core grammar
 /// hash, so a lowered-source cache cannot survive a target-core change.
 pub const TsxFrontendCatalog = struct {
@@ -504,6 +509,7 @@ test "stable GrammarCatalog exposes the productions and their enforcement points
     try std.testing.expectEqual(GrammarCatalog.Enforcement.check_time, match_expr.enforcement);
     try std.testing.expect(GrammarCatalog.findByName("NotAProduction") == null);
     try std.testing.expectEqualStrings(&compiler.grammar_registry.grammarHash(), &grammarHash());
+    try std.testing.expectEqualStrings(&compiler.semantics.semanticsHash(), &semanticsHash());
 }
 
 test "stable TSX frontend catalog binds its grammar identity" {

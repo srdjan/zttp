@@ -224,6 +224,25 @@ pub fn contentDigest(domain: []const u8, bytes: []const u8) ContentDigest {
     return hasher.finish(ContentDigest);
 }
 
+pub fn contentDigestParts(domain: []const u8, parts: []const []const u8) ContentDigest {
+    var hasher = FramedHasher.init(ContentDigest.domain_tag);
+    hasher.field("content-domain", domain);
+    hasher.u64Field("part-count", parts.len);
+    for (parts, 0..) |part, index| {
+        hasher.u64Field("part-index", index);
+        hasher.field("part", part);
+    }
+    return hasher.finish(ContentDigest);
+}
+
+test "content digest parts bind boundaries order and domain" {
+    const baseline = contentDigestParts("responses", &.{ "ab", "c" });
+    try std.testing.expect(baseline.eql(contentDigestParts("responses", &.{ "ab", "c" })));
+    try expectChanged(baseline, contentDigestParts("responses", &.{ "a", "bc" }));
+    try expectChanged(baseline, contentDigestParts("responses", &.{ "c", "ab" }));
+    try expectChanged(baseline, contentDigestParts("other", &.{ "ab", "c" }));
+}
+
 pub fn promptPersona(bytes: []const u8) PromptPersonaIdentity {
     var hasher = FramedHasher.init(PromptPersonaIdentity.domain_tag);
     hasher.field("prompt-persona-bytes", bytes);

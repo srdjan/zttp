@@ -149,6 +149,76 @@ pub fn specFor(op: Operation) *const OperationSpec {
     unreachable; // the table is exhaustive; the test below proves it
 }
 
+/// Stable identity of the complete schema-v2 protocol vocabulary. This covers
+/// the common envelope, every operation's declared input and payload fields,
+/// and the closed error set. Evidence manifests bind this hash so a protocol
+/// change cannot replay under an older schema identity.
+pub fn schemaHash() [64]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    schemaHashField(&hasher, "domain", "zts-agent-protocol-schema-v2");
+    var version_bytes: [4]u8 = undefined;
+    std.mem.writeInt(u32, &version_bytes, agent_identity.schema_version, .big);
+    schemaHashField(&hasher, "schema-version", &version_bytes);
+    schemaHashField(&hasher, "profile-id", agent_identity.profile_id);
+    inline for (&.{
+        "schema_version", "operation",   "profile_id",        "compiler_version",
+        "policy_version", "policy_hash", "module_graph_hash", "success",
+        "payload",        "diagnostics", "error",             "code",
+        "message",        "field",
+    }, 0..) |field, index| {
+        schemaHashIndex(&hasher, "envelope-field-index", index);
+        schemaHashField(&hasher, "envelope-field", field);
+    }
+    for (&operations, 0..) |spec, operation_index| {
+        schemaHashIndex(&hasher, "operation-index", operation_index);
+        schemaHashField(&hasher, "operation", @tagName(spec.op));
+        schemaHashField(&hasher, "status", @tagName(spec.status));
+        for (spec.input_fields, 0..) |field, field_index| {
+            schemaHashIndex(&hasher, "input-field-index", field_index);
+            schemaHashField(&hasher, "input-field", field);
+        }
+        for (spec.payload_fields, 0..) |field, field_index| {
+            schemaHashIndex(&hasher, "payload-field-index", field_index);
+            schemaHashField(&hasher, "payload-field", field);
+        }
+        schemaHashField(
+            &hasher,
+            "deferred-note",
+            spec.deferred_note orelse "",
+        );
+    }
+    inline for (@typeInfo(ErrorCode).@"enum".fields, 0..) |field, error_index| {
+        schemaHashIndex(&hasher, "error-index", error_index);
+        schemaHashField(&hasher, "error-code", field.name);
+    }
+    return std.fmt.bytesToHex(hasher.finalResult(), .lower);
+}
+
+fn schemaHashField(hasher: *std.crypto.hash.sha2.Sha256, label: []const u8, value: []const u8) void {
+    schemaHashFrame(hasher, label);
+    schemaHashFrame(hasher, value);
+}
+
+fn schemaHashIndex(hasher: *std.crypto.hash.sha2.Sha256, label: []const u8, value: usize) void {
+    var bytes: [8]u8 = undefined;
+    std.mem.writeInt(u64, &bytes, @intCast(value), .big);
+    schemaHashField(hasher, label, &bytes);
+}
+
+fn schemaHashFrame(hasher: *std.crypto.hash.sha2.Sha256, value: []const u8) void {
+    var length: [8]u8 = undefined;
+    std.mem.writeInt(u64, &length, @intCast(value.len), .big);
+    hasher.update(&length);
+    hasher.update(value);
+}
+
+test "schema hash is deterministic lowercase hex" {
+    const first = schemaHash();
+    try std.testing.expectEqualStrings(&first, &schemaHash());
+    try std.testing.expectEqual(@as(usize, 64), first.len);
+    for (first) |byte| try std.testing.expect(std.ascii.isDigit(byte) or (byte >= 'a' and byte <= 'f'));
+}
+
 // ---------------------------------------------------------------------------
 // Request and response plumbing
 // ---------------------------------------------------------------------------
