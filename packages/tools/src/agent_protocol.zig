@@ -5042,12 +5042,19 @@ test "a production that over-admits says which rule refuses the excess" {
             try testing.expect(zts.PolicyCatalog.findByCode(code) != null);
         }
     }
-    // The floor. A payload of nothing but parse_time rows would satisfy the
-    // loop while publishing the over-approximation as if it were exact.
-    // The model-minimal grammar has nine wider productions after removing the
-    // legacy TypeDecl row. Keep the wire-level floor aligned with the source
-    // registry so an empty enforcement projection cannot pass.
-    try testing.expect(check_rows >= 9);
+    // Assert the count the source registry states, not a floor beneath it. A
+    // payload of nothing but parse_time rows would satisfy the loop while
+    // publishing the over-approximation as if it were exact, and a hand-pinned
+    // number both has to be edited in lockstep with every grammar cut and
+    // still passes when the projection silently drops rows.
+    var expected_check_rows: usize = 0;
+    for (zts.GrammarCatalog.productions()) |p| {
+        if (p.enforcement != .parse_time) expected_check_rows += 1;
+    }
+    // The gate's own input: a catalog whose every row said parse_time would
+    // make the equality below true by checking nothing.
+    try testing.expect(expected_check_rows > 0);
+    try testing.expectEqual(expected_check_rows, check_rows);
 }
 
 test "the grammar section stops being deferred" {

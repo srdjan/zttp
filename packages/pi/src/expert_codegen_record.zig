@@ -680,22 +680,20 @@ fn greenRecordingRequired() bool {
     return std.mem.eql(u8, flag, "1");
 }
 
-fn requireGreenRecording(required: bool, applied_edit: bool, intent_passed: bool) !void {
-    if (!required) return;
+fn requireGreenRecording(applied_edit: bool, intent_passed: bool) !void {
     if (!applied_edit) return error.RecordedEditNotApplied;
     if (!intent_passed) return error.RecordedIntentCheckFailed;
 }
 
 test "required-green recording refuses unapplied and failed-intent turns" {
-    try requireGreenRecording(false, false, false);
-    try requireGreenRecording(true, true, true);
+    try requireGreenRecording(true, true);
     try testing.expectError(
         error.RecordedEditNotApplied,
-        requireGreenRecording(true, false, true),
+        requireGreenRecording(false, true),
     );
     try testing.expectError(
         error.RecordedIntentCheckFailed,
-        requireGreenRecording(true, true, false),
+        requireGreenRecording(true, false),
     );
 }
 
@@ -1015,16 +1013,26 @@ fn expectEmbeddedReferenceProbeCompiles(probe_name: []const u8) !void {
     try testing.expectEqual(@as(usize, 0), check.json_diagnostics.items.len);
 }
 
-test "embedded durable wait-signal reference passes the live compiler" {
-    try expectEmbeddedReferenceProbeCompiles("durable-wait-signal");
-}
-
-test "embedded literal-fetch query reference passes the live compiler" {
-    try expectEmbeddedReferenceProbeCompiles("fetch-literal-query");
-}
-
-test "embedded log timestamp reference passes the live compiler" {
-    try expectEmbeddedReferenceProbeCompiles("log-timestamp");
+test "every embedded compiler probe in the reference passes the live compiler" {
+    // Discover the probes rather than naming them: three hand-written tests
+    // compiled three blocks, so a fourth probe added to the reference was
+    // never compiled and the gate still reported a pass.
+    const marker_prefix = "<!-- compiler-probe: ";
+    var probes: usize = 0;
+    var cursor: usize = 0;
+    while (std.mem.indexOfPos(u8, zts_expert_skill.virtual_modules_md, cursor, marker_prefix)) |at| {
+        const name_start = at + marker_prefix.len;
+        const name_end = std.mem.indexOfPos(u8, zts_expert_skill.virtual_modules_md, name_start, " -->") orelse
+            return error.UnterminatedEmbeddedCompilerProbe;
+        cursor = name_end;
+        const tag = zts_expert_skill.virtual_modules_md[name_start..name_end];
+        if (!std.mem.endsWith(u8, tag, ":start")) continue;
+        try expectEmbeddedReferenceProbeCompiles(tag[0 .. tag.len - ":start".len]);
+        probes += 1;
+    }
+    // The gate's own input: a reference that lost its markers would compile
+    // nothing and still pass the loop above.
+    try testing.expect(probes >= 3);
 }
 
 test "every corpus virtual module has a dedicated embedded reference" {
@@ -2242,24 +2250,18 @@ test "record codegen baseline corpus (live, gated)" {
                     std.debug.print("[codegen-record] {s}: produced handler:\n{s}\n", .{ rc.name, handler });
                 } else |_| {}
             }
-            if (require_green) {
-                std.debug.print(
-                    "[codegen-record] {s}: declared intent did not pass ({s}); " ++
-                        "required-green mode will refuse promotion\n",
-                    .{ rc.name, @errorName(err) },
-                );
-            } else {
-                std.debug.print(
-                    "[codegen-record] {s}: declared intent did not pass ({s}); " ++
-                        "failure will be measured and promoted\n",
-                    .{ rc.name, @errorName(err) },
-                );
-            }
+            const outcome: []const u8 = if (require_green)
+                "required-green mode will refuse promotion"
+            else
+                "failure will be measured and promoted";
+            std.debug.print(
+                "[codegen-record] {s}: declared intent did not pass ({s}); {s}\n",
+                .{ rc.name, @errorName(err), outcome },
+            );
             if (err == error.IntentCheckUnavailable) return err;
         };
 
-        requireGreenRecording(
-            require_green,
+        if (require_green) requireGreenRecording(
             result.applied_edit,
             intent_passed,
         ) catch |err| {
@@ -3056,7 +3058,10 @@ test "flow-backed corpus replay executes recorded compaction" {
     const allocator = std.testing.allocator;
     const repo_root = try cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
-    const rc = blk: {
+    // Keep the winning case's steps rather than re-resolving them: the search
+    // already read the manifest, trace, and step fixtures off disk.
+    var rc: *const RecordCase = undefined;
+    var resolved = blk: {
         for (&record_corpus) |*candidate| {
             var candidate_resolved = try resolveCaseSteps(
                 allocator,
@@ -3070,12 +3075,14 @@ test "flow-backed corpus replay executes recorded compaction" {
                 }
                 break :compacted false;
             } else false;
+            if (recorded_compaction) {
+                rc = candidate;
+                break :blk candidate_resolved;
+            }
             candidate_resolved.deinit(allocator);
-            if (recorded_compaction) break :blk candidate;
         }
         return error.MissingCompactedCorpusCase;
     };
-    var resolved = try resolveCaseSteps(allocator, repo_root, headline_provider, rc.name);
     defer resolved.deinit(allocator);
     const flow_case = if (resolved.flow_case) |*case| case else return error.ExpectedFlowArtifact;
 
