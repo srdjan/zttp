@@ -433,6 +433,28 @@ zttp serve --test tests/handler.test.jsonl src/handler.ts
 zig build -Dhandler=src/handler.ts -Dtest-file=tests/handler.test.jsonl
 ```
 
+Ordinary fixtures use `test`, `request`, optional `io`, and `expect` rows. A
+durable workflow fixture can opt into one shared scenario backend by making a
+`runtime` row the first row:
+
+```jsonl
+{"type":"runtime","durable":true,"workflowQueue":false}
+{"type":"test","name":"the order completes"}
+{"type":"request","method":"POST","url":"/","headers":{"idempotency-key":"order-1"},"body":null}
+{"type":"expect","status":201}
+{"type":"expect-run","runKey":"order-1","complete":true}
+{"type":"expect-event","runKey":"order-1","kind":"step_start","name":"reserve"}
+{"type":"expect-event","runKey":"order-1","kind":"step_result","name":"reserve","resultContains":"reserved"}
+{"type":"expect-signals","count":0}
+```
+
+Scenario tests share a private durable store but create a fresh handler and
+replay state for every request. Assertion rows are strict: every run needs at
+least one ordered event, queue mode needs `expect-queue` evidence and a system
+manifest, and malformed, duplicate, extra, or unconsumed evidence fails the
+fixture. Supported event kinds are `step_start`, `step_result`, `wait_signal`,
+and `resume_signal`.
+
 Record and replay handler I/O:
 
 ```bash

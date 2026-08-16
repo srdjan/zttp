@@ -9,6 +9,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 test {
     _ = @import("runtime_cli.zig");
+    // runtime_cli reaches this only through a runtime dispatch branch. Anchor
+    // it so the fixture grammar and end-to-end runtime scenario tests cannot
+    // silently disappear while the product binary still compiles.
+    _ = @import("test_runner.zig");
     _ = @import("cli_shared.zig");
     // `zruntime_tests.zig`, the handler-instance test root, is deliberately absent,
     // and importing it here would be worse than useless. It is the root of its

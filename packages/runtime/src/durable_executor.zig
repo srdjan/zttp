@@ -650,8 +650,16 @@ pub fn openActiveDurableRun(rt: *HandlerInstance, key: []const u8) !ActiveDurabl
 
 pub fn buildDurableOplogPath(rt: *HandlerInstance, key: []const u8) ![]u8 {
     const dir = rt.config.durable_oplog_dir orelse return error.DurableDisabled;
+    return buildDurableOplogPathForDir(rt.allocator, dir, key);
+}
+
+pub fn buildDurableOplogPathForDir(
+    allocator: std.mem.Allocator,
+    dir: []const u8,
+    key: []const u8,
+) ![]u8 {
     return std.fmt.allocPrint(
-        rt.allocator,
+        allocator,
         "{s}/durable-{x}.jsonl",
         .{ dir, std.hash.Fnv1a_64.hash(key) },
     );
