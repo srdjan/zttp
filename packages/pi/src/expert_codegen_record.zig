@@ -1608,6 +1608,144 @@ const LiveRecordingProgress = struct {
     }
 };
 
+const recorder_transport_attempts: u8 = 3;
+
+/// Live recording is a long, expensive sequence of otherwise independent
+/// model requests. A connection that closes before a response is decoded has
+/// produced no replayable model event and no tool effect, so the exact pending
+/// request can be retried safely. Keep this policy at the recorder boundary:
+/// ordinary interactive sessions continue to surface transport failures.
+const RecorderModelClient = struct {
+    inner: loop.ModelClient,
+    progress: LiveRecordingProgress,
+
+    fn request(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        var attempt: u8 = 1;
+        while (true) {
+            const result = self.inner.request(arena, transcript, extra_user_text) catch |err| {
+                if (err != error.DeepSeekServerUnavailable or attempt >= recorder_transport_attempts) {
+                    return err;
+                }
+                attempt += 1;
+                std.debug.print(
+                    "[codegen-record] [{d}/{d}] {s}: transient transport failure; " ++
+                        "retrying the same model request ({d}/{d})\n",
+                    .{
+                        self.progress.case_index,
+                        self.progress.case_count,
+                        self.progress.case_name,
+                        attempt,
+                        recorder_transport_attempts,
+                    },
+                );
+                continue;
+            };
+            return result;
+        }
+    }
+
+    fn setDeadline(context: *anyopaque, deadline_ms: ?i64) void {
+        const self: *@This() = @ptrCast(@alignCast(context));
+        self.inner.setDeadline(deadline_ms);
+    }
+
+    fn asModelClient(self: *@This()) loop.ModelClient {
+        return .{
+            .context = self,
+            .request_fn = request,
+            .set_deadline_fn = setDeadline,
+        };
+    }
+};
+
+test "live recorder retries a transient DeepSeek transport failure only" {
+    const FakeClient = struct {
+        calls: usize = 0,
+        failures_left: usize,
+        deadline: ?i64 = null,
+
+        fn request(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: *const transcript_mod.Transcript,
+            _: ?[]const u8,
+        ) anyerror!loop.ModelCallResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            if (self.failures_left > 0) {
+                self.failures_left -= 1;
+                return error.DeepSeekServerUnavailable;
+            }
+            return .{ .reply = .{ .response = .{ .final_text = "recorded" } } };
+        }
+
+        fn setDeadline(context: *anyopaque, deadline_ms: ?i64) void {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.deadline = deadline_ms;
+        }
+
+        fn asModelClient(self: *@This()) loop.ModelClient {
+            return .{
+                .context = self,
+                .request_fn = request,
+                .set_deadline_fn = setDeadline,
+            };
+        }
+    };
+
+    var fake: FakeClient = .{ .failures_left = 2 };
+    var retrying: RecorderModelClient = .{
+        .inner = fake.asModelClient(),
+        .progress = .{ .case_index = 1, .case_count = 1, .case_name = "probe" },
+    };
+    const client = retrying.asModelClient();
+    client.setDeadline(1234);
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    const result = try client.request(testing.allocator, &transcript, null);
+
+    try testing.expectEqualStrings("recorded", result.reply.response.final_text);
+    try testing.expectEqual(@as(usize, 3), fake.calls);
+    try testing.expectEqual(@as(?i64, 1234), fake.deadline);
+}
+
+test "live recorder does not retry a non-transport failure" {
+    const FakeClient = struct {
+        calls: usize = 0,
+
+        fn request(
+            context: *anyopaque,
+            _: std.mem.Allocator,
+            _: *const transcript_mod.Transcript,
+            _: ?[]const u8,
+        ) anyerror!loop.ModelCallResult {
+            const self: *@This() = @ptrCast(@alignCast(context));
+            self.calls += 1;
+            return error.InvalidEditArgs;
+        }
+    };
+
+    var fake: FakeClient = .{};
+    var retrying: RecorderModelClient = .{
+        .inner = .{ .context = &fake, .request_fn = FakeClient.request },
+        .progress = .{ .case_index = 1, .case_count = 1, .case_name = "probe" },
+    };
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+
+    try testing.expectError(
+        error.InvalidEditArgs,
+        retrying.asModelClient().request(testing.allocator, &transcript, null),
+    );
+    try testing.expectEqual(@as(usize, 1), fake.calls);
+}
+
 test "live codegen recorder progress renders metadata only" {
     var text = TextBuffer.init(testing.allocator);
     defer text.deinit();
@@ -1825,7 +1963,11 @@ test "record codegen baseline corpus (live, gated)" {
         var tr: transcript_mod.Transcript = .{};
         defer tr.deinit(ca);
         try recorder.beginTurn(rc.prompt, tr.len(), .approve);
-        const result = loop.runTurnWith(ca, session.modelClient(), &registry, &tr, rc.prompt, .{
+        var recording_client: RecorderModelClient = .{
+            .inner = session.modelClient(),
+            .progress = live_progress,
+        };
+        const result = loop.runTurnWith(ca, recording_client.asModelClient(), &registry, &tr, rc.prompt, .{
             .workspace_root = ".",
             .max_attempts = loop.interactive_max_attempts,
             .approval_fn = recorder.approvalFn(),
