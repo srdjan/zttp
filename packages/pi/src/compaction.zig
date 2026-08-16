@@ -517,7 +517,7 @@ pub const regular_system_prompt =
     "Summarize completed coding-agent history for continuation. " ++
     "Do not continue the conversation. Return only the required Markdown sections. " ++
     "Preserve goals, user constraints, decisions, blocked state, exact tool facts, and next actions. " ++
-    "Do not invent file lists; the host appends those separately.";
+    "Do not emit <read-files> or <modified-files> blocks; the host appends those separately.";
 
 pub const prefix_system_prompt =
     "Summarize only the early prefix of one active coding-agent turn. " ++
@@ -534,7 +534,13 @@ pub fn buildRegularPrompt(
     const writer = buffer.writer();
     if (previous_summary) |previous| {
         try writer.writeAll("Previous validated summary:\n<previous-summary>\n");
-        try writer.writeAll(previous);
+        // Projection summaries end with host-authored file-fact blocks. They
+        // are cumulative typed state, not model prose. Feeding them back to a
+        // repeated summarization invites the model to copy them into its
+        // response, which correctly fails validation as invented file facts.
+        // The controller carries those lists separately through FileOps, so
+        // only the narrative belongs in the summarizer prompt.
+        try writer.writeAll(summaryNarrative(previous));
         try writer.writeAll("\n</previous-summary>\n\n");
     }
     try writer.writeAll("New conversation span:\n<conversation>\n");
@@ -558,6 +564,12 @@ pub fn buildRegularPrompt(
             "## Critical Context\n",
     );
     return buffer.toOwnedSlice();
+}
+
+fn summaryNarrative(summary: []const u8) []const u8 {
+    const marker = "\n\n<read-files>\n";
+    const marker_start = std.mem.lastIndexOf(u8, summary, marker) orelse return summary;
+    return summary[0..marker_start];
 }
 
 pub fn buildPrefixPrompt(
@@ -1020,4 +1032,16 @@ test "regular prompt contains previous summary new span focus and fixed contract
     try testing.expect(std.mem.indexOf(u8, prompt, "[User]:\nnew") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "focus on blocked work") != null);
     try testing.expect(std.mem.indexOf(u8, prompt, "## Critical Context") != null);
+}
+
+test "repeated compaction does not feed host file facts back to the summarizer" {
+    const previous = valid_regular ++
+        "\n\n<read-files>\nhandler.ts\n</read-files>\n\n" ++
+        "<modified-files>\nhandler.ts\n</modified-files>";
+    const prompt = try buildRegularPrompt(testing.allocator, previous, "[User]:\ncontinue", null);
+    defer testing.allocator.free(prompt);
+
+    try testing.expect(std.mem.indexOf(u8, prompt, valid_regular) != null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "<read-files>") == null);
+    try testing.expect(std.mem.indexOf(u8, prompt, "<modified-files>") == null);
 }
