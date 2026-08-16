@@ -196,6 +196,20 @@ fn renderExport(buf: *Buf, a: std.mem.Allocator, exp: FunctionBinding) !void {
         try stringArray(buf, a, 6, names[0..exp.param_types.len]);
     }
 
+    // Rendered beside `params` rather than merged into it: the kinds are what
+    // the checker enforces and the names are what a caller reads, and a reader
+    // of the spec must be able to tell which is which. Omitted when the export
+    // has not been filled in yet, so the published spec never claims a name it
+    // does not have.
+    if (exp.param_names.len > 0) {
+        try buf.appendSlice(a, ",\n");
+        try key(buf, a, 6, "paramNames");
+        var names: [64][]const u8 = undefined;
+        std.debug.assert(exp.param_names.len <= names.len);
+        for (exp.param_names, 0..) |p, i| names[i] = p;
+        try stringArray(buf, a, 6, names[0..exp.param_names.len]);
+    }
+
     // Rendered only when the export declares its own set. Absent means it
     // inherits the module's `requiredCapabilities` above, which is what an
     // untightened export does; present - including as an empty array - is the
@@ -261,6 +275,14 @@ pub fn renderModuleSpec(
     try key(&buf, allocator, 2, "source");
     try appendJsonString(&buf, allocator, source_path);
     try buf.appendSlice(allocator, ",\n");
+
+    // Omitted when undeclared, so a module that has not been filled in yet
+    // renders exactly as it does today rather than gaining an empty string.
+    if (binding.summary.len > 0) {
+        try key(&buf, allocator, 2, "summary");
+        try appendJsonString(&buf, allocator, binding.summary);
+        try buf.appendSlice(allocator, ",\n");
+    }
 
     try key(&buf, allocator, 2, "requiredCapabilities");
     var caps: [32][]const u8 = undefined;

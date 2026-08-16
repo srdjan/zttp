@@ -385,6 +385,12 @@ pub const FunctionBinding = struct {
     /// Effect classification for handler property derivation.
     effect: EffectClass = .read,
 
+    /// What each parameter position means, in order, parallel to
+    /// `param_types`. Carried across the SDK boundary rather than derived: a
+    /// type kind says a parameter is a string, and only a name says which
+    /// string. Empty means undeclared.
+    param_names: []const []const u8 = &.{},
+
     /// Runtime capabilities this export consumes, as opposed to the union its
     /// module declares. `null` means "inherit the module's set", which is what
     /// every binding did before this field existed - so an untightened module
@@ -515,6 +521,11 @@ pub const ModuleBinding = struct {
 
     /// All exported functions with full metadata.
     exports: []const FunctionBinding,
+
+    /// One line saying how the module is used, for the protocol a per-export
+    /// signature cannot carry - the register-then-execute contract of
+    /// `zttp:sql` being the case that earned it. Empty means undeclared.
+    summary: []const u8 = "",
 
     /// Runtime capabilities consumed by the module's Zig implementation.
     required_capabilities: []const ModuleCapability = &.{},

@@ -213,6 +213,12 @@ pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64
         hasher.update("\x00");
         hasher.update(binding.name);
         hasher.update("\x00");
+        // The hash answers "which module surface", and a client that cached
+        // work under it is entitled to reuse that work. The use protocol and
+        // the parameter names are part of what a caller was told, so an edit
+        // to either has to move the identity or the cache is a silent lie.
+        hasher.update(binding.summary);
+        hasher.update("\x00");
         inline for (binding.required_capabilities) |cap| {
             hasher.update(@tagName(cap));
             hasher.update(",");
@@ -228,6 +234,11 @@ pub fn registryHashFromBindings(comptime bindings: []const mb.ModuleBinding) [64
             hasher.update(@tagName(exp.failure_severity));
             hasher.update(":");
             hasher.update(if (exp.traceable) "trace" else "no-trace");
+            hasher.update(":");
+            inline for (exp.param_names) |param| {
+                hasher.update(param);
+                hasher.update(",");
+            }
             hasher.update("\x00");
         }
         hasher.update("\n");

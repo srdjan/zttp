@@ -61,6 +61,7 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
         .specifier = binding.specifier,
         .name = binding.name,
         .exports = &exports,
+        .summary = binding.summary,
         .required_capabilities = &required_capabilities,
         .stateful = binding.stateful,
         .state_init = binding.state_init,
@@ -122,6 +123,10 @@ fn adaptFunctionBinding(
         .required_capabilities = comptime adaptExportCapabilities(binding.required_capabilities),
         .returns = @enumFromInt(@intFromEnum(binding.returns)),
         .param_types = &param_types,
+        // Carried, not dropped: a peer-package module that names its
+        // parameters must reach discovery with them, or the type kinds answer
+        // alone and the model is back to guessing which string is which.
+        .param_names = binding.param_names,
         // Carried across the boundary rather than dropped: a peer-package
         // module that declares a precise signature must reach the checker
         // with it, or the coarse enum answers in its place and the loss is

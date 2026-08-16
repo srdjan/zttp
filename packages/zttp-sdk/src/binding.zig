@@ -195,6 +195,18 @@ pub const FunctionBinding = struct {
     required_capabilities: ?[]const ModuleCapability = null,
     returns: ReturnKind = .unknown,
     param_types: []const ReturnKind = &.{},
+    /// What each parameter position means, in order, parallel to
+    /// `param_types`. A kind says a parameter is a string; only a name says
+    /// which string. `sqlMany(string, object)` is what discovery published
+    /// before this field, and a model reading it wrote a SELECT statement into
+    /// the slot that takes a registered query name - which compiles, and fails
+    /// at runtime. `sqlMany(name, params)` is the whole fix for that case.
+    ///
+    /// Empty means undeclared, which `validateBindings` permits only while the
+    /// roster is being filled. When present the length must equal
+    /// `param_types`, so a parameter added without a name is a compile error
+    /// rather than a silently shortened list.
+    param_names: []const []const u8 = &.{},
     /// Argument positions whose type must be JSON-encodable, checked by the
     /// same rule `Response.json` runs. An export that serializes an argument
     /// to the wire owes its caller the diagnostic at the call site rather than
@@ -239,6 +251,15 @@ pub const ModuleBinding = struct {
     specifier: []const u8,
     name: []const u8,
     exports: []const FunctionBinding,
+    /// One line saying how the module is used, for the protocol a per-export
+    /// signature cannot carry. `zttp:sql` is the case that earned it: every
+    /// export reads correctly on its own, and the fact that a statement must
+    /// be registered with `sql(name, statement)` before any of the others can
+    /// execute it lives between them, not in any one of them.
+    ///
+    /// This is a use protocol, not prose documentation. Keep it to the
+    /// sentence a caller needs before the first call.
+    summary: []const u8 = "",
     required_capabilities: []const ModuleCapability = &.{},
     stateful: bool = false,
     state_init: ?*const fn (*anyopaque, std.mem.Allocator) anyerror!void = null,
@@ -272,6 +293,11 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
             @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' in " ++ binding.specifier);
         }
         for (binding.exports) |f| {
+            // Checked before the capability `orelse continue` below, so an
+            // export that inherits its module's set is still checked here.
+            if (f.param_names.len != 0 and f.param_names.len != f.param_types.len) {
+                @compileError("param_names must be parallel to param_types on " ++ binding.specifier ++ "." ++ f.name);
+            }
             const export_caps = f.required_capabilities orelse continue;
             if (findDuplicateRequiredCapability(export_caps)) |capability| {
                 @compileError("duplicate required capability '" ++ @tagName(capability) ++ "' on " ++ binding.specifier ++ "." ++ f.name);

@@ -52,11 +52,14 @@ EXPECTED_IDIOM_HASH="2a7059a7e3d4747c26af855ebd3a80b9fbb853bc5feb5ea16010bd300a5
 # The same boundary cut adds `restriction.raw-export-boundary-type`, so the
 # generated restriction matrix and the policy registry move together.
 EXPECTED_RESTRICTION_HASH="3409f9e0490c698e67dcd1e7a6e3465f0d14c50e0a611bbe9652025e80911f1b"
-# Moved when `zttp:compose` was deleted: the module surface went from 24
-# specifiers to 23. `guard` and `pipe` were parser forms wearing a module's
-# clothes, so their native implementations never ran, but they were published
-# on this surface and a client bound to it must see them leave.
-EXPECTED_BUILTIN_HASH="15d94f12e2ceb3a97cc4308f1969950340754a2279f9a0a76358115d2ef9b22e"
+# Moved 2026-08-17 when the module surface began publishing parameter names and
+# a per-module use protocol. No specifier joined or left; what changed is what a
+# caller is told about the ones already there, which is exactly what a client
+# caches under this hash. `zttp:sql` is the first module filled: discovery used
+# to publish `sqlMany` with a name and an effect and nothing else, and a model
+# reading that wrote a SELECT statement into the argument that takes a
+# registered query name.
+EXPECTED_BUILTIN_HASH="7450dc5b9d53cbedc454562d902ebc93687095f9f032f5a8da78619d808276fd"
 
 fail() {
   printf 'meta drift: %s\n' "$1" >&2

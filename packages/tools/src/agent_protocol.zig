@@ -820,6 +820,43 @@ fn writeBootstrapMetaPayload(json: *std.json.Stringify) !bool {
     return true;
 }
 
+/// Emit a module's use protocol, when it declares one.
+///
+/// Omitted rather than emitted empty: an absent field reads as "this module
+/// has no protocol beyond its signatures", while `"summary":""` reads as a
+/// module whose protocol is the empty string. The roster is filled module by
+/// module, so the difference is live.
+fn writeModuleSummary(json: *std.json.Stringify, binding: anytype) !void {
+    if (binding.summary.len == 0) return;
+    try json.objectField("summary");
+    try json.write(binding.summary);
+}
+
+/// Emit an export's parameter names, in call order.
+///
+/// This is the field the model needs and did not have. Discovery published
+/// `sqlMany` with a name and an effect and nothing else, so a model had no way
+/// to learn that its first argument is a query name registered by `sql()`
+/// rather than a SQL statement. Positions past `required_arg_count` carry a
+/// trailing `?`, which is derived here rather than stored - the arity is
+/// already declared and two sources for one fact drift.
+fn writeExportParams(json: *std.json.Stringify, exp: anytype) !void {
+    if (exp.param_names.len == 0) return;
+    const required: usize = if (exp.required_arg_count) |n| n else exp.param_names.len;
+    try json.objectField("params");
+    try json.beginArray();
+    for (exp.param_names, 0..) |param, index| {
+        if (index < required) {
+            try json.write(param);
+        } else {
+            var buf: [64]u8 = undefined;
+            const optional = std.fmt.bufPrint(&buf, "{s}?", .{param}) catch param;
+            try json.write(optional);
+        }
+    }
+    try json.endArray();
+}
+
 fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.beginObject();
 
@@ -913,6 +950,7 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
         try json.write(binding.specifier);
         try json.objectField("name");
         try json.write(binding.name);
+        try writeModuleSummary(json, binding);
         try json.objectField("required_capabilities");
         try json.beginArray();
         for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
@@ -925,6 +963,7 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
             try json.write(exp.name);
             try json.objectField("effect");
             try json.write(@tagName(exp.effect));
+            try writeExportParams(json, exp);
             try json.endObject();
         }
         try json.endArray();
@@ -1300,6 +1339,7 @@ fn writeModulesPayload(
         try json.write(binding.specifier);
         try json.objectField("name");
         try json.write(binding.name);
+        try writeModuleSummary(json, binding);
         try json.objectField("required_capabilities");
         try json.beginArray();
         for (binding.required_capabilities) |cap| try json.write(@tagName(cap));
@@ -1312,6 +1352,7 @@ fn writeModulesPayload(
             try json.write(exp.name);
             try json.objectField("effect");
             try json.write(@tagName(exp.effect));
+            try writeExportParams(json, exp);
             try json.endObject();
         }
         try json.endArray();
@@ -3094,6 +3135,71 @@ test "modules returns the resolved graph and binds one hash in two places" {
     try testing.expectEqualStrings("zttp:env", imports.items[0].object.get("specifier").?.string);
     try testing.expectEqualStrings("builtin", imports.items[0].object.get("kind").?.string);
     try testing.expectEqualStrings("util.ts", imports.items[1].object.get("target").?.string);
+}
+
+// The regression this closes was measured, not imagined. `zts_expert_reference`
+// and its prose carried `sqlOne(name: string, params?: object)`, a recorded
+// corpus case read it and drafted correct named-query code, and the tool was
+// deleted in `803ebc95`. The next recording of the same case wrote
+// `sqlMany("SELECT id, name FROM users", {})` - a SELECT statement in the slot
+// that takes a registered name - because discovery published only a name and
+// an effect per export. The named fact is back, through compiler authority.
+//
+// Asserted on the value, not on a difference from the old payload: a test that
+// only checked "params is present" would pass on `["string","object"]`, which
+// is the shape that could not teach anything.
+test "module discovery names each parameter and the module use protocol" {
+    const a = testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data =
+        \\import { sqlMany } from "zttp:sql";
+        \\export function handler(req) { return Response.json(sqlMany("listUsers")); }
+        \\
+    });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
+    defer a.free(root);
+
+    const req = try std.fmt.allocPrint(a,
+        \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{root});
+    defer a.free(req);
+    const out = try respond(a, req);
+    defer a.free(out);
+
+    var parsed = try parse(a, out);
+    defer parsed.deinit();
+    const payload = parsed.value.object.get("payload").?.object;
+
+    var found_sql_module = false;
+    var found_sql_many = false;
+    for (payload.get("builtins").?.array.items) |module| {
+        const module_obj = module.object;
+        if (!std.mem.eql(u8, module_obj.get("specifier").?.string, "zttp:sql")) continue;
+        found_sql_module = true;
+
+        // The protocol between the exports, which no single signature holds.
+        const summary = module_obj.get("summary").?.string;
+        try testing.expect(std.mem.indexOf(u8, summary, "sql(name, statement)") != null);
+        try testing.expect(std.mem.indexOf(u8, summary, "never SQL text") != null);
+
+        for (module_obj.get("exports").?.array.items) |exp| {
+            const exp_obj = exp.object;
+            if (!std.mem.eql(u8, exp_obj.get("name").?.string, "sqlMany")) continue;
+            found_sql_many = true;
+            const params = exp_obj.get("params").?.array;
+            try testing.expectEqual(@as(usize, 2), params.items.len);
+            try testing.expectEqualStrings("name", params.items[0].string);
+            // Derived from required_arg_count, so the optional marker cannot
+            // drift from the arity the checker enforces.
+            try testing.expectEqualStrings("params?", params.items[1].string);
+        }
+    }
+    // The floor: a payload that stopped carrying zttp:sql, or an export list
+    // that stopped carrying sqlMany, would satisfy every assertion above by
+    // never running one.
+    try testing.expect(found_sql_module);
+    try testing.expect(found_sql_many);
 }
 
 test "a file-bound operation binds the graph digest, not the context-free one" {

@@ -2,6 +2,7 @@
   "schemaVersion": 1,
   "specifier": "zttp:sql",
   "source": "packages/modules/src/data/sql.zig",
+  "summary": "Register every statement once with sql(name, statement) at module scope, then execute it by that name: the first argument of sqlOne, sqlMany, and sqlExec is the registered name, never SQL text. Bind values as named parameters like :id.",
   "requiredCapabilities": [
     "sqlite",
     "policy_check"
@@ -14,6 +15,10 @@
       "params": [
         "string",
         "string"
+      ],
+      "paramNames": [
+        "name",
+        "statement"
       ],
       "requiredCapabilities": [],
       "contractExtractions": [
@@ -30,6 +35,10 @@
         "string",
         "object"
       ],
+      "paramNames": [
+        "name",
+        "params"
+      ],
       "failureSeverity": "expected"
     },
     {
@@ -39,6 +48,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "name",
+        "params"
       ]
     },
     {
@@ -48,6 +61,10 @@
       "params": [
         "string",
         "object"
+      ],
+      "paramNames": [
+        "name",
+        "params"
       ]
     }
   ]

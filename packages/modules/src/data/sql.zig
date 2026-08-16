@@ -20,6 +20,9 @@ pub const MODULE_STATE_SLOT: usize = 2; // module_slots.Slot.sql
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:sql",
     .name = "sql",
+    .summary = "Register every statement once with sql(name, statement) at module scope, " ++
+        "then execute it by that name: the first argument of sqlOne, sqlMany, and sqlExec " ++
+        "is the registered name, never SQL text. Bind values as named parameters like :id.",
     .required_capabilities = &.{ .sqlite, .policy_check },
     .stateful = true,
     .contract_section = "sql",
@@ -36,6 +39,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .boolean,
             .param_types = &.{ .string, .string },
+            .param_names = &.{ "name", "statement" },
             .traceable = false,
             .contract_extractions = &.{.{ .category = .sql_registration }},
         },
@@ -50,6 +54,7 @@ pub const binding = sdk.ModuleBinding{
             // required_arg_count the arity rule defaulted to param_count (2) and
             // rejected the shipped one-arg form with ZTS202.
             .param_types = &.{ .string, .object },
+            .param_names = &.{ "name", "params" },
             .required_arg_count = 1,
             .failure_severity = .expected,
             .return_labels = .{ .internal = true },
@@ -61,6 +66,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .read,
             .returns = .object,
             .param_types = &.{ .string, .object },
+            .param_names = &.{ "name", "params" },
             .required_arg_count = 1,
             .return_labels = .{ .internal = true },
         },
@@ -71,6 +77,7 @@ pub const binding = sdk.ModuleBinding{
             .effect = .write,
             .returns = .object,
             .param_types = &.{ .string, .object },
+            .param_names = &.{ "name", "params" },
             .required_arg_count = 1,
         },
     },
