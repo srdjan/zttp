@@ -96,15 +96,16 @@ fn renderFromSource(
     // This is the same analyzer and contract serializer `zts check --json`
     // uses, called as a library so it works in an isolated workspace that does
     // not contain the zttp build graph.
-    const system_path = try zts_cli.discoverProjectSystemPath(allocator, source_path);
-    defer if (system_path) |path| allocator.free(path);
-    // Discovered, not null. Hard-coding null made `validateSqlContract` return
-    // `MissingSqlSchema` for every handler importing `zttp:sql`, and the error
-    // left the tool as a bare error string - so the one hole the model asked
-    // about never came back with a frame. The sibling filler discovers the
-    // same path through `edit_simulate`.
-    const sql_schema_path = zts_cli.edit_simulate.discoverProjectSqlSchemaPath(allocator, source_path);
-    defer if (sql_schema_path) |path| allocator.free(path);
+    // Discovered, not null. Hard-coding the schema null made
+    // `validateSqlContract` return `MissingSqlSchema` for every handler
+    // importing `zttp:sql`, and the error left the tool as a bare error string
+    // - so the one hole the model asked about never came back with a frame.
+    // Both paths come from one walk: resolving them separately walked the same
+    // ancestors and parsed the same zttp.json twice per render.
+    var project_paths = zts_cli.edit_simulate.discoverProjectPaths(allocator, source_path);
+    defer project_paths.deinit(allocator);
+    const system_path = project_paths.system;
+    const sql_schema_path = project_paths.sqlite;
     // The analyzer's own failures are results, not Zig errors leaving the tool.
     // `MissingSqlSchema` used to escape `execute` and reach the autoloop as an
     // aborting error and the model as opaque text with no frames.

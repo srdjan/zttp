@@ -318,7 +318,7 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     var owned_file: ?[]const u8 = null;
     defer if (owned_file) |f| allocator.free(f);
 
-    var input: EditSimulateInput = if (stdin_json) blk: {
+    const input: EditSimulateInput = if (stdin_json) blk: {
         const parsed = try readStdinJson(allocator);
         owned_file = parsed.file;
         owned_content = parsed.content;
@@ -337,12 +337,10 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
         };
     };
 
-    // CLI boundary: resolve the project's SQL schema once per invocation so
-    // zttp:sql edits validate the way `zttp dev`/`test` validate them.
-    const discovered_schema = discoverProjectSqlSchemaPath(allocator, null);
-    defer if (discovered_schema) |p| allocator.free(p);
-    input.sql_schema_path = discovered_schema;
-
+    // The project comes from the edited file, not from process cwd. Resolving
+    // the schema here from cwd left `system_path` null, so `simulate` walked a
+    // second time from `input.file` - and a cwd outside the handler's project
+    // made one invocation analyze against two different zttp.json files.
     var result = try simulate(allocator, input);
     defer result.deinit(allocator);
 
