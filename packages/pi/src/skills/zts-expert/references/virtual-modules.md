@@ -38,6 +38,36 @@ timingSafeEqual(a: string, b: string): boolean
 
 Always check `.ok` before accessing `.value` - the verifier enforces this. `jwtSign` takes JSON-stringified claims and always returns a string (not optional). `jwtVerify` accepts an optional third argument for the signing algorithm; only `"HS256"` is supported.
 
+## zttp:log (effect: write)
+
+```typescript
+import { logDebug, logInfo, logWarn, logError } from "zttp:log";
+
+logDebug(message: string, fields: object): unknown
+logInfo(message: string, fields: object): unknown
+logWarn(message: string, fields: object): unknown
+logError(message: string, fields: object): unknown
+```
+
+Every log call requires both the message and the structured fields object. The
+runtime adds its own timestamp. A clock value that reaches only a log does not
+make the response non-deterministic, but logging is still a write effect, so a
+handler using it should declare only the narrow proof properties it holds.
+
+<!-- compiler-probe: log-timestamp:start -->
+```typescript
+import { logInfo } from "zttp:log";
+
+structural LoggedResponse<T> = Proof<T, "deterministic" | "state_isolated">;
+
+export function handler(req: Request): LoggedResponse<Response> {
+    const at = Date.now();
+    logInfo("served request", { at: at });
+    return Response.json({ ok: true });
+}
+```
+<!-- compiler-probe: log-timestamp:end -->
+
 ## zttp:validate (effect: read)
 
 ```typescript

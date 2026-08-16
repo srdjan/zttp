@@ -997,6 +997,30 @@ test "embedded literal-fetch query reference passes the live compiler" {
     try expectEmbeddedReferenceProbeCompiles("fetch-literal-query");
 }
 
+test "embedded log timestamp reference passes the live compiler" {
+    try expectEmbeddedReferenceProbeCompiles("log-timestamp");
+}
+
+test "every corpus virtual module has a dedicated embedded reference" {
+    const modules = [_][]const u8{
+        "zttp:env",
+        "zttp:auth",
+        "zttp:validate",
+        "zttp:fetch",
+        "zttp:durable",
+        "zttp:workflow",
+        "zttp:sql",
+        "zttp:log",
+        "zttp:cache",
+        "zttp:io",
+    };
+    for (modules) |module_name| {
+        const heading = try std.fmt.allocPrint(testing.allocator, "## {s} ", .{module_name});
+        defer testing.allocator.free(heading);
+        try testing.expect(std.mem.indexOf(u8, zts_expert_skill.virtual_modules_md, heading) != null);
+    }
+}
+
 // The corpus spans common tasks the agent handles cleanly and harder ones that
 // probe known gap areas (user-input egress, websocket events, durable
 // workflows). Each elicits realistic multi-roundtrip behaviour (explore then
