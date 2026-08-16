@@ -99,7 +99,7 @@ fn renderRouteAdd(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
             defer allocator.free(proposed);
             const args = try renderApplyArgs(allocator, spec.file, proposed);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, parsed.step_index, "apply_edit", args);
+            break :blk try renderToolCall(allocator, parsed.step_index, "propose_change_set", args);
         },
         else => try renderText(
             allocator,
@@ -203,11 +203,11 @@ fn renderEnvFeature(allocator: std.mem.Allocator, parsed: request.ParsedRequest)
             const variable = findEnvName(parsed.ask) orelse "APP_NAME";
             const transform = try synthesizeEnvFeature(allocator, source, variable);
             break :blk switch (transform) {
-                .edit => |proposed| blk_edit: {
+                .change_set => |proposed| blk_edit: {
                     defer allocator.free(proposed);
                     const args = try renderApplyArgs(allocator, file, proposed);
                     defer allocator.free(args);
-                    break :blk_edit try renderToolCall(allocator, 2, "apply_edit", args);
+                    break :blk_edit try renderToolCall(allocator, 2, "propose_change_set", args);
                 },
                 .unsupported_handler => renderSourceMiss(
                     allocator,
@@ -258,7 +258,7 @@ fn renderTestGeneration(allocator: std.mem.Allocator, parsed: request.ParsedRequ
             defer allocator.free(proposed);
             const args = try renderApplyArgs(allocator, test_file, proposed);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 3, "apply_edit", args);
+            break :blk try renderToolCall(allocator, 3, "propose_change_set", args);
         },
         else => try renderText(
             allocator,
@@ -313,7 +313,7 @@ fn renderSeededViolationFix(
             }
             const args = try renderApplyArgs(allocator, file, seed.bad_draft);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 3, "apply_edit", args);
+            break :blk try renderToolCall(allocator, 3, "propose_change_set", args);
         },
         4 => blk: {
             if (parsed.rejected_drafts == 0) {
@@ -325,7 +325,7 @@ fn renderSeededViolationFix(
             if (parsed.source == null) break :blk try renderUnreadableSource(allocator, "fix");
             const args = try renderApplyArgs(allocator, file, seed.good_draft);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 4, "apply_edit", args);
+            break :blk try renderToolCall(allocator, 4, "propose_change_set", args);
         },
         else => try renderText(
             allocator,
@@ -400,7 +400,7 @@ fn renderHoleFill(allocator: std.mem.Allocator, parsed: request.ParsedRequest) !
 
             const args = try renderApplyArgs(allocator, file, content);
             defer allocator.free(args);
-            break :blk try renderToolCall(allocator, 3, "apply_edit", args);
+            break :blk try renderToolCall(allocator, 3, "propose_change_set", args);
         },
         else => try renderText(
             allocator,
@@ -486,11 +486,11 @@ fn renderViolationFix(allocator: std.mem.Allocator, parsed: request.ParsedReques
             const source = parsed.source orelse break :blk try renderUnreadableSource(allocator, "fix");
             const transform = try synthesizeViolationFix(allocator, source);
             break :blk switch (transform) {
-                .edit => |proposed| blk_edit: {
+                .change_set => |proposed| blk_edit: {
                     defer allocator.free(proposed);
                     const args = try renderApplyArgs(allocator, file, proposed);
                     defer allocator.free(args);
-                    break :blk_edit try renderToolCall(allocator, 3, "apply_edit", args);
+                    break :blk_edit try renderToolCall(allocator, 3, "propose_change_set", args);
                 },
                 .unsupported_seed => renderSourceMiss(
                     allocator,
@@ -1311,7 +1311,7 @@ test "stand-in natural add-route ask becomes the historical structured route spe
     try testing.expectEqual(@as(u16, 201), spec.status);
 }
 
-test "stand-in add-route steps use tool cassette event names and apply_edit last" {
+test "stand-in add-route steps use tool cassette event names and propose_change_set last" {
     const parsed: request.ParsedRequest = .{
         .ask = "Add a GET /health route to handler.ts",
         .step_index = 3,
@@ -1320,7 +1320,7 @@ test "stand-in add-route steps use tool cassette event names and apply_edit last
     const body = try renderResponse(testing.allocator, parsed);
     defer testing.allocator.free(body);
     try testing.expect(std.mem.indexOf(u8, body, "event: response.function_call_arguments.delta") != null);
-    try testing.expect(std.mem.indexOf(u8, body, "\"name\":\"apply_edit\"") != null);
+    try testing.expect(std.mem.indexOf(u8, body, "\"name\":\"propose_change_set\"") != null);
     try testing.expect(std.mem.indexOf(u8, body, "data: [DONE]") != null);
 }
 

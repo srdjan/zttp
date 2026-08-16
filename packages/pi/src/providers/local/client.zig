@@ -10,7 +10,7 @@ const loop = @import("../../loop.zig");
 const turn = @import("../../turn.zig");
 const transcript_mod = @import("../../transcript.zig");
 const registry_mod = @import("../../registry/registry.zig");
-const apply_edit = @import("../anthropic/apply_edit.zig");
+const propose_change_set = @import("../anthropic/propose_change_set.zig");
 const http_errors = @import("../http_errors.zig");
 const model_request = @import("../model_request.zig");
 const context_budget = @import("../../context_budget.zig");
@@ -658,7 +658,7 @@ fn decodeResponseValue(
                 .response = .{ .tool_calls = calls },
             };
             return .{
-                .reply = try apply_edit.maybeRemap(arena, reply, finish_reason),
+                .reply = try propose_change_set.maybeRemap(arena, reply, finish_reason),
                 .usage = usage,
                 .stop_reason = finish_reason,
             };
@@ -670,7 +670,7 @@ fn decodeResponseValue(
         const calls = try parseToolEnvelopes(arena, request_digest, response_digest, text);
         const reply: turn.AssistantReply = .{ .response = .{ .tool_calls = calls } };
         return .{
-            .reply = try apply_edit.maybeRemap(arena, reply, finish_reason),
+            .reply = try propose_change_set.maybeRemap(arena, reply, finish_reason),
             .usage = usage,
             .stop_reason = finish_reason,
         };
@@ -1832,7 +1832,7 @@ test "local tool serializer uses Chat Completions function wrappers" {
     const tools = parsed.value.array.items;
     try testing.expectEqual(@as(usize, 2), tools.len);
     try testing.expectEqualStrings("function", tools[0].object.get("type").?.string);
-    try testing.expectEqualStrings("apply_edit", tools[0].object.get("function").?.object.get("name").?.string);
+    try testing.expectEqualStrings("propose_change_set", tools[0].object.get("function").?.object.get("name").?.string);
     try testing.expectEqualStrings("inspect", tools[1].object.get("function").?.object.get("name").?.string);
     try testing.expect(tools[1].object.get("function").?.object.get("parameters").? == .object);
 }

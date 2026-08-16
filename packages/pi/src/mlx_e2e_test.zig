@@ -58,7 +58,7 @@ const VetoThenLocalClient = struct {
         const self: *VetoThenLocalClient = @ptrCast(@alignCast(context));
         if (!self.injected) {
             self.injected = true;
-            return .{ .reply = .{ .response = .{ .edit = .{
+            return .{ .reply = .{ .response = .{ .change_set = .{
                 .file = "handler.ts",
                 .content = "import { sqlOne } from \"zttp:sql\";\n" ++
                     "function handler(req: Request): Response { const row = sqlOne(\"SELECT * FROM users\"); return Response.json({ row: row }); }\n",
@@ -124,7 +124,7 @@ test "local MLX expert flow" {
         "A compatibility harness will inject a zttp:sql draft into this project, which deliberately has no SQL schema. " ++
         "After the compiler vetoes it, do not ask for a schema and do not keep SQL. You must use " ++
         "workspace_read_file to read handler.ts and inspect the veto feedback. Do not call zts_check because " ++
-        "apply_edit runs the compiler automatically. Then use apply_edit to replace handler.ts with exactly this code:\n\n" ++
+        "propose_change_set runs the compiler automatically. Then use propose_change_set to replace handler.ts with exactly this code:\n\n" ++
         accepted_handler ++
         "\nKeep working until accepted.";
     var client: VetoThenLocalClient = .{ .delegate = session.modelClient() };

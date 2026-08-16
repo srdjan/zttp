@@ -4,7 +4,7 @@ description: Add a `zttp:router` route table to an existing handler.
 ---
 Add routing to the handler using `zttp:router`:
 1. Read the target file. Run `zts_expert_verify_paths`. Gather current module facts with `zts_expert_modules`.
-2. Author the COMPLETE file content yourself and submit exactly one `apply_edit` call. The host compiler veto checks the draft before the approval policy can write it.
+2. Author the COMPLETE file content yourself for every changed path and submit exactly one `propose_change_set` call. The host proves the aggregate draft before the approval policy can commit it.
 3. Import `routerMatch` from `zttp:router`. Check the optional match with `if (found !== undefined)`.
 4. Keep each handler signature explicit.
 

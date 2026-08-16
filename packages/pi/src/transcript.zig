@@ -632,8 +632,8 @@ test "veto -> turn -> transcript pipeline still lands a proof entry" {
     });
     defer result.deinit(testing.allocator);
 
-    var machine: turn.TurnMachine = .{ .state = .verifying_edit };
-    const action = machine.transition(.{ .edit_verified = result.outcome });
+    var machine: turn.TurnMachine = .{ .state = .verifying_change_set };
+    const action = machine.transition(.{ .change_set_verified = result.outcome });
 
     var tr: Transcript = .{};
     defer tr.deinit(testing.allocator);
@@ -657,8 +657,8 @@ test "renderRich renders a proof_card payload legibly, not as raw edit-simulate 
     });
     defer result.deinit(testing.allocator);
 
-    var machine: turn.TurnMachine = .{ .state = .verifying_edit };
-    const action = machine.transition(.{ .edit_verified = result.outcome });
+    var machine: turn.TurnMachine = .{ .state = .verifying_change_set };
+    const action = machine.transition(.{ .change_set_verified = result.outcome });
 
     var tr: Transcript = .{};
     defer tr.deinit(testing.allocator);

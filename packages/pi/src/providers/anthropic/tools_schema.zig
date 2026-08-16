@@ -1,5 +1,5 @@
 //! Serializes the structured tool catalog the model sees into the Anthropic
-//! Messages API tool-use JSON shape. The synthetic `apply_edit` tool is
+//! Messages API tool-use JSON shape. The synthetic `propose_change_set` tool is
 //! prepended with its own schema and intercepted before it reaches the
 //! registry.
 
@@ -7,7 +7,7 @@ const std = @import("std");
 const TextBuffer = @import("../../text_buffer.zig").TextBuffer;
 const registry_mod = @import("../../registry/registry.zig");
 const json_writer = @import("../json_writer.zig");
-const apply_edit = @import("apply_edit.zig");
+const propose_change_set = @import("propose_change_set.zig");
 const tool_catalog = @import("../tool_catalog.zig");
 
 fn writeToolEntry(
@@ -80,7 +80,7 @@ fn findTool(array: std.json.Value, name: []const u8) ?std.json.Value {
     return null;
 }
 
-test "writeToolsArray: empty registry still emits the synthetic apply_edit tool" {
+test "writeToolsArray: empty registry still emits the synthetic propose_change_set tool" {
     var reg: registry_mod.Registry = .{};
     defer reg.deinit(testing.allocator);
 
@@ -91,13 +91,14 @@ test "writeToolsArray: empty registry still emits the synthetic apply_edit tool"
     defer parsed.deinit();
     try testing.expect(parsed.value == .array);
     try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
-    const synthetic = findTool(parsed.value, apply_edit.tool_name) orelse return error.TestFailed;
+    const synthetic = findTool(parsed.value, propose_change_set.tool_name) orelse return error.TestFailed;
     try testing.expect(synthetic.object.get("input_schema").? == .object);
-    // The synthetic schema declares file + content as required properties.
+    // The synthetic schema requires one nonempty changes array.
     const schema = synthetic.object.get("input_schema").?.object;
     const required = schema.get("required").?;
     try testing.expect(required == .array);
-    try testing.expectEqual(@as(usize, 2), required.array.items.len);
+    try testing.expectEqual(@as(usize, 1), required.array.items.len);
+    try testing.expectEqualStrings("changes", required.array.items[0].string);
 }
 
 test "writeToolsArray: model catalog omits generic workspace writers" {
@@ -121,10 +122,10 @@ test "writeToolsArray: model catalog omits generic workspace writers" {
 
     try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
     try testing.expect(findTool(parsed.value, "writer") == null);
-    _ = findTool(parsed.value, apply_edit.tool_name) orelse return error.TestFailed;
+    _ = findTool(parsed.value, propose_change_set.tool_name) orelse return error.TestFailed;
 }
 
-test "writeToolsArray: registered tool appears alongside apply_edit, found by name" {
+test "writeToolsArray: registered tool appears alongside propose_change_set, found by name" {
     var reg: registry_mod.Registry = .{};
     defer reg.deinit(testing.allocator);
     try reg.register(testing.allocator, .{
@@ -150,8 +151,8 @@ test "writeToolsArray: registered tool appears alongside apply_edit, found by na
     const meta = findTool(parsed.value, "zts_expert_meta") orelse return error.TestFailed;
     try testing.expectEqualStrings("Emit policy metadata.", meta.object.get("description").?.string);
 
-    // apply_edit is still present alongside registered tools.
-    _ = findTool(parsed.value, apply_edit.tool_name) orelse return error.TestFailed;
+    // propose_change_set is still present alongside registered tools.
+    _ = findTool(parsed.value, propose_change_set.tool_name) orelse return error.TestFailed;
 }
 
 test "writeToolsArray: only the last tool carries a cache_control breakpoint" {
@@ -184,14 +185,14 @@ test "writeToolsArray: only the last tool carries a cache_control breakpoint" {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
     defer parsed.deinit();
     const items = parsed.value.array.items;
-    // apply_edit, alpha, beta: only beta (the last) is cached.
+    // propose_change_set, alpha, beta: only beta (the last) is cached.
     try testing.expect(items[0].object.get("cache_control") == null);
     try testing.expect(items[1].object.get("cache_control") == null);
     const cc = items[2].object.get("cache_control") orelse return error.TestFailed;
     try testing.expectEqualStrings("ephemeral", cc.object.get("type").?.string);
 }
 
-test "writeToolsArray: apply_edit alone carries the cache_control breakpoint" {
+test "writeToolsArray: propose_change_set alone carries the cache_control breakpoint" {
     var reg: registry_mod.Registry = .{};
     defer reg.deinit(testing.allocator);
 
@@ -237,8 +238,8 @@ test "writeToolsArray: multiple registered tools preserve insertion order" {
     defer parsed.deinit();
 
     try testing.expectEqual(@as(usize, 3), parsed.value.array.items.len);
-    // apply_edit is first, then alpha, then beta.
-    try testing.expectEqualStrings(apply_edit.tool_name, parsed.value.array.items[0].object.get("name").?.string);
+    // propose_change_set is first, then alpha, then beta.
+    try testing.expectEqualStrings(propose_change_set.tool_name, parsed.value.array.items[0].object.get("name").?.string);
     try testing.expectEqualStrings("alpha", parsed.value.array.items[1].object.get("name").?.string);
     try testing.expectEqualStrings("beta", parsed.value.array.items[2].object.get("name").?.string);
 }

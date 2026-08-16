@@ -458,7 +458,7 @@ pub fn extractFileOps(
     };
     for (transcript.entries.items[start..end]) |entry| switch (entry) {
         .assistant_tool_use => |calls| for (calls) |call| {
-            if (std.mem.eql(u8, call.name, "apply_edit")) continue;
+            if (std.mem.eql(u8, call.name, "propose_change_set")) continue;
             if (!successful_calls.contains(call.id)) continue;
             try extractCallFiles(allocator, &reads, call.args_json);
         },
@@ -954,14 +954,14 @@ test "serializeSpan uses explicit labels exact args and a UTF-8-safe 2000-byte t
     try testing.expect(std.unicode.utf8ValidateSlice(serialized));
 }
 
-test "serializeSpan hides host apply_edit baseline from the summarizer" {
+test "serializeSpan hides host propose_change_set baseline from the summarizer" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
     const raw_args =
-        "{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\",\"baseline_state\":\"present\",\"baseline_sha256\":\"0123456789abcdef\"}";
+        "{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\",\"baseline_state\":\"present\",\"baseline_sha256\":\"0123456789abcdef\"}]}";
     const calls = [_]turn.ToolCall{.{
         .id = "apply_1",
-        .name = "apply_edit",
+        .name = "propose_change_set",
         .args_json = raw_args,
     }};
     try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
@@ -973,7 +973,7 @@ test "serializeSpan hides host apply_edit baseline from the summarizer" {
         .assistant_tool_use => |raw_calls| try testing.expectEqualStrings(raw_args, raw_calls[0].args_json),
         else => return error.TestExpectedRawToolUse,
     }
-    try testing.expect(std.mem.indexOf(u8, serialized, "args={\"file\":\"handler.ts\",\"content\":\"new\"}") != null);
+    try testing.expect(std.mem.indexOf(u8, serialized, "args={\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\"}]}") != null);
     try testing.expect(std.mem.indexOf(u8, serialized, "baseline_state") == null);
     try testing.expect(std.mem.indexOf(u8, serialized, "baseline_sha256") == null);
     try testing.expect(std.mem.indexOf(u8, serialized, "\"before\"") == null);
@@ -985,7 +985,7 @@ test "extractFileOps is cumulative unique and deterministic" {
     const calls = [_]turn.ToolCall{
         .{ .id = "r2", .name = "workspace_read_file", .args_json = "{\"path\":\"z.ts\"}" },
         .{ .id = "r1", .name = "zts_check", .args_json = "{\"file\":\"a.ts\"}" },
-        .{ .id = "e1", .name = "apply_edit", .args_json = "{\"file\":\"m.ts\",\"content\":\"x\"}" },
+        .{ .id = "e1", .name = "propose_change_set", .args_json = "{\"changes\":[{\"file\":\"m.ts\",\"content\":\"x\"}]}" },
     };
     try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
     for (calls) |call| try tr.append(testing.allocator, .{ .tool_result = .{
@@ -1033,7 +1033,7 @@ test "extractFileOps excludes failed reads and rejected edit attempts" {
     defer tr.deinit(testing.allocator);
     const calls = [_]turn.ToolCall{
         .{ .id = "read-failed", .name = "workspace_read_file", .args_json = "{\"path\":\"missing.ts\"}" },
-        .{ .id = "edit-rejected", .name = "apply_edit", .args_json = "{\"file\":\"rejected.ts\",\"content\":\"x\"}" },
+        .{ .id = "edit-rejected", .name = "propose_change_set", .args_json = "{\"changes\":[{\"file\":\"rejected.ts\",\"content\":\"x\"}]}" },
     };
     try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
     for (calls) |call| try tr.append(testing.allocator, .{ .tool_result = .{

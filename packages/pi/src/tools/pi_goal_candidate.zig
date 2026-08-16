@@ -27,7 +27,7 @@ pub const tool: registry_mod.ToolDef = .{
     \\never writes files. It calls pi_repair_plan, dry-runs supported repair
     \\intents through pi_apply_repair_plan, and returns proposed_content only
     \\after edit-simulate reports zero new violations. Apply returned bytes
-    \\through apply_edit or another compiler-vetoed writer.
+    \\through propose_change_set or another compiler-vetoed writer.
     ,
     .input_schema =
     \\{"type":"object","properties":{"path":{"type":"string"},"goals":{"type":"array","items":{"type":"string"}},"max_repairs":{"type":"integer","minimum":1,"maximum":8}},"required":["path"]}

@@ -1580,7 +1580,7 @@ fn compactTranscriptDetailed(
         const validated_summary = switch (response.response) {
             .final_text => |text| text,
             .tool_calls => return .{ .failed = error.SummaryReturnedToolCall },
-            .edit => return .{ .failed = error.SummaryReturnedEdit },
+            .change_set => return .{ .failed = error.SummaryReturnedEdit },
         };
         compaction.validateRegularSummary(validated_summary) catch |err| return .{ .failed = err };
         regular_summary = validated_summary;
@@ -1612,7 +1612,7 @@ fn compactTranscriptDetailed(
         const validated_summary = switch (response.response) {
             .final_text => |text| text,
             .tool_calls => return .{ .failed = error.SummaryReturnedToolCall },
-            .edit => return .{ .failed = error.SummaryReturnedEdit },
+            .change_set => return .{ .failed = error.SummaryReturnedEdit },
         };
         compaction.validatePrefixSummary(validated_summary) catch |err| return .{ .failed = err };
         prefix_summary = validated_summary;

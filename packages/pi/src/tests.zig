@@ -74,7 +74,7 @@ comptime {
     _ = @import("providers/selection.zig");
     _ = @import("providers/anthropic/request.zig");
     _ = @import("providers/anthropic/response_assembler.zig");
-    _ = @import("providers/anthropic/apply_edit.zig");
+    _ = @import("providers/anthropic/propose_change_set.zig");
     _ = @import("providers/anthropic/client.zig");
     _ = @import("providers/cassette_client.zig");
     _ = @import("providers/cassette_record.zig");

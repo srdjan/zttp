@@ -1038,7 +1038,7 @@ test "expert persona documents the protocol and approval-critical tools" {
         "zts_expert_verify_paths",
         "zts_expert_canonicalize",
         "pi_apply_repair_plan",
-        "apply_edit",
+        "propose_change_set",
     };
     for (required) |name| {
         try std.testing.expect(std.mem.indexOf(u8, persona_text, name) != null);

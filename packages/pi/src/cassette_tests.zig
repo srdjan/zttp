@@ -9,7 +9,7 @@ comptime {
     // compile-time drift here surfaces inside the cassette step.
     _ = @import("providers/anthropic/sse_parser.zig");
     _ = @import("providers/anthropic/response_assembler.zig");
-    _ = @import("providers/anthropic/apply_edit.zig");
+    _ = @import("providers/anthropic/propose_change_set.zig");
     _ = @import("providers/openai/client.zig");
     _ = @import("providers/deepseek/client.zig");
 }

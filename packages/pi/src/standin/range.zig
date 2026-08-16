@@ -220,7 +220,7 @@ fn kindsWithCoverage(comptime want: Coverage) []const expert_workflow.TaskKind {
 pub fn actionName(action: Action) []const u8 {
     return switch (action) {
         .answer => "text answer",
-        .edit => "workspace edit",
+        .change_set => "workspace edit",
     };
 }
 

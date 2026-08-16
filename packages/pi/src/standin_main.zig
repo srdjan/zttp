@@ -7,7 +7,7 @@ const request = @import("standin/request.zig");
 const range = @import("standin/range.zig");
 const sse_parser = @import("providers/openai/sse_parser.zig");
 const response_assembler = @import("providers/openai/response_assembler.zig");
-const apply_edit = @import("providers/anthropic/apply_edit.zig");
+const propose_change_set = @import("providers/anthropic/propose_change_set.zig");
 const standin_range_doc = @import("standin_range_doc");
 
 pub fn main(init: std.process.Init.Minimal) !void {
@@ -33,9 +33,9 @@ test "stand-in tool SSE survives the real parser, assembler, and apply-edit rema
     });
     const events = try sse_parser.parseAll(allocator, body);
     const outcome = try response_assembler.assemble(allocator, events);
-    const reply = try apply_edit.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
+    const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
-        .edit => |edit| {
+        .change_set => |edit| {
             try std.testing.expectEqualStrings("handler.ts", edit.file);
             try std.testing.expect(std.mem.indexOf(u8, edit.content, "\"GET /health\": handleGetHealth") != null);
         },

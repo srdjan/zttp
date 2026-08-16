@@ -2,7 +2,7 @@
 //!
 //! Read-only: returns the canonical source, the `fullyCanonical` fixed-point
 //! flag, any residual diagnostics, and the rewrite trace. The agent applies the
-//! canonical source through its normal `apply_edit` path; this tool never writes
+//! canonical source through its normal `propose_change_set` path; this tool never writes
 //! the file. Distinct from `zts_expert_canonicalize`, which previews single
 //! per-node refactor intents - this returns the fixed point.
 

@@ -25,7 +25,7 @@ pub const Usage = struct {
 pub const TurnState = enum {
     idle,
     awaiting_model,
-    verifying_edit,
+    verifying_change_set,
     executing_tools,
     awaiting_user,
     done,
@@ -41,13 +41,33 @@ pub const ToolCall = struct {
     reasoning_content: ?[]const u8 = null,
 };
 
-pub const Edit = struct {
+pub const Change = struct {
     file: []const u8,
     content: []const u8,
-    /// Continuation from the model's original apply_edit tool call. The loop
-    /// records the edit as a synthetic tool pair, so the continuation has to
-    /// move with the edit until that transcript entry is created.
+};
+
+pub const ChangeSet = struct {
+    /// A nonempty ordered set is represented as a required head plus a tail so
+    /// the turn machine cannot carry an empty proposal.
+    file: []const u8,
+    content: []const u8,
+    additional: []const Change = &.{},
+    /// Continuation from the model's original propose_change_set tool call.
+    /// The loop records the proposal as a synthetic tool pair, so the
+    /// continuation has to move with it until that transcript entry is created.
     reasoning_content: ?[]const u8 = null,
+
+    pub fn len(self: ChangeSet) usize {
+        return 1 + self.additional.len;
+    }
+
+    pub fn at(self: ChangeSet, index: usize) Change {
+        std.debug.assert(index < self.len());
+        return if (index == 0)
+            .{ .file = self.file, .content = self.content }
+        else
+            self.additional[index - 1];
+    }
 };
 
 pub const DisplayMessage = struct {
@@ -68,16 +88,16 @@ pub const AssistantReply = struct {
     pub const Response = union(enum) {
         final_text: []const u8,
         tool_calls: []const ToolCall,
-        edit: Edit,
+        change_set: ChangeSet,
     };
 };
 
-pub const EditOutcome = struct {
+pub const ChangeSetOutcome = struct {
     ok: bool,
     llm_text: []const u8,
     ui_payload: ?ui_payload.UiPayload = null,
 
-    pub fn deinit(self: *EditOutcome, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ChangeSetOutcome, allocator: std.mem.Allocator) void {
         allocator.free(self.llm_text);
         if (self.ui_payload) |*payload| payload.deinit(allocator);
         self.* = .{ .ok = false, .llm_text = &.{}, .ui_payload = null };
@@ -95,7 +115,7 @@ pub const ToolResultMessage = struct {
 pub const TurnEvent = union(enum) {
     user_submitted: []const u8,
     model_replied: AssistantReply,
-    edit_verified: EditOutcome,
+    change_set_verified: ChangeSetOutcome,
     tool_batch_completed,
     user_approved: bool,
     budget_exhausted,
@@ -122,7 +142,7 @@ pub const RetryPayload = struct {
 pub const Action = union(enum) {
     none,
     request_model,
-    run_veto: Edit,
+    run_change_set_veto: ChangeSet,
     invoke_tool_batch: []const ToolCall,
     retry_draft: RetryPayload,
     render: Message,
@@ -147,7 +167,7 @@ pub const TurnMachine = struct {
         return switch (self.state) {
             .idle => self.fromIdle(event),
             .awaiting_model => self.fromAwaitingModel(event),
-            .verifying_edit => self.fromVerifyingEdit(event),
+            .verifying_change_set => self.fromVerifyingChangeSet(event),
             .executing_tools => self.fromExecutingTools(event),
             .awaiting_user => self.fromAwaitingUser(event),
             .done => .none,
@@ -175,18 +195,18 @@ pub const TurnMachine = struct {
                     self.state = .executing_tools;
                     return .{ .invoke_tool_batch = calls };
                 },
-                .edit => |edit| {
-                    self.state = .verifying_edit;
-                    return .{ .run_veto = edit };
+                .change_set => |change_set| {
+                    self.state = .verifying_change_set;
+                    return .{ .run_change_set_veto = change_set };
                 },
             },
             else => return .none,
         }
     }
 
-    fn fromVerifyingEdit(self: *TurnMachine, event: TurnEvent) Action {
+    fn fromVerifyingChangeSet(self: *TurnMachine, event: TurnEvent) Action {
         switch (event) {
-            .edit_verified => |outcome| {
+            .change_set_verified => |outcome| {
                 if (outcome.ok) {
                     self.state = .done;
                     return .{ .render = .{ .proof_card = .{
@@ -289,28 +309,26 @@ test "executing_tools + tool_batch_completed -> awaiting_model with request_mode
     try testing.expect(action == .request_model);
 }
 
-test "awaiting_model + edit -> verifying_edit with run_veto" {
+test "awaiting_model + change set -> verifying change set" {
     var m: TurnMachine = .{ .state = .awaiting_model };
     const action = m.transition(.{ .model_replied = .{
-        .response = .{ .edit = .{
-            .file = "handler.ts",
-            .content = "...",
-        } },
+        .response = .{ .change_set = .{ .file = "handler.ts", .content = "..." } },
     } });
 
-    try testing.expectEqual(TurnState.verifying_edit, m.state);
+    try testing.expectEqual(TurnState.verifying_change_set, m.state);
     switch (action) {
-        .run_veto => |edit| {
-            try testing.expectEqualStrings("handler.ts", edit.file);
-            try testing.expectEqualStrings("...", edit.content);
+        .run_change_set_veto => |change_set| {
+            try testing.expectEqual(@as(usize, 1), change_set.len());
+            try testing.expectEqualStrings("handler.ts", change_set.file);
+            try testing.expectEqualStrings("...", change_set.content);
         },
         else => return error.TestFailed,
     }
 }
 
-test "verifying_edit + edit_verified(ok) -> done with proof_card" {
-    var m: TurnMachine = .{ .state = .verifying_edit };
-    const action = m.transition(.{ .edit_verified = .{
+test "verified change set completes with proof card" {
+    var m: TurnMachine = .{ .state = .verifying_change_set };
+    const action = m.transition(.{ .change_set_verified = .{
         .ok = true,
         .llm_text = "proof-body",
     } });
@@ -325,9 +343,9 @@ test "verifying_edit + edit_verified(ok) -> done with proof_card" {
     }
 }
 
-test "verifying_edit + edit_verified(fail) with budget remaining -> retry_draft" {
-    var m: TurnMachine = .{ .state = .verifying_edit, .max_attempts = 3 };
-    const action = m.transition(.{ .edit_verified = .{
+test "failed change set with budget remaining retries draft" {
+    var m: TurnMachine = .{ .state = .verifying_change_set, .max_attempts = 3 };
+    const action = m.transition(.{ .change_set_verified = .{
         .ok = false,
         .llm_text = "ZTS001 diag",
     } });
@@ -344,9 +362,9 @@ test "verifying_edit + edit_verified(fail) with budget remaining -> retry_draft"
     }
 }
 
-test "verifying_edit + edit_verified(fail) at max_attempts -> done with diagnostic_box" {
-    var m: TurnMachine = .{ .state = .verifying_edit, .attempt = 3, .max_attempts = 3 };
-    const action = m.transition(.{ .edit_verified = .{
+test "failed change set at max attempts completes with diagnostic" {
+    var m: TurnMachine = .{ .state = .verifying_change_set, .attempt = 3, .max_attempts = 3 };
+    const action = m.transition(.{ .change_set_verified = .{
         .ok = false,
         .llm_text = "final diag",
     } });
@@ -362,7 +380,7 @@ test "verifying_edit + edit_verified(fail) at max_attempts -> done with diagnost
 }
 
 test "budget_exhausted from any active state -> awaiting_user with prompt_user" {
-    const states = [_]TurnState{ .awaiting_model, .verifying_edit, .executing_tools };
+    const states = [_]TurnState{ .awaiting_model, .verifying_change_set, .executing_tools };
     for (states) |initial| {
         var m: TurnMachine = .{ .state = initial };
         const action = m.transition(.budget_exhausted);

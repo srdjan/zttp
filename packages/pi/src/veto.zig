@@ -1,7 +1,7 @@
 //! Compiler veto hook. Bridges the phase-2 turn state machine's `run_veto`
 //! action to the phase-1 `edit_simulate.simulate` primitive. Given a typed
 //! `turn.ModelReply.Edit`, runs the analysis pipeline, serializes the v1
-//! edit-simulate envelope, and returns a `turn.EditOutcome` the state machine
+//! edit-simulate envelope, and returns a `turn.ChangeSetOutcome` the state machine
 //! can feed back through `edit_verified`.
 //!
 //! `EditOutcome.ok = result.new_count == 0` - pre-existing violations don't
@@ -76,7 +76,7 @@ pub const VetoReport = struct {
 };
 
 pub const VetoResult = struct {
-    outcome: turn.EditOutcome,
+    outcome: turn.ChangeSetOutcome,
     report: VetoReport,
     /// True when the veto failed specifically due to a missing or invalid SQL
     /// schema. Set on the `sql_unsupported_guidance` and `sql_schema_load_guidance`
@@ -806,8 +806,8 @@ test "runVeto output fits turn.TurnMachine edit_verified event path" {
     });
     defer result.deinit(testing.allocator);
 
-    var machine: turn.TurnMachine = .{ .state = .verifying_edit };
-    const action = machine.transition(.{ .edit_verified = result.outcome });
+    var machine: turn.TurnMachine = .{ .state = .verifying_change_set };
+    const action = machine.transition(.{ .change_set_verified = result.outcome });
     try testing.expectEqual(turn.TurnState.done, machine.state);
     switch (action) {
         .render => |msg| switch (msg) {

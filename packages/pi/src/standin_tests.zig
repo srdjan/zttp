@@ -10,7 +10,7 @@ const loop = @import("loop.zig");
 const openai_client = @import("providers/openai/client.zig");
 const response_assembler = @import("providers/openai/response_assembler.zig");
 const sse_parser = @import("providers/openai/sse_parser.zig");
-const apply_edit = @import("providers/anthropic/apply_edit.zig");
+const propose_change_set = @import("providers/anthropic/propose_change_set.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
 const transcript_mod = @import("transcript.zig");
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
@@ -647,9 +647,9 @@ test "stand-in gate: every edit draft passes the real parser and compiler veto" 
         });
         const events = try sse_parser.parseAll(allocator, body);
         const outcome = try response_assembler.assemble(allocator, events);
-        const reply = try apply_edit.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
+        const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
         switch (reply.response) {
-            .edit => |edit| {
+            .change_set => |edit| {
                 try testing.expectEqualStrings(case.file, edit.file);
                 try testing.expect(std.mem.indexOf(u8, edit.content, case.must_contain) != null);
                 var veto_result = try veto.runVeto(allocator, .{
@@ -718,9 +718,9 @@ test "stand-in environment edit preserves existing handler source and passes the
     });
     const events = try sse_parser.parseAll(allocator, body);
     const outcome = try response_assembler.assemble(allocator, events);
-    const reply = try apply_edit.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
+    const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
-        .edit => |edit| {
+        .change_set => |edit| {
             try testing.expect(std.mem.indexOf(u8, edit.content, "// KEEP: application-specific response marker") != null);
             try testing.expect(std.mem.indexOf(u8, edit.content, "const marker = \"preserve-me\";") != null);
             try testing.expect(std.mem.indexOf(u8, edit.content, "import { env } from \"zttp:env\";") != null);
@@ -821,9 +821,9 @@ test "stand-in violation fix preserves source around the inserted guard" {
     });
     const events = try sse_parser.parseAll(allocator, body);
     const outcome = try response_assembler.assemble(allocator, events);
-    const reply = try apply_edit.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
+    const reply = try propose_change_set.maybeRemap(allocator, outcome.reply, outcome.stop_reason);
     switch (reply.response) {
-        .edit => |edit| {
+        .change_set => |edit| {
             try testing.expectEqualStrings(expected, edit.content);
             var veto_result = try veto.runVeto(allocator, .{
                 .file = edit.file,
@@ -963,7 +963,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
             try testing.expect(transcriptContains(&session.transcript, "deterministic playbook server"));
             try testing.expect(transcriptTextBytes(&session.transcript) >= 120);
         },
-        .edit => {
+        .change_set => {
             try testing.expect(result.applied_edit);
             try testing.expect(result.rawFirstDraftVetoPass());
             try testing.expect(result.firstAttemptGreen());

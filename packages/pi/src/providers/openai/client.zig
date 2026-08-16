@@ -19,7 +19,7 @@ const registry_mod = @import("../../registry/registry.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
 const http_errors = @import("../http_errors.zig");
-const apply_edit = @import("../anthropic/apply_edit.zig");
+const propose_change_set = @import("../anthropic/propose_change_set.zig");
 const tool_catalog = @import("../tool_catalog.zig");
 const model_request = @import("../model_request.zig");
 const context_budget = @import("../../context_budget.zig");
@@ -114,7 +114,7 @@ pub const Client = struct {
 fn assembleTurn(arena: std.mem.Allocator, response_body: []const u8) !loop.ModelCallResult {
     const event_list = try sse_parser.parseAll(arena, response_body);
     const outcome = try response_assembler.assemble(arena, event_list);
-    const reply = try apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+    const reply = try propose_change_set.maybeRemap(arena, outcome.reply, outcome.stop_reason);
     return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
 }
 
@@ -387,18 +387,18 @@ const writeJsonString = json_writer.writeString;
 
 const testing = std.testing;
 
-const apply_edit_sse =
+const propose_change_set_sse =
     \\event: response.created
     \\data: {"type":"response.created","response":{"id":"resp_edit","status":"in_progress"}}
     \\
     \\event: response.output_item.added
-    \\data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":""}}
+    \\data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"propose_change_set","arguments":""}}
     \\
     \\event: response.function_call_arguments.delta
-    \\data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"file\":\"handler.ts\",\"content\":\"function handler() {}\"}"}
+    \\data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"function handler() {}\"}]}"}
     \\
     \\event: response.output_item.done
-    \\data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":"{\"file\":\"handler.ts\",\"content\":\"function handler() {}\"}"}}
+    \\data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"propose_change_set","arguments":"{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"function handler() {}\"}]}"}}
     \\
     \\event: response.completed
     \\data: {"type":"response.completed","response":{"id":"resp_edit","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}
@@ -406,13 +406,13 @@ const apply_edit_sse =
     \\data: [DONE]
 ;
 
-test "OpenAI response pipeline remaps apply_edit into an edit reply" {
+test "OpenAI response pipeline remaps propose_change_set into a change set reply" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const result = try assembleTurn(arena.allocator(), apply_edit_sse);
+    const result = try assembleTurn(arena.allocator(), propose_change_set_sse);
     switch (result.reply.response) {
-        .edit => |edit| {
+        .change_set => |edit| {
             try testing.expectEqualStrings("handler.ts", edit.file);
             try testing.expectEqualStrings("function handler() {}", edit.content);
         },
@@ -440,13 +440,13 @@ const CaptureProbe = struct {
         try testing.expectEqual(@as(usize, 1), snapshot.items.len);
         try testing.expect(snapshot.wire_request_sha256 != null);
         try testing.expectEqualStrings("capture-user", snapshot.items[0].user_text);
-        try testing.expectEqualStrings(apply_edit_sse, raw_response);
+        try testing.expectEqualStrings(propose_change_set_sse, raw_response);
         if (self.fail) return error.InjectedCaptureFailure;
     }
 };
 
 fn captureTestPost(_: std.mem.Allocator, _: Config, _: []const u8) ![]const u8 {
-    return apply_edit_sse;
+    return propose_change_set_sse;
 }
 
 test "OpenAI client records the canonical request and raw response before parsing" {
@@ -651,7 +651,7 @@ test "writeToolsArray: wraps registry entries in flat Responses-API tool shape" 
     const items = parsed.value.array.items;
     try testing.expectEqual(@as(usize, 2), items.len);
     try testing.expectEqualStrings("function", items[0].object.get("type").?.string);
-    try testing.expectEqualStrings(apply_edit.tool_name, items[0].object.get("name").?.string);
+    try testing.expectEqualStrings(propose_change_set.tool_name, items[0].object.get("name").?.string);
     try testing.expectEqualStrings("echo", items[1].object.get("name").?.string);
     try testing.expectEqualStrings("Concatenate args with spaces", items[1].object.get("description").?.string);
     // The schema is inlined as-is.
@@ -680,7 +680,7 @@ test "writeToolsArray: omits registry workspace writers" {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, buf.written(), .{});
     defer parsed.deinit();
     try testing.expectEqual(@as(usize, 1), parsed.value.array.items.len);
-    try testing.expectEqualStrings(apply_edit.tool_name, parsed.value.array.items[0].object.get("name").?.string);
+    try testing.expectEqualStrings(propose_change_set.tool_name, parsed.value.array.items[0].object.get("name").?.string);
 }
 
 fn stubExecute(_: std.mem.Allocator, _: []const []const u8) anyerror!registry_mod.ToolResult {

@@ -38,12 +38,14 @@ const deterministic_handler =
     "    return Response.json({ ok: true });\n" ++
     "}\n";
 
-fn renderOpenAiApplyEditResponse(allocator: std.mem.Allocator) ![]u8 {
+fn renderOpenAiProposeChangeSetResponse(allocator: std.mem.Allocator) ![]u8 {
     var arguments = TextBuffer.init(allocator);
     defer arguments.deinit();
     try std.json.Stringify.value(.{
-        .file = "handler.ts",
-        .content = deterministic_handler,
+        .changes = &.{.{
+            .file = "handler.ts",
+            .content = deterministic_handler,
+        }},
     }, .{}, arguments.writer());
 
     var response = TextBuffer.init(allocator);
@@ -52,13 +54,13 @@ fn renderOpenAiApplyEditResponse(allocator: std.mem.Allocator) ![]u8 {
     try writer.writeAll("event: response.created\n" ++
         "data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_edit\",\"status\":\"in_progress\"}}\n\n" ++
         "event: response.output_item.added\n" ++
-        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"apply_edit\",\"arguments\":\"\"}}\n\n" ++
+        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"propose_change_set\",\"arguments\":\"\"}}\n\n" ++
         "event: response.function_call_arguments.delta\n" ++
         "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"delta\":");
     try std.json.Stringify.value(arguments.written(), .{}, writer);
     try writer.writeAll("}\n\n" ++
         "event: response.output_item.done\n" ++
-        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"apply_edit\",\"arguments\":");
+        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"id\":\"fc_edit\",\"type\":\"function_call\",\"call_id\":\"call_edit\",\"name\":\"propose_change_set\",\"arguments\":");
     try std.json.Stringify.value(arguments.written(), .{}, writer);
     try writer.writeAll("}}\n\n" ++
         "event: response.completed\n" ++
@@ -68,9 +70,9 @@ fn renderOpenAiApplyEditResponse(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn deterministicEditSteps(allocator: std.mem.Allocator) ![]const []const u8 {
-    const apply_edit_response = try renderOpenAiApplyEditResponse(allocator);
+    const propose_change_set_response = try renderOpenAiProposeChangeSetResponse(allocator);
     const steps = try allocator.alloc([]const u8, 1);
-    steps[0] = try cassette_record.serializeCassette(allocator, apply_edit_response, .{
+    steps[0] = try cassette_record.serializeCassette(allocator, propose_change_set_response, .{
         .provider = .openai,
         .scenario = "recorder-edit-flow",
         .stream = true,

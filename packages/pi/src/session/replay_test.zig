@@ -2,7 +2,7 @@
 //!
 //! The critical invariant: after resuming a session whose workspace has been
 //! mutated on disk, the reconstructed `assistant_tool_use` that encoded the
-//! original `apply_edit` must NOT re-apply - replay mode suppresses all
+//! original `propose_change_set` must NOT re-apply - replay mode suppresses all
 //! filesystem writes during the first turn after resume.
 
 const std = @import("std");
@@ -47,7 +47,7 @@ const EditClient = struct {
         _ = extra_user_text;
         const self: *EditClient = @ptrCast(@alignCast(ctx));
         self.call_count += 1;
-        return .{ .reply = .{ .response = .{ .edit = .{
+        return .{ .reply = .{ .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = clean_handler,
         } } } };

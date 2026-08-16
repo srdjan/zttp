@@ -130,8 +130,8 @@ still goes through the compiler veto.
 `pi_goal_candidate` is a non-writing wrapper for supported deterministic
 repairs. It calls `pi_repair_plan`, dry-runs repair intents through
 `pi_apply_repair_plan`, and returns `proposed_content` only after
-`edit_simulate` reports zero new violations. The model must still apply
-those bytes through `apply_edit` or another vetoed writer.
+`edit_simulate` reports zero new violations. The model must still propose
+those bytes through `propose_change_set`, which owns the vetoed write path.
 
 ### Post-apply verification (`loop.zig:postApplyCheck`)
 
@@ -365,7 +365,8 @@ Add a tool:
    `expert_persona.zig`.
 4. Rebuild. Model calls reject `write_workspace`; RPC calls allow only
    `analyze` and `read_workspace`. Model-mediated source writes must use the
-   synthetic `apply_edit` tool so the compiler veto and approval policy run.
+   synthetic `propose_change_set` tool so aggregate proof and the approval
+   policy run before the workspace transaction commits.
 
 ## Deferred
 

@@ -17,18 +17,23 @@ pub const Definition = struct {
     host_authoritative_keys: []const []const u8 = &.{},
 };
 
-pub const apply_edit: Definition = .{
-    .name = "apply_edit",
-    .description = "Propose a complete file edit. The zttp compiler runs edit-simulate " ++
-        "on the content before it reaches the user; if new violations appear, " ++
-        "you will be re-prompted with the diagnostic and must try again.",
+pub const propose_change_set: Definition = .{
+    .name = "propose_change_set",
+    .description = "Propose one ordered source change set. The zttp compiler proves the " ++
+        "aggregate result before one approval and one crash-safe commit; if new " ++
+        "violations appear, you will be re-prompted with the diagnostic.",
     .input_schema = "{\"type\":\"object\"," ++
         "\"additionalProperties\":false," ++
         "\"properties\":{" ++
-        "\"file\":{\"type\":\"string\",\"description\":\"Handler file path (e.g. handler.ts).\"}," ++
-        "\"content\":{\"type\":\"string\",\"description\":\"Full file content after the edit.\"}" ++
+        "\"changes\":{\"type\":\"array\",\"minItems\":1,\"maxItems\":32," ++
+        "\"description\":\"Ordered complete source-file replacements.\"," ++
+        "\"items\":{\"type\":\"object\",\"additionalProperties\":false," ++
+        "\"properties\":{" ++
+        "\"file\":{\"type\":\"string\",\"description\":\"Workspace-relative .ts or .tsx path.\"}," ++
+        "\"content\":{\"type\":\"string\",\"description\":\"Full source bytes after the change.\"}" ++
+        "},\"required\":[\"file\",\"content\"]}}" ++
         "}," ++
-        "\"required\":[\"file\",\"content\"]}",
+        "\"required\":[\"changes\"]}",
     .host_authoritative_keys = &.{ "before", "baseline_state", "baseline_sha256" },
 };
 
@@ -39,11 +44,11 @@ pub fn projectArgsForModel(
     tool_name: []const u8,
     raw_args_json: []const u8,
 ) !?[]u8 {
-    if (!std.mem.eql(u8, tool_name, apply_edit.name)) return null;
+    if (!std.mem.eql(u8, tool_name, propose_change_set.name)) return null;
     // Only the host writes these keys, and it writes them into well-formed
     // JSON. Args without them carry nothing to hide, so they are borrowed
     // verbatim rather than re-encoded on every request.
-    if (!mayCarryHostKeys(apply_edit.host_authoritative_keys, raw_args_json)) return null;
+    if (!mayCarryHostKeys(propose_change_set.host_authoritative_keys, raw_args_json)) return null;
 
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
@@ -62,9 +67,14 @@ pub fn projectArgsForModel(
     };
     if (parsed != .object) return null;
 
+    const changes_value = parsed.object.getPtr("changes") orelse return null;
+    if (changes_value.* != .array) return null;
     var removed = false;
-    for (apply_edit.host_authoritative_keys) |key| {
-        if (parsed.object.orderedRemove(key)) removed = true;
+    for (changes_value.array.items) |*change| {
+        if (change.* != .object) continue;
+        for (propose_change_set.host_authoritative_keys) |key| {
+            if (change.object.orderedRemove(key)) removed = true;
+        }
     }
     if (!removed) return null;
 
@@ -83,13 +93,13 @@ fn mayCarryHostKeys(keys: []const []const u8, raw_args_json: []const u8) bool {
 
 pub const Iterator = struct {
     registry: *const registry_mod.Registry,
-    emitted_apply_edit: bool = false,
+    emitted_change_set: bool = false,
     registry_index: usize = 0,
 
     pub fn next(self: *Iterator) ?Definition {
-        if (!self.emitted_apply_edit) {
-            self.emitted_apply_edit = true;
-            return apply_edit;
+        if (!self.emitted_change_set) {
+            self.emitted_change_set = true;
+            return propose_change_set;
         }
         const entries = self.registry.list();
         while (self.registry_index < entries.len) {
@@ -186,20 +196,20 @@ const testing = std.testing;
 test "projectArgsForModel strips host keys and never refuses model-authored args" {
     const stripped = (try projectArgsForModel(
         testing.allocator,
-        "apply_edit",
-        "{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\"," ++
-            "\"baseline_state\":\"present\",\"baseline_sha256\":\"0123\",\"reason\":\"repair\"}",
+        "propose_change_set",
+        "{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\"," ++
+            "\"baseline_state\":\"present\",\"baseline_sha256\":\"0123\"}]}",
     )).?;
     defer testing.allocator.free(stripped);
     try testing.expectEqualStrings(
-        "{\"file\":\"handler.ts\",\"content\":\"new\",\"reason\":\"repair\"}",
+        "{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\"}]}",
         stripped,
     );
 
     // Nothing to hide: borrowed verbatim rather than parsed and re-encoded.
     try testing.expectEqual(
         @as(?[]u8, null),
-        try projectArgsForModel(testing.allocator, "apply_edit", "{\"file\":\"a.ts\",\"content\":\"x\"}"),
+        try projectArgsForModel(testing.allocator, "propose_change_set", "{\"changes\":[{\"file\":\"a.ts\",\"content\":\"x\"}]}"),
     );
     // Another tool's args are never the host's to rewrite.
     try testing.expectEqual(
@@ -210,11 +220,11 @@ test "projectArgsForModel strips host keys and never refuses model-authored args
     // them: the host writes these keys only into well-formed JSON.
     try testing.expectEqual(
         @as(?[]u8, null),
-        try projectArgsForModel(testing.allocator, "apply_edit", "{\"file\":\"a.ts\",\"before\":"),
+        try projectArgsForModel(testing.allocator, "propose_change_set", "{\"changes\":[{\"file\":\"a.ts\",\"before\":"),
     );
     try testing.expectEqual(
         @as(?[]u8, null),
-        try projectArgsForModel(testing.allocator, "apply_edit", "[\"baseline_sha256\"]"),
+        try projectArgsForModel(testing.allocator, "propose_change_set", "[\"baseline_sha256\"]"),
     );
 }
 

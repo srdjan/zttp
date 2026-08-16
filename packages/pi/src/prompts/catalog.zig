@@ -140,7 +140,7 @@ test "coding templates point at compiler-native Pi workflows" {
     const route = findByName("add-route") orelse return error.TestFailed;
     try testing.expect(std.mem.indexOf(u8, route.body, "Author the COMPLETE file content yourself") != null);
     try testing.expect(std.mem.indexOf(u8, route.body, "pi_apply_feature_plan") == null);
-    try testing.expect(std.mem.indexOf(u8, route.body, "one `apply_edit` call") != null);
+    try testing.expect(std.mem.indexOf(u8, route.body, "one `propose_change_set` call") != null);
 
     const fix = findByName("fix") orelse return error.TestFailed;
     try testing.expect(std.mem.indexOf(u8, fix.body, "zts_expert_verify_paths") != null);

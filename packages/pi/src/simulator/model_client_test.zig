@@ -102,11 +102,11 @@ test "canonical request snapshot covers every model-visible input" {
     try testing.expect(!snapshot.transcript_sha256.eql(changed_transcript.transcript_sha256));
 }
 
-test "canonical request snapshot hides host apply_edit baseline while raw history keeps it" {
-    const raw_apply_edit_args =
-        "{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\",\"baseline_state\":\"present\",\"baseline_sha256\":\"0123456789abcdef\",\"reason\":\"repair\"}";
+test "canonical request snapshot hides host propose_change_set baseline while raw history keeps it" {
+    const raw_propose_change_set_args =
+        "{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\",\"before\":\"old\",\"baseline_state\":\"present\",\"baseline_sha256\":\"0123456789abcdef\"}]}";
     const calls = [_]turn.ToolCall{
-        .{ .id = "toolu_edit", .name = "apply_edit", .args_json = raw_apply_edit_args },
+        .{ .id = "toolu_edit", .name = "propose_change_set", .args_json = raw_propose_change_set_args },
         .{ .id = "toolu_other", .name = "inspect", .args_json = "{\"path\":\"handler.ts\"}" },
     };
     var transcript: transcript_mod.Transcript = .{};
@@ -126,13 +126,13 @@ test "canonical request snapshot hides host apply_edit baseline while raw histor
 
     switch (transcript.at(0).*) {
         .assistant_tool_use => |raw_calls| {
-            try testing.expectEqualStrings(raw_apply_edit_args, raw_calls[0].args_json);
+            try testing.expectEqualStrings(raw_propose_change_set_args, raw_calls[0].args_json);
         },
         else => return error.TestExpectedRawToolUse,
     }
     switch (snapshot.items[0]) {
         .tool_use => |call| try testing.expectEqualStrings(
-            "{\"file\":\"handler.ts\",\"content\":\"new\",\"reason\":\"repair\"}",
+            "{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"new\"}]}",
             call.args_json,
         ),
         else => return error.TestExpectedProjectedToolUse,
@@ -149,15 +149,15 @@ test "canonical request snapshot hides host apply_edit baseline while raw histor
     try testing.expect(std.mem.indexOf(u8, wire_body, "\\\"before\\\"") == null);
 }
 
-test "canonical request snapshot carries malformed apply_edit history verbatim" {
+test "canonical request snapshot carries malformed propose_change_set history verbatim" {
     // `loop` appends a raw tool batch before rejecting a mixed or truncated
     // one, so model-authored args that never parsed are already in the
     // transcript. Refusing them here would fail every later request in the
     // session, including compaction, over one off-spec call.
-    const truncated_args = "{\"file\":\"handler.ts\",\"content\":";
+    const truncated_args = "{\"changes\":[{\"file\":\"handler.ts\",\"content\":";
     const calls = [_]turn.ToolCall{.{
         .id = "toolu_edit",
-        .name = "apply_edit",
+        .name = "propose_change_set",
         .args_json = truncated_args,
     }};
     var transcript: transcript_mod.Transcript = .{};

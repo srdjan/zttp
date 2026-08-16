@@ -9,7 +9,7 @@ const transcript_mod = @import("../../transcript.zig");
 const request_mod = @import("request.zig");
 const sse_parser = @import("sse_parser.zig");
 const response_assembler = @import("response_assembler.zig");
-const apply_edit = @import("apply_edit.zig");
+const propose_change_set = @import("propose_change_set.zig");
 const http_errors = @import("../http_errors.zig");
 const model_request = @import("../model_request.zig");
 const context_budget = @import("../../context_budget.zig");
@@ -96,7 +96,7 @@ pub const Client = struct {
 
         const event_list = try sse_parser.parseAll(arena, response_body);
         const outcome = try response_assembler.assemble(arena, event_list);
-        const reply = try apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+        const reply = try propose_change_set.maybeRemap(arena, outcome.reply, outcome.stop_reason);
         return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
     }
 };

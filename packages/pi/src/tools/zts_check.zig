@@ -16,7 +16,7 @@ pub const tool: registry_mod.ToolDef = .{
     \\retry_safe, deterministic, idempotent, injection_safe,
     \\state_isolated, fault_covered, result_safe, and related leakage /
     \\validation flags. Use this to inspect the current on-disk proof state
-    \\of a file before editing. `apply_edit` drafts are validated before
+    \\of a file before editing. `propose_change_set` drafts are validated before
     \\they are written to disk, so use the compiler veto proof_card to
     \\validate post-edit properties instead.
     ,

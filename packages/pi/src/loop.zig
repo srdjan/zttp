@@ -11,7 +11,7 @@ const ui_payload_mod = @import("ui_payload.zig");
 const proof_enrichment = @import("proof_enrichment.zig");
 const zts = @import("zts");
 const file_io = zts.file_io;
-const apply_edit = @import("providers/anthropic/apply_edit.zig");
+const propose_change_set = @import("providers/anthropic/propose_change_set.zig");
 const tools_common = @import("tools/common.zig");
 const json_writer = @import("providers/json_writer.zig");
 const session_events = @import("session/events.zig");
@@ -157,8 +157,8 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.NoValidCompactionCut,
         error.InvalidCompactionToolPair,
         => "The request crossed the context target but could not be compacted safely. Close pending tool work, run `/compact`, or narrow the request.",
-        error.OutputTruncated => "The edit was too large for one response and was cut off at the model's output limit. Split the change into smaller edits (edit one function or section at a time), or switch to a model with a larger output budget via `/model <id>`.",
-        error.InvalidEditArgs => "The model sent an `apply_edit` call this host cannot accept: it must carry `file` and `content` only, and never a baseline the host owns. Retry the ask.",
+        error.OutputTruncated => "The change set was too large for one response and was cut off at the model's output limit. Split the change into smaller change sets (change one function or section at a time), or switch to a model with a larger output budget via `/model <id>`.",
+        error.InvalidChangeSetArgs => "The model sent a `propose_change_set` call this host cannot accept: it must carry one nonempty `changes` array of `{file, content}` objects and no host-owned baseline fields. Retry the ask.",
         error.RequestTimedOut => "The request timed out with no response. Check your network and try again.",
         error.LocalServerUnavailable,
         error.LocalHealthNotOk,
@@ -314,7 +314,7 @@ pub const veto_reject_preamble = "The compiler rejected this edit.";
 const max_auto_repairs: usize = 8;
 
 const PreparedEdit = struct {
-    edit: turn.Edit,
+    edit: turn.ChangeSet,
     resolved_path: []const u8,
     before: ?[]const u8,
     baseline_sha256: [32]u8,
@@ -340,38 +340,47 @@ fn callModel(
     return result;
 }
 
-/// Serialize a model edit draft into `apply_edit` tool-input JSON so the draft
+/// Serialize a model change-set draft into `propose_change_set` tool-input JSON so the draft
 /// can be recorded in the transcript as an assistant tool call. Recording the
 /// draft on the wire - paired with the compiler veto verdict as a tool_result -
 /// is what makes the retry loop information-complete: the diagnostics the model
 /// must fix reference bytes it can actually see, and the context survives a
 /// mid-repair tool call instead of evaporating with a transient prompt.
-fn buildApplyEditArgs(
+fn buildProposeChangeSetArgs(
     allocator: std.mem.Allocator,
-    edit: turn.Edit,
+    edit: turn.ChangeSet,
     prepared: ?*const PreparedEdit,
 ) ![]u8 {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
     const w = buf.writer();
-    try w.writeAll("{\"file\":");
-    try json_writer.writeString(w, edit.file);
-    try w.writeAll(",\"content\":");
-    try json_writer.writeString(w, edit.content);
-    if (prepared) |host| {
-        const digest_hex = std.fmt.bytesToHex(host.baseline_sha256, .lower);
-        try w.writeAll(",\"baseline_state\":\"");
-        try w.writeAll(if (host.before == null) "absent" else "present");
-        try w.writeAll("\",\"baseline_sha256\":\"");
-        try w.writeAll(&digest_hex);
-        try w.writeByte('"');
+    try w.writeAll("{\"changes\":[");
+    var index: usize = 0;
+    while (index < edit.len()) : (index += 1) {
+        if (index > 0) try w.writeByte(',');
+        const change = edit.at(index);
+        try w.writeAll("{\"file\":");
+        try json_writer.writeString(w, change.file);
+        try w.writeAll(",\"content\":");
+        try json_writer.writeString(w, change.content);
+        if (prepared) |host| {
+            if (index == 0) {
+                const digest_hex = std.fmt.bytesToHex(host.baseline_sha256, .lower);
+                try w.writeAll(",\"baseline_state\":\"");
+                try w.writeAll(if (host.before == null) "absent" else "present");
+                try w.writeAll("\",\"baseline_sha256\":\"");
+                try w.writeAll(&digest_hex);
+                try w.writeByte('"');
+            }
+        }
+        try w.writeByte('}');
     }
-    try w.writeByte('}');
+    try w.writeAll("]}");
     return try buf.toOwnedSlice();
 }
 
-/// Append the `tool_result` that closes a draft's synthetic `apply_edit` tool
-/// call. Every path out of `.run_veto` must call this so the transcript never
+/// Append the `tool_result` that closes a draft's synthetic `propose_change_set` tool
+/// call. Every path out of `.run_change_set_veto` must call this so the transcript never
 /// carries a dangling tool_use (which the Messages API rejects on the next
 /// request, and which would break `--resume`). The body/id are duplicated into
 /// `allocator` by the transcript, so arena-owned inputs are safe.
@@ -384,7 +393,7 @@ fn appendEditToolResult(
 ) !void {
     try transcript.append(allocator, .{ .tool_result = .{
         .tool_use_id = tool_use_id,
-        .tool_name = "apply_edit",
+        .tool_name = "propose_change_set",
         .ok = ok,
         .llm_text = llm_text,
         .ui_payload = null,
@@ -540,8 +549,8 @@ pub fn runTurnWith(
                 model_roundtrips += 1;
                 // The failed draft and its full diagnostic - plus any compiler-
                 // authored repair block and SQL escalation - are already in the
-                // transcript as an `apply_edit` tool_use paired with a failed
-                // tool_result (see the `.run_veto` arm). The model can therefore
+                // transcript as an `propose_change_set` tool_use paired with a failed
+                // tool_result (see the `.run_change_set_veto` arm). The model can therefore
                 // see exactly what it wrote and precisely which lines the
                 // compiler flagged, and that context survives even if the model
                 // runs a tool before re-drafting. Only a short framing nudge
@@ -558,8 +567,8 @@ pub fn runTurnWith(
                 turn_usage.add(result.usage);
                 next_event = .{ .model_replied = result.reply };
             },
-            .run_veto => |edit| {
-                // Record the model's draft as an `apply_edit` tool call so the
+            .run_change_set_veto => |edit| {
+                // Record the model's draft as an `propose_change_set` tool call so the
                 // retry loop is information-complete: the draft's bytes and the
                 // compiler's verdict live in the transcript (as a tool_use/
                 // tool_result pair) instead of a transient prompt, so the model
@@ -568,13 +577,13 @@ pub fn runTurnWith(
                 // transcript index so it is unique across the whole session
                 // (required for `--resume` replay). Every exit from this arm must
                 // append a matching tool_result to close the tool call.
-                const edit_call_id = try std.fmt.allocPrint(ta, "apply_edit-{d}", .{transcript.len()});
+                const edit_call_id = try std.fmt.allocPrint(ta, "propose_change_set-{d}", .{transcript.len()});
                 const prepared = prepareEdit(ta, options.workspace_root, edit) catch |err| {
                     if (err == error.OutOfMemory) return err;
-                    const args_json = try buildApplyEditArgs(ta, edit, null);
+                    const args_json = try buildProposeChangeSetArgs(ta, edit, null);
                     const calls = [_]turn.ToolCall{.{
                         .id = edit_call_id,
-                        .name = "apply_edit",
+                        .name = "propose_change_set",
                         .args_json = args_json,
                         .reasoning_content = edit.reasoning_content,
                     }};
@@ -597,14 +606,14 @@ pub fn runTurnWith(
                         );
                     try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = msg } });
                     try appendEditToolResult(allocator, transcript, edit_call_id, false, msg);
-                    next_event = .{ .edit_verified = .{ .ok = false, .llm_text = msg } };
+                    next_event = .{ .change_set_verified = .{ .ok = false, .llm_text = msg } };
                     continue;
                 };
                 {
-                    const args_json = try buildApplyEditArgs(ta, edit, &prepared);
+                    const args_json = try buildProposeChangeSetArgs(ta, edit, &prepared);
                     const calls = [_]turn.ToolCall{.{
                         .id = edit_call_id,
-                        .name = "apply_edit",
+                        .name = "propose_change_set",
                         .args_json = args_json,
                         .reasoning_content = edit.reasoning_content,
                     }};
@@ -622,11 +631,11 @@ pub fn runTurnWith(
                 // The outcome handed to the state machine. The model-free
                 // repair path (Phase B) overrides it to a pass after it lands a
                 // candidate, so the failed draft still drives the turn to done.
-                var edit_event: turn.EditOutcome = veto_result.outcome;
+                var edit_event: turn.ChangeSetOutcome = veto_result.outcome;
                 if (!veto_result.outcome.ok and veto_result.sql_failure) {
                     sql_veto_fail_count += 1;
                 }
-                // Close the draft's `apply_edit` tool call with the compiler's
+                // Close the draft's `propose_change_set` tool call with the compiler's
                 // verdict on the DRAFT itself (not `edit_event`, which Phase B may
                 // flip to a pass). Appended here - before the success paths'
                 // verified_patch/proof_card - so the tool_use is closed on every
@@ -747,20 +756,20 @@ pub fn runTurnWith(
                     );
                     try transcript.append(allocator, .{ .system_note = note });
                 }
-                next_event = .{ .edit_verified = edit_event };
+                next_event = .{ .change_set_verified = edit_event };
             },
             .invoke_tool_batch => |calls| {
                 try transcript.append(allocator, .{ .assistant_tool_use = calls });
 
-                const mixed_apply_edit = containsApplyEdit(calls) and calls.len > 1;
+                const mixed_propose_change_set = containsProposeChangeSet(calls) and calls.len > 1;
                 const over_budget = calls.len > options.max_tool_batch_size or
                     tool_calls_used + calls.len > options.max_tool_calls_per_turn;
 
-                if (mixed_apply_edit or over_budget) {
+                if (mixed_propose_change_set or over_budget) {
                     if (over_budget) hit_tool_budget = true;
                     for (calls) |call| {
-                        const message = if (mixed_apply_edit)
-                            "apply_edit was grouped with other tool calls. It must be issued alone in a single response so the compiler veto can run cleanly. Re-issue just the apply_edit call without any other tools."
+                        const message = if (mixed_propose_change_set)
+                            "propose_change_set was grouped with other tool calls. It must be issued alone in a single response so the compiler veto can run cleanly. Re-issue just the propose_change_set call without any other tools."
                         else
                             "tool-call budget exceeded for this turn";
                         try transcript.append(allocator, .{ .tool_result = .{
@@ -937,9 +946,9 @@ fn invokeToolRecovering(
     };
 }
 
-fn containsApplyEdit(calls: []const turn.ToolCall) bool {
+fn containsProposeChangeSet(calls: []const turn.ToolCall) bool {
     for (calls) |call| {
-        if (std.mem.eql(u8, call.name, apply_edit.tool_name)) return true;
+        if (std.mem.eql(u8, call.name, propose_change_set.tool_name)) return true;
     }
     return false;
 }
@@ -947,7 +956,7 @@ fn containsApplyEdit(calls: []const turn.ToolCall) bool {
 fn prepareEdit(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
-    edit: turn.Edit,
+    edit: turn.ChangeSet,
 ) !PreparedEdit {
     const target_path = try tools_common.resolveInsideWorkspace(allocator, workspace_root, edit.file);
     errdefer allocator.free(target_path);
@@ -1080,7 +1089,7 @@ fn applyVerifiedEdit(
             .rewrite_trace = report.rewrite_trace,
         };
         if (!try approve.call(preview)) {
-            // The synthetic apply_edit call was already closed with the
+            // The synthetic propose_change_set call was already closed with the
             // compiler verdict before the approval boundary. Record the human
             // decision as internal continuation context instead of inventing a
             // second, unmatched tool result that would invalidate provider
@@ -1391,7 +1400,7 @@ fn collectRecentRepairLinks(
 }
 
 /// Match only the exact v2 preview tool result for this path and the model's
-/// proposed bytes. A near match is not a protocol repair: semantic apply_edit
+/// proposed bytes. A near match is not a protocol repair: semantic propose_change_set
 /// remains available, but a selected bound repair can never be reconstructed
 /// from text or a broad diagnostic.
 fn findRecentProtocolRepair(
@@ -1724,8 +1733,8 @@ test "veto failure triggers model-free compiler-authored apply" {
     defer testing.allocator.free(written_path);
 
     var client: RetryCaptureClient = .{ .replies = &.{
-        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = unchecked_result_handler } } },
-        .{ .response = .{ .edit = .{ .file = "src/handler.ts", .content = clean_handler } } },
+        .{ .response = .{ .change_set = .{ .file = "src/handler.ts", .content = unchecked_result_handler } } },
+        .{ .response = .{ .change_set = .{ .file = "src/handler.ts", .content = clean_handler } } },
     } };
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
@@ -1755,7 +1764,7 @@ test "veto failure triggers model-free compiler-authored apply" {
 }
 
 // A client that records, on each roundtrip after the first, whether the failed
-// draft (recorded as an `apply_edit` tool_use) and the compiler diagnostic
+// draft (recorded as an `propose_change_set` tool_use) and the compiler diagnostic
 // (recorded as a failed tool_result) are visible in the transcript it is handed.
 // This is the #1 invariant: because those live in the transcript - not a
 // transient prompt - a tool call interleaved into the repair cannot erase the
@@ -1773,7 +1782,7 @@ const DraftVisibilityClient = struct {
             switch (entry.*) {
                 .assistant_tool_use => |calls| {
                     for (calls) |call| {
-                        if (std.mem.eql(u8, call.name, "apply_edit") and
+                        if (std.mem.eql(u8, call.name, "propose_change_set") and
                             std.mem.indexOf(u8, call.args_json, "var x = 1") != null)
                         {
                             saw_draft = true;
@@ -1807,7 +1816,7 @@ const DraftVisibilityClient = struct {
         const stub_calls = [_]turn.ToolCall{.{ .id = "toolu_probe", .name = "stub", .args_json = "{}" }};
         return switch (self.calls) {
             // First draft: fails the veto (unsupported `var`).
-            1 => .{ .reply = .{ .response = .{ .edit = .{ .file = "handler.ts", .content = bad_handler } } } },
+            1 => .{ .reply = .{ .response = .{ .change_set = .{ .file = "handler.ts", .content = bad_handler } } } },
             // Retry: the failed draft and its diagnostic must already be in the
             // transcript. Respond with a TOOL CALL rather than a new edit - the
             // mid-repair interleave that used to wipe the transient retry prompt.
@@ -1962,7 +1971,7 @@ test "text reply path injects workflow note before model text" {
         else => return error.TestFailed,
     }
     switch (tr.at(1).*) {
-        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "submit exactly one `apply_edit` call so the host veto checks the draft") != null),
+        .system_note => |body| try testing.expect(std.mem.indexOf(u8, body, "submit exactly one `propose_change_set` call so the host veto checks the draft") != null),
         else => return error.TestFailed,
     }
     switch (tr.at(2).*) {
@@ -1980,7 +1989,7 @@ test "clean edit path: veto passes and writes file" {
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "src/handler.ts",
             .content = clean_handler,
         } },
@@ -2016,7 +2025,7 @@ test "broken edit path: veto fails with diagnostic box" {
     defer testing.allocator.free(workspace_root);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "src/handler.ts",
             .content = bad_handler,
         } },
@@ -2086,8 +2095,8 @@ test "retry: one bad draft then one good draft lands a proof card" {
     defer testing.allocator.free(written_path);
 
     const replies = [_]turn.AssistantReply{
-        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = bad_handler } } },
-        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = clean_handler } } },
+        .{ .response = .{ .change_set = .{ .file = "handler.ts", .content = bad_handler } } },
+        .{ .response = .{ .change_set = .{ .file = "handler.ts", .content = clean_handler } } },
     };
     var seq: SequenceClient = .{ .replies = &replies };
     var tr: transcript_mod.Transcript = .{};
@@ -2126,7 +2135,7 @@ test "approval callback can block an otherwise verified edit from being written"
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = clean_handler,
         } },
@@ -2154,7 +2163,7 @@ test "approval callback can block an otherwise verified edit from being written"
     }
     var apply_results: usize = 0;
     for (tr.entries.items) |entry| switch (entry) {
-        .tool_result => |result| apply_results += @intFromBool(std.mem.eql(u8, result.tool_name, "apply_edit")),
+        .tool_result => |result| apply_results += @intFromBool(std.mem.eql(u8, result.tool_name, "propose_change_set")),
         else => {},
     };
     try testing.expectEqual(@as(usize, 1), apply_results);
@@ -2180,7 +2189,7 @@ test "approved bound repair uses host writer once and receipts returned identity
             .name = "pi_apply_repair_plan",
             .args_json = "{\"path\":\"handler.ts\",\"repairs\":[]}",
         }} } },
-        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = protocol_after_handler } } },
+        .{ .response = .{ .change_set = .{ .file = "handler.ts", .content = protocol_after_handler } } },
     };
     var sequence: SequenceClient = .{ .replies = &replies };
     var transcript: transcript_mod.Transcript = .{};
@@ -2264,7 +2273,7 @@ test "bound repair rejection never calls writer and writer refusal never falls b
             .name = "pi_apply_repair_plan",
             .args_json = "{\"path\":\"handler.ts\",\"repairs\":[]}",
         }} } },
-        .{ .response = .{ .edit = .{ .file = "handler.ts", .content = protocol_after_handler } } },
+        .{ .response = .{ .change_set = .{ .file = "handler.ts", .content = protocol_after_handler } } },
     };
     var denied_sequence: SequenceClient = .{ .replies = &replies };
     var transcript: transcript_mod.Transcript = .{};
@@ -2365,7 +2374,7 @@ test "workspace change during approval fails closed without overwriting concurre
         .expected_before = original,
         .concurrent_content = concurrent,
     };
-    var canned: CannedClient = .{ .reply = .{ .response = .{ .edit = .{
+    var canned: CannedClient = .{ .reply = .{ .response = .{ .change_set = .{
         .file = "handler.ts",
         .content = clean_handler,
     } } } };
@@ -2375,7 +2384,7 @@ test "workspace change during approval fails closed without overwriting concurre
     defer registry.deinit(testing.allocator);
 
     // Ending the turn rather than raising: the transcript already closed the
-    // synthetic apply_edit call with the compiler verdict, so an error here
+    // synthetic propose_change_set call with the compiler verdict, so an error here
     // would leave "verified" as the last word on an edit that never landed.
     const result = try runTurnWith(
         testing.allocator,
@@ -2399,7 +2408,7 @@ test "workspace change during approval fails closed without overwriting concurre
 
 test "edit path outside the workspace is surfaced as a recoverable diagnostic, not a crash" {
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "../outside-handler.ts",
             .content = clean_handler,
         } },
@@ -2443,7 +2452,7 @@ test "unreadable edit target fails closed as a recoverable baseline diagnostic" 
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
 
-    var canned: CannedClient = .{ .reply = .{ .response = .{ .edit = .{
+    var canned: CannedClient = .{ .reply = .{ .response = .{ .change_set = .{
         .file = "handler.ts",
         .content = clean_handler,
     } } } };
@@ -2544,7 +2553,7 @@ test "prepareEdit refuses a target larger than the authoritative baseline limit"
     }));
 }
 
-test "recorded apply_edit arguments carry a host digest without baseline bytes" {
+test "recorded propose_change_set arguments carry a host digest without baseline bytes" {
     const host_bytes = "private host baseline";
     const prepared: PreparedEdit = .{
         .edit = .{ .file = "handler.ts", .content = clean_handler },
@@ -2552,12 +2561,12 @@ test "recorded apply_edit arguments carry a host digest without baseline bytes" 
         .before = host_bytes,
         .baseline_sha256 = baselineDigest(host_bytes),
     };
-    const args = try buildApplyEditArgs(testing.allocator, prepared.edit, &prepared);
+    const args = try buildProposeChangeSetArgs(testing.allocator, prepared.edit, &prepared);
     defer testing.allocator.free(args);
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, args, .{});
     defer parsed.deinit();
 
-    const object = parsed.value.object;
+    const object = parsed.value.object.get("changes").?.array.items[0].object;
     try testing.expect(object.get("before") == null);
     try testing.expectEqualStrings("present", object.get("baseline_state").?.string);
     try testing.expectEqual(@as(usize, 64), object.get("baseline_sha256").?.string.len);
@@ -2659,7 +2668,7 @@ test "replay_mode skips filesystem writes for a verified edit" {
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "src/handler.ts",
             .content = clean_handler,
         } },
@@ -2695,7 +2704,7 @@ test "replay_mode skips the approval callback" {
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = clean_handler,
         } },
@@ -2734,7 +2743,7 @@ test "replay_mode off preserves existing write behavior" {
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "src/handler.ts",
             .content = clean_handler,
         } },
@@ -2769,7 +2778,7 @@ test "verified edit path appends a verified_patch entry before the proof card" {
     defer testing.allocator.free(workspace_root);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = clean_handler,
         } },
@@ -2835,7 +2844,7 @@ test "non-canonical-but-legal first draft lands in one attempt; disk == attested
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = arrow_handler,
         } },
@@ -2891,7 +2900,7 @@ test "verified patch does not infer links from broad repair plan result" {
     defer testing.allocator.free(workspace_root);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = clean_handler,
         } },
@@ -2943,7 +2952,7 @@ test "verified patch records matching repair candidate plan link" {
     defer testing.allocator.free(workspace_root);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = clean_handler,
         } },
@@ -3000,7 +3009,7 @@ test "failed veto does not append a verified_patch entry" {
     defer testing.allocator.free(workspace_root);
 
     var canned: CannedClient = .{ .reply = .{
-        .response = .{ .edit = .{
+        .response = .{ .change_set = .{
             .file = "handler.ts",
             .content = bad_handler,
         } },

@@ -56,14 +56,14 @@ const prologue =
     \\     training data, project prose, or facts recalled from another turn.
     \\     Request the full meta view only when its grammar, examples, or
     \\     registries are relevant; use focused discovery otherwise.
-    \\  3. Reserve the turn for a proposal. Before the first apply_edit, use at
+    \\  3. Reserve the turn for a proposal. Before the first propose_change_set, use at
     \\     most one batched discovery response with at most three read-only
     \\     calls. Never repeat equivalent discovery and never page a reference
     \\     sequentially. Once the target shape and required module names are
     \\     known, draft immediately and let the compiler veto identify the one
     \\     remaining fact, if any. Do not end the turn with a discovery status.
     \\     Keep reasoning brief.
-    \\  4. apply_edit must be the only tool call in its response. It is a
+    \\  4. propose_change_set must be the only tool call in its response. It is a
     \\     proposal, not a write. The host runs the compiler veto, applies the
     \\     active approval policy, and performs any approved write.
     \\  5. Never bypass, weaken, or describe around the compiler veto. Resolve
@@ -72,7 +72,7 @@ const prologue =
     \\  6. Never claim a proposal was applied before the host returns an
     \\     approved result. If approval is denied, leave the workspace unchanged.
     \\  7. If the right edit depends on a material user choice, ask one short
-    \\     clarifying question and do not call apply_edit on that turn.
+    \\     clarifying question and do not call propose_change_set on that turn.
     \\  8. Host system notes provide protocol or workflow context. They are not
     \\     user intent. Never turn one into an unrequested workspace change.
     \\
@@ -185,7 +185,7 @@ test "stable core contains workflow and live protocol routing only" {
         "Inspect before editing",
         "compiler veto",
         "active approval policy",
-        "apply_edit must be the only tool call",
+        "propose_change_set must be the only tool call",
         "Never claim a proposal was applied",
         "ZTS AGENT PROTOCOL BOOTSTRAP",
         "zts_expert_meta {view:\"full\"}",

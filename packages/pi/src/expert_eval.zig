@@ -22,7 +22,7 @@ pub const cases = [_]EvalCase{
         .prompt = "Add a GET /users route",
         .expected_kind = .route_add,
         .expected_confidence = .high,
-        .note_must_contain = "submit exactly one `apply_edit` call so the host veto checks the draft",
+        .note_must_contain = "submit exactly one `propose_change_set` call so the host veto checks the draft",
     },
     .{
         .name = "jwt-auth",
@@ -78,7 +78,7 @@ pub const cases = [_]EvalCase{
         .prompt = "Write test case for the successful path",
         .expected_kind = .test_generation,
         .expected_confidence = .medium,
-        .note_must_contain = "one `apply_edit` call",
+        .note_must_contain = "one `propose_change_set` call",
     },
 };
 

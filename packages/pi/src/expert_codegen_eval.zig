@@ -508,7 +508,7 @@ fn isDiagnosticResult(result: transcript_mod.OwnedToolResult) bool {
     if (std.mem.eql(u8, result.tool_name, "zts_expert_review_patch") or
         std.mem.eql(u8, result.tool_name, "zts_check")) return true;
     return !result.ok and
-        std.mem.eql(u8, result.tool_name, "apply_edit") and
+        std.mem.eql(u8, result.tool_name, "propose_change_set") and
         std.mem.startsWith(u8, result.llm_text, loop.veto_reject_preamble);
 }
 
@@ -613,7 +613,7 @@ const clean_health =
     "function handler(req: Request): Proof<Response, \"deterministic\"> { return Response.json({ ok: true }); }";
 
 test "runCase scores a clean first draft as a veto pass" {
-    var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
+    var client: ScriptedClient = .{ .reply = .{ .response = .{ .change_set = .{
         .file = "handler.ts",
         .content = clean_health,
     } } } };
@@ -646,7 +646,7 @@ test "runCase scores a clean workflow first draft as a veto pass" {
         \\  });
         \\}
     ;
-    var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
+    var client: ScriptedClient = .{ .reply = .{ .response = .{ .change_set = .{
         .file = "handler.ts",
         .content = workflow_handler,
     } } } };
@@ -670,7 +670,7 @@ test "runCase records the failing ZTS code for a bad first draft" {
     // A forbidden `var` is a hard parse error (ZTS001) that the repair lane
     // cannot author a fix for, so it stays failed and the histogram records its
     // code - exactly the hard-failure case the gap histogram is meant to rank.
-    var client: ScriptedClient = .{ .reply = .{ .response = .{ .edit = .{
+    var client: ScriptedClient = .{ .reply = .{ .response = .{ .change_set = .{
         .file = "handler.ts",
         .content = "function handler(req: Request): Proof<Response, \"deterministic\"> { var x = 1; return Response.json({ x: x }); }",
     } } } };
@@ -788,7 +788,7 @@ test "code collection reads persisted apply edit compiler rejections" {
     defer tr.deinit(testing.allocator);
     try tr.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = "apply-1",
-        .tool_name = "apply_edit",
+        .tool_name = "propose_change_set",
         .ok = false,
         .llm_text = "The compiler rejected this edit. ZTS400 secret data flows into response body",
     } });

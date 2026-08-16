@@ -255,13 +255,13 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
     const cases = [_]SequenceCase{
         .{ .entry_id = "explain", .tools = &.{"zts_expert_modules"} },
         .{ .entry_id = "review", .tools = &.{"workspace_read_file"} },
-        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_modules", "apply_edit" } },
-        .{ .entry_id = "add-env", .tools = &.{ "zts_expert_modules", "workspace_read_file", "apply_edit" } },
-        .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file", "apply_edit" } },
-        .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "apply_edit" } },
+        .{ .entry_id = "add-route", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "zts_expert_modules", "propose_change_set" } },
+        .{ .entry_id = "add-env", .tools = &.{ "zts_expert_modules", "workspace_read_file", "propose_change_set" } },
+        .{ .entry_id = "write-test", .tools = &.{ "workspace_read_file", "zts_expert_verify_paths", "workspace_read_file", "propose_change_set" } },
+        .{ .entry_id = "fix", .tools = &.{ "zts_expert_verify_paths", "pi_repair_plan", "workspace_read_file", "propose_change_set" } },
         .{
             .entry_id = "fill-hole",
-            .tools = &.{ "workspace_read_file", "zts_expert_holes", "zts_expert_fill_hole", "apply_edit" },
+            .tools = &.{ "workspace_read_file", "zts_expert_holes", "zts_expert_fill_hole", "propose_change_set" },
             .outputs = &.{
                 null,
                 null,
@@ -279,7 +279,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
 
     for (cases) |case| {
         const entry = range.findById(case.entry_id) orelse return error.MissingRangeEntry;
-        var apply_edits: usize = 0;
+        var propose_change_sets: usize = 0;
         for (case.tools, 0..) |expected_tool, step_index| {
             var arena = std.heap.ArenaAllocator.init(testing.allocator);
             defer arena.deinit();
@@ -299,15 +299,15 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
                 },
                 else => return error.ExpectedToolCall,
             }
-            if (std.mem.eql(u8, expected_tool, "apply_edit")) {
-                apply_edits += 1;
+            if (std.mem.eql(u8, expected_tool, "propose_change_set")) {
+                propose_change_sets += 1;
                 try testing.expectEqual(case.tools.len - 1, step_index);
             }
         }
 
         switch (entry.action) {
-            .answer => try testing.expectEqual(@as(usize, 0), apply_edits),
-            .edit => try testing.expectEqual(@as(usize, 1), apply_edits),
+            .answer => try testing.expectEqual(@as(usize, 0), propose_change_sets),
+            .change_set => try testing.expectEqual(@as(usize, 1), propose_change_sets),
         }
 
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -323,7 +323,7 @@ test "stand-in gate: playbooks call facts first and apply at most one edit last"
         switch (outcome.reply.response) {
             .final_text => |text| switch (entry.action) {
                 .answer => try testing.expect(text.len >= 120),
-                .edit => try testing.expect(text.len > 0),
+                .change_set => try testing.expect(text.len > 0),
             },
             else => return error.ExpectedFinalText,
         }
@@ -803,7 +803,7 @@ test "stand-in gate: every generated env source gets the answer its shape implie
         }
 
         const proposed = switch (transform) {
-            .edit => |bytes| bytes,
+            .change_set => |bytes| bytes,
             else => {
                 std.debug.print(
                     "[standin-gate] env variant import={} read={} body={} was refused, not edited\n",
@@ -950,7 +950,7 @@ test "stand-in gate: generated out-of-range prompts never reach a playbook" {
             // is a usable refusal rather than merely a marker, which is the
             // part that can actually regress.
             try testing.expect(std.mem.indexOf(u8, reply, "supported range is") != null);
-            try testing.expect(std.mem.indexOf(u8, reply, "apply_edit") == null);
+            try testing.expect(std.mem.indexOf(u8, reply, "propose_change_set") == null);
         }
     }
 

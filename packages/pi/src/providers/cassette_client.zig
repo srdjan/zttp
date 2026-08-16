@@ -27,7 +27,7 @@ const loop = @import("../loop.zig");
 const transcript_mod = @import("../transcript.zig");
 const anthropic_sse_parser = @import("anthropic/sse_parser.zig");
 const anthropic_response_assembler = @import("anthropic/response_assembler.zig");
-const anthropic_apply_edit = @import("anthropic/apply_edit.zig");
+const anthropic_propose_change_set = @import("anthropic/propose_change_set.zig");
 const openai_sse_parser = @import("openai/sse_parser.zig");
 const openai_response_assembler = @import("openai/response_assembler.zig");
 const local_client = @import("local/client.zig");
@@ -250,7 +250,7 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
         .anthropic => {
             const event_list = try anthropic_sse_parser.parseAll(arena, cassette.body);
             const outcome = try anthropic_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+            const reply = try anthropic_propose_change_set.maybeRemap(arena, outcome.reply, outcome.stop_reason);
             return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
         .deepseek => {
@@ -268,7 +268,7 @@ pub fn replay(arena: std.mem.Allocator, cassette: Cassette) !loop.ModelCallResul
             if (!cassette.header.stream) return CassetteError.NonStreamingOpenAINotSupported;
             const event_list = try openai_sse_parser.parseAll(arena, cassette.body);
             const outcome = try openai_response_assembler.assemble(arena, event_list);
-            const reply = try anthropic_apply_edit.maybeRemap(arena, outcome.reply, outcome.stop_reason);
+            const reply = try anthropic_propose_change_set.maybeRemap(arena, outcome.reply, outcome.stop_reason);
             return .{ .reply = reply, .usage = outcome.usage, .stop_reason = outcome.stop_reason };
         },
     };
@@ -340,18 +340,18 @@ test "replay: a streaming deepseek cassette is refused, not misframed" {
     }));
 }
 
-const cassette_openai_apply_edit =
+const cassette_openai_propose_change_set =
     \\event: response.created
     \\data: {"type":"response.created","response":{"id":"resp_edit","status":"in_progress"}}
     \\
     \\event: response.output_item.added
-    \\data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":""}}
+    \\data: {"type":"response.output_item.added","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"propose_change_set","arguments":""}}
     \\
     \\event: response.function_call_arguments.delta
-    \\data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"file\":\"handler.ts\",\"content\":\"ok\"}"}
+    \\data: {"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"ok\"}]}"}
     \\
     \\event: response.output_item.done
-    \\data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"apply_edit","arguments":"{\"file\":\"handler.ts\",\"content\":\"ok\"}"}}
+    \\data: {"type":"response.output_item.done","output_index":0,"item":{"id":"fc_edit","type":"function_call","call_id":"call_edit","name":"propose_change_set","arguments":"{\"changes\":[{\"file\":\"handler.ts\",\"content\":\"ok\"}]}"}}
     \\
     \\event: response.completed
     \\data: {"type":"response.completed","response":{"id":"resp_edit","status":"completed","usage":{"input_tokens":7,"output_tokens":3,"total_tokens":10}}}
@@ -383,16 +383,16 @@ test "replay: openai cassette produces final_text reply" {
     try testing.expectEqual(@as(u64, 3), result.usage.output_tokens);
 }
 
-test "replay: openai cassette remaps apply_edit into an edit reply" {
+test "replay: openai cassette remaps propose_change_set into a change set reply" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
     const result = try replay(arena.allocator(), .{
         .header = .{ .provider = .openai, .stream = true },
-        .body = cassette_openai_apply_edit,
+        .body = cassette_openai_propose_change_set,
     });
     switch (result.reply.response) {
-        .edit => |edit| {
+        .change_set => |edit| {
             try testing.expectEqualStrings("handler.ts", edit.file);
             try testing.expectEqualStrings("ok", edit.content);
         },

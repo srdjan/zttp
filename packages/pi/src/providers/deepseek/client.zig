@@ -18,7 +18,7 @@ const loop = @import("../../loop.zig");
 const turn = @import("../../turn.zig");
 const transcript_mod = @import("../../transcript.zig");
 const registry_mod = @import("../../registry/registry.zig");
-const apply_edit = @import("../anthropic/apply_edit.zig");
+const propose_change_set = @import("../anthropic/propose_change_set.zig");
 const http_errors = @import("../http_errors.zig");
 const model_request = @import("../model_request.zig");
 const context_budget = @import("../../context_budget.zig");
@@ -578,7 +578,7 @@ fn decodeResponseValue(
                 .response = .{ .tool_calls = calls },
             };
             return .{
-                .reply = try apply_edit.maybeRemap(arena, reply, finish_reason),
+                .reply = try propose_change_set.maybeRemap(arena, reply, finish_reason),
                 .usage = usage,
                 .stop_reason = finish_reason,
             };
@@ -913,16 +913,16 @@ test "text alongside a tool call is kept as the preamble" {
     try testing.expectEqual(@as(usize, 1), result.reply.response.tool_calls.len);
 }
 
-test "an apply_edit tool call is remapped to an edit reply" {
+test "a propose_change_set tool call is remapped to a change set reply" {
     const response =
         "{\"choices\":[{\"finish_reason\":\"tool_calls\",\"message\":{\"content\":null," ++
         "\"tool_calls\":[{\"id\":\"call_edit\",\"type\":\"function\",\"function\":{" ++
-        "\"name\":\"apply_edit\",\"arguments\":\"{\\\"file\\\":\\\"handler.ts\\\",\\\"content\\\":\\\"ok\\\"}\"}}]}}]}";
+        "\"name\":\"propose_change_set\",\"arguments\":\"{\\\"changes\\\":[{\\\"file\\\":\\\"handler.ts\\\",\\\"content\\\":\\\"ok\\\"}]}\"}}]}}]}";
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const result = try decodeResponse(arena.allocator(), response);
-    try testing.expectEqualStrings("handler.ts", result.reply.response.edit.file);
-    try testing.expectEqualStrings("ok", result.reply.response.edit.content);
+    try testing.expectEqualStrings("handler.ts", result.reply.response.change_set.file);
+    try testing.expectEqualStrings("ok", result.reply.response.change_set.content);
 }
 
 test "a truncated completion is an error, not a short answer" {

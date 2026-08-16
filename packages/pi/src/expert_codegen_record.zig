@@ -1010,7 +1010,7 @@ test "intent cohort is explicit and non-vacuous" {
 /// transcript adds only ~5,000 more. Thirty-seven tools contribute roughly
 /// 21 KB of that preamble and the recorded traces call eight of them.
 ///
-/// Two things this deliberately does not do. It never drops `apply_edit`,
+/// Two things this deliberately does not do. It never drops `propose_change_set`,
 /// which `tool_catalog` emits ahead of the registry and is the only way an
 /// edit reaches the veto. And it fails on a name that matches nothing rather
 /// than silently keeping fewer tools than asked for - a typo'd allowlist that
@@ -1499,7 +1499,7 @@ const record_corpus = [_]RecordCase{
         // So what this case measures is not the imprecision but the way around
         // it: whether the model contains a secret at the boundary rather than
         // carrying it across and filtering after. Three `edit_simulate` calls
-        // preceded the one `apply_edit`, which is where the shape was found.
+        // preceded the one `propose_change_set`, which is where the shape was found.
         //
         // No intent spec: the response is a bare app name read from an env var,
         // and asserting it would test the env stub rather than the containment
@@ -2080,7 +2080,7 @@ test "live recorder does not retry a non-transport failure" {
         ) anyerror!loop.ModelCallResult {
             const self: *@This() = @ptrCast(@alignCast(context));
             self.calls += 1;
-            return error.InvalidEditArgs;
+            return error.InvalidChangeSetArgs;
         }
     };
 
@@ -2093,7 +2093,7 @@ test "live recorder does not retry a non-transport failure" {
     defer transcript.deinit(testing.allocator);
 
     try testing.expectError(
-        error.InvalidEditArgs,
+        error.InvalidChangeSetArgs,
         retrying.asModelClient().request(testing.allocator, &transcript, null),
     );
     try testing.expectEqual(@as(usize, 1), fake.calls);
