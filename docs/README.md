@@ -75,6 +75,11 @@ they are designs rather than a backlog. Finished plans live under
   cassette goes stale, how to re-record the corpus against DeepSeek, a local
   MLX server, Claude, or OpenAI, and how to republish the convergence and
   coverage pages.
+- [ZTS Expert Overview](zts-expert-overview.html) - a browser-readable report on
+  the agent behind `zttp expert`: its identity, the proof loop one proposal
+  crosses, the six authority invariants, and the measured state of the corpus.
+  Dated, so read the numbers against [Convergence](convergence.md) and
+  [Coverage](coverage.md) rather than as live facts.
 - [zts Expert Contract](internals/zts-expert-contract.md) - stable
   structured-tool output used by compiler-in-the-loop workflows.
 - [Agent Protocol v2](internals/agent-protocol-v2.md) - the

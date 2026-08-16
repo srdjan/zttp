@@ -1,0 +1,1421 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <meta name="description" content="Current architecture, measured quality, constraints, and recommended enhancements for the ZTS Expert PI agent.">
+  <title>ZTS Expert - Current State and Recommended Enhancements</title>
+  <script>
+    try {
+      const savedTheme = localStorage.getItem("zts-expert-theme");
+      if (savedTheme === "light" || savedTheme === "dark") {
+        document.documentElement.dataset.theme = savedTheme;
+      } else if (window.matchMedia("(prefers-color-scheme: light)").matches) {
+        document.documentElement.dataset.theme = "light";
+      }
+    } catch (_) {}
+  </script>
+  <style>
+    @layer reset, tokens, base, layout, components, utilities, motion;
+
+    @layer reset {
+      *, *::before, *::after { box-sizing: border-box; }
+      html { scroll-behavior: smooth; }
+      body, h1, h2, h3, p, ol, ul, dl, dd, figure, blockquote { margin: 0; }
+      ol, ul { padding: 0; }
+      button, input { font: inherit; }
+      img, svg { display: block; max-width: 100%; }
+      table { border-collapse: collapse; }
+    }
+
+    @layer tokens {
+      :root {
+        --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        --font-mono: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+        --paper: oklch(13% 0.018 168);
+        --paper-raised: oklch(16.5% 0.022 168);
+        --paper-soft: oklch(19.5% 0.022 168);
+        --ink: oklch(94% 0.018 166);
+        --ink-soft: oklch(73% 0.026 166);
+        --ink-faint: oklch(57% 0.025 166);
+        --line: oklch(30% 0.032 168);
+        --line-strong: oklch(42% 0.045 168);
+        --signal: oklch(84% 0.15 166);
+        --signal-soft: oklch(77% 0.09 166);
+        --proof: oklch(82% 0.16 133);
+        --warn: oklch(79% 0.14 76);
+        --veto: oklch(70% 0.2 27);
+        --blue: oklch(76% 0.11 231);
+        --shadow: 0 24px 70px oklch(2% 0.01 168 / 0.42);
+        --radius-sm: 0.4rem;
+        --radius-md: 0.85rem;
+        --radius-lg: 1.35rem;
+        --rail-width: 17.5rem;
+        --content-width: 78rem;
+      }
+
+      :root[data-theme="light"] {
+        --paper: oklch(96.5% 0.018 91);
+        --paper-raised: oklch(99% 0.008 91);
+        --paper-soft: oklch(93% 0.022 91);
+        --ink: oklch(20% 0.03 168);
+        --ink-soft: oklch(39% 0.035 168);
+        --ink-faint: oklch(51% 0.03 168);
+        --line: oklch(82% 0.035 168);
+        --line-strong: oklch(66% 0.06 168);
+        --signal: oklch(48% 0.13 169);
+        --signal-soft: oklch(54% 0.1 169);
+        --proof: oklch(49% 0.14 136);
+        --warn: oklch(54% 0.14 66);
+        --veto: oklch(53% 0.2 27);
+        --blue: oklch(49% 0.12 231);
+        --shadow: 0 24px 70px oklch(35% 0.04 91 / 0.12);
+      }
+    }
+
+    @layer base {
+      html {
+        background: var(--paper);
+        color: var(--ink);
+        font-family: var(--font-sans);
+        font-size: 16px;
+        line-height: 1.55;
+        text-rendering: optimizeLegibility;
+      }
+
+      body {
+        min-width: 20rem;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 92% 6%, color-mix(in oklch, var(--signal) 12%, transparent), transparent 27rem),
+          linear-gradient(90deg, transparent 0 49.95%, color-mix(in oklch, var(--line) 22%, transparent) 50%, transparent 50.05%),
+          var(--paper);
+      }
+
+      a { color: inherit; }
+
+      code, kbd, samp {
+        font-family: var(--font-mono);
+        font-size: 0.91em;
+      }
+
+      code {
+        color: var(--signal);
+        overflow-wrap: anywhere;
+      }
+
+      ::selection {
+        background: color-mix(in oklch, var(--signal) 35%, transparent);
+        color: var(--ink);
+      }
+
+      :focus-visible {
+        outline: 2px solid var(--signal);
+        outline-offset: 4px;
+      }
+
+      h1, h2, h3 {
+        line-height: 1.08;
+        text-wrap: balance;
+      }
+
+      h1 {
+        max-width: 10ch;
+        font-size: clamp(3.4rem, 9vw, 8rem);
+        font-weight: 760;
+        letter-spacing: -0.07em;
+      }
+
+      h2 {
+        max-width: 18ch;
+        font-size: clamp(2.25rem, 5vw, 4.6rem);
+        font-weight: 710;
+        letter-spacing: -0.055em;
+      }
+
+      h3 {
+        font-size: clamp(1.12rem, 1.8vw, 1.42rem);
+        font-weight: 670;
+        letter-spacing: -0.025em;
+      }
+
+      p { text-wrap: pretty; }
+    }
+
+    @layer layout {
+      .shell {
+        display: grid;
+        grid-template-columns: var(--rail-width) minmax(0, 1fr);
+        min-height: 100vh;
+      }
+
+      .rail {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        padding: 1.35rem;
+        border-right: 1px solid var(--line);
+        background: color-mix(in oklch, var(--paper) 92%, transparent);
+        backdrop-filter: blur(18px);
+      }
+
+      main { min-width: 0; }
+
+      .section,
+      .hero {
+        width: min(100% - clamp(2rem, 7vw, 7rem), var(--content-width));
+        margin-inline: auto;
+      }
+
+      .hero {
+        display: grid;
+        align-content: center;
+        min-height: 95vh;
+        padding-block: clamp(5rem, 10vw, 9rem) 4rem;
+      }
+
+      .section {
+        padding-block: clamp(5rem, 9vw, 8rem);
+        border-top: 1px solid var(--line);
+        scroll-margin-top: 2rem;
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: minmax(0, 0.8fr) minmax(18rem, 1fr);
+        gap: clamp(2rem, 7vw, 8rem);
+        align-items: end;
+        margin-bottom: clamp(3rem, 6vw, 5.5rem);
+      }
+
+      .section-head > p {
+        max-width: 38rem;
+        color: var(--ink-soft);
+        font-size: clamp(1.05rem, 1.8vw, 1.3rem);
+      }
+
+      .two-column {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(18rem, 0.82fr);
+        gap: clamp(2rem, 6vw, 6rem);
+        align-items: start;
+      }
+
+      .wide-narrow {
+        display: grid;
+        grid-template-columns: minmax(0, 1.35fr) minmax(17rem, 0.65fr);
+        gap: clamp(2rem, 5vw, 5rem);
+        align-items: start;
+      }
+    }
+
+    @layer components {
+      .skip-link {
+        position: fixed;
+        inset: 0 auto auto 0;
+        z-index: 100;
+        padding: 0.8rem 1rem;
+        color: var(--paper);
+        background: var(--signal);
+        transform: translateY(-120%);
+      }
+
+      .skip-link:focus { transform: translateY(0); }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        text-decoration: none;
+      }
+
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 2.55rem;
+        aspect-ratio: 1;
+        border: 1px solid var(--signal);
+        border-radius: 50%;
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+        font-weight: 700;
+      }
+
+      .brand-name {
+        display: grid;
+        font-family: var(--font-mono);
+        font-size: 0.73rem;
+        line-height: 1.35;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      .brand-name span:last-child { color: var(--ink-faint); }
+
+      .rail-status {
+        display: flex;
+        gap: 0.55rem;
+        align-items: center;
+        margin-top: 1.35rem;
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+      }
+
+      .status-light {
+        width: 0.46rem;
+        aspect-ratio: 1;
+        border-radius: 50%;
+        background: var(--proof);
+        box-shadow: 0 0 0.75rem color-mix(in oklch, var(--proof) 65%, transparent);
+      }
+
+      .rail nav {
+        margin-block: auto;
+        padding-block: 2rem;
+      }
+
+      .rail nav ol {
+        display: grid;
+        gap: 0.15rem;
+        list-style: none;
+      }
+
+      .rail nav a {
+        display: grid;
+        grid-template-columns: 2rem 1fr;
+        gap: 0.45rem;
+        padding: 0.48rem 0;
+        color: var(--ink-faint);
+        font-size: 0.8rem;
+        text-decoration: none;
+        transition: color 160ms ease, transform 160ms ease;
+      }
+
+      .rail nav a span:first-child {
+        font-family: var(--font-mono);
+        font-size: 0.66rem;
+      }
+
+      .rail nav a:hover,
+      .rail nav a[aria-current="true"] {
+        color: var(--signal);
+        transform: translateX(0.2rem);
+      }
+
+      .theme-button {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        width: 100%;
+        padding: 0.7rem 0;
+        border: 0;
+        border-top: 1px solid var(--line);
+        color: var(--ink-soft);
+        background: transparent;
+        cursor: pointer;
+      }
+
+      .theme-button span:last-child {
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+      }
+
+      .eyebrow,
+      .section-kicker {
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.7rem;
+        font-weight: 650;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+      }
+
+      .hero h1 span {
+        display: block;
+        color: var(--signal);
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.12fr) minmax(18rem, 0.7fr);
+        gap: clamp(2rem, 8vw, 9rem);
+        align-items: end;
+        margin-top: 2.2rem;
+      }
+
+      .hero-copy {
+        max-width: 42rem;
+        color: var(--ink-soft);
+        font-size: clamp(1.18rem, 2.2vw, 1.55rem);
+        line-height: 1.45;
+      }
+
+      .verdict {
+        position: relative;
+        padding: 1.4rem 0 1.4rem 1.5rem;
+        border-left: 1px solid var(--signal);
+        color: var(--ink-soft);
+        font-size: 0.98rem;
+      }
+
+      .verdict::before {
+        content: "VERDICT";
+        display: block;
+        margin-bottom: 0.7rem;
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.66rem;
+        letter-spacing: 0.14em;
+      }
+
+      .passport {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        margin-top: clamp(3rem, 7vw, 6rem);
+        border-block: 1px solid var(--line-strong);
+      }
+
+      .passport-item {
+        min-width: 0;
+        padding: 1.25rem 1.15rem 1.35rem;
+        border-right: 1px solid var(--line);
+      }
+
+      .passport-item:last-child { border-right: 0; }
+
+      .passport-value {
+        display: block;
+        margin-bottom: 0.35rem;
+        color: var(--ink);
+        font-family: var(--font-mono);
+        font-size: clamp(1.5rem, 3.2vw, 2.65rem);
+        line-height: 1;
+        letter-spacing: -0.06em;
+      }
+
+      .passport-label {
+        color: var(--ink-faint);
+        font-size: 0.7rem;
+        line-height: 1.35;
+      }
+
+      .passport-meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.65rem 1.5rem;
+        margin-top: 1rem;
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.66rem;
+      }
+
+      .identity-table {
+        width: 100%;
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .identity-table th,
+      .identity-table td {
+        padding: 1rem 0;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .identity-table th {
+        width: 35%;
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+        font-weight: 500;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .identity-table td {
+        color: var(--ink-soft);
+        font-size: 0.95rem;
+      }
+
+      .command-block {
+        position: sticky;
+        top: 2rem;
+        overflow: hidden;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-lg);
+        background: var(--paper-raised);
+        box-shadow: var(--shadow);
+      }
+
+      .command-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.8rem 1rem;
+        border-bottom: 1px solid var(--line);
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.66rem;
+      }
+
+      .command-body { padding: 1.4rem; }
+
+      .command-body pre {
+        margin: 0;
+        white-space: pre-wrap;
+        color: var(--ink-soft);
+        font-family: var(--font-mono);
+        font-size: 0.78rem;
+        line-height: 1.8;
+      }
+
+      .prompt { color: var(--signal); }
+      .compiler { color: var(--proof); }
+      .diagnostic { color: var(--veto); }
+
+      .command-note {
+        padding: 1rem 1.4rem 1.2rem;
+        border-top: 1px solid var(--line);
+        color: var(--ink-faint);
+        font-size: 0.77rem;
+      }
+
+      .proof-loop {
+        position: relative;
+        display: grid;
+        gap: 0;
+        list-style: none;
+      }
+
+      .proof-loop::before {
+        content: "";
+        position: absolute;
+        top: 2.2rem;
+        bottom: 2.2rem;
+        left: 1.15rem;
+        width: 1px;
+        background: linear-gradient(var(--signal), var(--warn) 68%, var(--proof));
+      }
+
+      .loop-step {
+        position: relative;
+        display: grid;
+        grid-template-columns: 2.3rem minmax(0, 1fr) minmax(12rem, 0.55fr);
+        gap: 1.25rem;
+        align-items: start;
+        min-height: 7.4rem;
+        padding: 1.35rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .loop-index {
+        position: relative;
+        z-index: 2;
+        display: grid;
+        place-items: center;
+        width: 2.3rem;
+        aspect-ratio: 1;
+        border: 1px solid var(--line-strong);
+        border-radius: 50%;
+        color: var(--signal);
+        background: var(--paper);
+        font-family: var(--font-mono);
+        font-size: 0.66rem;
+      }
+
+      .loop-step h3 { margin-bottom: 0.6rem; }
+      .loop-step p { max-width: 40rem; color: var(--ink-soft); }
+
+      .loop-owner {
+        justify-self: end;
+        padding-top: 0.25rem;
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.67rem;
+        text-align: right;
+      }
+
+      .verdict-branch {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1px;
+        margin-top: 1.5rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-md);
+        overflow: hidden;
+        background: var(--line);
+      }
+
+      .branch {
+        min-height: 10rem;
+        padding: 1.35rem;
+        background: var(--paper-raised);
+      }
+
+      .branch.pass { border-top: 2px solid var(--proof); }
+      .branch.fail { border-top: 2px solid var(--veto); }
+      .branch h3 { margin-bottom: 0.65rem; }
+      .branch.pass h3 { color: var(--proof); }
+      .branch.fail h3 { color: var(--veto); }
+      .branch p { color: var(--ink-soft); font-size: 0.9rem; }
+
+      .invariant-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1px;
+        list-style: none;
+        border: 1px solid var(--line);
+        background: var(--line);
+      }
+
+      .invariant-list li {
+        min-height: 10rem;
+        padding: 1.4rem;
+        background: var(--paper-raised);
+      }
+
+      .invariant-code {
+        display: block;
+        margin-bottom: 1.5rem;
+        color: var(--proof);
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        letter-spacing: 0.1em;
+      }
+
+      .invariant-list p {
+        color: var(--ink-soft);
+        font-size: 0.9rem;
+      }
+
+      .authority-stack {
+        display: grid;
+        gap: 0.5rem;
+      }
+
+      .authority-row {
+        display: grid;
+        grid-template-columns: 5.5rem minmax(0, 1fr);
+        gap: 1.2rem;
+        padding: 1rem;
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        background: color-mix(in oklch, var(--paper-raised) 78%, transparent);
+      }
+
+      .authority-row:nth-child(4) { border-color: color-mix(in oklch, var(--signal) 50%, var(--line)); }
+      .authority-row:nth-child(5) { border-color: color-mix(in oklch, var(--proof) 55%, var(--line)); }
+
+      .authority-row dt {
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.65rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .authority-row dd { color: var(--ink-soft); font-size: 0.88rem; }
+
+      .route-matrix {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 1px;
+        list-style: none;
+        border: 1px solid var(--line);
+        background: var(--line);
+      }
+
+      .route-matrix li {
+        min-height: 8.2rem;
+        padding: 1.15rem;
+        background: var(--paper-raised);
+      }
+
+      .route-name {
+        display: block;
+        margin-bottom: 1.2rem;
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.72rem;
+      }
+
+      .route-matrix p { color: var(--ink-soft); font-size: 0.84rem; }
+
+      .capability-ledger {
+        display: grid;
+        gap: 0;
+        margin-top: 3rem;
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .capability-row {
+        display: grid;
+        grid-template-columns: minmax(9rem, 0.45fr) minmax(0, 1fr) auto;
+        gap: 1.5rem;
+        align-items: start;
+        padding: 1.2rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .capability-row dt { color: var(--ink); font-weight: 620; }
+      .capability-row dd { color: var(--ink-soft); }
+      .capability-row .count {
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.76rem;
+        text-align: right;
+      }
+
+      .evidence-ladder {
+        counter-reset: evidence;
+        display: grid;
+        gap: 0;
+        list-style: none;
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .evidence-ladder li {
+        counter-increment: evidence;
+        display: grid;
+        grid-template-columns: 3.25rem minmax(10rem, 0.48fr) minmax(0, 1fr);
+        gap: 1.2rem;
+        padding: 1.25rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .evidence-ladder li::before {
+        content: "0" counter(evidence);
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+      }
+
+      .evidence-ladder h3 { font-size: 1rem; }
+      .evidence-ladder p { color: var(--ink-soft); font-size: 0.89rem; }
+
+      .coverage-panel {
+        padding: 1.5rem;
+        border: 1px solid var(--line-strong);
+        border-radius: var(--radius-lg);
+        background: var(--paper-raised);
+      }
+
+      .coverage-number {
+        color: var(--ink);
+        font-family: var(--font-mono);
+        font-size: clamp(3rem, 7vw, 5.5rem);
+        line-height: 1;
+        letter-spacing: -0.08em;
+      }
+
+      .coverage-number span { color: var(--ink-faint); }
+
+      .coverage-track {
+        height: 0.72rem;
+        margin-block: 1.5rem 0.9rem;
+        border: 1px solid var(--line);
+        background: var(--paper-soft);
+      }
+
+      .coverage-fill {
+        width: 7.04%;
+        height: 100%;
+        background: var(--warn);
+        box-shadow: 0 0 1.2rem color-mix(in oklch, var(--warn) 38%, transparent);
+      }
+
+      .coverage-panel p { color: var(--ink-soft); font-size: 0.88rem; }
+
+      .boundary-note {
+        margin-top: 1.2rem;
+        padding-top: 1.2rem;
+        border-top: 1px solid var(--line);
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+      }
+
+      .gap-ledger {
+        width: 100%;
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .gap-ledger th,
+      .gap-ledger td {
+        padding: 1.15rem 1.25rem 1.15rem 0;
+        border-bottom: 1px solid var(--line);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .gap-ledger thead th {
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.64rem;
+        font-weight: 500;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+      }
+
+      .gap-ledger tbody th {
+        width: 26%;
+        color: var(--ink);
+        font-size: 0.95rem;
+        font-weight: 620;
+      }
+
+      .gap-ledger td { color: var(--ink-soft); font-size: 0.88rem; }
+
+      .gap-code {
+        display: block;
+        margin-bottom: 0.45rem;
+        color: var(--warn);
+        font-family: var(--font-mono);
+        font-size: 0.62rem;
+        letter-spacing: 0.1em;
+      }
+
+      .roadmap {
+        counter-reset: roadmap;
+        display: grid;
+        gap: 0;
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .roadmap-item {
+        counter-increment: roadmap;
+        display: grid;
+        grid-template-columns: 4.2rem minmax(13rem, 0.6fr) minmax(0, 1fr);
+        gap: clamp(1rem, 3vw, 3rem);
+        padding: 2rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .roadmap-item::before {
+        content: counter(roadmap, decimal-leading-zero);
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 1.3rem;
+      }
+
+      .roadmap-title h3 { margin-bottom: 0.8rem; }
+
+      .priority {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.63rem;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .priority::before {
+        content: "";
+        width: 0.42rem;
+        aspect-ratio: 1;
+        border-radius: 50%;
+        background: currentColor;
+      }
+
+      .priority.now { color: var(--veto); }
+      .priority.next { color: var(--warn); }
+      .priority.later { color: var(--blue); }
+
+      .roadmap-body > p {
+        max-width: 48rem;
+        margin-bottom: 1rem;
+        color: var(--ink-soft);
+      }
+
+      .gate {
+        display: grid;
+        grid-template-columns: 4.3rem minmax(0, 1fr);
+        gap: 0.8rem;
+        padding-top: 0.9rem;
+        border-top: 1px dashed var(--line);
+        color: var(--ink-faint);
+        font-size: 0.79rem;
+      }
+
+      .gate span:first-child {
+        color: var(--proof);
+        font-family: var(--font-mono);
+        font-size: 0.64rem;
+        letter-spacing: 0.08em;
+      }
+
+      .decision-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 1px;
+        list-style: none;
+        border: 1px solid var(--line);
+        background: var(--line);
+      }
+
+      .decision-list li {
+        min-height: 11rem;
+        padding: 1.4rem;
+        background: var(--paper-raised);
+      }
+
+      .decision-list h3 {
+        margin-bottom: 1rem;
+        color: var(--signal);
+      }
+
+      .decision-list p { color: var(--ink-soft); font-size: 0.9rem; }
+
+      .source-list {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 0 3rem;
+        list-style: none;
+        border-top: 1px solid var(--line-strong);
+      }
+
+      .source-list li {
+        min-width: 0;
+        padding: 1rem 0;
+        border-bottom: 1px solid var(--line);
+      }
+
+      .source-list a {
+        display: block;
+        color: var(--signal);
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+        text-decoration: none;
+        overflow-wrap: anywhere;
+      }
+
+      .source-list a:hover { text-decoration: underline; }
+      .source-list p { margin-top: 0.45rem; color: var(--ink-faint); font-size: 0.79rem; }
+
+      details {
+        margin-top: 2.5rem;
+        border-block: 1px solid var(--line);
+      }
+
+      summary {
+        padding: 1rem 0;
+        color: var(--ink-soft);
+        cursor: pointer;
+        font-family: var(--font-mono);
+        font-size: 0.75rem;
+      }
+
+      .audit-note {
+        max-width: 55rem;
+        padding: 0 0 1.4rem;
+        color: var(--ink-faint);
+        font-size: 0.84rem;
+      }
+
+      .page-footer {
+        width: min(100% - clamp(2rem, 7vw, 7rem), var(--content-width));
+        margin-inline: auto;
+        padding-block: 2.5rem 4rem;
+        border-top: 1px solid var(--line);
+        color: var(--ink-faint);
+        font-family: var(--font-mono);
+        font-size: 0.68rem;
+      }
+    }
+
+    @layer utilities {
+      .accent { color: var(--signal); }
+      .proof-text { color: var(--proof); }
+      .warn-text { color: var(--warn); }
+      .muted { color: var(--ink-faint); }
+      .mono { font-family: var(--font-mono); }
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
+      }
+    }
+
+    @layer motion {
+      @media (prefers-reduced-motion: no-preference) {
+        @keyframes signal-pulse {
+          0%, 100% { opacity: 0.5; transform: scale(0.9); }
+          50% { opacity: 1; transform: scale(1.1); }
+        }
+
+        .status-light { animation: signal-pulse 2.8s ease-in-out infinite; }
+      }
+
+      @media (max-width: 72rem) {
+        .shell { grid-template-columns: 1fr; }
+        .rail {
+          position: sticky;
+          flex-direction: row;
+          align-items: center;
+          width: 100%;
+          height: auto;
+          padding: 0.8rem 1rem;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+        .rail-status, .rail nav { display: none; }
+        .theme-button {
+          width: auto;
+          margin-left: auto;
+          padding: 0.5rem 0;
+          border: 0;
+          gap: 0.65rem;
+        }
+        .brand-name span:last-child { display: none; }
+        .hero { min-height: auto; padding-top: 6rem; }
+      }
+
+      @media (max-width: 54rem) {
+        .section-head,
+        .hero-grid,
+        .two-column,
+        .wide-narrow { grid-template-columns: 1fr; }
+
+        .section-head { align-items: start; }
+        .command-block { position: static; }
+        .passport { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .passport-item { border-bottom: 1px solid var(--line); }
+        .passport-item:nth-child(2n) { border-right: 0; }
+        .passport-item:last-child { grid-column: 1 / -1; border-bottom: 0; }
+        .loop-step { grid-template-columns: 2.3rem minmax(0, 1fr); }
+        .loop-owner { grid-column: 2; justify-self: start; text-align: left; }
+        .route-matrix { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+        .roadmap-item { grid-template-columns: 3rem minmax(0, 1fr); }
+        .roadmap-body { grid-column: 2; }
+        .source-list { grid-template-columns: 1fr; }
+      }
+
+      @media (max-width: 38rem) {
+        h1 { font-size: clamp(3.2rem, 19vw, 5rem); }
+        .section, .hero, .page-footer { width: min(100% - 1.5rem, var(--content-width)); }
+        .passport { grid-template-columns: 1fr; }
+        .passport-item,
+        .passport-item:nth-child(2n) { border-right: 0; border-bottom: 1px solid var(--line); }
+        .passport-item:last-child { grid-column: auto; }
+        .verdict-branch,
+        .invariant-list,
+        .route-matrix,
+        .decision-list { grid-template-columns: 1fr; }
+        .capability-row { grid-template-columns: 1fr; gap: 0.5rem; }
+        .capability-row .count { text-align: left; }
+        .evidence-ladder li { grid-template-columns: 2.4rem 1fr; }
+        .evidence-ladder p { grid-column: 2; }
+        .gap-ledger thead { display: none; }
+        .gap-ledger,
+        .gap-ledger tbody,
+        .gap-ledger tr,
+        .gap-ledger th,
+        .gap-ledger td { display: block; width: 100%; }
+        .gap-ledger tr { padding: 1.2rem 0; border-bottom: 1px solid var(--line); }
+        .gap-ledger th,
+        .gap-ledger td { padding: 0.35rem 0; border: 0; }
+        .roadmap-item { grid-template-columns: 2.4rem 1fr; gap: 1rem; }
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+
+  <div class="shell">
+    <aside class="rail" aria-label="Report navigation">
+      <a class="brand" href="#top" aria-label="ZTS Expert overview home">
+        <span class="brand-mark">Z/E</span>
+        <span class="brand-name"><span>ZTS Expert</span><span>Architecture report</span></span>
+      </a>
+
+      <div class="rail-status"><span class="status-light" aria-hidden="true"></span>working-tree snapshot</div>
+
+      <nav aria-label="Sections">
+        <ol>
+          <li><a href="#identity"><span>01</span><span>Identity</span></a></li>
+          <li><a href="#loop"><span>02</span><span>Proof loop</span></a></li>
+          <li><a href="#authority"><span>03</span><span>Authority</span></a></li>
+          <li><a href="#expertise"><span>04</span><span>Expertise</span></a></li>
+          <li><a href="#evidence"><span>05</span><span>Evidence</span></a></li>
+          <li><a href="#constraints"><span>06</span><span>Constraints</span></a></li>
+          <li><a href="#roadmap"><span>07</span><span>Enhancements</span></a></li>
+          <li><a href="#decisions"><span>08</span><span>Decisions</span></a></li>
+          <li><a href="#sources"><span>09</span><span>Sources</span></a></li>
+        </ol>
+      </nav>
+
+      <button class="theme-button" id="theme-toggle" type="button" aria-label="Switch color theme">
+        <span>Theme</span><span id="theme-label">DARK</span>
+      </button>
+    </aside>
+
+    <main id="content">
+      <header class="hero" id="top">
+        <p class="eyebrow">Current state / 16 Aug 2026</p>
+        <h1>ZTS <span>Expert</span></h1>
+
+        <div class="hero-grid">
+          <p class="hero-copy">The PI coding agent behind <code>zttp expert</code>. It writes ZTS under compiler authority, with live language discovery, typed workflows, and a veto before any workspace write.</p>
+          <p class="verdict">The safety architecture is mature. The next quality jump depends on a wider evaluation corpus, executable intent checks for durable workflows, and one canonical source for language expertise.</p>
+        </div>
+
+        <div class="passport" aria-label="Latest recorded expert measurements">
+          <div class="passport-item"><span class="passport-value proof-text">19/19</span><span class="passport-label">final drafts passed the compiler gate</span></div>
+          <div class="passport-item"><span class="passport-value">9/19</span><span class="passport-label">passed on the first model draft</span></div>
+          <div class="passport-item"><span class="passport-value proof-text">13/13</span><span class="passport-label">available behavior intents passed</span></div>
+          <div class="passport-item"><span class="passport-value">5</span><span class="passport-label">median model round trips</span></div>
+          <div class="passport-item"><span class="passport-value warn-text">5/71</span><span class="passport-label">advertised rules exercised by the corpus</span></div>
+        </div>
+        <div class="passport-meta">
+          <span>checkout d3f903e9</span>
+          <span>model deepseek-v4-flash</span>
+          <span>corpus 19dc67a54ec3</span>
+          <span>policy 63caf9a69229</span>
+          <span>measurement commit 38743443</span>
+        </div>
+      </header>
+
+      <section class="section" id="identity">
+        <div class="section-head">
+          <div><p class="section-kicker">01 / Identity</p><h2>A compiler-native PI agent</h2></div>
+          <p>ZTS Expert is a specialized mode of the PI coding loop. The public agent command and the compiler protocol are separate surfaces with separate jobs.</p>
+        </div>
+
+        <div class="two-column">
+          <table class="identity-table">
+            <tbody>
+              <tr><th scope="row">User surface</th><td><code>zttp expert</code> starts the coding session.</td></tr>
+              <tr><th scope="row">Compiler surface</th><td><code>zts agent --stdin-json</code> exposes schema-v2 metadata, checks, simulations, normalization, repairs, and proofs.</td></tr>
+              <tr><th scope="row">Runtime boundary</th><td>PI links into the development binary. The analyzer and production runtime do not depend on the agent.</td></tr>
+              <tr><th scope="row">Current default</th><td>DeepSeek V4 Flash is the product and evaluation default. Local, Claude, OpenAI, and DeepSeek providers share the same host policy.</td></tr>
+              <tr><th scope="row">Expert identity</th><td>A protected host prompt, project instructions, compiler bootstrap metadata, deterministic task routing, and compiler-owned verdicts.</td></tr>
+              <tr><th scope="row">Model role</th><td>The model authors a proposed source edit. The host controls baselines, writes, approvals, and receipts.</td></tr>
+            </tbody>
+          </table>
+
+          <figure class="command-block" aria-label="Representative expert session">
+            <div class="command-top"><span>expert.session</span><span>schema-v2</span></div>
+            <div class="command-body"><pre><span class="prompt">$ zttp expert</span>
+
+user      add an authenticated invoice route
+router    auth_jwt + route_add
+compiler  profile zts-model-1
+model     inspect -> discover -> propose
+host      establish baseline
+<span class="compiler">veto      PROVEN</span>
+user      approve
+host      write -> verify -> receipt</pre></div>
+            <figcaption class="command-note">The compiler supplies language facts at session start and on demand. The host does not rely on a large handwritten language manual.</figcaption>
+          </figure>
+        </div>
+      </section>
+
+      <section class="section" id="loop">
+        <div class="section-head">
+          <div><p class="section-kicker">02 / Proof loop</p><h2>One proposal crosses the fence</h2></div>
+          <p>The pure turn machine keeps dialogue state separate from effects. The outer loop owns tool execution, verification, retry budgets, and the final write.</p>
+        </div>
+
+        <ol class="proof-loop">
+          <li class="loop-step">
+            <span class="loop-index">01</span>
+            <div><h3>Load stable authority</h3><p>The host combines the protected expert core, complete project instructions, and the bounded schema-v2 compiler bootstrap.</p></div>
+            <span class="loop-owner">host / compiler</span>
+          </li>
+          <li class="loop-step">
+            <span class="loop-index">02</span>
+            <div><h3>Classify the task</h3><p>A deterministic router selects one of 11 named expert workflows or the unknown fallback. The selected note tells the model which compiler facts and tools matter.</p></div>
+            <span class="loop-owner">expert_workflow.zig</span>
+          </li>
+          <li class="loop-step">
+            <span class="loop-index">03</span>
+            <div><h3>Inspect and discover</h3><p>The model reads workspace state and asks the live compiler for profile, rules, modules, effects, or proof data. The protocol bounds pre-edit discovery to keep the turn moving.</p></div>
+            <span class="loop-owner">read-only tools</span>
+          </li>
+          <li class="loop-step">
+            <span class="loop-index">04</span>
+            <div><h3>Propose one edit</h3><p><code>apply_edit</code> must be the only tool call in its response. Its payload is a proposal. It carries no write capability and no authoritative baseline.</p></div>
+            <span class="loop-owner">model</span>
+          </li>
+          <li class="loop-step">
+            <span class="loop-index">05</span>
+            <div><h3>Establish the baseline and veto</h3><p>The host resolves the path, checks containment, reads the current file, and runs the compiler veto against that exact baseline.</p></div>
+            <span class="loop-owner">host / compiler</span>
+          </li>
+        </ol>
+
+        <div class="verdict-branch" aria-label="Veto result branches">
+          <article class="branch pass"><h3>PROVEN</h3><p>The user approves the checked proposal. The host writes it, verifies affected paths, reviews the resulting patch, and emits a receipt.</p></article>
+          <article class="branch fail"><h3>VETOED</h3><p>The host can apply a validated compiler repair against the original baseline or return diagnostics and repair guidance for another model draft.</p></article>
+        </div>
+      </section>
+
+      <section class="section" id="authority">
+        <div class="section-head">
+          <div><p class="section-kicker">03 / Authority</p><h2>Effects stay at the edge</h2></div>
+          <p>The system gives each layer one job. The model proposes. PI owns effects. The compiler owns language and proof verdicts.</p>
+        </div>
+
+        <div class="wide-narrow">
+          <ul class="invariant-list">
+            <li><span class="invariant-code">INV-01 / NO MODEL WRITE</span><p>The model-visible catalog excludes workspace-write tools. <code>apply_edit</code> creates a proposal for the host.</p></li>
+            <li><span class="invariant-code">INV-02 / EXACT BASELINE</span><p>The host reads the target after the proposal arrives. A model-supplied snapshot cannot become write authority.</p></li>
+            <li><span class="invariant-code">INV-03 / MANDATORY VETO</span><p>Every proposed edit runs through the compiler gate. Prompt text and provider choice cannot bypass it.</p></li>
+            <li><span class="invariant-code">INV-04 / APPROVAL BOUNDARY</span><p>A proven edit still waits for user approval before the host changes the workspace.</p></li>
+            <li><span class="invariant-code">INV-05 / POST-APPLY CHECKS</span><p>The host verifies affected paths and reviews the applied patch before reporting completion.</p></li>
+            <li><span class="invariant-code">INV-06 / BAKED POLICY</span><p>Tools, personas, models, and skills come from the binary. Project instructions are the only external prompt context.</p></li>
+          </ul>
+
+          <dl class="authority-stack">
+            <div class="authority-row"><dt>Prompt</dt><dd>Protected core capped at 8 KiB, plus complete project instructions.</dd></div>
+            <div class="authority-row"><dt>Discovery</dt><dd>One batched discovery response and at most three read-only calls before the first proposal.</dd></div>
+            <div class="authority-row"><dt>Turn</dt><dd>Typed states cover model waits, verification, tool execution, user approval, and completion.</dd></div>
+            <div class="authority-row"><dt>Tools</dt><dd>Each tool declares its effect and context policy. Generic RPC admits read and analysis effects only.</dd></div>
+            <div class="authority-row"><dt>Veto</dt><dd>The compiler checks the draft and may supply a validated repair preview. PI applies only after the proof boundary passes.</dd></div>
+          </dl>
+        </div>
+      </section>
+
+      <section class="section" id="expertise">
+        <div class="section-head">
+          <div><p class="section-kicker">04 / Expertise</p><h2>Specific routes, live facts</h2></div>
+          <p>The router narrows the task before the model drafts. Compiler metadata supplies the current language rules, so the stable persona stays compact.</p>
+        </div>
+
+        <ul class="route-matrix" aria-label="Named expert workflows">
+          <li><span class="route-name">route_add</span><p>Add a route through the canonical router and handler surfaces.</p></li>
+          <li><span class="route-name">handler_scaffold</span><p>Build a handler shape that matches the active ZTS profile.</p></li>
+          <li><span class="route-name">violation_fix</span><p>Use exact diagnostics, rule descriptions, and safe repair paths.</p></li>
+          <li><span class="route-name">spec_goal</span><p>Turn a property request into a solver-backed proof goal.</p></li>
+          <li><span class="route-name">workflow_authoring</span><p>Author durable workflow code with the relevant effects and modules.</p></li>
+          <li><span class="route-name">sql_feature</span><p>Route SQL work through the compiler-owned database vocabulary.</p></li>
+          <li><span class="route-name">auth_jwt</span><p>Use the supported JWT boundary and keep secrets out of responses.</p></li>
+          <li><span class="route-name">env_feature</span><p>Read configuration through explicit environment capabilities.</p></li>
+          <li><span class="route-name">test_generation</span><p>Write tests against the shipped ZTS test surface.</p></li>
+          <li><span class="route-name">review_explain</span><p>Inspect and explain source without turning the session into an edit.</p></li>
+          <li><span class="route-name">hole_fill</span><p>Discover exact typed holes and fill one source site at a time.</p></li>
+        </ul>
+
+        <dl class="capability-ledger">
+          <div class="capability-row"><dt>Compiler discovery</dt><dd>Metadata, features, restrictions, rule descriptions, modules, check, canonicalize, simulate, normalize, and verify.</dd><dd class="count">10 read-only ops</dd></div>
+          <div class="capability-row"><dt>Proof autoloop</dt><dd>Solver-backed goals cover secret leakage, credential leakage, injection safety, input validation, and PII containment.</dd><dd class="count">5 goals</dd></div>
+          <div class="capability-row"><dt>Validated repair</dt><dd>The current validator implements six semantics-preserving repair intents. Five more await semantic kernels; four remain inapplicable to auto-repair.</dd><dd class="count">6 / 15 live</dd></div>
+          <div class="capability-row"><dt>Typed holes</dt><dd>The compiler publishes exact source ranges and expected types. The expert fills one site, then re-runs the full veto.</dd><dd class="count">exact-site edits</dd></div>
+          <div class="capability-row"><dt>Model-visible tools</dt><dd>The registry contributes 36 tools and the provider catalog adds the synthetic proposal tool.</dd><dd class="count">37 total</dd></div>
+        </dl>
+      </section>
+
+      <section class="section" id="evidence">
+        <div class="section-head">
+          <div><p class="section-kicker">05 / Evidence</p><h2>Green, with a narrow lens</h2></div>
+          <p>The latest direct-cutover corpus reached a proven result in every case. The same run exposed a 47% first-draft rate and sparse rule coverage.</p>
+        </div>
+
+        <div class="wide-narrow">
+          <ol class="evidence-ladder">
+            <li><h3>Static route cases</h3><p>Nine deterministic cases guard workflow classification and common misroutes.</p></li>
+            <li><h3>Range stand-in</h3><p>Seven entries and 14 paraphrase checks exercise supported deterministic responses. Reserved task kinds stay explicit.</p></li>
+            <li><h3>Offline production replay</h3><p>Nineteen cases run the real turn loop, veto, apply, retry, compiler repair, and hole machinery against recorded model output.</p></li>
+            <li><h3>Live model recording</h3><p>Current cassettes measure the DeepSeek default on an exact corpus, model, policy, and commit identity.</p></li>
+          </ol>
+
+          <aside class="coverage-panel" aria-label="Corpus rule coverage">
+            <p class="coverage-number">5<span>/71</span></p>
+            <div class="coverage-track" aria-hidden="true"><div class="coverage-fill"></div></div>
+            <p>The corpus trips ZTS305, ZTS400, ZTS500, ZTS501, and ZTS502. Sixty-six advertised rules remain untripped.</p>
+            <p class="boundary-note">Offline replay proves host machinery against recorded responses. Only a live recording run measures model behavior.</p>
+          </aside>
+        </div>
+
+        <details>
+          <summary>Measurement interpretation</summary>
+          <p class="audit-note">The 9/19 first-draft result follows the direct cutover to the model-minimal language profile. Older rows used different corpus and policy identities, so their percentages are historical context rather than an apples-to-apples baseline. The latest run also reports 13/13 intent checks because six cases have no executable intent specification today.</p>
+        </details>
+      </section>
+
+      <section class="section" id="constraints">
+        <div class="section-head">
+          <div><p class="section-kicker">06 / Constraints</p><h2>The work left to earn "expert"</h2></div>
+          <p>The compiler boundary catches bad drafts. The remaining gaps concern how often the agent drafts the right program, how broadly the corpus tests it, and whether every expertise source agrees.</p>
+        </div>
+
+        <div class="wide-narrow">
+          <table class="gap-ledger">
+            <thead><tr><th>Constraint</th><th>Current evidence</th><th>Consequence</th></tr></thead>
+            <tbody>
+              <tr><th scope="row"><span class="gap-code">C1 / COVERAGE</span>Most rules have no corpus case</th><td>Five of 71 advertised rules are tripped.</td><td>A 19/19 green headline covers the workflow, not the full language contract.</td></tr>
+              <tr><th scope="row"><span class="gap-code">C2 / INTENT</span>Six cases lack behavior checks</th><td>Five durable or workflow cases lack an offline backend. The parallel-secret case is veto-oriented.</td><td>A compiler-clean result can miss an incorrect durable behavior.</td></tr>
+              <tr><th scope="row"><span class="gap-code">C3 / FIRST DRAFT</span>Ten cases need correction</th><td>The latest run passed 9 of 19 on the first draft, with a median of five model round trips.</td><td>Safety holds, but latency and model cost remain high for common authoring work.</td></tr>
+              <tr><th scope="row"><span class="gap-code">C4 / AUTHORITY</span>A detached skill snapshot has drifted</th><td><code>packages/pi/src/skills/zts-expert</code> is used by codegen corpus tests, not the live persona. It still describes older protocol and language facts. One protocol document says eight repair rows while the validator implements six.</td><td>Maintainers can read a stale source and make the wrong change.</td></tr>
+              <tr><th scope="row"><span class="gap-code">C5 / TOOL PREFIX</span>The catalog is wider than observed use</th><td>The first request exposes 37 tools and about 21 KB of schemas. Recorded traces call eight of them.</td><td>Unused schemas consume context and increase tool-selection ambiguity.</td></tr>
+              <tr><th scope="row"><span class="gap-code">C6 / TRANSACTION</span>The write proposal is single-file</th><td>The loop proposes one path and one content body. A separate system-proof tool can inspect wider state.</td><td>Cross-file workflow edits lack one atomic proposal, proof, approval, and receipt.</td></tr>
+            </tbody>
+          </table>
+
+          <aside class="coverage-panel">
+            <p class="section-kicker">Assessment</p>
+            <p style="margin-top: 1rem; font-size: 1.12rem; color: var(--ink);">Architecture: <span class="proof-text">strong</span></p>
+            <p style="margin-top: 0.55rem;">The model cannot bypass the baseline, veto, approval, or post-apply checks.</p>
+            <p style="margin-top: 1.25rem; font-size: 1.12rem; color: var(--ink);">Expert quality: <span class="warn-text">promising</span></p>
+            <p style="margin-top: 0.55rem;">Current measurements support the workflow, but the corpus is too small to support a broad language-quality claim.</p>
+            <p class="boundary-note">Confidence: high for architecture, medium for model-quality generalization.</p>
+          </aside>
+        </div>
+      </section>
+
+      <section class="section" id="roadmap">
+        <div class="section-head">
+          <div><p class="section-kicker">07 / Enhancements</p><h2>Recommended next work</h2></div>
+          <p>These changes improve authoring quality without weakening the compiler boundary or adding a second language authority.</p>
+        </div>
+
+        <div class="roadmap">
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Build a risk-weighted expert corpus</h3><span class="priority now">Now / critical</span></div>
+            <div class="roadmap-body"><p>Add cases by diagnostic family, effect boundary, proof property, and common authoring task. Include direct-return and transform probes for past fail-open classes. Generate the coverage report and fail when a critical family loses its last case.</p><p class="gate"><span>GATE</span><span>Every security-critical rule family has a positive and adversarial case; the corpus and policy hashes remain part of every result.</span></p></div>
+          </article>
+
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Execute durable workflow intent offline</h3><span class="priority now">Now / critical</span></div>
+            <div class="roadmap-body"><p>Add deterministic durable-store and queue adapters to the test runner. Use them to assert the five workflow cases that currently stop at compiler success. Keep the parallel-secret case veto-focused unless it gains a meaningful runtime outcome.</p><p class="gate"><span>GATE</span><span>At least 18 of 19 current cases carry executable intent checks, with no skipped backend path and no empty filter.</span></p></div>
+          </article>
+
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Make compiler metadata the sole expertise source</h3><span class="priority now">Now / high</span></div>
+            <div class="roadmap-body"><p>Retire the detached <code>zts-expert</code> skill snapshot or generate its human-readable replacement from schema-v2 metadata and registries. Generate repair counts and related tables from source instead of maintaining numbers in prose.</p><p class="gate"><span>GATE</span><span>No handwritten file claims live syntax, modules, protocol version, or repair counts outside a tested compiler-owned source.</span></p></div>
+          </article>
+
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Improve first drafts from recorded failures</h3><span class="priority next">Next / high</span></div>
+            <div class="roadmap-body"><p>Classify the ten first-draft failures by missing fact, wrong route, bad tool order, and source-shape error. Fix each cluster with a bounded workflow hint, a compiler-owned example, or an exact typed-hole step. Keep the stable prompt small.</p><p class="gate"><span>GATE</span><span>On the same 19-case corpus, model, and policy: at least 14 first-draft passes, 19 final passes, all intent checks green, and median round trips no higher than four.</span></p></div>
+          </article>
+
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Add verified multi-file change sets</h3><span class="priority next">Next / high</span></div>
+            <div class="roadmap-body"><p>Let the model propose an ordered set of file edits with a host-read baseline per path. Run project and system proof against the aggregate, ask for one approval, then apply atomically. The compiler should keep validating source rather than authoring whole handlers.</p><p class="gate"><span>GATE</span><span>A failed proof or stale baseline leaves every file unchanged. A passing transaction produces one proof identity and one receipt.</span></p></div>
+          </article>
+
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Extend only provable repair intents</h3><span class="priority next">Next / medium</span></div>
+            <div class="roadmap-body"><p>Implement planned M3 repair rows after their semantic kernels exist. Add one corpus failure and one equivalence regression for each repair. Leave M5 and behavior-changing fixes outside automatic application.</p><p class="gate"><span>GATE</span><span>Every implemented repair validates against the original baseline, re-enters the full veto, and has a diagnostic-specific corpus case.</span></p></div>
+          </article>
+
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Shrink the static tool surface</h3><span class="priority later">Later / medium</span></div>
+            <div class="roadmap-body"><p>Consolidate the read-only <code>zts_expert_*</code> wrappers behind one typed schema-v2 compiler query tool, or remove proven duplicates. Preserve a stable catalog identity so provider prefix caching does not churn between tasks.</p><p class="gate"><span>GATE</span><span>Reduce schema bytes by at least 40% while the full expert corpus, routing cases, context policy tests, and cache identity checks stay green.</span></p></div>
+          </article>
+
+          <article class="roadmap-item">
+            <div class="roadmap-title"><h3>Qualify local models on the full bar</h3><span class="priority later">Later / medium</span></div>
+            <div class="roadmap-body"><p>Run the current local candidate through every recorded case with no skips. Report empty responses, first-draft rate, intent results, and round trips under the same identity rules used for the hosted default.</p><p class="gate"><span>GATE</span><span>No local model becomes the product default until it completes the current corpus and meets a pre-registered quality threshold.</span></p></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="section" id="decisions">
+        <div class="section-head">
+          <div><p class="section-kicker">08 / Decisions</p><h2>Keep these boundaries</h2></div>
+          <p>Recent work removed duplicate authority and stabilized the request prefix. Future improvements should preserve those decisions unless new measurements justify a change.</p>
+        </div>
+
+        <ul class="decision-list">
+          <li><h3>Compiler verdicts remain mandatory</h3><p>Higher first-draft rates must come from better expertise and smaller search space. Proof rules do not bend to improve a benchmark.</p></li>
+          <li><h3>The model remains the source author</h3><p>Typed holes and compiler examples can constrain a draft. Whole-handler forge tools would restore an authority split that the current design removed.</p></li>
+          <li><h3>The production prefix remains stable</h3><p>Per-task dynamic tool loadouts were rejected because they destabilize request identity. Consolidate schemas and benchmark a static catalog instead.</p></li>
+          <li><h3>Automatic repairs remain semantics-graded</h3><p>M5 and behavior-changing edits require model reasoning and user review. Compiler auto-apply stays limited to validator-backed equivalence.</p></li>
+          <li><h3>Measurements carry exact identity</h3><p>Model, profile, policy hash, corpus hash, tool catalog, and commit belong beside each result. Cross-corpus percentages do not establish a trend.</p></li>
+          <li><h3>Cut over instead of duplicating manuals</h3><p>Retire stale expertise artifacts once schema-v2 metadata owns their facts. Compatibility copies would create another source to maintain.</p></li>
+        </ul>
+      </section>
+
+      <section class="section" id="sources">
+        <div class="section-head">
+          <div><p class="section-kicker">09 / Sources</p><h2>Live checkout evidence</h2></div>
+          <p>The report traces the current implementation, generated measurements, and maintained internal documentation. Forward-looking items are recommendations.</p>
+        </div>
+
+        <ul class="source-list">
+          <li><a href="../packages/pi/README.md">packages/pi/README.md</a><p>Agent purpose, lockdown, providers, tools, events, and test entry points.</p></li>
+          <li><a href="../packages/pi/src/expert_persona.zig">packages/pi/src/expert_persona.zig</a><p>Protected prompt, discovery bounds, proposal rules, and project instructions.</p></li>
+          <li><a href="../packages/pi/src/meta_bootstrap.zig">packages/pi/src/meta_bootstrap.zig</a><p>Bounded schema-v2 compiler bootstrap.</p></li>
+          <li><a href="../packages/pi/src/expert_workflow.zig">packages/pi/src/expert_workflow.zig</a><p>Deterministic task kinds, classification, and workflow notes.</p></li>
+          <li><a href="../packages/pi/src/turn.zig">packages/pi/src/turn.zig</a><p>Pure state machine and typed assistant replies.</p></li>
+          <li><a href="../packages/pi/src/loop.zig">packages/pi/src/loop.zig</a><p>Budgets, baseline handling, veto, repair, approval, and post-apply flow.</p></li>
+          <li><a href="../packages/pi/src/app.zig">packages/pi/src/app.zig</a><p>Tool registry and capability bundles.</p></li>
+          <li><a href="../packages/pi/src/registry/tool.zig">packages/pi/src/registry/tool.zig</a><p>Tool effects, context policies, and result projections.</p></li>
+          <li><a href="../packages/pi/src/tools/zts_agent_client.zig">packages/pi/src/tools/zts_agent_client.zig</a><p>Typed, read-only schema-v2 client used by the expert.</p></li>
+          <li><a href="../packages/pi/src/providers/models.zig">packages/pi/src/providers/models.zig</a><p>Provider registry, curated models, and current default.</p></li>
+          <li><a href="internals/agent-protocol-v2.md">docs/internals/agent-protocol-v2.md</a><p>Compiler protocol, identity guards, operations, and repair contracts.</p></li>
+          <li><a href="../packages/zts/src/repair_validator.zig">packages/zts/src/repair_validator.zig</a><p>Source authority for implemented, planned, and inapplicable repairs.</p></li>
+          <li><a href="convergence.md">docs/convergence.md</a><p>Generated live-model convergence ledger.</p></li>
+          <li><a href="coverage.md">docs/coverage.md</a><p>Generated rule coverage and offline proof boundary.</p></li>
+          <li><a href="roadmap.md">docs/roadmap.md</a><p>Shipped agent-compiler agenda, current measurement gap, and refused directions.</p></li>
+          <li><a href="../packages/pi/src/expert_codegen_record.zig">packages/pi/src/expert_codegen_record.zig</a><p>Current recorder corpus, intent checks, and measured tool-catalog footprint.</p></li>
+        </ul>
+
+        <details>
+          <summary>Scope and method</summary>
+          <p class="audit-note">Snapshot date: 2026-08-16 at checkout <code>d3f903e9</code>. The review followed source references from the CLI and PI loop through provider projection, tool effects, compiler protocol, repair validation, and generated evaluation reports. Git history was used to distinguish live design decisions from superseded implementations. Forward items are recommendations rather than committed roadmap work.</p>
+        </details>
+      </section>
+
+      <footer class="page-footer">ZTS Expert overview / current working tree / 2026-08-16</footer>
+    </main>
+  </div>
+
+  <script>
+    const root = document.documentElement;
+    const themeToggle = document.getElementById("theme-toggle");
+    const themeLabel = document.getElementById("theme-label");
+
+    function syncThemeLabel() {
+      themeLabel.textContent = root.dataset.theme === "light" ? "LIGHT" : "DARK";
+    }
+
+    themeToggle.addEventListener("click", () => {
+      const next = root.dataset.theme === "light" ? "dark" : "light";
+      root.dataset.theme = next;
+      try { localStorage.setItem("zts-expert-theme", next); } catch (_) {}
+      syncThemeLabel();
+    });
+
+    syncThemeLabel();
+
+    const navLinks = [...document.querySelectorAll(".rail nav a")];
+    const sections = navLinks
+      .map((link) => document.querySelector(link.getAttribute("href")))
+      .filter(Boolean);
+
+    if ("IntersectionObserver" in window) {
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries
+          .filter((entry) => entry.isIntersecting)
+          .sort((a, b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (!visible) return;
+        navLinks.forEach((link) => {
+          const active = link.getAttribute("href") === `#${visible.target.id}`;
+          if (active) link.setAttribute("aria-current", "true");
+          else link.removeAttribute("aria-current");
+        });
+      }, { rootMargin: "-20% 0px -65%", threshold: [0, 0.15, 0.4] });
+      sections.forEach((section) => observer.observe(section));
+    }
+  </script>
+</body>
+</html>
