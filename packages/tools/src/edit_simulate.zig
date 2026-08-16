@@ -682,7 +682,7 @@ test "simulate preserves sibling module proof context" {
         \\export function displayName(): string { return env("APP_NAME") ?? "unnamed"; }
     ;
 
-    try tmp.dir.makePath(std.testing.io, "lib");
+    try tmp.dir.createDirPath(std.testing.io, "lib");
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = before });
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "lib/settings.ts", .data = settings });
 
