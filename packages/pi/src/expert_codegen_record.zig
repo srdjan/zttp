@@ -1091,22 +1091,16 @@ const record_corpus = [_]RecordCase{
             "with the secret from env JWT_SECRET, returns 401 when the token is missing or invalid, " ++
             "and otherwise returns Response.json({ authenticated: true }). Never return the " ++
             "verified claims or secret, and never use a fallback secret.",
-        // The env stub is what makes this check test its own name. Without it
-        // JWT_SECRET is unset in the workspace, so a handler that validates its
-        // configuration before it looks at the request answers 500 "server
-        // misconfigured" and the check reports a bearer-token failure that never
-        // happened. It passed for years only because the recorded handler
-        // happened to read the header first; the 2026-08-03 re-record produced
-        // one that checks the secret first, and the check failed on a handler
-        // that does return 401 for a missing token.
-        //
-        // Same correction as `websocket-echo` below, in the other direction:
-        // that one passed for a reason its name did not describe, this one
-        // failed for one. Neither was measuring what it claimed.
+        // An invalid bearer token makes the secret lookup mandatory regardless
+        // of whether the handler checks configuration before or after parsing
+        // the header. The old missing-token request still declared an exact env
+        // I/O event; a correct header-first handler returned 401 without reading
+        // env, leaving the mock unconsumed and failing intent for call order
+        // rather than behavior.
         .intent = .{
             .tests_jsonl =
-            \\{"type":"test","name":"a request with no bearer token is unauthorized"}
-            \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
+            \\{"type":"test","name":"a request with an invalid bearer token is unauthorized"}
+            \\{"type":"request","method":"GET","url":"/","headers":{"authorization":"Bearer invalid-token"},"body":""}
             \\{"type":"io","seq":0,"module":"env","fn":"env","args":["JWT_SECRET"],"result":"test-signing-secret"}
             \\{"type":"expect","status":401}
             \\
@@ -1606,6 +1600,24 @@ const record_corpus = [_]RecordCase{
         .expect_first_draft_pass = true,
     },
 };
+
+test "jwt intent is independent of secret lookup order" {
+    const jwt = for (record_corpus) |candidate| {
+        if (std.mem.eql(u8, candidate.name, "jwt-auth")) break candidate;
+    } else return error.TestExpectedEqual;
+    const intent = jwt.intent orelse return error.TestExpectedEqual;
+
+    try testing.expect(std.mem.indexOf(
+        u8,
+        intent.tests_jsonl,
+        "\"authorization\":\"Bearer invalid-token\"",
+    ) != null);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        intent.tests_jsonl,
+        "\"module\":\"env\",\"fn\":\"env\",\"args\":[\"JWT_SECRET\"]",
+    ) != null);
+}
 
 const LiveRecordingProgress = struct {
     case_index: usize,
