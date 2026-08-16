@@ -3058,9 +3058,22 @@ test "flow-backed corpus replay executes recorded compaction" {
     defer allocator.free(repo_root);
     const rc = blk: {
         for (&record_corpus) |*candidate| {
-            if (std.mem.eql(u8, candidate.name, "durable-order")) break :blk candidate;
+            var candidate_resolved = try resolveCaseSteps(
+                allocator,
+                repo_root,
+                headline_provider,
+                candidate.name,
+            );
+            const recorded_compaction = if (candidate_resolved.flow_case) |flow_case| compacted: {
+                for (flow_case.trace.model_calls) |checkpoint| {
+                    if (checkpoint.projection_first_kept_entry_id != null) break :compacted true;
+                }
+                break :compacted false;
+            } else false;
+            candidate_resolved.deinit(allocator);
+            if (recorded_compaction) break :blk candidate;
         }
-        return error.MissingCorpusCase;
+        return error.MissingCompactedCorpusCase;
     };
     var resolved = try resolveCaseSteps(allocator, repo_root, headline_provider, rc.name);
     defer resolved.deinit(allocator);
