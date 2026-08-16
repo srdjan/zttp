@@ -31,6 +31,8 @@ const loop = @import("loop.zig");
 const app = @import("app.zig");
 const agent = @import("agent.zig");
 const codegen = @import("expert_codegen_eval.zig");
+const codegen_types = @import("expert_codegen_types.zig");
+const evidence_identity = @import("expert_evidence_identity.zig");
 const expert_persona = @import("expert_persona.zig");
 const models = @import("providers/models.zig");
 const TextBuffer = @import("text_buffer.zig").TextBuffer;
@@ -779,6 +781,19 @@ test "record-tee captures a faithful anthropic cassette offline" {
     std.debug.print("[codegen-smoke] live and replay agree: {s}\n", .{@tagName(replay_kind)});
 }
 
+const IntentPolicy = union(enum) {
+    runtime: codegen.IntentCheck,
+    pending_runtime: []const u8,
+    compiler_veto_only: []const u8,
+};
+
+fn runtimeIntent(policy: IntentPolicy) ?codegen.IntentCheck {
+    return switch (policy) {
+        .runtime => |intent| intent,
+        .pending_runtime, .compiler_veto_only => null,
+    };
+}
+
 const RecordCase = struct {
     name: []const u8,
     prompt: []const u8,
@@ -788,11 +803,10 @@ const RecordCase = struct {
     /// currently fails is a valid, pinned corpus entry (it feeds the gap
     /// histogram) - not a broken test.
     expect_first_draft_pass: bool = true,
-    /// Behaviour the produced handler must exhibit for the case to count as
-    /// having done the task. Null leaves the case veto-checked but not
-    /// intent-checked, which the summary reports separately rather than
-    /// counting as a pass.
-    intent: ?codegen.IntentCheck = null,
+    /// Runtime evidence or an explicit reason this case cannot execute. The
+    /// union prevents a missing spec from being represented as an executable
+    /// case and prevents a runtime spec from carrying an unsupported reason.
+    intent: IntentPolicy,
     /// How the turn starts. `whole_file` hands the agent an empty workspace and
     /// asks for a handler; `holes` seeds a skeleton whose response expressions
     /// are `hole()` and asks for them to be filled one at a time.
@@ -805,7 +819,7 @@ const RecordCase = struct {
     mode: Mode = .whole_file,
 };
 
-pub const Mode = enum { whole_file, holes };
+pub const Mode = codegen_types.InputMode;
 
 fn workspaceCaptureAllowlist(
     allocator: std.mem.Allocator,
@@ -922,67 +936,132 @@ fn firstDraftExpectation(
 /// against a different tier.
 pub const headline_model = models.defaultForProvider(headline_provider).id;
 
-/// Identity of the frozen prompt corpus.
-///
-/// A published pass rate means nothing without saying which corpus produced it,
-/// and a hand-maintained version number rots the moment someone edits a prompt.
-/// This hashes the corpus itself - names, prompts, seed files, and the pinned
-/// outcomes - so editing any case changes the version by construction. Same
-/// mechanism as `zts.policyHash`, for the same reason.
-pub fn corpusVersion() [64]u8 {
-    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    for (&record_corpus) |*rc| {
-        hasher.update(rc.name);
-        hasher.update("\x00");
-        hasher.update(rc.prompt);
-        hasher.update("\x00");
-        for (rc.seed_files) |sf| {
-            hasher.update(sf.path);
-            hasher.update("\x00");
-            hasher.update(sf.bytes);
-            hasher.update("\x00");
+/// Model-visible identity of the frozen headline input. Expected and observed
+/// outcomes are unrepresentable here: the constructor reads only case names,
+/// prompts, seed paths/bytes, and turn modes.
+pub fn headlineInputIdentity() evidence_identity.HeadlineInputIdentity {
+    const seed_count = comptime blk: {
+        var total: usize = 0;
+        for (record_corpus) |rc| total += rc.seed_files.len;
+        break :blk total;
+    };
+    var seeds: [seed_count]codegen_types.SeedFile = undefined;
+    var cases: [record_corpus.len]evidence_identity.HeadlineCase = undefined;
+    var seed_index: usize = 0;
+    for (record_corpus, 0..) |rc, case_index| {
+        const first_seed = seed_index;
+        for (rc.seed_files) |seed| {
+            seeds[seed_index] = seed;
+            seed_index += 1;
         }
-        // The pinned outcome is part of the corpus identity: flipping a case
-        // from accepted-failure to expected-pass changes what the rate means.
-        hasher.update(&[_]u8{@intFromBool(rc.expect_first_draft_pass)});
-        hasher.update("\x00");
-        // So is the turn mode. The same prompt against a holed skeleton and
-        // against an empty workspace are two different measurements, and a
-        // corpus version that could not tell them apart would let the split
-        // change under a stable hash.
-        hasher.update(&[_]u8{@intFromEnum(rc.mode)});
-        hasher.update("\x00");
-        // So is the intent spec: loosening what a case must do changes what a
-        // published intent-pass rate is a rate of.
-        if (rc.intent) |intent| {
-            hasher.update(intent.tests_jsonl);
-            hasher.update("\x00");
-            hasher.update(intent.handler_path);
-            hasher.update("\x00");
-            if (intent.zttp_json) |cfg| hasher.update(cfg);
-            hasher.update("\x00");
-        }
+        cases[case_index] = .{
+            .name = rc.name,
+            .prompt = rc.prompt,
+            .seed_files = seeds[first_seed..seed_index],
+            .mode = rc.mode,
+        };
     }
-    var digest: [32]u8 = undefined;
-    hasher.final(&digest);
-    var out: [64]u8 = undefined;
-    _ = std.fmt.bufPrint(&out, "{x}", .{digest}) catch unreachable;
-    return out;
+    return evidence_identity.headlineInput(&cases);
 }
 
-test "corpus version changes when a case changes" {
-    const before = corpusVersion();
-    // Same input twice is stable - the hash is a function of the corpus, not
-    // of call order or allocation.
-    try testing.expectEqualSlices(u8, &before, &corpusVersion());
-    // A version that is all zeroes or empty would silently pass the equality
-    // above, so assert it looks like a real digest.
-    try testing.expectEqual(@as(usize, 64), before.len);
-    var nonzero = false;
-    for (before) |c| {
-        if (c != '0') nonzero = true;
+pub fn intentSuiteIdentity() evidence_identity.IntentSuiteIdentity {
+    var scenarios: [record_corpus.len]evidence_identity.IntentScenario = undefined;
+    for (record_corpus, 0..) |rc, index| {
+        scenarios[index] = switch (rc.intent) {
+            .runtime => |intent| .{ .runtime = .{
+                .name = rc.name,
+                .spec = intent.tests_jsonl,
+                .runner = "zttp-test-jsonl-v1",
+                .handler_path = intent.handler_path,
+                .config = intent.zttp_json,
+            } },
+            .pending_runtime => |reason| .{ .unsupported = .{
+                .name = rc.name,
+                .kind = .pending_runtime,
+                .reason = reason,
+            } },
+            .compiler_veto_only => |reason| .{ .unsupported = .{
+                .name = rc.name,
+                .kind = .compiler_veto_only,
+                .reason = reason,
+            } },
+        };
     }
-    try testing.expect(nonzero);
+    return evidence_identity.intentSuite(&scenarios);
+}
+
+// A model-authoring case is not a deterministic adversarial probe. Keep the
+// cohort empty until the risk-catalog slice adds executable positive and
+// adversarial inputs with exact diagnostic or property assertions.
+const security_probe_corpus = [_]evidence_identity.SecurityProbe{};
+
+pub fn securityProbeIdentity() evidence_identity.SecurityProbeCorpusIdentity {
+    return evidence_identity.securityProbeCorpus(&security_probe_corpus);
+}
+
+pub fn thresholdIdentity() evidence_identity.ThresholdIdentity {
+    var outcomes: [record_corpus.len]evidence_identity.ExpectedOutcome = undefined;
+    for (record_corpus, 0..) |rc, index| {
+        outcomes[index] = .{
+            .scenario = rc.name,
+            .metric = .first_attempt_green,
+            .verdict = if (rc.expect_first_draft_pass) .pass else .fail,
+        };
+    }
+    return evidence_identity.thresholds(&outcomes, &.{});
+}
+
+pub fn evaluationManifestIdentity() evidence_identity.ManifestIdentity {
+    return evidence_identity.manifest(.{
+        .headline_input = headlineInputIdentity(),
+        .intent_suite = intentSuiteIdentity(),
+        .security_probes = securityProbeIdentity(),
+        .thresholds = thresholdIdentity(),
+    });
+}
+
+/// Compatibility accessor for the existing JSON field. It is now the frozen
+/// model-visible input identity, not an aggregate containing expectations.
+pub fn corpusVersion() [64]u8 {
+    return headlineInputIdentity().bytes;
+}
+
+test "evaluation identities are deterministic and the corpus accessor is input only" {
+    const headline = headlineInputIdentity();
+    const intents = intentSuiteIdentity();
+    const probes = securityProbeIdentity();
+    const expected = thresholdIdentity();
+    const aggregate = evaluationManifestIdentity();
+
+    try testing.expect(headline.eql(headlineInputIdentity()));
+    try testing.expect(intents.eql(intentSuiteIdentity()));
+    try testing.expect(probes.eql(securityProbeIdentity()));
+    try testing.expect(expected.eql(thresholdIdentity()));
+    try testing.expect(aggregate.eql(evaluationManifestIdentity()));
+    try testing.expectEqualSlices(u8, &headline.bytes, &corpusVersion());
+}
+
+test "intent cohort is explicit and non-vacuous" {
+    var executable: usize = 0;
+    var pending_runtime: usize = 0;
+    var compiler_veto_only: usize = 0;
+    for (record_corpus) |rc| switch (rc.intent) {
+        .runtime => {
+            executable += 1;
+        },
+        .pending_runtime => |reason| {
+            try testing.expect(reason.len > 0);
+            pending_runtime += 1;
+        },
+        .compiler_veto_only => |reason| {
+            try testing.expect(reason.len > 0);
+            compiler_veto_only += 1;
+        },
+    };
+    try testing.expectEqual(@as(usize, 13), executable);
+    try testing.expectEqual(@as(usize, 5), pending_runtime);
+    try testing.expectEqual(@as(usize, 1), compiler_veto_only);
+    try testing.expectEqual(@as(usize, 0), security_probe_corpus.len);
 }
 
 /// Compile the fenced block opened by the `:start` marker at `marker_at`.
@@ -1249,28 +1328,28 @@ const record_corpus = [_]RecordCase{
         // Asserts the task the prompt names, not the shape of one recording: a
         // different-but-correct handler must still pass, or the check measures
         // the cassette instead of the model.
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"GET /health reports ok"}
             \\{"type":"request","method":"GET","url":"/health","headers":{},"body":""}
             \\{"type":"expect","status":200,"bodyContains":"\"ok\":true"}
             \\
             ,
-        },
+        } },
     },
     .{
         .name = "validate-body",
         .prompt = "Create a handler in handler.ts that decodes the JSON request body with " ++
             "zttp:validate against a schema named \"item\" requiring a string field \"name\", " ++
             "returns the validated data on success, and returns a 400 with the errors on failure.",
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"a body missing name is rejected"}
             \\{"type":"request","method":"POST","url":"/","headers":{"content-type":"application/json"},"body":"{}"}
             \\{"type":"expect","status":400}
             \\
             ,
-        },
+        } },
         // The corpus's one accepted failure, and the reason the published
         // first-draft rate reads 10/11 rather than 11/11.
         //
@@ -1300,7 +1379,7 @@ const record_corpus = [_]RecordCase{
         // I/O event; a correct header-first handler returned 401 without reading
         // env, leaving the mock unconsumed and failing intent for call order
         // rather than behavior.
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"a request with an invalid bearer token is unauthorized"}
             \\{"type":"request","method":"GET","url":"/","headers":{"authorization":"Bearer invalid-token"},"body":""}
@@ -1308,7 +1387,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":401}
             \\
             ,
-        },
+        } },
         // This case caught label laundering through JSON round-tripping and
         // then through validateJson. Both are closed; a verified claims value
         // remains credential-labelled and cannot enter a response. The corpus
@@ -1326,14 +1405,14 @@ const record_corpus = [_]RecordCase{
         // The success path needs egress, which the offline replay has no way to
         // serve. The missing-parameter path is the part of the task that can be
         // demonstrated without a network, so that is what this asserts.
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"a request with no city is rejected"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
             \\{"type":"expect","status":400}
             \\
             ,
-        },
+        } },
         // Was ZTS602 (never converged); closed by the literal-URL + init-query
         // egress teaching.
         .expect_first_draft_pass = true,
@@ -1342,6 +1421,7 @@ const record_corpus = [_]RecordCase{
         .name = "durable-order",
         .prompt = "Create a durable handler in handler.ts using zttp:durable that runs a " ++
             "two-step order workflow: a `reserve` step then a `charge` step, via run() and step().",
+        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-store" },
         // Was ZTS042/narrowing death-spiral (never converged); closed by the
         // "use untyped values directly, never narrow with as/guards" teaching.
         .expect_first_draft_pass = true,
@@ -1351,6 +1431,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable workflow handler in handler.ts using zttp:durable and " ++
             "zttp:workflow. It should read the Idempotency-Key header, enter run(key), " ++
             "and dispatch a greet child handler with workflow.call at durable depth 0.",
+        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
         .expect_first_draft_pass = true,
     },
     .{
@@ -1358,6 +1439,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable order workflow in handler.ts. Reserve inventory with a " ++
             "durable step, then dispatch a notify child handler with workflow.call after the " ++
             "step completes. Keep the child dispatch outside the step callback.",
+        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
         // Flipped to false on the 2026-08-03 re-record, and back to true on
         // 2026-08-04 when the compiler defect that caused the failure was
         // fixed. Both flips are worth keeping, because they say different
@@ -1384,6 +1466,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts using zttp:workflow saga() for reserve, " ++
             "charge, and ship steps. Include compensate functions for every non-last static " ++
             "saga step so the saga compensation proof can pass.",
+        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-or-queue-runtime" },
         .expect_first_draft_pass = true,
     },
     .{
@@ -1391,6 +1474,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a durable approval workflow in handler.ts using waitSignal and " ++
             "signal. The /wait path should park a run using the Idempotency-Key header, and " ++
             "the /signal path should resume the same key with an approved payload.",
+        .intent = .{ .pending_runtime = "zttp-test-has-no-durable-store" },
         .expect_first_draft_pass = true,
     },
     .{
@@ -1411,7 +1495,7 @@ const record_corpus = [_]RecordCase{
         // shape the response, and stubbing the store is what the spec format is
         // for. Asserting on the stubbed value also proves the rows reach the
         // body, which asserting on the literal "users" would not.
-        .intent = .{
+        .intent = .{ .runtime = .{
             .zttp_json = "{\n  \"entry\": \"handler.ts\",\n  \"sqlite\": \"schema.sql\"\n}\n",
             .tests_jsonl =
             \\{"type":"test","name":"queried rows reach the response body"}
@@ -1420,7 +1504,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"ada"}
             \\
             ,
-        },
+        } },
         // Recorded with the best model (Sonnet): writes correct SQL, self-checks
         // cleanly, and first-draft-passes. Previously it failed because the
         // property analysis reported read_only as PROVEN for a SELECT and the
@@ -1446,14 +1530,14 @@ const record_corpus = [_]RecordCase{
             "including the current time from Date.now(), using logInfo from zttp:log. " ++
             "The response body must be exactly Response.json({ ok: true }) - the " ++
             "timestamp belongs in the log and must never appear in the response.",
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"the timestamp stays out of the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
             \\{"type":"expect","status":200,"body":"{\"ok\":true}"}
             \\
             ,
-        },
+        } },
         .expect_first_draft_pass = true,
     },
     .{
@@ -1471,7 +1555,7 @@ const record_corpus = [_]RecordCase{
         .prompt = "Create a handler in handler.ts that reads the \"hits\" counter from the " ++
             "\"counters\" namespace with cacheGet from zttp:cache and returns it as JSON " ++
             "under a \"hits\" key. Treat a missing counter as \"0\".",
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"the stored counter reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1479,7 +1563,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"41"}
             \\
             ,
-        },
+        } },
         .expect_first_draft_pass = true,
     },
     .{
@@ -1517,6 +1601,7 @@ const record_corpus = [_]RecordCase{
             "environment variables concurrently using parallel() from zttp:io. Return 503 " ++
             "when API_SECRET is not set. Otherwise return Response.json with only the app " ++
             "name - the secret must never appear in the response.",
+        .intent = .{ .compiler_veto_only = "veto-only-boundary-probe" },
         .expect_first_draft_pass = true,
     },
     .{
@@ -1534,7 +1619,7 @@ const record_corpus = [_]RecordCase{
             "https://api.example.com/v1/status with fetch from zttp:fetch, passing an init " ++
             "object that sets the method to GET and an \"accept: application/json\" header. " ++
             "Return the upstream JSON on success and a 502 when the upstream call fails.",
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"the upstream payload reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1542,7 +1627,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"green"}
             \\
             ,
-        },
+        } },
         .expect_first_draft_pass = true,
     },
     .{
@@ -1582,7 +1667,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"the configured name crosses the file boundary and the token does not"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1591,7 +1676,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"body":"{\"name\":\"orders-api\"}"}
             \\
             ,
-        },
+        } },
         .expect_first_draft_pass = true,
     },
 
@@ -1673,14 +1758,14 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"GET /health reports ok"}
             \\{"type":"request","method":"GET","url":"/health","headers":{},"body":""}
             \\{"type":"expect","status":200,"bodyContains":"\"ok\":true"}
             \\
             ,
-        },
+        } },
         .mode = .holes,
         .expect_first_draft_pass = true,
     },
@@ -1707,7 +1792,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"the stored counter reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1715,7 +1800,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"41"}
             \\
             ,
-        },
+        } },
         .mode = .holes,
         .expect_first_draft_pass = true,
     },
@@ -1742,7 +1827,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"the upstream payload reaches the response body"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1750,7 +1835,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"bodyContains":"green"}
             \\
             ,
-        },
+        } },
         .mode = .holes,
         .expect_first_draft_pass = true,
     },
@@ -1795,7 +1880,7 @@ const record_corpus = [_]RecordCase{
                 ,
             },
         },
-        .intent = .{
+        .intent = .{ .runtime = .{
             .tests_jsonl =
             \\{"type":"test","name":"the configured name crosses the file boundary and the token does not"}
             \\{"type":"request","method":"GET","url":"/","headers":{},"body":""}
@@ -1804,7 +1889,7 @@ const record_corpus = [_]RecordCase{
             \\{"type":"expect","status":200,"body":"{\"name\":\"orders-api\"}"}
             \\
             ,
-        },
+        } },
         .mode = .holes,
         .expect_first_draft_pass = true,
     },
@@ -1814,7 +1899,7 @@ test "jwt intent is independent of secret lookup order" {
     const jwt = for (record_corpus) |candidate| {
         if (std.mem.eql(u8, candidate.name, "jwt-auth")) break candidate;
     } else return error.TestExpectedEqual;
-    const intent = jwt.intent orelse return error.TestExpectedEqual;
+    const intent = runtimeIntent(jwt.intent) orelse return error.TestExpectedEqual;
 
     try testing.expect(std.mem.indexOf(
         u8,
@@ -2326,7 +2411,7 @@ test "record codegen baseline corpus (live, gated)" {
             }
         }
 
-        const zttp_bin: ?[]u8 = if (rc.intent != null)
+        const zttp_bin: ?[]u8 = if (runtimeIntent(rc.intent) != null)
             codegen.locateZttpBinary(ca, repo_root) orelse {
                 std.debug.print(
                     "[codegen-record] {s}: declared intent cannot run because zig-out/bin/zttp is unavailable; active case unchanged\n",
@@ -2339,7 +2424,7 @@ test "record codegen baseline corpus (live, gated)" {
         var intent_passed = true;
         requireRecordedIntent(
             ca,
-            rc.intent,
+            runtimeIntent(rc.intent),
             tmp.abs_path,
             zttp_bin,
             codegen.runIntentCheck,
@@ -2482,14 +2567,14 @@ const anthropic_coverage_baseline = [_][]const u8{
     "ZTS500",
     "ZTS502",
 };
-const anthropic_coverage_corpus_version = "83c9c0c040e8e6f1f659ddc7d853f9f21bc4c0e1db1837f8cedfb11bad1baf08";
+const anthropic_coverage_legacy_corpus_version = "83c9c0c040e8e6f1f659ddc7d853f9f21bc4c0e1db1837f8cedfb11bad1baf08";
 
 /// Five of seventy-one, measured 2026-08-16 over the complete post-cutover
 /// 19-case DeepSeek corpus. The corpus now asks jwt-auth to return only public
 /// confirmation, so it no longer trips the old corpus's ZTS401 credential leak;
 /// workflow helper capsules now trip ZTS502 instead. That is a corpus change,
 /// not lost coverage within one frozen sample, which is why the baseline binds
-/// the corpus hash as well as provider and model.
+/// the model-visible headline input as well as provider and model.
 const deepseek_coverage_baseline = [_][]const u8{
     "ZTS305",
     "ZTS400",
@@ -2497,41 +2582,51 @@ const deepseek_coverage_baseline = [_][]const u8{
     "ZTS501",
     "ZTS502",
 };
-const deepseek_coverage_corpus_version = "19dc67a54ec34cf9a26e03a03aef15e251f9e197cbbbcb20d1408c047b1048a9";
+const deepseek_coverage_headline_input_id = "2ab88da3e4754662a707350241d21c6062ce83fbf6bd2c16dfe33f726bc2f22d";
 
-/// Return the coverage floor measured for one exact corpus and model identity.
-/// A prompt or seed change creates a new corpus and must publish a new floor;
-/// silently borrowing an older sample's fence set is not a valid ratchet.
-fn coverageBaseline(provider: agent.Provider, model: []const u8, corpus_version: []const u8) ?[]const []const u8 {
+/// Return the live coverage floor for one exact model-visible input and model.
+/// Expected outcomes and thresholds cannot reset this ratchet.
+fn coverageBaseline(
+    provider: agent.Provider,
+    model: []const u8,
+    headline_input: evidence_identity.HeadlineInputIdentity,
+) ?[]const []const u8 {
     return switch (provider) {
-        .anthropic => if (std.mem.eql(u8, model, models.defaultForProvider(.anthropic).id) and
-            std.mem.eql(u8, corpus_version, anthropic_coverage_corpus_version))
-            &anthropic_coverage_baseline
-        else
-            null,
         .deepseek => if (std.mem.eql(u8, model, models.defaultForProvider(.deepseek).id) and
-            std.mem.eql(u8, corpus_version, deepseek_coverage_corpus_version))
+            std.mem.eql(u8, headline_input.slice(), deepseek_coverage_headline_input_id))
             &deepseek_coverage_baseline
         else
             null,
-        .local, .openai => null,
+        .local, .anthropic, .openai => null,
     };
 }
 
-test "coverage baselines are corpus provider and model qualified" {
+/// Historical Anthropic evidence predates the separated identities. It remains
+/// queryable by its exact legacy hash but is never accepted by the live path.
+fn legacyCoverageBaseline(provider: agent.Provider, model: []const u8, legacy_id: []const u8) ?[]const []const u8 {
+    if (provider != .anthropic) return null;
+    if (!std.mem.eql(u8, model, models.defaultForProvider(.anthropic).id)) return null;
+    if (!std.mem.eql(u8, legacy_id, anthropic_coverage_legacy_corpus_version)) return null;
+    return &anthropic_coverage_baseline;
+}
+
+test "coverage baselines are input provider and model qualified" {
+    const headline_input = headlineInputIdentity();
+    try testing.expectEqualStrings(deepseek_coverage_headline_input_id, headline_input.slice());
     try testing.expectEqual(
         @as(?[]const []const u8, &anthropic_coverage_baseline),
-        coverageBaseline(.anthropic, models.defaultForProvider(.anthropic).id, anthropic_coverage_corpus_version),
+        legacyCoverageBaseline(.anthropic, models.defaultForProvider(.anthropic).id, anthropic_coverage_legacy_corpus_version),
     );
     try testing.expectEqual(
         @as(?[]const []const u8, &deepseek_coverage_baseline),
-        coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, deepseek_coverage_corpus_version),
+        coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, headline_input),
     );
-    try testing.expectEqualStrings(deepseek_coverage_corpus_version, &corpusVersion());
-    try testing.expect(coverageBaseline(.local, local.default_model, deepseek_coverage_corpus_version) == null);
-    try testing.expect(coverageBaseline(.anthropic, "claude-other", anthropic_coverage_corpus_version) == null);
-    try testing.expect(coverageBaseline(.deepseek, "deepseek-v4-pro", deepseek_coverage_corpus_version) == null);
-    try testing.expect(coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, "old-corpus") == null);
+    try testing.expect(coverageBaseline(.local, local.default_model, headline_input) == null);
+    try testing.expect(legacyCoverageBaseline(.anthropic, "claude-other", anthropic_coverage_legacy_corpus_version) == null);
+    try testing.expect(coverageBaseline(.deepseek, "deepseek-v4-pro", headline_input) == null);
+    var changed_input = headline_input;
+    changed_input.bytes[0] = if (changed_input.bytes[0] == '0') '1' else '0';
+    try testing.expect(coverageBaseline(.deepseek, models.defaultForProvider(.deepseek).id, changed_input) == null);
     // The two sets are measurements of different models, not copies.
     try testing.expect(anthropic_coverage_baseline.len == deepseek_coverage_baseline.len);
     var identical = true;
@@ -2820,13 +2915,16 @@ test "codegen baseline replays at the committed first-draft pass rate" {
             );
             if (on_headline) return error.MissingProviderFirstDraftExpectation;
         }
-        var case_intent: codegen.IntentOutcome = .not_checked;
+        var case_intent: codegen.IntentOutcome = switch (rc.intent) {
+            .compiler_veto_only => .compiler_veto_only,
+            .runtime, .pending_runtime => .not_checked,
+        };
 
         // Intent: does the produced handler do what the prompt asked for? Run
         // after the turn, against whatever it actually wrote. A case with no
         // spec, or a run with no built binary, stays `.not_checked` - never a
         // pass, so an unmeasured corpus reads as unmeasured.
-        if (rc.intent) |intent| {
+        if (runtimeIntent(rc.intent)) |intent| {
             if (zttp_bin) |bin| {
                 case_intent = codegen.runIntentCheck(ca, intent, tmp.abs_path, bin);
                 if (case_intent == .passed) intent_passes += 1 else {
@@ -2905,7 +3003,8 @@ test "codegen baseline replays at the committed first-draft pass rate" {
     // skipped - a row that says `intentChecked: 0` is honest; a missing row
     // would just look like the eval was not run.
     const summary = codegen.summarize(results.items);
-    const version = corpusVersion();
+    const headline_input = headlineInputIdentity();
+    const version = headline_input.bytes;
     std.debug.print(
         "[codegen-convergence] {{\"corpusVersion\":\"{s}\",\"corpusCases\":{d}," ++
             "\"provider\":\"{s}\",\"model\":\"{s}\",\"policyHash\":\"{s}\",\"firstDraftPassPercent\":{d}," ++
@@ -2982,7 +3081,7 @@ test "codegen baseline replays at the committed first-draft pass rate" {
 
         const on_headline = replay_provider == headline_provider and
             std.mem.eql(u8, published_model, headline_model);
-        if (coverageBaseline(replay_provider, published_model, version[0..])) |baseline| {
+        if (coverageBaseline(replay_provider, published_model, headline_input)) |baseline| {
             // Floor on the selected baseline itself. An emptied list makes the
             // loop below iterate nothing and report a clean ratchet over no
             // claim at all, which is the shape this repo has been bitten by.

@@ -24,13 +24,11 @@ const turn = @import("turn.zig");
 const transcript_mod = @import("transcript.zig");
 const registry_mod = @import("registry/registry.zig");
 const expert_workflow = @import("expert_workflow.zig");
+const codegen_types = @import("expert_codegen_types.zig");
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const zts = @import("zts");
 
-pub const SeedFile = struct {
-    path: []const u8,
-    bytes: []const u8,
-};
+pub const SeedFile = codegen_types.SeedFile;
 
 /// A case's intent check: the behaviour the produced handler must actually
 /// exhibit, as a `zttp test` jsonl spec.
@@ -82,7 +80,7 @@ pub const CodegenCase = struct {
 /// from `passed`: a case with no spec, or one whose turn produced no edit to
 /// run a spec against, has not demonstrated anything and must not be counted
 /// as if it had.
-pub const IntentOutcome = enum { not_checked, passed, failed };
+pub const IntentOutcome = codegen_types.IntentOutcome;
 
 pub const CaseResult = struct {
     name: []const u8,
@@ -285,7 +283,7 @@ pub fn summarize(results: []const CaseResult) CodegenSummary {
                 s.intent_checked += 1;
             },
             .failed => s.intent_checked += 1,
-            .not_checked => {},
+            .not_checked, .compiler_veto_only => {},
         }
     }
     s.median_roundtrips = medianRoundtrips(results);
@@ -344,11 +342,11 @@ test "intent rate is measured over checked cases, not the whole corpus" {
             };
         }
     }.r;
-    const s = summarize(&.{ mk(.passed), mk(.failed), mk(.not_checked) });
-    try std.testing.expectEqual(@as(usize, 3), s.total);
+    const s = summarize(&.{ mk(.passed), mk(.failed), mk(.not_checked), mk(.compiler_veto_only) });
+    try std.testing.expectEqual(@as(usize, 4), s.total);
     try std.testing.expectEqual(@as(usize, 2), s.intent_checked);
     try std.testing.expectEqual(@as(usize, 1), s.intent_passes);
-    // 1 of 2 checked, not 1 of 3 total.
+    // 1 of 2 checked, not 1 of 4 total.
     try std.testing.expectEqual(@as(usize, 50), s.intentPassPercent());
 }
 

@@ -10,11 +10,12 @@ const std = @import("std");
 const context_budget = @import("../context_budget.zig");
 const transcript_mod = @import("../transcript.zig");
 const models = @import("models.zig");
+const request_policy = @import("request_policy.zig");
 const tool_catalog = @import("tool_catalog.zig");
 
 pub const Provider = models.Provider;
-pub const Purpose = enum { normal, summarization };
-pub const CachePolicy = enum { enabled, disabled };
+pub const Purpose = request_policy.Purpose;
+pub const CachePolicy = request_policy.CachePolicy;
 pub const compaction_summary_marker = "[zttp compaction summary v1]";
 
 pub const Config = struct {
