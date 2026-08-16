@@ -2,6 +2,8 @@
 //!
 //! Corpus recording spends real model time and stays gated behind
 //! `ZTTP_CODEGEN_RECORD=1`. `ZTTP_CODEGEN_PROVIDER` selects the provider;
+//! `ZTTP_CODEGEN_REQUIRE_GREEN=1` refuses to promote a turn that did not apply
+//! an edit or whose declared runtime intent did not pass.
 //! cloud credentials are required only for an explicitly selected cloud
 //! provider. Transport, capture, disk, and replay are tested offline.
 //! Live cassettes remain the only source for model-behavior measurements.
@@ -671,6 +673,30 @@ fn envValue(name_z: [:0]const u8) ?[]const u8 {
 fn recordingRequested() bool {
     const flag = envValue("ZTTP_CODEGEN_RECORD") orelse return false;
     return std.mem.eql(u8, flag, "1");
+}
+
+fn greenRecordingRequired() bool {
+    const flag = envValue("ZTTP_CODEGEN_REQUIRE_GREEN") orelse return false;
+    return std.mem.eql(u8, flag, "1");
+}
+
+fn requireGreenRecording(required: bool, applied_edit: bool, intent_passed: bool) !void {
+    if (!required) return;
+    if (!applied_edit) return error.RecordedEditNotApplied;
+    if (!intent_passed) return error.RecordedIntentCheckFailed;
+}
+
+test "required-green recording refuses unapplied and failed-intent turns" {
+    try requireGreenRecording(false, false, false);
+    try requireGreenRecording(true, true, true);
+    try testing.expectError(
+        error.RecordedEditNotApplied,
+        requireGreenRecording(true, false, true),
+    );
+    try testing.expectError(
+        error.RecordedIntentCheckFailed,
+        requireGreenRecording(true, true, false),
+    );
 }
 
 // Smoke test: prove the production Anthropic record tee writes a cassette that
@@ -2197,6 +2223,7 @@ test "record codegen baseline corpus (live, gated)" {
             }
         else
             null;
+        var intent_passed = true;
         requireRecordedIntent(
             ca,
             rc.intent,
@@ -2204,6 +2231,7 @@ test "record codegen baseline corpus (live, gated)" {
             zttp_bin,
             codegen.runIntentCheck,
         ) catch |err| {
+            intent_passed = false;
             const handler_path: ?[]u8 = std.fs.path.join(
                 ca,
                 &.{ tmp.abs_path, "handler.ts" },
@@ -2218,6 +2246,19 @@ test "record codegen baseline corpus (live, gated)" {
                 .{ rc.name, @errorName(err) },
             );
             if (err == error.IntentCheckUnavailable) return err;
+        };
+
+        requireGreenRecording(
+            greenRecordingRequired(),
+            result.applied_edit,
+            intent_passed,
+        ) catch |err| {
+            std.debug.print(
+                "[codegen-record] {s}: required-green check failed " ++
+                    "(applied={} intent-passed={} error={s}); active case unchanged\n",
+                .{ rc.name, result.applied_edit, intent_passed, @errorName(err) },
+            );
+            return err;
         };
 
         std.debug.print(
