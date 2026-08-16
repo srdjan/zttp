@@ -162,17 +162,21 @@ type-checker band, which are real codes outside the policy-hashed registry.
 those same bytes. `start == end` is a point rather than a range, which is what a
 producer that has an offset but no extent reports.
 
-`repair_available` is true exactly when the diagnostic's repair intent has a
-validator row whose method is implemented, which is what spec 4.8 permits
-advertising an exact repair on. Six of the registry's fifteen rows qualify, all
-under M4: the validator
-re-derives the declared law's rewrite from the original and requires the
-candidate to match it. A `canonicalize` candidate or `normalize` rewrite grades
+`repair_available` is true exactly when that diagnostic instance carries a
+repair intent whose validator row is implemented. Seven of the registry's 17
+rows qualify: six declared-law rewrites under M4 and the pure chained-ternary
+slice under M3. The checker may leave an instance intent null when its
+precondition is not proven. The validator re-derives the rewrite from the
+original and requires the candidate to match the exact diagnostic-bound splice.
+A `canonicalize` candidate or `normalize` rewrite grades
 `mechanical_repair` under the same condition and `proposed_refactor` otherwise,
 read from that registry rather than from a constant.
 
-One row is `.planned` rather than implemented: `insert_semicolon`, under M2.
-The repair shipped and was withdrawn in the same phase after a review found it
+Five rows remain `.planned`. `replace_effectful_ternary_with_match` waits for a
+kernel that models branch effects and evaluation order. `lead_with_spread`
+cannot move even a collision-free nonempty literal spread while object insertion
+order is observable. The two M5 rows remain advisory-only. `insert_semicolon`
+remains planned under M2. That repair shipped and was withdrawn after review found it
 unsound - it took line numbers from a parse of the stripped source, built its
 replacement from a trimmed line, and was certified by a parse identity that read
 both sides under the ASI grammar this compiler no longer ships. Nothing

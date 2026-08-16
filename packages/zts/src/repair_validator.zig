@@ -17,19 +17,12 @@
 //! classification, not a gap waiting to be closed.
 //!
 //! Second, for the rewrites that are equivalences, which method discharges
-//! them? M4, declared law, for every one of them, and the catalog says why the
-//! other four do not. M1 and M2 were built and measured: layout identity prints
-//! both sides and compares bytes, parse identity compares trees, and neither
-//! discharged a single row. Every rewrite here changes the tree, so parse
-//! identity refuses them all, and layout identity is strictly weaker than parse
-//! identity. Their case is the rewrite that moves
-//! a token without moving structure, which is the semicolon spec 5.5 forbids
-//! ASI from inserting; the code went out with the measurement rather than being
-//! carried against a rewrite that does not exist yet. M3 needs the semantic
-//! kernel, which spec section 10 defers. M5 is advisory-only by construction.
-//! That leaves M4, whose machinery already runs under z3 in `scripts/verify.sh`
-//! and whose published shape - a law plus "the law's own preconditions carried
-//! into the row's precondition column" - is the shape these rewrites need.
+//! them? Six line-local rewrites use M4 declared laws. A bounded M3 expression
+//! kernel discharges pure chained ternaries and refuses every node it does not
+//! model. M1 discharged no row. M2 remains planned for the withdrawn semicolon
+//! repair. M5 is advisory-only by construction. The other M3 rows remain
+//! planned for explicit reasons: effectful selection needs ordered effect
+//! semantics, while leading a spread changes observable object insertion order.
 //!
 //! Where a precondition comes from is part of the row. It is the checker: the
 //! rewrite is sound exactly where the diagnostic that requested it fired.
@@ -54,6 +47,7 @@
 const std = @import("std");
 const repair_intent = @import("repair_intent.zig");
 const ir_identity = @import("ir_identity.zig");
+const kernel_identity = @import("kernel_identity.zig");
 
 pub const RepairIntent = repair_intent.RepairIntent;
 
@@ -158,16 +152,22 @@ pub const rows = [_]Row{
         .precondition = "the arrow is bound once and never used before its declaration",
     },
     .{
-        .intent = .replace_ternary_with_if,
+        .intent = .replace_effectful_ternary_with_match,
         .method = .kernel_identity,
         .status = .planned,
-        .precondition = "both arms are pure, so the conditional and the statement form share one elaboration",
+        .precondition = "unavailable until the kernel represents branch effects and evaluation order",
+    },
+    .{
+        .intent = .replace_chained_ternary_with_match,
+        .method = .kernel_identity,
+        .status = .implemented,
+        .precondition = "the checker proved the complete conditional expression pure and the kernel supports every node",
     },
     .{
         .intent = .lead_with_spread,
         .method = .kernel_identity,
         .status = .planned,
-        .precondition = "no later key collides with a spread key",
+        .precondition = "unavailable because moving even a collision-free literal spread changes observable object insertion order",
     },
     // These two named M2 and could not be discharged by it: one turns a
     // statement into two and the other turns two into one, so the trees differ
@@ -309,6 +309,61 @@ pub fn validateApplication(
     return dischargeByMethod(allocator, row.method, intent, original, repaired, line);
 }
 
+/// Validate a concrete span repair against the exact diagnostic instance that
+/// authorized it. The producer snapshot and replacement must describe the
+/// complete source splice before a semantic method sees either expression.
+/// This prevents a valid local rewrite from laundering unrelated edits in the
+/// same candidate.
+pub fn validateSpanApplication(
+    allocator: std.mem.Allocator,
+    intent: RepairIntent,
+    diagnostic_code: []const u8,
+    original_source: []const u8,
+    repaired_source: []const u8,
+    start_offset: usize,
+    end_offset: usize,
+    original_snapshot: []const u8,
+    replacement: []const u8,
+    line: u32,
+) error{OutOfMemory}!Discharge {
+    if (start_offset > end_offset or end_offset > original_source.len) {
+        return .{ .not_law_shape = "the repair span is outside the original source" };
+    }
+    if (!std.mem.eql(u8, original_source[start_offset..end_offset], original_snapshot)) {
+        return .{ .not_law_shape = "the repair snapshot does not match its source span" };
+    }
+    const expected_len = original_source.len - original_snapshot.len + replacement.len;
+    if (repaired_source.len != expected_len or
+        !std.mem.eql(u8, repaired_source[0..start_offset], original_source[0..start_offset]) or
+        !std.mem.eql(u8, repaired_source[start_offset .. start_offset + replacement.len], replacement) or
+        !std.mem.eql(
+            u8,
+            repaired_source[start_offset + replacement.len ..],
+            original_source[end_offset..],
+        ))
+    {
+        return .{ .not_law_shape = "the candidate contains bytes outside the exact repair splice" };
+    }
+
+    const row = find(intent) orelse return .no_validator;
+    if (row.status != .implemented) return .no_validator;
+    if (row.method == .kernel_identity) {
+        if (!diagnosticMatchesKernelIntent(diagnostic_code, intent)) {
+            return .{ .not_law_shape = "the diagnostic does not authorize this kernel repair intent" };
+        }
+        return dischargeKernelIdentity(allocator, intent, original_snapshot, replacement);
+    }
+    return validateApplication(allocator, intent, original_source, repaired_source, line);
+}
+
+fn diagnosticMatchesKernelIntent(code: []const u8, intent: RepairIntent) bool {
+    return switch (intent) {
+        .replace_chained_ternary_with_match => std.mem.eql(u8, code, "ZTS621"),
+        .lead_with_spread => std.mem.eql(u8, code, "ZTS614"),
+        else => false,
+    };
+}
+
 /// The method table. A row with no implemented method never reaches here
 /// through `validateApplication`: it returns first.
 pub fn dischargeByMethod(
@@ -322,14 +377,35 @@ pub fn dischargeByMethod(
     return switch (method) {
         .declared_law => dischargeDeclaredLaw(intent, original, repaired, line),
         .parse_identity => dischargeParseIdentity(allocator, original, repaired),
+        .kernel_identity => dischargeKernelIdentity(allocator, intent, original, repaired),
         // M1 was built, ran, and discharged no row, so it went out with the
-        // measurement. M3 has no kernel to elaborate into and M5 never
-        // auto-applies. `.none` claims no equivalence at all.
+        // measurement. M5 never auto-applies. `.none` claims no equivalence.
         .layout_identity,
-        .kernel_identity,
         .contract_equivalence,
         .none,
         => .no_validator,
+    };
+}
+
+fn dischargeKernelIdentity(
+    allocator: std.mem.Allocator,
+    intent: RepairIntent,
+    original: []const u8,
+    repaired: []const u8,
+) error{OutOfMemory}!Discharge {
+    return switch (intent) {
+        .replace_chained_ternary_with_match,
+        .lead_with_spread,
+        => switch (try kernel_identity.compareExpressions(allocator, original, repaired, .{})) {
+            .identical => .equivalent,
+            .differs => |why| .{ .not_law_shape = why },
+            .unsupported => .{ .undecided = "the repair reaches an expression outside the M3 kernel" },
+            .unparsable => |side| switch (side) {
+                .original => .{ .undecided = "the original repair target does not parse as an expression" },
+                .repaired => .{ .not_law_shape = "the repaired target does not parse as an expression" },
+            },
+        },
+        else => .no_validator,
     };
 }
 
@@ -874,10 +950,9 @@ test "declaring an exported boundary type is not advertised as an automatic repa
 
 test "naming a method is not the same as having one" {
     // The property that keeps the wire honest, and it still has live examples
-    // now that the M4 rows are discharged: `replace_ternary_with_if` names M3,
-    // which is the right method for it, and the semantic kernel M3 needs does
-    // not exist. Naming it does not make the rewrite advertisable.
-    const row = find(.replace_ternary_with_if).?;
+    // The effectful form names M3, but remains unavailable until the kernel
+    // represents branch effects and evaluation order.
+    const row = find(.replace_effectful_ternary_with_match).?;
     try std.testing.expectEqual(Method.kernel_identity, row.method);
     try std.testing.expectEqual(Status.planned, row.status);
     try std.testing.expect(row.precondition != null);
@@ -909,9 +984,8 @@ test "every gradable row has a law, and every law has a gradable row" {
                 // M2 needs no law: it compares whole trees, so there is
                 // nothing per-row to re-derive. `dischargeByMethod` reaches
                 // `ir_identity.compare` for it.
-                .parse_identity => true,
+                .parse_identity, .kernel_identity => true,
                 .layout_identity,
-                .kernel_identity,
                 .contract_equivalence,
                 .none,
                 => false,
@@ -925,9 +999,9 @@ test "every gradable row has a law, and every law has a gradable row" {
             return error.TestFailed;
         }
     }
-    // Six, all under M4. The one M2 row is `.planned` while its pipeline is
-    // withdrawn, so it is not gradable and advertises nothing.
-    try std.testing.expectEqual(@as(usize, 6), gradable_count);
+    // Six M4 rows and one bounded M3 row. The M2 row is `.planned` while its
+    // pipeline is withdrawn, so it is not gradable and advertises nothing.
+    try std.testing.expectEqual(@as(usize, 7), gradable_count);
 }
 
 test "the withdrawn semicolon row advertises nothing" {
@@ -1158,11 +1232,108 @@ test "two candidates on one line refuse rather than guess" {
 }
 
 test "a planned intent has no validator" {
-    // Distinct from a refusal: the edit is never examined. `lead_with_spread`
-    // names M3 and nothing runs it, so an edit carrying it gets no verdict
-    // rather than a negative one.
-    const answer = try validateApplication(std.testing.allocator, .lead_with_spread, "const a = {...b, c};", "const a = {...b, c};", 1);
+    const answer = try validateApplication(
+        std.testing.allocator,
+        .replace_effectful_ternary_with_match,
+        "const a = ready ? load() : 0;",
+        "const a = match (!!ready) { when true: load(), default: 0 };",
+        1,
+    );
     try std.testing.expect(answer == .no_validator);
+}
+
+test "M3 discharges only the exact chained ternary diagnostic splice" {
+    const original = "const x = ready ? 1 : fallback ? 2 : 3;\n";
+    const snapshot = "ready ? 1 : fallback ? 2 : 3";
+    const replacement = "match (!!(ready)) { when true: 1, default: fallback ? 2 : 3 }";
+    const repaired = "const x = match (!!(ready)) { when true: 1, default: fallback ? 2 : 3 };\n";
+    const start = std.mem.indexOf(u8, original, snapshot).?;
+    try std.testing.expectEqual(
+        Discharge.equivalent,
+        try validateSpanApplication(
+            std.testing.allocator,
+            .replace_chained_ternary_with_match,
+            "ZTS621",
+            original,
+            repaired,
+            start,
+            start + snapshot.len,
+            snapshot,
+            replacement,
+            1,
+        ),
+    );
+
+    const wrong_code = try validateSpanApplication(
+        std.testing.allocator,
+        .replace_chained_ternary_with_match,
+        "ZTS612",
+        original,
+        repaired,
+        start,
+        start + snapshot.len,
+        snapshot,
+        replacement,
+        1,
+    );
+    try std.testing.expect(wrong_code == .not_law_shape);
+
+    const extra_edit = "const y = match (!!(ready)) { when true: 1, default: fallback ? 2 : 3 };\n";
+    const widened = try validateSpanApplication(
+        std.testing.allocator,
+        .replace_chained_ternary_with_match,
+        "ZTS621",
+        original,
+        extra_edit,
+        start,
+        start + snapshot.len,
+        snapshot,
+        replacement,
+        1,
+    );
+    try std.testing.expect(widened == .not_law_shape);
+}
+
+test "M3 does not advertise spread moves while object order is observable" {
+    const original = "const x = { a: 1, ...{ b: 2 } };\n";
+    const snapshot = "{ a: 1, ...{ b: 2 } }";
+    const replacement = "{ ...{ b: 2 }, a: 1 }";
+    const repaired = "const x = { ...{ b: 2 }, a: 1 };\n";
+    const start = std.mem.indexOf(u8, original, snapshot).?;
+    try std.testing.expectEqual(
+        Discharge.no_validator,
+        try validateSpanApplication(
+            std.testing.allocator,
+            .lead_with_spread,
+            "ZTS614",
+            original,
+            repaired,
+            start,
+            start + snapshot.len,
+            snapshot,
+            replacement,
+            1,
+        ),
+    );
+
+    const collision_original = "const x = { a: 1, ...{ a: 2 } };\n";
+    const collision_snapshot = "{ a: 1, ...{ a: 2 } }";
+    const collision_replacement = "{ ...{ a: 2 }, a: 1 }";
+    const collision_repaired = "const x = { ...{ a: 2 }, a: 1 };\n";
+    const collision_start = std.mem.indexOf(u8, collision_original, collision_snapshot).?;
+    const refused = try validateSpanApplication(
+        std.testing.allocator,
+        .lead_with_spread,
+        "ZTS614",
+        collision_original,
+        collision_repaired,
+        collision_start,
+        collision_start + collision_snapshot.len,
+        collision_snapshot,
+        collision_replacement,
+        1,
+    );
+    try std.testing.expect(refused == .no_validator);
 }
 
 test "no planned row can advertise a repair" {

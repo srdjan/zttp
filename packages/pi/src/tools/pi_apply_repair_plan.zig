@@ -23,7 +23,7 @@ pub const tool: registry_mod.ToolDef = .{
     .description =
     \\Preview one or more exact bound repair candidates returned by
     \\zts_expert_canonicalize. The compiler rechecks source, profile, policy,
-    \\and module-graph identity, applies the repairs in memory, and returns
+    \\module-graph, and semantics identity, applies the repairs in memory, and returns
     \\proposed_content. This tool never writes files.
     ,
     .input_schema =
@@ -144,6 +144,7 @@ const RepairIdentity = struct {
     profile_id: []const u8,
     policy_hash: []const u8,
     module_graph_hash: []const u8,
+    semantics_hash: []const u8,
 };
 
 fn commonRepairIdentity(repairs: []const std.json.Value) ?RepairIdentity {
@@ -158,6 +159,7 @@ fn commonRepairIdentity(repairs: []const std.json.Value) ?RepairIdentity {
             .profile_id = stringValue(bound.get("profile_id")) orelse return null,
             .policy_hash = stringValue(bound.get("policy_hash")) orelse return null,
             .module_graph_hash = stringValue(bound.get("module_graph_hash")) orelse return null,
+            .semantics_hash = stringValue(bound.get("semantics_hash")) orelse return null,
         };
         if (identity) |first| {
             if (!sameRepairIdentity(first, current)) return null;
@@ -182,7 +184,8 @@ fn sameRepairIdentity(a: RepairIdentity, b: RepairIdentity) bool {
     return std.mem.eql(u8, a.source_digest, b.source_digest) and
         std.mem.eql(u8, a.profile_id, b.profile_id) and
         std.mem.eql(u8, a.policy_hash, b.policy_hash) and
-        std.mem.eql(u8, a.module_graph_hash, b.module_graph_hash);
+        std.mem.eql(u8, a.module_graph_hash, b.module_graph_hash) and
+        std.mem.eql(u8, a.semantics_hash, b.semantics_hash);
 }
 
 /// Internal compatibility seam for the autonomous semantic-repair lane.
@@ -483,7 +486,7 @@ test "bound canonicalize candidate previews through v2 without writing" {
     try testing.expectEqualStrings(source, on_disk);
 
     var candidate_bound = candidate.object.get("bound").?.object;
-    for ([_][]const u8{ "source_digest", "profile_id", "policy_hash", "module_graph_hash" }) |field| {
+    for ([_][]const u8{ "source_digest", "profile_id", "policy_hash", "module_graph_hash", "semantics_hash" }) |field| {
         const field_ptr = candidate_bound.getPtr(field).?;
         const original = field_ptr.*;
         field_ptr.* = .{ .string = "stale-binding" };
@@ -523,8 +526,8 @@ test "bound repair preview rejects mixed identity before protocol invocation" {
         std.json.Value,
         testing.allocator,
         \\[
-        \\  {"bound":{"source_digest":"same","profile_id":"zts-model-1","policy_hash":"policy-a","module_graph_hash":"graph"}},
-        \\  {"bound":{"source_digest":"same","profile_id":"zts-model-1","policy_hash":"policy-b","module_graph_hash":"graph"}}
+        \\  {"bound":{"source_digest":"same","profile_id":"zts-model-1","policy_hash":"policy-a","module_graph_hash":"graph","semantics_hash":"semantics"}},
+        \\  {"bound":{"source_digest":"same","profile_id":"zts-model-1","policy_hash":"policy-b","module_graph_hash":"graph","semantics_hash":"semantics"}}
         \\]
     ,
         .{},

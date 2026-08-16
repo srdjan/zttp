@@ -12,6 +12,7 @@ const flow_checker = @import("flow_checker.zig");
 const handler_verifier = @import("handler_verifier.zig");
 const strict_checker = @import("strict_checker.zig");
 const type_checker = @import("type_checker.zig");
+const RepairIntent = @import("repair_intent.zig").RepairIntent;
 const SourceLocation = @import("zts-engine").parser.SourceLocation;
 
 pub const Source = enum {
@@ -49,6 +50,11 @@ pub const Diagnostic = struct {
     start_offset: u32,
     end_offset: u32,
     suggestion: ?[]const u8,
+    /// Exact intent chosen by the producer for this diagnostic instance.
+    /// This may be null even when the static rule has a possible repair: the
+    /// producer owns instance-specific preconditions such as purity and closed
+    /// object shape.
+    repair_intent: ?RepairIntent,
 };
 
 pub const CodeEntry = struct {
@@ -88,6 +94,14 @@ pub fn project(comptime source: Source, diagnostic: anytype, ir_view: anytype) ?
         .start_offset = bytes.start,
         .end_offset = bytes.end,
         .suggestion = diagnostic.help,
+        .repair_intent = projectRepairIntent(source, diagnostic),
+    };
+}
+
+fn projectRepairIntent(comptime source: Source, diagnostic: anytype) ?RepairIntent {
+    return switch (source) {
+        .flow, .verifier, .strict => diagnostic.repair_intent,
+        .boolean, .type => null,
     };
 }
 

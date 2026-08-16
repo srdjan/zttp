@@ -42,7 +42,7 @@ fi
 # compiler-owned policy registry. ZTS061 adds one verifier rule and makes the
 # policy identity cover that cross-module contract requirement.
 EXPECTED_PROFILE="zts-model-1"
-EXPECTED_POLICY_HASH="1c0a024766ab61a1fb327da0f201c7b1b52fbc3cb0a7adac64a2de34fa8d18cb"
+EXPECTED_POLICY_HASH="a05c98c7d610d7421481812c57dd55140cfd9d7a2eedf9a29569670392e1dc3c"
 # TSX is separately identified, and its hash binds the core grammar it lowers
 # into, so the declaration cut moves both hashes even though TSX syntax did not.
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"

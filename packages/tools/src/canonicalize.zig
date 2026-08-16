@@ -32,6 +32,10 @@ pub const Repair = struct {
     /// what made three vocabularies out of one. They are one enum now, and
     /// `legacyKind` is the only place the old spelling survives.
     intent: RepairIntent,
+    /// Exact diagnostic that authorized this instance. Empty only in tests
+    /// that exercise generic span mechanics; a gradable application requires
+    /// the compiler-produced code.
+    diagnostic_code: []const u8 = "",
     /// The spec 4.2.1 idiom row this repair realizes, or null when it repairs a
     /// restriction instead. Most repairs are the latter.
     idiom_id: ?[]const u8 = null,
@@ -231,6 +235,7 @@ fn buildLineRepairs(
                     .replace_arrow_with_function
                 else
                     .replace_export_arrow_with_function,
+                .diagnostic_code = diag.code,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -247,6 +252,7 @@ fn buildLineRepairs(
                     .canonicalize_for_of_const
                 else
                     .replace_let_with_const,
+                .diagnostic_code = diag.code,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -260,6 +266,7 @@ fn buildLineRepairs(
             };
             try appendRepairUnique(allocator, source, result, .{
                 .intent = .replace_compound_assign_with_explicit,
+                .diagnostic_code = diag.code,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -274,6 +281,7 @@ fn buildLineRepairs(
             };
             try appendRepairUnique(allocator, source, result, .{
                 .intent = .drop_redundant_bool_compare,
+                .diagnostic_code = diag.code,
                 .line = diag.line,
                 .column = diag.column,
                 .message = try allocator.dupe(u8, diag.message),
@@ -714,6 +722,7 @@ fn capabilityAliasReplacement(
     errdefer allocator.free(alias.original_line);
     return .{
         .intent = .canonicalize_capability_key_alias,
+        .diagnostic_code = diag.code,
         .line = alias.line,
         .column = 1,
         .message = try allocator.dupe(u8, "make capability key alias compiler-visible"),
@@ -1059,7 +1068,25 @@ pub fn applyStatementIntent(
     }
 
     var one = [_]Repair{only};
-    return applyRepairs(allocator, source, &one);
+    const candidate = try applyRepairs(allocator, source, &one);
+    errdefer allocator.free(candidate);
+    const discharge = try repairPolicy.validateSpanApplication(
+        allocator,
+        only.intent,
+        only.diagnostic_code,
+        source,
+        candidate,
+        only.start_offset,
+        only.end_offset,
+        only.original,
+        only.replacement,
+        only.line,
+    );
+    switch (discharge) {
+        .equivalent => {},
+        else => return error.UnsupportedRepairIntent,
+    }
+    return candidate;
 }
 
 /// The 1-based line `offset` falls on.
@@ -1085,11 +1112,15 @@ fn buildSpanRepairs(
     result: *Result,
 ) !void {
     for (diagnostics) |diag| {
-        // ZTS612 (impure arm) and ZTS621 (chained) share one rewrite: both are
-        // repaired by lifting the conditional into an expression-position
-        // `match`, and both report at the `?` token the scanner keys off.
+        // The producer owns the diagnostic-specific intent. An effectful
+        // ternary can be described, but its M3 row remains planned and every
+        // apply path refuses it. A pure chained ternary is eligible for the
+        // independent kernel discharge below.
         if (std.mem.eql(u8, diag.code, "ZTS612") or std.mem.eql(u8, diag.code, "ZTS621")) {
-            const rw = ternaryToMatchRewrite(allocator, source, diag.line, diag.column) catch |err| switch (err) {
+            const intent = diag.repair_intent orelse continue;
+            if (intent != .replace_effectful_ternary_with_match and
+                intent != .replace_chained_ternary_with_match) continue;
+            const rw = ternaryToMatchRewrite(allocator, source, diag.line, diag.column, intent, diag.code) catch |err| switch (err) {
                 error.UnsupportedRefactor => continue,
                 else => return err,
             };
@@ -1130,6 +1161,8 @@ fn ternaryToMatchRewrite(
     source: []const u8,
     line: u32,
     column: u32,
+    intent: RepairIntent,
+    diagnostic_code: []const u8,
 ) !Repair {
     const q = lineColToOffset(source, line, column) orelse return error.UnsupportedRefactor;
     if (q >= source.len or source[q] != '?') return error.UnsupportedRefactor;
@@ -1167,7 +1200,8 @@ fn ternaryToMatchRewrite(
     errdefer allocator.free(original);
 
     return .{
-        .intent = .replace_ternary_with_if,
+        .intent = intent,
+        .diagnostic_code = diagnostic_code,
         .start_offset = real_start,
         .end_offset = else_end,
         .replacement = replacement,
@@ -1544,6 +1578,47 @@ fn selectNonOverlapping(
     return keep.toOwnedSlice(allocator);
 }
 
+/// Keep only repairs whose registered method discharges the exact splice.
+/// This is the shared authority for the normalizer and single-intent apply
+/// path: a planned row or an undecided kernel term is not an edit.
+fn selectValidated(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    repairs: []const Repair,
+) ![]const Repair {
+    var keep: std.ArrayListUnmanaged(Repair) = .empty;
+    errdefer keep.deinit(allocator);
+    for (repairs) |repair| {
+        if (!repairPolicy.isGradable(repair.intent)) continue;
+        var one = [_]Repair{repair};
+        const candidate = applyRepairs(allocator, source, &one) catch |err| switch (err) {
+            error.OverlappingRepairs,
+            error.StaleRepair,
+            error.RepairOutOfBounds,
+            => continue,
+            else => return err,
+        };
+        defer allocator.free(candidate);
+        const discharge = try repairPolicy.validateSpanApplication(
+            allocator,
+            repair.intent,
+            repair.diagnostic_code,
+            source,
+            candidate,
+            repair.start_offset,
+            repair.end_offset,
+            repair.original,
+            repair.replacement,
+            repair.line,
+        );
+        switch (discharge) {
+            .equivalent => try keep.append(allocator, repair),
+            else => {},
+        }
+    }
+    return keep.toOwnedSlice(allocator);
+}
+
 pub fn simulateRepairs(
     allocator: std.mem.Allocator,
     file: []const u8,
@@ -1757,15 +1832,20 @@ pub fn normalizeSourceWithOptions(
         defer stmt_result.deinit(allocator);
         try buildSpanRepairs(allocator, current, check.json_diagnostics.items, &stmt_result);
 
-        if (result.repairs.items.len == 0 and stmt_result.repairs.items.len == 0) {
+        const line_repairs = try selectValidated(allocator, current, result.repairs.items);
+        defer allocator.free(line_repairs);
+        const span_repairs = try selectValidated(allocator, current, stmt_result.repairs.items);
+        defer allocator.free(span_repairs);
+
+        if (line_repairs.len == 0 and span_repairs.len == 0) {
             converged = true;
             break;
         }
 
         const Step = struct { next: []u8, intents: []const RepairIntent, intents_owned: bool };
         const step: ?Step = blk: {
-            if (result.repairs.items.len > 0) {
-                const next = applyRepairs(allocator, current, result.repairs.items) catch |err| switch (err) {
+            if (line_repairs.len > 0) {
+                const next = applyRepairs(allocator, current, line_repairs) catch |err| switch (err) {
                     // A pass we cannot apply deterministically (two repairs
                     // whose spans overlap, a stale snapshot, a span outside the
                     // source) stops the loop short of a fixed point rather than
@@ -1776,11 +1856,13 @@ pub fn normalizeSourceWithOptions(
                     => break :blk null,
                     else => return err,
                 };
-                break :blk .{ .next = next, .intents = &.{}, .intents_owned = false };
+                const intents = try allocator.alloc(RepairIntent, line_repairs.len);
+                for (line_repairs, 0..) |repair, index| intents[index] = repair.intent;
+                break :blk .{ .next = next, .intents = intents, .intents_owned = true };
             }
             // No line-derived repairs this pass: apply the innermost
             // non-overlapping subset of span repairs, post-order.
-            const subset = selectNonOverlapping(allocator, stmt_result.repairs.items) catch |err| return err;
+            const subset = selectNonOverlapping(allocator, span_repairs) catch |err| return err;
             defer allocator.free(subset);
             if (subset.len == 0) break :blk null;
             const next = applyRepairs(allocator, current, subset) catch |err| switch (err) {
@@ -1820,13 +1902,7 @@ pub fn normalizeSourceWithOptions(
         {
             errdefer allocator.free(next);
             errdefer if (s.intents_owned) allocator.free(s.intents);
-            if (result.repairs.items.len > 0) {
-                for (result.repairs.items) |r| {
-                    try trace.append(allocator, r.intent);
-                }
-            } else {
-                for (s.intents) |intent| try trace.append(allocator, intent);
-            }
+            for (s.intents) |intent| try trace.append(allocator, intent);
         }
         if (s.intents_owned) allocator.free(s.intents);
         allocator.free(current);
@@ -2404,7 +2480,7 @@ test "every rewrite row has a v1 name, and only the renamed five differ" {
 
     // An intent that never reached the line-keyed path renders as its tag:
     // there is no v1 output to stay compatible with.
-    try std.testing.expectEqualStrings("replace_ternary_with_if", legacyKind(.replace_ternary_with_if));
+    try std.testing.expectEqualStrings("replace_chained_ternary_with_match", legacyKind(.replace_chained_ternary_with_match));
 
     var renamed: usize = 0;
     for (rewrite_row_intents) |intent| {
@@ -2709,7 +2785,7 @@ test "applyRepairs applies a replacement that spans lines" {
     ;
     const span = lineSpan(source, 2).?;
     const repair = Repair{
-        .intent = .replace_ternary_with_if,
+        .intent = .replace_chained_ternary_with_match,
         .start_offset = span.start,
         .end_offset = span.end,
         .line = 2,
@@ -3080,14 +3156,9 @@ test "redundant-bool-compare rewrite is behavior-equivalent (contract diff)" {
     try std.testing.expect(diff.behavioralVerdict().isSafeNoOp());
 }
 
-test "normalizeSource: ternary is rewritten to an expression-position match and is fully canonical" {
-    // ZTS612 lands as a span-keyed rewrite: `cond ? a : b` becomes
-    // `match (!!(cond)) { when true: a, default: b }`, which is valid in the
-    // const-initializer position the ternary occupied. The loop converges with
-    // no residual canonical-band diagnostic.
-    // The vehicle is an impure arm: since spec 5.4 admitted the pure unchained
-    // `?:` as idiomatic, only an effectful or chained ternary reaches the
-    // rewriter at all.
+test "normalizeSource leaves effectful ternary as an unavailable residual" {
+    // ZTS612 cannot use the pure-expression M3 kernel. A planned method is not
+    // an edit, even though the scanner can spell a candidate.
     const source =
         \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
@@ -3099,22 +3170,10 @@ test "normalizeSource: ternary is rewritten to an expression-position match and 
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
     defer nr.deinit(std.testing.allocator);
     try std.testing.expect(nr.converged);
-    try std.testing.expect(nr.fully_canonical);
-    try std.testing.expect(nr.iterations >= 1);
-    try std.testing.expectEqual(@as(u32, 0), nr.residual);
-    // The canonical formatter lays a `match` body out one arm per line, so the
-    // rewrite is asserted arm by arm rather than as the one line it used to
-    // print on.
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "match (!!(ok)) {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: 200,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: fallbackStatus()") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "?") == null);
-
-    var found = false;
-    for (nr.rewrite_trace.items) |intent| {
-        if (intent == .replace_ternary_with_if) found = true;
-    }
-    try std.testing.expect(found);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expectEqual(@as(u32, 1), nr.residual);
+    try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "ok ? 200 : fallbackStatus()") != null);
 }
 
 test "normalizeSource: ternary with a relational condition parenthesizes the whole condition" {
@@ -3124,9 +3183,9 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
     // (Contract-diff equivalence compares surfaces, not expression semantics,
     // so this is asserted textually.)
     const source =
-        \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
-        \\  const status = req.method === "GET" ? 200 : fallbackStatus();
+        \\  const fallback = req.method === "POST";
+        \\  const status = req.method === "GET" ? 200 : fallback ? 201 : 500;
         \\  return Response.json({ status: status });
         \\}
     ;
@@ -3222,8 +3281,7 @@ test "normalizeSource: a ternary in an arrow body bounds the condition at `=>`" 
     // the arrow params into the condition (which would yield an always-truthy
     // `match (!!((x) => cond))`).
     const source =
-        \\function minusOne(): number { return -1; }
-        \\const clamp = (x: number): number => x > 0 ? 1 : minusOne();
+        \\const clamp = (x: number): number => x > 0 ? 1 : x === 0 ? 0 : -1;
         \\function handler(req: Request): Response {
         \\  const v = clamp(2);
         \\  return Response.json({ v: v });
@@ -3257,7 +3315,7 @@ test "scanOperandTokenBack refuses a member tail of a call/index chain" {
 test "applyRepairs splices a single span and validates the snapshot" {
     const source = "const x = a ? 1 : 2;\n";
     const rw = Repair{
-        .intent = .replace_ternary_with_if,
+        .intent = .replace_chained_ternary_with_match,
         .start_offset = 10,
         .end_offset = 19,
         .replacement = try std.testing.allocator.dupe(u8, "match (!!a) { when true: 1, default: 2 }"),
@@ -3273,7 +3331,7 @@ test "applyRepairs splices a single span and validates the snapshot" {
 test "applyRepairs rejects a stale snapshot" {
     const source = "const x = a ? 1 : 2;\n";
     var rw = Repair{
-        .intent = .replace_ternary_with_if,
+        .intent = .replace_chained_ternary_with_match,
         .start_offset = 10,
         .end_offset = 19,
         .replacement = try std.testing.allocator.dupe(u8, "X"),
@@ -3287,14 +3345,14 @@ test "applyRepairs rejects a stale snapshot" {
 test "applyRepairs rejects overlapping spans" {
     const source = "abcdefghij";
     var a = Repair{
-        .intent = .replace_ternary_with_if,
+        .intent = .replace_chained_ternary_with_match,
         .start_offset = 0,
         .end_offset = 5,
         .replacement = try std.testing.allocator.dupe(u8, "X"),
         .original = try std.testing.allocator.dupe(u8, "abcde"),
     };
     var b = Repair{
-        .intent = .replace_ternary_with_if,
+        .intent = .replace_chained_ternary_with_match,
         .start_offset = 3,
         .end_offset = 8,
         .replacement = try std.testing.allocator.dupe(u8, "Y"),
@@ -3317,17 +3375,17 @@ test "lineColToOffset maps a 1-based position to a byte offset" {
 test "ternaryToMatchRewrite builds the canonical match form for a const initializer" {
     const source = "  const status = ok ? 200 : 500;\n";
     // `?` is at 1-based column 21 on line 1.
-    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 21);
+    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 21, .replace_chained_ternary_with_match, "ZTS621");
     defer rw.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("ok ? 200 : 500", rw.original);
     try std.testing.expectEqualStrings("match (!!(ok)) { when true: 200, default: 500 }", rw.replacement);
-    try std.testing.expectEqual(RepairIntent.replace_ternary_with_if, rw.intent);
+    try std.testing.expectEqual(RepairIntent.replace_chained_ternary_with_match, rw.intent);
 }
 
 test "ternaryToMatchRewrite handles a return-position ternary" {
     const source = "  return ok ? Response.text(\"y\") : Response.text(\"n\");\n";
     // `?` after `ok` is at column 13.
-    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 13);
+    var rw = try ternaryToMatchRewrite(std.testing.allocator, source, 1, 13, .replace_chained_ternary_with_match, "ZTS621");
     defer rw.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("ok ? Response.text(\"y\") : Response.text(\"n\")", rw.original);
     try std.testing.expectEqualStrings(
@@ -3339,9 +3397,9 @@ test "ternaryToMatchRewrite handles a return-position ternary" {
 test "ternaryToMatchRewrite refuses an optional chain and a nullish operator" {
     // `?.` is at column 4; `??` is at column 4 in the second source.
     const oc = "  a?.b;\n";
-    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, oc, 1, 4));
+    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, oc, 1, 4, .replace_chained_ternary_with_match, "ZTS621"));
     const nc = "  a ?? b;\n";
-    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, nc, 1, 5));
+    try std.testing.expectError(error.UnsupportedRefactor, ternaryToMatchRewrite(std.testing.allocator, nc, 1, 5, .replace_chained_ternary_with_match, "ZTS621"));
 }
 
 test "normalizeSource ternary rewrite is behavior-equivalent (contract diff)" {
@@ -3354,13 +3412,15 @@ test "normalizeSource ternary rewrite is behavior-equivalent (contract diff)" {
     const before =
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  return ok ? Response.text("ready") : Response.text("not");
+        \\  const message = ok ? "ready" : req.method === "POST" ? "post" : "not";
+        \\  return Response.text(message);
         \\}
     ;
     const reference =
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  return match (!!ok) { when true: Response.text("ready"), default: Response.text("not") };
+        \\  const message = match (!!ok) { when true: "ready", default: req.method === "POST" ? "post" : "not" };
+        \\  return Response.text(message);
         \\}
     ;
 
@@ -3431,10 +3491,10 @@ test "normalizeSource ternary rewrite preserves strings containing ? and :" {
 
 test "normalizeSource ternary inside an object-literal value is rewritten in place" {
     const source =
-        \\function fallbackStatus(): number { return 500; }
         \\function handler(req: Request): Response {
         \\  const ok = req.method === "GET";
-        \\  return Response.json({ code: ok ? 200 : fallbackStatus(), ok: ok });
+        \\  const alt = req.method === "POST";
+        \\  return Response.json({ code: ok ? 200 : alt ? 201 : 500, ok: ok });
         \\}
     ;
     var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
@@ -3442,7 +3502,46 @@ test "normalizeSource ternary inside an object-literal value is rewritten in pla
     try std.testing.expect(nr.fully_canonical);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "code: match (!!(ok)) {") != null);
     try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "when true: 200,") != null);
-    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: fallbackStatus()") != null);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "default: alt ? 201 : 500") != null);
+}
+
+test "normalizeSource leaves a closed literal spread residual because key order is observable" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const next = { status: "ok", ...{ count: 1 } };
+        \\  return Response.json(next);
+        \\}
+    ;
+    var nr = try normalizeSource(std.testing.allocator, source, "handler.ts");
+    defer nr.deinit(std.testing.allocator);
+    try std.testing.expect(!nr.fully_canonical);
+    try std.testing.expectEqual(@as(usize, 0), nr.rewrite_trace.items.len);
+    try std.testing.expect(std.mem.indexOf(u8, nr.canonical_source, "status: \"ok\",") != null);
+}
+
+test "normalizeSource refuses dynamic and colliding spread moves" {
+    const dynamic =
+        \\function handler(req: Request): Response {
+        \\  const base = { count: 1 };
+        \\  const next = { status: "ok", ...base };
+        \\  return Response.json(next);
+        \\}
+    ;
+    var dynamic_result = try normalizeSource(std.testing.allocator, dynamic, "handler.ts");
+    defer dynamic_result.deinit(std.testing.allocator);
+    try std.testing.expect(!dynamic_result.fully_canonical);
+    try std.testing.expectEqual(@as(usize, 0), dynamic_result.rewrite_trace.items.len);
+
+    const collision =
+        \\function handler(req: Request): Response {
+        \\  const next = { count: 2, ...{ count: 1 } };
+        \\  return Response.json(next);
+        \\}
+    ;
+    var collision_result = try normalizeSource(std.testing.allocator, collision, "handler.ts");
+    defer collision_result.deinit(std.testing.allocator);
+    try std.testing.expect(!collision_result.fully_canonical);
+    try std.testing.expectEqual(@as(usize, 0), collision_result.rewrite_trace.items.len);
 }
 
 // ---------------------------------------------------------------------------
@@ -3549,17 +3648,6 @@ const normalize_cases = [_]NormalizeCase{
         \\    return Response.text("yes");
         \\  }
         \\  return Response.text("no");
-        \\}
-        ,
-    },
-    .{
-        .name = "impure ternary -> match",
-        .source =
-        \\function fallbackStatus(): number { return 500; }
-        \\function handler(req: Request): Response {
-        \\  const ok = req.method === "GET";
-        \\  const status = ok ? 200 : fallbackStatus();
-        \\  return Response.json({ status: status });
         \\}
         ,
     },

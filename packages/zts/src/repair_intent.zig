@@ -15,7 +15,8 @@ const std = @import("std");
 
 pub const RepairIntent = enum {
     // ZTS6xx — canonical ZigTS profile (strict_checker)
-    replace_ternary_with_if,
+    replace_effectful_ternary_with_match,
+    replace_chained_ternary_with_match,
     replace_let_with_const,
     replace_arrow_with_function,
     replace_export_arrow_with_function,
@@ -69,8 +70,8 @@ pub const RepairIntent = enum {
 
 test "RepairIntent.asString returns enum tag name" {
     try std.testing.expectEqualStrings(
-        "replace_ternary_with_if",
-        RepairIntent.replace_ternary_with_if.asString(),
+        "replace_effectful_ternary_with_match",
+        RepairIntent.replace_effectful_ternary_with_match.asString(),
     );
     try std.testing.expectEqualStrings(
         "insert_guard_before_line",

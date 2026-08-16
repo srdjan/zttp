@@ -34,7 +34,7 @@ pub const tool: registry_mod.ToolDef = .{
     \\replace_let_with_const, canonicalize_for_of_const,
     \\replace_arrow_with_function, replace_export_arrow_with_function,
     \\replace_compound_assign_with_explicit, drop_redundant_bool_compare,
-    \\canonicalize_capability_key_alias, replace_ternary_with_if.
+    \\canonicalize_capability_key_alias, replace_chained_ternary_with_match.
     \\The tool never writes files; it returns the proposed content and an
     \\edit_simulate veto verdict.
     ,
@@ -53,7 +53,7 @@ const SupportedKind = enum {
     replace_compound_assign_with_explicit,
     drop_redundant_bool_compare,
     canonicalize_capability_key_alias,
-    replace_ternary_with_if,
+    replace_chained_ternary_with_match,
 
     fn fromIntent(intent: RepairIntent) ?SupportedKind {
         return switch (intent) {
@@ -64,7 +64,7 @@ const SupportedKind = enum {
             .replace_compound_assign_with_explicit => .replace_compound_assign_with_explicit,
             .drop_redundant_bool_compare => .drop_redundant_bool_compare,
             .canonicalize_capability_key_alias => .canonicalize_capability_key_alias,
-            .replace_ternary_with_if => .replace_ternary_with_if,
+            .replace_chained_ternary_with_match => .replace_chained_ternary_with_match,
             else => null,
         };
     }
@@ -79,7 +79,7 @@ const SupportedKind = enum {
     fn requiresFile(self: SupportedKind) bool {
         return switch (self) {
             .canonicalize_capability_key_alias,
-            .replace_ternary_with_if,
+            .replace_chained_ternary_with_match,
             => true,
             else => false,
         };
@@ -204,7 +204,7 @@ fn produceProposed(
             .line = line,
             .template = "",
         }),
-        .replace_ternary_with_if => try repair_apply.applyStatementIntent(allocator, source, absolute, kind.asString(), line),
+        .replace_chained_ternary_with_match => try repair_apply.applyStatementIntent(allocator, source, absolute, kind.asString(), line),
         .canonicalize_capability_key_alias => try applyCapabilityAlias(allocator, absolute, source, line),
     };
 }
@@ -632,7 +632,7 @@ test "ast rewrite: canonicalize_capability_key_alias rewrites the alias line" {
     }
 }
 
-test "ast rewrite: replace_ternary_with_if lifts a chained ternary" {
+test "ast rewrite: replace_chained_ternary_with_match lifts a chained ternary" {
     // The span-keyed family. The construct runs past the line it is reported
     // on, so this dispatch runs a fresh analysis pass to derive its byte range
     // rather than rewriting the reported line in place.
@@ -649,7 +649,7 @@ test "ast rewrite: replace_ternary_with_if lifts a chained ternary" {
 
     const input = try std.fmt.allocPrint(
         testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_ternary_with_if\",\"plan_id\":\"rp_g_tern\"}}",
+        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_chained_ternary_with_match\",\"plan_id\":\"rp_g_tern\"}}",
         .{path},
     );
     defer testing.allocator.free(input);
@@ -679,7 +679,7 @@ test "ast rewrite: a span-keyed intent refuses a source override" {
 
     const input = try std.fmt.allocPrint(
         testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_ternary_with_if\",\"source\":\"function handler() {{}}\"}}",
+        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_chained_ternary_with_match\",\"source\":\"function handler() {{}}\"}}",
         .{path},
     );
     defer testing.allocator.free(input);
@@ -693,6 +693,17 @@ test "ast rewrite: a span-keyed intent refuses a source override" {
 test "ast rewrite: unknown intent string returns typed failure" {
     const input =
         \\{"path":"handler.ts","line":1,"intent":"not_a_real_intent"}
+    ;
+    var result = try runExecute(testing.allocator, input);
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "unsupported_repair_intent") != null);
+    try testing.expect(result.ui_payload == null);
+}
+
+test "ast rewrite: effectful ternary remains outside automatic application" {
+    const input =
+        \\{"path":"handler.ts","line":1,"intent":"replace_effectful_ternary_with_match"}
     ;
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);

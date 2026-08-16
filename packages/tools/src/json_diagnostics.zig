@@ -38,6 +38,8 @@ pub const JsonDiagnostic = struct {
     start_offset: u32 = 0,
     end_offset: u32 = 0,
     suggestion: ?[]const u8,
+    /// Exact checker-owned repair intent for this diagnostic instance.
+    repair_intent: ?zts.RepairIntent = null,
     /// True when `message` is a heap copy owned by this diagnostic (duped at
     /// capture time so it outlives the checker allocator that produced it).
     /// `deinit` frees it; static-string messages keep this false and are
@@ -201,6 +203,7 @@ pub fn fromCheckerDiagnostic(
         .start_offset = projected.start_offset,
         .end_offset = projected.end_offset,
         .suggestion = projected.suggestion,
+        .repair_intent = projected.repair_intent,
         .message_owned = owned_msg != null,
     };
 }

@@ -299,7 +299,7 @@ const strict_meta = [_]struct {
         .description = "A ?: arm must be a pure value; effectful selection uses match or if.",
         .example = "const status = ready ? load() : fallback;",
         .help = "Bind the effectful call first, or use `match` over the condition for an effectful two-way choice.",
-        .repair = .replace_ternary_with_if,
+        .repair = .replace_effectful_ternary_with_match,
     },
     .{
         .kind = .canonical_ternary_chain,
@@ -307,7 +307,7 @@ const strict_meta = [_]struct {
         .description = "A conditional expression may not appear as an arm of another conditional expression.",
         .example = "const tier = a ? 1 : b ? 2 : 3;",
         .help = "Use `match` over one scrutinee, or an if/else chain feeding a named function.",
-        .repair = .replace_ternary_with_if,
+        .repair = .replace_chained_ternary_with_match,
     },
     .{
         .kind = .canonical_compound_assignment,

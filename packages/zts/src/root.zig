@@ -779,6 +779,32 @@ pub const RepairPolicy = struct {
     ) error{OutOfMemory}!Discharge {
         return repair_validator.validateApplication(allocator, intent, original, repaired, line);
     }
+
+    pub fn validateSpanApplication(
+        allocator: std.mem.Allocator,
+        intent: RepairIntent,
+        diagnostic_code: []const u8,
+        original_source: []const u8,
+        repaired_source: []const u8,
+        start_offset: usize,
+        end_offset: usize,
+        original_snapshot: []const u8,
+        replacement: []const u8,
+        line: u32,
+    ) error{OutOfMemory}!Discharge {
+        return repair_validator.validateSpanApplication(
+            allocator,
+            intent,
+            diagnostic_code,
+            original_source,
+            repaired_source,
+            start_offset,
+            end_offset,
+            original_snapshot,
+            replacement,
+            line,
+        );
+    }
 };
 
 test "stable RepairPolicy exposes validator catalog and discharge" {

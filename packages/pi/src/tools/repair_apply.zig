@@ -8,7 +8,7 @@
 //! the two insertion intents and the two span-local rewrites.
 //!
 //! `applyStatementIntent` covers the two whose construct spans more than the
-//! line it is reported on (`replace_ternary_with_if`). That needs a fresh analysis pass to derive the
+//! line it is reported on (`replace_chained_ternary_with_match`). That needs a fresh analysis pass to derive the
 //! construct's byte span, so they take a path as well as source and run through
 //! `canonicalize.applyStatementIntent`. They are a separate entry point rather
 //! than a branch inside `applyIntent` because `applyIntent`'s contract - pure,
@@ -54,7 +54,7 @@ pub const RepairKind = enum {
 /// an intent belongs to exactly one apply path, and a caller that guesses wrong
 /// gets `UnsupportedRepairIntent` rather than a rewrite from the wrong family.
 pub const StatementKind = enum {
-    replace_ternary_with_if,
+    replace_chained_ternary_with_match,
 
     pub fn fromString(s: []const u8) ?StatementKind {
         return std.meta.stringToEnum(StatementKind, s);
@@ -62,7 +62,7 @@ pub const StatementKind = enum {
 
     fn asIntent(self: StatementKind) canonicalize.RepairIntent {
         return switch (self) {
-            .replace_ternary_with_if => .replace_ternary_with_if,
+            .replace_chained_ternary_with_match => .replace_chained_ternary_with_match,
         };
     }
 };

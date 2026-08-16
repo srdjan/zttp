@@ -243,6 +243,7 @@ const RepairBinding = struct {
     profile_id: []const u8,
     policy_hash: [64]u8,
     module_graph_hash: [64]u8,
+    semantics_hash: [64]u8,
 
     fn current(source_digest: [64]u8, identity: Identity) RepairBinding {
         return .{
@@ -250,6 +251,7 @@ const RepairBinding = struct {
             .profile_id = agent_identity.profile_id,
             .policy_hash = identity.policy_hash,
             .module_graph_hash = identity.module_graph_hash,
+            .semantics_hash = zts.semanticsHash(),
         };
     }
 
@@ -263,6 +265,8 @@ const RepairBinding = struct {
         try json.write(&self.policy_hash);
         try json.objectField("module_graph_hash");
         try json.write(&self.module_graph_hash);
+        try json.objectField("semantics_hash");
+        try json.write(&self.semantics_hash);
         try json.endObject();
     }
 };
@@ -278,8 +282,8 @@ fn checkRepairBinding(value: ?std.json.Value, expected: RepairBinding) RepairBin
         .object => |o| o,
         else => return .{ .malformed = "repair `bound` must be an object" },
     };
-    if (object.count() != 4) {
-        return .{ .malformed = "repair `bound` must contain exactly source_digest, profile_id, policy_hash, and module_graph_hash" };
+    if (object.count() != 5) {
+        return .{ .malformed = "repair `bound` must contain exactly source_digest, profile_id, policy_hash, module_graph_hash, and semantics_hash" };
     }
 
     const fields = [_]struct { name: []const u8, expected: []const u8 }{
@@ -287,6 +291,7 @@ fn checkRepairBinding(value: ?std.json.Value, expected: RepairBinding) RepairBin
         .{ .name = "profile_id", .expected = expected.profile_id },
         .{ .name = "policy_hash", .expected = &expected.policy_hash },
         .{ .name = "module_graph_hash", .expected = &expected.module_graph_hash },
+        .{ .name = "semantics_hash", .expected = &expected.semantics_hash },
     };
     for (fields) |field| {
         const supplied = object.get(field.name) orelse
@@ -1424,6 +1429,10 @@ fn parseRepairs(
             return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`intent` must be a string");
         const intent = zts.RepairIntent.fromString(intent_value.string) orelse
             return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .unknown_intent, "`intent` is not a member of the repair vocabulary; read meta.validators for the closed set");
+        const diagnostic_code_value = o.get("diagnostic_code") orelse
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "a repair must name the exact compiler diagnostic that authorized it");
+        if (diagnostic_code_value != .string or diagnostic_code_value.string.len == 0)
+            return try writeApplyRefusalWithGraph(json, file_rel, digest, identity.module_graph_hash, .malformed_repair, "`diagnostic_code` must be a nonempty string");
 
         // A repair is keyed on a byte span. `line` is the older spelling of the
         // same thing for a whole-line rewrite, and it keeps working: within
@@ -1475,6 +1484,7 @@ fn parseRepairs(
 
         try out.append(allocator, .{
             .intent = intent,
+            .diagnostic_code = diagnostic_code_value.string,
             .start_offset = start_offset,
             .end_offset = end_offset,
             .line = line,
@@ -1967,7 +1977,8 @@ fn writeCheckPayload(
 /// equivalence validator exists, so the flag is true exactly when this
 /// diagnostic's repair intent has a row whose method is implemented.
 ///
-/// Six rows answer true, every one of them under M4: the validator
+/// Seven rows answer true: six declared laws under M4 and the pure chained
+/// ternary kernel slice under M3. The validator
 /// re-derives the declared law's rewrite from the original and requires the
 /// candidate to match it byte for byte. Every other row is still `planned` and
 /// answers false.
@@ -2031,7 +2042,7 @@ fn writeDiagnostic(
     try json.objectField("suggestion");
     if (diag.suggestion) |sug| try json.write(sug) else try json.write(null);
     try json.objectField("repair_available");
-    try json.write(repairAvailableFor(diag.code));
+    try json.write(repairAvailableFor(diag));
     try json.endObject();
 }
 
@@ -2039,9 +2050,8 @@ fn writeDiagnostic(
 /// equivalence validator is registered and implemented. A code with no rule, or
 /// a rule with no typed repair, answers false: an unclassified rewrite is
 /// exactly what must not be advertised.
-fn repairAvailableFor(code: []const u8) bool {
-    const rule = policy_catalog.findByCode(code) orelse return false;
-    const intent = rule.repair orelse return false;
+fn repairAvailableFor(diag: json_diagnostics.JsonDiagnostic) bool {
+    const intent = diag.repair_intent orelse return false;
     return repairPolicy.isGradable(intent);
 }
 
@@ -2116,6 +2126,8 @@ fn runCanonicalize(
         // spelling. The legacy names survive only on the frozen v1 surface.
         try json.objectField("intent");
         try json.write(@tagName(repair.intent));
+        try json.objectField("diagnostic_code");
+        try json.write(repair.diagnostic_code);
         try json.objectField("grade");
         try json.write(candidateGrade(repair.intent));
         // The row from the equivalence-validator registry, so a client reads
@@ -2389,7 +2401,11 @@ fn respondWithCurrentRepairBindings(allocator: std.mem.Allocator, request: []con
         try bound.put(arena, "profile_id", .{ .string = binding.profile_id });
         try bound.put(arena, "policy_hash", .{ .string = &binding.policy_hash });
         try bound.put(arena, "module_graph_hash", .{ .string = &binding.module_graph_hash });
+        try bound.put(arena, "semantics_hash", .{ .string = &binding.semantics_hash });
         try repair.object.put(arena, "bound", .{ .object = bound });
+        if (repair.object.get("diagnostic_code") == null) {
+            try repair.object.put(arena, "diagnostic_code", .{ .string = "ZTS604" });
+        }
     }
 
     var encoded: std.Io.Writer.Allocating = .init(allocator);
@@ -2416,7 +2432,7 @@ fn currentTestRepairBinding(
     });
 }
 
-const TestStaleBindingField = enum { none, source_digest, profile_id, policy_hash, module_graph_hash };
+const TestStaleBindingField = enum { none, source_digest, profile_id, policy_hash, module_graph_hash, semantics_hash };
 
 fn testRepairJson(
     allocator: std.mem.Allocator,
@@ -2429,7 +2445,7 @@ fn testRepairJson(
 ) ![]u8 {
     const stale = "stale";
     return std.fmt.allocPrint(allocator,
-        \\{{"intent":"{s}","line":{d},"original":{f},"replacement":{f},"bound":{{"source_digest":"{s}","profile_id":"{s}","policy_hash":"{s}","module_graph_hash":"{s}"}}}}
+        \\{{"intent":"{s}","diagnostic_code":"ZTS604","line":{d},"original":{f},"replacement":{f},"bound":{{"source_digest":"{s}","profile_id":"{s}","policy_hash":"{s}","module_graph_hash":"{s}","semantics_hash":"{s}"}}}}
     , .{
         intent,
         line,
@@ -2439,6 +2455,7 @@ fn testRepairJson(
         if (stale_field == .profile_id) stale else binding.profile_id,
         if (stale_field == .policy_hash) stale else &binding.policy_hash,
         if (stale_field == .module_graph_hash) stale else &binding.module_graph_hash,
+        if (stale_field == .semantics_hash) stale else &binding.semantics_hash,
     });
 }
 
@@ -3374,7 +3391,10 @@ test "check on a rejected handler binds every diagnostic to the digest" {
         // so a client can re-validate without knowing the host layout.
         try testing.expectEqualStrings(digest, d.get("source_digest").?.string);
         try testing.expectEqualStrings("h.ts", d.get("file").?.string);
-        try testing.expect(!d.get("repair_available").?.bool);
+        try testing.expectEqual(
+            std.mem.eql(u8, d.get("code").?.string, "ZTS621"),
+            d.get("repair_available").?.bool,
+        );
         // The span is a half-open byte range into the bytes the digest covers,
         // and its start is the same number `byte_offset` reaches from the line
         // and column. The two are computed independently - the producer carries
@@ -3400,15 +3420,14 @@ test "check on a rejected handler binds every diagnostic to the digest" {
     try testing.expect(found_chain);
 }
 
-test "repair_available is true for the one intent with an implemented validator" {
+test "repair_available follows the exact diagnostic intent and implemented validator" {
     const a = testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     // ZTS620 carries `drop_redundant_bool_compare`, whose registry row reached
-    // `.implemented`. The sibling test above pins the other direction: ZTS621
-    // names no implemented validator and still answers false. Both matter -
-    // a flag that is true everywhere advertises exactly as little as one that
-    // is false everywhere.
+    // `.implemented`. The sibling test above also pins the M3 direction for a
+    // pure ZTS621 instance. Both matter: a flag that ignores the producer's
+    // exact instance intent can advertise a repair whose precondition failed.
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data =
         \\export function handler(req: Request): Response {
         \\  const ready = true;
@@ -3560,7 +3579,7 @@ test "simulate refuses every stale repair binding" {
     defer a.free(root);
     const binding = try currentTestRepairBinding(a, root, "h.ts");
 
-    for ([_]TestStaleBindingField{ .source_digest, .profile_id, .policy_hash, .module_graph_hash }) |stale_field| {
+    for ([_]TestStaleBindingField{ .source_digest, .profile_id, .policy_hash, .module_graph_hash, .semantics_hash }) |stale_field| {
         const repair = try testRepairJson(
             a,
             "replace_let_with_const",

@@ -2522,8 +2522,9 @@ The corpus MUST include:
 - fixed records, arrays, tuples, and limited spread with explicit member reads
 - strict operators, optional chaining, and nullish coalescing
 - `if`, `match`, `assert`, snapshot-finite `for...of`
-- pure boolean conditional expressions, with impure arms rejected as ZTS612 and
-  chained forms as ZTS621, both carrying the `replace_ternary_with_if` repair
+- pure boolean conditional expressions, with impure arms rejected as ZTS612
+  carrying planned `replace_effectful_ternary_with_match`, and pure chained
+  forms as ZTS621 carrying implemented `replace_chained_ternary_with_match`
 - static named modules
 - structural aliases, unions, intersections, literals, readonly, optionals, nominal
   types, guards, utility types, and proof/effect capsules

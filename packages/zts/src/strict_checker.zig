@@ -431,7 +431,7 @@ pub const StrictChecker = struct {
                 .node = node,
                 .message = "a conditional expression may not appear as an arm of another conditional expression",
                 .help = "use `match` over one scrutinee, or an if/else chain feeding a named function",
-                .repair_intent = .replace_ternary_with_if,
+                .repair_intent = if (self.isPureExpr(node)) .replace_chained_ternary_with_match else null,
             });
             return;
         }
@@ -443,7 +443,7 @@ pub const StrictChecker = struct {
                 .node = node,
                 .message = "a ?: arm must be a pure value; effectful selection uses match or if",
                 .help = "bind the effectful call first, or use `match` over the condition for an effectful two-way choice",
-                .repair_intent = .replace_ternary_with_if,
+                .repair_intent = .replace_effectful_ternary_with_match,
             });
         }
     }
@@ -532,6 +532,89 @@ pub const StrictChecker = struct {
             },
             else => true,
         };
+    }
+
+    /// The possible M3 spread intent only names one non-leading spread whose value is
+    /// itself a closed literal object. Moving an unknown object changes
+    /// override precedence, and duplicate literal keys do too. This producer
+    /// check is deliberately allocation-free and conservative; the independent
+    /// kernel validator still has to discharge the concrete replacement. The
+    /// row remains planned because object insertion order is observable.
+    fn canLeadLiteralSpread(
+        self: *const StrictChecker,
+        object_node: NodeIndex,
+        spread_index: usize,
+    ) bool {
+        const object_expr = self.ir_view.getObject(object_node) orelse return false;
+        var spread_count: usize = 0;
+        var flattened_count: usize = 0;
+        for (0..object_expr.properties_count) |index| {
+            const child = self.ir_view.getListIndex(object_expr.properties_start, @intCast(index));
+            if (self.ir_view.getTag(child) == .object_spread) {
+                spread_count += 1;
+                if (index != spread_index) return false;
+                const value = self.ir_view.getOptValue(child) orelse return false;
+                if (self.ir_view.getTag(value) != .object_literal) return false;
+                const literal = self.ir_view.getObject(value) orelse return false;
+                for (0..literal.properties_count) |nested_index| {
+                    const nested = self.ir_view.getListIndex(literal.properties_start, @intCast(nested_index));
+                    if (self.literalPropertyKey(nested) == null) return false;
+                    const property = self.ir_view.getProperty(nested) orelse return false;
+                    if (!self.isPureExpr(property.value)) return false;
+                }
+                flattened_count += literal.properties_count;
+                continue;
+            }
+            if (self.literalPropertyKey(child) == null) return false;
+            const property = self.ir_view.getProperty(child) orelse return false;
+            if (!self.isPureExpr(property.value)) return false;
+            flattened_count += 1;
+        }
+        if (spread_count != 1 or spread_index == 0) return false;
+
+        var left: usize = 0;
+        while (left < flattened_count) : (left += 1) {
+            const left_key = self.flattenedLiteralKey(object_node, left) orelse return false;
+            var right = left + 1;
+            while (right < flattened_count) : (right += 1) {
+                const right_key = self.flattenedLiteralKey(object_node, right) orelse return false;
+                if (std.mem.eql(u8, left_key, right_key)) return false;
+            }
+        }
+        return true;
+    }
+
+    fn literalPropertyKey(self: *const StrictChecker, node: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(node) != .object_property) return null;
+        const property = self.ir_view.getProperty(node) orelse return null;
+        const string_index = self.ir_view.getStringIdx(property.key) orelse return null;
+        return self.ir_view.getString(string_index);
+    }
+
+    fn flattenedLiteralKey(
+        self: *const StrictChecker,
+        object_node: NodeIndex,
+        target: usize,
+    ) ?[]const u8 {
+        const object_expr = self.ir_view.getObject(object_node) orelse return null;
+        var cursor: usize = 0;
+        for (0..object_expr.properties_count) |index| {
+            const child = self.ir_view.getListIndex(object_expr.properties_start, @intCast(index));
+            if (self.ir_view.getTag(child) == .object_spread) {
+                const value = self.ir_view.getOptValue(child) orelse return null;
+                if (self.ir_view.getTag(value) != .object_literal) return null;
+                const literal = self.ir_view.getObject(value) orelse return null;
+                for (0..literal.properties_count) |nested_index| {
+                    const nested = self.ir_view.getListIndex(literal.properties_start, @intCast(nested_index));
+                    if (cursor == target) return self.literalPropertyKey(nested);
+                    cursor += 1;
+                }
+                continue;
+            }
+            if (cursor == target) return self.literalPropertyKey(child);
+            cursor += 1;
+        }
+        return null;
     }
 
     /// A callback body is pure when every statement in it is. The statement
@@ -761,7 +844,7 @@ pub const StrictChecker = struct {
                                 .node = prop_idx,
                                 .message = "object spread must appear before any explicit keys",
                                 .help = "reorder so the spread is first: `{...base, x: 1}` instead of `{x: 1, ...base}`. Later keys still override.",
-                                .repair_intent = .lead_with_spread,
+                                .repair_intent = if (self.canLeadLiteralSpread(node, i)) .lead_with_spread else null,
                             });
                         }
                         if (self.ir_view.getOptValue(prop_idx)) |value| self.walkExpr(value);
@@ -2744,7 +2827,35 @@ test "canonical_compound_assignment does not fire on plain =" {
 test "canonical_non_leading_spread fires when spread follows explicit keys" {
     var checker = try checkSource("function handler(req) { const base = {a: 1}; const next = {b: 2, ...base}; return Response.json(next); }");
     defer checker.deinit();
-    try expectKind(&checker, .canonical_non_leading_spread);
+    var found = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind != .canonical_non_leading_spread) continue;
+        found = true;
+        try testing.expectEqual(@as(?RepairIntent, null), diag.repair_intent);
+    }
+    try testing.expect(found);
+}
+
+test "closed collision-free literal spread carries the bounded M3 intent" {
+    var checker = try checkSource("function handler(req) { const next = {b: 2, ...{a: 1}}; return Response.json(next); }");
+    defer checker.deinit();
+    var found = false;
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind != .canonical_non_leading_spread) continue;
+        found = true;
+        try testing.expectEqual(@as(?RepairIntent, .lead_with_spread), diag.repair_intent);
+    }
+    try testing.expect(found);
+}
+
+test "literal spread collision has no repair intent" {
+    var checker = try checkSource("function handler(req) { const next = {a: 2, ...{a: 1}}; return Response.json(next); }");
+    defer checker.deinit();
+    for (checker.getDiagnostics()) |diag| {
+        if (diag.kind == .canonical_non_leading_spread) {
+            try testing.expectEqual(@as(?RepairIntent, null), diag.repair_intent);
+        }
+    }
 }
 
 test "canonical_non_leading_spread accepts leading spread" {
@@ -2763,7 +2874,7 @@ test "canonical_call_spread accepts positional args" {
     }
 }
 
-test "canonical_ternary_impure diagnostic carries repair_intent = replace_ternary_with_if" {
+test "canonical ternary diagnostics carry diagnostic-specific repair intents" {
     // Every veto-able strict diagnostic must populate the typed repair
     // primitive so the agent picks an apply step
     // directly. ZTS612 is the representative canonical-profile case.
@@ -2774,7 +2885,7 @@ test "canonical_ternary_impure diagnostic carries repair_intent = replace_ternar
         if (diag.kind == .canonical_ternary_impure) {
             saw_ternary = true;
             try testing.expectEqual(
-                @as(?RepairIntent, .replace_ternary_with_if),
+                @as(?RepairIntent, .replace_effectful_ternary_with_match),
                 diag.repair_intent,
             );
         }
