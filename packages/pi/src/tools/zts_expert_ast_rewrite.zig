@@ -543,8 +543,16 @@ test "ast rewrite: replace_arrow_with_function clears veto on reused arrow helpe
 }
 
 test "ast rewrite: replace_export_arrow_with_function clears veto" {
+    // The parameter carries a declared boundary type rather than a raw
+    // `string`. ZTS061 refuses a raw built-in in an exported signature, so with
+    // `id: string` this rewrite traded one diagnostic for another: the arrow
+    // form reported ZTS609 alone and the rewritten form reported ZTS061 alone,
+    // which is a new violation and exactly what the veto exists to refuse. The
+    // test asserts the veto clears, so the fixture has to be a handler whose
+    // only defect is the one the rewrite fixes.
     const source =
-        \\export const load = (id: string): Response => Response.text(id);
+        \\nominal DocId = string;
+        \\export const load = (id: DocId): Response => Response.text(id);
         \\function handler(req: Request): Proof<Response, "state_isolated"> {
         \\  return Response.text("x");
         \\}
@@ -554,9 +562,11 @@ test "ast rewrite: replace_export_arrow_with_function clears veto" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
+    // Line 2: the alias declaration takes line 1, and the intent is located by
+    // line.
     const input = try std.fmt.allocPrint(
         testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":1,\"intent\":\"replace_export_arrow_with_function\"}}",
+        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_export_arrow_with_function\"}}",
         .{path},
     );
     defer testing.allocator.free(input);
@@ -564,7 +574,7 @@ test "ast rewrite: replace_export_arrow_with_function clears veto" {
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "export function load(id: string): Response { return Response.text(id); }") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "export function load(id: DocId): Response { return Response.text(id); }") != null);
     try expectPayloadIntent(result, "replace_export_arrow_with_function");
 }
 
