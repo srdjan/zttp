@@ -2038,8 +2038,15 @@ fn writeCheckPayload(
     try json.objectField("contract_body");
     if (result) |r| {
         if (r.contract) |*contract| {
+            // The precompile contract owns the absolute path it read. The
+            // agent protocol is project-root relative, and exposing that host
+            // path makes identical projects produce different envelopes and
+            // non-replayable tool results. A shallow view is sufficient: the
+            // writer only borrows the contract and `file_rel` outlives it.
+            var portable_contract = contract.*;
+            portable_contract.handler.path = file_rel;
             try json.beginWriteRaw();
-            try zts.handler_contract.writeContractJsonV2(contract, json.writer);
+            try zts.handler_contract.writeContractJsonV2(&portable_contract, json.writer);
             json.endWriteRaw();
         } else try json.write(null);
     } else try json.write(null);
@@ -3352,6 +3359,41 @@ test "check on a clean handler succeeds with no diagnostics" {
     try testing.expectEqual(@as(i64, 2), contract_version.integer);
     try testing.expect(contract_body.object.get("service_calls") != null);
     try testing.expect(contract_body.object.get("serviceCalls") == null);
+}
+
+test "check response is identical for identical projects at different roots" {
+    const allocator = testing.allocator;
+    const source =
+        \\export function handler(req: Request): Response {
+        \\    return Response.json({ ok: true });
+        \\}
+        \\
+    ;
+    var first = testing.tmpDir(.{});
+    defer first.cleanup();
+    var second = testing.tmpDir(.{});
+    defer second.cleanup();
+    try first.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = source });
+    try second.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = source });
+    const first_root = try std.Io.Dir.realPathFileAlloc(first.dir, testing.io, ".", allocator);
+    defer allocator.free(first_root);
+    const second_root = try std.Io.Dir.realPathFileAlloc(second.dir, testing.io, ".", allocator);
+    defer allocator.free(second_root);
+
+    const first_request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{first_root});
+    defer allocator.free(first_request);
+    const second_request = try std.fmt.allocPrint(allocator,
+        \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"handler.ts"}}}}
+    , .{second_root});
+    defer allocator.free(second_request);
+    const first_response = try respond(allocator, first_request);
+    defer allocator.free(first_response);
+    const second_response = try respond(allocator, second_request);
+    defer allocator.free(second_response);
+
+    try testing.expectEqualStrings(first_response, second_response);
 }
 
 test "check publishes a null contract_body when no contract exists" {
