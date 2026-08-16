@@ -2795,11 +2795,35 @@ const Stripper = struct {
     }
 
     fn isObjectTypeBraceStart(self: *const Self, pos: usize) bool {
-        const prev = self.previousSignificantChar(pos) orelse return true;
-        return switch (prev) {
-            ':', '|', '&', '(', '[', '<', ',', '=' => true,
-            else => false,
-        };
+        const prev_idx = self.previousSignificantCharIndex(pos) orelse return true;
+        const prev = self.source[prev_idx];
+        switch (prev) {
+            ':', '|', '&', '(', '[', '<', ',', '=' => return true,
+            else => {},
+        }
+        // `readonly` is a modifier, not a type name, so a brace directly after
+        // it opens the object type it modifies. Deciding from the single
+        // preceding character cannot see that: after `readonly` the character
+        // is the `y`, which reads exactly like the end of a return type, so the
+        // brace was taken for a block and the annotation ended there.
+        //
+        // Only this keyword is admitted. Every other identifier before a brace
+        // really does end a type, and `function f(): boolean {` has to keep
+        // reading the brace as the body.
+        if (isIdentifierContinue(prev)) {
+            return std.mem.eql(u8, self.identifierEndingAt(prev_idx), "readonly");
+        }
+        return false;
+    }
+
+    /// The identifier whose last character sits at `end_idx`, or an empty slice
+    /// when that character does not end one.
+    fn identifierEndingAt(self: *const Self, end_idx: usize) []const u8 {
+        if (end_idx >= self.source.len or !isIdentifierContinue(self.source[end_idx])) return "";
+        var start = end_idx;
+        while (start > 0 and isIdentifierContinue(self.source[start - 1])) start -= 1;
+        if (!isIdentifierStart(self.source[start])) return "";
+        return self.source[start .. end_idx + 1];
     }
 
     fn isObjectTypeMemberKey(self: *const Self, pos: usize) bool {
@@ -3277,6 +3301,54 @@ test "structural declaration stripped" {
     defer @constCast(&result).deinit();
     const trimmed = std.mem.trim(u8, result.code, " \n\r\t");
     try std.testing.expectEqual(@as(usize, 0), trimmed.len);
+}
+
+/// Assert stripped output ignoring how wide the blanking is. The stripper
+/// replaces removed type text with spaces so byte offsets still map back to the
+/// authored file, which makes an exact comparison a test of the annotation's
+/// character count rather than of what survived.
+fn expectStrippedCode(source: []const u8, expected: []const u8) !void {
+    const result = try strip(std.testing.allocator, source, .{});
+    defer @constCast(&result).deinit();
+
+    var collapsed: std.ArrayListUnmanaged(u8) = .empty;
+    defer collapsed.deinit(std.testing.allocator);
+    var in_space = false;
+    for (std.mem.trim(u8, result.code, " \n\r\t")) |c| {
+        const is_space = c == ' ' or c == '\t' or c == '\n' or c == '\r';
+        if (is_space) {
+            in_space = true;
+            continue;
+        }
+        if (in_space and collapsed.items.len > 0) try collapsed.append(std.testing.allocator, ' ');
+        in_space = false;
+        try collapsed.append(std.testing.allocator, c);
+    }
+    try std.testing.expectEqualStrings(expected, collapsed.items);
+}
+
+test "a readonly modifier before an object type keeps the annotation whole" {
+    // `isObjectTypeBraceStart` answers from the character before the brace, and
+    // after `readonly` that character is the `y` of the modifier. The brace read
+    // as a block, so the annotation ended at it and the `= [...]` was left
+    // detached: the declaration reported "const declarations must have an
+    // initializer" and the line reported as unterminated. `readonly string[]`
+    // and `readonly (string | number)[]` were unaffected, which is what kept
+    // this to the one spelling.
+    try expectStrippedCode(
+        "const xs: readonly { name: string }[] = [{ name: \"a\" }];\n",
+        "const xs = [{ name: \"a\" }];",
+    );
+}
+
+test "a brace after a non-modifier identifier still ends the annotation" {
+    // The companion direction. `readonly` is admitted by name, so an identifier
+    // that merely ends in those letters, or any other type name, must keep the
+    // old behaviour of treating the brace as a block.
+    try expectStrippedCode(
+        "function f(): boolean { return true; }\n",
+        "function f() { return true; }",
+    );
 }
 
 test "nominal declaration stripped" {
