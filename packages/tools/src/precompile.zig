@@ -2431,6 +2431,34 @@ fn hasFileImports(js_parser: *zts.parser.JsParser, _: ir.NodeIndex) bool {
 }
 
 /// Compile a handler with file imports as a multi-module bundle
+pub fn discoverModulePaths(
+    allocator: std.mem.Allocator,
+    entry_source: []const u8,
+    filename: []const u8,
+) ![][]u8 {
+    var graph = zts.modules.ModuleGraph.init(allocator);
+    defer graph.deinit();
+    try graph.build(filename, entry_source, readFilePosixForGraph);
+
+    const paths = try allocator.alloc([]u8, graph.module_list.items.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (paths[0..initialized]) |path| allocator.free(path);
+        allocator.free(paths);
+    }
+    for (graph.module_list.items, 0..) |module, index| {
+        paths[index] = try allocator.dupe(u8, module.path);
+        initialized += 1;
+    }
+    return paths;
+}
+
+pub fn freeModulePaths(allocator: std.mem.Allocator, paths: [][]u8) void {
+    for (paths) |path| allocator.free(path);
+    allocator.free(paths);
+}
+
+/// Compile a handler with file imports as a multi-module bundle.
 fn compileMultiModule(
     allocator: std.mem.Allocator,
     entry_source: []const u8,

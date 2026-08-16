@@ -103,6 +103,7 @@ pub const OwnedEntry = union(enum) {
     proof_card: OwnedDisplayMessage,
     diagnostic_box: OwnedDisplayMessage,
     verified_patch: OwnedDisplayMessage,
+    verified_change_set: OwnedDisplayMessage,
     tool_result: OwnedToolResult,
     system_note: []const u8,
 
@@ -113,6 +114,7 @@ pub const OwnedEntry = union(enum) {
             .proof_card => |*message| message.deinit(allocator),
             .diagnostic_box => |*message| message.deinit(allocator),
             .verified_patch => |*message| message.deinit(allocator),
+            .verified_change_set => |*message| message.deinit(allocator),
             .system_note => |body| allocator.free(body),
             .assistant_tool_use => |calls| {
                 for (calls) |*call| call.deinit(allocator);
@@ -356,6 +358,7 @@ pub fn renderPlain(writer: anytype, entry: *const OwnedEntry) !void {
         .proof_card => |message| try writeTaggedLine(writer, "proof", message.llm_text),
         .diagnostic_box => |message| try writeTaggedLine(writer, "error", message.llm_text),
         .verified_patch => |message| try writeTaggedLine(writer, "patch", message.llm_text),
+        .verified_change_set => |message| try writeTaggedLine(writer, "change-set", message.llm_text),
         .system_note => |body| try writeTaggedLine(writer, "note", body),
         .assistant_tool_use => |calls| {
             try writer.writeAll("assistant: tool_use ");
@@ -397,7 +400,7 @@ fn renderRich(writer: *std.Io.Writer, entry: *const OwnedEntry) !void {
     // analyzer JSON; render those legibly for humans. Everything else (and any
     // entry without a payload) falls through to the plain-text label form.
     const payload: ?ui_payload.UiPayload = switch (entry.*) {
-        .proof_card, .diagnostic_box, .verified_patch => |message| message.ui_payload,
+        .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => |message| message.ui_payload,
         .tool_result => |result| result.ui_payload,
         else => null,
     };

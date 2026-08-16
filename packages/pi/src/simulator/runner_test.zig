@@ -278,12 +278,16 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
 test "approval validator rejects digest mismatch without advancing its cursor" {
     var rewrite = "replace_let_with_const".*;
     const rewrite_trace = [_][]u8{rewrite[0..]};
-    const expected_preview = @import("../loop.zig").ApprovalPreview{
+    const changes = [_]@import("../loop.zig").ChangePreview{.{
         .file = "handler.ts",
         .before = "old\n",
         .after = "new\n",
-        .properties = null,
         .rewrite_trace = &rewrite_trace,
+    }};
+    const expected_preview = @import("../loop.zig").ChangeSetApprovalPreview{
+        .proof_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .changes = &changes,
+        .system_proven = false,
     };
     const expected_digest = try runner.approvalPreviewDigest(testing.allocator, expected_preview);
     const manifest = [_]artifact.ApprovalExpectation{.{
@@ -302,8 +306,10 @@ test "approval validator rejects digest mismatch without advancing its cursor" {
     validator.beginTurn(0);
 
     const callback = validator.asApprovalFn();
+    var changed_changes = changes;
+    changed_changes[0].after = "tampered\n";
     var changed = expected_preview;
-    changed.after = "tampered\n";
+    changed.changes = &changed_changes;
     try testing.expectError(error.ReplayMismatch, callback.call(changed));
     try testing.expectEqual(@as(usize, 0), validator.consumedCount());
     switch (validator.lastMismatch().?) {

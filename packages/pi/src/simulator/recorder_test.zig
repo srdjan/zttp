@@ -38,13 +38,16 @@ const deterministic_handler =
     "    return Response.json({ ok: true });\n" ++
     "}\n";
 
-fn renderOpenAiProposeChangeSetResponse(allocator: std.mem.Allocator) ![]u8 {
+fn renderOpenAiProposeChangeSetResponse(
+    allocator: std.mem.Allocator,
+    content: []const u8,
+) ![]u8 {
     var arguments = TextBuffer.init(allocator);
     defer arguments.deinit();
     try std.json.Stringify.value(.{
         .changes = &.{.{
             .file = "handler.ts",
-            .content = deterministic_handler,
+            .content = content,
         }},
     }, .{}, arguments.writer());
 
@@ -70,7 +73,7 @@ fn renderOpenAiProposeChangeSetResponse(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn deterministicEditSteps(allocator: std.mem.Allocator) ![]const []const u8 {
-    const propose_change_set_response = try renderOpenAiProposeChangeSetResponse(allocator);
+    const propose_change_set_response = try renderOpenAiProposeChangeSetResponse(allocator, deterministic_handler);
     const steps = try allocator.alloc([]const u8, 1);
     steps[0] = try cassette_record.serializeCassette(allocator, propose_change_set_response, .{
         .provider = .openai,
@@ -684,18 +687,18 @@ test "simulator recorder captures approved and denied real edit flows" {
             const recorded_digest = try observation.applyReceiptDigest(allocator, entry);
             try testing.expect(recorded_digest.eql(recorder.apply_receipts.items[0].payload_sha256));
             switch (entry.*) {
-                .verified_patch => |*message| switch (message.ui_payload.?) {
-                    .verified_patch => |*patch| {
-                        const applied_at_unix_ms = patch.applied_at_unix_ms;
-                        patch.applied_at_unix_ms +%= 1;
+                .verified_change_set => |*message| switch (message.ui_payload.?) {
+                    .verified_change_set => |*receipt| {
+                        const applied_at_unix_ms = receipt.applied_at_unix_ms;
+                        receipt.applied_at_unix_ms +%= 1;
                         const timestamp_mutation = try observation.applyReceiptDigest(allocator, entry);
                         try testing.expect(recorded_digest.eql(timestamp_mutation));
-                        patch.applied_at_unix_ms = applied_at_unix_ms;
+                        receipt.applied_at_unix_ms = applied_at_unix_ms;
 
-                        patch.post_apply_ok = !patch.post_apply_ok;
+                        receipt.system_proven = !receipt.system_proven;
                         const stable_mutation = try observation.applyReceiptDigest(allocator, entry);
                         try testing.expect(!recorded_digest.eql(stable_mutation));
-                        patch.post_apply_ok = !patch.post_apply_ok;
+                        receipt.system_proven = !receipt.system_proven;
                     },
                     else => return error.TestFailed,
                 },
@@ -741,9 +744,19 @@ test "simulator runner preserves an approved edit into the next real Turn" {
     const allocator = arena.allocator();
     const one_turn_steps = try deterministicEditSteps(allocator);
     try testing.expectEqual(@as(usize, 1), one_turn_steps.len);
-    const steps = try allocator.alloc([]const u8, one_turn_steps.len * 2);
-    @memcpy(steps[0..one_turn_steps.len], one_turn_steps);
-    @memcpy(steps[one_turn_steps.len..], one_turn_steps);
+    const second_handler =
+        "function handler(req: Request): Proof<Response, \"deterministic\"> {\n" ++
+        "    return Response.json({ ok: true, revision: 2 });\n" ++
+        "}\n";
+    const second_response = try renderOpenAiProposeChangeSetResponse(allocator, second_handler);
+    const steps = try allocator.alloc([]const u8, 2);
+    steps[0] = one_turn_steps[0];
+    steps[1] = try cassette_record.serializeCassette(allocator, second_response, .{
+        .provider = .openai,
+        .scenario = "recorder-edit-flow-second-turn",
+        .stream = true,
+        .model = openai_client.default_model,
+    });
 
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);

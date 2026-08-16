@@ -1133,26 +1133,31 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
     }
 }
 
-fn approveEdit(preview: loop.ApprovalPreview) !bool {
-    // Show what is being approved before asking: change size and the proven
-    // properties the edit establishes (the differentiator), with `d` to dump the
-    // full proposed file. Approving a verified change sight-unseen defeats the
-    // human-in-the-loop gate, so the preview comes before the prompt.
+fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
     var hdr_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(
         &hdr_buf,
-        "\nVerified edit to {s}  ({d} -> {d} lines)\n",
-        .{ preview.file, lineCount(preview.before orelse ""), lineCount(preview.after) },
-    ) catch "\nVerified edit\n";
+        "\nVerified change set: {d} source file{s}  proof={s}\n",
+        .{ preview.changes.len, if (preview.changes.len == 1) "" else "s", preview.proof_id },
+    ) catch "\nVerified change set\n";
     _ = std.c.write(std.c.STDOUT_FILENO, header.ptr, header.len);
-    if (preview.properties) |props| writeProvenProperties(props);
-    if (preview.rewrite_trace.len > 0) writeRewriteTrace(preview.rewrite_trace);
-    // Show what changed inline so review+approve is one keystroke; `d` still
-    // dumps the full proposed file for cases the compact diff cannot convey.
-    writeEditDiff(preview.before, preview.after);
+    for (preview.changes) |change| {
+        const change_header = std.fmt.bufPrint(
+            &hdr_buf,
+            "\n{s}  ({d} -> {d} lines)\n",
+            .{ change.file, lineCount(change.before orelse ""), lineCount(change.after) },
+        ) catch "\nsource change\n";
+        _ = std.c.write(std.c.STDOUT_FILENO, change_header.ptr, change_header.len);
+        if (change.rewrite_trace.len > 0) writeRewriteTrace(change.rewrite_trace);
+        writeEditDiff(change.before, change.after);
+    }
+    if (preview.system_proven) {
+        const system_line = "\nAggregate system proof passed.\n";
+        _ = std.c.write(std.c.STDOUT_FILENO, system_line.ptr, system_line.len);
+    }
 
     while (true) {
-        const prompt = "Apply this edit? [y/N, d=show file] ";
+        const prompt = "Apply this change set? [y/N, d=show files] ";
         _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
 
         var line_buf: [256]u8 = undefined;
@@ -1163,8 +1168,12 @@ fn approveEdit(preview: loop.ApprovalPreview) !bool {
         switch (trimmed[0]) {
             'y', 'Y' => return true,
             'd', 'D' => {
-                _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
-                writeMaybeTruncated(preview.after);
+                for (preview.changes) |change| {
+                    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+                    _ = std.c.write(std.c.STDOUT_FILENO, change.file.ptr, change.file.len);
+                    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+                    writeMaybeTruncated(change.after);
+                }
                 continue;
             },
             else => return false,

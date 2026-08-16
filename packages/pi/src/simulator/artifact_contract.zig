@@ -77,6 +77,7 @@ pub const EventKind = enum {
     proof_card,
     diagnostic_box,
     verified_patch,
+    verified_change_set,
     system_note,
     turn_end,
 };
@@ -88,6 +89,7 @@ pub const TranscriptItemKind = enum {
     proof_card,
     diagnostic_box,
     verified_patch,
+    verified_change_set,
     system_note,
 };
 pub const WorkspaceChangeKind = enum { created, changed, deleted };

@@ -1,12 +1,12 @@
 //! Rebuild an owned raw `Transcript` plus its latest provider projection from
-//! a framed v3 event journal.
+//! a framed v4 event journal.
 //!
 //! Pure, wire-free helper used by resume flows to restore a previous session
 //! into memory. Tool-use frames that share one logical entry ID are coalesced
 //! back into the original multi-call assistant entry.
 //!
 //! Errors:
-//!   - `error.SchemaVersionUnsupported` - the journal is not direct-cutover v3.
+//!   - `error.SchemaVersionUnsupported` - the journal is not direct-cutover v4.
 //!   - `error.CorruptEventsLog` - frame or JSON corruption, invalid stable IDs,
 //!     a malformed checkpoint, or an unknown event kind.
 //!   - Underlying file-IO errors propagate (`error.FileNotFound`, etc.).
@@ -48,7 +48,7 @@ pub fn reconstructTranscript(
             => {
                 if (diag) |d| d.* = .{
                     .line_number = record_number + 1,
-                    .message = "invalid or malformed v3 event frame",
+                    .message = "invalid or malformed v4 event frame",
                 };
                 return error.CorruptEventsLog;
             },
@@ -61,7 +61,7 @@ pub fn reconstructTranscript(
             error.CorruptEventsLog, error.InvalidProjectionCut => {
                 if (diag) |d| d.* = .{
                     .line_number = record_number,
-                    .message = "invalid or malformed v3 event frame",
+                    .message = "invalid or malformed v4 event frame",
                 };
                 return error.CorruptEventsLog;
             },
@@ -126,6 +126,8 @@ fn appendFromLine(
         try appendDisplayMessage(allocator, tr, payload, .diagnostic_box);
     } else if (std.mem.eql(u8, kind, "verified_patch")) {
         try appendDisplayMessage(allocator, tr, payload, .verified_patch);
+    } else if (std.mem.eql(u8, kind, "verified_change_set")) {
+        try appendDisplayMessage(allocator, tr, payload, .verified_change_set);
     } else if (std.mem.eql(u8, kind, "tool_use")) {
         try appendToolUse(allocator, tr, payload);
     } else if (std.mem.eql(u8, kind, "tool_use_batch")) {
@@ -156,6 +158,7 @@ fn isTranscriptKind(kind: []const u8) bool {
         std.mem.eql(u8, kind, "proof_card") or
         std.mem.eql(u8, kind, "diagnostic_box") or
         std.mem.eql(u8, kind, "verified_patch") or
+        std.mem.eql(u8, kind, "verified_change_set") or
         std.mem.eql(u8, kind, "tool_use") or
         std.mem.eql(u8, kind, "tool_use_batch") or
         std.mem.eql(u8, kind, "tool_result") or
@@ -228,7 +231,7 @@ fn appendText(
     try tr.entries.append(allocator, entry);
 }
 
-const DisplayKind = enum { proof_card, diagnostic_box, verified_patch };
+const DisplayKind = enum { proof_card, diagnostic_box, verified_patch, verified_change_set };
 
 fn appendDisplayMessage(
     allocator: std.mem.Allocator,
@@ -251,6 +254,7 @@ fn appendDisplayMessage(
         .proof_card => .{ .proof_card = message },
         .diagnostic_box => .{ .diagnostic_box = message },
         .verified_patch => .{ .verified_patch = message },
+        .verified_change_set => .{ .verified_change_set = message },
     });
 }
 

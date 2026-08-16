@@ -239,7 +239,7 @@ pub const Recorder = struct {
                 .kind = observation.transcriptKind(entry),
                 .payload_sha256 = event.payload_sha256,
             });
-            if (event.kind == .verified_patch) {
+            if (event.kind == .verified_patch or event.kind == .verified_change_set) {
                 const receipt_digest = try observation.applyReceiptDigest(self.allocator(), entry);
                 try self.apply_receipts.append(self.allocator(), .{
                     .index = @intCast(self.apply_receipts.items.len),
@@ -519,7 +519,7 @@ pub const Recorder = struct {
         };
     }
 
-    fn recordApproval(context: *anyopaque, preview: loop.ApprovalPreview) anyerror!bool {
+    fn recordApproval(context: *anyopaque, preview: loop.ChangeSetApprovalPreview) anyerror!bool {
         const self: *Recorder = @ptrCast(@alignCast(context));
         const pending = if (self.pending_turn) |*turn| turn else return error.InvalidRecorderState;
         if (self.approval_checkpoints.items.len >= artifact.Limits.approval_checkpoints) {

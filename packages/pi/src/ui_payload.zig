@@ -486,6 +486,67 @@ pub const VerifiedPatchPayload = struct {
     }
 };
 
+pub const VerifiedChange = struct {
+    file: []u8,
+    baseline_state: []u8,
+    baseline_sha256: []u8,
+    candidate_sha256: []u8,
+    before: ?[]u8,
+    after: []u8,
+    unified_diff: []u8,
+    rewrite_trace: [][]u8 = &.{},
+
+    pub fn clone(self: VerifiedChange, allocator: std.mem.Allocator) !VerifiedChange {
+        return payload_memory.cloneOwned(VerifiedChange, self, allocator);
+    }
+
+    pub fn deinit(self: *VerifiedChange, allocator: std.mem.Allocator) void {
+        payload_memory.freeOwned(VerifiedChange, self, allocator);
+    }
+};
+
+pub const VerifiedProofInput = struct {
+    path: []u8,
+    state: []u8,
+    sha256: []u8,
+
+    pub fn clone(self: VerifiedProofInput, allocator: std.mem.Allocator) !VerifiedProofInput {
+        return payload_memory.cloneOwned(VerifiedProofInput, self, allocator);
+    }
+
+    pub fn deinit(self: *VerifiedProofInput, allocator: std.mem.Allocator) void {
+        payload_memory.freeOwned(VerifiedProofInput, self, allocator);
+    }
+};
+
+/// One durable receipt for an ordered source change set. The transaction and
+/// compiler proof share `transaction_id`; every source and proof input needed
+/// to reproduce or audit the decision is listed explicitly.
+pub const VerifiedChangeSetPayload = struct {
+    proof_schema_version: []u8,
+    transaction_id: []u8,
+    compiler_version: []u8,
+    profile_id: []u8,
+    policy_hash: []u8,
+    grammar_hash: []u8,
+    semantics_hash: []u8,
+    diagnostic_catalog_hash: []u8,
+    read_set_digest: []u8,
+    applied_at_unix_ms: i64,
+    system_proven: bool,
+    proof_roots: [][]u8,
+    changes: []VerifiedChange,
+    proof_inputs: []VerifiedProofInput,
+
+    pub fn clone(self: VerifiedChangeSetPayload, allocator: std.mem.Allocator) !VerifiedChangeSetPayload {
+        return payload_memory.cloneOwned(VerifiedChangeSetPayload, self, allocator);
+    }
+
+    pub fn deinit(self: *VerifiedChangeSetPayload, allocator: std.mem.Allocator) void {
+        payload_memory.freeOwned(VerifiedChangeSetPayload, self, allocator);
+    }
+};
+
 fn cloneStringSlice(allocator: std.mem.Allocator, items: []const []u8) ![][]u8 {
     const copy = try allocator.alloc([]u8, items.len);
     errdefer allocator.free(copy);
@@ -545,6 +606,7 @@ pub const UiPayload = union(enum) {
     repair_candidate: RepairCandidatePayload,
     protocol_repair: ProtocolRepairPayload,
     verified_patch: VerifiedPatchPayload,
+    verified_change_set: VerifiedChangeSetPayload,
     plain_text: []u8,
 
     pub fn clone(self: UiPayload, allocator: std.mem.Allocator) !UiPayload {
@@ -559,6 +621,7 @@ pub const UiPayload = union(enum) {
             .repair_candidate => |payload| .{ .repair_candidate = try payload.clone(allocator) },
             .protocol_repair => |payload| .{ .protocol_repair = try payload.clone(allocator) },
             .verified_patch => |payload| .{ .verified_patch = try payload.clone(allocator) },
+            .verified_change_set => |payload| .{ .verified_change_set = try payload.clone(allocator) },
             .plain_text => |text| .{ .plain_text = try allocator.dupe(u8, text) },
         };
     }
@@ -572,6 +635,7 @@ pub const UiPayload = union(enum) {
             .repair_candidate => |*payload| payload.deinit(allocator),
             .protocol_repair => |*payload| payload.deinit(allocator),
             .verified_patch => |*payload| payload.deinit(allocator),
+            .verified_change_set => |*payload| payload.deinit(allocator),
             .plain_text => |text| allocator.free(text),
         }
         self.* = .{ .plain_text = &.{} };
@@ -903,6 +967,71 @@ pub fn writeJson(writer: *std.Io.Writer, payload: UiPayload) !void {
                 .{ patch.capsule_total, patch.capsule_regressed },
             );
         },
+        .verified_change_set => |receipt| {
+            try writer.writeAll("\"kind\":\"verified_change_set\",\"proof_schema_version\":");
+            try json_writer.writeString(writer, receipt.proof_schema_version);
+            try writer.writeAll(",\"transaction_id\":");
+            try json_writer.writeString(writer, receipt.transaction_id);
+            try writer.writeAll(",\"compiler_version\":");
+            try json_writer.writeString(writer, receipt.compiler_version);
+            try writer.writeAll(",\"profile_id\":");
+            try json_writer.writeString(writer, receipt.profile_id);
+            try writer.writeAll(",\"policy_hash\":");
+            try json_writer.writeString(writer, receipt.policy_hash);
+            try writer.writeAll(",\"grammar_hash\":");
+            try json_writer.writeString(writer, receipt.grammar_hash);
+            try writer.writeAll(",\"semantics_hash\":");
+            try json_writer.writeString(writer, receipt.semantics_hash);
+            try writer.writeAll(",\"diagnostic_catalog_hash\":");
+            try json_writer.writeString(writer, receipt.diagnostic_catalog_hash);
+            try writer.writeAll(",\"read_set_digest\":");
+            try json_writer.writeString(writer, receipt.read_set_digest);
+            try writer.writeAll(",\"applied_at_unix_ms\":");
+            try writer.print("{d}", .{receipt.applied_at_unix_ms});
+            try writer.writeAll(",\"system_proven\":");
+            try writer.writeAll(if (receipt.system_proven) "true" else "false");
+            try writer.writeAll(",\"proof_roots\":[");
+            for (receipt.proof_roots, 0..) |root, index| {
+                if (index > 0) try writer.writeByte(',');
+                try json_writer.writeString(writer, root);
+            }
+            try writer.writeAll("],\"changes\":[");
+            for (receipt.changes, 0..) |change, index| {
+                if (index > 0) try writer.writeByte(',');
+                try writer.writeAll("{\"file\":");
+                try json_writer.writeString(writer, change.file);
+                try writer.writeAll(",\"baseline_state\":");
+                try json_writer.writeString(writer, change.baseline_state);
+                try writer.writeAll(",\"baseline_sha256\":");
+                try json_writer.writeString(writer, change.baseline_sha256);
+                try writer.writeAll(",\"candidate_sha256\":");
+                try json_writer.writeString(writer, change.candidate_sha256);
+                try writer.writeAll(",\"before\":");
+                if (change.before) |before| try json_writer.writeString(writer, before) else try writer.writeAll("null");
+                try writer.writeAll(",\"after\":");
+                try json_writer.writeString(writer, change.after);
+                try writer.writeAll(",\"unified_diff\":");
+                try json_writer.writeString(writer, change.unified_diff);
+                try writer.writeAll(",\"rewrite_trace\":[");
+                for (change.rewrite_trace, 0..) |rewrite, rewrite_index| {
+                    if (rewrite_index > 0) try writer.writeByte(',');
+                    try json_writer.writeString(writer, rewrite);
+                }
+                try writer.writeAll("]}");
+            }
+            try writer.writeAll("],\"proof_inputs\":[");
+            for (receipt.proof_inputs, 0..) |input, index| {
+                if (index > 0) try writer.writeByte(',');
+                try writer.writeAll("{\"path\":");
+                try json_writer.writeString(writer, input.path);
+                try writer.writeAll(",\"state\":");
+                try json_writer.writeString(writer, input.state);
+                try writer.writeAll(",\"sha256\":");
+                try json_writer.writeString(writer, input.sha256);
+                try writer.writeByte('}');
+            }
+            try writer.writeByte(']');
+        },
     }
     try writer.writeByte('}');
 }
@@ -935,6 +1064,19 @@ pub fn writeLegible(writer: *std.Io.Writer, payload: UiPayload) !bool {
                 }
                 try writer.writeByte('\n');
             }
+            return true;
+        },
+        .verified_change_set => |receipt| {
+            try writer.print(
+                "verified change set: {d} file{s} ({s})\n",
+                .{
+                    receipt.changes.len,
+                    if (receipt.changes.len == 1) "" else "s",
+                    receipt.transaction_id,
+                },
+            );
+            for (receipt.changes) |change| try writer.print("  {s}\n", .{change.file});
+            if (receipt.system_proven) try writer.writeAll("  aggregate system proof passed\n");
             return true;
         },
         .verified_patch => |patch| {
@@ -1268,12 +1410,180 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             .capsule_regressed = capsule_regressed,
         } };
     }
+    if (std.mem.eql(u8, kind_val.string, "verified_change_set")) {
+        const changes_value = obj.get("changes") orelse return error.InvalidUiPayload;
+        const inputs_value = obj.get("proof_inputs") orelse return error.InvalidUiPayload;
+        const roots_value = obj.get("proof_roots") orelse return error.InvalidUiPayload;
+        if (changes_value != .array or changes_value.array.items.len == 0 or
+            inputs_value != .array or inputs_value.array.items.len == 0 or
+            roots_value != .array or roots_value.array.items.len == 0)
+        {
+            return error.InvalidUiPayload;
+        }
+        const transaction_id = getString(obj, "transaction_id") orelse return error.InvalidUiPayload;
+        const policy_hash = getString(obj, "policy_hash") orelse return error.InvalidUiPayload;
+        const grammar_hash = getString(obj, "grammar_hash") orelse return error.InvalidUiPayload;
+        const semantics_hash = getString(obj, "semantics_hash") orelse return error.InvalidUiPayload;
+        const diagnostic_hash = getString(obj, "diagnostic_catalog_hash") orelse return error.InvalidUiPayload;
+        const read_set_digest = getString(obj, "read_set_digest") orelse return error.InvalidUiPayload;
+        const hashes = [_][]const u8{
+            transaction_id,
+            policy_hash,
+            grammar_hash,
+            semantics_hash,
+            diagnostic_hash,
+            read_set_digest,
+        };
+        for (hashes) |hash| if (!isLowerHex64(hash)) return error.InvalidUiPayload;
+
+        const changes = try parseVerifiedChanges(allocator, changes_value.array.items);
+        errdefer {
+            for (changes) |*change| change.deinit(allocator);
+            allocator.free(changes);
+        }
+        const proof_inputs = try parseVerifiedProofInputs(allocator, inputs_value.array.items);
+        errdefer {
+            for (proof_inputs) |*input| input.deinit(allocator);
+            allocator.free(proof_inputs);
+        }
+        const proof_roots = try parseStringArrayField(allocator, roots_value);
+        errdefer freeStringSlice(allocator, proof_roots);
+
+        const proof_schema_copy = try allocator.dupe(u8, getString(obj, "proof_schema_version") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(proof_schema_copy);
+        const transaction_copy = try allocator.dupe(u8, transaction_id);
+        errdefer allocator.free(transaction_copy);
+        const compiler_copy = try allocator.dupe(u8, getString(obj, "compiler_version") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(compiler_copy);
+        const profile_copy = try allocator.dupe(u8, getString(obj, "profile_id") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(profile_copy);
+        const policy_copy = try allocator.dupe(u8, policy_hash);
+        errdefer allocator.free(policy_copy);
+        const grammar_copy = try allocator.dupe(u8, grammar_hash);
+        errdefer allocator.free(grammar_copy);
+        const semantics_copy = try allocator.dupe(u8, semantics_hash);
+        errdefer allocator.free(semantics_copy);
+        const diagnostic_copy = try allocator.dupe(u8, diagnostic_hash);
+        errdefer allocator.free(diagnostic_copy);
+        const read_set_copy = try allocator.dupe(u8, read_set_digest);
+        errdefer allocator.free(read_set_copy);
+
+        return .{ .verified_change_set = .{
+            .proof_schema_version = proof_schema_copy,
+            .transaction_id = transaction_copy,
+            .compiler_version = compiler_copy,
+            .profile_id = profile_copy,
+            .policy_hash = policy_copy,
+            .grammar_hash = grammar_copy,
+            .semantics_hash = semantics_copy,
+            .diagnostic_catalog_hash = diagnostic_copy,
+            .read_set_digest = read_set_copy,
+            .applied_at_unix_ms = getInteger(obj, "applied_at_unix_ms") orelse return error.InvalidUiPayload,
+            .system_proven = getBool(obj, "system_proven") orelse return error.InvalidUiPayload,
+            .proof_roots = proof_roots,
+            .changes = changes,
+            .proof_inputs = proof_inputs,
+        } };
+    }
 
     return .{ .plain_text = try std.fmt.allocPrint(
         allocator,
         "Unsupported UI payload kind: {s}",
         .{kind_val.string},
     ) };
+}
+
+fn parseVerifiedChanges(allocator: std.mem.Allocator, values: []const std.json.Value) ![]VerifiedChange {
+    const changes = try allocator.alloc(VerifiedChange, values.len);
+    for (changes) |*change| change.* = undefined;
+    var initialized: usize = 0;
+    errdefer {
+        while (initialized > 0) {
+            initialized -= 1;
+            changes[initialized].deinit(allocator);
+        }
+        allocator.free(changes);
+    }
+    while (initialized < values.len) : (initialized += 1) {
+        const value = values[initialized];
+        if (value != .object) return error.InvalidUiPayload;
+        const obj = value.object;
+        const baseline_state = getString(obj, "baseline_state") orelse return error.InvalidUiPayload;
+        const baseline_sha256 = getString(obj, "baseline_sha256") orelse return error.InvalidUiPayload;
+        const candidate_sha256 = getString(obj, "candidate_sha256") orelse return error.InvalidUiPayload;
+        if ((!std.mem.eql(u8, baseline_state, "present") and !std.mem.eql(u8, baseline_state, "absent")) or
+            !isLowerHex64(baseline_sha256) or !isLowerHex64(candidate_sha256))
+        {
+            return error.InvalidUiPayload;
+        }
+        const rewrite_trace = try parseStringArrayField(allocator, obj.get("rewrite_trace"));
+        errdefer freeStringSlice(allocator, rewrite_trace);
+        const file = try allocator.dupe(u8, getString(obj, "file") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(file);
+        const state = try allocator.dupe(u8, baseline_state);
+        errdefer allocator.free(state);
+        const baseline = try allocator.dupe(u8, baseline_sha256);
+        errdefer allocator.free(baseline);
+        const candidate = try allocator.dupe(u8, candidate_sha256);
+        errdefer allocator.free(candidate);
+        const before_value = try getOptionalString(obj, "before");
+        const before = if (before_value) |bytes| try allocator.dupe(u8, bytes) else null;
+        errdefer if (before) |bytes| allocator.free(bytes);
+        const after = try allocator.dupe(u8, getString(obj, "after") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(after);
+        const diff = try allocator.dupe(u8, getString(obj, "unified_diff") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(diff);
+        changes[initialized] = .{
+            .file = file,
+            .baseline_state = state,
+            .baseline_sha256 = baseline,
+            .candidate_sha256 = candidate,
+            .before = before,
+            .after = after,
+            .unified_diff = diff,
+            .rewrite_trace = rewrite_trace,
+        };
+    }
+    return changes;
+}
+
+fn parseVerifiedProofInputs(allocator: std.mem.Allocator, values: []const std.json.Value) ![]VerifiedProofInput {
+    const inputs = try allocator.alloc(VerifiedProofInput, values.len);
+    for (inputs) |*input| input.* = undefined;
+    var initialized: usize = 0;
+    errdefer {
+        while (initialized > 0) {
+            initialized -= 1;
+            inputs[initialized].deinit(allocator);
+        }
+        allocator.free(inputs);
+    }
+    while (initialized < values.len) : (initialized += 1) {
+        const value = values[initialized];
+        if (value != .object) return error.InvalidUiPayload;
+        const obj = value.object;
+        const state_value = getString(obj, "state") orelse return error.InvalidUiPayload;
+        const digest_value = getString(obj, "sha256") orelse return error.InvalidUiPayload;
+        if ((!std.mem.eql(u8, state_value, "present") and !std.mem.eql(u8, state_value, "absent")) or
+            !isLowerHex64(digest_value))
+        {
+            return error.InvalidUiPayload;
+        }
+        const path = try allocator.dupe(u8, getString(obj, "path") orelse return error.InvalidUiPayload);
+        errdefer allocator.free(path);
+        const state = try allocator.dupe(u8, state_value);
+        errdefer allocator.free(state);
+        const digest = try allocator.dupe(u8, digest_value);
+        errdefer allocator.free(digest);
+        inputs[initialized] = .{ .path = path, .state = state, .sha256 = digest };
+    }
+    return inputs;
+}
+
+fn isLowerHex64(value: []const u8) bool {
+    if (value.len != 64) return false;
+    for (value) |byte| if (!std.ascii.isDigit(byte) and !(byte >= 'a' and byte <= 'f')) return false;
+    return true;
 }
 
 fn parseHash32(value_opt: ?std.json.Value) !?[32]u8 {
@@ -2262,6 +2572,69 @@ test "verified_patch parser accepts legacy minimal schema" {
         },
         else => return error.TestFailed,
     }
+}
+
+test "verified change set payload round-trips every proof binding" {
+    const hash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    var rewrites = [_][]u8{@constCast("normalize-semicolon")};
+    var changes = [_]VerifiedChange{.{
+        .file = @constCast("src/a.ts"),
+        .baseline_state = @constCast("present"),
+        .baseline_sha256 = @constCast(hash),
+        .candidate_sha256 = @constCast(hash),
+        .before = @constCast("old"),
+        .after = @constCast("new"),
+        .unified_diff = @constCast("@@ -1,1 +1,1 @@\n-old\n+new\n"),
+        .rewrite_trace = &rewrites,
+    }};
+    var inputs = [_]VerifiedProofInput{.{
+        .path = @constCast("src/a.ts"),
+        .state = @constCast("present"),
+        .sha256 = @constCast(hash),
+    }};
+    var roots = [_][]u8{@constCast("src/a.ts")};
+    const source: VerifiedChangeSetPayload = .{
+        .proof_schema_version = @constCast("zttp-aggregate-source-proof-v1"),
+        .transaction_id = @constCast(hash),
+        .compiler_version = @constCast("0.1.0"),
+        .profile_id = @constCast("zttp-public-v1"),
+        .policy_hash = @constCast(hash),
+        .grammar_hash = @constCast(hash),
+        .semantics_hash = @constCast(hash),
+        .diagnostic_catalog_hash = @constCast(hash),
+        .read_set_digest = @constCast(hash),
+        .applied_at_unix_ms = 42,
+        .system_proven = true,
+        .proof_roots = &roots,
+        .changes = &changes,
+        .proof_inputs = &inputs,
+    };
+    var payload: UiPayload = .{ .verified_change_set = try source.clone(testing.allocator) };
+    defer payload.deinit(testing.allocator);
+
+    var roundtripped = try roundTrip(testing.allocator, payload);
+    defer roundtripped.deinit(testing.allocator);
+    switch (roundtripped) {
+        .verified_change_set => |receipt| {
+            try testing.expectEqualStrings(hash, receipt.transaction_id);
+            try testing.expectEqual(@as(usize, 1), receipt.changes.len);
+            try testing.expectEqualStrings("src/a.ts", receipt.changes[0].file);
+            try testing.expectEqualStrings("new", receipt.changes[0].after);
+            try testing.expectEqualStrings("normalize-semicolon", receipt.changes[0].rewrite_trace[0]);
+            try testing.expectEqual(@as(usize, 1), receipt.proof_inputs.len);
+            try testing.expect(receipt.system_proven);
+        },
+        else => return error.TestFailed,
+    }
+}
+
+test "verified change set parser rejects an empty proof cohort" {
+    const json =
+        \\{"kind":"verified_change_set","changes":[],"proof_inputs":[],"proof_roots":[]}
+    ;
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    try testing.expectError(error.InvalidUiPayload, parse(testing.allocator, parsed.value));
 }
 
 test "session tree payload round-trips" {

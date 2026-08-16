@@ -41,6 +41,12 @@ const persister = @import("session/persister.zig");
 const reconstructor = @import("session/reconstructor.zig");
 const project_context = @import("context/project_context.zig");
 const expert_workflow = @import("expert_workflow.zig");
+const change_transaction = @import("change_transaction.zig");
+const change_set = @import("change_set.zig");
+const workspace_snapshot = @import("workspace_snapshot.zig");
+const aggregate_proof = @import("aggregate_proof.zig");
+const change_set_receipt = @import("change_set_receipt.zig");
+const ui_payload = @import("ui_payload.zig");
 
 const Registry = registry_mod.Registry;
 const Transcript = transcript_mod.Transcript;
@@ -797,6 +803,105 @@ pub const AgentSession = struct {
     }
 };
 
+fn recoverWorkspaceSourcesBeforeBackend(allocator: std.mem.Allocator) !void {
+    var lock = try change_transaction.WorkspaceLock.acquire(allocator, ".");
+    defer lock.deinit();
+    _ = try change_transaction.recoverAllLocked(allocator, &lock, ".");
+}
+
+fn transactionIdFromEntry(entry: *const transcript_mod.OwnedEntry) ?[]const u8 {
+    return switch (entry.*) {
+        .verified_change_set => |message| if (message.ui_payload) |payload| switch (payload) {
+            .verified_change_set => |receipt| receipt.transaction_id,
+            else => null,
+        } else null,
+        else => null,
+    };
+}
+
+fn transcriptHasTransaction(session: *const AgentSession, transaction_id: []const u8) bool {
+    for (session.transcript.entries.items) |*entry| {
+        const present = transactionIdFromEntry(entry) orelse continue;
+        if (std.mem.eql(u8, present, transaction_id)) return true;
+    }
+    return false;
+}
+
+fn appendRecoveredReceipt(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+    pending: change_transaction.PendingReceipt,
+) !void {
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, pending.json, .{}) catch
+        return error.InvalidRecoveredChangeSetReceipt;
+    defer parsed.deinit();
+    var payload = ui_payload.parse(allocator, parsed.value) catch
+        return error.InvalidRecoveredChangeSetReceipt;
+    var payload_owned = true;
+    defer if (payload_owned) payload.deinit(allocator);
+    const receipt = switch (payload) {
+        .verified_change_set => |value| value,
+        else => return error.InvalidRecoveredChangeSetReceipt,
+    };
+    if (!std.mem.eql(u8, receipt.transaction_id, &pending.transaction_id))
+        return error.InvalidRecoveredChangeSetReceipt;
+    const summary = try std.fmt.allocPrint(
+        allocator,
+        "recovered verified change set: {d} source file{s} ({s})",
+        .{
+            receipt.changes.len,
+            if (receipt.changes.len == 1) "" else "s",
+            receipt.transaction_id,
+        },
+    );
+    errdefer allocator.free(summary);
+    try session.transcript.entries.append(allocator, .{ .verified_change_set = .{
+        .llm_text = summary,
+        .ui_payload = payload,
+    } });
+    payload_owned = false;
+}
+
+fn persistTranscriptTail(allocator: std.mem.Allocator, session: *AgentSession) !void {
+    const entries = session.transcript.entries.items;
+    while (session.last_persisted_len < entries.len) {
+        try session.appendPersistedEntry(
+            allocator,
+            session.transcript.entryIdAt(session.last_persisted_len),
+            &entries[session.last_persisted_len],
+        );
+        session.last_persisted_len += 1;
+    }
+}
+
+/// Recover source state first, then make every committed receipt durable in the
+/// current session before acknowledging it in the workspace journal. If the
+/// journal append fails, the receipt remains pending and startup retries it.
+fn reconcileWorkspaceReceipts(
+    allocator: std.mem.Allocator,
+    session: *AgentSession,
+) !void {
+    var lock = try change_transaction.WorkspaceLock.acquire(allocator, ".");
+    defer lock.deinit();
+    _ = try change_transaction.recoverAllLocked(allocator, &lock, ".");
+    const pending = try change_transaction.pendingReceiptsLocked(allocator, &lock, ".");
+    defer {
+        for (pending) |*receipt| receipt.deinit(allocator);
+        allocator.free(pending);
+    }
+    for (pending) |receipt| {
+        if (!transcriptHasTransaction(session, &receipt.transaction_id))
+            try appendRecoveredReceipt(allocator, session, receipt);
+        if (session.events_path != null) try persistTranscriptTail(allocator, session);
+        try change_transaction.markReceiptedLocked(
+            allocator,
+            &lock,
+            ".",
+            &receipt.transaction_id,
+        );
+    }
+}
+
 /// Resolve session identity, construct only that provider's backend, and,
 /// unless `config.no_session` is true, materialize the on-disk session
 /// directory and event persistence.
@@ -824,6 +929,11 @@ fn initFromEnvWithPreparedResume(
     std.debug.assert(!(config.resume_latest and config.session_id != null));
     std.debug.assert(!(config.fork_session_id != null and config.resume_latest));
     std.debug.assert(!(config.fork_session_id != null and config.session_id != null));
+
+    // Crash recovery is a workspace precondition, not a provider feature. Run
+    // it before credentials, local-model readiness, project context, or session
+    // materialization so no model can observe a partially applied change set.
+    try recoverWorkspaceSourcesBeforeBackend(allocator);
 
     // Resolve the source session and read its identity before credential
     // validation, transport readiness, or any session-directory write.
@@ -1031,6 +1141,7 @@ fn initFromEnvWithPreparedResume(
         if (bootstrap_note) |note| {
             try ensureCurrentMetaBootstrap(allocator, &session, note, false);
         }
+        try reconcileWorkspaceReceipts(allocator, &session);
         return session;
     }
 
@@ -1150,6 +1261,7 @@ fn initFromEnvWithPreparedResume(
         }
     }
 
+    try reconcileWorkspaceReceipts(allocator, &session);
     return session;
 }
 
@@ -1330,21 +1442,18 @@ pub fn runOneTurnWithClient(
             .approval_fn = approval_fn,
             .replay_mode = replay,
             .max_attempts = loop.interactive_max_attempts,
+            .receipt_durability = if (session.events_path == null) .workspace else .session_journal,
         },
     ) catch |err| {
         if (session.events_path != null) {
             var persistence_failure: ?anyerror = null;
-            const entries = session.transcript.entries.items;
-            while (session.last_persisted_len < entries.len) {
-                session.appendPersistedEntry(
-                    allocator,
-                    session.transcript.entryIdAt(session.last_persisted_len),
-                    &entries[session.last_persisted_len],
-                ) catch |persist_err| {
+            persistTranscriptTail(allocator, session) catch |persist_err| {
+                persistence_failure = persist_err;
+            };
+            if (persistence_failure == null) {
+                reconcileWorkspaceReceipts(allocator, session) catch |persist_err| {
                     persistence_failure = persist_err;
-                    break;
                 };
-                session.last_persisted_len += 1;
             }
             if (persistence_failure == null) {
                 session.appendPersistedEvent(allocator, .{ .turn_end = .{
@@ -1368,17 +1477,13 @@ pub fn runOneTurnWithClient(
         // must not throw the answer away. Resume loses this turn; the user does
         // not lose the reply they are waiting on.
         var persistence_failure: ?anyerror = null;
-        const entries = tr.entries.items;
-        while (session.last_persisted_len < entries.len) {
-            session.appendPersistedEntry(
-                allocator,
-                tr.entryIdAt(session.last_persisted_len),
-                &entries[session.last_persisted_len],
-            ) catch |persist_err| {
+        persistTranscriptTail(allocator, session) catch |persist_err| {
+            persistence_failure = persist_err;
+        };
+        if (persistence_failure == null) {
+            reconcileWorkspaceReceipts(allocator, session) catch |persist_err| {
                 persistence_failure = persist_err;
-                break;
             };
-            session.last_persisted_len += 1;
         }
         if (persistence_failure == null) {
             session.appendPersistedEvent(allocator, .{ .turn_end = .{
@@ -2321,10 +2426,151 @@ const testing = std.testing;
 const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
 const EnvOverride = @import("test_support/env.zig").EnvOverride;
 const cwdPathAlloc = @import("test_support/cwd.zig").cwdPathAlloc;
-const ui_payload = @import("ui_payload.zig");
 
 fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
     return IsolatedTmp.init(allocator, "agent");
+}
+
+test "startup completes workspace recovery before provider credential validation" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old-a" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/b.ts", .data = "old-b" });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    const tail = [_]turn.Change{.{ .file = "src/b.ts", .content = "new-b" }};
+    var prepared = try change_set.prepare(allocator, root, .{
+        .file = "src/a.ts",
+        .content = "new-a",
+        .additional = &tail,
+    });
+    defer prepared.deinit(allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(allocator, &prepared);
+    defer snapshot.deinit(allocator);
+    var proof: aggregate_proof.AggregateProof = .{
+        .proof_id = @splat('d'),
+        .policy_hash = zts.policyHash(),
+        .read_set_digest = @splat('e'),
+        .proof_roots = try allocator.alloc([]u8, 0),
+        .diagnostics = try allocator.alloc(aggregate_proof.Diagnostic, 0),
+        .system_proven = false,
+    };
+    defer proof.deinit(allocator);
+    {
+        var lock = try change_transaction.WorkspaceLock.acquire(allocator, root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            change_transaction.commitLocked(allocator, &lock, &prepared, &snapshot, &proof, .{
+                .fault = .{ .after_rename = 0 },
+            }),
+        );
+    }
+
+    const prior_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(prior_cwd);
+    try std.Io.Threaded.chdir(root);
+    defer std.Io.Threaded.chdir(prior_cwd) catch {};
+    var credential = try EnvOverride.unset(allocator, "ANTHROPIC_API_KEY");
+    defer credential.restore(allocator);
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    try testing.expectError(error.MissingAnthropicCredential, initFromEnvWithSessionConfig(
+        allocator,
+        &registry,
+        .{
+            .no_session = true,
+            .no_context_files = true,
+            .provider = .anthropic,
+        },
+    ));
+
+    const first = try zts.file_io.readFile(allocator, prepared.changes[0].resolved_path, 64);
+    defer allocator.free(first);
+    const second = try zts.file_io.readFile(allocator, prepared.changes[1].resolved_path, 64);
+    defer allocator.free(second);
+    try testing.expectEqualStrings("new-a", first);
+    try testing.expectEqualStrings("new-b", second);
+}
+
+test "committed workspace receipt is appended to a session exactly once" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    var prepared = try change_set.prepare(allocator, root, .{
+        .file = "src/a.ts",
+        .content = "new",
+    });
+    defer prepared.deinit(allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(allocator, &prepared);
+    defer snapshot.deinit(allocator);
+    const roots = try allocator.alloc([]u8, 1);
+    roots[0] = try allocator.dupe(u8, "src/a.ts");
+    var proof: aggregate_proof.AggregateProof = .{
+        .proof_id = @splat('f'),
+        .policy_hash = zts.policyHash(),
+        .read_set_digest = @splat('a'),
+        .proof_roots = roots,
+        .diagnostics = try allocator.alloc(aggregate_proof.Diagnostic, 0),
+        .system_proven = false,
+    };
+    defer proof.deinit(allocator);
+    var receipt_payload: ui_payload.UiPayload = .{ .verified_change_set = try change_set_receipt.build(
+        allocator,
+        &prepared,
+        &snapshot,
+        &proof,
+        42,
+    ) };
+    defer receipt_payload.deinit(allocator);
+    var receipt_json = TextBuffer.init(allocator);
+    defer receipt_json.deinit();
+    try ui_payload.writeJson(receipt_json.writer(), receipt_payload);
+    {
+        var lock = try change_transaction.WorkspaceLock.acquire(allocator, root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            change_transaction.commitLocked(allocator, &lock, &prepared, &snapshot, &proof, .{
+                .receipt_json = receipt_json.written(),
+                .fault = .after_committed,
+            }),
+        );
+    }
+
+    const prior_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(prior_cwd);
+    try std.Io.Threaded.chdir(root);
+    defer std.Io.Threaded.chdir(prior_cwd) catch {};
+    var session = AgentSession.initStub();
+    defer session.deinit(allocator);
+    const events_path = try std.fs.path.resolve(allocator, &.{ root, "events.jsonl" });
+    defer allocator.free(events_path);
+    session.events_path = try allocator.dupe(u8, events_path);
+    session.journal_writer = try session_events.JournalWriter.open(allocator, events_path);
+
+    try reconcileWorkspaceReceipts(allocator, &session);
+    try testing.expectEqual(@as(usize, 1), session.transcript.len());
+    try testing.expectEqual(@as(usize, 1), session.last_persisted_len);
+    switch (session.transcript.at(0).*) {
+        .verified_change_set => |message| switch (message.ui_payload.?) {
+            .verified_change_set => |receipt| try testing.expectEqualStrings(&proof.proof_id, receipt.transaction_id),
+            else => return error.TestUnexpectedResult,
+        },
+        else => return error.TestUnexpectedResult,
+    }
+    try reconcileWorkspaceReceipts(allocator, &session);
+    try testing.expectEqual(@as(usize, 1), session.transcript.len());
+
+    var reconstructed = try reconstructor.reconstructTranscript(allocator, events_path, null);
+    defer reconstructed.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), reconstructed.len());
 }
 
 /// All proof-guarantee booleans set to `value`. Used to exercise the metrics

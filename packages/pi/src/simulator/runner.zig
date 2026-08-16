@@ -69,7 +69,7 @@ pub const ApprovalValidator = struct {
         }
     }
 
-    fn approvalFn(context: *anyopaque, preview: loop.ApprovalPreview) anyerror!bool {
+    fn approvalFn(context: *anyopaque, preview: loop.ChangeSetApprovalPreview) anyerror!bool {
         const self: *ApprovalValidator = @ptrCast(@alignCast(context));
         if (self.cursor >= self.expectations.len or self.cursor >= self.checkpoints.len) {
             return self.fail(.{ .approval_mismatch = .{
@@ -312,7 +312,7 @@ pub const Runner = struct {
             );
             try self.expectEvent(event);
             try self.expectTranscriptItem(expected.index, entry, event.payload_sha256);
-            if (event.kind == .verified_patch) {
+            if (event.kind == .verified_patch or event.kind == .verified_change_set) {
                 const receipt_digest = try observation.applyReceiptDigest(self.allocator, entry);
                 try self.expectApplyReceipt(expected.index, receipt_digest);
             }

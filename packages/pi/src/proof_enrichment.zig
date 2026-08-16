@@ -789,12 +789,12 @@ fn scanRuleCodes(
     }
 }
 
-const UnifiedDiff = struct {
+pub const UnifiedDiff = struct {
     text: []u8,
     hunks: []ui_payload.DiffHunk,
 };
 
-fn buildUnifiedDiff(
+pub fn buildUnifiedDiff(
     allocator: std.mem.Allocator,
     before: ?[]const u8,
     after: []const u8,

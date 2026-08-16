@@ -33,10 +33,11 @@ const accepted_handler =
 const ApprovalProbe = struct {
     calls: usize = 0,
 
-    fn approve(context: *anyopaque, preview: loop.ApprovalPreview) anyerror!bool {
+    fn approve(context: *anyopaque, preview: loop.ChangeSetApprovalPreview) anyerror!bool {
         const self: *ApprovalProbe = @ptrCast(@alignCast(context));
         self.calls += 1;
-        if (preview.file.len == 0 or preview.after.len == 0) return false;
+        if (preview.proof_id.len != 64 or preview.changes.len == 0) return false;
+        for (preview.changes) |change| if (change.file.len == 0 or change.after.len == 0) return false;
         return true;
     }
 

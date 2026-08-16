@@ -1,8 +1,8 @@
 //! Session persistence primitives: checksummed event frames + meta.json.
 //!
-//! Event schema `v3` keeps the raw journal append-only, assigns stable logical
+//! Event schema `v4` keeps the raw journal append-only, assigns stable logical
 //! entry IDs, and persists model-projection checkpoints independently from the
-//! proof and ledger history.
+//! proof and ledger history. It adds the aggregate verified-change-set receipt.
 //! Metadata schema `v4` adds the required expert protocol identity. The event
 //! envelope did not change, so its framed wire remains v3.
 
@@ -12,12 +12,12 @@ const ui_payload = @import("../ui_payload.zig");
 const json_writer = @import("../providers/json_writer.zig");
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 
-pub const schema_version: u32 = 3;
+pub const schema_version: u32 = 4;
 pub const meta_schema_version: u32 = 4;
 
-const frame_magic = "ZTE3";
+const frame_magic = "ZTE4";
 const frame_header_len = frame_magic.len + @sizeOf(u64) + 32;
-const frame_footer_magic = "3ETZ";
+const frame_footer_magic = "4ETZ";
 const frame_footer_len = @sizeOf(u64) + frame_footer_magic.len;
 const max_frame_payload_bytes: usize = 64 * 1024 * 1024;
 
@@ -30,6 +30,7 @@ const EventKind = enum {
     proof_card,
     diagnostic_box,
     verified_patch,
+    verified_change_set,
     system_note,
     autoloop_outcome,
     turn_end,
@@ -169,6 +170,7 @@ pub const EventRecord = union(EventKind) {
     proof_card: DisplayMessage,
     diagnostic_box: DisplayMessage,
     verified_patch: DisplayMessage,
+    verified_change_set: DisplayMessage,
     system_note: []const u8,
     autoloop_outcome: AutoloopOutcome,
     turn_end: TurnEnd,
@@ -698,7 +700,7 @@ fn validateEnvelopePayload(allocator: std.mem.Allocator, payload: []const u8) !v
     const entry_id = object.get("entry_id");
     const part_index = object.get("part_index");
     const transcript_record = switch (event_kind) {
-        .user_text, .model_text, .tool_use, .tool_use_batch, .tool_result, .proof_card, .diagnostic_box, .verified_patch, .system_note => true,
+        .user_text, .model_text, .tool_use, .tool_use_batch, .tool_result, .proof_card, .diagnostic_box, .verified_patch, .verified_change_set, .system_note => true,
         .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => false,
     };
     if (transcript_record) {
@@ -730,7 +732,7 @@ fn validateEnvelopePayload(allocator: std.mem.Allocator, payload: []const u8) !v
                 return error.CorruptEventsLog;
             }
         },
-        .proof_card, .diagnostic_box, .verified_patch => if (data != .string and data != .object) {
+        .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => if (data != .string and data != .object) {
             return error.CorruptEventsLog;
         },
         .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => if (data != .object) {
@@ -828,6 +830,7 @@ fn isTranscriptRecord(record: EventRecord) bool {
         .proof_card,
         .diagnostic_box,
         .verified_patch,
+        .verified_change_set,
         .system_note,
         => true,
         .autoloop_outcome, .turn_end, .session_summary, .compaction_checkpoint => false,
@@ -844,6 +847,7 @@ fn kindTag(record: EventRecord) []const u8 {
         .proof_card => "proof_card",
         .diagnostic_box => "diagnostic_box",
         .verified_patch => "verified_patch",
+        .verified_change_set => "verified_change_set",
         .system_note => "system_note",
         .autoloop_outcome => "autoloop_outcome",
         .turn_end => "turn_end",
@@ -909,6 +913,7 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
         .proof_card => |message| try writeDisplayPayload(writer, message),
         .diagnostic_box => |message| try writeDisplayPayload(writer, message),
         .verified_patch => |message| try writeDisplayPayload(writer, message),
+        .verified_change_set => |message| try writeDisplayPayload(writer, message),
         .autoloop_outcome => |outcome| try writeAutoloopOutcomePayload(writer, outcome),
         .turn_end => |te| {
             try writer.writeByte('{');
@@ -1195,7 +1200,7 @@ fn readWhole(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return try zts.file_io.readFile(allocator, path, 1 * 1024 * 1024);
 }
 
-test "appendEntryEvent frames a v3 user_text event with stable identity" {
+test "appendEntryEvent frames a v4 user_text event with stable identity" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -1207,13 +1212,13 @@ test "appendEntryEvent frames a v3 user_text event with stable identity" {
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"v\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"v\":4") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"entry_id\":1") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"k\":\"user_text\"") != null);
     try testing.expect(std.mem.indexOf(u8, raw, "\"hello world\"") != null);
 }
 
-test "model_text JSON projection uses the documented v3 envelope" {
+test "model_text JSON projection uses the documented v4 envelope" {
     const allocator = testing.allocator;
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
@@ -1223,7 +1228,7 @@ test "model_text JSON projection uses the documented v3 envelope" {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try testing.expectEqual(@as(i64, 3), obj.get("v").?.integer);
+    try testing.expectEqual(@as(i64, 4), obj.get("v").?.integer);
     try testing.expectEqualStrings("model_text", obj.get("k").?.string);
     // `d` is a bare string for model_text (not an object), as documented.
     try testing.expectEqualStrings("hello", obj.get("d").?.string);

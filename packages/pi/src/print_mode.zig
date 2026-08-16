@@ -191,7 +191,7 @@ fn runWithSession(
 
     if (!flags.json_mode) {
         // The last transcript entry after a verified edit is the proof card;
-        // the legible "verified:" summary lives in the verified_patch entry
+        // the legible summary lives in the verified_change_set entry
         // just before it. Surface that summary first so `--print` shows the
         // applied file and verdict, not just the proof card.
         try writeVerifiedSummary(allocator, out_writer, &session.transcript, turn_start_len);
@@ -203,10 +203,8 @@ fn runWithSession(
     try emitEndEvent(allocator, out_writer);
 }
 
-/// In non-JSON `--print`, emit the legible verified-patch summary (the "verified:"
-/// line plus stats) if the current turn applied an edit. Renders the most recent
-/// current-turn verified_patch entry's `llm_text` summary; no-op when no edit was
-/// applied this turn.
+/// In non-JSON `--print`, emit the legible verified-change-set summary if the
+/// current turn applied a change set. No-op when no change set was applied.
 fn writeVerifiedSummary(
     allocator: std.mem.Allocator,
     out: ?*std.Io.Writer,
@@ -219,7 +217,7 @@ fn writeVerifiedSummary(
     while (i > start) {
         i -= 1;
         const entry = transcript.at(i);
-        if (entry.* == .verified_patch) {
+        if (entry.* == .verified_change_set) {
             const rendered = try transcript_mod.renderRichEntryToOwned(allocator, entry);
             defer allocator.free(rendered);
             try writeOutLine(out, rendered);
@@ -264,6 +262,10 @@ fn emitEntry(allocator: std.mem.Allocator, out: ?*std.Io.Writer, entry: *const t
             .ui_payload = body.ui_payload,
         } }),
         .verified_patch => |body| try emitRecord(allocator, out, .{ .verified_patch = .{
+            .llm_text = body.llm_text,
+            .ui_payload = body.ui_payload,
+        } }),
+        .verified_change_set => |body| try emitRecord(allocator, out, .{ .verified_change_set = .{
             .llm_text = body.llm_text,
             .ui_payload = body.ui_payload,
         } }),
@@ -460,7 +462,7 @@ test "runWithClient: json mode emits user_text, model_text, end in order" {
     try testing.expect(model_line < end_line);
     try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "hello") != null);
     try testing.expect(std.mem.indexOf(u8, lines.items[model_line], "hi") != null);
-    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":3") != null);
+    try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":4") != null);
 }
 
 test "runWithClient: non-json mode writes rendered text" {
@@ -499,7 +501,7 @@ test "emitErrorEvent: known provider error carries name and remediation in-band"
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, line, .{});
     defer parsed.deinit();
     const obj = parsed.value.object;
-    try testing.expectEqual(@as(i64, 3), obj.get("v").?.integer);
+    try testing.expectEqual(@as(i64, 4), obj.get("v").?.integer);
     try testing.expectEqualStrings("error", obj.get("k").?.string);
     const d = obj.get("d").?.object;
     try testing.expectEqualStrings("AuthFailed", d.get("error").?.string);
@@ -559,13 +561,13 @@ test "exitCodeForOutcome maps every terminal reason to a distinct code" {
     try testing.expectEqual(@as(u8, 1), exitCodeForOutcome(.error_exit));
 }
 
-test "writeVerifiedSummary ignores verified patches before current turn" {
+test "writeVerifiedSummary ignores verified change sets before current turn" {
     const allocator = testing.allocator;
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(allocator);
 
-    try tr.entries.append(allocator, .{ .verified_patch = .{
-        .llm_text = try allocator.dupe(u8, "verified: old.ts"),
+    try tr.entries.append(allocator, .{ .verified_change_set = .{
+        .llm_text = try allocator.dupe(u8, "verified change set: old.ts"),
         .ui_payload = null,
     } });
 
@@ -581,20 +583,20 @@ test "writeVerifiedSummary ignores verified patches before current turn" {
     try testing.expectEqual(@as(usize, 0), buf.written().len);
 }
 
-test "writeVerifiedSummary emits verified patch from current turn" {
+test "writeVerifiedSummary emits verified change set from current turn" {
     const allocator = testing.allocator;
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(allocator);
 
-    try tr.entries.append(allocator, .{ .verified_patch = .{
-        .llm_text = try allocator.dupe(u8, "verified: old.ts"),
+    try tr.entries.append(allocator, .{ .verified_change_set = .{
+        .llm_text = try allocator.dupe(u8, "verified change set: old.ts"),
         .ui_payload = null,
     } });
 
     const turn_start_len = tr.len();
     try tr.append(allocator, .{ .user_text = "apply edit" });
-    try tr.entries.append(allocator, .{ .verified_patch = .{
-        .llm_text = try allocator.dupe(u8, "verified: current.ts"),
+    try tr.entries.append(allocator, .{ .verified_change_set = .{
+        .llm_text = try allocator.dupe(u8, "verified change set: current.ts"),
         .ui_payload = null,
     } });
 

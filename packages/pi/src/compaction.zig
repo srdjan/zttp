@@ -223,7 +223,7 @@ fn entryTokens(entry: *const transcript_mod.OwnedEntry) u64 {
         .tool_result => |result| jsonStringPayloadBytes(result.tool_use_id) +|
             jsonStringPayloadBytes(result.tool_name) +|
             jsonStringPayloadBytes(result.llm_text) +| 40,
-        .proof_card, .diagnostic_box, .verified_patch => 0,
+        .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => 0,
     };
     return context_budget.estimateBytes(bytes);
 }
@@ -342,6 +342,7 @@ fn serializeEntry(
         .proof_card => |message| try writeSection(writer, "Verification: proof", message.llm_text),
         .diagnostic_box => |message| try writeSection(writer, "Verification: diagnostics", message.llm_text),
         .verified_patch => |message| try writeSection(writer, "Verification: applied patch", message.llm_text),
+        .verified_change_set => |message| try writeSection(writer, "Verification: applied change set", message.llm_text),
         .assistant_tool_use => |calls| {
             try writer.writeAll("[Assistant tool calls]:\n");
             for (calls) |call| {
@@ -452,6 +453,12 @@ pub fn extractFileOps(
         },
         .verified_patch => |message| if (message.ui_payload) |payload| switch (payload) {
             .verified_patch => |patch| try addUnique(allocator, &modified, patch.file),
+            else => {},
+        },
+        .verified_change_set => |message| if (message.ui_payload) |payload| switch (payload) {
+            .verified_change_set => |receipt| for (receipt.changes) |change| {
+                try addUnique(allocator, &modified, change.file);
+            },
             else => {},
         },
         else => {},

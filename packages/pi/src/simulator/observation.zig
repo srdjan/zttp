@@ -8,22 +8,23 @@ const TextBuffer = @import("../text_buffer.zig").TextBuffer;
 
 pub fn approvalPreviewDigest(
     allocator: std.mem.Allocator,
-    preview: loop.ApprovalPreview,
+    preview: loop.ChangeSetApprovalPreview,
 ) !artifact.Sha256Hex {
     var canonical = TextBuffer.init(allocator);
     defer canonical.deinit();
     const writer = canonical.writer();
-    try writeFrame(writer, preview.file);
-    if (preview.before) |before| {
-        try writeFrame(writer, "before-present");
-        try writeFrame(writer, before);
-    } else try writeFrame(writer, "before-absent");
-    try writeFrame(writer, preview.after);
-    if (preview.properties) |properties| {
-        try writeFrame(writer, "properties-present");
-        try std.json.Stringify.value(properties, .{}, writer);
-    } else try writeFrame(writer, "properties-absent");
-    for (preview.rewrite_trace) |rewrite| try writeFrame(writer, rewrite);
+    try writeFrame(writer, preview.proof_id);
+    try writer.print("{d}\n", .{preview.changes.len});
+    for (preview.changes) |change| {
+        try writeFrame(writer, change.file);
+        if (change.before) |before| {
+            try writeFrame(writer, "before-present");
+            try writeFrame(writer, before);
+        } else try writeFrame(writer, "before-absent");
+        try writeFrame(writer, change.after);
+        for (change.rewrite_trace) |rewrite| try writeFrame(writer, rewrite);
+    }
+    try writeFrame(writer, if (preview.system_proven) "system-proven" else "system-absent");
     return artifact.Sha256Hex.fromBytes(canonical.written());
 }
 
@@ -41,11 +42,12 @@ pub fn eventForEntry(
         .proof_card => .proof_card,
         .diagnostic_box => .diagnostic_box,
         .verified_patch => .verified_patch,
+        .verified_change_set => .verified_change_set,
         .system_note => .system_note,
     };
     const payload_sha256 = switch (entry.*) {
         .user_text, .model_text, .system_note => |text| artifact.Sha256Hex.fromBytes(text),
-        .proof_card, .diagnostic_box, .verified_patch => |message| artifact.Sha256Hex.fromBytes(message.llm_text),
+        .proof_card, .diagnostic_box, .verified_patch, .verified_change_set => |message| artifact.Sha256Hex.fromBytes(message.llm_text),
         .assistant_tool_use => |calls| blk: {
             var canonical = TextBuffer.init(allocator);
             defer canonical.deinit();
@@ -79,27 +81,37 @@ pub fn applyReceiptDigest(
     allocator: std.mem.Allocator,
     entry: *const transcript_mod.OwnedEntry,
 ) !artifact.Sha256Hex {
-    const patch = switch (entry.*) {
+    return switch (entry.*) {
         .verified_patch => |message| switch (message.ui_payload orelse return error.InvalidApplyReceipt) {
-            .verified_patch => |payload| payload,
+            .verified_patch => |payload| digestReceiptPayload(allocator, "zttp-apply-receipt-v1", payload),
+            else => return error.InvalidApplyReceipt,
+        },
+        .verified_change_set => |message| switch (message.ui_payload orelse return error.InvalidApplyReceipt) {
+            .verified_change_set => |payload| digestReceiptPayload(allocator, "zttp-change-set-receipt-v1", payload),
             else => return error.InvalidApplyReceipt,
         },
         else => return error.InvalidApplyReceipt,
     };
+}
 
+fn digestReceiptPayload(
+    allocator: std.mem.Allocator,
+    domain: []const u8,
+    payload: anytype,
+) !artifact.Sha256Hex {
     var canonical = TextBuffer.init(allocator);
     defer canonical.deinit();
     const writer = canonical.writer();
-    try writeFrame(writer, "zttp-apply-receipt-v1");
+    try writeFrame(writer, domain);
     try writer.writeByte('{');
     var wrote_field = false;
-    inline for (@typeInfo(@TypeOf(patch)).@"struct".fields) |field| {
+    inline for (@typeInfo(@TypeOf(payload)).@"struct".fields) |field| {
         if (comptime std.mem.eql(u8, field.name, "applied_at_unix_ms")) continue;
         if (wrote_field) try writer.writeByte(',');
         wrote_field = true;
         try std.json.Stringify.value(field.name, .{}, writer);
         try writer.writeByte(':');
-        try std.json.Stringify.value(@field(patch, field.name), .{}, writer);
+        try std.json.Stringify.value(@field(payload, field.name), .{}, writer);
     }
     try writer.writeByte('}');
     return artifact.Sha256Hex.fromBytes(canonical.written());
@@ -114,6 +126,7 @@ pub fn transcriptKind(entry: *const transcript_mod.OwnedEntry) artifact.Transcri
         .proof_card => .proof_card,
         .diagnostic_box => .diagnostic_box,
         .verified_patch => .verified_patch,
+        .verified_change_set => .verified_change_set,
         .system_note => .system_note,
     };
 }

@@ -325,13 +325,19 @@ fn discoverProofRoots(
     @memset(reachable, false);
     var root_index: usize = 0;
     while (root_index < roots.items.len) : (root_index += 1) {
-        try markReachableChanges(allocator, prepared, candidate, roots.items[root_index], reachable);
+        markReachableChanges(allocator, prepared, candidate, roots.items[root_index], reachable) catch |err| switch (err) {
+            error.ParseError => {},
+            else => return err,
+        };
     }
     for (prepared.changes, 0..) |change, index| {
         if (reachable[index]) continue;
         const relative = common.relativeToRoot(prepared.project_root, change.resolved_path);
         try appendUniqueOwned(allocator, &roots, relative);
-        try markReachableChanges(allocator, prepared, candidate, relative, reachable);
+        markReachableChanges(allocator, prepared, candidate, relative, reachable) catch |err| switch (err) {
+            error.ParseError => {},
+            else => return err,
+        };
     }
     return roots.toOwnedSlice(allocator);
 }
@@ -345,25 +351,31 @@ fn markReachableChanges(
 ) !void {
     const root_path = try candidate.pathFor(allocator, relative_root);
     defer allocator.free(root_path);
+    for (prepared.changes, 0..) |change, index| {
+        const relative = common.relativeToRoot(prepared.project_root, change.resolved_path);
+        if (std.mem.eql(u8, relative, relative_root)) reachable[index] = true;
+    }
     const source = try zts.file_io.readFile(allocator, root_path, change_set.max_file_bytes);
     defer allocator.free(source);
-    var graph = zts.modules.ModuleGraph.init(allocator);
-    defer graph.deinit();
-    try graph.build(root_path, source, zts.file_io.readFileForModuleGraph);
-    var strings = zts.StringTable.init(allocator);
-    defer strings.deinit();
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var compiler = zts.modules.ModuleCompiler.init(allocator, &atoms, &strings);
-    var compiled = try compiler.compileAll(&graph);
-    defer compiled.deinit();
-    defer for (compiled.codegens) |*codegen| codegen.freeOwnedConstantPayloads();
-    for (graph.module_list.items) |module| {
+    var front_end = try zts_cli.precompile.runCheckOnlyFromSource(
+        allocator,
+        source,
+        root_path,
+        null,
+        true,
+        null,
+        true,
+    );
+    defer front_end.deinit(allocator);
+    if (front_end.parse_errors > 0) return;
+    const module_paths = try zts_cli.precompile.discoverModulePaths(allocator, source, root_path);
+    defer zts_cli.precompile.freeModulePaths(allocator, module_paths);
+    for (module_paths) |module_path| {
         for (prepared.changes, 0..) |change, index| {
             const relative = common.relativeToRoot(prepared.project_root, change.resolved_path);
             const mapped = try candidate.pathFor(allocator, relative);
             defer allocator.free(mapped);
-            if (std.mem.eql(u8, module.path, mapped)) reachable[index] = true;
+            if (std.mem.eql(u8, module_path, mapped)) reachable[index] = true;
         }
     }
 }
@@ -391,9 +403,34 @@ fn collectCheckDiagnostics(
     schema_path: ?[]const u8,
     system_path: ?[]const u8,
 ) !void {
-    var check = try zts_cli.precompile.runCheckOnly(allocator, handler_path, schema_path, true, system_path);
+    var check = zts_cli.precompile.runCheckOnly(allocator, handler_path, schema_path, true, system_path) catch |full_error| {
+        const source = try zts.file_io.readFile(allocator, handler_path, change_set.max_file_bytes);
+        defer allocator.free(source);
+        var fallback = zts_cli.precompile.runCheckOnlyFromSource(
+            allocator,
+            source,
+            handler_path,
+            schema_path,
+            true,
+            system_path,
+            true,
+        ) catch return full_error;
+        defer fallback.deinit(allocator);
+        if (fallback.json_diagnostics.items.len == 0) return full_error;
+        try appendCheckDiagnostics(allocator, out, materialized_root, fallback.json_diagnostics.items);
+        return;
+    };
     defer check.deinit(allocator);
-    for (check.json_diagnostics.items) |diagnostic| {
+    try appendCheckDiagnostics(allocator, out, materialized_root, check.json_diagnostics.items);
+}
+
+fn appendCheckDiagnostics(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(Diagnostic),
+    materialized_root: []const u8,
+    diagnostics: anytype,
+) !void {
+    for (diagnostics) |diagnostic| {
         const file = if (std.fs.path.isAbsolute(diagnostic.file) and common.isPathInsideRoot(materialized_root, diagnostic.file))
             common.relativeToRoot(materialized_root, diagnostic.file)
         else
@@ -504,8 +541,13 @@ fn digestProof(
     hasher.field("grammar", &zts.grammarHash());
     hasher.field("semantics", &zts.semanticsHash());
     hasher.field("diagnostics", &zts.diagnosticCatalogHash());
-    hasher.field("workspace", prepared.workspace_root);
-    hasher.field("project", prepared.project_root);
+    // Bind project placement without embedding a host-specific absolute path.
+    // Receipts and deterministic flow artifacts must remain replayable after a
+    // workspace is copied to another canonical directory.
+    hasher.field(
+        "project-relative-root",
+        common.relativeToRoot(prepared.workspace_root, prepared.project_root),
+    );
     hasher.usizeField("change-count", prepared.changes.len);
     for (prepared.changes, 0..) |change, index| {
         hasher.usizeField("change-index", index);
