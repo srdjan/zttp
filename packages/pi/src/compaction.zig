@@ -288,11 +288,6 @@ fn splitBoundary(
     if (entries.len > turn_start + 1 or entries[turn_start] != .user_text) {
         return entries.len;
     }
-    i = @min(threshold, entries.len);
-    while (i > turn_start + 1) {
-        i -= 1;
-        if (isAssistantBoundary(entries[i])) return i;
-    }
     return null;
 }
 

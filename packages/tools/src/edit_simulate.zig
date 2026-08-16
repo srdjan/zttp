@@ -76,25 +76,20 @@ pub fn simulate(
     allocator: std.mem.Allocator,
     input: EditSimulateInput,
 ) !SimulateResult {
-    // When the caller passes no explicit schema, discover the project's from cwd
-    // exactly as the CLI boundary (`run`) does. Without this, every in-process
-    // tool that simulates a zttp:sql handler (the repair-apply lane, review
-    // patch, ast rewrite, feature apply) throws MissingSqlSchema even though the
-    // project has a configured schema. The veto and CLI already pass a non-null
-    // path, so discovery only runs for the schema-less in-process callers.
-    const discovered_schema: ?[]u8 = if (input.sql_schema_path == null)
-        discoverProjectSqlSchemaPath(allocator, input.file)
+    // When the caller passes no explicit schema or system manifest, discover
+    // the project's from the edited file exactly as the CLI boundary (`run`,
+    // `zts check`) does. Without this, every in-process tool that simulates a
+    // zttp:sql handler (the repair-apply lane, review patch, ast rewrite,
+    // feature apply) throws MissingSqlSchema even though the project has a
+    // configured schema. The veto and CLI already pass non-null paths, so
+    // discovery only runs for the path-less in-process callers.
+    var discovered: ProjectPaths = if (input.sql_schema_path == null or input.system_path == null)
+        discoverProjectPaths(allocator, input.file)
     else
-        null;
-    defer if (discovered_schema) |p| allocator.free(p);
-    const schema_path = input.sql_schema_path orelse discovered_schema;
-
-    const discovered_system: ?[]u8 = if (input.system_path == null)
-        discoverProjectSystemPath(allocator, input.file)
-    else
-        null;
-    defer if (discovered_system) |p| allocator.free(p);
-    const system_path = input.system_path orelse discovered_system;
+        .{};
+    defer discovered.deinit(allocator);
+    const schema_path = input.sql_schema_path orelse discovered.sqlite;
+    const system_path = input.system_path orelse discovered.system;
 
     // Analyze the proposed bytes under the original file identity. Writing
     // them to `/tmp` severed relative imports, so a valid sibling helper was
@@ -354,39 +349,49 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
     try writeResultJson(writer, &result);
 }
 
-/// Resolve the project's SQL schema for analysis: the `sqlite` entry in the
-/// nearest `zttp.json` walking up from `start_path` (or cwd when null),
-/// resolved against the project root. This is the same source `zttp dev`,
-/// `zttp test`, and `zttp doctor` pass to the analyzer. Returns null when
-/// there is no project, no `sqlite` entry, or the manifest cannot be read:
-/// a broken zttp.json degrades to schema-less analysis rather than failing
-/// the edit. Caller frees the returned slice.
-pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
+/// The two `zttp.json` entries the analyzer reads. Caller frees via `deinit`.
+pub const ProjectPaths = struct {
+    sqlite: ?[]u8 = null,
+    system: ?[]u8 = null,
+
+    pub fn deinit(self: *ProjectPaths, allocator: std.mem.Allocator) void {
+        if (self.sqlite) |p| allocator.free(p);
+        if (self.system) |p| allocator.free(p);
+        self.* = .{};
+    }
+};
+
+/// Resolve the project's SQL schema and system manifest for analysis: the
+/// `sqlite` and `system` entries in the nearest `zttp.json` walking up from
+/// `start_path` (or cwd when null), resolved against the project root. This is
+/// the same source `zttp dev`, `zttp test`, and `zttp doctor` pass to the
+/// analyzer, and the same boundary `zts check` uses. A field is null when
+/// there is no project, no such entry, or the manifest cannot be read: a
+/// broken zttp.json degrades to path-less analysis rather than failing the
+/// edit.
+///
+/// Both come from one walk. Resolving them separately walked the ancestor
+/// directories and parsed the same manifest twice for every simulated edit.
+pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u8) ProjectPaths {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
 
-    var project = project_config_mod.discover(allocator, io, start_path) catch return null;
+    var project = project_config_mod.discover(allocator, io, start_path) catch return .{};
     defer if (project) |*p| p.deinit(allocator);
-    if (project) |*cfg| {
-        return cfg.resolvedSqlitePath(allocator) catch null;
-    }
-    return null;
+    const cfg = if (project) |*p| p else return .{};
+    return .{
+        .sqlite = cfg.resolvedSqlitePath(allocator) catch null,
+        .system = cfg.resolvedSystemPath(allocator) catch null,
+    };
 }
 
-/// Resolve the project system manifest from the edited file. This mirrors the
-/// `zts check` boundary without importing zts_cli back into its dependency.
-pub fn discoverProjectSystemPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-    const io = io_backend.io();
-
-    var project = project_config_mod.discover(allocator, io, start_path) catch return null;
-    defer if (project) |*p| p.deinit(allocator);
-    if (project) |*cfg| {
-        return cfg.resolvedSystemPath(allocator) catch null;
-    }
-    return null;
+/// Single-path wrapper for the callers that analyze without a system manifest.
+/// Caller frees the returned slice.
+pub fn discoverProjectSqlSchemaPath(allocator: std.mem.Allocator, start_path: ?[]const u8) ?[]u8 {
+    const paths = discoverProjectPaths(allocator, start_path);
+    if (paths.system) |p| allocator.free(p);
+    return paths.sqlite;
 }
 
 // ---------------------------------------------------------------------------
